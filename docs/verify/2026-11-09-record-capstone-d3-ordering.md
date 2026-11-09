@@ -17,9 +17,10 @@ Read that precisely. Two different claims are separated below and must not be me
   cache statements in this capture carried **no** declared lane. D3's own sentence is *"assert the
   capture writes journal → record → cache in that order, with no cache-only path"*, so **D3 is not met
   as written by this measurement**; what is met is the part of it that a door can be held to, plus the
-  property that no cache-ahead write is *silent* (each one declares the order it used), plus the
-  second half of the criterion: **no cache-only path** — every mutating cache statement has a journal
-  append and an APPLIED record write behind it (§6).
+  property that no cache-ahead write is *silent* (each one declares the order it used), plus a
+  FLOOR on the second half — no mutating cache statement precedes the capture's first journal append
+  and first APPLIED record write (§6). It does **not** establish a per-write attribution for
+  raw-handle cache writes; see §4.
 
 | | |
 |---|---|
@@ -138,6 +139,14 @@ falsifier had to be expressed against the lane the door *claims* (F3) rather tha
 - **It is not a claim that `fold` count 3 means "3 cache writes".** The cache axis is 32 statements; the
   fold door is one *entry point* into them (the other statements are issued by declared live/apply-first
   lanes and by the six undeclared ones).
+- **It does not attribute an arbitrary raw-handle cache write to an append.** Leg 4 asserts a floor —
+  nothing mutating reaches the cache before the capture's first journal append and first APPLIED record
+  write. A cache write injected MID-capture (after some append and its record have landed) is green in
+  every leg, **measured** (§6.2 F6), because the trace has no descriptor tying a raw `_GuardedGraph.query`
+  statement to the append it skipped. D3's falsifier is therefore satisfied for the early shape only.
+- **It does not cover every mutating verb on the handle.** Only `_GuardedGraph.query` is wrapped.
+  `ro_query` and `execute_command` are write-CAPABLE by the module's own comments
+  (`projection/__init__.py:5739-5743`, `:5796-5803`), so a write through either is invisible here.
 
 ## 5. What #11477 inherits from this run
 
@@ -161,7 +170,7 @@ RED** (§6.2).
 |---|---|---|---|
 | 1 | **P1** — leg 3's `stmt.lane != "live-door"` could never fail: `"live-door"` is only `_live_write_scope`'s **default argument** (`projection/__init__.py:4063`) and no production caller uses it (`git grep '"live-door"'` → 2 hits: that default, and the assertion). It was green on the exact contradiction it documented: the ahead folds run under `_live_write_scope("create_entity")`, a journal-first lane. | `git grep` both hits; `sdk.py:43309`; `projection/__init__.py:3535-3540`; `sdk.py:4835` KNOWN DEVIATIONS | classify with the tree's own discriminator `_APPLY_FIRST_LANE` (`projection/__init__.py:4969`, read back at the write handle by `test_9206`) and pin the `(event_type, lane)` SET `_KNOWN_AHEAD_DEVIATIONS` |
 | 2 | **P1** — the criterion's *"with no cache-only path"* half was **unmeasured**: leg 3 inspects only statements of a fold that ran ahead (`e.in_fold == fold.event_type`), so a mutating statement with `in_fold=None` — the shape D3's own falsifier injects — was examined by no leg | `tests/test_9567_record_capstone.py` leg 3 population; issue #9567 D3 falsifier sentence | a **fourth leg** over the whole mutating-cache population requiring a journal append and an APPLIED record write behind every statement |
-| 3 | **P2** — the record door counted **calls**, not **writes**: the wrapper appended `Door("record")` after forwarding and discarded `out`, so a declined seam kept `len(records) == len(journal)` green. Leg 2's probe runs **inside** the test body, where the autouse `_no_ambient_record_arming` (`tests/conftest.py:664`) has cleared the DSN — so it was ordering a record write that wrote nothing. | `record_writer.py:2338` (`return None` when unarmed), `:2178` (REFUSED), `tests/conftest.py:664-706`; leg 2 body | carry the seam's `outcome` on `Door`; leg 1 asserts APPLIED count == journal count; leg 2 re-arms the way `test_D1` does and asserts the door APPLIED |
+| 3 | **P2** — the record door counted **calls**, not **writes**: the wrapper appended `Door("record")` after forwarding and discarded `out`, so a declined seam kept `len(records) == len(journal)` green. Leg 2's probe runs **inside** the test body, where the autouse `_no_ambient_record_arming` (`tests/conftest.py:664`) has cleared the DSN — so it was ordering a record write that wrote nothing. | `record_writer.py:2340` (`return None` when unarmed), `:2343` (`return _refused(...)`), `tests/conftest.py:664-706`; leg 2 body | carry the seam's `outcome` on `Door`; leg 1 asserts APPLIED count == journal count; leg 2 re-arms the way `test_D1` does and asserts the door APPLIED |
 
 ### 6.1 Re-measured at this head (`629283eef`, after the fixes)
 
@@ -182,48 +191,70 @@ SKIPPED: TEST_RECORD_SCRATCH_URI not set — the drill refuses a scratch target 
 (`cache=29`, not the §1 run's 32: the two runs are different heads and different captures. Both are
 counted in the run that printed them, never asserted against a constant.)
 
-### 6.2 The four replacement falsifiers, executed and observed RED
+### 6.2 The replacement falsifiers, executed and observed RED
 
 Each mutation was applied to this worktree's committed tree, the leg run, the red captured, then the
-file restored with `git checkout -- <file>` (`git status --porcelain` empty afterwards).
+file restored from a byte-exact copy and verified with `git diff --exit-code` (`git status
+--porcelain` empty afterwards).
 
-**F1 — drop the record write in `_emit_event` → leg 1 (count half)**
+#### F1 — drop the record write in `_emit_event` → leg 1 (count half)
+
 ```console
 E AssertionError: the capture appended 14 journal record(s) and made 0 record write(s):
   a write path bypassed the record (or invented one)
 ```
 
-**F2 — swap the fold BEFORE the append inside `_apply_and_journal` → leg 2**
+#### F2 — swap the fold BEFORE the append inside `_apply_and_journal` → leg 2
+
 ```console
 E AssertionError: `_apply_and_journal` did not write journal → record → cache: observed
   ['fold', 'cache', 'journal', 'record'] (journal at 2, record at 3, fold at 0)
 ```
 
-**F3 — the same swap → leg 3 (the property, not a rename)**
+#### F3 — the same swap → leg 3 (the property, not a rename)
+
 ```console
 E AssertionError: the journal-first-ahead fold population changed: observed
   [('EventRecorded', 'create_entity'), ('ObjectRegistered', 'chokepoint'),
    ('ObjectRegistered', 'create_entity')],
   pinned [('EventRecorded', 'create_entity'), ('ObjectRegistered', 'create_entity')].
 ```
-The `('ObjectRegistered', 'chokepoint')` pair is the reordered door naming ITSELF — this is the red the
-old literal comparison could not produce.
 
-**F4 — make the record seam DECLINE (force the unarmed branch) → leg 1 (APPLIED half)**
+The `('ObjectRegistered', 'chokepoint')` pair is the reordered door naming ITSELF — this is the red
+the old literal comparison could not produce.
+
+#### F4 — make the record seam DECLINE (force the unarmed branch) → leg 1 (APPLIED half)
+
 ```console
 E AssertionError: the capture appended 14 journal record(s) and only 0 reached the record as APPLIED
   (outcomes: {'None': 14}) — the door was CALLED and did not WRITE, which is the
   `derived = replay(journal)` gap D3 measures (an unarmed/refused call is not a record write)
 ```
+
 This is the finding-3 red: the count-based assertion alone stays green here.
 
-**F5 — inject `CREATE (:X {id:'cache-only'})` at the top of the measured region → leg 4**
+#### F5 — inject `CREATE (:X {id:'cache-only'})` at the top of the measured region → leg 4
+
 ```console
 E AssertionError: 1 mutating cache statement(s) ran with no journal append and no APPLIED record write
   behind them — the cache-only path D3 forbids: [0] "CREATE (:X {id:'cache-only'})" (lane=None, in_fold=None)
 ```
-This is D3's OWN stated falsifier (*"inject a cache write that skips the record → D3 must red"*), which
-before this cycle left all three legs green.
+
+#### F6 — ⛔ THE SAME INJECTION PLACED MID-CAPTURE DOES **NOT** RED, and that is the residue
+
+A review of this fix measured the limit of leg 4 rather than accepting its wording: the same cache-only
+write injected after `_emit_event`'s record branch (i.e. after some append and its record have already
+landed) leaves **all five** D3 legs green — `cache=43`, `5 passed`. Leg 4 asserts a FLOOR (nothing before
+the first append/first APPLIED record), not a per-write attribution, because the trace carries no
+descriptor tying a raw-handle statement to the append it skipped. Its docstring, its name and the verdict
+line now say exactly that instead of "the whole mutating-cache population". See §4.
+
+#### F7 — `_apply_and_journal` raw-handle cache write before its append → leg 2
+
+A `proj.g.query(...)` issued on the sanctioned door before its append used to be unexamined: leg 2's
+ordering loop filtered to `e.in_fold is not None`, and a raw statement has `in_fold is None`. The loop
+now covers **every** cache statement in the probe's window (and uses `enumerate`, not `observed.index`,
+which resolved by value on a dataclass).
 
 ### 6.3 What the fixes do not change
 

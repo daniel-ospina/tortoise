@@ -409,6 +409,54 @@ _KNOWN_AHEAD_DEVIATIONS = frozenset({
     ("ObjectRegistered", "create_entity"),
 })
 
+#: The steps `tortoise/sdk.py`'s KNOWN DEVIATIONS block actually NAMES as apply-first
+#: (`:4836`: *"`TortoiseSDK._create_entity`'s Object/**Subject**/Event registration
+#: blocks are apply-first"*), all under the `create_entity` lane (`sdk.py:43309`).
+#: Kept SEPARATE from the pin above on purpose: the pin is the population THIS
+#: capture exercises, and a capture that creates a Subject legitimately yields
+#: `("SubjectAdded", "create_entity")` without that being a fresh violation. The
+#: failure message consults this set so an observed-but-not-pinned pair is
+#: reported as *a recorded deviation this capture newly exercises* (extend the
+#: pin after review) and only an UNRECORDED pair is called a violation.
+_RECORDED_DEVIATION_EVENT_TYPES = frozenset(
+    {"ObjectRegistered", "SubjectAdded", "EventRecorded"}
+)
+
+
+def _ahead_population_advice(gained: set, lost: set) -> str:
+    """The remediation text for a moved journal-first-ahead population.
+
+    Split by whether the pair is one the tree ALREADY records, so the leg cannot
+    accuse a recorded deviation of being a fresh violation (the Subject arm is
+    named at `sdk.py:4836` but this capture never creates a Subject, so it is not
+    in the pin).
+    """
+    recorded = sorted(p for p in gained if p[0] in _RECORDED_DEVIATION_EVENT_TYPES)
+    unrecorded = sorted(p for p in gained if p[0] not in _RECORDED_DEVIATION_EVENT_TYPES)
+    lines = []
+    if recorded:
+        lines.append(
+            f"  \u2022 RECORDED, newly exercised by this capture: {recorded}. The "
+            "KNOWN DEVIATIONS block at the top of `tortoise/sdk.py` names these "
+            "arms, so this is a deviation being OBSERVED, not a fresh violation. "
+            "Extend `_KNOWN_AHEAD_DEVIATIONS` so the pin covers the population "
+            "the capture actually drives."
+        )
+    if unrecorded:
+        lines.append(
+            f"  \u2022 NOT RECORDED anywhere: {unrecorded}. This is a fresh "
+            "violation of D3's order \u2014 a door claiming journal-first while "
+            "folding first. Fix the door; do not widen the pin."
+        )
+    if lost:
+        lines.append(
+            f"  \u2022 Pinned pair(s) GONE: {sorted(lost)}. That deviation was "
+            "closed or re-declared apply-first (`_apply_first_write_scope`). "
+            "Re-grade D3 (#9567 / #11477) and shrink the pin \u2014 an assertion "
+            "whose population moved must not stay green."
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
+
 
 @dataclass
 class Door:
@@ -423,7 +471,7 @@ class Door:
     #: The record door's own verdict ("record" only): `RecordWriteOutcome.APPLIED`
     #: when a row was materialized, `None` when the seam was UNARMED, `REFUSED`
     #: otherwise. A CALL is not a WRITE, and only this field can tell them apart
-    #: (`write_live_record` returns `None` when unarmed, `record_writer.py:2338`).
+    #: (`write_live_record` returns `None` when unarmed, `record_writer.py:2340`).
     outcome: Any = None
 
 
@@ -661,24 +709,32 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
     Falsifier: swap the door's order (fold before the append) → the fold's own
     statements precede its record write and this reds, naming both positions.
     """
-    from tortoise.record_writer import RECORD_DSN_ENV
     from tests.test_9078_record_written_by_production_path import _app_role_dsn
+    from tortoise.record_writer import RECORD_DSN_ENV
 
     monkeypatch.setenv(RECORD_DSN_ENV, _app_role_dsn(armed.dsn))
 
     object_id = f"order-probe-{uuid.uuid4().hex[:10]}"
     mark = len(traced.entries)
-    with use_record_tenant(*traced.tenant):
-        traced.sdk._apply_and_journal(
-            traced.sdk._get_proj(),
-            {
-                "type": "ObjectRegistered",
-                "id": object_id,
-                "name": f"ordering probe {object_id}",
-                "objectKind": "concept",
-            },
-        )
-    observed = traced.entries[mark:]
+    try:
+        with use_record_tenant(*traced.tenant):
+            traced.sdk._apply_and_journal(
+                traced.sdk._get_proj(),
+                {
+                    "type": "ObjectRegistered",
+                    "id": object_id,
+                    "name": f"ordering probe {object_id}",
+                    "objectKind": "concept",
+                },
+            )
+        observed = list(traced.entries[mark:])
+    finally:
+        # ⛔ The trace is MODULE-scoped and shared by every leg in this file. This
+        # probe used to leak its doors into it, so leg 3's "ahead" population
+        # silently depended on leg 2 having run: run alone with
+        # `-k "D3 and SILENTLY"`, leg 3's declared falsifier did NOT red. Trim the
+        # probe back out so each leg reads the capture and nothing else.
+        del traced.entries[mark:]
     doors = [e.door for e in observed]
     assert "journal" in doors and "record" in doors and "fold" in doors, (
         "`_apply_and_journal` did not reach all three doors: observed "
@@ -700,15 +756,22 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
         "`_apply_and_journal` did not write journal → record → cache: observed "
         f"{doors} (journal at {first_j}, record at {first_r}, fold at {first_f})"
     )
-    folded = [e for e in observed if e.door == "cache" and e.in_fold is not None]
+    folded = [(i, e) for i, e in enumerate(observed) if e.door == "cache"]
     assert folded, (
         "the fold issued no cache statement — the door folded an event and wrote "
         f"nothing, which is not the write the criterion describes: {doors}"
     )
-    for stmt in folded:
-        assert observed.index(stmt) > first_r, (
-            f"a fold statement ran before the door's record write ({stmt.statement!r}) — "
-            "the cache is ahead of the record on a door that claims journal-first"
+    # ⛔ EVERY cache statement in this probe's window, not only the ones carrying
+    # `in_fold`. A raw-handle write (`in_fold is None`) issued on this door before
+    # its append is exactly the shape a cache-only path takes, and filtering to
+    # `e.in_fold is not None` left it unexamined. `enumerate`, never
+    # `observed.index(e)`: `Door` is a dataclass, so `.index` resolves by VALUE
+    # and would return an earlier equal instance.
+    for i, stmt in folded:
+        assert i > first_r, (
+            f"a cache statement ran before the door's record write ({i} <= "
+            f"{first_r}: {stmt.statement!r}, in_fold={stmt.in_fold!r}) — the cache "
+            "is ahead of the record on a door that claims journal-first"
         )
 
 
@@ -736,9 +799,13 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
     tree already exports the mechanical discriminator (`_APPLY_FIRST_LANE`,
     `projection/__init__.py:4969`) and that is what classifies a lane here.
 
-    Falsifier: reorder `_apply_and_journal` to fold before its append → its fold
-    then runs ahead under its own lane (`"chokepoint"`), which is NOT a pinned
-    pair, and this reds naming it.
+    Falsifier: change the lane a CAPTURE door declares while it still folds first —
+    e.g. `_create_entity`'s `_live_write_scope("create_entity")` to any other
+    non-apply-first reason → a `(event_type, lane)` pair that is not pinned
+    appears and this reds naming it. (It used to name "reorder
+    `_apply_and_journal`", which stopped being true once leg 2's probe is trimmed
+    back out of this module-scoped trace: `_apply_and_journal` is not on the
+    capture path, so a reorder there is leg 2's falsifier, not this one's.)
     """
     from tortoise.projection import _APPLY_FIRST_LANE
 
@@ -801,22 +868,17 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
         "the journal-first-ahead fold population changed: observed "
         f"{sorted(journal_first_ahead)}, pinned "
         f"{sorted(_KNOWN_AHEAD_DEVIATIONS)}.\n"
-        "  • A `(event_type, lane)` that is NEW here is a fresh violation of D3's "
-        "order — a door claiming journal-first while folding first. Fix the door; "
-        "do not widen the pin.\n"
-        "  • A pinned pair that is GONE means that deviation was closed or "
-        "re-declared apply-first (`_apply_first_write_scope`). Re-grade D3 "
-        "(#9567 / #11477) and update the pin; an assertion whose population moved "
-        "must not stay green.\n"
-        "  The recorded set is the KNOWN DEVIATIONS block at the top of "
-        "`tortoise/sdk.py`."
+        + _ahead_population_advice(
+            journal_first_ahead - set(_KNOWN_AHEAD_DEVIATIONS),
+            set(_KNOWN_AHEAD_DEVIATIONS) - journal_first_ahead,
+        )
     )
 
 
 def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write(
     traced,
 ):
-    """D3 (no cache-only path): no cache write precedes the record it derives from.
+    """D3 (no cache-only path): no cache write precedes the capture's first record.
 
     D3's row states BOTH halves — *"journal → record → cache in that order, **with
     no cache-only path**"* — and pins the falsifier *"inject a cache write that
@@ -828,18 +890,27 @@ def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_writ
       with `in_fold=None` — the raw-handle class that a cache-only write takes —
       was never examined anywhere.
 
-    So this leg takes the WHOLE mutating-cache population, folded and raw, and
-    requires every statement to have a journal append AND an APPLIED record write
-    behind it. A statement that reached the cache with neither is a cache-only
-    path by definition — the census's `cache-with-no-declared-lane` count is a
-    different question (§17.1 declaration), and this leg is the one D3 asks.
+    ⛔ WHAT THIS LEG MEASURES, stated as narrowly as it actually is. It asserts the
+    FLOOR: no mutating cache statement precedes the capture's first journal append
+    and first APPLIED record write. It is NOT a per-write attribution, and a
+    reviewer measured what that costs: a cache write injected MID-capture — after
+    some append and its record have already landed — leaves this leg (and all
+    three others) green, because the trace carries no descriptor tying a raw-handle
+    statement to the append it skipped. Attribution of an arbitrary raw write is
+    not recoverable from call order alone; see §4 of the artifact for the residue
+    and why it stays on #11477.
+
+    The population is also exactly `_GuardedGraph.query` — the handle's other
+    mutating-capable verbs (`ro_query` and `execute_command`, which the module's
+    own comments call out as write-capable) are NOT wrapped, so a write through
+    them is invisible to every leg here.
 
     Falsifier: add
-    `traced.sdk._get_proj().g.query("CREATE (:X {id:'cache-only'})")` at the top of
-    the measured region (before the capture) → the statement has no journal append
-    and no APPLIED record write behind it, and this reds naming it. Measured on a
-    tree where the injection is absent: every cache statement follows the first
-    append and the first APPLIED record.
+    `sdk._get_proj().g.query("CREATE (:X {id:'cache-only'})")` at the TOP of the
+    measured region (before the capture) → the statement has no journal append and
+    no APPLIED record write behind it, and this reds naming it. The mid-capture
+    placement is NOT this leg's falsifier: it does not red, and that is the
+    measured residue, not an oversight.
     """
     cache = [(i, e) for i, e in enumerate(traced.entries) if e.door == "cache"]
     assert cache, (
