@@ -2055,11 +2055,16 @@ def test_the_real_machine_record_agrees_with_the_pins():
     drift cannot be the one place drift goes unwatched, so its
     `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
     census range's own opening and closing lines - never as a window a shift can
-    slide inside. The field's ONE cite to a DIFFERENT file - the live
-    `extractor_v2.py` read of the same switch, whose number nothing in `tests/`,
-    `tools/` or `docs/` re-checked - is pinned here beside them for the same reason;
-    that gap was recorded as a residual by a fresh-context review at `33109a66184a`
-    and is closed by the arm below rather than left to the next merge. Kept inside THIS test rather than added as a new test in
+    slide inside. The field carries FOUR cites to files other than the probe, and ONE of
+    them - the live `extractor_v2.py` read of the same switch, whose number nothing in
+    `tests/`, `tools/` or `docs/` re-checked - is pinned here beside the probe cites for
+    the same reason; that gap was recorded as a residual by a fresh-context review at
+    `33109a66184a` and is closed by the arm below rather than left to the next merge. The
+    other three (`sparse.py:226`, `projection/entities.py:1208`,
+    `subject_binding.py:189`) are named in the arm's comment and are STILL unpinned: this
+    pins one of four, not four of four, and an earlier cut of this docstring said "ONE" as
+    if the `extractor_v2.py` cite were the field's only other-file cite - caught by a
+    fresh-context review at `11a18e9da`. Kept inside THIS test rather than added as a new test in
     `tests/test_7949_capstone_measure.py`, because the thing pinned is THIS
     file's own subject (`check.check_machine_record` over the machine record),
     and THIS file's durations row states no case count, so a pin here moves no
@@ -2090,8 +2095,8 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert probe[518 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
         f"capstone_measure.py:518 reads {probe[518 - 1].strip()!r}, not the pinned entry")
 
-    # ⛔ THE SAME FIELD CARRIES A SECOND LIVE CITE, TO A DIFFERENT FILE, AND NOTHING WATCHED
-    # IT. The arms above pin every `capstone_measure.py` cite in this field; the field also
+    # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
+    # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
     # says the switch is "read PER EMITTED POINT at `extractor_v2.py:9944`", and until this
     # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/`
     # returned the field itself and no pin (measured). That is the exact asymmetry #10274
@@ -2099,11 +2104,21 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # `33109a66184a`: the number was right at that head, and the next merge could rot it
     # silently. `tortoise/extractor_v2.py` is the most-edited file any row here cites, so it
     # is the likeliest of all these numbers to move.
+    # ⛔ ONE OF FOUR, STATED AS ONE OF FOUR. Enumerating `([A-Za-z0-9_./]+\.py):(\d+)` over
+    # this field gives `sparse.py:226`, `projection/entities.py:1208`,
+    # `subject_binding.py:189`, `extractor_v2.py:9944` and the probe cite
+    # `probes/capstone_measure.py:518` — so three other-file cites remain UNPINNED by this
+    # arm (`grep -rn '226\|1208\|189' tests/test_capstone_preregistration_9075.py` is empty).
+    # They are correct at this head; they rot unwatched. An earlier cut of this comment
+    # called the `extractor_v2.py` cite "the SECOND", as if only two existed, which is the
+    # overclaim a fresh-context review at `11a18e9da` measured and is corrected here rather
+    # than widened: pinning those three is a follow-up, and pretending they are covered is
+    # the defect class this whole bundle exists to remove.
     #
     # The NUMBER is read OUT of the citing field and never typed here — a typed number is
     # the defect this arm catches, which is why `_CROSS_FILE_PROBE_CITES` types none either.
     # ⛔ AND THE SYMBOL ALONE IS NOT ENOUGH, measured in this very file: the switch's name
-    # occurs THREE times in `extractor_v2.py` — its `def` (`def
+    # occurs FOUR times in `extractor_v2.py` — a comment line naming it, its `def` (`def
     # _state_value_verbatim_enforced() -> bool:`), a second read assigned to `armed =`, and
     # the per-emitted-point read assigned to `_value_fidelity_judged`. A cite re-staled onto
     # the DEFINITION would satisfy a bare `symbol in line` check while pointing at the place
@@ -2112,34 +2127,44 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # names. So the shape (not a `def`) and the receiving variable are asserted beside the
     # symbol. Non-vacuity measured at this head: re-staling the field to the pre-fix
     # `:9929` reds this arm, because that line is not this read.
-    _switch_cite = re.search(r"extractor_v2\.py:(\d+)(?!\d)", read_back)
-    assert _switch_cite is not None, (
+    # ("occurs THREE times" was this comment's earlier count; `grep -c
+    # _state_value_verbatim_enforced tortoise/extractor_v2.py` is 4, and the three the
+    # sentence enumerates are the CODE occurrences. Corrected to the measured count — the
+    # sentence says "measured in this very file" and must therefore survive the grep.)
+    _switch_nums = [int(_n) for _n in re.findall(r"extractor_v2\.py:(\d+)(?!\d)", read_back)]
+    assert _switch_nums, (
         "the record must name where TORTOISE_STATE_VALUE_VERBATIM is read "
         "(`extractor_v2.py:NNNN`) — dropping the cite is how a live read becomes unmeasured")
-    _switch_num = int(_switch_cite.group(1))
+    # ⛔ EVERY `extractor_v2.py:NNNN` IN THE FIELD, not just the first. `re.search` bound only
+    # the first match, so a SECOND, EARLIER cite of the same file could rot to a stale number
+    # while the arm stayed green (measured by a fresh-context review at `11a18e9da`: with
+    # `(see extractor_v2.py:9944)` inserted ahead of a re-staled `extractor_v2.py:9929`, the
+    # `re.search` form passed). The set below is every number the field names, so no mention
+    # can hide behind another.
     _extractor = (REPO_ROOT / "tortoise" / "extractor_v2.py").read_text(
         encoding="utf-8").splitlines()
-    # A lookahead bounds the DIGITS; the file length bounds the POSITION. `:5180`-style
-    # re-stales pointed past the end of their file and indexed out; a length guard turns
-    # that into the message below instead of an IndexError that names no defect.
-    assert 1 <= _switch_num <= len(_extractor), (
-        f"the record cites extractor_v2.py:{_switch_num}, but that file has "
-        f"{len(_extractor)} lines — the cite points at a line that does not exist")
-    _switch_line = _extractor[_switch_num - 1].strip()
-    assert "_state_value_verbatim_enforced()" in _switch_line, (
-        f"the record cites extractor_v2.py:{_switch_num} as the "
-        "TORTOISE_STATE_VALUE_VERBATIM read, but that line reads "
-        f"{_switch_line!r}, which is not the switch being read. Re-derive the number from "
-        "the tree (grep the symbol); do NOT move the symbol to fit the cite")
-    assert not _switch_line.startswith("def "), (
-        f"the record cites extractor_v2.py:{_switch_num} as a READ, but that line is the "
-        f"DEFINITION ({_switch_line!r}) — a definition is where the switch is declared, "
-        "never where it is read per emitted point")
-    assert "_value_fidelity_judged" in _switch_line, (
-        f"the record cites extractor_v2.py:{_switch_num} as the read 'PER EMITTED POINT … "
-        "handed to the rule as armed=', but that line reads "
-        f"{_switch_line!r} — the per-point read assigns `_value_fidelity_judged`; the other "
-        "call site (assigned to `armed =`) is a different read this sentence does not name")
+    for _switch_num in _switch_nums:
+        # A lookahead bounds the DIGITS; the file length bounds the POSITION. `:5180`-style
+        # re-stales pointed past the end of their file and indexed out; a length guard turns
+        # that into the message below instead of an IndexError that names no defect.
+        assert 1 <= _switch_num <= len(_extractor), (
+            f"the record cites extractor_v2.py:{_switch_num}, but that file has "
+            f"{len(_extractor)} lines — the cite points at a line that does not exist")
+        _switch_line = _extractor[_switch_num - 1].strip()
+        assert "_state_value_verbatim_enforced()" in _switch_line, (
+            f"the record cites extractor_v2.py:{_switch_num} as the "
+            "TORTOISE_STATE_VALUE_VERBATIM read, but that line reads "
+            f"{_switch_line!r}, which is not the switch being read. Re-derive the number from "
+            "the tree (grep the symbol); do NOT move the symbol to fit the cite")
+        assert not _switch_line.startswith("def "), (
+            f"the record cites extractor_v2.py:{_switch_num} as a READ, but that line is the "
+            f"DEFINITION ({_switch_line!r}) — a definition is where the switch is declared, "
+            "never where it is read per emitted point")
+        assert "_value_fidelity_judged" in _switch_line, (
+            f"the record cites extractor_v2.py:{_switch_num} as the read 'PER EMITTED POINT … "
+            "handed to the rule as armed=', but that line reads "
+            f"{_switch_line!r} — the per-point read assigns `_value_fidelity_judged`; the other "
+            "call site (assigned to `armed =`) is a different read this sentence does not name")
 
     # ⛔ A SET OVER THE RANGES CITED, not a count and not a phrase. The first cut of this
     # arm asserted `count(":2726-2728") == 2`, which false-failed a CORRECT additive edit
