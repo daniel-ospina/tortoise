@@ -108,9 +108,11 @@ def _base_env(home: Path) -> dict:
     #   E  AssertionError: silent by default (W4 posture)
     #   E  assert True is False
     #
-    # ⛔ THE MEASURED BLAST RADIUS IS EXACTLY ONE SWITCH, and saying otherwise
-    # is how a review record goes wrong — two review rounds caught this record
-    # overstating it, in opposite directions. `TORTOISE_VOLUNTEER_DISABLE`
+    # ⛔ THE MEASURED BLAST RADIUS IS EXACTLY ONE SWITCH. Every clause below is
+    # a measurement, and a clause that cannot be measured does not belong here:
+    # this paragraph is evidence other lanes read, so an unmeasured claim about
+    # itself is a defect in its own right.
+    # `TORTOISE_VOLUNTEER_DISABLE`
     # and `TORTOISE_COMMAND` were already clean BEFORE this fix — the fixture's
     # own `monkeypatch.delenv` loop below removes them from `os.environ` during
     # setup, and `_run_driver` builds its env at ROW time, so they never reached
