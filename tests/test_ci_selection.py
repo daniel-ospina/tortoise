@@ -13055,6 +13055,72 @@ def test_every_required_merge_check_carries_an_outer_cap():
         f"measurement (docs/ops/ci-wall-clock.md).")
 
 
+def _slow_wall_remedy(manifest: dict, target: float | None = None,
+                      setup: float | None = None) -> str:
+    """#11605: the remedy the wall arm can ACTUALLY clear, derived from the map.
+
+    The wall arm's failure text used to tell every reader to "Raise
+    `config/ci-surfaces.yml::slow_shards` (reviewed)". Measured on the 2026-11-09
+    refresh, that advice is INERT: a leg is FILE-granular (`build_shard_entries`
+    packs whole files, and `python-ci.yml` maps each name to `tests/<name>.py`),
+    so `max(leg) >= <the heaviest file>`. Once one file alone exceeds the pytest
+    budget a leg may spend (`target - setup`), no leg count clears the wall —
+    raising the count only relocates the red onto the BALANCE arm. Five lanes
+    re-derived that dead end from the failure text, one after another.
+
+    So the two arms are solved for the leg count before a word is written. With
+    `pool` = the gating pool, `h` = the heaviest file, `room = target - setup`:
+
+      * the WALL needs `pool / L <= room`  ->  `L >= ceil(pool / room)` = `lo`;
+      * the BALANCE band needs `h <= ratio x pool / L`  ->  `L <= floor(ratio x
+        pool / h)` = `hi` (the heaviest file must still fit the band).
+
+    `lo > hi` (or `h > room`) is the indivisible-pool state: no `slow_shards`
+    value can pass, and the message says so, names the file, and names the two
+    routes that remain (split/move it, or move the ceiling — an OWNER decision,
+    #6792). Otherwise the window `[lo, hi]` is stated, so the advice is a number
+    a reviewer can act on instead of "raise it".
+
+    Pure: reads only the passed manifest (and the two measured constants), so it
+    is testable against synthetic maps. Returns "" when the pool is empty (an
+    empty pool is the coverage arm's finding, not this one's).
+    """
+    target = SLOW_LEG_WALL_TARGET_MIN if target is None else target
+    setup = SLOW_LEG_SETUP_ALLOWANCE_MIN if setup is None else setup
+    room = target - setup
+    dmap = cs._durations_map(manifest)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(manifest)}
+    if not weights or room <= 0:
+        return ""
+    heaviest = max(weights, key=lambda n: weights[n])
+    h = weights[heaviest]
+    pool = sum(weights.values())
+    count = slow_shard_count(manifest)
+    ratio = cs.HALF_DURATION_IMBALANCE_RATIO
+    # ceil(pool / room) on the seconds, so the answer is exact at a boundary
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(ratio * pool / h) if h > 0 else 0
+    if h > room or lo > hi:
+        return (
+            f"⛔ No `slow_shards` value can clear this, and more legs are not the "
+            f"remedy: a leg is FILE-granular, so `max(leg)` is at least the "
+            f"heaviest file (`{heaviest}`, {h:.2f}m alone) while a leg may spend "
+            f"only {room:.2f}m of pytest ({target:.0f}m target − {setup:.1f}m "
+            f"setup). Clearing the wall needs >= {lo} legs; the {ratio}x balance "
+            f"band admits at most {hi} at {h:.2f}m — the two windows do not "
+            f"overlap, so the pool has to become DIVISIBLE: split or move "
+            f"`{heaviest}` (or move the {target:.0f}m ceiling, an OWNER decision "
+            f"— #6792 — never a lane's). Committed at {count} legs; see #11605.")
+    return (
+        f"Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the "
+        f"[{lo}, {hi}] window this map admits: the wall needs >= {lo} legs "
+        f"({pool:.2f}m / {room:.2f}m of pytest per leg — a LOWER bound, the LPT "
+        f"pack must still land inside it) and the {ratio}x balance band allows "
+        f"<= {hi} while `{heaviest}` ({h:.2f}m) is the heaviest file, instead of "
+        f"letting this lane become the merge ceiling again")
+
+
 def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     """#9539: the slow legs must be a complete, duration-balanced partition AND
     the wall their pack projects must stay inside the CI guideline.
@@ -13074,10 +13140,13 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
       * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
         guideline, AND, once the matrix is capped (#6744), the job's real band
         `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
-        A new slow file big enough to break either reds here, and the remedy is a
-        reviewed `slow_shards` bump, not a quieter number. The second bound is
-        not optional: a per-leg number alone certifies a wall the job cannot
-        hit as soon as one leg is not the whole job.
+        A new slow file big enough to break either reds here, and the remedy is derived
+        by `_slow_wall_remedy()` from the map rather than asserted: a reviewed
+        `slow_shards` bump when the pool is divisible, and a split/move of the
+        offending file when one file alone exceeds the pytest budget a leg may
+        spend (no leg count can help then — #11605). Never a quieter number. The
+        second bound is not optional: a per-leg number alone certifies a wall the
+        job cannot hit as soon as one leg is not the whole job.
 
     The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
     over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
@@ -13114,9 +13183,8 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
         f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
         f"{proj['projected_wall_min']:.2f}m — over the "
-        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. Raise "
-        f"`config/ci-surfaces.yml::slow_shards` (reviewed) instead of letting "
-        f"this lane become the merge ceiling again")
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. "
+        + _slow_wall_remedy(m))
     # #6744: the per-leg number above is NOT the job's wall once the matrix is
     # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
     # that stops at the per-leg share stays GREEN while asserting a wall the job
@@ -13145,6 +13213,95 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     inc = slow_matrix_include(entries)["include"]
     assert [r["half"] for r in inc] == [e["name"] for e in entries]
     assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
+
+
+def test_the_slow_wall_remedy_names_a_remedy_that_can_fire():
+    """#11605: the wall arm's advice must be a REMEDY, not an incantation.
+
+    The pin failed for a week telling every reader to "raise `slow_shards`" on a
+    map where no `slow_shards` value can pass (the heaviest file alone is 9.09m
+    against an 8.00m pytest budget). Five lanes re-derived that by hand. This
+    pins both shapes on synthetic maps, and the third arm derives the committed
+    map's verdict from the map itself rather than hard-coding today's answer —
+    so when the monolith is split the assertion flips with it, and a stale
+    "cannot be sharded" claim cannot outlive its cause (#10575 P2).
+    """
+    room = SLOW_LEG_WALL_TARGET_MIN - SLOW_LEG_SETUP_ALLOWANCE_MIN
+    assert room > 0, "the wall/setup constants leave no pytest budget at all"
+
+    # --- Arm 1: one file heavier than a leg may spend — no count can clear it.
+    indivisible = {
+        "slow_shards": 2,
+        "slow_files": ["test_big", "test_a", "test_b"],
+        "durations": {"test_big.py": (room + 2.0) * 60,
+                      "test_a.py": 120.0, "test_b.py": 120.0},
+    }
+    verdict = _slow_wall_remedy(indivisible)
+    assert "No `slow_shards` value can clear this" in verdict, verdict
+    assert "test_big" in verdict, (
+        "the indivisible verdict must NAME the file that cannot be split — that "
+        f"naming is the whole point (got: {verdict})")
+    assert "Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the" \
+        not in verdict, (
+            "an indivisible pool must not be handed the remediless advice: "
+            f"{verdict}")
+    # and the claim it makes is TRUE — the pack really cannot meet the wall
+    proj = slow_wall_projection(indivisible)
+    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
+        "the fixture stopped being a failing map, so arm 1 proves nothing")
+
+    # --- Arm 2: every file is small, the POOL is what is too big for 2 legs.
+    # 60 x 50s = 50m over 2 legs; no single file can be blamed, so the leg count
+    # IS the lever — and the window the message names must actually work. (The
+    # fixtures are FINE-GRAINED on purpose: with coarse items no leg count helps
+    # even when the windows overlap, because an LPT pack is integral — that is a
+    # property of the pack, and the verdict says `>=` rather than `=`, never
+    # claiming the count alone is sufficient.)
+    divisible = {
+        "slow_shards": 2,
+        "slow_files": [f"test_s{i:02d}" for i in range(60)],
+        "durations": {f"test_s{i:02d}.py": 50.0 for i in range(60)},
+    }
+    verdict = _slow_wall_remedy(divisible)
+    assert "No `slow_shards` value can clear this" not in verdict, (
+        f"a divisible pool must not be declared hopeless: {verdict}")
+    lo = -(-round(sum(divisible["durations"].values()))
+          // round(room * 60))
+    assert f"[{lo}, " in verdict, (
+        f"the advice must state the leg-count window, starting at {lo}: "
+        f"{verdict}")
+    # non-vacuity of the ADVICE: the count it names clears the wall arm.
+    assert slow_wall_projection(divisible)["projected_wall_min"] \
+        > SLOW_LEG_WALL_TARGET_MIN, "the fixture stopped needing more legs"
+    raised = dict(divisible, slow_shards=lo)
+    assert slow_wall_projection(raised)["projected_wall_min"] \
+        <= SLOW_LEG_WALL_TARGET_MIN, (
+            f"the `slow_shards: {lo}` the message prescribes does not clear the "
+            "wall arm — the advice is inert again, which is the defect")
+
+    # --- Arm 3: the COMMITTED map — verdict derived, never hard-coded.
+    m = load_manifest()
+    dmap = cs._durations_map(m)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(m)}
+    heaviest = max(weights, key=lambda n: weights[n])
+    pool = sum(weights.values())
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(cs.HALF_DURATION_IMBALANCE_RATIO * pool / weights[heaviest])
+    committed = _slow_wall_remedy(m)
+    assert heaviest in committed, (
+        f"the committed map's heaviest slow file is `{heaviest}`; the verdict "
+        f"must name it (got: {committed})")
+    if weights[heaviest] > room or lo > hi:
+        assert "No `slow_shards` value can clear this" in committed, (
+            f"`{heaviest}` is {weights[heaviest]:.2f}m against a {room:.2f}m "
+            f"budget and the leg windows [{lo}, {hi}] do not overlap, so the "
+            f"verdict must be the indivisible one (got: {committed})")
+    else:
+        assert f"[{lo}, {hi}]" in committed, (
+            f"a shardable window [{lo}, {hi}] exists for `{heaviest}` "
+            f"({weights[heaviest]:.2f}m), so the verdict must be the window "
+            f"(got: {committed})")
 
 
 def test_slow_shards_declaration_is_fail_closed():
