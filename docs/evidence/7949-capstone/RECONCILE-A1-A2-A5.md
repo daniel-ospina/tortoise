@@ -67,8 +67,8 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 ⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
-`hasPart` (`tortoise/extractor_v2.py:1744`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11099`, and
+`hasPart` (`tortoise/extractor_v2.py:1764`). It does **not** discharge A1: it is **transport only** —
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11119`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
 load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
@@ -160,7 +160,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    insertion then moved both; both now read `17581`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2724-2726`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2736-2738`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -306,7 +306,7 @@ mechanical half now defaults ON — the composition is the `vet_enabled = (vet_a
 _vet_enabled() or _value_gate_enabled())` assignment (`extractor_v2.py:11731-11732` at `80c912244`;
 **`:12302-12303` at `d69faaf38`**), and the default-ON itself lives at `tortoise/value_gate.py:81`
 (`is_truthy(os.environ.get(ENV_FLAG, "1"))`).
-`extractor_v2.py:1178` is the **`TORTOISE_VET` toggle** (`:1154` on the pinned bases below), still OFF by default — cite it for that and
+`extractor_v2.py:1154` is the **`TORTOISE_VET` toggle**, still OFF by default — cite it for that and
 nothing else. ⚠️ **A line cite is pinned to a base, and cites drift SITE BY SITE.** Three points, each
 named by the sha it is true at, so every delta has a reproducible operand: `:11351-11352` / `:1153` at
 **`aa414b4d5`** (the `#11211` landing — ⚠️ the immediate parent of the next point, `80c912244^`, holds
@@ -320,7 +320,9 @@ the path matters: unscoped, both patterns also match THIS record and its quoted 
 count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
 `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-`:13243` at HEAD and `:12779` at `62248db88`, and the sweep covers **neither** of those two bases), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+`:12929` at `a1dff7cec8` and `:12779` at `62248db88`, and the sweep covers **neither** of those two
+bases — pinned to the two shas, never to `HEAD`, because a `HEAD`-relative number is the same rot in a
+new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -627,7 +629,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :13243 at HEAD (:12779 at 62248db88), which is none of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at a1dff7cec8, :12779 at 62248db88, neither of which is one of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
@@ -637,11 +639,8 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 # §0's four `create_operator` MENTIONS are base-dependent too — the CALL count is 0 either way:
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
-# the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68,
-# and the inserts above them in `tortoise/extractor_v2.py` moved the four by a further +208 to this head
-# (measured: 9006+208=9214, 9024+208=9232, 9031+208=9239, 9411+208=9619 — a UNIFORM shift, so the
-# arithmetic is the whole explanation and not four coincidences)
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9214 :9232 :9239 :9619
+# the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9234 :9252 :9259 :9639
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
@@ -656,7 +655,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
-git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :11099 — no production
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :11119 — no production
                                                           # consumer of #11205's channel (⚠️ the `-- tortoise/`
                                                           # scope is the claim: unscoped it also matches the
                                                           # reader below)

@@ -2200,3 +2200,30 @@ and `_EVENT_HANDLED` / `_DOC_PASSTHROUGH_HANDLED` (the folds) already deny the k
 `test_the_journal_replay_drops_the_prose_and_the_residual_says_so` plus
 `test_the_event_journal_replay_drops_the_prose` pin it. This change closes the RECORD route, which is the
 one that was open.
+
+---
+
+## 2026-11-07 — V1 RESOLVED, and §2.0's 2026-10-08 ruling SPLIT (owner)
+
+**The decision as the lane relayed it** (`#4051` comment `6713838871`, §"What is decided", items 1–3; **item 4 is
+the phase correction in comment `6714119028`**, which supersedes that comment's own *"a budget-derived window
+before launch"*): **(1)** the
+**vector index and the embedding payload move to Postgres** (`pgvector`), which **resolves V1 (`#4997`)** — the
+vector index does not live in FalkorDB; **(2)** the **text index stays** in FalkorDB, because moving it is a
+measured regression (M3 defers it); **(3)** **traversal, writes and EP stay** in the graph, so the Cypher
+surface is untouched; **(4)** the graph is **complete through private-beta** and becomes a **budget-derived
+window only after measurement** (the phase split is comment `6714119028`).
+
+**What this reverses in the design document, and what it does not.** `§12.1c` is no longer an OPEN DECISION:
+its recommendation (option 2, vectors to Postgres) is adopted, and what remains open there is the *different*
+question of whether `:Object`/`:Event` ever carry embeddings (§14.3 **V3**). **§2.0's 2026-10-08 ruling is SPLIT**,
+not reversed: its *"keep the limit in falkor high"* clause is narrowed to *complete through private-beta,
+windowed after M2*, and carries an `OVERRIDES:` line; its *"so we don't need to rush with enabling our queries
+to parse both falkor and postgres"* clause is what makes the dual-store **search** path adoptable. ⚠️ **`#7970`'s
+anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it.
+
+**The canonical document is `docs/architecture/SEARCH-ARCHITECTURE.md`**, registered in `docs/00_index.md`,
+which holds the method ruling, the executing surface of the move, the window policy and the five measurements
+(M1–M5) that gate it. Two corrections belong to this entry because the design document states the design and
+not the history: the earlier *"5.6 KB vs 1 KB"* and *"19.4 MB as a 2026-11-04 measurement"* figures recorded
+above stand as corrected there, and neither is an input to the 2026-11-07 decision.

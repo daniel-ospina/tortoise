@@ -18859,11 +18859,11 @@ class FalkorProjection(
         declaration, #4997); this method introduces no second label vocabulary.
 
         ⛔ This does NOT create an index and does NOT assert that the served set
-        and the indexed set SHOULD be equal. Whether Object/Event/Source vectors
-        should be indexed is the owner's open decision V1
-        (docs/architecture/STORAGE-ARCHITECTURE.md §12.1c / §14.3, raised
-        2026-09-24); this method makes the RELATIONSHIP observable without
-        acting on it.
+        and the indexed set SHOULD be equal. WHERE an index lives is settled: V1
+        (docs/architecture/STORAGE-ARCHITECTURE.md §12.1c, resolved 2026-11-07)
+        moves it out of FalkorDB. Whether these labels carry an index at all is
+        §14.3 V3's question and stays open; this method makes the RELATIONSHIP
+        observable without acting on it.
 
         Row shape (measured on falkordb/falkordb:latest): 9 columns, where
         ``[0]`` is the label, ``[1]`` the properties and ``[2]`` the ``types``
@@ -18992,9 +18992,10 @@ class FalkorProjection(
             if first_report:
                 log.warning(
                     "#4997: vector search on %s is unindexed for label(s) %s "
-                    "(indexed: %s) — those reads silently full-scan. This is "
-                    "the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) "
-                    "governs; indexing those labels is NOT done here.",
+                    "(indexed: %s) — those reads silently full-scan. Whether "
+                    "those labels get an index is §14.3 V3 of "
+                    "STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index "
+                    "lives. Indexing them is NOT done here.",
                     self._graph_name,
                     sorted(gap),
                     indexes_reported or "none",
@@ -19739,9 +19740,9 @@ class FalkorProjection(
 
         ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
         served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
-        carry one is the owner's OPEN decision V1
-        (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
-        2026-09-24) — this store MAKES THE RELATIONSHIP A FACT
+        carry one is §14.3 V3's question and stays open — V1 settled only WHERE
+        an index lives (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c,
+        resolved 2026-11-07) — this store MAKES THE RELATIONSHIP A FACT
         (``_vector_index_served_labels`` vs ``_vector_indexed_labels``; every
         served label absent from the latter full-scans) and never spends that
         decision. See ``_record_vector_index_inventory``.

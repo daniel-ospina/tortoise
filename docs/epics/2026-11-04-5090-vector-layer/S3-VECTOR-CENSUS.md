@@ -321,13 +321,15 @@ assertion measures.
 ```text
 $ uv run python tools/test_lane.py run -- tests/test_dod_5090_probe.py -q
 121 passed, 1 skipped in 42.50s   # the #11088 transcript this row was cut from
-                                 # this tree: 165 collected, 164 passed, 1 skipped
+                                 # this tree: 166 collected, 165 passed, 1 skipped
 ```
 
-(115 collected before #11088's round 7; the file collects **165 in the tree this document sits in** —
+(115 collected before #11088's round 7; the file collects **166 in the tree this document sits in** —
 nine added by #11337 over the then-122 baseline, nineteen by `#11444`'s writer-register falsifiers, one
-by `#11471`'s GATED-writer bypass arm, and fourteen by `#11492` — so `main` collects `122 + 9 + 19 + 1 = 151`
-and this tree `151 + 14 = 165`): seven
+by `#11471`'s GATED-writer bypass arm, fourteen by `#11492`, and one by `#11437`
+(`122 + 9 + 19 + 1 + 14 + 1 = 166`). ⚠️ No figure here names what `main` collects TODAY: four of
+those five additions are already merged and the fifth lands with this document, so any "`main` at N"
+would be a moving reference this paragraph forbids — the total is bound to THIS TREE alone): seven
 row-2 resolution pins (register resolves every writer; the unserved-label falsifier; the
 derived-label-wins arm; the runtime-label hold; the unreadable register holding as `UNMEASURED`; the
 malformed-`stores` hold; the register's own `bypass` hold), one that holds the row on a census
@@ -338,14 +340,15 @@ fixture skipped), one that pins the `unexplained` note itself so a `PARTIAL` can
 and one that drives row 2's `ungated` candidate arm (whether a DECLARED `ungated` writer is scored
 from its declaration or blamed as an undeclared one), one that drives the two-label **DERIVATION**
 itself (every other `partial`-hold fixture injects the sentinel string, so nothing tied the
-derivation to `PARTIAL_LABEL_PREFIX` — see the note below) —
+derivation to `PARTIAL_LABEL_PREFIX` — see the note below), and one added by `#11437` that drives
+the residual pin's polarity as an executor over its own row set rather than a table in a message —
 and
-reads 164 passed, 1 skipped on the docker lane. The
-skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **163 passed,
+reads 165 passed, 1 skipped on the docker lane. The
+skip is the `<3.12` re-derive. ⛔ The SPLIT is lane-bound, and the same tree reads **164 passed,
 2 skipped** under `TORTOISE_TEST_CARVE_OUT=1` with no `TORTOISE_DB_URI` — the second skip is
 `tests/_live_utils.py`'s live-graph fixture, which only the docker lane satisfies. Both splits add
-to the same `165` the pin re-derives, so **neither is a stale figure**: a carve-out run that
-"corrects" 164/1 to 163/2 rewrites a true record into a false one, and the pin deliberately does
+to the same `166` the pin re-derives, so **neither is a stale figure**: a carve-out run that
+"corrects" 165/1 to 164/2 rewrites a true record into a false one, and the pin deliberately does
 not cover the split for exactly that reason. ⚠️ The COUNT is bound to THIS TREE, never to a branch
 head: a figure
 stated as *"at #11337's head"* is stale against the same tree it sits in as soon as one more test is
@@ -394,10 +397,16 @@ lane holding either issue's body is not collided with:
   *"vectors out"* → *"the vector layer — its census and surface request; where the vectors live is
   pending V1"*.
 
-The contradiction they are qualified against, verbatim from `STORAGE-ARCHITECTURE.md` §12.1c:
+⚠️ **SUPERSEDED 2026-11-07.** §12.1c now reads *"✅ DECIDED 2026-11-07 — the vector index does NOT live in
+FalkorDB"* (`docs/architecture/SEARCH-ARCHITECTURE.md`), so the *"pending V1"* premise of the two comments
+above no longer holds: the location is decided (Postgres). **Neither comment has been re-pointed — that
+reconciliation is still OWED** (`05-decompose.md`'s "also in this child" item). The wording they should carry is
+"the vector layer — its census and surface request; its location is decided and the WORK is #4051's", not
+"pending V1". The sentence below is the state those comments were qualified against, kept
+as the record of it and **not** as current text:
 
-> **⚠️ NOT DECIDED — owner's call.** It is an open decision (§14.3 V1), because it changes what the
-> graph holds.
+> **⚠️ NOT DECIDED — owner's call.** It is an open decision (§14.3 V1), because it changes what the graph
+> holds.
 
 ---
 

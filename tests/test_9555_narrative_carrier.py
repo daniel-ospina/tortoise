@@ -3013,10 +3013,14 @@ _NARRATIVE_NEGATION_REWORDINGS: list[tuple[str, str, str]] = [
 #: above and fail here.
 _NARRATIVE_NEGATION_INVERSIONS: list[tuple[str, str, str]] = [
     #: ⚠️ MEASURED ON THE REAL FOOTNOTE, not on a constructed line: applying this
-    #: exactly to `docs/architecture/STORAGE-ARCHITECTURE.md:1070` turns the
+    #: exactly to `docs/architecture/STORAGE-ARCHITECTURE.md:1094` turns the
     #: negation off in the document a reader actually lands on, and the guard
     #: refuses the result (`test_the_REAL_footnote_LOSES_the_negation_when_it_is_
     #: dropped`).
+    #: ⚠️ A LINE NUMBER ROTS: this one was `:1070` until #4051's §2.0 insertion
+    #: shifted the document by +24. If the footnote moves again, re-point this
+    #: rather than trusting the number — the citation is decorative to the test
+    #: and a stale value silently misdescribes what the guard measured.
     ('negation-dropped', "the negation dropped, the narrative still named", "the narrative"),
     ('negates-another-name', "the negation bound to ANOTHER name",
      "not `public.session_narrative`; `summary` is §4.6 metadata and the "
