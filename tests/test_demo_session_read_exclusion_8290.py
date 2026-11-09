@@ -33,11 +33,14 @@ SDK doors), ``test_the_list_where_survives_a_legacy_non_string_session_id``
 surfaces and not the docker lane. ⛔ Do NOT resolve this by legislating a
 meaning for "DB-free": ``config/ci-surfaces.yml`` uses the phrase BOTH ways —
 its ``test_10047_record_every_lane.py`` note means *no graph* ("a fake control
-plane and a recording fake SDK, no graph writes, no server"), while its
-``:9481``/``:9816``/``:1548`` entries call a throwaway EMBEDDED real engine
-"DB-free". Say what this file actually does instead; a header claiming it
-touches no engine would invite exactly the re-laning that drops the P1
-regression pin (`STARTS WITH` on a non-string id).
+plane and a recording fake SDK, no graph writes, no server"), while other
+rows use it for a throwaway EMBEDDED engine — its
+``test_10017_turn_carrier_replay.py`` note reads "DB-free and network-free — a
+throwaway embedded ``TortoiseSDK`` per test". (Named rows, not line numbers: a
+position cite here rots the moment anyone edits a line above it — one did, by
+4, in this very branch.) Say what this file actually does instead; a header
+claiming it touches no engine would invite exactly the re-laning that drops
+the P1 regression pin (`STARTS WITH` on a non-string id).
 """
 from __future__ import annotations
 
