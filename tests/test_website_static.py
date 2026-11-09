@@ -5961,11 +5961,19 @@ class TestSiteIconAndSocialPreviewContract:
                 f"website/apps/dashboard/public/{name} differs from website/{name} — the app "
                 "origin and the marketing origin would show different marks")
 
+        # ⛔ THE /admin CONSOLE IS A SURFACE TOO. `website/apps/blog-admin/index.html` is
+        # staged to `dist/admin/` and served on the APP origin, so a browser there asks for
+        # `/favicon.ico` — the UNVERSIONED path — unless the page declares a versioned link.
+        # It declared none, so a stale console tab after a re-export was still possible while
+        # every other surface was covered (review round 1). Its links resolve against the app
+        # root, and it may name that origin absolutely, so it grades with the app surface.
         surfaces = {
             "marketing": (self._pages(), self.WEB, self.SITE_ORIGINS),
             "app": ([self.WEB / "apps" / "dashboard" / "index.html",
                      *sorted(self.DASHBOARD_ROOT.glob("*.html"))],
                     self.DASHBOARD_ROOT, self.ICON_ORIGINS),
+            "app-admin": ([self.WEB / "apps" / "blog-admin" / "index.html"],
+                          self.DASHBOARD_ROOT, self.ICON_ORIGINS),
         }
         for label, (pages, root, origins) in surfaces.items():
             assert pages, f"no {label} pages found — the guard would pass vacuously"
@@ -6056,7 +6064,14 @@ class TestSiteIconAndSocialPreviewContract:
                     f"{page_name} links {href!r}, which does not exist under "
                     f"{root.name}/ — the tab request 404s")
                 continue
-            if self._href_version(href) != expected[resolved]:
+            version = self._href_version(href)
+            if version is None:
+                violations.append(
+                    f"{page_name} links {href!r} with NO `?v=` — declare "
+                    f"`?v={expected[resolved]}` (this file's sha256 prefix). Without it a "
+                    "browser or edge holding the old icon keeps drawing it after a "
+                    "re-export, which is the stale-icon bug this contract exists for")
+            elif version != expected[resolved]:
                 violations.append(
                     f"{page_name} links {href!r} but the file's sha256 starts "
                     f"{expected[resolved]!r} — bump the `?v=` with the bytes, or a browser "

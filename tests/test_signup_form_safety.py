@@ -692,6 +692,15 @@ _NAVIGATION_FORMS = (
 # Constructs the REAL page legitimately contains. None may trip the guard: a
 # guard that fires on the correct implementation gets deleted by the next
 # person, and then it protects nothing.
+_REAL_SIGNUP_ICON = next(
+    (line.strip() for line in SIGNUP.splitlines()
+     if line.strip().startswith('<link rel="icon"')),
+    None,
+)
+assert _REAL_SIGNUP_ICON is not None, (
+    "signup.html declares no <link rel=\"icon\"> — the legitimate-construct sample below is "
+    "pinned to the real page, so it cannot be quoted once the page stops having one")
+
 _LEGITIMATE_CONSTRUCTS = (
     '<form id="reset-form" method="post" action="/auth/update-password">',
     '<a href="/auth?mode=login">Sign in</a>',
@@ -699,8 +708,11 @@ _LEGITIMATE_CONSTRUCTS = (
     'fetch("/auth/update-password", { credentials: "same-origin" })',
     '<button type="submit" class="btn-submit" id="btn-reset">Update</button>',
     'form.addEventListener("submit", function (e) { e.preventDefault(); })',
-    '<link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">',
-    # #11407: was the wordmark (`/logo.png`), which the page no longer uses as an icon.
+    # #11407: READ FROM THE PAGE. The icon hrefs carry a `?v=<sha256[:12]>` cache-buster
+    # that moves with the artwork, so a retyped copy here stops describing the real page on
+    # the next re-export — and this list's whole claim is "constructs the REAL page
+    # legitimately contains". (It was the wordmark `/logo.png` until #11407.)
+    _REAL_SIGNUP_ICON,
     '<script src="/consent.js" defer></script>',
     'var u = "https://app.premiselabs.co/x";',
     '// a trailing comment mentioning location must not fire',
