@@ -846,8 +846,15 @@ def test_edge_function_hook_path_is_gone():
     #                          the very hole the closure sweep exists to close.
     #                          `test_the_hook_fingerprint_ignores_the_request_
     #                          parameter_name` pins that separation on a snippet.
-    #   req.clone            — a SECOND body read (the live handler reads it once,
-    #                          with `req.text()`, and passes it in as an argument).
+    #   req.clone            — a SECOND body read. At THIS head the handler reads
+    #                          the body ONCE (`index.ts:175`, `req.text()`) and
+    #                          uses that one string itself (`:193`, `:206`);
+    #                          `authenticateCaller` takes only `req` (`:101`,
+    #                          `:179`). ⛔ It does NOT "pass it in as an argument"
+    #                          here — that is `origin/main`'s shape (`:238`, `:242`),
+    #                          where the hook path's signature verified the raw
+    #                          bytes. A clone is a SECOND read whichever shape it
+    #                          is in, so the pin holds for both.
     #                          Still name-bound, and deliberately so: a restore that
     #                          renames the receiver STILL has to read the
     #                          `webhook-signature` header to verify anything, so the
