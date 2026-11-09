@@ -263,6 +263,18 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # refusing. Pinned by `tests/test_10017_cache_tier.py`.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261029000001_record_point_cache_tier.sql", None),
+    # #10620 — R4's remaining half: `public.point.search_keys` NARROWED from
+    # `jsonb` to `text`. Same class as the 20261022 entry above (a TYPE change no
+    # re-apply of the CREATE TABLE files can make), and it is the entry that
+    # removes the row-loss failure rather than a backstop gap: on a container
+    # whose `point.search_keys` is still `jsonb`, EVERY point carrying search
+    # keys is refused `22P02` and the residue pass below would blame *"a NEW
+    # defect"* on the current tree — which is exactly what a pre-#10620 container
+    # would earn. Guarded `DO` block keyed on `information_schema`, so
+    # re-applying on a narrowed column is a no-op, and its `USING` helper
+    # function is created and dropped inside the file.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261102000002_record_point_search_keys_text.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in
