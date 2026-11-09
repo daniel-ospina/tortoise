@@ -502,6 +502,31 @@ Deno.serve(async (req: Request) => {
         "provision_team failed for " + safeName + ":",
         provisionError
       );
+      // ── #1981: the one-free-org entitlement refusal is TERMINAL ──────────
+      // The RPC's DB-level backstop (migration 20261108000001) raises
+      // `one_free_org_limit:<org_id>` when this person ALREADY OWNS a free
+      // organization. Answering 502 + "Please try again" turns a rule the
+      // product enforces into a permanent dead end: retrying can never succeed,
+      // because the condition is the user's existing org, not a transient
+      // fault — and this function is reachable both from the
+      // `after_user_created` hook and from a direct call with the user's own
+      // JWT. Mirror the Python lanes' payload EXACTLY (#2789: the dashboard
+      // dialog is driven by `code`, never by string-matching `message`), so
+      // this lane is not the one that renders a dead end.
+      const provisionMessage = String(provisionError.message ?? "");
+      const marker = "one_free_org_limit:";
+      const markerAt = provisionMessage.indexOf(marker);
+      if (markerAt >= 0) {
+        const blockingOrgId = provisionMessage
+          .slice(markerAt + marker.length)
+          .trim()
+          .split(/\s/)[0] || null;
+        return json({
+          code: "one_free_org_limit",
+          message: "You can only have one free organization",
+          org_id: blockingOrgId,
+        }, 402, corsOrigin);
+      }
       return json({ error: "Provisioning failed. Please try again." }, 502, corsOrigin);
     }
 

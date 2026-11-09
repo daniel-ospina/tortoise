@@ -43,11 +43,18 @@
 -- not byte-identical in EVERY writer silently loses mutual exclusion with no
 -- error". The distinction that makes it correct HERE: this RPC is the ONLY
 -- writer that derives this key. It is the sole provisioning path for the
--- Supabase control plane (`/v1/register`, `/v1/agent/signup`,
--- POST /v1/organizations, the onboarding sub-org create, the paid-new-org
--- checkout), and `provision_team_with_token` PERFORM's THIS function rather
--- than re-deriving anything — so there is exactly one derivation site and it
--- cannot drift out of agreement with itself. A `hashtextextended` collision can
+-- Supabase control plane — enumerated in full, because an audit that names five
+-- lanes and omits a sixth is how a caller ends up unmapped (#1981 round-4
+-- review, P2): `/v1/register`, `/v1/agent/signup`, POST /v1/organizations, the
+-- onboarding sub-org create, the paid-new-org checkout, and the
+-- `tenant-provision` Edge Function (`supabase/functions/tenant-provision`, the
+-- `after_user_created` Auth hook — it calls `provision_team` with a non-NULL
+-- `p_user_id` and no `p_tier`, so THE GATE DOES ENGAGE THERE; its refusal is now
+-- mapped to the product's 402 `one_free_org_limit` payload instead of an
+-- unmapped 502 "try again", which was a dead end that could never succeed).
+-- `provision_team_with_token` PERFORM's THIS function rather than re-deriving
+-- anything, so there is exactly one derivation site and it cannot drift out of
+-- agreement with itself. A `hashtextextended` collision can
 -- only OVER-serialise two unrelated users (the lock is not the gate — the
 -- in-transaction re-check is), never under-serialise the same user, which is
 -- the only direction that loses mutual exclusion.
@@ -83,15 +90,43 @@
 -- single RPC over HTTP).
 --
 -- SCOPE — enabled only where the entitlement applies:
---   * `p_user_id IS NOT NULL`: the identity path (`p_identity`, /v1/register,
---     /v1/agent/signup) has no person to hold an allowance. It is idempotent on
---     its own anchor (`uq_member_identity_org`), which is what keeps one person
---     from accumulating orgs there (`tests/test_free_team_entitlement.py::
---     TestCrossLaneFreeOrgInvariant`).
+--   * `p_user_id IS NOT NULL`: THE GATE IS KEYED ON THE PERSON. The identity path
+--     (`p_identity`, /v1/register, /v1/agent/signup) has no user row to hold an
+--     allowance and no per-person row to lock, so the check cannot be expressed
+--     there. That is a LIMITATION of this backstop, not a proof that the path is
+--     safe — and it is the only honest reason.
+--
+--     ⛔ CORRECTED (#1981 round-4 review, P2). This note used to claim the
+--     identity path "is idempotent on its own anchor (`uq_member_identity_org`),
+--     which is what keeps one person from accumulating orgs there". Both halves
+--     were wrong, and a future lane reads this header to decide whether that
+--     path needs the backstop:
+--       - `uq_member_identity_org` is UNIQUE (identity, org_id) WHERE
+--         user_id IS NULL (renamed from `uq_member_identity_team` in
+--         20260915000001). It is a SAME-ORG retry anchor. It does not bound
+--         accumulation at all: a fresh identity is a fresh row.
+--       - the accumulation bound is `uq_member_identity_active`, UNIQUE
+--         (identity) WHERE user_id IS NULL AND role = 'owner' AND status =
+--         'active' (20260827000002) — one ACTIVE OWNER org per identity. §8d of
+--         `supabase/tests/0010_provisioning_rpcs.sql` names that index, so the
+--         two artifacts must agree.
+--       - and it does not hold for `/v1/agent/signup` at all: that lane mints a
+--         FRESH `anon-{uuid4[:12]}` per request, so no per-identity anchor bounds
+--         a PERSON there. The in-tree record says exactly that — see
+--         `_assert_free_org_allowance` in `hosted_api.py`: "one person could mint
+--         N anon orgs (/v1/agent/signup) and claim each in turn". That path is
+--         closed by `/v1/claim` running the ownership gate, because an anon org
+--         is not OWNED until claimed — not by this migration.
+--     Residual, stated so it is not read as covered: the identity path's bounds
+--     are the per-identity uniqueness above plus the claim lane's gate, and
+--     neither of them is this backstop.
 --   * the new org is FREE (`COALESCE(p_tier,'free') = 'free'`): a PAID
 --     provision is exactly the "buy a subscription for a NEW organization"
 --     exit #2789 design 2 requires, and must never be refused. The
---     paid-new-org checkout lane passes the purchased tier here.
+--     paid-new-org checkout lane passes the purchased tier here — and it now
+--     REFUSES a free or absent tier rather than defaulting to 'free', because
+--     reaching this gate would refuse a provision the customer already paid for
+--     (`hosted_api._provision_new_org_from_checkout`).
 -- Those are precisely the calls the Python gate already refuses, so this
 -- backstop cannot newly refuse anything a legitimate lane is allowed to do —
 -- it only makes the refusal ATOMIC.
