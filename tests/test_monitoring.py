@@ -1860,15 +1860,22 @@ class TestProbeSetupBudget:
     #: start LONGER than the reachability budget still reports `ok`. They are a
     #: DISCRIMINATOR PAIR: what the assertion depends on is
     #: ``_COLD_START_S > _REACHABILITY_BUDGET_S`` (a tool that failed to opt into
-    #: the setup allowance gets the combined budget and times out on the cold
-    #: start), never the absolute values. The ABSOLUTE values are therefore
+    #: the setup allowance is bounded by the bare reachability budget —
+    #: ``total_budget = PROBE_TIMEOUT`` when ``setup_timeout`` is None/0 — and
+    #: times out on the cold start), never the absolute values. Measured, not
+    #: assumed, for the pair below: the same 3.0 s cold start reports
+    #: ``unknown``/``graph_size 0`` at ``setup_timeout=0`` and ``ok``/``9019`` at
+    #: ``PROBE_SETUP_TIMEOUT``. The ABSOLUTE values are therefore
     #: sized by the SCHEDULING noise of the runner, not by the code's cost: this
     #: SDK's reachability query returns immediately, so a budget it cannot meet
     #: is measuring the machine. At 0.05 s the MCP row went RED on a CORRECT
-    #: build in `test-slow (b)` (run 42531585230): `latency_ms: 850.9` for a call
-    #: bounded at 0.25 s — ~600 ms of scheduler stall inside the measured span
-    #: swallowed the whole 50 ms query window (#3143's probe worker is a single
-    #: process-lifetime thread, so it competes with the shard's other threads).
+    #: build in `test-slow (b)` (run 42531585230), and the job log is the
+    #: evidence: ``{'db': {'ok': False, 'observed': True, 'latency_ms': 850.9,
+    #: 'error': 'probe timeout after 0.05s'}, 'graph_size': 0}`` — ~800 ms of
+    #: scheduling/slot stall inside the measured span against a 50 ms budget,
+    #: so the reachability query never got its window (#3143's probe worker is a
+    #: single process-lifetime thread, so it competes with the shard's other
+    #: threads).
     _REACHABILITY_BUDGET_S = 1.0
     _COLD_START_S = 3.0
 
