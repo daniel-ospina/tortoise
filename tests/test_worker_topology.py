@@ -2105,8 +2105,9 @@ def _uvicorn_arity(params):
     form consumes NOTHING — while `_parsed_options` unconditionally takes the
     next token, so the walk would swallow `--other` as the option's value and
     under-report the worker count (the direction that PERMITS N workers).
-    MEASURED: 0 of the 55 long params in uvicorn 0.52.1 or 0.54.0 has this
-    shape, so today this is a guard against a future uvicorn, not a live bug.
+    MEASURED: 0 of uvicorn's long options have this shape — 55 of them in
+    0.52.1 (the pin) and 56 in 0.54.0 (`--http2` is the difference) — so today
+    this is a guard against a future uvicorn, not a live bug.
     """
     flags: set[str] = set()
     value_taking: set[str] = set()
