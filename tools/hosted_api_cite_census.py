@@ -26,11 +26,19 @@ that is exactly how the count was briefly "re-measured" from 449 to 450.
 """
 from __future__ import annotations
 
+import sys
+
+if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
+    raise SystemExit(
+        f"tools/hosted_api_cite_census.py requires Python >= 3.12 (got "
+        f"{sys.version_info[0]}.{sys.version_info[1]}) — run it as "
+        f"`uv run python tools/hosted_api_cite_census.py`"
+    )
+
 import argparse
 import json
 import re
 import subprocess
-import sys
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
