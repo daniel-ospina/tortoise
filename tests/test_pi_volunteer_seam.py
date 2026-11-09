@@ -95,20 +95,34 @@ _SEEDED_CLAIM = "CI pipeline deploys via GitHub Actions"
 
 
 def _base_env(home: Path) -> dict:
-    # ⛔ The seam's OWN switches are BLANKED here, not merely deleted from
-    # `os.environ` in the fixture (#11584 review round 12). `{**os.environ}`
-    # copies them in, and `_run_driver` hands this dict straight to node where
-    # the seam reads it — so an operator or CI runner with
+    # ⛔ The seam's OWN switches are BLANKED here (#11584 review round 12).
+    # `{**os.environ}` copies them into the dict `_run_driver` hands to node,
+    # where the installed artifact reads them — so an operator or CI runner with
     # `TORTOISE_VOLUNTEER_DISPLAY=1` exported (a switch the seam documents)
     # REDS the W4 "silent by default" row: a verdict about the HOST, not the
-    # artifact, and indistinguishable from a real regression. Measured:
+    # artifact, and indistinguishable from a real regression. Measured at the
+    # head that introduced the seam:
     #
     #   $ TORTOISE_VOLUNTEER_DISPLAY=1 pytest tests/test_pi_volunteer_seam.py \
     #         -q -k installed_extension_injects_the_real_reflex_block
     #   E  AssertionError: silent by default (W4 posture)
     #   E  assert True is False
     #
-    # This is the same root the sibling `hermetic()` helper names verbatim in
+    # ⛔ THE MEASURED BLAST RADIUS IS EXACTLY ONE SWITCH, and saying otherwise
+    # is how a review record goes wrong (round 13 caught this one overstating
+    # it). `TORTOISE_VOLUNTEER_DISABLE` and `TORTOISE_COMMAND` were already
+    # clean BEFORE this fix — the fixture's own `monkeypatch.delenv` loop below
+    # removes them from `os.environ` during setup, and `_run_driver` builds its
+    # env at ROW time, so they never reached the subprocess; measured at the
+    # parent head they pass. `TORTOISE_SRC_DIR` also leaked and measured
+    # harmless. Only `TORTOISE_VOLUNTEER_DISPLAY` and `TORTOISE_VOLUNTEER_DEBUG`
+    # were neither deleted nor blanked, and only DISPLAY changes the assertion.
+    #
+    # They are blanked anyway because the fixture's `delenv` list is a
+    # hand-maintained enumeration that does not name them: extending it would
+    # leave the next switch one forgotten edit from the same false red, whereas
+    # blanking here holds for every switch the seam reads. This is the same root
+    # the sibling `hermetic()` helper names verbatim in
     # `tortoise-volunteer.test.ts` ("a Pi user who followed the SHIPPED README
     # reds the silent-default row"), closed one layer over. Empty is falsy for
     # both `truthy()` and the `||`/`??` chains, so the SHIPPED default stays
@@ -116,8 +130,9 @@ def _base_env(home: Path) -> dict:
     #
     # `VIRTUAL_ENV` is deliberately NOT blanked: `_run_driver` supplies the
     # interpreter on `PATH`, and `VIRTUAL_ENV` is a legitimate candidate in the
-    # seam's module-dir resolution — blanking it would test a different path
-    # than a real install takes.
+    # seam's module-dir resolution. Measured inert here (`PATH`'s hit wins the
+    # candidate order), but blanking it would test a different path than a real
+    # install takes.
     return {
         **os.environ,
         "TORTOISE_DB_PATH": str(home.parent / "seams.db"),
@@ -146,9 +161,12 @@ def home(tmp_path, monkeypatch):
     for key in ("TORTOISE_API_KEY", "TORTOISE_API_URL",
                 "TORTOISE_VOLUNTEER_DISABLE", "TORTOISE_COMMAND"):
         monkeypatch.delenv(key, raising=False)
-    # AFTER the `delenv` loop on purpose: built before it, `env` still carried
-    # the operator's values even though `os.environ` had been cleaned, so the
-    # two could silently disagree (#11584 review round 12).
+    # AFTER the `delenv` loop on purpose. Ordering hygiene, not a measured bug:
+    # every `env` this fixture builds feeds the GRAPH-SEED subprocess below, and
+    # the seed script reads none of these keys — so nothing here could have
+    # red a row either way (measured; do not claim otherwise). It is kept so the
+    # seed subprocess env cannot carry an operator switch if that script ever
+    # starts reading one.
     env = _base_env(h)
     # `PATH.home()` is what the INSTALLER and the `--uninstall` verb resolve
     # their root from, so the fixture must move it too or `_uninstall_pi_volunteer`
