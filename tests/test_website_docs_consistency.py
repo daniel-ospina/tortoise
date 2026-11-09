@@ -2749,11 +2749,57 @@ def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
 
     This is the half the tree could not see before: robots.txt named four sitemaps and
     nothing checked that the file (or the Function) behind each one exists.
+
+    Its CONVERSE — a sitemap that exists and is advertised by nothing — is
+    `test_every_sitemap_in_the_tree_is_advertised`. Both halves are needed: this one walks
+    the advertisement, that one walks the tree.
     """
     missing = [url for url in _robots_sitemap_urls() if _sitemap_file_for(url) is None]
     assert not missing, (
         f"robots.txt advertises sitemap(s) with no file or Function behind them: "
         f"{missing}. Either add the sitemap or drop the `Sitemap:` line")
+
+
+def test_every_sitemap_in_the_tree_is_advertised() -> None:
+    """The OTHER half: a sitemap no crawler is told about is invisible, not covered.
+
+    Neither model above can see this one. `test_every_advertised_sitemap_is_servable…`
+    walks the ADVERTISEMENT (every advertised URL must have a file behind it), and
+    `test_every_in_scope_page_appears_in_a_sitemap` walks the FILES (every page must be in
+    some `sitemap-*.xml`). So delete a `<sitemap>` block from the index AND its matching
+    `Sitemap:` line from robots.txt and everything still agrees: the two advertisements
+    stay equal, and every page the dropped file carried is still counted as covered — by
+    a file no crawler is ever told exists. That is the #11615 defect with its halves
+    swapped (coverage without an entry point), which is why it is held here.
+
+    Derived from the tree, not from a list, so a NEW `website/sitemap-*.xml` is held to it
+    the moment it lands — the same derivation discipline as
+    `test_every_in_scope_page_appears_in_a_sitemap`.
+    """
+    advertised = {
+        (urlparse(url).netloc, urlparse(url).path or "/")
+        for url in set(_xml_locs(SITEMAP_INDEX)) | set(_robots_sitemap_urls())
+    }
+    advertised_paths = {path for _host, path in advertised}
+    problems: list[str] = []
+    for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
+        path = f"/{sitemap.name}"
+        if path not in advertised_paths:
+            problems.append(
+                f"website/{sitemap.name} — served at {path}, but no `<loc>` in "
+                "website/sitemap.xml and no `Sitemap:` line in website/robots.txt names "
+                "that path, so no crawler is told it exists")
+    # The app origin's sitemap is a committed copy for a SEPARATE Pages project, so the
+    # glob above cannot reach it; it is still a sitemap this tree publishes.
+    app_sitemap = WEBSITE / "apps" / "dashboard" / "public" / "sitemap.xml"
+    if app_sitemap.is_file() and ("app.premiselabs.co", "/sitemap.xml") not in advertised:
+        problems.append(
+            "website/apps/dashboard/public/sitemap.xml — advertised by nothing, so "
+            "app.premiselabs.co/sitemap.xml is unreachable by any crawler")
+    assert not problems, "\n".join(problems) + (
+        "\nAdvertise it — in BOTH files, since the index and robots.txt are held equal to "
+        "each other — or delete it. A sitemap that exists but is advertised by nothing is "
+        "#11615 with its halves swapped")
 
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
