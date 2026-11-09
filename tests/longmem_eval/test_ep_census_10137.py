@@ -609,6 +609,46 @@ def test_census_probe_reads_the_arm_from_a_checkpoint_fingerprint(tmp_path):
     assert probe.cells(_write(tmp_path / "a", armed))["source"] == "checkpoint"
 
 
+def test_the_probe_reads_the_summarizers_headline_ratio(tmp_path):
+    """#10137 indicator (a): ONE derivation of the headline quotient.
+
+    ``summarize_belief_activation`` now publishes ``questions_with_ep_ratio``
+    beside the two cells it divides — that is what indicator (a) asks for
+    ("published per run") — so a consumer READS the cell instead of dividing
+    again. Two derivations of one number is how they disagree, and this one is
+    the bundle's headline: it shipped as the one cell a hand could edit
+    (#10678 review, P1).
+
+    Non-vacuous: a re-deriving probe publishes ``2 / 2 = 1.0`` here, not the
+    sentinel the summarizer's own block carries.
+    """
+    outcomes = _outcomes(2)
+    summary = mp.summarize_belief_activation(outcomes, requested=True)
+    assert summary["questions_with_ep_ratio"] == 1.0     # the real quotient
+    summary["questions_with_ep_ratio"] = 0.125           # sentinel, READ below
+
+    out = _probe().cells(
+        _write(tmp_path, _report_doc(outcomes, activation=summary)))
+
+    assert out["questions_with_ep"] == 2 and out["questions"] == 2
+    assert out["questions_with_ep_ratio"] == 0.125
+
+
+def test_the_probe_falls_back_when_a_summary_carries_no_ratio(tmp_path):
+    """An input carrying a summary produced BEFORE the cell existed (an older
+    checkpoint, or a foreign one) must still publish the quotient rather than
+    ``None`` — the fallback is the same arithmetic, so the two cannot report
+    two values for one population."""
+    outcomes = _outcomes(2)
+    summary = mp.summarize_belief_activation(outcomes, requested=True)
+    summary.pop("questions_with_ep_ratio")
+
+    out = _probe().cells(
+        _write(tmp_path, _report_doc(outcomes, activation=summary)))
+
+    assert out["questions_with_ep_ratio"] == 1.0
+
+
 def test_census_probe_publishes_absence_when_no_outcome_has_a_manifest(tmp_path):
     """24 rows of nulls would read as a measured-and-null question; publish the
     absence and where it comes from instead."""
@@ -1650,12 +1690,16 @@ def test_committed_census_rederives_its_own_aggregate():
     # …and their QUOTIENT, which is the bundle's HEADLINE (the README quotes
     # it verbatim as "questions_with_ep / questions = 24 / 24 = 1.00", under
     # the heading sentence "The number this issue was opened to produce").
-    # Derived exactly as the probe
-    # derives it — ``census.py``'s ``questions_with_ep_ratio`` (``with_ep / q``),
-    # and ``None`` when the denominator is not a usable count — the same way the
-    # sibling ``point_coverage.ratio`` is derived below. Without this the one number
-    # this artifact exists to publish was the one number a hand could edit
-    # (#10678 review, P1: ``1.0`` → ``0.5`` shipped green).
+    # Derived HERE, independently of the probe — this pin divides the two
+    # cells itself, and ``None`` when the denominator is not a usable count —
+    # the same way the sibling ``point_coverage.ratio`` is derived below.
+    # (The probe does not divide: since #10137 indicator (a) it READS the
+    # summarizer's own ``questions_with_ep_ratio`` cell, so the artifact's
+    # value has one producer and this test is that producer's independent
+    # check — pinned by
+    # ``test_the_probe_reads_the_summarizers_headline_ratio``.) Without this
+    # the one number this artifact exists to publish was the one number a hand
+    # could edit (#10678 review, P1: ``1.0`` → ``0.5`` shipped green).
     if not doc["questions"]:
         assert doc["questions_with_ep_ratio"] is None, (
             f"{_ARTIFACT}: questions_with_ep_ratio = "
