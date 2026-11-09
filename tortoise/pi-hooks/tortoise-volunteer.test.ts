@@ -179,8 +179,30 @@ test("an inert verdict is LATCHED — one probe per process, not per turn", asyn
   const home = tmpHome();
   const crumbs = join(home, "capture-errors");
   const pi = mockPi();
-  tortoiseVolunteer(pi as never, { env: { PATH: "" }, home, breadcrumbDir: crumbs });
+  // Hermetic (#11584 review): WITHOUT `configPath` the factory falls back to
+  // `CONFIG_PATH` = the OPERATOR's real `~/.pi/agent/tortoise-config.json`. On a
+  // machine that carries a file-sourced `apiKey` this row would then take the
+  // hosted transport and POST the test prompt to the production endpoint — and
+  // the row would red, because a `refused` verdict writes no breadcrumb. The
+  // counter makes the omission FAIL CLOSED instead of egressing a credential.
+  let hostedCalls = 0;
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: "" },
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: crumbs,
+    fetchImpl: (async () => {
+      hostedCalls += 1;
+      return { ok: false, status: 500, statusText: "Unexpected" } as Response;
+    }) as typeof fetch,
+  });
   await pi.handlers.before_agent_start({ messageType: "user", prompt: "one" }, SESSION_CTX());
+  assert.equal(
+    hostedCalls,
+    0,
+    "no configPath ⇒ no key ⇒ the hosted transport must never be reached; a row " +
+      "that inherits the operator's config is not hermetic and leaks the prompt",
+  );
   const breadcrumb = join(crumbs, "pi-install.json");
   assert.equal(existsSync(breadcrumb), true);
   const first = readFileSync(breadcrumb, "utf8");
@@ -810,11 +832,25 @@ test("no reflex and no key: an inert breadcrumb lands in the canonical slot; an 
   const home = tmpHome();
   const crumbs = join(home, "capture-errors");
   const pi = mockPi();
-  tortoiseVolunteer(pi as never, { env: { PATH: "" }, home, breadcrumbDir: crumbs });
+  // Hermetic for the same reason as the latch row above: this row is titled "no
+  // reflex and no key", so inheriting the operator's config contradicts it —
+  // and with a real key the prompt would be POSTed to the hosted endpoint.
+  let hostedCalls = 0;
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: "" },
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: crumbs,
+    fetchImpl: (async () => {
+      hostedCalls += 1;
+      return { ok: false, status: 500, statusText: "Unexpected" } as Response;
+    }) as typeof fetch,
+  });
   assert.equal(
     await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
     undefined,
   );
+  assert.equal(hostedCalls, 0, "this row asserts NO KEY — it must never reach the network");
   const crumb = join(crumbs, "pi-install.json");
   assert.ok(existsSync(crumb), "an inert install must leave evidence (#4314)");
   const record = JSON.parse(readFileSync(crumb, "utf-8")) as Record<string, unknown>;
