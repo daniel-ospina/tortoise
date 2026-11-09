@@ -26,6 +26,11 @@ and the two regression pins that must NOT move:
   * `rotate` keeps its #4355 cap predicate verbatim — a member rotating even
     their OWN bootstrap row still 403s at the POLICY A gate (the brief §8
     "keep the 409 / distinct replace" decision). `DELETE` stays owner/admin.
+  * `rotate`'s non-own cases are pinned on DURABLE targets (a peer's, the
+    owner's, and one the acting member MINTER themselves): an owner rotating
+    the same rows gets 200, a member gets the POLICY A 403, so the refusal is
+    the authorization and never the cap predicate. This is the half the
+    per-criterion check on #2446 (2026-11-01) left unproven.
   * every non-own-key surface reads the pre-#2446 403 detail — a distinct
     message would turn the gate into an ownership oracle.
 
@@ -522,6 +527,64 @@ class TestPolicyAUnchanged:
         assert r.status_code == 409, r.text
         assert r.json()["detail"] == "Cannot modify a session key"
         assert _row(fake, "owner-boot")["enabled"] is True
+
+    def test_member_rotate_of_a_peer_durable_key_still_403(self, sb, as_user):
+        """The remainder #2446's per-criterion check left open (issue comment
+        2026-11-01): a member must not reach the ROTATE route for a PEER's key.
+
+        The target is a DURABLE row, not a bootstrap one, so the refusal is
+        provably the POLICY A gate and not the #4355 cap predicate — an owner
+        rotating this same row shape gets 200
+        (`test_owner_rotate_of_a_durable_row_is_unchanged`), and a member
+        SESSION is `is_owner_class` in the handler's terms, so a widening of
+        the own-key slice onto `rotate` would mint a replacement and revoke the
+        peer's row here instead of refusing.
+        """
+        tc, fake = sb
+        _sb_membership(fake, _SB_TEAM, _U1, "member")
+        _sb_membership(fake, _SB_TEAM, _U2, "member")
+        _sb_key(fake, "peer-durable", _SB_TEAM, created_by=_U2,
+                created_via="recovery", expires_at=None)
+        before = len(fake.tables["api_keys"])
+        as_user(_U1)
+        _assert_role_403(tc.post("/v1/team/keys/peer-durable/rotate", json={}))
+        assert len(fake.tables["api_keys"]) == before, (
+            "a refused rotate may not mint a replacement")
+        assert _row(fake, "peer-durable")["revoked_at"] is None
+
+    def test_member_rotate_of_the_owners_durable_key_still_403(self, sb, as_user):
+        """Same pin one rung up: the owner's durable credential is not a
+        member's to rotate, and the refusal is the shared POLICY A gate."""
+        tc, fake = sb
+        _sb_membership(fake, _SB_TEAM, _U1, "member")
+        _sb_membership(fake, _SB_TEAM, _UOWN, "owner")
+        _sb_key(fake, "owner-durable", _SB_TEAM, created_by=_UOWN,
+                created_via="recovery", expires_at=None)
+        before = len(fake.tables["api_keys"])
+        as_user(_U1)
+        _assert_role_403(tc.post("/v1/team/keys/owner-durable/rotate", json={}))
+        assert len(fake.tables["api_keys"]) == before
+        assert _row(fake, "owner-durable")["revoked_at"] is None
+
+    def test_member_rotate_of_a_durable_row_they_MINted_still_403(self, sb, as_user):
+        """The MINTER branch of the same gate — the reading the issue body had
+        before its 2026-10-15 premise correction, pinned in its negative form.
+
+        `created_by == caller` is NOT authority to rotate: a durable row is
+        ORG-OWNED (holder NULL, #2427 §4.2), so the member who minted it is
+        refused exactly like any other non-owner. If `rotate` were ever gated on
+        `created_by` instead of the holder predicate, this row — the only shape
+        where the two predicates disagree — would turn 200.
+        """
+        tc, fake = sb
+        _sb_membership(fake, _SB_TEAM, _U1, "member")
+        _sb_key(fake, "own-durable", _SB_TEAM, created_by=_U1,
+                created_via="recovery", expires_at=None)
+        before = len(fake.tables["api_keys"])
+        as_user(_U1)
+        _assert_role_403(tc.post("/v1/team/keys/own-durable/rotate", json={}))
+        assert len(fake.tables["api_keys"]) == before
+        assert _row(fake, "own-durable")["revoked_at"] is None
 
     def test_owner_rotate_of_a_durable_row_is_unchanged(self, sb, as_user):
         """The owner lane of rotate still works byte-for-byte (a durable row at
