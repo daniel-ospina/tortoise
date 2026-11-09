@@ -133,7 +133,7 @@ Five answers came back, four of which asked for research. The research **changed
 
 So **the movement of funds has a home**; what is missing is the *durable provision* relation's meaning.
 
-- **Proposal:** `funds` comes back **as a meaning in its own right** — REA's `provide`: *source provides economic resources to target* — with direction `->` and mechanism `IMPL`.
+- **CORRECTED 2026-11-07 — `funds` is a LABEL, not a meaning.** The proposal below was recorded on 2026-11-05 and was wrong in *kind*, not just in detail: `#2766` (2026-10-09) had already ruled that *"`funds` fails the test … nothing in the machine changes behaviour because a relation is a funding relation. So `funds` is a layer-3 label, not a new semantics entry."* The owner confirmed it on 2026-11-07. The reasoning that follows is kept because it explains why the *durable provision* needs a meaning at all — it simply takes an **existing** one.
 - ⛔ **It must not be `transacts`**, which declares direction `-` (no confidence transfer) and therefore contradicts the relation's own `mechanism: IMPL`.
 - **Granular choice:** name the meaning **`funds`** — **DECIDED 2026-11-05: `funds`.**
 - **What does *not* follow:** no new relation for *movement*. A movement is an event; adding a durable `movedFunds` edge would duplicate `disbursement` and drift from the pack's own state/event split.
