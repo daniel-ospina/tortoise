@@ -2606,6 +2606,37 @@ def _sitemap_root_tag(path: Path) -> str:
     return ElementTree.parse(path).getroot().tag
 
 
+# A sitemap document is identified by its ROOT ELEMENT, never by its filename: the
+# sitemaps.org protocol defines the document, not its name, and `sitemap.xml`,
+# `sitemap-*.xml`, `*-sitemap.xml` and `sitemap_index.xml` are all conventional in the
+# wild. A name-based glob can only ever hold the shapes its author happened to think of.
+SITEMAP_ROOT_ELEMENTS = frozenset({"urlset", "sitemapindex"})
+
+
+def _is_sitemap_document(path: Path) -> bool:
+    """True when `path` is a sitemap by CONTENT, whatever it is called."""
+    try:
+        root_element = _sitemap_root_tag(path).rsplit("}", 1)[-1]
+    except ElementTree.ParseError:
+        return False
+    return root_element in SITEMAP_ROOT_ELEMENTS
+
+
+def _published_sitemaps(root: Path) -> list[Path]:
+    """Every sitemap document directly under `root`, the entry-point index excluded.
+
+    `root/sitemap.xml` is the ADVERTISEMENT when it is an index — the thing that names the
+    others — so it is the one sitemap-shaped document never required to be advertised
+    itself. Non-sitemap XML beside the sitemaps (feeds, exports) is excluded by its root
+    element, not by being missing from a list.
+    """
+    return [
+        path
+        for path in sorted(root.glob("*.xml"))
+        if path.name != "sitemap.xml" and _is_sitemap_document(path)
+    ]
+
+
 def _robots_sitemap_urls() -> list[str]:
     """The `Sitemap:` lines robots.txt advertises, in file order."""
     urls = []
@@ -2772,9 +2803,11 @@ def test_every_sitemap_in_the_tree_is_advertised() -> None:
     a file no crawler is ever told exists. That is the #11615 defect with its halves
     swapped (coverage without an entry point), which is why it is held here.
 
-    Derived from the tree, not from a list, so a NEW `website/sitemap-*.xml` is held to it
-    the moment it lands — the same derivation discipline as
-    `test_every_in_scope_page_appears_in_a_sitemap`.
+    Derived from the tree, not from a list, so a NEW sitemap is held to it the moment it
+    lands — the same derivation discipline as `test_every_in_scope_page_appears_in_a_sitemap`.
+    The population is found by ROOT ELEMENT, not by filename (`_published_sitemaps`), so a
+    new file is held to this under ANY conventional name (`blog-sitemap.xml` included), not
+    only the `sitemap-*.xml` shape that happened to exist when the guard was written.
     """
     advertised = {
         (urlparse(url).netloc, urlparse(url).path or "/")
@@ -2782,7 +2815,7 @@ def test_every_sitemap_in_the_tree_is_advertised() -> None:
     }
     advertised_paths = {path for _host, path in advertised}
     problems: list[str] = []
-    for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
+    for sitemap in _published_sitemaps(WEBSITE):
         path = f"/{sitemap.name}"
         if path not in advertised_paths:
             problems.append(
@@ -2800,6 +2833,44 @@ def test_every_sitemap_in_the_tree_is_advertised() -> None:
         "\nAdvertise it — in BOTH files, since the index and robots.txt are held equal to "
         "each other — or delete it. A sitemap that exists but is advertised by nothing is "
         "#11615 with its halves swapped")
+
+
+def test_sitemap_discovery_reads_the_root_element_not_the_filename(tmp_path: Path) -> None:
+    """A sitemap is identified by its ROOT ELEMENT — a name the old glob never knew counts.
+
+    `test_every_sitemap_in_the_tree_is_advertised` claimed to derive its population from the
+    tree, but the derivation was `WEBSITE.glob("sitemap-*.xml")`, so it only ever held the
+    one naming shape present when it was written. A `website/blog-sitemap.xml` — a plausible
+    shape here, since the blog's own sitemap is served by
+    `website/functions/blog/sitemap.xml.ts` — would have shipped advertised by nothing with
+    every guard green: #11615 exactly, and the guard that exists to catch it silent.
+    """
+    ns = SITEMAP_NS[1:-1]  # the namespace URI, without the `{…}` wrapper
+    urlset = (
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<urlset xmlns="{ns}"><url><loc>https://premiselabs.co/docs</loc></url></urlset>\n'
+    )
+    (tmp_path / "blog-sitemap.xml").write_text(urlset, encoding="utf-8")
+    (tmp_path / "sitemap-company.xml").write_text(urlset, encoding="utf-8")
+    (tmp_path / "sitemap.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n'
+        f'<sitemapindex xmlns="{ns}"><sitemap>'
+        "<loc>https://premiselabs.co/sitemap-company.xml</loc>"
+        "</sitemap></sitemapindex>\n",
+        encoding="utf-8",
+    )
+    # Not a sitemap — the root element says so, so sitting beside them cannot smuggle it in.
+    (tmp_path / "feed.xml").write_text(
+        '<?xml version="1.0" encoding="UTF-8"?>\n<rss version="2.0"></rss>\n',
+        encoding="utf-8",
+    )
+
+    found = {p.name for p in _published_sitemaps(tmp_path)}
+
+    # The pre-fix derivation, stated here so this test's non-vacuity is visible rather than
+    # asserted: the glob it used cannot see the file at all.
+    assert {p.name for p in tmp_path.glob("sitemap-*.xml")} == {"sitemap-company.xml"}
+    assert found == {"blog-sitemap.xml", "sitemap-company.xml"}
 
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
@@ -2822,10 +2893,28 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     the per-host index. What IS asserted about that file today: it is advertised and
     servable (`test_every_advertised_sitemap_is_servable_from_this_tree`), and a change to
     it selects this file (tests/test_ci_selection.py).
+
+    HOST is checked here for every `<loc>` in the walk, because `_document_for_loc` resolves a
+    non-root `<loc>` by PATH only: a `<urlset>` `<loc>` on a host this project does not serve
+    resolves to a real document, and the checks above stay green. Measured before this assertion
+    existed: `premiselabs.co`'s `/contact` rewritten to `https://not-our-host.example.net/contact`
+    passed 71/71.
+
+    WHAT THIS DOES NOT CLOSE, named rather than implied: a `<loc>` on a host we DO serve but the
+    wrong one for that sitemap (e.g. `https://premiselabs.co/docs` in `sitemap-product.xml`, which
+    `_middleware.ts` 301s to the tortoise host) still passes, because `SITE_HOSTS` is the set of
+    served hosts and not a per-file canonical map. That needs the per-file host table (§6.5's
+    `Host` column), which is #11624's scope together with the per-host index.
     """
     problems: list[str] = []
     for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
         for loc in _xml_locs(sitemap):
+            netloc = urlparse(loc).netloc
+            if netloc not in SITE_HOSTS:
+                problems.append(
+                    f"{sitemap.name}: {loc} — {netloc} is not a host this project serves "
+                    f"({sorted(SITE_HOSTS)}), so the URL is unfetchable from that sitemap")
+                continue
             document = _document_for_loc(loc)
             if document is None:
                 problems.append(f"{sitemap.name}: {loc} — no document in the served tree")
