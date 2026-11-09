@@ -45,12 +45,17 @@ DEFAULT_PIVOT = 23128
 
 
 def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
-    """The four figures the notes state, plus the pivot split."""
+    """The four figures the notes state, plus the pivot split.
+
+    ``git grep`` exits **1** when nothing matches — that is an EMPTY census, not a
+    failure, and the fast test's collapse floor is what decides whether an empty
+    one is acceptable. Only rc >= 2 is a real error.
+    """
     proc = subprocess.run(
         ["git", "grep", "-o", "-h", "-E", CITE_RE],
         cwd=str(repo), capture_output=True, text=True, check=False,
     )
-    if proc.returncode != 0:
+    if proc.returncode > 1:
         raise SystemExit(
             f"hosted_api_cite_census: `git grep` failed in {repo}: {proc.stderr!r}")
     targets = sorted({int(tok.rsplit(":", 1)[1]) for tok in proc.stdout.split()})
@@ -59,7 +64,7 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
         ["git", "grep", "-l", "-E", CITE_RE],
         cwd=str(repo), capture_output=True, text=True, check=False,
     )
-    if files.returncode != 0:
+    if files.returncode > 1:
         raise SystemExit(
             f"hosted_api_cite_census: `git grep -l` failed: {files.stderr!r}")
 
@@ -76,15 +81,20 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
 
 
 def pivot_is_the_lifetime_site(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> bool:
-    """True when `hosted_api.py:<pivot>` really executes `LIFETIME_MEMORY_QUERY`."""
+    """True when ``hosted_api.py:<pivot>`` EXECUTES ``LIFETIME_MEMORY_QUERY``.
+
+    Exact line, and it must be a CALL. A ±N window is not good enough: a window
+    that spans the ``from … import LIFETIME_MEMORY_QUERY`` line a few lines above
+    accepts the IMPORT as the execution site, so ``_PIVOT`` could be set to the
+    wrong line and the pin would stay green — measured, which is why the window is
+    gone (mutation attribution, agent-infra#3442: an assertion the mutant survives
+    is dead weight that reads as coverage).
+    """
     path = repo / "tortoise" / "hosted_api.py"
     lines = path.read_text(encoding="utf-8").splitlines()
-    if pivot > len(lines):
+    if not 1 <= pivot <= len(lines):
         return False
-    # The execution site is the query call; the anchor need not sit on the exact
-    # line, so accept a small window around it.
-    window = "\n".join(lines[max(0, pivot - 4): pivot + 4])
-    return "LIFETIME_MEMORY_QUERY" in window
+    return "query(LIFETIME_MEMORY_QUERY)" in lines[pivot - 1]
 
 
 def main(argv: list[str] | None = None) -> int:
