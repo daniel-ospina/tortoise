@@ -483,7 +483,7 @@ _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
 #: stale while the three above were corrected (#1981 review, P2):
 #: `docs/00_index.md`'s #4051 row (*"pgvector appears in **0 of 79
 #: migrations**"*) and the doc THAT row routes to,
-#: `docs/architecture/SEARCH-ARCHITECTURE.md` (*"appears in 0 of 79\n#: migrations"* — wrapped, hence `\s+`). Neither was read: the patterns above
+#: `docs/architecture/SEARCH-ARCHITECTURE.md` (*"appears in 0 of 79\nmigrations"* — wrapped, hence `\s+`). Neither was read: the patterns above
 #: are anchored to §R7/§A5 of the prerequisites doc and to the #7879 index row,
 #: so `-#4051`'s copy had no reader at all and went stale in the identical
 #: direction. A count is only pinned where a pattern reaches it.

@@ -222,7 +222,12 @@ try {
   //
   // ⛔ THERE ARE TWO SUCH SIGNATURES, because there are two key semantics. The
   // handler's ARGUMENT is the same either way
-  // (origin/main:supabase/functions/tenant-provision/index.ts:183:
+  // ⛔ THE SHA IS PART OF THE CITATION. These two pointers named `origin/main`,
+  // a moving ref: #1120's squash (`2484e1d47e5a`) then deleted the old path AND
+  // the hook code they cited, so both became unfollowable — the reader could
+  // not check the measurements the file rests on. An immutable sha is the only
+  // form a citation can keep.
+  // (2484e1d47e5a^:supabase/functions/tenant-provision/index.ts:183:
   //   new Webhook(hookSecret.replace(/^v1,whsec_/, ""))  → the base64 text),
   // but the two verifiers hash that argument DIFFERENTLY:
   //   - the deleted TEST STUB used it as ASCII
@@ -379,7 +384,7 @@ try {
   );
   assert.ok(okBody.org_id, "201 body must include org_id");
   // ⛔ KEEP THE ORG-NAME ASSERTION. The deleted harness pinned it
-  // (`origin/main:tests/test_tenant_provision_cors.mjs:202` —
+  // (`2484e1d47e5a^:tests/test_tenant_provision_cors.mjs:202` —
   // `jwtBody.org_name === "test"`, "team name derives from display_name") and
   // this replacement dropped it, so neutering the provider-display-name lookup
   // left the harness fully green while the org name, the starter-seed
