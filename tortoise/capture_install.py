@@ -12,17 +12,24 @@ depends on a hand-copied script or a hand-merged settings fragment.
 What it installs, per harness
 -----------------------------
 ``claude``
-    ``tortoise/claude-hooks/session-start.sh`` + ``session-end.sh`` into
-    ``<root>/.claude/hooks/`` (mode 0755), and **merges** — never overwrites —
-    the ``SessionStart`` / ``SessionEnd`` registration into
-    ``<root>/.claude/settings.json``, carrying the load-bearing
-    ``"timeout": 60`` from #3754/#3801.  Unrelated settings keys, other
-    events, and the user's own hooks in those events are preserved.
+    ``tortoise/claude-hooks/session-start.sh`` + ``session-end.sh`` +
+    ``session-turn.sh`` into ``<root>/.claude/hooks/`` (mode 0755), and
+    **merges** — never overwrites — the ``SessionStart`` / ``SessionEnd`` /
+    ``UserPromptSubmit`` registrations into ``<root>/.claude/settings.json``,
+    carrying the load-bearing ``timeout`` values (60 / 60 / 30) from
+    #3754/#3801/#3963.  ``session-turn.sh`` is the cheap per-turn spool: capture
+    used to happen only at ``SessionEnd``, which is cancelled at its ~1.5 s
+    default and does not fire at all on a kill, so an interrupted session filed
+    nothing.  Unrelated settings keys, other events, and the user's own hooks in
+    those events are preserved.
 
 ``pi``
     ``tortoise/pi-hooks/tortoise-capture.ts`` into
-    ``<home>/.pi/agent/extensions/tortoise-capture.ts``, after the
-    non-destructive legacy guard from #3713 (see below).
+    ``<home>/.pi/agent/extensions/tortoise-capture.ts`` AND, in the SAME run,
+    ``tortoise/pi-hooks/tortoise-volunteer.ts`` into
+    ``<home>/.pi/agent/extensions/tortoise-volunteer.ts`` — the per-turn READ
+    seam, graded with the capture half as ONE contract number (#2119) — after
+    the non-destructive legacy guard from #3713 (see below).
 
 ``codex``
     ``tortoise/codex-hooks/session-end.sh`` into ``<codex_home>/hooks/``
