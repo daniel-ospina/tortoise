@@ -6880,7 +6880,13 @@ def _text_with_a_duplicated_durations_row(path: Path) -> tuple[str, str]:
     lines = path.read_text().splitlines(keepends=True)
     start = lines.index("durations:\n")
     row = lines[start + 1]
-    assert re.match(r"^  [A-Za-z0-9_.\-]+\.py: ", row), row
+    # ⛔ The key may be PATH-QUALIFIED (`eval/write_path/<file>.py`) — 49 of the
+    # rows are, because `split_fast_gate` looks a weight up by the path relative
+    # to `tests/`. A bare-name-only regex made this helper assert on the map's
+    # ROW ORDER instead of on the guard it tests, and a branch that added such a
+    # row first turned 7 required `core` cases red with a message about the
+    # manifest's layout rather than about duplicates (#11548).
+    assert re.match(r"^  [A-Za-z0-9_./\-]+\.py: ", row), row
     return path.read_text().replace(row, row + row, 1), row.split(":", 1)[0].strip()
 
 
@@ -19719,6 +19725,38 @@ def test_turn_parity_census_guard_runs_on_a_tools_only_change():
     assert r["full"] is False, r
     assert r["surfaces"] == ["core"], r
     assert "test_10017_turn_parity_census.py" in r["test_files"], r
+
+
+def test_relation_write_leg_runs_on_the_module_that_carries_it():
+    # #11237 review P1: `tortoise/relation_write.py` matches no SOURCE_PATTERNS
+    # row, so a diff to it ALONE falls through `select()`'s `tortoise/` fallback
+    # to `core` — and before this pin NOTHING registered on `core` imported the
+    # module, so the whole relation write path (the `#11235` ambiguity refusal,
+    # the `#10000` typed-only rule, the declared-hierarchy branch, the collapse
+    # accounting, the inverted-predicate refusal) was verified by NOTHING on the
+    # surface that carries it: the #1349/#2938/#3332/#3616 silent-drop class,
+    # on the module that decides whether a narrative relation becomes an edge.
+    #
+    # ⛔ The remedy is NOT "promote the eval lane": `eval/**` is `on_demand` by
+    # an OWNER DECISION (#10194 decision A — "the eval subtrees do not gate a
+    # merge … they run on demand, never on a merge"), and the on-demand
+    # subtraction happens AFTER surface selection, so an `eval/...` row on
+    # `core` is a row that can never select the file. The pure-plan guards
+    # therefore live in `tests/test_relation_write_11237.py`, which this surface
+    # reaches; the graph-level lane stays on demand.
+    #
+    # Measured before the pin: `select(["tortoise/relation_write.py"])` →
+    # surfaces `["core"]`, ~735 files, BOTH the eval lane and the pure-plan
+    # guards absent. Mutation: removing `test_relation_write_11237.py` from the
+    # `core` list fails the third arm.
+    r = _sel(["tortoise/relation_write.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_relation_write_11237.py" in r["test_files"], r["test_files"][:20]
+    # The on-demand half is NOT promoted by this pin — the product-number lane
+    # runs where #10194 put it.
+    assert "eval/write_path/test_write_path_relation_lane.py" \
+        not in r["test_files"], r
 
 
 def test_purge_legacy_turns_guard_runs_on_a_tools_only_change():
