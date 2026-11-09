@@ -3297,12 +3297,22 @@ class PackRegistry:
         ``_build_kind_expansions`` (built from this method) could not widen a
         core root. Pack declarations are appended AFTER the core ones so the
         returned order is stable across loads.
+
+        #11000: the argument is normalised to the BARE spelling, because
+        ``expand_kind`` declares a core kind's bare and ``core:`` forms ONE kind
+        (that is what makes the widening reach the rows the classifier writes,
+        ``core:WorkItem``) — and this is the method that table is built from.
+        Without the fold, ``get_subclasses("core:Subject")`` answered ``[]``
+        while ``expand_kind("core:Subject")`` answered with the whole bucket: a
+        wrong-empty for a caller that spells a kind the way `extractor_v2.SUBJECTS`
+        does (``core:organization``, ``core:team``, …).
         """
-        result = list(CORE_SUBCLASSES.get(parent_kind, ()))
+        bare = parent_kind[5:] if parent_kind.startswith("core:") else parent_kind
+        result = list(CORE_SUBCLASSES.get(bare, ()))
         for p in self.packs.values():
             ns = p.namespace
             for child, parent in p.kind_subclasses.items():
-                if parent == parent_kind:
+                if parent == bare:
                     result.append(f"{ns}:{child}")
         return result
 

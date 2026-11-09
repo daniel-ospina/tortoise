@@ -1750,6 +1750,25 @@ class TestCoreHierarchy:
         # pre-#7848 rows stop being readable.
         assert "dev:deployment" in shipped.expand_kind("core:deployment")
 
+    def test_get_subclasses_folds_the_core_prefix_like_expand_kind(self, shipped):
+        """`get_subclasses` answers the `core:` spelling too, not a wrong-empty.
+
+        The failure this prevents: the SAME asymmetry the spelling pass above
+        removes from `expand_kind`, left in the method that table is built from.
+        Measured before the fold: `get_subclasses("core:Subject") == []` while
+        `expand_kind("core:Subject")` returned the whole Subject bucket, and
+        `get_subclasses("core:WorkItem") == []` while `expand_kind("core:WorkItem")`
+        reached `dev:issue`. A caller that spells a kind the way the classifier
+        and the write doors do (``extractor_v2.SUBJECTS`` is ``core:organization``)
+        then gets a wrong-empty instead of the subclasses.
+        """
+        for parent in CORE_SUBCLASSES:
+            assert shipped.get_subclasses(f"core:{parent}") == shipped.get_subclasses(parent)
+            assert set(shipped.get_subclasses(f"core:{parent}")) >= set(
+                CORE_SUBCLASSES[parent])
+        assert "dev:issue" in shipped.get_subclasses("core:WorkItem")
+        assert "dev:epic" in shipped.get_subclasses("core:Project")
+
     # ── the negative control ───────────────────────────────────────────
 
     def test_the_subject_row_matches_s5_except_the_nil_bucket(self):
