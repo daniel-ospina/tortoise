@@ -1049,6 +1049,41 @@ class TestAtomicProvisionBackstop:
         assert r.status_code == 409, r.text
         assert len(dropped) == 1, dropped
 
+    def test_a_failing_drop_submission_cannot_swallow_the_402(
+            self, user_client, monkeypatch):
+        """#1981 round-3 review P2 — the drop must not be able to fail the
+        refusal.
+
+        `_drop_org_graph` swallows its OWN errors, but the `to_thread`
+        SUBMISSION is outside that (a refused executor submit, "cannot schedule
+        new futures after shutdown", a cancelled task). The await used to be
+        naked, so that raise replaced the structured 402 with the generic 500 —
+        losing exactly the `code`-bearing refusal the dashboard dialog reads
+        (#2789).
+        """
+        import asyncio as _asyncio
+
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        real_to_thread = _asyncio.to_thread
+
+        def _to_thread(fn, *a, **kw):
+            if fn is ha._drop_org_graph:
+                raise RuntimeError(
+                    "cannot schedule new futures after shutdown")
+            return real_to_thread(fn, *a, **kw)
+
+        monkeypatch.setattr(_asyncio, "to_thread", _to_thread)
+        r = tc.post("/v1/organizations", json={"name": "racer-submit"})
+        assert r.status_code == 402, (
+            f"a failing drop SUBMISSION turned the structured refusal into "
+            f"{r.status_code}: {r.text}")
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+
     def test_the_refusal_drops_the_graph_off_the_event_loop(
             self, user_client, monkeypatch):
         """#1981 review P1: the compensating drop is SYNCHRONOUS socket I/O
@@ -1380,6 +1415,67 @@ class TestAtomicProvisionBackstop:
                 f"`{name}` no longer passes `p_tier: 'free'`; "
                 "`COALESCE(p_tier,'free') = 'free'` would not engage and the "
                 "one-free-org backstop would never fire on this lane")
+
+
+class TestNamespaceReclaimAttribution:
+    """#1981 (round-3 review): a reclaim may only fire on PROOF nothing landed.
+
+    The eager default-graph init runs BEFORE the RPC, so a failed provision
+    leaves a namespace behind. Reclaiming it is only safe when the failure
+    PROVES the write did not commit: `provision_org` raises the SAME
+    `RuntimeError` for a PostgREST error RESPONSE and for a TRANSPORT failure,
+    and the control-plane read timeout is 5.0 s — short enough that a
+    provision which COMMITTED can surface as a lost response. Deleting then
+    destroys a LIVE org's `TeamMeta`/`OnboardingState`.
+
+    Both lanes (`_create_org_supabase_lane`, `register_user`) now share ONE
+    predicate, so this class grades the predicate itself rather than two
+    drifting copies of the judgement.
+    """
+
+    def test_only_a_server_answer_proves_nothing_landed(self):
+        from tortoise.hosted_api import _rpc_failure_proves_nothing_landed
+
+        # PostgREST ANSWERED with a status: the transaction did not commit.
+        for msg in (
+            "Supabase control-plane RPC failed (provision_team): HTTP 402: "
+            "one_free_org_limit:org-a",
+            "Supabase control-plane RPC failed (provision_team): HTTP 409: "
+            "duplicate key value violates unique constraint",
+            "Supabase control-plane RPC failed (provision_team): HTTP 500: "
+            "boom",
+        ):
+            assert _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
+
+        # TRANSPORT: the RPC may have committed and only the reply was lost.
+        for msg in (
+            "Supabase control-plane RPC failed (provision_team): "
+            "ReadTimeout('')",
+            "Supabase control-plane RPC failed (provision_team): "
+            "ConnectError('connection reset')",
+            "Supabase control-plane RPC failed (provision_team): ",
+            "",
+        ):
+            assert not _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
+
+    def test_a_free_or_absent_tier_cannot_reach_the_paid_provision(self):
+        """The paid-new-org lane must never carry a free tier into
+        `provision_team`: the gate would engage and refuse a provision the
+        customer already paid for, which the webhook re-raises as a 500 that
+        Stripe redelivers forever (round-3 review, P2)."""
+        import pytest as _pytest
+
+        from tortoise.hosted_api import _provision_new_org_from_checkout
+
+        for meta in (
+            {"user_id": "u", "org_name": "n"},                     # absent
+            {"user_id": "u", "org_name": "n", "tier": "free"},
+            {"user_id": "u", "org_name": "n", "tier": "anon"},
+            {"user_id": "u", "org_name": "n", "tier": ""},
+        ):
+            with _pytest.raises(RuntimeError) as excinfo:
+                _provision_new_org_from_checkout(None, "org-x", meta)
+            assert "PAID tier" in str(excinfo.value), (meta, excinfo.value)
 
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(

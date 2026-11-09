@@ -45,15 +45,17 @@ re-check would be the wrong seam. Both fail — see §2.
 
 ## 4. Wiring
 
+⛔ **Cites are SYMBOLS, not `file:line` offsets, on purpose.** This table carried line numbers and three of them were stale at the head that shipped them (a 24–34 line miss in a 45k-line file), which is exactly how the next lane lands on the wrong function. A symbol survives the next edit; an offset does not.
+
 | Call site | What it does after this change |
 |---|---|
-| `tortoise/supabase_control.py:3823` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC**, and the pair is pinned by `test_the_sql_predicate_is_the_python_predicate` on BOTH sides of the claim: the exclusion set is BUILT FROM `_BILLING_ACTIVE_STATUSES` / `_PENDING_PAYMENT_STATUS` (a constant change in either direction reddens it), and the NEGATIVE space is pinned too — the gate may reference only the columns the Python twin reads, and its WHERE clause is a golden text — so an ADDED condition (`o.tier`, `o.deleted_at`, `m.status <> 'deleted'`) reddens rather than silently changing what counts as free. Any future edit must move both. |
-| `tortoise/hosted_api.py:24881` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and drops the eagerly materialized graph namespace. |
-| `tortoise/hosted_api.py:37815` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. |
-| `tortoise/hosted_api.py:44989` `_provision_new_org_from_checkout` | Unaffected by construction: it passes the purchased (paid) tier, and the gate only fires for `COALESCE(p_tier,'free') = 'free'`. |
-| `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | Unaffected by construction: the identity path passes `p_user_id = NULL`. |
-| `tortoise/hosted_api.py:25077` `_create_org_registry_lane` | Unchanged: registry (selfhost) mode writes into the graph, where Postgres constraints do not exist. |
-| `tortoise/hosted_api.py:32913`, `:33045` claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. |
+| `tortoise/supabase_control.py` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC**, and the pair is pinned by `test_the_sql_predicate_is_the_python_predicate` on BOTH sides of the claim: the exclusion set is BUILT FROM `_BILLING_ACTIVE_STATUSES` / `_PENDING_PAYMENT_STATUS` (a constant change in either direction reddens it), and the NEGATIVE space is pinned too — the gate may reference only the columns the Python twin reads, and its WHERE clause is a golden text — so an ADDED condition (`o.tier`, `o.deleted_at`, `m.status <> 'deleted'`) reddens rather than silently changing what counts as free. Any future edit must move both. |
+| `tortoise/hosted_api.py` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and reclaims the eagerly materialized graph namespace — **gated on attribution** (`_rpc_failure_proves_nothing_landed`): only a PostgREST ANSWER proves nothing committed, so a transport failure never `GRAPH.DELETE`s a live org's namespace. The drop is bounded and cannot fail the refusal. |
+| `tortoise/hosted_api.py` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. Passes `p_user_id=owner_user_id` and `p_tier='free'`, so it is a user-path lane and is pinned as one. |
+| `tortoise/hosted_api.py` `_provision_new_org_from_checkout` | ⛔ **NOT "unaffected by construction"** — that was an assumption, not an invariant. It now REFUSES a free or absent tier loudly: defaulting a missing tier to `'free'` made the gate engage and refuse a provision the customer had already paid for, which the webhook re-raises as a 500 Stripe redelivers forever. The session-creation route rejects `free`/`anon` before checkout, so reaching here with one means the metadata was lost. |
+| `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | The entitlement gate does not fire (the identity path passes `p_user_id = NULL`). The namespace reclaim in `register_user` is **gated on attribution** — it used to delete on ANY exception, the same defect as the create-org lane, and a lost response after a committed registration would have destroyed a live account's graph. |
+| `tortoise/hosted_api.py` `_create_org_registry_lane` | Unchanged: registry (selfhost) mode writes into the graph, where Postgres constraints do not exist. |
+| claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. |
 
 ## 5. Implementation steps (all landed in this PR)
 
