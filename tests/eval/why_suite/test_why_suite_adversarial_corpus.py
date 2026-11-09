@@ -34,7 +34,7 @@ from pathlib import Path
 import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
-from eval.why_suite import adversarial, corpus, generate_corpus, judge, schema  # noqa: E402
+from eval.why_suite import adversarial, corpus, generate_corpus, judge, runner, schema  # noqa: E402
 
 # The v1 A11 pilot corpus's fixtures_hash — PINNED AS A LITERAL.  The
 # adversarial corpus is a SECOND fixture set; if it (or any later corpus) ever
@@ -279,6 +279,137 @@ def test_standing_bars_are_corpus_scoped_and_can_fail():
         assert schema.tripped_bars(broken, corpus.ADVERSARIAL_CORPUS), metric
     # The v1 vocabulary has no adversarial arms at all.
     assert schema.tripped_bars(at_bars, corpus.DEFAULT_CORPUS) == []
+
+
+def test_tripped_bars_reads_an_absent_metric_as_tripped():
+    """An ABSENT (or non-numeric) metric is a TRIPPED bar, never a met one.
+
+    The first version `continue`d on a missing value, so `tripped_bars({})`
+    returned `[]` — an empty or partial snapshot read as "every bar met" on the
+    helper the lane's own gate assertions call. Fail-open on a gate helper, and
+    the OPPOSITE of `aggregate_metrics`' stated convention (an empty denominator
+    collapses to the WORST value, so a corpus that stops measuring an arm reads
+    as a failure). Mutation check: restoring the `continue` makes every arm
+    here return `[]`.
+    """
+    adv = corpus.ADVERSARIAL_CORPUS
+    everything = [label for _, _, _, label in schema.standing_bars(adv)]
+    assert len(everything) == 6, everything  # 3 v1 bars + 3 adversarial arms
+    # Empty snapshot: every armed bar is tripped, on BOTH corpora.
+    assert schema.tripped_bars({}, adv) == everything
+    assert schema.tripped_bars({}, corpus.DEFAULT_CORPUS) == everything[:3]
+    # Each bar removed on its own trips exactly that bar and nothing else — a
+    # partial snapshot cannot pass by omission.
+    complete = {m: 1.0 for m in schema.metric_values(adv)}
+    complete["false_positive_rate"] = 0.0
+    complete["nand_recovery_rate"] = 0.8261
+    assert schema.tripped_bars(complete, adv) == []
+    for metric, _, _, label in schema.standing_bars(adv):
+        partial = {k: v for k, v in complete.items() if k != metric}
+        assert schema.tripped_bars(partial, adv) == [label], metric
+    # A non-numeric value (and a bool, which `isinstance(x, int)` accepts) is
+    # not a measurement either.
+    for bad in (None, "0.99", True, [0.99]):
+        corrupted = dict(complete)
+        corrupted["conflict_surfacing_rate"] = bad
+        assert schema.tripped_bars(corrupted, adv) == [
+            "conflict-surfacing-below-floor"], bad
+
+
+def test_failure_classes_record_every_tripped_bar_not_the_first_four():
+    """A bless records EVERY tripped bar in `history[]`, never a `[:4]` slice.
+
+    The slice was exactly lossless while v1 was the only corpus (3 bars +
+    `a4-not-measured` = 4) and became lossy when #2275 armed three more: a
+    `why_suite_adversarial` re-publish with 6 tripped bars wrote a blessed entry
+    naming only four, with nothing recording the drop.
+    Mutation check: restoring `failure_classes[:4]` in `runner._bless_main` — or
+    the equivalent slice in `failure_classes_for` — fails the length assert.
+    """
+    adv = corpus.ADVERSARIAL_CORPUS
+    broken = {m: 1.0 for m in schema.metric_values(adv)}
+    broken.update(
+        {
+            "conflict_surfacing_rate": 0.5,
+            "dig_deeper_navigation_accuracy": 0.5,
+            "false_positive_rate": 0.5,
+            "nand_recovery_rate": 0.5,
+            "high_severity_nand_recovery": 0.0,
+            "contested_classification_accuracy": 0.5,
+        }
+    )
+    assert len(schema.tripped_bars(broken, adv)) == 6  # every armed bar
+    classes = runner.failure_classes_for(broken, adv)
+    assert classes == schema.tripped_bars(broken, adv)
+    assert len(classes) == 6, classes
+    # v1 keeps its own composition: bars + the `a4-not-measured` marker, still
+    # complete (4 = 3 bars + the marker — the case the old cap was sized for).
+    assert runner.failure_classes_for(broken, corpus.DEFAULT_CORPUS, a4_measured=False) == [
+        "conflict-surfacing-below-floor",
+        "dig-deeper-navigation-below-floor",
+        "clean-false-positives",
+        "a4-not-measured",
+    ]
+    assert runner.failure_classes_for(broken, corpus.DEFAULT_CORPUS) == [
+        "conflict-surfacing-below-floor",
+        "dig-deeper-navigation-below-floor",
+        "clean-false-positives",
+    ]  # a MEASURED A4 is not a failure class
+
+
+def test_bless_writes_every_failure_class_into_the_history_record(tmp_path, monkeypatch):
+    """The BLESS PATH — not just the helper — records all six classes.
+
+    `failure_classes[:4]` lived at the `_bless_main` call site, so a helper-only
+    assertion cannot fail on the pre-fix code. This drives `_bless_main` itself
+    (with the run and the receipt plumbing stubbed) and reads the baseline it
+    writes: pre-fix, `history[-1].failure_classes` has FOUR entries and this
+    asserts six.
+    """
+    adv = corpus.ADVERSARIAL_CORPUS
+    pending = corpus.load_baseline(corpus.WHY_DIR, posture="m2", corpus=adv)
+    metrics = {m: 1.0 for m in schema.metric_values(adv)}
+    metrics.update(
+        {
+            "conflict_surfacing_rate": 0.5,
+            "dig_deeper_navigation_accuracy": 0.5,
+            "false_positive_rate": 0.5,
+            "nand_recovery_rate": 0.5,
+            "high_severity_nand_recovery": 0.0,
+            "contested_classification_accuracy": 0.5,
+        }
+    )
+    report = {
+        "run_status": "completed",
+        "run_id": "w3b-bless-test",
+        "date": "2026-11-09",
+        "metrics": metrics,
+        "corpus_hash": pending["fixtures_hash"],
+        "judge_pin": judge.judge_pin(),
+        "resolved_config": pending["config"],
+        "a4_result": {"measured": True},
+        "log": [],
+    }
+    written = tmp_path / "adversarial_m2.json"
+    monkeypatch.setattr(runner, "run_benchmark", lambda **_: report)
+    monkeypatch.setattr(
+        runner, "corpus",
+        type("C", (), {
+            "DEFAULT_CORPUS": corpus.DEFAULT_CORPUS,
+            "RECEIPTS_DIR": tmp_path / "receipts",
+            "baseline_path": staticmethod(lambda *a, **k: written),
+            "load_baseline": staticmethod(lambda *a, **k: pending),
+        }),
+    )
+    monkeypatch.setattr(runner, "build_receipt", lambda *a, **k: {})
+    monkeypatch.setattr(runner, "validate_receipt", lambda *a, **k: [])
+
+    rc = runner._bless_main(tmp_path, "m2", "test justification", None, False, False, [], adv)
+    assert rc == 0
+    blessed = json.loads(written.read_text(encoding="utf-8"))
+    recorded = blessed["history"][-1]["failure_classes"]
+    assert len(recorded) == 6, recorded
+    assert sorted(recorded) == sorted(schema.tripped_bars(metrics, adv))
 
 
 def test_aggregate_metrics_adversarial_arms_math():

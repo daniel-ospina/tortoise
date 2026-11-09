@@ -18,7 +18,7 @@ produced by `tortoise.why.assemble_why_blocks` is all the grader ever sees.
 | Issue | #2100 (W3-b) — epic #2080 (gbrain measurable-memory adoption) |
 | Graded artifact | REAL `tortoise.why.assemble_why_blocks` (the W4 assembly, #2101) — the same artifact the search/ask/analyze/MCP surfaces consume |
 | Seeding | Shared E2E-1/E2E-7 planted-conflict corpus — 40 fictional points (30 conflicted incl. 10 P9 / 5 decision / 5 superseded subsets + 10 clean), content-mirrored from W4-a's `_seed_e2e1_corpus` (`tests/test_w4_why_enrichment.py`) and pinned by the jointly-pinned `corpus_manifest.json` |
-| Judge pin | `judge_why_suite_v3` — static prompt file (`judge_why_suite_v3.txt`) whose sha256 is folded into the baseline `judge_pin` (`judge_why_suite_v3:<hex>`) together with `grading.py` + `schema.py` + `adversarial.py` (the adversarial corpus's grading arms are protocol code too); asserted in the grading pre-step; a prompt/grader/gold change is a PROTOCOL change (new protocol name + `--bless-protocol`), never a silent compare |
+| Judge pin | `judge_why_suite_v4` — static prompt file (`judge_why_suite_v4.txt`) whose sha256 is folded into the baseline `judge_pin` (`judge_why_suite_v4:<hex>`) together with `grading.py` + `schema.py` + `adversarial.py` (the adversarial corpus's grading arms are protocol code too); asserted in the grading pre-step; a prompt/grader/gold change is a PROTOCOL change (new protocol name + `--bless-protocol`), never a silent compare |
 | Lanes | deterministic m2 (`TORTOISE_SESSION_EXTRACTOR=m2`) — the CI can-fail gate, byte-reproducible; llm posture (`main.json`) records the same numbers (this suite is zero-LLM end to end) |
 | A11 gate | if the surfaced context can't answer ≥ 0.95, the W4 ASSEMBLY changes first — a plan change, not a test fix (epic R2) |
 
@@ -115,7 +115,7 @@ TORTOISE_DB_URI='docker://:falkordb@localhost:6379/why_suite_matrix' \
 # publish (at a clean committed head, pending baseline)
 ... runner.py --bless --justification "first publish (m2 numbers at the bar)"
 ... runner.py --bless-corpus --justification "intentional manifest/gold regen"
-... runner.py --bless-protocol --justification "judge_why_suite_v3 re-pin (illustrative)"
+... runner.py --bless-protocol --justification "judge_why_suite_v4 re-pin (illustrative)"
 # the adversarial lane blesses ITS OWN baseline (never v1's)
 ... runner.py --corpus why_suite_adversarial --bless --justification "..."
 
@@ -134,7 +134,7 @@ TORTOISE_TEST_CARVE_OUT=1 uv run pytest tests/eval/why_suite/test_why_suite_sche
 * **corpus drift** — manifest/gold edit without corpus-bless ⇒ the gate is
   `inconclusive` (hash mismatch); `generate_corpus.py --check` names the
   drifted file.
-* **judge drift** — a `judge_why_suite_v3.txt` / `grading.py` / `schema.py` /
+* **judge drift** — a `judge_why_suite_v4.txt` / `grading.py` / `schema.py` /
   `adversarial.py` edit without a re-pin fails the pre-step as
   `judge_pin_mismatch` (protocol change = new protocol name + re-run).
 * **adversarial-arm failure** — `nand_recovery_rate` below its cap-bound

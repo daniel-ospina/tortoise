@@ -13,7 +13,7 @@ Assertions cover the properties the issue owns:
   arm is 0 (clean points never invent contradictions);
 * A11: graded from the canonical why-block only (the grader row never
   touches the graph);
-* judge pin: the run's pin is the pinned ``judge_why_suite_v3`` (prompt
+* judge pin: the run's pin is the pinned ``judge_why_suite_v4`` (prompt
   hash asserted in the pre-step) and the receipt validates with per-point
   rows;
 * determinism: two full runs produce byte-identical metrics;
@@ -117,7 +117,7 @@ def test_full_corpus_grades_e2e7_bars_from_surfaced_context(m2_env):
     assert all(r["support_sufficient"] is True for r in report["point_results"] if not r["expected_resolved"])
     # Judge pin: the pinned protocol + the pre-step hash assertion.
     assert report["judge_pin"] == judge.judge_pin()
-    assert "judge_why_suite_v3:" in report["judge_pin"]
+    assert "judge_why_suite_v4:" in report["judge_pin"]
     # A11 note present (graded from surfaced context only).
     assert any("surfaced context ONLY (A11)" in n for n in report["notes"])
     # Receipt validates with per-point rows (evidentiality).
@@ -208,8 +208,8 @@ def test_judge_pin_drift_fails_preflight(m2_env, tmp_path, monkeypatch):
     root = _tmp_corpus(tmp_path)
     # Point the judge module at the corpus copy's prompt (the pre-step must
     # guard the artifact the RUN would grade under, not the installed one).
-    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v3.txt")
-    judge_path = Path(root) / "judge_why_suite_v3.txt"
+    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v4.txt")
+    judge_path = Path(root) / "judge_why_suite_v4.txt"
     judge_path.write_text("DRIFTED PROTOCOL\n", encoding="utf-8")
     report = runner.run_benchmark(root=root)
     assert report["run_status"] == "failed"

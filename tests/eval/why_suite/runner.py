@@ -8,7 +8,7 @@ Runs the why-layer suite on ONE hermetic throwaway graph:
 2. **assemble** — the W4 why-block assembly (``tortoise.why.
    assemble_why_blocks``) produces the canonical §3.1.4 surfaced context for
    every planted point (A11: this block is ALL the grader sees);
-3. **grade** — the deterministic graders (the ``judge_why_suite_v3`` pinned
+3. **grade** — the deterministic graders (the ``judge_why_suite_v4`` pinned
    rubric) answer the four why-questions from each block ALONE — conflict
    surfacing / dig-deeper navigation (pointer targets resolved against the
    planted role map the harness owns) / support-chain + trade-off
@@ -634,6 +634,29 @@ def _write_json(path: Path, doc: dict) -> None:
     path.write_text((json.dumps(doc, indent=2, sort_keys=True) + "\n"), encoding="utf-8")
 
 
+def failure_classes_for(
+    metrics: dict, corpus_name: str = corpus.DEFAULT_CORPUS, *, a4_measured: bool = True
+) -> list[str]:
+    """The failure-class labels a bless records in ``history[]``.
+
+    Every bar the snapshot trips, plus ``a4-not-measured`` on the v1 lane
+    (whose A4 arm is the one measurement that can legitimately be absent).
+
+    ⛔ NEVER truncated. The list used to be sliced to ``[:4]``, which was
+    exactly lossless while v1 was the ONLY corpus (3 bars + ``a4-not-measured``
+    = 4) and became LOSSY the moment #2275 armed three more bars: a
+    ``why_suite_adversarial`` re-publish with 5-6 tripped bars would have
+    written a blessed history entry naming only the first four, with nothing
+    recording that the rest were dropped — a silent hole in the very record
+    that says WHAT failed. The bound is the bar table itself
+    (``schema.standing_bars``), so adding a corpus cannot reintroduce the cap.
+    """
+    failure_classes = schema.tripped_bars(metrics, corpus_name)
+    if corpus_name == corpus.DEFAULT_CORPUS and not a4_measured:
+        failure_classes.append("a4-not-measured")
+    return failure_classes
+
+
 def _bless_main(
     root: Path,
     posture: str,
@@ -657,11 +680,11 @@ def _bless_main(
         print(f"run failed ({report['failure_origin']}): " + "; ".join(report.get("log", [])[-4:]))
         return 2
     try:
-        failure_classes = schema.tripped_bars(report["metrics"], corpus_name)
-        if corpus_name == corpus.DEFAULT_CORPUS and not (
-            report["a4_result"] and report["a4_result"].get("measured")
-        ):
-            failure_classes.append("a4-not-measured")
+        failure_classes = failure_classes_for(
+            report["metrics"],
+            corpus_name,
+            a4_measured=bool(report["a4_result"] and report["a4_result"].get("measured")),
+        )
         blessed = schema.bless_baseline(
             pending,
             {
@@ -670,7 +693,7 @@ def _bless_main(
                 "judge_pin": report["judge_pin"],
                 "config": report["resolved_config"],
                 "metrics": report["metrics"],
-                "failure_classes": failure_classes[:4],
+                "failure_classes": failure_classes,
             },
             justification=justification,
             corpus_bless=corpus_bless,

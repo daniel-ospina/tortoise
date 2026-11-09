@@ -16,7 +16,7 @@ manifest (a ``gold`` key in the manifest = validation error), ``fixtures_hash``
 over manifest + gold, jointly-pinned corpus manifest (the deterministic
 seed → planted composition shared with W4-a's E2E-1 seeding), BPRE-style
 posture-scoped baselines (``baselines/main.json`` + ``baselines/m2.json``),
-receipts with validated per-run rows, and the PINNED ``judge_why_suite_v3``
+receipts with validated per-run rows, and the PINNED ``judge_why_suite_v4``
 (prompt hash recorded in the baseline ``judge_pin``; asserted in the grading
 pre-step — a judge/gold change is a protocol change, never a silent compare).
 

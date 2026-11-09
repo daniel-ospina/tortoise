@@ -183,11 +183,28 @@ def standing_bars(corpus: str = DEFAULT_CORPUS) -> Bars:
 
 def tripped_bars(metrics: dict, corpus: str = DEFAULT_CORPUS) -> list[str]:
     """The failure-class labels of the standing bars a metric snapshot sits
-    outside of (empty ⇒ every bar met)."""
+    outside of (empty ⇒ every bar met).
+
+    ⛔ An ABSENT or non-numeric metric is a TRIPPED bar, never a met one. The
+    first version `continue`d on a missing value, so an empty or partial
+    snapshot reported EVERY bar met — the fail-OPEN direction on a gate helper
+    (`tripped_bars({}, ADVERSARIAL_CORPUS)` returned `[]`).
+    `aggregate_metrics` states the same convention for the numbers themselves
+    ("each denominator collapses to the WORST value when empty … a corpus that
+    stops planting an edge case must read as a failure, never as a clean
+    pass"), and this helper is what the lane's own gate assertions call, so a
+    run whose metrics dict lost an arm would have read as lane-clean.
+
+    Not reachable as a false PASS today — `compare_run` rejects a run missing
+    any committed metric first, and `bless_baseline` rejects missing dimensions
+    — which is why this is closed at the source while the helper is new and
+    public rather than left as a latent trap for the next caller.
+    """
     tripped: list[str] = []
     for metric, direction, bound, label in standing_bars(corpus):
         value = metrics.get(metric)
         if not isinstance(value, (int, float)) or isinstance(value, bool):
+            tripped.append(label)
             continue
         if (direction == "min" and value < bound) or (direction == "max" and value > bound):
             tripped.append(label)
