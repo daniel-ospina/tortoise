@@ -21,15 +21,22 @@ needs a real tenant graph (docker lane). Both halves are deliberate: a
 source-pin alone cannot see a route that quietly stops calling the predicate,
 and a behavioural test alone cannot see WHY the exclusion is safe.
 
-⚠️ **NOT "DB-free" — read this before re-laning the file.** Three tests here
-(``test_the_list_where_survives_a_legacy_non_string_session_id`` and the two
-lifetime-baseline pins) RUN the composed WHERE against a real graph. That graph
-is a throwaway EMBEDDED one (``TortoiseSDK(<tmp_path>/tortoise.db)``: no
-docker, no server, no tenant graph), which is why the file is registered on the
-FAST ``api``/``core``/``sdk`` surfaces and not the docker lane. The repo's own
-idiom defines "DB-free" as *no graph at all* (``config/ci-surfaces.yml``, the
-``test_10047_record_every_lane.py`` note) — this module is not that, and a
-header claiming so would invite exactly the re-laning that drops the P1
+⚠️ **NOT a fake, and not "no graph" either — read this before re-laning.**
+Three tests here build a throwaway EMBEDDED engine and run real Cypher against
+it: ``test_a_real_capture_cannot_be_filed_under_the_reserved_namespace`` (the
+SDK doors), ``test_the_list_where_survives_a_legacy_non_string_session_id``
+(the composed WHERE) and
+``test_the_lifetime_baseline_excludes_the_sample_at_the_query``
+(``LIFETIME_MEMORY_QUERY``). That engine is
+``TortoiseSDK(<tmp_path>/tortoise.db)``: no docker, no server, no tenant graph
+— which is why the file is registered on the FAST ``api``/``core``/``sdk``
+surfaces and not the docker lane. ⛔ Do NOT resolve this by legislating a
+meaning for "DB-free": ``config/ci-surfaces.yml`` uses the phrase BOTH ways —
+its ``test_10047_record_every_lane.py`` note means *no graph* ("a fake control
+plane and a recording fake SDK, no graph writes, no server"), while its
+``:9481``/``:9816``/``:1548`` entries call a throwaway EMBEDDED real engine
+"DB-free". Say what this file actually does instead; a header claiming it
+touches no engine would invite exactly the re-laning that drops the P1
 regression pin (`STARTS WITH` on a non-string id).
 """
 from __future__ import annotations
@@ -427,8 +434,9 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
     """NON-VACUITY for the whole exclusion, at the DOOR the user actually uses.
 
     Pinning ``session_id_refusal`` alone would leave this green if a door
-    stopped calling it. This drives the REAL SDK doors (embedded lane, no
-    FalkorDB) with a reserved id and asserts the refusal is audible AND that
+    stopped calling it. This drives the REAL SDK doors (embedded lane —
+    FalkorDBLite, no docker) with a reserved id and asserts the refusal is
+    audible AND that
     nothing was written — the capture that would otherwise have become
     invisible on every read surface.
     """
