@@ -205,7 +205,7 @@ SELECTION rules, so an off-shape block (a pointer or conflict field missing
 or ill-typed) is not exercised by any family in either corpus.  It is
 covered only at the grader-unit level (`test_why_suite_grading.py` asserts
 an unmeasured support-chain entry grades "not answerable"); a
-malformed-surface FAMILY is still open work.  Nor can it falsify
+malformed-surface FAMILY is still open work (#11597).  Nor can it falsify
 real-memory recall semantics — these fixtures are still SYNTHETIC and still
 authored by this team, so they pin the assembly's documented selection
 rules rather than a real conversation's graph.  A corpus derived from a
