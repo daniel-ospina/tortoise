@@ -5499,6 +5499,12 @@ surfaces:
   - test_pack_hierarchy_11001.py
   - test_pack_kinds.py
   - test_pack_registry_gaps.py
+  # #11656: the declared-relation INVENTORY the endpoint-kind-binding scope cites, re-derived from
+  # `packs/*/manifest.yaml` on every run (36 declared / 35 kind-bearing / 34 IMPL + 1 NAND, `hasPart`
+  # declared once, `addresses` 6x over 6 distinct pairs, the 8 declarations a naive D3 binding test
+  # would disable) — plus the three door/reader facts the review established, and the two DOC defects:
+  # an unregistered doc, and a bare citation of an ambiguous basename. Offline, no graph, ~4s.
+  - test_11656_endpoint_kind_binding_scope.py
   # #11083: the per-pack relation census — HERMETIC half. Holds the committed
   # artifact to a live re-derivation (declared / writable / effective_direction /
   # written_label / declaration_only_reason / dangling), the derived denominator,
