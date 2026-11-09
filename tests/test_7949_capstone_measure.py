@@ -12292,3 +12292,188 @@ def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
                 f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
                 f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
                 "entry names the two CALLS whose order it argues from, never a definition")
+
+
+# ── E1's after arm, replicated (#4917 §5 item 5: "n >= 2 per arm") ───────────────
+#
+# Until this reader existed the after side could hold exactly ONE realization:
+# `score()` read the single module constant `ON_ARM_LOG`, so no number of runs
+# could satisfy the replication the bundle's own README names as the requirement
+# that ends E1's REFUSED — the arm the effect is read off was a single LLM
+# realization BY CONSTRUCTION. These pins hold the two halves of the fix: the
+# extra realizations are read and scored, and every cheap way to satisfy the
+# requirement without replicating anything is refused.
+
+_EXTRA_GRAPH = "capstone_on_54922a800_1700000002"
+
+
+def _add_after_arm(repo: Path, index: int = 2, *, objects: int = 62,
+                   bare: int = 12, graph: str = _EXTRA_GRAPH,
+                   head: str | None = None, witness: bool = True,
+                   copy_census: bool = False) -> None:
+    """Write a SECOND after realization (and its census witness) into `repo`.
+
+    A copy of the shipped log with a DIFFERENT census and graph is the shape a
+    real realization has: same corpus, same head, its own population. `bare` of
+    the names are `^the <X>`, which is the class E1's share counts.
+    """
+    evidence = repo / "docs/evidence/9889"
+    text = (evidence / "on-arm.log").read_text()
+    share = bare / objects
+    text = re.sub(r"^# graph: \S+.*$",
+                  f"# graph: {graph} (fresh, disposable; every node in it was "
+                  "written by this run)", text, count=1, flags=re.M)
+    text = re.sub(r"^e3 label=Object nodes=\d+", f"e3 label=Object nodes={objects}",
+                  text, count=1, flags=re.M)
+    text = re.sub(r"^e1-aux objects_in_graph=\d+ bare_definite=\d+ share=\S+",
+                  f"e1-aux objects_in_graph={objects} bare_definite={bare} "
+                  f"share={share!r}", text, count=1, flags=re.M)
+    if head is not None:
+        text = re.sub(r"^# head: \S+", f"# head: {head}", text, count=1, flags=re.M)
+    (evidence / f"on-arm-{index}.log").write_text(text)
+    if not witness:
+        return
+    record = json.loads((evidence / "e1-gate-drops.json").read_text())
+    names = ([f"the arm{index} item {n}" for n in range(bare)]
+             + [f"arm{index} item {n}" for n in range(objects - bare)])
+    if copy_census:
+        # The SAME population as arm 1 — a re-stamped copy, not a realization.
+        names = json.loads((evidence / "e1-gate-drops.json").read_text())["object_names"]
+    record.update({
+        "graph": graph,
+        "objects": objects,
+        "bare_definite": bare,
+        "bare_definite_share": share,
+        "object_names": names,
+    })
+    (evidence / f"e1-gate-drops-{index}.json").write_text(json.dumps(record))
+
+
+def test_the_shipped_bundle_states_its_after_arm_count_and_spread(tmp_path):
+    """The record now carries the treatment side's n and its realized spread.
+
+    `before_spread_pp` was the ONLY spread the record stated, so a reader could
+    see the control's variance and had no way to learn the treatment was a
+    single realization — the half of the confound nothing counted. Asserted
+    against the SHIPPED bundle, so the number is the committed one and not a
+    value this test supplies.
+    """
+    record = scores_probe.score(_bundle(tmp_path))
+    e1 = record["e1"]
+    assert len(e1["after_arms"]) == 1, e1["after_arms"]
+    assert e1["after_arms"][0]["artifact"].endswith("on-arm.log")
+    assert e1["after_spread_pp"] == 0.0, e1["after_spread_pp"]
+    # …and the before-side figure the record has always carried does not move
+    # when the after side becomes a list: it is a statistic about the BEFORE arms.
+    assert e1["before_spread_pp"] == 20.6, e1["before_spread_pp"]
+    assert e1["outcome"] == "REFUSED", e1["outcome"]
+
+
+def test_a_second_after_realization_is_scored_and_its_own_spread_reported(tmp_path):
+    """The requirement the README names is now EXPRESSIBLE — that is the fix.
+
+    Non-vacuity: on the shipped bundle this test's `len(after_arms) == 1` arm
+    fails, because the reader did not exist. What the second realization buys is
+    stated in the record and NOT overclaimed: the pairings go from 2 to 4 and
+    `after_spread_pp` becomes measurable, while the verdict stays REFUSED because
+    the disagreement is on the BEFORE side (20.6 pp) — which more after
+    realizations cannot resolve.
+    """
+    repo = _bundle(tmp_path)
+    _add_after_arm(repo)
+    e1 = scores_probe.score(repo)["e1"]
+    assert len(e1["after_arms"]) == 2, e1["after_arms"]
+    assert {arm["graph"] for arm in e1["after_arms"]} == {
+        "capstone_on_54922a800_1793378318", _EXTRA_GRAPH}
+    # 2 before x 2 after — every realization pair is a pairing (E1-E2.md).
+    assert len(e1["pairings"]) == 4, e1["pairings"]
+    assert {p["passed"] for p in e1["pairings"]} == {True, False}
+    # 13/61 = 0.2131 against 12/62 = 0.1935 → 1.96 pp, stated to one decimal.
+    assert e1["after_spread_pp"] == 2.0, e1["after_spread_pp"]
+    assert e1["before_spread_pp"] == 20.6, e1["before_spread_pp"]
+    assert e1["outcome"] == "REFUSED" and e1["decidable"] is False, e1
+    # The record says WHY, and it no longer promises that more runs decide it.
+    assert "before spread 20.6 pp" in e1["why"], e1["why"]
+
+
+def test_an_after_realization_without_its_census_witness_is_refused(tmp_path, capsys):
+    """A share is only as trustworthy as the arm it is scored over.
+
+    The witness is the one record that can refuse a self-consistent multi-field
+    edit of a log's `e1-aux` line; an extra arm with no witness would let the
+    treatment side's pairing pass on a number nothing else corroborates.
+    """
+    repo = _bundle(tmp_path)
+    _add_after_arm(repo, witness=False)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "e1-gate-drops-2.json does not exist" in err, err
+    assert "missing the census witness" in err, err
+
+
+def test_an_after_realization_that_is_a_restamped_copy_is_refused(tmp_path, capsys):
+    """The identity is the POPULATION, not the graph name and not the stamp.
+
+    Copying the shipped log, bumping its epoch and calling it a second
+    realization makes two names for ONE reading — the cheapest way to satisfy a
+    replication requirement without replicating anything, and agreement between
+    copies of one reading is not agreement between readings.
+    """
+    repo = _bundle(tmp_path)
+    # arm 1's population AND its counts, under a new stamp: a copy, not a run.
+    _add_after_arm(repo, objects=61, bare=13, copy_census=True)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "SAME `object_names` census" in err, err
+
+    # …and the same GRAPH is refused on its own, before the population is reached.
+    repo2 = _bundle(tmp_path / "same-graph")
+    _add_after_arm(repo2, graph="capstone_on_54922a800_1793378318")
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo2)
+    assert refused.value.code == 2, refused.value
+    assert "the same run is not a second realization" in capsys.readouterr().err
+
+
+def test_an_after_realization_under_the_frozen_floor_is_refused(tmp_path, capsys):
+    """A population the pre-registration calls REFUSED is not half a decided bar."""
+    repo = _bundle(tmp_path)
+    _add_after_arm(repo, objects=20, bare=4)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "under the frozen floor of" in err, err
+    assert "on-arm-2.log" in err, err
+
+
+def test_a_gap_in_the_after_realization_numbering_is_refused(tmp_path, capsys):
+    """A gap means a realization was deleted — and a deleted one hides the
+    disagreement that keeps E1 from being decided."""
+    repo = _bundle(tmp_path)
+    _add_after_arm(repo, index=3)
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "is not 2..N" in err, err
+
+
+def test_an_after_realization_at_another_head_is_refused(tmp_path, capsys):
+    """One commit per pair (#9076): two heads are not two realizations of one arm."""
+    repo = _bundle(tmp_path)
+    _add_after_arm(repo, head="54922a800" + "0" * 31)
+    # …and pin the value gate, because an ABSENT one is licensed only at the
+    # pre-`#10996` campaign head — otherwise THIS refusal fires first.
+    path = repo / "docs/evidence/9889/on-arm-2.log"
+    path.write_text(path.read_text().replace(
+        "TORTOISE_VALUE_GATE=<unset>", "TORTOISE_VALUE_GATE=0"))
+    with pytest.raises(SystemExit) as refused:
+        scores_probe.score(repo)
+    assert refused.value.code == 2, refused.value
+    err = capsys.readouterr().err
+    assert "two heads are not two realizations of one arm" in err, err

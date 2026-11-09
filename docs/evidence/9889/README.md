@@ -444,6 +444,49 @@ the 0.3590 one, and a decided `PASS` when it is the 0.5652 one. The `PASS` is th
 direction that matters: it is the one this guard exists to stop, and the one
 `e1_e2_scores.py`'s own reproduction measured.
 
+### Replicating the AFTER arm — `n >= 2 per arm`, now expressible
+
+Until `#4917` §5 item 5 was re-read against this driver, the requirement above
+was **half expressible**: the before side held a list of realizations, and
+`score()` read exactly one after arm from the module constant `ON_ARM_LOG`. No
+number of ON runs could therefore satisfy `n >= 2 per arm` on the side the
+effect is read off — the treatment was a single LLM realization **by
+construction**, and the record stated only the control's spread.
+
+A second (and later) ON realization is now a file pair beside the scored one:
+
+```bash
+# the SCORED run stays on-arm.log; extra realizations are on-arm-<n>.log,
+# contiguous from 2, each beside its own census witness.
+uv run python docs/evidence/7949-capstone/probes/capstone_measure.py \
+    --graph capstone_on_<head8>_<epoch> --out on-arm-2.log
+uv run python docs/evidence/7949-capstone/probes/e1_gate_drops.py \
+    --graph capstone_on_<head8>_<epoch> --out e1-gate-drops-2.json
+```
+
+`e1_pairings` scores the **full (before x after) cross product**, and the row is
+decided only when EVERY pairing agrees — a direction that can only make E1
+harder to green, never easier. The record carries `after_arms` (each
+realization's artifact, graph, share and census) and `after_spread_pp`, the half
+of the confound nothing counted before.
+
+Every cheap way to *appear* replicated is refused: an extra realization with no
+`e1-gate-drops-<n>.json`; one under E1's frozen 30-`Object` floor; one measured
+at another head (a bar is a threshold AND its corpus, `#9076`); a shared `graph`;
+and one carrying another arm's `object_names` — the identity is the POPULATION,
+not the graph name or its stamp. A gap in the numbering is refused too, because
+the one thing a DELETED realization hides is the disagreement that keeps E1 from
+being decided.
+
+⚠️ **What this does NOT claim.** Replication makes the requirement expressible
+and the treatment side's spread measurable; it does **not** decide this pair,
+and the record says so in its own `why`. The disagreement here is on the BEFORE
+side (20.6 pp), and no number of after realizations can resolve a disagreement it
+is not a party to. What decides a mixed pair is a tighter control arm or the
+controlled single-extraction design `#9076` built (`assert_one_gate_population`,
+`probes/e1_e2_probe.py`) — the instrument this bundle's capstone README names as
+the next step when `n >= 2` keeps disagreeing.
+
 **The counts reach the rows.** The capstone's E2 row now carries E2a's count over
 the FROZEN 14 (`8 of 14` today; the bar is `>= 13 of 14`), and E1's carries the
 after arm's `Object` count in the PASS direction — the Objects that are NOT

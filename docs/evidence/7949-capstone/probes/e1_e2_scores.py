@@ -1330,15 +1330,23 @@ def _before_corpus_provenance(name: str, record: dict, floors: dict) -> dict:
     }
 
 
-def read_on_arm(repo: Path) -> dict:
+def read_on_arm(repo: Path, log_name: str = ON_ARM_LOG) -> dict:
     """The after arm, off the ON run's own census line (`e1-aux …`).
 
     The line is written by `capstone_measure.py` at the head it measured, so it
     is the after arm's own reading rather than a second capture by this driver.
+
+    ⛔ `log_name` exists because ONE after realization cannot be replicated
+    (#4917 §5 item 5: E1 "is re-taken at n >= 2 per arm"). Every message below
+    names the file it actually read, because a driver with three arms that
+    reports the first one's name is a tool that cannot answer its own question
+    — and the arm-1 call passes the module constant, so the shipped bundle's
+    messages are unchanged.
     """
-    path = repo / EVIDENCE / ON_ARM_LOG
+    path = repo / EVIDENCE / log_name
+    label = f"{EVIDENCE / log_name}"
     if not path.is_file():
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} does not exist")
+        raise _refuse(f"{label} does not exist")
     try:
         # UTF-8 explicitly, for the same reason as `_read_json`'s (#10610 review at
         # `2ffc5db19`, P3): the locale default is not this file's contract.
@@ -1347,7 +1355,7 @@ def read_on_arm(repo: Path) -> dict:
         # Same class as `_read_json`'s (#10610 review at `858675ade`, P2): a log that
         # is not UTF-8 was an uncaught traceback, not the exit-2 refusal the module
         # promises for a corrupt input.
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} is not UTF-8 text, so it cannot be "
+        raise _refuse(f"{label} is not UTF-8 text, so it cannot be "
                       f"the log it is cited as: {exc}") from exc
     objects = _int_token(text, r"^e1-aux objects_in_graph=(\d+)",
                         what="e1-aux objects_in_graph")
@@ -1361,7 +1369,7 @@ def read_on_arm(repo: Path) -> dict:
     # share=0.21311475409836064`, and `13/61` is that float exactly), so a share
     # that disagrees with them is a record edited between the count and the
     # share — the arm a false GREEN is cheapest to forge on.
-    _consistent_share(f"{EVIDENCE / ON_ARM_LOG}", share, bare, objects)
+    _consistent_share(f"{label}", share, bare, objects)
     # …and the log's OWN third copy of the same count. `e3 label=Object nodes=N` is
     # emitted by the census pass in the same run, so a single-field edit to the
     # `e1-aux` line leaves an artifact contradicting itself where nobody was looking
@@ -1370,7 +1378,7 @@ def read_on_arm(repo: Path) -> dict:
                             what="e3 label=Object nodes")
     if e3_objects != objects:
         raise _refuse(
-            f"{EVIDENCE / ON_ARM_LOG}'s e1-aux line reports "
+            f"{label}'s e1-aux line reports "
             f"objects_in_graph={objects} but its own `e3 label=Object "
             f"nodes={e3_objects}` line reports {e3_objects} — one run, one Object "
             "census")
@@ -1384,14 +1392,14 @@ def read_on_arm(repo: Path) -> dict:
     match = re.search(r"^e1b outcome=\S+ real_facts=\d+ bar=(\d+) of (\d+)", text,
                       re.M)
     if not match:
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG} carries no `e1b … bar=<required> of "
+        raise _refuse(f"{label} carries no `e1b … bar=<required> of "
                       "<population>` line, so its numerator is the only statement of "
                       "the population it counts")
     e1b_required, e1b_population = int(match.group(1)), int(match.group(2))
     # The numerator must be inside the population the SAME LINE prints. The bar's
     # agreement with the pre-registration is checked in `score()`, where the frozen
     # record is in hand.
-    _count(f"{EVIDENCE / ON_ARM_LOG}", "e1b real_facts", real_facts,
+    _count(f"{label}", "e1b real_facts", real_facts,
            ceiling=e1b_population)
     head = _grep(text, r"^# head: (\S+)", what="# head")
     graph = _grep(text, r"^# graph: (\S+)", what="# graph")
@@ -1410,14 +1418,14 @@ def read_on_arm(repo: Path) -> dict:
     printed_share = _float_token(text, r"^e2b outcome=\S+ fused=\d+/\d+ = (\S+)",
                                  what="e2b share")
     if atomic <= 0:
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line grades {fused}/{atomic} "
+        raise _refuse(f"{label}'s e2b line grades {fused}/{atomic} "
                       "— a share of no population is not a measurement")
     if not 0 <= fused <= atomic:
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line reports {fused} fused "
+        raise _refuse(f"{label}'s e2b line reports {fused} fused "
                       f"of {atomic} atomic Points — a numerator above its own "
                       "denominator is not a share")
     if abs(fused / atomic - printed_share) > 1e-6:
-        raise _refuse(f"{EVIDENCE / ON_ARM_LOG}'s e2b line reports "
+        raise _refuse(f"{label}'s e2b line reports "
                       f"{fused}/{atomic} = {printed_share}, but those counts give "
                       f"{fused / atomic:.6f} — the counts and the share printed "
                       "beside them cannot disagree")
@@ -1442,7 +1450,7 @@ def read_on_arm(repo: Path) -> dict:
         # reviewer measured by changing ONE line of the log.
         if not _is_truthy(after_arm.get(var)):
             raise _refuse(
-                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
+                f"{label}'s arm readback has {var}="
                 f"{after_arm.get(var)!r}, so the measured passes were not ON — "
                 "an after arm that never enabled the treatment cannot be the "
                 "ON half of a before/after pair")
@@ -1470,22 +1478,22 @@ def read_on_arm(repo: Path) -> dict:
     for var in _ARM_OFF_VARS:
         if var not in after_arm:
             raise _refuse(
-                f"{EVIDENCE / ON_ARM_LOG}'s arm readback carries no {var}, so it "
+                f"{label}'s arm readback carries no {var}, so it "
                 "does not show the switch was pinned OFF — a missing key is not "
                 "an unset one, and the measured arm is only the ON half of a "
                 "before/after pair while its OFF switches are declared")
         if _is_truthy(after_arm.get(var)):
             raise _refuse(
-                f"{EVIDENCE / ON_ARM_LOG}'s arm readback has {var}="
+                f"{label}'s arm readback has {var}="
                 f"{after_arm.get(var)!r}, but the measured arm pins it OFF — "
                 "that is a different arm (the value-gate/seam pass), and "
                 "crediting its after share to E1 would score a treatment this "
                 "pair never declared")
         if var in _DEFAULT_ON_VARS and _is_absent_pin(after_arm.get(var)):
-            _absent_default_on_refusal(f"{EVIDENCE / ON_ARM_LOG}'s arm readback",
+            _absent_default_on_refusal(f"{label}'s arm readback",
                                        var, legacy_licence)
     return {
-        "artifact": f"{EVIDENCE / ON_ARM_LOG}",
+        "artifact": f"{label}",
         "head": head,
         "graph": graph,
         "arm": after_arm,
@@ -1508,40 +1516,272 @@ def read_on_arm(repo: Path) -> dict:
     }
 
 
-def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
-    """E1 scored against EVERY before realization — and the aggregate stated.
+#: The SECOND and later after realizations, and their census witnesses.
+#:
+#: `on-arm.log` stays arm 1 — the SCORED run, off which E2a, E2b and E1b are
+#: read. The extras are `on-arm-<n>.log` for n = 2..N, each beside its own
+#: `e1-gate-drops-<n>.json`. The numbering must be CONTIGUOUS: a gap means a
+#: realization was DELETED, and the one thing a deleted realization can hide is
+#: the disagreement that keeps E1 from being decided — so a gap is refused.
+_EXTRA_ON_ARM_LOG = re.compile(r"on-arm-(\d+)\.log\Z")
+
+
+def _extra_on_arm_name(index: int) -> tuple[str, str]:
+    """The (log, witness) file names of after realization `index` (>= 2)."""
+    return f"on-arm-{index}.log", f"e1-gate-drops-{index}.json"
+
+
+def _after_census_witness(arm: dict, witness: dict, label: str) -> list[str]:
+    """The one record that WITNESSES an ON run's census, checked against it.
+
+    Shared by the scored run and every extra after realization, because the
+    forgery it exists to refuse does not care which realization it is attached
+    to: a self-consistent multi-field edit of a log's `e1-aux` line is invisible
+    to every per-field reconciliation, and only a SECOND artifact about the same
+    run can refuse it. `label` names the file the witness was read from, so a
+    bundle with three arms reports the one that actually disagreed.
+    """
+    gate_names = witness.get("object_names")
+    if not isinstance(gate_names, list) or not gate_names:
+        raise _refuse(
+            f"{label} carries no `object_names` census — the one record that "
+            "WITNESSES the ON run's census must carry the population it counts; an "
+            "absent, empty or non-list census is the shape a cheaper edit produces, "
+            "and it cannot be confirmed by anything else in the record")
+    # ⛔ The MEMBERS are checked as object names, like the before arms'
+    # `object_names` (#10610 review at `2ffc5db19`, P3). `gate_bare` counts
+    # `_is_bare_definite(item)` and that helper stringifies, so a list or dict
+    # member silently counted as NON-bare: `object_names: [0..60]` was refused only
+    # incidentally (its bare count came out 0 against the log's 13), and a member of
+    # another type that happened to orchestrate to the right count would have
+    # scored. This is the one census the file calls the ON run's only independent
+    # witness, and its siblings — the before arms and `_unit_id_members` — already
+    # refuse a member of another type.
+    for member in gate_names:
+        if not isinstance(member, str):
+            raise _refuse(
+                f"{label} carries an `object_names` member {member!r}, which "
+                "is not an object name — the census is the run's own list of "
+                "`:Object` names, so a member of another type is an edited record")
+    # ⛔ A CENSUS HAS NO DUPLICATES here either (#10610 review at `bde94f89d`, P2).
+    # The before arms refuse `len(set(names)) != len(names)` — "a census no producer
+    # can write" — and the E2a census gets the same rule through the partition
+    # check, but `gate_names` did not. Measured on a copy of the bundle: replacing
+    # this record's 61 names with the 13 bare ones plus 48 COPIES of one non-bare
+    # name kept `len == after["objects"]` (61) and `gate_bare ==
+    # after["bare_definite"]` (13), and `score()` proceeded at exit 0 with a
+    # population no producer can emit — lowering the cost of the coupled multi-field
+    # forgery this witness is here to refuse.
+    if len(set(gate_names)) != len(gate_names):
+        raise _refuse(
+            f"{label} lists the same `object_names` member twice "
+            f"({len(gate_names)} entries, {len(set(gate_names))} distinct) — the "
+            "census is a population of `:Object` nodes, and `e1_gate_drops.py` "
+            "writes one row per node, so a duplicated name is an edited record")
+    if len(gate_names) != arm["objects"]:
+        raise _refuse(
+            f"{label} carries {len(gate_names)} `object_names` beside its "
+            f"own objects={witness.get('objects')} — the record's census "
+            "and its count cannot disagree either")
+    gate_bare = sum(1 for item in gate_names if _is_bare_definite(item))
+    if gate_bare != arm["bare_definite"] or arm["objects"] != len(gate_names):
+        raise _refuse(
+            f"{label}'s own {len(gate_names)} `object_names` ({gate_bare} "
+            f"bare-definite) do not reproduce the ON arm's "
+            f"{arm['bare_definite']}/{arm['objects']} — the run's census is "
+            "the names it wrote, so a share computed over another one is not "
+            "this run's share")
+    for field in ("objects", "bare_definite"):
+        stated = witness.get(field)
+        if stated is not None and stated != arm[field]:
+            raise _refuse(
+                f"{label} reports {field}={stated} but the log it witnesses "
+                f"reports {arm[field]} — two censuses of one ON run cannot "
+                "disagree")
+    return gate_names
+
+
+def read_extra_on_arms(repo: Path, primary: dict) -> list[dict]:
+    """The after realizations AFTER arm 1 — E1's second and later ON runs.
+
+    `#4917` §5 item 5 and this bundle's own README name **n >= 2 per arm** as the
+    requirement that ends E1's `REFUSED`. Until this reader existed the after
+    side could not hold one: `score()` read exactly one log, so no number of runs
+    could satisfy the replication on the treatment side — the arm the effect is
+    read off was a single LLM realization by construction.
+
+    Fail-closed on every axis that could manufacture agreement: contiguous
+    numbering, one head, one corpus, a graph per realization that names it, a
+    POPULATION per realization (a re-stamped copy of another arm is one reading,
+    not two), and its own census witness. Every refusal names the file it read.
+    """
+    indexes: list[int] = []
+    for path in sorted((repo / EVIDENCE).glob("on-arm-*.log")):
+        name = path.name
+        match = _EXTRA_ON_ARM_LOG.fullmatch(name)
+        if not match:
+            raise _refuse(
+                f"{EVIDENCE / name} is shaped like an after realization and is "
+                "not one — the naming is `on-arm.log` (arm 1) and "
+                "`on-arm-<n>.log` for n >= 2, so this file can be neither read "
+                "nor ignored")
+        indexes.append(int(match.group(1)))
+    if indexes != list(range(2, len(indexes) + 2)):
+        raise _refuse(
+            f"the extra after realizations present are numbered {indexes}, which "
+            "is not 2..N — a gap means a realization was DELETED, and the one "
+            "thing a deleted realization hides is the disagreement that keeps "
+            "E1 from being decided")
+    extras: list[dict] = []
+    for index in indexes:
+        log_name, witness_name = _extra_on_arm_name(index)
+        arm = read_on_arm(repo, log_name)
+        log_label = f"{EVIDENCE / log_name}"
+        witness_label = f"{EVIDENCE / witness_name}"
+        witness_path = repo / EVIDENCE / witness_name
+        if not witness_path.is_file():
+            raise _refuse(
+                f"{witness_label} does not exist — after realization {index} "
+                f"({log_label}) is missing the census witness its share must be "
+                "reproduced from; a pairing is only as trustworthy as the arm "
+                "it is scored over")
+        witness = _read_json(witness_path)
+        if arm["head"] != primary["head"]:
+            raise _refuse(
+                f"{log_label} was measured at head {arm['head']}, but the scored "
+                f"arm is at {primary['head']} — E1's bar is scored over one "
+                "commit (a threshold AND its corpus, #9076), so two heads are "
+                "not two realizations of one arm")
+        if not _names_head(str(arm.get("graph") or ""), arm["head"]):
+            raise _refuse(
+                f"{log_label}'s `# graph:` line is {arm.get('graph')!r}, which "
+                "does not name its own `# head:` line "
+                f"({arm['head'][:_HEAD_PREFIX]}) — one log, one run")
+        if str(witness.get("graph") or "") != str(arm.get("graph") or ""):
+            raise _refuse(
+                f"{witness_label} was taken on graph {witness.get('graph')!r} "
+                f"but {log_label} was measured on {arm.get('graph')!r} — the "
+                "witness must be the run it witnesses, and two runs of the SAME "
+                "head are still two graphs")
+        if arm["corpus_sha256"] != primary["corpus_sha256"]:
+            raise _refuse(
+                f"{log_label} measured corpus {arm['corpus_sha256']}, not the "
+                f"scored arm's {primary['corpus_sha256']} — a realization of a "
+                "DIFFERENT corpus is not a second reading of this one")
+        gate_names = _after_census_witness(arm, witness, witness_label)
+        # ⛔ THE IDENTITY IS THE POPULATION, not the graph name and not the
+        # stamp — the rule the before arms already carry (#10610 review at
+        # `ec7b5e7fe`, P1). Copying one log and bumping its epoch makes two names
+        # for ONE realization, which is the cheapest way to satisfy a replication
+        # requirement without replicating anything.
+        for prior in [primary] + extras:
+            if str(prior["graph"]) == str(arm["graph"]):
+                raise _refuse(
+                    f"{log_label} and {prior['artifact']} were both taken on "
+                    f"graph {arm['graph']!r} — the same run is not a second "
+                    "realization")
+            if prior.get("object_names") == gate_names:
+                raise _refuse(
+                    f"{log_label} carries the SAME `object_names` census as "
+                    f"{prior['artifact']} — that is one population wearing two "
+                    "stamps, not two realizations of the arm, and agreement "
+                    "between copies of one reading is not agreement between "
+                    "readings")
+        arm["object_names"] = gate_names
+        arm["witness"] = witness_label
+        extras.append(arm)
+    return extras
+
+
+def e1_pairings(before_arms: list[dict], after: dict, floors: dict,
+                extra_afters: list[dict] | None = None) -> dict:
+    """E1 scored against EVERY (before, after) realization — aggregate stated.
 
     `multiplier` is the frozen `E1.multiplier` (0.50 today, PARSED out of
     `criteria[E1].threshold` by ``parse_bars`` — never typed): a pairing PASSES
-    when the after share is at or under that fraction of its before share. One
-    after arm paired with two before arms can disagree, and when it does the
-    metric is NOT decided — reporting the passing pairing as "the" result would be
-    picking the answer.
+    when the after share is at or under that fraction of its before share.
+
+    ⛔ THE UNIT IS THE PAIRING, AND THE SCORE IS ITS SET (E1-E2.md). One after
+    realization paired against two before realizations can disagree, and when it
+    does the metric is NOT decided — reporting the passing pairing as "the"
+    result would be picking the answer. The same rule applies to a SECOND after
+    realization, which is why `extra_afters` is scored the same way: every
+    (before, after) pair is a pairing, and unanimity across ALL of them is the
+    only thing that decides the row. Adding an after arm can therefore only make
+    E1 HARDER to green — the safe direction — and `after_spread_pp` makes the
+    realized spread on the treatment side visible instead of implicit.
     """
+    afters = [after] + list(extra_afters or [])
     multiplier = floors["bars"]["E1"]["multiplier"]
     pairings = []
     for arm in before_arms:
         bound = multiplier * arm["share"]
-        passed = after["share"] <= bound
-        pairings.append({
-            "before_artifact": arm["artifact"],
-            "before_graph": arm["graph"],
-            "before_arm": arm.get("arm"),
-            "before_share": arm["share"],
-            "before_objects": arm["objects"],
-            "before_bare_definite": arm.get("bare_definite"),
-            "after_share": after["share"],
-            "after_objects": after["objects"],
-            "after_bare_definite": after["bare_definite"],
-            "bound": round(bound, 6),
-            "ratio": round(after["share"] / arm["share"], 6),
-            "passed": passed,
-        })
+        for scored in afters:
+            passed = scored["share"] <= bound
+            pairings.append({
+                "before_artifact": arm["artifact"],
+                "before_graph": arm["graph"],
+                "before_arm": arm.get("arm"),
+                "before_share": arm["share"],
+                "before_objects": arm["objects"],
+                "before_bare_definite": arm.get("bare_definite"),
+                "after_artifact": scored["artifact"],
+                "after_graph": scored.get("graph"),
+                "after_share": scored["share"],
+                "after_objects": scored["objects"],
+                "after_bare_definite": scored["bare_definite"],
+                "bound": round(bound, 6),
+                "ratio": round(scored["share"] / arm["share"], 6),
+                "passed": passed,
+            })
     verdicts = {pairing["passed"] for pairing in pairings}
     decidable = len(verdicts) == 1
-    below_floor = after["objects"] < floors["e1_objects"]
+    # E1's denominator floor is per-RUN, so it is checked on every after
+    # realization: an extra arm below the frozen floor contributes a share the
+    # pre-registration calls REFUSED ("an undecidable-looking pair an undecidable
+    # run could otherwise hand a reader"), and a number REFUSED as a MEASUREMENT
+    # cannot be half of a decided bar.
+    below_floor = any(arm["objects"] < floors["e1_objects"] for arm in afters)
+    under = [arm for arm in afters if arm["objects"] < floors["e1_objects"]]
     outcome = ("REFUSED" if below_floor or not decidable
                else "PASS" if verdicts.pop() else "FAIL")
+    before_spread = abs(before_arms[0]["share"] - before_arms[-1]["share"]) * 100
+    after_shares = [arm["share"] for arm in afters]
+    after_spread = (max(after_shares) - min(after_shares)) * 100
+    # `why` narrates the state the record is IN. The floor is checked FIRST
+    # because it is a different finding: an after arm under the frozen floor was
+    # never scoreable at any n, so saying "the pairings disagree" about it reports
+    # a disagreement that did not happen and hides the real cause (the
+    # pre-registration's own vocabulary: below_floor is "REFUSED, which is neither
+    # a pass nor a fail").
+    if below_floor:
+        why = (f"after realization{'s' if len(under) > 1 else ''} "
+               f"{', '.join(repr(str(a['artifact'])) for a in under)} "
+               f"carry {', '.join(str(a['objects']) for a in under)} Objects, "
+               f"under the frozen floor of {floors['e1_objects']} — a population "
+               "that small cannot decide `after <= multiplier x before`, so the "
+               "bar is REFUSED and the pairings are not read as a verdict")
+    elif not decidable and len(afters) == 1:
+        why = ("one after realization paired against every before realization "
+               "gives both verdicts, so E1 is not decided — and the disagreement "
+               f"is on the BEFORE side ({round(before_spread, 1)} pp), which more "
+               "after realizations cannot resolve: a second one measures the "
+               "treatment side's own spread, and the row is decided only when "
+               "EVERY pairing agrees. `#4917` §5 item 5 names `n >= 2 per arm` as "
+               "the requirement; that is what makes the treatment side "
+               "replicable, not what makes this pair decidable")
+    elif not decidable:
+        why = (f"{len(afters)} after realizations x {len(before_arms)} before "
+               f"realizations give both verdicts (after spread "
+               f"{round(after_spread, 1)} pp, before spread "
+               f"{round(before_spread, 1)} pp), so E1 is not decided — the "
+               "spread that matters is the one the pairings disagree across")
+    elif len(afters) > 1:
+        why = (f"every before realization agrees with every after realization "
+               f"({len(pairings)} pairings, {len(afters)} after realization(s) "
+               f"spread {round(after_spread, 1)} pp)")
+    else:
+        why = "every before realization agrees on the pairing"
     return {
         "criterion": "E1",
         "bar": (f"after_share <= {multiplier} x before_share "
@@ -1550,24 +1790,25 @@ def e1_pairings(before_arms: list[dict], after: dict, floors: dict) -> dict:
         "decidable": decidable and not below_floor,
         "below_floor": below_floor,
         "pairings": pairings,
-        "before_spread_pp": round(
-            abs(pairings[0]["before_share"] - pairings[-1]["before_share"]) * 100, 1),
-        # `why` narrates the state the record is IN. The floor is checked FIRST
-        # because it is a different finding: an after arm under the frozen floor
-        # was never scoreable at any n, so saying "the pairings disagree" about it
-        # reports a disagreement that did not happen and hides the real cause
-        # (the pre-registration's own vocabulary: below_floor is "REFUSED, which
-        # is neither a pass nor a fail").
-        "why": (f"the after arm has {after['objects']} Objects, under the frozen "
-                f"floor of {floors['e1_objects']} — a population that small "
-                "cannot decide `after <= multiplier x before`, so the bar is "
-                "REFUSED and the pairings are not read as a verdict"
-                if below_floor else
-                "one after realization paired against two independent before "
-                "realizations gives both verdicts, so E1 is not decided at n=1 "
-                "per arm — n >= 2 per arm is the next requirement"
-                if not decidable else
-                "every before realization agrees on the pairing"),
+        # The treatment side's own realized spread. It was the missing half of
+        # the confound this bundle reports: the before arms' 20.6 pp was measured
+        # while the after arm's was nobody's number, because the arm could not be
+        # replicated.
+        "after_arms": [{"artifact": arm["artifact"],
+                        "graph": arm.get("graph"),
+                        "arm": arm.get("arm"),
+                        "share": arm["share"],
+                        "objects": arm["objects"],
+                        "bare_definite": arm["bare_definite"]}
+                       for arm in afters],
+        "after_spread_pp": round(after_spread, 1),
+        # Kept FIRST-then-LAST for a single after realization, which is what the
+        # shipped record is: `pairings[0]` and `pairings[-1]` are the same before
+        # arms as before, so this number does not move when an extra after arm is
+        # added (a before-side spread described by after-side pairing order would
+        # silently become a different statistic).
+        "before_spread_pp": round(before_spread, 1),
+        "why": why,
     }
 
 
@@ -1938,57 +2179,23 @@ def score(repo: Path = _ROOT) -> dict:
     # than read as unset. `probes/e1_gate_drops.py` writes `object_names`
     # UNCONDITIONALLY, so an absent or empty list is always an edit, never a producer's
     # older shape.
-    gate_names = gates_record.get("object_names")
-    if not isinstance(gate_names, list) or not gate_names:
-        raise _refuse(
-            f"{GATE_DROPS} carries no `object_names` census — the one record that "
-            "WITNESSES the ON run's census must carry the population it counts; an "
-            "absent, empty or non-list census is the shape a cheaper edit produces, "
-            "and it cannot be confirmed by anything else in the record")
-    # ⛔ The MEMBERS are checked as object names, like the before arms'
-    # `object_names` above (#10610 review at `2ffc5db19`, P3). `gate_bare` counts
-    # `_is_bare_definite(item)` and that helper stringifies, so a list or dict
-    # member silently counted as NON-bare: `object_names: [0..60]` was refused only
-    # incidentally (its bare count came out 0 against the log's 13), and a member of
-    # another type that happened to orchestrate to the right count would have
-    # scored. This is the one census the file calls the ON run's only independent
-    # witness, and its siblings — the before arms and `_unit_id_members` — already
-    # refuse a member of another type.
-    for member in gate_names:
-        if not isinstance(member, str):
+    gate_names = _after_census_witness(after, gates_record, GATE_DROPS)
+    # The scored run's own population, so the extra-arm identity guard compares
+    # against a LIST and not against another record's field of the same name.
+    after["object_names"] = gate_names
+    extra_on_arms = read_extra_on_arms(repo, after)
+    # E1's denominator floor is per-RUN, and a realization the pre-registration
+    # calls REFUSED is not a number a decided bar may be computed from — the same
+    # rule `read_off_arms` applies to a before arm under the floor (exit 2, no
+    # record), applied to the after side now that it can hold a second run.
+    for arm in extra_on_arms:
+        if arm["objects"] < floors["e1_objects"]:
             raise _refuse(
-                f"{GATE_DROPS} carries an `object_names` member {member!r}, which "
-                "is not an object name — the census is the run's own list of "
-                "`:Object` names, so a member of another type is an edited record")
-    # ⛔ A CENSUS HAS NO DUPLICATES here either (#10610 review at `bde94f89d`, P2).
-    # The before arms refuse `len(set(names)) != len(names)` — "a census no producer
-    # can write" — and the E2a census gets the same rule through the partition
-    # check, but `gate_names` did not. Measured on a copy of the bundle: replacing
-    # this record's 61 names with the 13 bare ones plus 48 COPIES of one non-bare
-    # name kept `len == after["objects"]` (61) and `gate_bare ==
-    # after["bare_definite"]` (13), and `score()` proceeded at exit 0 with a
-    # population no producer can emit — lowering the cost of the coupled multi-field
-    # forgery this witness is here to refuse.
-    if len(set(gate_names)) != len(gate_names):
-        raise _refuse(
-            f"{GATE_DROPS} lists the same `object_names` member twice "
-            f"({len(gate_names)} entries, {len(set(gate_names))} distinct) — the "
-            "census is a population of `:Object` nodes, and `e1_gate_drops.py` "
-            "writes one row per node, so a duplicated name is an edited record")
-    if len(gate_names) != after["objects"]:
-        raise _refuse(
-            f"{GATE_DROPS} carries {len(gate_names)} `object_names` beside its "
-            f"own objects={gates_record.get('objects')} — the record's census "
-            "and its count cannot disagree either")
-    gate_bare = sum(1 for item in gate_names if _is_bare_definite(item))
-    if gate_bare != after["bare_definite"] or after["objects"] != len(gate_names):
-        raise _refuse(
-            f"{GATE_DROPS}'s own {len(gate_names)} `object_names` ({gate_bare} "
-            f"bare-definite) do not reproduce the ON arm's "
-            f"{after['bare_definite']}/{after['objects']} — the run's census is "
-            "the names it wrote, so a share computed over another one is not "
-            "this run's share")
-    e1 = e1_pairings(before_arms, after, floors)
+                f"{arm['artifact']} carries {arm['objects']} `:Object` nodes, "
+                f"under the frozen floor of {floors['e1_objects']} — the "
+                "pre-registration calls that population REFUSED, so it cannot "
+                "be one realization of a decided `after <= multiplier x before`")
+    e1 = e1_pairings(before_arms, after, floors, extra_on_arms)
     # ⛔ The E1b bar the log PRINTS must be the one the pre-registration froze (#10610
     # review at `f12471075`, P3): `real_facts` is a numerator, and a log printing
     # `bar=90 of 90` beside a frozen `90 of 90` is the only way a reader can check it.

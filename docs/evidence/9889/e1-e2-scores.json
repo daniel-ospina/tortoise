@@ -100,6 +100,8 @@
     "before_share": 0.358974358974359,
     "before_objects": 78,
     "before_bare_definite": 28,
+    "after_artifact": "docs/evidence/9889/on-arm.log",
+    "after_graph": "capstone_on_54922a800_1793378318",
     "after_share": 0.21311475409836064,
     "after_objects": 61,
     "after_bare_definite": 13,
@@ -119,6 +121,8 @@
     "before_share": 0.5652173913043478,
     "before_objects": 69,
     "before_bare_definite": 39,
+    "after_artifact": "docs/evidence/9889/on-arm.log",
+    "after_graph": "capstone_on_54922a800_1793378318",
     "after_share": 0.21311475409836064,
     "after_objects": 61,
     "after_bare_definite": 13,
@@ -127,8 +131,24 @@
     "passed": true
    }
   ],
+  "after_arms": [
+   {
+    "artifact": "docs/evidence/9889/on-arm.log",
+    "graph": "capstone_on_54922a800_1793378318",
+    "arm": {
+     "TORTOISE_VET": "1",
+     "TORTOISE_CLASSIFY_LATER": "1",
+     "TORTOISE_VALUE_GATE": "<unset>",
+     "TORTOISE_S2_DECISION_SEAM": "<unset>"
+    },
+    "share": 0.21311475409836064,
+    "objects": 61,
+    "bare_definite": 13
+   }
+  ],
+  "after_spread_pp": 0.0,
   "before_spread_pp": 20.6,
-  "why": "one after realization paired against two independent before realizations gives both verdicts, so E1 is not decided at n=1 per arm \u2014 n >= 2 per arm is the next requirement"
+  "why": "one after realization paired against every before realization gives both verdicts, so E1 is not decided \u2014 and the disagreement is on the BEFORE side (20.6 pp), which more after realizations cannot resolve: a second one measures the treatment side's own spread, and the row is decided only when EVERY pairing agrees. `#4917` \u00a75 item 5 names `n >= 2 per arm` as the requirement; that is what makes the treatment side replicable, not what makes this pair decidable"
  },
  "e1b": {
   "bar": "90 of 90",
