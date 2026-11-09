@@ -40,6 +40,18 @@ is added to either kind of run"*), and its exported type
 `dist/core/extensions/types.d.ts::BeforeAgentStartEvent` /
 `BeforeAgentStartEventResult`. See the correction log below.
 
+⚠️ **Continuity is not optional on this row either.** `#2119`'s first cut passed
+only `--session-id` and its comment claimed the reflex suppresses a re-mentioned
+pointer "when it is given the session id" — the SAME false premise the `#2120`
+correction below records for Hermes. `session_id` is carried and never
+consulted; the suppression set is `pointer_ids_in_text(prior_context)`. The
+shipped seam now writes the `{window, session_id, prior_context}` contract dict
+to the CLI's stdin and sends `prior_context` in the hosted body, holding one
+turn of continuity per session (`createContinuity`, the same depth as
+`tortoise/openclaw-plugin/index.mjs`). Pinned by
+`tortoise/pi-hooks/tortoise-volunteer.test.ts` → `CONTINUITY: turn 2 hands the
+reflex turn 1's block as prior_context` and its hosted twin.
+
 For a harness whose per-turn surface is a native PLUGIN rather than a shell
 command (Hermes, #2121), the callback invokes the same `tortoise volunteer`
 CLI directly — the arrow on the left is the only part that differs.
@@ -387,7 +399,7 @@ pass:
 | Claim | Re-measurement |
 |---|---|
 | The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
-| "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
+| "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The one-shot shell hooks have nowhere to keep a prior block, and **Hermes' `--session-id` claim is the same false premise (#8957)**. The Pi seam shipped the same false premise in `#2119`'s first cut and was corrected the same way: it writes the contract dict to stdin and sends `prior_context` in the hosted body (see the Pi row above). |
 
 Note on the W3 harness row: #2120's scope item "W3 harness seam entry (ingest
 and inject graded)" is *partly* delivered. **Injection** is fully graded:

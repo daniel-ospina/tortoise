@@ -20,8 +20,11 @@
 //     dead reflex, a malformed `--json` body, a thrown handler) — a read seam
 //     that can break a turn is worse than one that injects nothing.
 //   * the CLI CONTRACT, run for real against a fake `tortoise` on PATH: the
-//     seam must call `volunteer --json --session-id <id>` with the prompt on
-//     STDIN and read `block`/`surfaced` out of the response.
+//     seam must call `volunteer --json --session-id <id>` and write the
+//     documented `{window, session_id, prior_context}` CONTRACT DICT to STDIN
+//     (not bare text — a bare prompt carries no `prior_context`, which is the
+//     only input the reflex's re-mention suppression reads), and read
+//     `block`/`surfaced` out of the response.
 //   * the CO-SOURCE rule (#2369 D1): a FILE-sourced key never takes the env
 //     URL, so a poisoned environment cannot redirect a stored credential.
 //   * the INERT BREADCRUMB (#4314): "no reflex resolved" leaves evidence in
@@ -51,6 +54,7 @@ import tortoiseVolunteer, {
   MAX_SEEN_PER_SESSION,
   buildInjection,
   clipToBytes,
+  createContinuity,
   createDedupe,
   disabled,
   parseReflexJson,
@@ -603,7 +607,7 @@ function fakeCli(dir: string, body: string): string {
   return path;
 }
 
-test("the CLI contract, run for real: `volunteer --json --session-id`, prompt on stdin", async () => {
+test("the CLI contract, run for real: `volunteer --json --session-id`, the contract dict on stdin", async () => {
   const home = tmpHome();
   const argsFile = join(home, "args.txt");
   const promptFile = join(home, "prompt.txt");
@@ -623,7 +627,15 @@ test("the CLI contract, run for real: `volunteer --json --session-id`, prompt on
     assert.deepEqual(verdict.result.surfaced, ["CI"]);
   }
   assert.equal(readFileSync(argsFile, "utf-8"), "volunteer --json --session-id sess-9");
-  assert.equal(readFileSync(promptFile, "utf-8"), "how does CI deploy?");
+  // ⛔ THE STDIN PAYLOAD IS THE CONTRACT DICT (#11584 review, P1). It used to be
+  // BARE TEXT, which silently disabled the reflex's re-mention suppression:
+  // the suppression reads `prior_context`, `session_id` is carried but not
+  // consulted, and a bare prompt sends neither. Turn 1 has nothing to suppress.
+  assert.deepEqual(JSON.parse(readFileSync(promptFile, "utf-8")), {
+    window: [{ role: "user", content: "how does CI deploy?" }],
+    session_id: "sess-9",
+    prior_context: null,
+  });
 });
 
 test("a non-zero exit, a `{status:error}` body, and an unparseable body are fail-open and NEVER `inert`", async () => {
@@ -1253,6 +1265,100 @@ test("a thrown transport failure carries its CAUSE — DNS and TLS are distingui
       "one of them looks like without it",
   );
   assert.match(dns.refused, /fetch failed/, "the outer shape stays, so the class is recognisable");
+});
+
+test("CONTINUITY: turn 2 hands the reflex turn 1's block as `prior_context` (#2120)", async () => {
+  // #11584 review, P1. The reflex's stage-5 re-mention suppression reads
+  // `prior_context` — the block a seam injected on an earlier turn — and NEVER
+  // `session_id` (`tortoise/__main__.py`: "carried but not consulted by the
+  // decision"; `volunteer.py`: `suppressed_ids = set(pointer_ids_in_text(
+  // prior_context))`). A seam that passes only a session id suppresses NOTHING,
+  // so a turn whose block changes by one pointer re-surfaces pointers this
+  // session already saw — the false fire #2119's own target (≤0.03) measures,
+  // and the false premise `platform-seams.md` already recorded for Hermes
+  // (#2120 / #8957). This row is the caller-visible consequence: the payload
+  // must carry the PREVIOUS block.
+  //
+  // MUTATION: drop `prior_context` from the stdin payload (or from the hosted
+  // body) → `prior_context` reads `null` on turn 2 → RED.
+  const home = tmpHome();
+  const payloads: Array<Record<string, unknown>> = [];
+  const cli = fakeCli(
+    join(home, "bin"),
+    [
+      `cat >> ${JSON.stringify(join(home, "payloads.jsonl"))}`,
+      `printf '\\n' >> ${JSON.stringify(join(home, "payloads.jsonl"))}`,
+      `printf '%s' '{"pointers":[{"id":"p1","label":"CI"}],"why":[],"surfaced":[{"label":"CI","band":"measured"}],"block":"## Memory surfaced this turn\\n- **CI** → point/p1","degraded_reason":null}'`,
+    ].join("\n"),
+  );
+  const cfg = readVolunteerConfig({ TORTOISE_COMMAND: cli }, join(home, "absent.json"));
+
+  const turn1 = await resolveBlock("first turn", "sess-c", cfg, []);
+  assert.equal(turn1.status, "block");
+  const block1 = turn1.status === "block" ? turn1.result.block : "";
+  assert.ok(block1.includes("point/p1"));
+
+  // Turn 2: what a caller holding the continuity state does — hand back turn 1's block.
+  const turn2 = await resolveBlock("second turn", "sess-c", cfg, [], undefined, block1);
+  assert.equal(turn2.status, "block");
+
+  const lines = readFileSync(join(home, "payloads.jsonl"), "utf-8").trim().split("\n");
+  for (const line of lines) payloads.push(JSON.parse(line) as Record<string, unknown>);
+  assert.equal(payloads.length, 2);
+  assert.deepEqual(payloads[0], {
+    window: [{ role: "user", content: "first turn" }],
+    session_id: "sess-c",
+    prior_context: null,
+  });
+  assert.deepEqual(payloads[1], {
+    window: [{ role: "user", content: "second turn" }],
+    session_id: "sess-c",
+    prior_context: block1,
+  });
+});
+
+test("CONTINUITY: the seam remembers what it injected, one turn deep, per session", async () => {
+  // `createContinuity` is the state machine behind the row above: one turn
+  // deep (not the whole session), keyed per session, empty until something is
+  // injected — the same contract as the sibling
+  // `tortoise/openclaw-plugin/index.mjs::createContinuity` (whose tests pin
+  // both polarities), so the two seams cannot drift in depth.
+  const cont = createContinuity();
+  assert.equal(cont.prior("s1"), "", "nothing injected yet ⇒ no prior context");
+  cont.remember("s1", "block-for:alpha");
+  assert.equal(cont.prior("s1"), "block-for:alpha");
+  cont.remember("s1", "block-for:beta");
+  assert.equal(cont.prior("s1"), "block-for:beta", "one turn deep, not an append");
+  assert.equal(cont.prior("s2"), "", "sessions do not leak into one another");
+  cont.remember("s2", "");
+  assert.equal(cont.prior("s2"), "", "an empty block is not a memory");
+  cont.remember("s1", "");
+  assert.equal(cont.prior("s1"), "block-for:beta", "an empty block never clears the memory");
+});
+
+test("CONTINUITY: the HOSTED transport sends `prior_context` too", async () => {
+  // Both transports must carry the input — the seam picks one at runtime, so a
+  // row that pins only the CLI leg leaves half the shipped paths silent.
+  let body: Record<string, unknown> | null = null;
+  const run = runReflexHosted(
+    "https://h",
+    "k",
+    "q",
+    "sess-h",
+    1000,
+    (async (_url: string, init: { body?: unknown }) => {
+      body = JSON.parse(String(init.body)) as Record<string, unknown>;
+      return { ok: true, status: 200, json: async () => ({ block: "b" }) } as Response;
+    }) as unknown as typeof fetch,
+    "block-for:prior",
+  );
+  const got = await run;
+  assert.equal(got.refused, "");
+  assert.deepEqual(body, {
+    window: [{ role: "user", content: "q" }],
+    session_id: "sess-h",
+    prior_context: "block-for:prior",
+  });
 });
 
 test("sessionKeyOf tolerates every ctx shape Pi may hand a handler", () => {

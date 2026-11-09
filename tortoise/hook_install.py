@@ -2946,6 +2946,26 @@ def _grade_optional_artifact(installed: Path, source: Path,
     does not warrant: a stale/incompatible read seam is repaired by the same
     one command, so the finding only has to name it and say so.
 
+    ⛔ "OWNERSHIP SNIFFING" IS NOT WHAT THE THREE STRUCTURAL CHECKS ARE
+    (#11584 review, round 2). An earlier version of this docstring justified
+    dropping them and they are NOT droppable — none needs ownership evidence,
+    and each one changes the VERDICT a user acts on:
+
+    * an UNREADABLE seam (``chmod 000``) fell through to the markerless branch,
+      where ``read_hook_version`` and ``_looks_like_our_script`` both swallow the
+      ``OSError`` — so a perfectly good Tortoise seam that merely lost its read
+      bit was reported ``foreign-artifact``, whose advice is "move it aside",
+      instead of the primary's ``not-readable`` ("chmod it");
+    * a SYMLINK whose target is byte-identical graded ``[]`` — CLEAN — while
+      ``tortoise install``/``upgrade`` refuse that same leaf through
+      ``_symlink_escape``, so status said current and the repair said
+      "Refusing: … resolves to … outside the install home". That is the #5351
+      "advice the installer contradicts" class, which the primary's own comment
+      spells out ("without this note `doctor` would recommend `tortoise install
+      <harness>` for a command that refuses");
+    * a BROKEN symlink graded ``not-a-regular-file`` ("is not a regular file")
+      where the primary says "is a broken symlink — remove or re-point it".
+
     The ``-artifact`` kind names are SHARED with the primary on purpose: the
     manual-fix predicate (:func:`is_manual_fix`) then covers both artifacts
     with one entry, and a caller that groups by kind groups the pair together.
@@ -2955,6 +2975,15 @@ def _grade_optional_artifact(installed: Path, source: Path,
             return []
     except OSError:  # pragma: no cover - an unreadable parent is not our call
         return []
+    findings: list[Finding] = []
+    if installed.is_symlink() and not installed.exists():
+        # `.exists()` follows the link, so a broken pointer would otherwise fall
+        # through to `not-a-regular-file` and name the wrong shape and remedy.
+        return [Finding(
+            "symlinked-artifact",
+            f"{installed} is a broken symlink — remove or re-point it",
+            script=source.name,
+        )]
     if not installed.is_file():
         return [Finding(
             "not-a-regular-file",
@@ -2964,6 +2993,24 @@ def _grade_optional_artifact(installed: Path, source: Path,
     expected = read_hook_version(source)
     if expected is None:
         return []  # repo defect (pinned by tests), not this install's problem
+    if installed.is_symlink():
+        # A note, never a reason to skip the version checks below: the grader
+        # reads the RESOLVED bytes, and a symlink to an older checkout IS stale.
+        findings.append(Finding(
+            "symlinked-artifact",
+            f"{installed} is a symlink — it tracks its target, so a stale "
+            "target is reported below; re-point or copy it to upgrade",
+            script=source.name, blocking=False,
+        ))
+    if not os.access(installed, os.R_OK):
+        # BEFORE the markerless branch, which would otherwise read the swallowed
+        # `OSError` as "not ours" and send the user to move aside their own file.
+        findings.append(Finding(
+            "not-readable",
+            f"{installed} is not readable — chmod it so the seam can load",
+            script=source.name,
+        ))
+        return findings
     found = read_hook_version(installed)
     if found is None:
         # ⛔ THE PRIMARY ARTIFACT'S TWO-WAY SPLIT, not one branch (review finding
@@ -2976,7 +3023,7 @@ def _grade_optional_artifact(installed: Path, source: Path,
         # naming the one step that works — the "installer-command clause the
         # installer would refuse" class (#5351).
         if _looks_like_our_script(installed):
-            return [Finding(
+            return [*findings, Finding(
                 "unversioned-artifact",
                 f"{installed} carries no {HOOK_VERSION_TOKEN} marker "
                 f"(expected {expected}) — it was installed before the version "
@@ -2984,14 +3031,14 @@ def _grade_optional_artifact(installed: Path, source: Path,
                 f"with `tortoise install {harness}`",
                 script=source.name,
             )]
-        return [Finding(
+        return [*findings, Finding(
             "foreign-artifact",
             f"{installed} is not a Tortoise read seam — move it aside, then "
             f"re-run `tortoise install {harness}` to install ours",
             script=source.name,
         )]
     if found < expected:
-        return [Finding(
+        return [*findings, Finding(
             "stale-artifact",
             f"{installed} is {HOOK_VERSION_TOKEN} {found}, current is "
             f"{expected} — the per-turn read seam runs older logic; "
@@ -2999,7 +3046,7 @@ def _grade_optional_artifact(installed: Path, source: Path,
             script=source.name,
         )]
     if found > expected:
-        return [Finding(
+        return [*findings, Finding(
             "ahead-artifact",
             f"{installed} is {HOOK_VERSION_TOKEN} {found}, newer than this "
             f"CLI's {expected}; `tortoise install {harness}` would replace it "
@@ -3008,15 +3055,15 @@ def _grade_optional_artifact(installed: Path, source: Path,
         )]
     try:
         if installed.read_bytes() != source.read_bytes():
-            return [Finding(
+            return [*findings, Finding(
                 "modified-artifact",
                 f"{installed} marker matches ({found}) but its bytes differ "
                 "from the shipped read seam (local edit)",
                 script=source.name,
             )]
     except OSError:  # pragma: no cover - read raced a delete; nothing to say
-        return []
-    return []
+        return findings
+    return findings
 
 
 def detect_artifact_install(root: str | os.PathLike[str],

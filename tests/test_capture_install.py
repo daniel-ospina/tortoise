@@ -4552,40 +4552,29 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
     # here rather than rewritten.
     #
-    # ⛔ RE-PINNED IN PLACE, not bumped (review findings 1 and 3 changed these
-    # bytes).  That is legitimate ONLY because of the sentence above: generation
-    # 18 of the READ half has never shipped, so there is no installed copy whose
-    # "local edit" verdict a re-pin could falsify — the entry is still being
-    # created.  A SHIPPED generation's digest must never be rewritten; it moves
-    # to a new generation, which is a two-file change (`contract_version_for`
-    # grades the pair).
+    # ⛔ RE-PINNED IN PLACE, NOT BUMPED — four times, all inside the review of
+    # the PR that CREATES this generation (1: review findings 1 and 3; 2: the
+    # hosted `catch` was bare; 3: `describeError` had to render `cause`; 4: the
+    # seam now supplies `prior_context`, the reflex's only re-mention-suppression
+    # input).  That is legitimate ONLY because of the sentence above: generation
+    # 18 of the READ half has never shipped — `tortoise-volunteer.ts` has never
+    # been reachable from `main` — so there is no installed copy whose "local
+    # edit" verdict a re-pin could falsify.  The entry is still being CREATED,
+    # not rewritten.
     #
-    # ⛔ RE-PINNED IN PLACE A SECOND TIME, and the reason is the same sentence:
-    # the fresh review of the rebased head found `runReflexHosted`'s `catch` was
-    # BARE (the reason discarded, so the caller reported "returned no block" —
-    # which claims the endpoint ANSWERED — about a request that never got a
-    # response), and binding it (`describeError`) changes these bytes again.  The
-    # generation is still 18 and still unshipped, so this is the entry being
-    # finished, not a shipped digest being rewritten.  If generation 18 HAS
-    # shipped by the time this is read, this re-pin is a defect and the fix is a
-    # bump to 19 in BOTH Pi artifacts plus a new entry here.
-    #
-    # ⛔ THE THIRD RE-PIN IS THE SAME COMMIT, ONE FINDING LATER: the re-review
-    # measured that `fetch` reports EVERY transport failure as the same
-    # `TypeError: fetch failed` with `code === undefined`, putting the real
-    # reason (ENOTFOUND / CERT_HAS_EXPIRED / bad port) on `cause` — so binding
-    # the error was not enough and `describeError` now renders `cause` too.  That
-    # is a byte change to the same unshipped generation.  Three re-pins inside
-    # one unshipped generation is the signal to look for: it is legitimate here
-    # ONLY because the read half has never been reachable from `main`.
-    18: "e2907970f75ee07b1f0ef824bef04a963c71c21852d3ba1c21dfe5a8980b293f",
+    # ⛔ FOUR RE-PINS IS THE SIGNAL TO RE-CHECK THAT REASONING, so state the test
+    # explicitly: if generation 18 HAS shipped by the time this is read, every
+    # re-pin above is a defect, and the correct fix is a BUMP (19 in BOTH Pi
+    # artifacts, a new entry here, and the pair below moved with it) — a SHIPPED
+    # generation's digest must never be rewritten.
+    18: "e801dfd1b23a80ac40bfe073901881ee5d0b3a8cdf6a3be40fb2248b9bdcbeb3",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "e2907970f75ee07b1f0ef824bef04a963c71c21852d3ba1c21dfe5a8980b293f")
+    18, "e801dfd1b23a80ac40bfe073901881ee5d0b3a8cdf6a3be40fb2248b9bdcbeb3")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

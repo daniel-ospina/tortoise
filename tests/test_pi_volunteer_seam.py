@@ -230,6 +230,72 @@ def test_a_stale_read_seam_is_reported_and_its_absence_is_not(home):
     assert "unversioned-artifact" in {f.kind for f in findings}
 
 
+def test_an_unreadable_read_seam_is_not_readable_not_foreign(home):
+    """#11584 review, round 2: the two structural checks the optional half
+    dropped are the primary's, and neither needs ownership evidence.
+
+    An UNREADABLE seam used to fall through to the markerless branch, where
+    `read_hook_version` and `_looks_like_our_script` both swallow the `OSError`,
+    so a good Tortoise seam that merely lost its read bit graded
+    `foreign-artifact` — whose advice is "move it aside" — instead of the
+    primary's `not-readable` ("chmod it"). That is advice the user acts on.
+    """
+    from tortoise import hook_install
+
+    result = _install(home)
+    assert result.ok, result.error
+    root = _ext_dir(home)
+    seam = root / VOLUNTEER_EXTENSION.name
+    seam.chmod(0o000)
+    try:
+        findings = hook_install.detect_artifact_install(root, "pi")
+        kinds = {f.kind for f in findings}
+        assert "not-readable" in kinds, (
+            f"an unreadable read seam must grade `not-readable`, got {sorted(kinds)}")
+        assert "foreign-artifact" not in kinds, (
+            "an unreadable file is not evidence that it is somebody else's")
+        detail = " ".join(f.detail for f in findings)
+        assert "move it aside" not in detail
+        assert "chmod" in detail
+    finally:
+        seam.chmod(0o644)
+
+
+def test_a_symlinked_read_seam_is_named_not_silent(home, tmp_path):
+    """The installer REFUSES a symlink that escapes the install home
+    (`_symlink_escape`), so a grader that reports CLEAN for one tells the user
+    to run a command that refuses — the #5351 "advice the installer
+    contradicts" class the primary artifact's own comment spells out."""
+    from tortoise import hook_install
+
+    result = _install(home)
+    assert result.ok, result.error
+    root = _ext_dir(home)
+    seam = root / VOLUNTEER_EXTENSION.name
+    outside = tmp_path / "copy-of-the-seam.ts"
+    outside.write_bytes(seam.read_bytes())
+    seam.unlink()
+    seam.symlink_to(outside)
+
+    findings = hook_install.detect_artifact_install(root, "pi")
+    kinds = {f.kind for f in findings}
+    assert "symlinked-artifact" in kinds, (
+        f"a symlinked read seam must be NAMED, got {sorted(kinds)} (silence here is "
+        "a false CLEAN over a file `install`/`upgrade` refuses)")
+    link = next(f for f in findings if f.kind == "symlinked-artifact")
+    assert link.blocking is False, "a symlink is a note, not a block"
+
+    # A BROKEN symlink is its own shape and gets the primary's remedy wording,
+    # not `not-a-regular-file` ("is not a regular file") — wrong advice.
+    seam.unlink()
+    seam.symlink_to(tmp_path / "gone.ts")
+    findings = hook_install.detect_artifact_install(root, "pi")
+    broken = [f for f in findings if f.kind == "symlinked-artifact"]
+    assert broken, f"a broken symlink must be named, got {[f.kind for f in findings]}"
+    assert "broken symlink" in broken[0].detail
+    assert "not-a-regular-file" not in {f.kind for f in findings}
+
+
 def test_the_two_artifacts_declare_one_contract_number():
     """`contract_version_for("pi")` answers only when BOTH shipped artifacts
     agree — the layout half's "one contract, one number" invariant (#4680)."""
@@ -306,8 +372,9 @@ def test_a_repair_never_reports_success_over_a_broken_seam_shape(home, shape):
     it used `is_file()` — so a directory, a FIFO or a symlink whose target was
     moved made the gate report ABSENT, the artifact installer never ran, and
     `hooks upgrade` printed "already current — nothing to do" and exited **0**
-    while `detect_artifact_install` still returned a blocking
-    `not-a-regular-file` for that same path. A silent false SUCCESS over a
+    while `detect_artifact_install` still returned a blocking finding for that
+    same path (`not-a-regular-file` for a directory/FIFO, `symlinked-artifact`
+    for a dangling link). A silent false SUCCESS over a
     blocking finding, in a command whose whole contract is "fail loudly"
     (`capture_install.py`: "Refusals are the product").
 
@@ -332,8 +399,18 @@ def test_a_repair_never_reports_success_over_a_broken_seam_shape(home, shape):
 
     blocking_before = [f.kind for f in
                        hook_install.detect_artifact_install(root, "pi") if f.blocking]
-    assert "not-a-regular-file" in blocking_before, (
-        "precondition: this shape is a blocking finding for `hooks status`")
+    # The KIND is shape-specific — the read seam's grader now mirrors the primary
+    # artifact's vocabulary (round-2 review), so a DANGLING SYMLINK is
+    # `symlinked-artifact` ("is a broken symlink — remove or re-point it") rather
+    # than the vaguer `not-a-regular-file` the primary never emits for that
+    # shape. Both are BLOCKING, which is the only property this row's
+    # precondition needs (and the earlier wording pinned the wrong kind until the
+    # round-2 fix moved it, which is what made this row fail — correctly).
+    expected_kind = ("symlinked-artifact" if shape == "dangling-symlink"
+                     else "not-a-regular-file")
+    assert expected_kind in blocking_before, (
+        f"precondition: a {shape} at the seam must be a blocking finding for "
+        f"`hooks status`, got {blocking_before}")
 
     rc = _upgrade_artifact_seam(
         SimpleNamespace(harness="pi", dry_run=False), root, home)

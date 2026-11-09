@@ -487,6 +487,7 @@ export function runReflexCommand(
   prompt: string,
   sessionId: string,
   timeoutMs: number,
+  priorContext: string = "",
 ): Promise<{ ok: boolean; stdout: string; error: string; timedOut: boolean }> {
   return new Promise((resolve) => {
     const args = ["volunteer", "--json"];
@@ -610,7 +611,23 @@ export function runReflexCommand(
     // A CLI that exits before reading stdin raises EPIPE on the write; that is
     // the failure the callback already reports, never an uncaught throw.
     child?.stdin?.on?.("error", () => {});
-    child?.stdin?.end?.(prompt);
+    // ⛔ THE STDIN PAYLOAD IS THE DOCUMENTED CONTRACT DICT, NOT BARE TEXT
+    // (#11584 review, P1). `prior_context` is the reflex's re-mention-
+    // suppression input and `session_id` is carried-but-not-consulted, so a
+    // bare-text stdin silently disables the suppression. `_cmd_volunteer`
+    // accepts both shapes, and a DICT beats a `--prior-context` flag for
+    // forward compatibility: a `tortoise` older than this seam IGNORES an
+    // unknown payload key and still runs, while an unknown FLAG is an argparse
+    // error — which this seam's fail-open turns into no injection at all, on
+    // every turn, silently. Same reasoning and same payload as the sibling
+    // `tortoise/openclaw-plugin/index.mjs::reflexPayload`.
+    child?.stdin?.end?.(
+      JSON.stringify({
+        window: [{ role: "user", content: prompt }],
+        session_id: sessionId || null,
+        prior_context: priorContext ? String(priorContext) : null,
+      }),
+    );
   });
 }
 
@@ -689,6 +706,7 @@ export async function runReflexHosted(
   sessionId: string,
   timeoutMs: number,
   fetchImpl: typeof fetch = fetch,
+  priorContext: string = "",
 ): Promise<{ result: ReflexResult | null; timedOut: boolean; refused: string }> {
   if (!apiKey) return { result: null, timedOut: false, refused: "" };
   const controller = new AbortController();
@@ -703,6 +721,11 @@ export async function runReflexHosted(
       body: JSON.stringify({
         window: [{ role: "user", content: prompt }],
         session_id: sessionId || null,
+        // Same continuity input as the CLI leg (#11584 review, P1): the
+        // documented `VolunteerContextRequest` field the reflex's re-mention
+        // suppression reads. Omitting it made the hosted transport suppress
+        // nothing while the seam's own comment claimed it did.
+        prior_context: priorContext ? String(priorContext) : null,
       }),
       signal: controller.signal,
     });
@@ -763,10 +786,20 @@ export async function runReflexHosted(
 
 /**
  * Cross-turn re-mention suppression at the SEAM (#2119 indicator 4, the same
- * rule `#2120` ships): never inject the same block twice in one session. The
- * reflex already suppresses re-mentioning a pointer it surfaced earlier when
- * it is given the session id; this is the belt to that braces, so a stateless
- * hosted call cannot re-inject an identical block.
+ * rule `#2120` ships): never inject the same block twice in one session.
+ *
+ * ⛔ THE REFLEX'S OWN SUPPRESSION IS `prior_context`, NOT `session_id` — and an
+ * earlier revision of this comment said the opposite (#11584 review, P1).
+ * `tortoise/__main__.py` says it verbatim: *"the reflex's re-mention suppression
+ * reads `prior_context` (the block a seam injected on an earlier turn) — never
+ * `session_id`, which is carried but not consulted by the decision"*, and the
+ * suppression set is `pointer_ids_in_text(prior_context)`
+ * (`tortoise/volunteer.py`). With `prior_context` absent the set is EMPTY, so a
+ * seam that passes only a session id suppresses nothing — exactly the false
+ * premise `platform-seams.md` records for Hermes (#2120 / #8957). This seam now
+ * supplies it via `createContinuity()` below; this digests set is the BELT
+ * (identical blocks), and the continuity input is the BRACES (a block that
+ * changed by one pointer).
  *
  * ⛔ A SET PER SESSION, NOT THE LAST DIGEST (review finding 6). The first cut
  * stored one digest per session key and answered "is this the same as LAST
@@ -778,6 +811,32 @@ export async function runReflexHosted(
  * letting the map grow.
  */
 export const MAX_SEEN_PER_SESSION = 64;
+
+/**
+ * Cross-turn CONTINUITY (#2120 scope "Cross-turn dedupe") — the input the
+ * reflex's stage-5 re-mention suppression actually reads.
+ *
+ * `createDedupe` above only catches an IDENTICAL block. A turn whose block
+ * changes by one pointer (a second pointer clears the gate, or one drops out)
+ * re-surfaces the pointers this session already saw — the false fire #2119's
+ * own target (≤0.03) measures. The reflex suppresses it, but ONLY when it is
+ * handed `prior_context`, so remember the block injected last turn and pass it
+ * back as that input.
+ *
+ * One turn deep, not the whole session, and per session key — the same
+ * contract as the sibling `tortoise/openclaw-plugin/index.mjs::createContinuity`,
+ * so the two seams cannot drift into different depths.
+ */
+export function createContinuity() {
+  const last = new Map<string, string>();
+  return {
+    prior: (sessionKey: string): string => last.get(sessionKey) ?? "",
+    remember: (sessionKey: string, block: string): void => {
+      if (!block) return;
+      last.set(sessionKey, block);
+    },
+  };
+}
 
 export function createDedupe() {
   const seen = new Map<string, Set<string>>();
@@ -935,6 +994,7 @@ export async function resolveBlock(
   cfg: VolunteerConfig,
   candidates: string[],
   fetchImpl: typeof fetch = fetch,
+  priorContext: string = "",
 ): Promise<ReflexVerdict> {
   const chain = cfg.command ? [cfg.command] : candidates;
   let lastError = "";
@@ -954,7 +1014,7 @@ export async function resolveBlock(
         detail: `the reflex chain spent its ${cfg.timeoutMs}ms budget before ${command}`,
       };
     }
-    const run = await runReflexCommand(command, prompt, sessionId, remaining);
+    const run = await runReflexCommand(command, prompt, sessionId, remaining, priorContext);
     if (run.timedOut) {
       return { status: "timeout", detail: `${command}: ${run.error}` };
     }
@@ -998,6 +1058,7 @@ export async function resolveBlock(
     sessionId,
     cfg.timeoutMs,
     fetchImpl,
+    priorContext,
   );
   if (hosted.timedOut) {
     return { status: "timeout", detail: `POST ${cfg.apiUrl}/v1/context timed out` };
@@ -1035,6 +1096,10 @@ export default function tortoiseVolunteer(
   const home = deps.home ?? homedir();
   const cfg = readVolunteerConfig(env, configPath);
   const dedupe = createDedupe();
+  // #2120 continuity: the reflex's re-mention suppression reads the block this
+  // seam injected LAST TURN, never the session id (#11584 review, P1). See
+  // `createContinuity` — the digest set above is the belt, this is the braces.
+  const continuity = createContinuity();
   // ⛔ AN INERT VERDICT IS LATCHED FOR THE PROCESS (review finding 5). Without
   // this, every user turn re-walked the whole candidate chain, re-spawned
   // Python, and REWROTE the breadcrumb — so its `recorded_at` always read
@@ -1047,8 +1112,7 @@ export default function tortoiseVolunteer(
   let inertLatched = false;
 
   /** Run the reflex for one turn, fail-open in every direction. */
-  const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {
-    if (deps.reflexImpl) {
+  const reflex = async (prompt: string, sessionId: string): Promise<ReflexResult | null> => {    if (deps.reflexImpl) {
       try {
         return await deps.reflexImpl(prompt, sessionId);
       } catch {
@@ -1066,6 +1130,7 @@ export default function tortoiseVolunteer(
         candidates,
         (deps.fetchImpl ??
           (typeof fetch === "function" ? fetch : undefined)) as typeof fetch,
+        continuity.prior(sessionId || HARNESS),
       );
     } catch (error) {
       // An unexpected throw out of the resolver is a bug in THIS seam, not
@@ -1132,6 +1197,9 @@ export default function tortoiseVolunteer(
       const message = buildInjection(result.block, result.surfaced, cfg.display);
       if (!message) return undefined;
       if (!dedupe(sessionKey || HARNESS, message.content)) return undefined;
+      // Remember what was INJECTED so the next turn can hand it back as
+      // `prior_context` — the input the reflex's re-mention suppression reads.
+      continuity.remember(sessionKey || HARNESS, result.block);
       return { message };
     } catch {
       // Fail-open: a read seam must never be able to break an agent turn.
