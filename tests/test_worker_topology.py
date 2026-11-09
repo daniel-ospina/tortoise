@@ -1184,6 +1184,20 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         (("sh", "-c", "uvicorn app:app --lifespan off --workers 4"), {}),
         (("bash", "-lc", "uvicorn app:app --lifespan=off"), {}),
         (("sh", "-c", "UVICORN_LIFESPAN=off uvicorn app:app --workers 4"), {}),
+        # ⛔ THE SAME SHAPE IN A DIFFERENT SPELLING. `/bin/sh -c` word-splits on
+        # ANY whitespace run and strips quotes, so all three of these reach
+        # uvicorn as `--lifespan off`. The first cut of this arm matched only the
+        # literal strings `--lifespan=off`, `"--lifespan off"` (ONE space) and
+        # `UVICORN_LIFESPAN=off`, so these three matched nothing, fell through to
+        # the REPORT arm, exited 0 and booted N ungated workers — the exact
+        # fail-open the arm was added to close, one spacing character away.
+        # MEASURED on the shipped block (2026-11-09): rc=0 for each.
+        (("sh", "-c", "uvicorn app:app --lifespan  off --workers 4"), {}),
+        (("sh", "-c", 'uvicorn app:app --lifespan "off" --workers 4'), {}),
+        (("sh", "-c", "uvicorn app:app --lifespan\t\toff --workers 4"), {}),
+        # ⛔ AND A WRAPPED SCRIPT THAT IS NOT `-c`-ONLY. The shell-flag list was
+        # the enumerated `-c|-lc|-ic|-cl`, which missed `-euc` / `-ec` / `-xc`.
+        (("bash", "-euc", "uvicorn app:app --lifespan off --workers 4"), {}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)

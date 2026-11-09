@@ -651,8 +651,14 @@ _argv_is_shell_wrapped() {
     # such as `--header "X: Y"` does not trip it.
     local _arg=""
     for _arg in "$@"; do
+        # ⛔ ANY short-option bundle ending in `c` — `-c`, `-lc`, `-ic`, `-cl`,
+        # and equally `-ec`, `-euc`, `-xc`, `-euo pipefail -c`. An enumerated
+        # list is a coverage claim that goes stale the first time someone adds a
+        # shell flag, and the whole point of this arm is that it must not miss a
+        # wrapped command line. (An unmatched option does not reach here as a
+        # wrapper anyway: it is just an option this block cannot read.)
         case "$_arg" in
-            -c|-lc|-ic|-cl) return 0 ;;
+            -[[:alpha:]]*c) return 0 ;;
         esac
         case "$_arg" in
             *[[:space:]]*)
@@ -676,10 +682,23 @@ _wrapped_argv_disables_lifespan() {
     _argv_is_shell_wrapped "$@" || return 1
     local _arg=""
     for _arg in "$@"; do
+        # ⛔ ANY MENTION of the lifespan input, not a spelling of `off`.
+        # An enumerated pattern list is the SAME defect this function exists to
+        # close, one level down: `/bin/sh -c` word-splits on any whitespace run
+        # and strips quotes, so `--lifespan  off` (two spaces), `--lifespan		 off`
+        # and `--lifespan "off"` all reach uvicorn as `--lifespan off` while
+        # matching none of `*--lifespan=off*` / `*"--lifespan off"*`. MEASURED on
+        # the shipped block (2026-11-09): the one-space form refused and the
+        # two-space and quoted forms fell through to the REPORT arm, rc=0, real
+        # uvicorn 4 workers, lifespan never runs.
+        # The block cannot PARSE a command line that lives inside one token, and
+        # a lifespan flag it cannot parse IS the unreadable case — so the honest
+        # answer is to refuse on the mention, which is also the fail-closed
+        # direction. `--no-lifespan` does not exist in uvicorn, so a mention is
+        # never a benign one.
         case "$_arg" in
-            *--lifespan=off*) return 0 ;;
-            *"--lifespan off"*) return 0 ;;
-            *UVICORN_LIFESPAN=off*) return 0 ;;
+            *--lifespan*) return 0 ;;
+            *UVICORN_LIFESPAN*) return 0 ;;
         esac
     done
     return 1
@@ -883,7 +902,7 @@ if [ "$_IS_SERVER" = "1" ]; then
         # length guard closes. Ordered first so the comparison never runs on a
         # value bash cannot evaluate.
         if ! _count_is_verifiable "$@"; then
-            _refuse_why="a worker count this boot script cannot read (the value is not an ASCII integer), which uvicorn's int() may still turn into N"
+            _refuse_why="a worker count this boot script cannot evaluate (the value is not an ASCII integer, or it is an integer too large for this shell's arithmetic — bash is intmax_t, so past 18 digits it cannot be compared), which uvicorn's int() may still turn into N"
         elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
             _refuse_why="${TORTOISE_WEB_WORKERS} uvicorn workers"
         elif _app_env_file_in_play "$@"; then
