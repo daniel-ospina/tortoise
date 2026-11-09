@@ -53,8 +53,8 @@ from tools.longmem_eval.retrieve import (  # noqa: E402, RUF100
     render_context, retrieve_for_question,
 )
 from tools.longmem_eval.run import (
-    CheckpointStaleError, _assert_python_version, _print_summary,
-    outcomes_to_report, run_evaluation, run_main,
+    CheckpointStaleError, _assert_python_version, _breaker_dropped_outcome,
+    _print_summary, outcomes_to_report, run_evaluation, run_main,
 )
 from tools.longmem_eval.report import (
     _outcome_grade, compare_reports, mcnemar_exact, wilson_ci,
@@ -406,6 +406,14 @@ def test_outcomes_to_report_golden_shape():
         "label": True,
         "hypothesis": "golden hypothesis",
         "session_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        # #2516 (C1): the gold-cutoff variant's per-question fraction rides
+        # the Layer-1 projection UNCONDITIONALLY (like ``breaker_open`` /
+        # ``evidence_recall@k``), so a pre-feature outcome projects None —
+        # absent from the RAW outcome, present (null) in the published one.
+        # Pin the null: a projection that DROPS the key is the defect this
+        # entry exists to prevent (w7_publish then reads n=0, n_excluded=all
+        # on every real receipt while the aggregate looks right).
+        "session_recall@n_gold": None,
         "turn_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
         "evidence_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
         "chunk_evidence_recall@k": {"5": 0.5, "10": 0.5, "20": 0.5},
@@ -532,6 +540,96 @@ def test_outcomes_to_report_golden_shape():
     }
     assert report["failures"] == []
     assert report["n_failed"] == 0
+
+
+def test_gold_cutoff_variant_survives_the_layer1_projection():
+    """#2516 (C1) WIRING: the variant's per-question fraction must survive
+    ``outcomes_to_report``'s Layer-1 projection and reach the publication
+    layer that seals it.
+
+    Every unit test in the diff exercises ``build_report`` DIRECTLY (which
+    aggregates from its positional raw ``outcomes``) or hand-builds outcomes
+    for ``w7_publish``, so all of them are blind to this seam: the projected
+    list is what ``build_report`` publishes under ``extra["outcomes"]``
+    (spread OVER the raw list), and ``w7_publish --report`` reads exactly
+    that. With ``session_recall@n_gold`` missing from the projection
+    allowlist, ``GOLD_CUTOFF_ROW`` reads ``value: None, n: 0,
+    n_excluded: <all non-_abs>`` on every real run — the sealed variant can
+    never register a number on the artifact it was sealed for, and nothing
+    goes red. This is the assertion the per-unit tests structurally cannot
+    make.
+
+    RED mutation: drop the key from the allowlist → n collapses to 0.
+    """
+    from tools.longmem_eval.w7_publish import (
+        GOLD_CUTOFF_ROW,
+        category_variant_rows,
+        variant_rows,
+    )
+
+    report = outcomes_to_report(
+        [{
+            "question_id": "q-spread",
+            "question_type": "multi-session",
+            "label": True,
+            # 6 gold sessions, all retrieved: 5/6 in top-5 → the OFFICIAL
+            # recall_all@5 is 0.0; 6/6 at the question's own cutoff → 1.0.
+            "session_recall@k": {"5": 5 / 6, "10": 1.0, "20": 1.0},
+            "session_recall@n_gold": 1.0,
+            "turn_recall@k": {"5": 1.0, "10": 1.0, "20": 1.0},
+        }],
+        reader_model="r", judge_model="j", ks=(5, 10, 20), top_k=20,
+        split="s", dataset_semantics_audit=_trusted_audit())
+    projected = report["outcomes"][0]
+    assert projected["session_recall@n_gold"] == 1.0
+
+    rows = variant_rows(report["outcomes"])
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 1
+    assert rows[GOLD_CUTOFF_ROW]["value"] == 1.0
+    # the official row is untouched — same population, its own blinded number
+    assert rows["official_recall_all@5"]["value"] == 0.0
+    assert rows["official_recall_all@5"]["n"] == 1
+
+    cat = category_variant_rows(report["outcomes"])["rows"]["multi-session"]
+    assert cat["n_gold"] == 1
+    assert cat["n_excluded_gold"] == 0
+    assert cat[GOLD_CUTOFF_ROW] == 1.0
+
+
+def test_breaker_dropped_outcome_keeps_the_variant_ineligible():
+    """#2516 (C1) / #1349: a breaker-DROPPED outcome follows the SAME
+    empty-gold convention as the in-band metrics it mirrors.
+
+    The official ``session_recall@k`` is 0.0 for a gold-less question (so a
+    drop is 0.0 there), but the gold-cutoff VARIANT is ``None`` in band —
+    an empty denominator is not eligible, never a fabricated score. A
+    hard-coded 0.0 on the drop counted a gold-less question as a MISS when
+    the breaker fired and as UNMEASURED when it graded, so the variant's
+    denominator tracked whether a breaker opened instead of the data.
+
+    RED mutation: hard-code 0.0 for the variant again → the gold-less
+    assertions below read n=1 / value 0.0.
+    """
+    from tools.longmem_eval.w7_publish import GOLD_CUTOFF_ROW, variant_rows
+
+    gold = _breaker_dropped_outcome(
+        {"question_type": "multi-session",
+         "answer_session_ids": ["s1", "s2"]}, "q-gold", (5, 10))
+    assert gold["breaker_open"] is True
+    assert gold["session_recall@k"] == {"5": 0.0, "10": 0.0}
+    # nothing was retrieved, but there WAS gold to miss → a 0.0 miss
+    assert gold["session_recall@n_gold"] == 0.0
+    assert variant_rows([gold])[GOLD_CUTOFF_ROW]["n"] == 1
+
+    gold_less = _breaker_dropped_outcome(
+        {"question_type": "single-session-preference"}, "q-abs", (5, 10))
+    # the official convention is unchanged (0.0), the variant stays ineligible
+    assert gold_less["session_recall@k"] == {"5": 0.0, "10": 0.0}
+    assert gold_less["session_recall@n_gold"] is None
+    rows = variant_rows([gold_less])
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 0
+    assert rows[GOLD_CUTOFF_ROW]["n_excluded"] == 1
+    assert rows[GOLD_CUTOFF_ROW]["value"] is None
 
 
 def test_report_truncation_readout_warning_only():
@@ -4593,28 +4691,42 @@ def test_recall_metrics_turn_evidence_semantics_pinned():
     ]
     # healthy: 5 evidence points exist, 3 marked hits in top-10 — the pair
     # is numerically identical (same formula, same denominator).
-    session, turn, ev, chunk = _recall_metrics(
+    # #2516 (C1): the return arity grew by the gold-cutoff variant's
+    # per-question fraction (``session_recall@n_gold``). Unpack it here — a
+    # stale 4-tuple unpack is a ValueError, so this line is the guard that the
+    # variant's shape stays wired to every caller of this helper.
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids=set(), evidence_point_count=5,
         chunk_evidence_point_count=0)
     assert turn["10"] == ev["10"] == 3 / 5
     assert session["10"] == 1.0
     assert chunk["10"] is None
+    # one gold session → N_gold=1 → top-1 holds h0 ("s0") → 1/1.
+    assert at_gold == 1.0
     # degraded: 0 evidence points → evidence is None; turn falls back to
     # the binary answer-turn match (h2 is in top-10, h99 is not → 1/2).
-    session, turn, ev, chunk = _recall_metrics(
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids={"h2", "h99"}, evidence_point_count=0,
         chunk_evidence_point_count=0)
     assert ev["10"] is None
     assert turn["10"] == 0.5
+    assert at_gold == 1.0
     # degraded + no answer-turn ids either → both None (never forced 0.0).
-    session, turn, ev, chunk = _recall_metrics(
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids=set(), evidence_point_count=0,
         chunk_evidence_point_count=0)
     assert ev["10"] is None
     assert turn["10"] is None
+    assert at_gold == 1.0
+    # no gold session → the variant is NOT ELIGIBLE (None), never a
+    # fabricated 1.0 — the official ``all([])`` edge is not minted here.
+    assert _recall_metrics(
+        hits, ks=(10,), answer_sessions=set(),
+        evidence_turn_ids=set(), evidence_point_count=5,
+        chunk_evidence_point_count=0)[4] is None
 
 
 def test_reader_surface_counts_context_evidence_beyond_pool_k(tmp_path, monkeypatch):

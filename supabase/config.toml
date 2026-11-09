@@ -312,13 +312,15 @@ max_frequency = "5s"
 # enabled = true
 # uri = "pg-functions://postgres/auth/before-user-created-hook"
 
-# Auth hook after_user_created is configured on the REMOTE project (Management API)
-# — CLI v2.90 cannot parse [auth.hook.after_user_created] in config.toml.
-# Remote state (2026-08-10, #832): hook_after_user_created is DISABLED on this
-# plan (its Standard-Webhooks signature could never be verified) and
-# AUTH_HOOK_SECRET was removed from tenant-provision — the function's hook
-# path fails CLOSED (401). Client-side provisioning (welcome page JWT path)
-# is the production path (#802/#839).
+# Auth hook `after_user_created` does NOT exist on this platform: the supported
+# hooks are before_user_created, custom_access_token, send_sms, send_email,
+# MFA verification and password verification (Supabase docs, Auth Hooks). #839's
+# "Error invoking hook" 500 was a platform-capability gap, not a config gap, and
+# #1120 deleted the function's dead hook path rather than leaving it inert.
+# Provisioning is triggered server-side by the dashboard's same-origin BFF route
+# (`website/apps/dashboard/functions/api/provision.ts`, #3501/#4054), which mints
+# the caller's access token from the `__Host-session` cookie and calls
+# tenant-provision with it (#802).
 
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
@@ -469,13 +471,14 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
 
 # ── Edge Functions ────────────────────────────────────────────────
-# tenant-provision is invoked by the after_user_created auth hook.
-# Auth hooks call WITHOUT a user JWT → verify_jwt must be false
-# (Supabase Auth signs the hook request itself with the hook secret).
-# Caller auth is enforced INSIDE the function (#802): it verifies the
-# Standard-Webhooks signature against AUTH_HOOK_SECRET (hook calls) or a
-# user JWT whose identity matches the provisioning target (direct calls).
-# The public anon key alone returns 401.
+# tenant-provision is called SERVER-SIDE ONLY, by the dashboard's same-origin
+# BFF route (website/apps/dashboard/functions/api/provision.ts, #3501/#4054).
+# That BFF mints the user's access token and sends no Origin header, so the
+# function keeps verify_jwt=false (the caller is verified inside it, #802) while
+# carrying NO CORS surface at all: no origin allowlist, no preflight answer, no
+# Access-Control-* header, and an origin-bearing request is refused 403 (#1120).
+# The public anon key alone returns 401, and a caller may only provision for
+# THEMSELVES (JWT identity must match the provisioning target).
 [functions.tenant-provision]
 verify_jwt = false
 

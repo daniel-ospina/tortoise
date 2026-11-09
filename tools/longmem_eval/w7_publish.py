@@ -211,6 +211,48 @@ CATEGORY_GATE_TYPES = ("multi-session", "knowledge-update",
                        "single-session-preference")
 
 
+#: #2516 (C1) / #10538 — the ADDITIVE gold-cutoff variant. ``recall_all@5``
+#: is identically ``0.0`` for any question whose evidence set exceeds five
+#: pieces, at any ranking quality (the fifth slot is a wall), so the
+#: spread-evidence / multi-session class cannot register an improvement under
+#: that cutoff however well retrieval does. The arithmetic is recorded on
+#: #10538 (decision relay 2026-11-07T17:54Z + the 2026-11-07 decision lane),
+#: and BOTH records name #2516 — the issue that owns this publication surface —
+#: as the place the variant is sealed. The unit is:
+#:
+#:     recall_all@N_gold = all(gold session in top-N_gold),  N_gold = |gold|
+#:
+#: i.e. the same official all-or-nothing binary, measured at a cutoff equal to
+#: each question's OWN evidence count instead of a fixed 5. It is a DECLARED
+#: LABELLED VARIANT riding beside the official row (R12): ``recall_all@5`` is
+#: untouched, stays comparable, and is never replaced by this number.
+#:
+#: ⚠️ CEILING — the variant is computed over the arm's MEASURED surface, so its
+#: achievable value is ``min(n_gold, depth)/n_gold``, where ``depth`` is that
+#: arm's retrieval depth: the vector arm fetches ``limit=max(ks)`` (20 by
+#: default) and the hybrid rerank/pool-only arms truncate ``pool[:top_k]``
+#: (20), while the plain no-rerank hybrid arm leaves the deduped pool
+#: untruncated. A question whose gold-session count exceeds its arm's depth
+#: therefore stays below 1.0 at its own cutoff, and the ceiling differs BY ARM —
+#: compare this row across arms only where ``n_gold <= depth``. The wall moved
+#: from 5 to ``depth``; it did not disappear (#11598 review).
+GOLD_CUTOFF_ROW = "recall_all@N_gold"
+
+
+def _gold_cutoff_fraction(outcome: dict) -> float | None:
+    """Per-question fraction at a cutoff equal to the question's gold count
+    (``retrieve.py::_recall_metrics`` → ``session_recall@n_gold``).
+
+    ``None`` (not 0.0) when the outcome carries no such record: an older
+    report, or a question with no gold session. Absence is counted
+    (``n_excluded``/``n_missing``), never coerced into the mean — the same
+    discipline ``_fraction_at_k`` applies, and the reason a report produced
+    before this variant existed cannot silently read as a zero.
+    """
+    v = outcome.get("session_recall@n_gold")
+    return v if isinstance(v, (int, float)) and not isinstance(v, bool) else None
+
+
 def category_variant_rows(outcomes: list[dict], k: int | str = 5,
                           *,
                           categories: tuple[str, ...] = CATEGORY_GATE_TYPES,
@@ -234,27 +276,49 @@ def category_variant_rows(outcomes: list[dict], k: int | str = 5,
     A gate category ABSENT from the outcome set is returned with
     ``n == 0`` and ``value is None`` — never omitted (an omitted row is
     indistinguishable from a row nobody looked at, and the coverage target
-    "tail categories ≥95% covered" has to be checkable) and never
+    "tail categories >=95% covered" has to be checkable) and never
     fabricated.
+
+    Each row ALSO carries the ``recall_all@N_gold`` labelled variant
+    (:data:`GOLD_CUTOFF_ROW`) with its own ``n_gold``/``n_excluded_gold``:
+    ``recall_all@5`` is identically 0.0 for a question needing more than five
+    evidence pieces, so the multi-session class this block exists to gate
+    cannot register an improvement under it (#10538 arithmetic). "Coverage"
+    stays computed from the OFFICIAL row only — the variant is additive and
+    a category with zero questions stays legitimate (tests pin both).
     """
     non_abs = [o for o in outcomes if not _is_abs(o.get("question_id"))]
 
     def _row(rows: list[dict]) -> dict[str, Any]:
         vals: list[float] = []
         fracs: list[float] = []
+        gold_vals: list[float] = []
         for o in rows:
             f = _fraction_at_k(o, k)
-            if f is None:
-                continue
-            vals.append(binary_projections(f)[0])
-            fracs.append(f)
+            if f is not None:
+                vals.append(binary_projections(f)[0])
+                fracs.append(f)
+            # #2516 / #10538: the gold-cutoff variant, computed by the SAME
+            # `binary_projections` rule as the official row — one
+            # implementation of the official semantics, so the variant can
+            # never be projected by a different rule than the headline.
+            g = _gold_cutoff_fraction(o)
+            if g is not None:
+                gold_vals.append(binary_projections(g)[0])
         return {
             f"official_recall_all@{k}": (
                 sum(vals) / len(vals) if vals else None),
             f"fraction_paper@{k}": (
                 sum(fracs) / len(fracs) if fracs else None),
+            GOLD_CUTOFF_ROW: (
+                sum(gold_vals) / len(gold_vals) if gold_vals else None),
             "n": len(vals),
             "n_excluded": len(rows) - len(vals),
+            # the variant's OWN counts — a row whose n_gold is 0 is visible as
+            # unmeasured rather than reading 0.0 (the same reason the gate
+            # categories are never omitted).
+            "n_gold": len(gold_vals),
+            "n_excluded_gold": len(rows) - len(gold_vals),
         }
 
     rows = {"full_mix": _row(non_abs)}
@@ -267,6 +331,12 @@ def category_variant_rows(outcomes: list[dict], k: int | str = 5,
         "semantics": "official all(doc in recalled_docs for doc in "
                      "correct_docs) projection, non-_abs ONLY, grouped by "
                      "the dataset's question_type",
+        "variant_semantics": (
+            f"{GOLD_CUTOFF_ROW}: LABELED VARIANT (NOT official) — the same "
+            "all-or-nothing binary measured at a cutoff equal to each "
+            "question's own gold-session count, so a spread-evidence "
+            "question is measurable at all (#10538); the official row "
+            "stays recall_all@5"),
         "gate_categories": list(categories),
         "rows": rows,
         "coverage": {
@@ -296,6 +366,10 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
       turn_* (variant D2: assistant-role turns) — the report's turn-level
           aggregates include assistant-role evidence turns (out-of-corpus
           officially); carried as labeled values with the divergence note
+      recall_all@N_gold (labeled variant, #2516/#10538) — the same official
+          all-or-nothing binary at a cutoff equal to each question's own
+          gold-session count; the only cutoff under which a spread-evidence
+          question is not arithmetically pinned to 0.0
       audit_record — dataset_audit.py census (variant D4: sparse
           has_answer; and the D2 role census)
     """
@@ -322,6 +396,11 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
         anyhit_vals.append(recall_any)
     frac_paper, n_paper, n_ex_paper = _mean(non_abs)
     frac_legacy, n_legacy, n_ex_legacy = _mean(outcomes)
+    gold_cutoff_vals: list[float] = []
+    for o in non_abs:
+        g = _gold_cutoff_fraction(o)
+        if g is not None:
+            gold_cutoff_vals.append(binary_projections(g)[0])
     out = {
         f"official_recall_all@{k}": {
             "label": "OFFICIAL LongMemEval recall_all@k (all correct "
@@ -357,6 +436,22 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
             "n": n_legacy,
             "n_excluded": n_ex_legacy,
             "n_abs": len(abs_q),
+        },
+        GOLD_CUTOFF_ROW: {
+            "label": "LABELED VARIANT (NOT official) — #2516/#10538: "
+                     "recall_all at a cutoff equal to each question's own "
+                     "gold-session count (N_gold). The official "
+                     f"recall_all@{k} is identically 0.0 for any question "
+                     "whose evidence set exceeds that cutoff, so the "
+                     "spread-evidence class can only be seen here",
+            "value": (sum(gold_cutoff_vals) / len(gold_cutoff_vals)
+                      if gold_cutoff_vals else None),
+            "n": len(gold_cutoff_vals),
+            "n_excluded": len(non_abs) - len(gold_cutoff_vals),
+            "semantics": "all(doc in ranked[:n_gold] for doc in "
+                         "correct_docs), n_gold = len(correct_docs); "
+                         "capped by the arm's retrieval depth "
+                         "(min(n_gold, depth)/n_gold)",
         },
         "turn_recall_paper@k": {
             "label": "LABELED VARIANT (D2): turn-level recall over the "

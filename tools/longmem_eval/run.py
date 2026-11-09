@@ -4121,6 +4121,39 @@ def _hard_gate_red(outcome: dict) -> list[str]:
     return [r for r in _gate_red(outcome) if r in HARD_GATE_REASONS]
 
 
+def _breaker_dropped_outcome(
+    question: dict, qid: str, ks: tuple[int, ...],
+) -> dict[str, Any]:
+    """#1349: the outcome recorded when the vector-arm breaker DROPS a
+    question — a drop, never a failure, and never recall 0 in the means.
+
+    #2516 (C1): the two recall rows do NOT share a drop convention, because
+    they do not share an empty-gold-set convention in band. The official
+    ``session_recall@k`` dict is 0.0 for a gold-less question
+    (``retrieve.py::_recall_metrics``), so a drop mirrors that with 0.0. The
+    gold-cutoff VARIANT is ``None`` there — in band and in
+    ``w7_publish`` — because an empty denominator is NOT ELIGIBLE rather than
+    a fabricated perfect score, and absence becomes ``n_excluded``. Mirroring
+    the VARIANT's in-band ``None`` here is what keeps ``n_gold`` a property of
+    the DATA: hard-coding 0.0 counted a gold-less question as a 0.0 miss on a
+    dropped question and as unmeasured on a graded one, so the variant's
+    denominator moved with whether a breaker happened to open.
+    """
+    return {
+        "question_id": qid,
+        "question_type": question.get("question_type", ""),
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None,
+        "hypothesis": None,
+        "session_recall@k": {str(k): 0.0 for k in ks},
+        "session_recall@n_gold": (
+            0.0 if (question.get("answer_session_ids") or []) else None),
+        "turn_recall@k": {str(k): 0.0 for k in ks},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+
+
 def _activate_beliefs_for_question(
     sdk, *, namespace: str | None, qid: str,
 ) -> dict[str, Any]:
@@ -5374,6 +5407,13 @@ def run_evaluation(
                         "s4_out_tokens": (ingest_stats.get("recovery") or {}).get("s4_out_tokens", 0),
                         "s4_merge": ingest_stats.get("s4_merge", {}),
                         "session_recall@k": ret["session_recall@k"],
+                        # #2516 (C1): the labelled `recall_all@N_gold` cutoff
+                        # variant's per-question fraction (retrieve.py computes
+                        # it on the SAME ranking `session_recall@k` is measured
+                        # on). Absent on a retriever arm that does not emit it →
+                        # the publication layer counts it n_missing, never 0.0.
+                        "session_recall@n_gold": ret.get(
+                            "session_recall@n_gold"),
                         "turn_recall@k": ret["turn_recall@k"],
                         "evidence_recall@k": ret.get("evidence_recall@k"),
                         # R1 (#1540): the M6 raw-chunk containment view, wired
@@ -5623,17 +5663,8 @@ def run_evaluation(
                     # means (count surfaced in report["dropped"]). Never
                     # recall 0.
                     with _lock:
-                        dropped_outcome = {
-                            "question_id": qid,
-                            "question_type": question.get("question_type", ""),
-                            "breaker_open": True,
-                            "dropped_reason": "breaker_open",
-                            "label": None,
-                            "hypothesis": None,
-                            "session_recall@k": {str(k): 0.0 for k in ks},
-                            "turn_recall@k": {str(k): 0.0 for k in ks},
-                            "ndcg@10": None, "p@10": None, "p@5": None,
-                        }
+                        dropped_outcome = _breaker_dropped_outcome(
+                            question, qid, ks)
                         outcomes.append(dropped_outcome)
                         done[qid] = dropped_outcome
                         # #2185: breaker-open spend is OVERHEAD (Am 20/24) —
@@ -6238,7 +6269,26 @@ def outcomes_to_report(
         "outcomes": [
             {k: o.get(k) for k in (
                 "question_id", "question_type", "question_date", "label",
-                "hypothesis", "session_recall@k", "turn_recall@k",
+                "hypothesis", "session_recall@k",
+                # #2516 (C1) — the labelled ``recall_all@N_gold`` variant's
+                # per-question fraction MUST ride this projection: it is the
+                # ONLY path a real run's outcome takes into the published
+                # report (``build_report`` spreads this projected list over
+                # its raw one under ``extra["outcomes"]``, and
+                # ``w7_publish --report`` reads THAT list), so a variant key
+                # missing here is stripped from every receipt forever while
+                # the aggregate still looks right — ``GOLD_CUTOFF_ROW`` reads
+                # ``value: None, n: 0, n_excluded: <all non-_abs>`` on a real
+                # run and nothing goes red (the #10137 failure mode the
+                # ``belief_activation`` entry below already records: a
+                # published aggregate DROPPED the per-question cells it was
+                # counted from).
+                # Unconditional, like ``evidence_recall@k``/``breaker_open``
+                # beside it: the value is legitimately ``None`` for a question
+                # with no gold session, and ``w7_publish`` counts a null as
+                # ``n_excluded`` — never a fabricated 0.0.
+                "session_recall@n_gold",
+                "turn_recall@k",
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "ingest_error_text",
@@ -7379,8 +7429,9 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
         # compute_embedding (ingest-time interception) AND sets the
         # _ACTIVE_CACHE global that encode_query reads (query-encode
         # persistence across questions/processes). Without .active() the
-        # cache is dead code — every question re-encodes the overlapping
-        # haystack (the 5-10x redundancy the cache exists to eliminate).
+        # cache is dead code — every question re-encodes the haystack text
+        # whose vectors a previous question already produced (measured 1.299x
+        # / 23.0% of encode units in one pass — #1779 haystack_overlap).
         with cache.active():
             outcomes, _report = run_evaluation(
                 instances, reader=None, judge=None, ks=ks, top_k=top_k,

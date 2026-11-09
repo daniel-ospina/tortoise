@@ -28,11 +28,23 @@ one is not**:
 - **§8 product-owner decision — DECIDED (c), 2026-09-22** (owner ruling, issue comment 5787468112),
   with its `OVERRIDES:` line carried in §8. This section said "one product-owner decision open" for
   six weeks *after* the ruling landed; corrected 2026-11-07.
-- **Phase-0 sealed baseline receipt (#2516 indicator 1) — NOT RUN.** Evals are out of scope for this
-  reconciliation (the dispatch brief parks them; no owner ruling on it is recorded on this issue). The
-  tracker's own recorded blockers for the same runs are different in kind — lane budget / ingest cost
-  (#10540 "the run does not fit this lane's budget"; #10538 "ingest-bound at 156–375 s/q") — **plus**
-  the eval lane's embedder preflight failing **under load**: the blocker receipt
+- **Phase-0 sealed baseline receipt (#2516 indicator 1) — NOT RUN, and now gated by name.** The gate is
+  the owner's **2026-11-07 finite-gate ruling**, not a parked lane: *"if we have other p1,p0,p2 that we
+  know affect the eval, then let's first fix those. And then we run the eval. what i dont want is to
+  waste an eval while we know what's broken"* (#8486 comment 6710955512). That ruling names **eight**
+  affected items and makes them dispatchable; **#2516 is one of them**, and its own deliverable is the
+  reporting surface (below), not the run — *"none of them needs an eval to close: their deliverable is
+  the fix, each with its own mechanism-level test"*. The run happens when the named set is empty, under
+  the unchanged `HARD_STOP_USD = 10.00`.
+  **Two blockers this bullet used to name are RETIRED** (re-measured 2026-11-08 at `53d2ab7854`):
+  **#10540** is CLOSED (merge `5f033b6d221`, `git merge-base --is-ancestor` → true) and **#11070** is
+  CLOSED (merge `98df3bd4c`, ancestor → true). They were current at this doc's own pin (`de72cfd455a`,
+  2026-11-06 18:05), which is why the rows below still listed them — stale-by-pin, not wrong when
+  written. Do not read a retired blocker as an unblock: **budget and ingest cost are properties of the
+  run, not of the issues** that quoted them, and #10538 (the ingest-cost blocker in its own right) is
+  still OPEN.
+  The third constraint is unchanged and is **not** an issue: the eval lane's embedder preflight fails
+  **under load** — the blocker receipt
   (`docs/scoping/receipts/2026-09-22-2513-embedder-preflight-blocker.json`, PR #4679) records three
   consecutive `--mock` preflights timing out at 30.0–30.1 s at load ~250 on 10 CPUs, and #2518 recorded
   the same failure at `--workers 6` — after which `--mock` continues keyword-only, i.e. it measures a
@@ -162,6 +174,33 @@ filtered):
 2. **official `recall_all@5`** binary projection — `session_recall@k == 1.0` over the
    question's answer sessions (all pieces in top-5). This is the *all-pieces* semantics the
    program targets; partial-evidence questions score 0 until C3 makes the pool complete.
+2b. **`recall_all@N_gold` — the ADDITIVE cutoff variant (sealed 2026-11-08, #2516).** `recall_all@5`
+   is **identically `0`** for any question whose evidence set exceeds five pieces, at **any** ranking
+   quality — the fifth slot is a wall — so the spread-evidence class §1 attributes 53 % of the misses to
+   **cannot register an improvement under the official cutoff even when the fix works perfectly** (the
+   arithmetic is recorded on #10538, decision relay 2026-11-07T17:54Z, which names #2516 as the issue
+   that seals it). The variant measures the **same** all-or-nothing binary at a cutoff equal to each
+   question's **own** gold-session count:
+
+   ```text
+   recall_all@N_gold = all(gold session in ranked[:N_gold]),  N_gold = |gold sessions|
+   ```
+
+   It is a **declared labelled variant**, never a substitution (R12): `recall_all@5` stays the official
+   row, untouched and comparable, and the variant rides beside it with its own `n`. Live in
+   `w7_publish.GOLD_CUTOFF_ROW` (top-level + per gate category in `category_variant_rows`), fed by
+   `retrieve.py::_session_recall_at_n_gold` (one implementation, called from both retrieval arms) →
+   `session_recall@n_gold` on the **same** ranking the `@5` fraction is measured on, and surfaced per
+   category as a fraction in `report.py`'s `retrieval_by_category`. A report that predates it counts
+   `n_missing`, never `0.0`.
+
+   ⚠️ **Ceiling — the wall moved from 5 to the arm's depth, it did not disappear.** The variant is
+   computed over the arm's *measured surface*, so the achievable value is
+   `min(n_gold, depth) / n_gold`: the vector arm fetches `limit=max(ks)` (20 by default) and the hybrid
+   rerank / pool-only arms truncate `pool[:top_k]` (20), while the plain no-rerank hybrid arm leaves the
+   deduped pool untruncated. A question whose gold-session count exceeds its arm's depth therefore still
+   cannot reach `1.0` at its own cutoff, and the ceiling differs **by arm** — compare this row across
+   arms only where `n_gold ≤ depth`.
 3. **reader_evidence@5 / reader_surface@k** — the evidence that actually enters the reader
    context (C1 #1745 context-level measures), so a pool win cannot be eaten by the
    assembly caps.
@@ -340,10 +379,10 @@ cohort run, which is blocked (§10.4).
 
 | Remaining | Why it is open, stated as a testable condition |
 |---|---|
-| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. Blocked on: evals parked for this lane by the dispatch brief (no ruling recorded on the issue) **and** the tracker's own recorded blockers for the same runs (#10540 budget, #10538 ingest cost) **and** the eval-lane embedder preflight failing under load (§0). The metric it needs already exists (§10.2 row 3), so this is a *run*, not a build. |
-| **#10538 (C6 tail)** | The DATE-RANGE half landed (#10549); the unit's Target is not evidenced — same blocked run. |
+| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. The gate is the owner's 2026-11-07 finite-gate ruling (§0): #2516 is one of the eight **named** items, and its deliverable is the reporting surface plus a mechanism-level test — *not* the run (*"none of them needs an eval to close"*). **Retired as blockers (re-measured 2026-11-08 at `53d2ab7854`):** #10540 (CLOSED, merge `5f033b6d221`) and #11070 (CLOSED, merge `98df3bd4c`) — both were current at this doc's pin `de72cfd455a`. Remaining: the **run**, gated on the other named items (#10538, #10360, #2683, #2684, #2518, #8775, all OPEN) **and** the load-dependent embedder preflight (§0). |
+| **#10538 (C6 tail)** | The DATE-RANGE half landed (#10549); the unit's Target is not evidenced — same gated run. **Sealed here, 2026-11-08:** the metric re-cut this issue's decision relay assigns to #2516 — `recall_all@N_gold`, the official all-or-nothing binary at a cutoff equal to the question's own gold count — now rides the publication surface as a **declared labelled variant** (`w7_publish.GOLD_CUTOFF_ROW`, per category in `category_variant_rows`, fraction per category in `report.py`). `recall_all@5` is untouched. |
 | **#2518 (C2)** | Measured and **not adopted**; its plan's fail-safe OFF stands. Open as a decision, not as work. |
-| **#10540 (C4 survivor)** | Re-injection that survives #8713; its instrument landed (#10632) but not the fix. |
+| **#10540 (C4 survivor)** | **CLOSED 2026-11-07T17:28:40Z** — merge `5f033b6d221`, an ancestor of `main` at `53d2ab7854` (`git merge-base --is-ancestor` → true). The row read *"its instrument landed (#10632) but not the fix"* because this doc's pin (`de72cfd455a`, 2026-11-06 18:05) **preceded the merge by 66 minutes** — stale-by-pin, not a live blocker. Its constraint (reader-window crowding) still rides any run's budget; closing the *issue* did not make the run cheaper. |
 | **#2567 (C3 shell, P0)** | The shell and its arm markers landed (#2608; `tortoise/coverage_loop.py`, `TORTOISE_LME_COVERAGE_LOOP` off-by-default, markers/iteration-cap tests in §10.3). Its Target — official `recall_all@5` ≥ +0.06 on the sealed MSR slice with a Wilson lower bound ≥ +0.02 — is the same blocked sealed run as #2516, so it closes on that receipt, not before. |
 | **#4211 (candidate-scope item 1, recall half)** | Open child of this epic (`Epic: #2513`), not one of the C1–C6 children: it introduces the turns the pool never saw via the `(Session)-[:CONTAINS]->(turn)` hierarchy (1 of the 5 measured window-miss questions has its answer-bearing turns outside the ~120-item pool, so no re-ranker or reader change can reach them). Its own O/I/T is the exit; nothing in §10.2's table is its landing evidence. |
 | **#10553 (C5 measurement)** | Exact-count accuracy before/after for the reader aggregation discipline. |

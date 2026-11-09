@@ -65,9 +65,13 @@ const PROVISION_PATH = "/functions/v1/tenant-provision";
  * OURS and has no meaning upstream (and leaking it would hand the upstream our
  * session credential). `content-length` is stripped because the body is
  * streamed — fetch recomputes framing, and a stale length is how a truncated
- * body gets accepted. `origin` is stripped deliberately: this is a SERVER-SIDE
- * call, so the Edge Function's browser-CSRF origin gate does not apply, and
- * forwarding the dashboard's origin would only couple us to its allowlist.
+ * body gets accepted. `origin` is stripped deliberately AND load-bearingly:
+ * the Edge Function is SERVER-ONLY since #1120 and refuses ANY request that
+ * carries `Origin` with a 403 BEFORE it verifies the token, so forwarding the
+ * dashboard's origin would make every signup fail (it is no longer a matter of
+ * "coupling us to an allowlist" — there is no allowlist left). Do not relax
+ * this strip; `tests/e2e/auth/test_provision_bff.py` sends a browser-shaped
+ * `Origin` and asserts the upstream never sees one.
  * Authorization is still fully enforced upstream (#802): the attached token's
  * identity must match the `user_id`/`email` in the body.
  */
@@ -211,8 +215,9 @@ export const onRequest: PagesFunction<Env> = async ({ request, env }) => {
   const outHeaders = new Headers();
   for (const [k, v] of upstreamRes.headers) {
     const name = k.toLowerCase();
-    // Same-origin only: never advertise a cross-origin capability, even if the
-    // upstream (which speaks CORS to its own direct browser callers) sets one.
+    // Same-origin only: never advertise a cross-origin capability. The upstream
+    // has no browser caller at all (#1120 made tenant-provision server-only), so
+    // an `access-control-*` header on its response can only be stray.
     if (STRIP_RESPONSE.has(name) || name.startsWith("access-control-")) continue;
     outHeaders.set(k, v);
   }

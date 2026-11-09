@@ -1,0 +1,686 @@
+{
+  "corpus": "why_suite_adversarial",
+  "entries": [
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_c"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "near_tie",
+      "point_id": "near_tie-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_c"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "near_tie",
+      "point_id": "near_tie-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_c"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "near_tie",
+      "point_id": "near_tie-topic-2"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_c"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "near_tie",
+      "point_id": "near_tie-topic-3"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter_c"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter_a",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_b",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_c",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "multi_nand",
+      "point_id": "multi_nand-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter_c"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter_a",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_b",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_c",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "multi_nand",
+      "point_id": "multi_nand-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter_c"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter_a",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_b",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_c",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "multi_nand",
+      "point_id": "multi_nand-topic-2"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter_c"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter_a",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_b",
+            "severity": "medium"
+          },
+          {
+            "role": "counter_c",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "multi_nand",
+      "point_id": "multi_nand-topic-3"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "superseded",
+            "target_role": "successor"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": false
+      },
+      "family": "chain",
+      "point_id": "chain-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "superseded",
+            "target_role": "successor"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": false
+      },
+      "family": "chain",
+      "point_id": "chain-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "superseded",
+            "target_role": "successor"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": false
+      },
+      "family": "chain",
+      "point_id": "chain-topic-2"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "superseded",
+            "target_role": "successor"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": false
+      },
+      "family": "chain",
+      "point_id": "chain-topic-3"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_c"
+          }
+        ],
+        "favored_option_role": "option_c",
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": true
+      },
+      "family": "wide_decision",
+      "point_id": "wide_decision-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_c"
+          }
+        ],
+        "favored_option_role": "option_c",
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": true
+      },
+      "family": "wide_decision",
+      "point_id": "wide_decision-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_c"
+          }
+        ],
+        "favored_option_role": "option_c",
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": true
+      },
+      "family": "wide_decision",
+      "point_id": "wide_decision-topic-2"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": true,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_c"
+          }
+        ],
+        "favored_option_role": "option_c",
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": true
+      },
+      "family": "wide_decision",
+      "point_id": "wide_decision-topic-3"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_a"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": true
+      },
+      "family": "precedence",
+      "point_id": "precedence-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          },
+          {
+            "kind": "tradeoff",
+            "target_role": "option_a"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": true,
+        "support_chain_sufficient": false,
+        "tradeoff_sufficient": true
+      },
+      "family": "precedence",
+      "point_id": "precedence-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "boundary",
+      "point_id": "boundary-topic-0"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "boundary",
+      "point_id": "boundary-topic-1"
+    },
+    {
+      "clean": false,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support"
+          },
+          {
+            "kind": "nand",
+            "target_role": "counter"
+          }
+        ],
+        "nand_roles": [
+          {
+            "role": "counter",
+            "severity": "high"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "boundary",
+      "point_id": "boundary-topic-2"
+    },
+    {
+      "clean": true,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_a"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "clean",
+      "point_id": "clean-topic-0"
+    },
+    {
+      "clean": true,
+      "expected": {
+        "conflict_surfacing": false,
+        "dig_deeper_targets": [
+          {
+            "kind": "supports",
+            "target_role": "support_a"
+          }
+        ],
+        "resolved": false,
+        "support_chain_sufficient": true,
+        "tradeoff_sufficient": false
+      },
+      "family": "clean",
+      "point_id": "clean-topic-1"
+    }
+  ],
+  "protocol": "why_suite_corpus_v2_adversarial",
+  "schema_version": 1,
+  "seed": 4275,
+  "suite": "why_suite"
+}

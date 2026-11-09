@@ -165,21 +165,24 @@ def resolve_expected(gold_entry: dict, role_map_entry: dict) -> dict:
         target_id = (role_map_entry or {}).get(role)
         if target_id:
             targets.append({"kind": t.get("kind"), "target_id": target_id})
-    # The EP-favored alternative is a PLANT property: seeding always plants
+    # The EP-favored alternative is a PLANT property.  v1 seeds always plant
     # option_a as max-ep (the (4,1) vs (5,2) split) and the plant-time
-    # tie-freedom assert in seeding.py locks that invariant.  Resolution
-    # reads the role map's option_a (never a hardcoded graph id) and FAILS
-    # LOUD when a tradeoff-sufficiency gold exists without an option_a role
-    # — a silently-None favored id would mass-fail every sufficiency grade
-    # with no explanation (review P1b, #2100: gold may legitimately point
-    # tradeoff NAVIGATION at either alternative, but sufficiency is graded
-    # against the EP-favored one only).
-    favored_option_id = (role_map_entry or {}).get("option_a")
+    # tie-freedom assert in seeding.py locks that invariant.  The adversarial
+    # corpus (#2275) plants the favorite THIRD, so gold may name the role
+    # explicitly (``expected.favored_option_role``, default ``option_a``) —
+    # resolution always reads the ROLE MAP (never a hardcoded graph id) and
+    # FAILS LOUD when a tradeoff-sufficiency gold exists without a resolvable
+    # role — a silently-None favored id would mass-fail every sufficiency
+    # grade with no explanation (review P1b, #2100: gold may legitimately
+    # point tradeoff NAVIGATION at either alternative, but sufficiency is
+    # graded against the EP-favored one only).
+    favored_role = expected.get("favored_option_role") or "option_a"
+    favored_option_id = (role_map_entry or {}).get(favored_role)
     if bool(expected.get("tradeoff_sufficient")) and not favored_option_id:
         raise ValueError(
             f"gold {gold_entry.get('point_id')!r} expects tradeoff "
-            "sufficiency but the planted role map has NO option_a role — "
-            "the EP-favored alternative cannot be resolved (corpus/gold "
+            f"sufficiency but the planted role map has NO {favored_role!r} role "
+            "— the EP-favored alternative cannot be resolved (corpus/gold "
             "inconsistency, never a silent mass failure)"
         )
     return {
@@ -193,6 +196,7 @@ def resolve_expected(gold_entry: dict, role_map_entry: dict) -> dict:
         # RESOLVED — graded by the anti-ghost arm (never a live dispute).
         "expected_resolved": bool(expected.get("resolved")),
         "favored_option_id": favored_option_id,
+        "favored_option_role": favored_role,
     }
 
 
