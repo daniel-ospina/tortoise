@@ -431,7 +431,7 @@ same step with the same tail is the investigation.
   measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
   queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
   `OK`: an unmeasured wait is not a measured-healthy one.
-- **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 28) by construction; with
+- **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 29) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
   many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work. It bounds
@@ -557,8 +557,8 @@ matrices**: `manifest-integrity`, `surface-guard` and `workflow-lint` carry no `
 and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted-api` and
 `test-record-postgres` need only `changes` — the same trigger the three matrices wait on.
 (`changes` is itself a fourth `needs:`-less job and is excluded from the 8 deliberately: the
-matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 28
-jobs** (17 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
+matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 29
+jobs** (18 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
 most **17 can be in flight at once** (9 capped matrix slots + the 8 eligible non-matrix). **The
 pool does not bound that** — it bounds only the subset that lands on it. `test` and
 `test-carve-out` ask for `ubuntu-latest`, and `test-slow` pins `ubuntu-24.04` — but on this repo

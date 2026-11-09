@@ -8314,7 +8314,7 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
     the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
     which the matrices wait on and so cannot overlap them; 5 need only
-    `changes`), so on a full selection a PR requests 28 jobs (17 matrix legs +
+    `changes`), so on a full selection a PR requests 29 jobs (18 matrix legs +
     11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
     at once. The POOL does not bound that — it bounds only the subset that lands
     on it (`test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
@@ -8403,6 +8403,151 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
         f"are left for other PRs: the bound is {measured_pool} - "
         f"{reserved_for_others} = {measured_pool - reserved_for_others} "
         "(#6744)")
+
+
+#: The present-tense "how many jobs does ONE full-selection run emit" claims. There are FOUR
+#: copies of that count in the tree and `fast_shards: 9 -> 10` (#11602) moved all four: the
+#: `max-parallel` comment block in `python-ci.yml` states it TWICE (the second copy, in the same
+#: block, is the one a sibling fix missed), `docs/ops/ci-wall-clock.md` §5 and §7 each state it,
+#: and this file's own `test_every_matrix_bounds_its_fan_out_below_the_measured_pool` docstring
+#: states it. Nothing read any of them, which is how one file came to claim `18` matrix jobs at
+#: `:749` and `17` matrix legs at `:798` a screen apart.
+#:
+#: ⛔ Read through `re.sub(r"\s+", " ", ...)` with `**` stripped: the doc wraps
+#: `**requests 29` / `jobs** (18 matrix legs` across two lines, so a line-oriented pattern would
+#: match nothing there and stay silently green — the exact vacuity this pin exists to avoid.
+_FULL_SELECTION_TOTAL_RE = re.compile(
+    r"(?:REQUESTS|requests)\s+(?P<total>\d+)\s+jobs\s*\((?P<legs>\d+)\s+matrix")
+_FULL_SELECTION_MAX_RE = re.compile(
+    r"`python-ci`\s+run\s+is\s+(?P<typical>\d+)\s+jobs\s*\(max\s+(?P<max>\d+)\)")
+
+
+def _full_selection_claim_violations(
+    sources: dict[str, str], total: int, legs: int,
+) -> list[str]:
+    """Every full-selection count stated in `sources` that disagrees with `total` / `legs`.
+
+    Pure, so the non-vacuity control below can feed it the PRE-FIX text instead of trusting a
+    comment that the pin would catch the numbers it was written to catch.
+    """
+    violations: list[str] = []
+    for name, text in sources.items():
+        flat = re.sub(r"\s+", " ", text.replace("**", ""))
+        for match in _FULL_SELECTION_TOTAL_RE.finditer(flat):
+            stated = (int(match.group("total")), int(match.group("legs")))
+            if stated != (total, legs):
+                violations.append(
+                    f"{name}: states {stated[0]} jobs ({stated[1]} matrix legs), but the "
+                    f"shipped shape emits {total} ({legs}) — {match.group(0)!r}")
+        for match in _FULL_SELECTION_MAX_RE.finditer(flat):
+            if int(match.group("max")) != total:
+                violations.append(
+                    f"{name}: states a max of {match.group('max')} jobs, but the shipped "
+                    f"shape requests {total} — {match.group(0)!r}")
+    return violations
+
+
+def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
+    """P2 (#11602 review at `4ddc9ec63a73`): the 9 -> 10 raise falsified four prose counts.
+
+    `da93af0e1c39` rewrote `python-ci.yml:749-750` to *""requests **18** matrix jobs ... (**10**
+    fast + 5 slow + 3 carve-out)""* for exactly this reason — ""Doc prose that understates the
+    emitted shape is how the next reader infers a 9-leg matrix from a file that emits 10"" — and
+    missed the same block's `:798`, both `ci-wall-clock.md` §5/§7 copies, and this file's
+    sibling docstring. On `origin/main` (9 fast legs) 17 legs / 28 jobs was correct; the raise
+    is what made it wrong, so this is attributable to the change, not inherited.
+
+    The counts are DERIVED, never hard-coded, so a future re-tune needs the prose moved with it:
+    `legs = fast + slow + carve` shard counts from the manifest, `non_matrix_pr = every job in
+    `python-ci.yml` minus the matrix jobs minus the push-gated ones, and the in-flight figure is
+    NOT derived — it is `sum(caps) + eligible non-matrix` and is pinned by the sibling test
+    above, which is also why `:798`'s ""at most 17"" is correct at 10 fast legs. `17` therefore
+    appears twice on that line with two different meanings; only the LEG count is this pin's.
+
+    Coverage is asserted per source, so deleting a stale sentence is not a way to pass: the pin
+    reds on a missing claim the same way it reds on a wrong one. ⛔ Deliberately NOT reached: the
+    past-tense ""up to **17** matrix jobs (9 fast + 5 slow + 3 carve-out)"" in §7's ""before
+    #6744"" paragraph, and the ""(17 jobs)"" inside this file's other docstring — both describe
+    the MEASURED past shape at the 9-leg measurement window, and rewriting a dated measurement to
+    today's shard count is how a record becomes a guess.
+    """
+    from tools.ci_selection import (carve_shard_count, fast_shard_count,
+                                    load_manifest, slow_shard_count)
+
+    manifest = load_manifest()
+    jobs = _load_python_ci()["jobs"]
+    matrix_jobs = {
+        job_id for job_id, job in jobs.items()
+        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
+    }
+    # anchor the population before deriving from it: an emptied/moved matrix set would make
+    # `legs` a sum of nothing and the prose trivially "agree"
+    assert len(matrix_jobs) == 3, matrix_jobs
+    push_gated = {
+        job_id for job_id, job in jobs.items()
+        if job_id not in matrix_jobs
+        and "github.event_name == 'push'" in str(job.get("if") or "")
+    }
+    assert push_gated == {"canary-streak"}, (
+        "the push-gated job set moved, so `non_matrix_pr` below no longer means "
+        f"'jobs a PR actually requests'; got {sorted(push_gated)}")
+    legs = (fast_shard_count(manifest) + slow_shard_count(manifest)
+            + carve_shard_count(manifest))
+    non_matrix_pr = len(jobs) - len(matrix_jobs) - len(push_gated)
+    total = legs + non_matrix_pr
+    assert legs >= 3 and non_matrix_pr >= 1, (legs, non_matrix_pr)
+
+    sources = {
+        ".github/workflows/python-ci.yml": (
+            REPO / ".github" / "workflows" / "python-ci.yml").read_text(),
+        "docs/ops/ci-wall-clock.md": (
+            REPO / "docs" / "ops" / "ci-wall-clock.md").read_text(),
+        "tests/test_ci_selection.py": Path(__file__).read_text(),
+    }
+    sites = {
+        name: (len(_FULL_SELECTION_TOTAL_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))),
+               len(_FULL_SELECTION_MAX_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))))
+        for name, text in sources.items()
+    }
+    assert sites == {
+        ".github/workflows/python-ci.yml": (1, 0),
+        "docs/ops/ci-wall-clock.md": (1, 1),
+        "tests/test_ci_selection.py": (1, 0),
+    }, (
+        "the full-selection claim sites moved (a sentence was added, reworded past this pin, or "
+        f"deleted): {sites}. Re-point the regexes at the new wording instead of letting the "
+        "remaining copies drift unchecked")
+
+    violations = _full_selection_claim_violations(sources, total, legs)
+    assert not violations, (
+        "a full-selection count disagrees with the shape `python-ci.yml` emits today — prose "
+        "that understates the emitted shape is how the next reader infers a 9-leg matrix from a "
+        "file that emits 10:\n  " + "\n  ".join(violations))
+
+    # NON-VACUITY, derived from the finding rather than hard-coded: the four PRE-FIX copies
+    # (#11602 at 9 fast legs, before the raise) must be rejected by this same checker, and the
+    # line-WRAPPED form must be read, not skipped. ⛔ Built with f-strings ON PURPOSE: a literal
+    # `… 28 jobs (17 matrix …` here would itself match the scanner below (this file is one of the
+    # pinned sources) and turn the pin red on its own non-vacuity fixture.
+    pre_fix = {
+        "python-ci.yml": (f"On a full selection a PR REQUESTS {total - 1} jobs "
+                          f"({legs - 1} matrix legs + 11 non-matrix"),
+        "ci-wall-clock.md wrapped": (f"a PR therefore **requests {total - 1}\njobs** "
+                                     f"({legs - 1} matrix legs + 11 non-matrix"),
+        "ci-wall-clock.md max": (f"A `python-ci` run is 20 jobs (max {total - 1}) by "
+                                 "construction"),
+    }
+    pre_fix_violations = _full_selection_claim_violations(pre_fix, total, legs)
+    assert len(pre_fix_violations) == len(pre_fix), (
+        "the checker is vacuous on the very text this fix replaced: "
+        f"{pre_fix_violations}")
+    assert any(f"{total - 1} jobs" in v and f"{legs - 1} matrix legs" in v
+               for v in pre_fix_violations), pre_fix_violations
+    # the wrapped copy is the one a line-oriented pattern silently skips — key the assertion on
+    # its SOURCE NAME: flattening makes its matched text identical to the unwrapped copy's.
+    assert any(v.startswith("ci-wall-clock.md wrapped:")
+               and f"requests {total - 1} jobs ({legs - 1} matrix" in v
+               for v in pre_fix_violations), pre_fix_violations
 
 
 def test_no_required_check_names_a_fast_leg():
