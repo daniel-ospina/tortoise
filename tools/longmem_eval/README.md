@@ -439,7 +439,7 @@ distinct over 124,345 chunk prompts, **27 repeats**. `realizable` therefore
 requires the reuse to be *material* (`MATERIAL_HIT_SHARE`, 1% of the avenue's
 own unit population), not merely > 1.0: 27 of 124,345 is a rounding error of
 the LLM work. The numbers are pinned by
-`tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
+`tests/test_haystack_overlap_1779.py::test_census_on_real_s_split`
 (@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
 instead of silently re-basing them.
 

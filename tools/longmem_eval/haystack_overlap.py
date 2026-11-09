@@ -40,9 +40,12 @@ drift):
     dataset-derivable (its chunks are ``chunk_transcript`` over **LLM-derived**
     EDUs), so the raw-chunk leg is the finest cell a dataset-only census can
     measure — the same 'dataset-derivable only' boundary the encode-unit
-    denominator states. ``extract_session_v2`` is also the v1 path's extractor
-    (``ingest.py`` calls it), so this is the product's prompt granularity, not
-    a v2-only shape;
+    denominator states. ``extract_session_v2`` is the **v2** leg's extractor
+    (``ingest_v2.py`` → ``extract_session_v2``); the v1 leg
+    (``ingest.py``) does no LLM extraction at all — it writes deterministic
+    episodic turns and raw chunks only — so the S1 prompt unit is the v2
+    path's granularity. That makes the response-cache avenue *more* clearly
+    unreachable, not less: the v1 leg renders no prompt to cache;
   * **encode units** — the two texts ``ingest_haystack`` /
     ``ingest_haystack_v2`` embed per session: one turn Point per turn
     (``ingest._turn_text``) and one raw chunk per ``chunk_turns`` window
@@ -134,7 +137,7 @@ CHUNK_PROMPT_IDENTITY = "rendered S1 chunk text + session_date"
 MATERIAL_HIT_SHARE = 0.01
 
 #: The measured S-split census (2026-11-08, 500 questions, chunk_turns=2).
-#: Pinned by `tests/longmem_eval/test_haystack_overlap_1779.py::test_census_on_real_s_split`
+#: Pinned by `tests/test_haystack_overlap_1779.py::test_census_on_real_s_split`
 #: (a @slow test — CI has no dataset) so the numbers in the docs cannot rot
 #: silently, and so a dataset refresh surfaces as a red pin rather than as a
 #: quietly re-based published reuse factor. The `decision` block is NOT pinned
@@ -519,6 +522,19 @@ def main(argv: list[str] | None = None) -> int:
     instances = lme_dataset.load_dataset(
         split=args.split, limit=args.limit, data_path=args.data,
         download=args.download)
+    # #1779: an EMPTY population is not a measurement, and a census over zero
+    # instances publishes a full, authoritative-looking VERDICT (`0.0x — NOT
+    # realizable`) plus a fabricated explanation — an empty or mistyped read
+    # would invert the built cache's published "realizable" with exit 0. Fail
+    # closed with a refusal instead: a census must never report on a
+    # population it did not read.
+    if not instances:
+        print(
+            "[haystack_overlap] refusing to publish a census over 0 instances "
+            "— no dataset read (check --data/--split, or drop --limit)",
+            file=sys.stderr,
+        )
+        return 2
     census = census_overlap(instances, chunk_turns=args.chunk_turns)
     payload = json.dumps(census, indent=2, sort_keys=True) + "\n"
     if args.out:

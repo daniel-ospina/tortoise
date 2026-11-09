@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tools.longmem_eval import dataset as lme_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.haystack_overlap import (  # noqa: E402, RUF100
@@ -236,7 +236,7 @@ def test_both_ingest_legs_CALL_turn_text_and_keep_no_inline_twin():
     enumeration ratchets: each leg must CALL `_turn_text`, and may carry at most
     the ONE `f"[{role}]` occurrence that is the definition's own body.
     """
-    root = Path(__file__).resolve().parent.parent.parent / "tools" / "longmem_eval"
+    root = Path(__file__).resolve().parent.parent / "tools" / "longmem_eval"
     # (file, `_turn_text` DEFINITIONS, `_turn_text` CALL SITES)
     for name, defs, calls in (("ingest.py", 1, 1), ("ingest_v2.py", 0, 1)):
         source = (root / name).read_text(encoding="utf-8")
@@ -400,6 +400,38 @@ def test_cli_passes_download_through(tmp_path, monkeypatch, capsys):
     capsys.readouterr()
 
 
+def test_cli_refuses_an_empty_population_instead_of_publishing_a_verdict(
+    tmp_path, capsys,
+):
+    """A census over ZERO instances must refuse, not publish a verdict.
+
+    An empty (or mistyped) read used to exit 0 while printing a complete,
+    authoritative-looking verdict — `encode_cache… reuse 0.0x — NOT realizable`
+    plus a *fabricated* explanation ("0 S1 chunk prompts render from the chunk
+    leg … so a repeated chunk text carried by a differently-dated session is a
+    different prompt") for a population holding no chunk texts at all. That
+    inverts the built cache's published `realizable` on no evidence, which is
+    the fail-open direction: `--limit 0`, an empty `--data` file and a mistyped
+    path all reach it. The refusal must be exit 2, name the cause, and print NO
+    census body.
+    """
+    empty = tmp_path / "empty.json"
+    empty.write_text("[]", encoding="utf-8")
+
+    rc = main(["--data", str(empty), "--json"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, f"an empty population must exit 2, not {rc}"
+    assert "refusing" in captured.err, (
+        f"the refusal must say what it refused: {captured.err!r}")
+    assert "0 instances" in captured.err, (
+        f"the refusal must name the population size: {captured.err!r}")
+    # ★ the point: no verdict may reach stdout. A caller that pipes this into a
+    # report must get nothing to report, never a `NOT realizable` it can quote.
+    assert captured.out.strip() == "", (
+        f"an empty population must publish NO census body: {captured.out!r}")
+
+
 def test_the_research_doc_publishes_this_files_REAL_test_count():
     """§5 of the research note states this suite's size, so the size is DERIVED.
 
@@ -410,7 +442,7 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
     from collection, which depends on the pytest invocation) and compared to
     the sentence §5 publishes: a new test without a §5 update reds here.
     """
-    doc = (Path(__file__).resolve().parents[2]
+    doc = (Path(__file__).resolve().parents[1]
            / "docs/research/2026-11-08-1779-eval-session-dedup.md")
     tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
     tests = [n for n in tree.body

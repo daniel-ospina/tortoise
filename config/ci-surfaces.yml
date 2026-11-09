@@ -7943,24 +7943,29 @@ surfaces:
   # #1779: the cross-question haystack-overlap census (`tools/longmem_eval/haystack_overlap.py`)
   # and the pinned measured reuse factors. `tools/longmem_eval/` is a SOURCE_PATTERNS
   # entry of THIS surface, so a census-tool-only change selects `eval` and REPLACES the
-  # `core` fallback (#2938). ⛔ This row is surface OWNERSHIP, not arming: as a
-  # `longmem_eval/**` path it is a non-gating `on_demand` member (#10194/#10206), and
-  # `on_demand_files()` SUBTRACTS that subtree from `test_files` on every non-full
-  # selection (`tools/ci_selection.py:4269`) — so the `@slow` pin that re-derives the
-  # published numbers does NOT run on a census-tool change with or without this row.
-  # ⛔ And NO CI lane re-derives it: the on-demand lane (`eval-suite-manual.yml`,
-  # #10194) provisions the embedder and FalkorDB but never
-  # `~/.cache/tortoise-longmemeval`, so the pin SKIPS there (measured: grep for
-  # TORTOISE_LME_CACHE_DIR/longmemeval over
-  # `.github/workflows/` returns nothing). The numbers are re-derived only by running
-  # `test_census_on_real_s_split` on a box that holds the cached S split (research
-  # note §8); provisioning the dataset in CI is out of scope for this measurement-only
-  # PR, so it is recorded as the gap rather than implied away. The row is
-  # still correct: it is the ownership answer `--surface-audit`/`classify_test_file`
-  # gives for THIS file.
-  # Do NOT "fix" that gap by dropping `longmem_eval/**` from `on_demand` — that reverses
+  # `core` fallback (#2938).
+  # ⛔ THE FILE LIVES AT `tests/`, NOT THE SUBTRACTED `tests/longmem_eval/` SUBTREE —
+  # same #10194/#10206 reasoning as the `test_temporal_leg_non_eviction_receipt_11494.py`
+  # sibling below. `on_demand_files()` SUBTRACTS `longmem_eval/**` from `test_files` on
+  # every non-full selection (`tools/ci_selection.py:4269`), so a file under that
+  # subtree is off the gate entirely: measured on this branch, a PR touching
+  # `tools/longmem_eval/ingest.py` selects 142 test files and NOT ONE from
+  # `tests/longmem_eval/`. That would make the HERMETIC ratchets inert — notably
+  # `test_both_ingest_legs_CALL_turn_text_and_keep_no_inline_twin`, whose whole job is
+  # to red a PR that re-introduces the inline `f"[{role}] {{content}}"` twin in
+  # `ingest.py`; a revert renders byte-identically, so an ungated ratchet cannot fire on
+  # the edit it exists to prevent. The 17 hermetic tests are therefore GATED, on purpose.
+  # ⛔ The `@slow` real-split PIN inside the same file stays UNARMED, and that gap is
+  # recorded, not implied away: NO CI lane re-derives it (the on-demand lane
+  # `eval-suite-manual.yml`, #10194, provisions the embedder and FalkorDB but never
+  # `~/.cache/tortoise-longmemeval` — grep for TORTOISE_LME_CACHE_DIR/longmemeval over
+  # `.github/workflows/` returns nothing), so it SKIPS there (measured: 17 passed,
+  # 1 skipped with an empty cache dir) and the numbers are re-derived only on a box that
+  # holds the cached S split (research note §8). Provisioning the dataset in CI is out of
+  # scope for this measurement-only PR.
+  # Do NOT "fix" that pin gap by dropping `longmem_eval/**` from `on_demand` — that reverses
   # owner decision A of 2026-10-27 (#10194).
-  - longmem_eval/test_haystack_overlap_1779.py
+  - test_haystack_overlap_1779.py
   - test_temporal_aggregate_arm.py  # #2886: guards tools/longmem_eval/retrieve.py's `temporal_aggregate_verdict` adapter — `tools/longmem_eval/` is a SOURCE_PATTERNS entry of this surface, so a retrieve.py-only change selects it (dual-registered with `core` for the core's verdict semantics)
   - test_temporal_leg_replay_wiring_10538.py  # #10538: the offline replay proxy reproduces the SHIPPED temporal wiring — the question's resolved date window is threaded to the leg with the question date as the recency clock (hermetic, no DB/network; TF-IDF proxy over a hand-built pool, no dataset read)
   - test_temporal_leg_non_eviction_receipt_11494.py  # #11494: the non-eviction guard's RECEIPT on a WIRED read — `tools/longmem_eval/retrieve.py` is a SOURCE_PATTERNS entry of THIS surface, so a receipt-only change selects `eval`; without this arm the pin that kills the surviving slice-mutants never runs on the change it guards. Same #10194 reasoning as the sibling above: the file lives at `tests/`, not the subtracted `tests/longmem_eval/` subtree (hermetic, no DB/network/dataset)
