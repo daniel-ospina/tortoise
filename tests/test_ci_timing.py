@@ -1046,6 +1046,142 @@ def test_an_absent_denominator_is_unknown_not_fully_covered(tmp_path: Path) -> N
     assert "#3554: a local estimate" in row
 
 
+# ── #11607: a parametrised file's row must be able to record an IMPROVEMENT ──
+#
+# `declared_test_counts` OMITS a `parametrize` file (a `def` count is a floor of
+# the collected count, and admitting a floor once licensed a 10x discount —
+# #9134). The unremarked consequence was that the row became MONOTONIC: absent
+# denominator -> UNKNOWN -> "raisable, never lowerable", so even a measured 4.25x
+# speedup could not reach the map. That is what deadlocked PR #11602: its wall pin
+# reads `test_ci_selection.py: 545.1` and refused to move, while the real cost of
+# that file was 84 % uncached YAML parsing.
+#
+# These four pins are the falsifier the issue asks for: a parametrised file with a
+# COMPLETE, lower reading must move DOWN, and one with a TRUNCATED reading must
+# not — and the collection probe must be the thing that decides, so removing it
+# puts every assertion back to the pre-fix (monotonic) answer.
+
+_PARAMETRISED_MANIFEST = (
+    "surfaces:\n  core:\n    - test_param.py\n"
+    "durations:\n"
+    "  test_param.py: 545.1  # ci-timing junit-census+top-15 2026-11-09 "
+    "(run 42546828652); was 389.2\n"
+)
+
+
+def _rendered_parametrised(tmp_path: Path, *, observed: int,
+                           collected: dict | None) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, _PARAMETRISED_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        # the measured post-fix census of `tests/test_ci_selection.py`
+        {"test_param.py": 126.5},
+        "2026-11-09T09:00:00Z",
+        # the AST denominator is ABSENT for a parametrised file — that is the
+        # whole shape under test, so `declared` is 0 and the AST cannot decide
+        coverage={"test_param.py": (observed, 0)},
+        sample_label=_LOWER_BOUND_LABEL,
+        collected=collected,
+    )
+
+
+def test_a_parametrised_row_moves_down_when_collection_proves_full_coverage(
+        tmp_path: Path) -> None:
+    """THE #11607 DEFECT. The reading saw every testcase pytest collects, so it is
+    comparable to the recorded weight and the row MUST move — the direction the
+    map could not take for any parametrised file.
+
+    Non-vacuity: drop `collected=` and the identical render keeps 545.1 (the next
+    pin asserts exactly that), so this assertion is the one the fix buys.
+    """
+    text, stats = _rendered_parametrised(tmp_path, observed=486,
+                                         collected={"test_param.py": 486})
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_param.py"] == 126.5
+    assert stats["kept_as_lower_bound"] == 0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "was 545.1" in row, row
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_the_same_parametrised_row_is_still_monotonic_without_a_collection(
+        tmp_path: Path) -> None:
+    """The control: SAME manifest, SAME reading, no collection probe. The row is
+    held and the note says why — this is the pre-#11607 behaviour the fix must not
+    silently retire for keys the probe cannot answer for (a probe that failed, a
+    pytest that could not import the file, a `--allow-window-only` sweep)."""
+    text, stats = _rendered_parametrised(tmp_path, observed=486, collected=None)
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "no declared testcase count" in row, row
+    assert "kept 545.1" in row, row
+
+
+def test_a_truncated_reading_on_a_parametrised_file_cannot_lower_the_row(
+        tmp_path: Path) -> None:
+    """THE DIRECTION THE #9134 GUARD PROTECTS, kept. 400 of the 486 testcases is
+    a LOWER bound: it can raise a weight but it cannot discount one, exactly as
+    before. Without this arm the fix would be a licence to discount from any
+    partial census."""
+    text, stats = _rendered_parametrised(tmp_path, observed=400,
+                                         collected={"test_param.py": 486})
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    # and the witness now names WHERE the denominator came from, so a reader can
+    # tell a collected count from a declared one
+    assert "the reading saw 400 of 486 testcases pytest collects" in row, row
+
+
+def test_collected_test_counts_probes_pytest_and_fails_closed(
+        tmp_path: Path) -> None:
+    """The probe is the denominator's whole basis, so it is pinned against
+    pytest's own answer rather than against a constant that could drift."""
+    repo_root = Path(__file__).resolve().parent.parent
+    counts = ci_timing.collected_test_counts(
+        ["test_dialog_tile_key.py", "test_no_such_file_11607.py"], repo_root)
+    # a real, parametrised-by-fixture file collects a positive count
+    assert counts.get("test_dialog_tile_key.py", 0) > 0
+    # an absent file is ABSENT (not 0, not guessed) — absent stays UNKNOWN
+    assert "test_no_such_file_11607.py" not in counts
+    # and the count agrees with what pytest reports for that same file
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest",
+         str(repo_root / "tests" / "test_dialog_tile_key.py"),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert counts["test_dialog_tile_key.py"] == sum(
+        1 for line in proc.stdout.splitlines()
+        if ci_timing._COLLECTED_NODEID_RE.match(line))
+
+
+def test_only_the_rows_a_collection_can_change_are_probed() -> None:
+    """The probe costs a subprocess, so it is scoped to the rows where it can
+    change the verdict: an absent AST denominator AND a discount. A key with a
+    declared count is decided by the AST; a reading that RAISES needs no proof; a
+    key with no committed row is an ADD, which an absent denominator never
+    blocked."""
+    manifest = (
+        "surfaces:\n  core:\n"
+        "    - test_param.py\n    - test_declared.py\n"
+        "    - test_raise.py\n    - test_new.py\n"
+        "durations:\n"
+        "  test_param.py: 100.0\n  test_declared.py: 100.0\n"
+        "  test_raise.py: 10.0\n"
+    )
+    weights = {"test_param.py": 50.0,   # absent AST count + discount -> PROBE
+               "test_declared.py": 50.0,  # AST count decides -> no probe
+               "test_raise.py": 99.0,   # absent AST count but a RAISE -> no probe
+               "test_new.py": 5.0}      # no committed row -> an add, no probe
+    assert ci_timing.discount_candidate_keys(
+        weights, manifest, {"test_declared.py": 7}) == ["test_param.py"]
+
+
 def test_a_held_row_states_one_basis_across_refreshes(tmp_path: Path) -> None:
     """The map is rewritten every week: a held row must not accumulate one basis
     sentence per refresh (nothing else prunes this file)."""
