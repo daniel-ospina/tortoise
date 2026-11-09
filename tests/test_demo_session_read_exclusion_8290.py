@@ -195,9 +195,21 @@ def test_hosted_list_excludes_by_the_derived_prefix():
     assert "(s.id IS NULL OR NOT toString(s.id) STARTS WITH $demo_prefix)" in helper, (
         "the null-id arm is missing: a NULL-id Session would be silently "
         "dropped, which is not the demo set")
-    assert " NOT s.id STARTS WITH " not in src, (
-        "the raw-operand form is back: it aborts the whole query on a "
-        "non-string `:Session.id`, which the handler reports as zero sessions")
+    # ⛔ THE PIN IS OVER THE COMPOSED WHERE, NEVER OVER THE FILE'S PROSE (review
+    # of #8290, P2). The whole-file form of this assertion passed only because
+    # the explaining comment wraps the bare form in BACKTICKS: an editor who
+    # wrote it without them (a docstring, a bullet) got a failure claiming a
+    # behavioural regression that did not exist — and the search could not see
+    # the thing it cares about anyway, which is the condition list the query
+    # actually receives.
+    from tortoise.hosted_api import _session_list_conds
+    composed = " AND ".join(_session_list_conds(None)[0])
+    assert "toString(s.id) STARTS WITH $demo_prefix" in composed, composed
+    assert "s.id STARTS WITH" not in composed.replace(
+        "toString(s.id) STARTS WITH", ""), (
+        "the raw-operand form is back in the COMPOSED where: it aborts the "
+        "whole query on a non-string `:Session.id`, which the handler reports "
+        f"as zero sessions; got {composed!r}")
     # the query builds a WHERE from the condition list; a `MATCH ... ` with no
     # WHERE would drop the exclusion on the actor_filter=None path
     assert '"MATCH (s:Session) WHERE "' in body, (
@@ -504,3 +516,57 @@ def test_the_activation_scorecard_does_not_count_the_demo_session():
     _stages2, detail2 = stage_counts(rows[1:], "2026-01-01T00:00:00Z",
                                      "2026-01-03T00:00:00Z")
     assert detail2["captured_sessions"] == 1, detail2
+
+
+def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
+    """Stage 4's baseline is a SIBLING surface, and it is fixed at the query (P2).
+
+    ``LIFETIME_MEMORY_QUERY`` returns ``min(s.created_at)`` over sessions that
+    carry a non-``event`` point, and that value is load-bearing: a non-NULL
+    ``first_memory_at`` is what moves stage 4 off ``no_memory_produced_in_lifetime``
+    onto a measured recall count. ``stage_counts`` filtering the funnel's rows
+    does not reach it, so a demo Session that carried such a point — through a
+    journal replay, or a future seeder — would move the baseline BACK to the
+    sample's creation date and stage 4 with it (review of #8290, P2).
+
+    Runs the real constant against a real graph holding both sessions, and
+    re-runs the pre-exclusion form on the same data so the pin cannot pass on a
+    fixture the exclusion never reached.
+    """
+    from tortoise.activation_scorecard import LIFETIME_MEMORY_QUERY
+    from tortoise.sdk import TortoiseSDK
+
+    client = TortoiseSDK(str(tmp_path / "tortoise.db"),
+                         event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
+    try:
+        g = client._get_proj().g
+        for stmt in (
+            "CREATE (s:Session {id:'session_demo_abcdef12', "
+            "created_at:'2026-01-01T00:00:00Z'})",
+            "CREATE (p:Point {id:'p_demo_memory', pointKind:'claim', "
+            "created_at:'2026-01-01T00:00:00Z'})",
+            "MATCH (s:Session {id:'session_demo_abcdef12'}), "
+            "(p:Point {id:'p_demo_memory'}) CREATE (s)-[:CONTAINS]->(p)",
+            "CREATE (s:Session {id:'session_0123456789ab', "
+            "created_at:'2026-01-05T00:00:00Z'})",
+            "CREATE (p:Point {id:'p_real_memory', pointKind:'claim', "
+            "created_at:'2026-01-05T00:00:00Z'})",
+            "MATCH (s:Session {id:'session_0123456789ab'}), "
+            "(p:Point {id:'p_real_memory'}) CREATE (s)-[:CONTAINS]->(p)",
+        ):
+            g.query(stmt)
+        rows = g.query(LIFETIME_MEMORY_QUERY).result_set
+        assert rows and rows[0][1] == 1, (
+            f"the baseline counted the sample session: {rows!r}")
+        assert rows[0][0] == "2026-01-05T00:00:00Z", (
+            "the baseline's first_memory_at moved back to the sample's "
+            f"creation date: {rows!r}")
+        # NON-VACUITY: the same graph WITHOUT the exclusion counts both, so the
+        # assertions above are the exclusion working, not an empty fixture.
+        pre = g.query(
+            "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
+            "WHERE (p.pointKind IS NULL OR p.pointKind <> 'event') "
+            "RETURN min(s.created_at), count(DISTINCT s)").result_set
+        assert pre == [["2026-01-01T00:00:00Z", 2]], pre
+    finally:
+        client.close()
