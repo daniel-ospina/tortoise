@@ -73,18 +73,54 @@ class _RecordingWriter:
 
 
 class _FalseWriter:
-    """An SDK whose STRUCTURAL writer reports a write it did NOT make.
+    """A writer that answers the bare ``bool`` rather than an envelope.
 
-    This is not a synthetic shape: ``Projection.create_edge`` returns ``False``
-    when it resolves no endpoint (``tortoise/projection/edges.py:2919-2920``)
-    instead of raising, and ``link_entities`` returns whatever the chosen writer
-    returns (``sdk.py:17955``). So the leg has two refusal channels — an
-    exception on the direct arm and a ``False`` on the structural one — and
-    reading only the first counted a refusal as a write (#11548 review, ISSUE 1).
+    ⛔ NOT the shape either production writer returns, and this docstring used to
+    claim it was: ``link_entities`` reaches ``TortoiseSDK.create_edge`` on the
+    structural arm, and that door WRAPS the projection's bool in
+    ``{"edge": …, "created": created, "nudges": […]}``
+    (``tortoise/sdk.py:49406-49412``) — so the bare ``False`` that
+    ``Projection.create_edge`` returns (``tortoise/projection/edges.py:2919-2920``)
+    never reaches this call site. It is kept as the SECOND channel (a writer that
+    answers a plain bool is still a refusal, not a write); the REAL envelope is
+    :class:`_StructuralRefusalWriter` (#11548 review, P1).
     """
 
     def link_entities(self, *_a, **_kw):
         return False
+
+
+class _StructuralRefusalWriter:
+    """The STRUCTURAL door's REAL refusal envelope — a write it did NOT make.
+
+    ``TortoiseSDK.create_edge`` returns
+    ``{"edge": …, "created": created, "nudges": […]}``
+    (``tortoise/sdk.py:49406-49412``), so a projection that resolved no endpoint
+    comes back as a TRUTHY dict with ``created: False``. An ``is False`` test on
+    that result is dead, and the row was appended to ``written`` while the graph
+    held no edge (#11548 review, P1).
+    """
+
+    def link_entities(self, *_a, **_kw):
+        return {"edge": {"relation": "related", "from": "obj-1",
+                         "to": "obj-2"},
+                "created": False, "nudges": []}
+
+
+class _DirectDedupWriter:
+    """``create_direct_edge``'s MERGE dedup hit — ``created: False`` on an edge
+    the graph DOES hold (``{"created": created, "deduped": not created}``,
+    ``tortoise/sdk.py:29283-29284``).
+
+    ⛔ The control that stops the structural fix from over-reaching: reading
+    ``created is False`` on the DIRECT arm would report every idempotent
+    re-capture as a refusal, which is the same fail-silent in the opposite
+    direction (a written edge reported as uncommitted).
+    """
+
+    def link_entities(self, *_a, **_kw):
+        return {"direct_edge": "IMPL", "from": "obj-1", "to": "obj-2",
+                "created": False, "deduped": True}
 
 
 def test_ambiguous_endpoint_is_refused_not_guessed():
@@ -319,6 +355,51 @@ def test_the_stated_direction_is_consumed_from_the_registry_map():
         INDEX)
     _predicate, _src, _dst, kwargs = writer.calls[-1]
     assert kwargs.get("direction") == "->", writer.calls
+
+
+def test_the_rows_own_declared_direction_outranks_the_meaning():
+    """⛔ #11548 review P1: the census and the writer must agree about a ROW.
+
+    :func:`pack_registry.effective_direction` exists because *"the census and
+    the writer cannot disagree about a row"* (#11083 indicator (c)) — and this
+    leg disagreed with it on every row that declares its OWN ``direction:``.
+    ``_direction_for`` consulted the row's MEANING and skipped the row's token, so
+    two shipped rows were written backwards against their own declaration:
+
+      * ``blocks`` — ``packs/project-management: semantics: dependsOn,
+        direction: "<-"`` → written ``->``
+      * ``holds`` — ``packs/venture: mechanism: IMPL, direction: "<-"`` →
+        written ``->``
+
+    while ``tools/pack_relation_census.py`` reports ``<-`` for the same two rows.
+    ONTOLOGY §3.6 carries the sense per declaration and §8's ``ownedBy`` row says
+    a declared token outranks the default; for ``holds`` the inverted ``->``
+    asserts *the company owns the investment* on a claim that states the reverse,
+    which is the reading the venture row's own comment says it was added to
+    prevent.
+
+    Non-vacuity: with ``declared_direction`` skipped (the pre-fix lookup) both
+    assertions read ``->`` — the meaning's ``dependsOn``/``ownedBy`` default —
+    while ``effective_direction`` still says ``<-`` for each row.
+    """
+    from tortoise.pack_registry import declared_directions
+
+    for predicate in ("blocks", "holds"):
+        declared = declared_directions(label=predicate)
+        assert declared, (
+            f"the pack catalog must declare a direction for {predicate!r} — "
+            "this case is vacuous without it")
+        (ruled, _source), = declared
+        edges, drops = plan_relation_edges([
+            {"src": "retry storm", "dst": "deadline slip",
+             "predicate": predicate}], INDEX)
+        assert not drops, drops
+        assert len(edges) == 1, edges
+        assert edges[0].direction == ruled == "<-", (
+            f"{predicate!r} declares {ruled!r} and the leg planned "
+            f"{edges[0].direction!r} — the writer and the census disagree "
+            "about the row, which is the one thing effective_direction "
+            "exists to prevent")
 
 
 def test_a_second_verb_on_a_declared_hierarchy_pair_is_a_COUNTED_fold():
@@ -577,22 +658,18 @@ def test_a_repeated_unwritable_statement_counts_once():
 def test_a_writer_that_returns_False_is_a_REFUSAL_not_a_write():
     """⛔ Reading only the exception made a structural refusal count as a WRITE.
 
-    ``link_entities`` returns whatever the chosen writer returns. The two arms
-    disagree about how they report failure: ``create_direct_edge`` RAISES, while
-    ``Projection.create_edge`` returns **``False``** when it resolves no endpoint
-    (``tortoise/projection/edges.py:2919-2920``). The leg read one and ignored the
-    other, so on that path it appended the row to ``written``, emitted no
-    ``RelationDrop`` and no warning, and ``written + dropped + folded`` still
-    reconciled — the statement counted as a SUCCESS against a graph that holds no
+    The leg has two refusal channels and used to read only the raising one, so a
+    refused edge was appended to ``written`` with no ``RelationDrop`` and no
+    warning — the statement counted as a SUCCESS against a graph that holds no
     edge. That is the `fail-silent` class `link_entities`'s own dispatch says a
     merge must never add, and `written` is the number the capture receipt carries
     and the PR body quotes (#11548 review, ISSUE 1).
 
-    Latent today (the only caller hands over ids it minted microseconds earlier),
-    and one line from live for any future caller — a replay leg, a connector
-    sync, a repair pass.
+    This case pins the BARE-BOOL channel (a writer answering `False`); the
+    production SHAPE is the next test, which is the one that was missing:
+    an ``is False`` test on it is DEAD because the door wraps the bool.
 
-    Mutation: drop the `if result is False` arm and `written` reads 1 with
+    Mutation: drop the ``result is False`` arm and `written` reads 1 with
     `dropped == 0`.
     """
     report = apply_relation_edges(
@@ -605,8 +682,7 @@ def test_a_writer_that_returns_False_is_a_REFUSAL_not_a_write():
     drop = report["drops"][0]
     assert (drop["src"], drop["dst"]) == ("retry storm", "deadline slip"), drop
     assert drop["predicate"] == "related", drop
-    assert "False" in drop["reason"], drop
-    assert "no endpoint" in drop["reason"], drop
+    assert "created NOTHING" in drop["reason"], drop
 
     # …and a refused edge that had ABSORBED a meaning loses that meaning too,
     # exactly as the raising channel does — one drop per lost meaning, so the
@@ -621,6 +697,50 @@ def test_a_writer_that_returns_False_is_a_REFUSAL_not_a_write():
     assert folded["folded"] == 0, folded
     assert sorted(row["predicate"] for row in folded["drops"]) == \
         ["causes", "supports"], folded
+
+
+def test_the_structural_doors_refusal_envelope_is_NOT_a_write():
+    """⛔ #11548 review P1: the refusal channel on the arm that HAS the bug.
+
+    ``TortoiseSDK.create_edge`` does not return the projection's bool — it wraps
+    it (``sdk.py:49406-49412``), so the real refusal arrives as a TRUTHY dict
+    with ``created: False``. ``if result is False`` never fired on it, the row
+    was appended to ``written``, and ``written + dropped + folded`` still
+    reconciled: a receipt claiming an edge the graph does not hold, on exactly
+    the arm whose docstring claims to have closed that class.
+
+    Non-vacuity: with the bare-bool-only arm restored, this case reports
+    ``written == 1, dropped == 0`` (executed). It is a SEPARATE case from the
+    bare-bool one on purpose — the two channels are different shapes, and one
+    fabricated shape certified coverage the other does not provide.
+    """
+    report = apply_relation_edges(
+        _StructuralRefusalWriter(),
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "related"}],
+        INDEX)
+    assert report["written"] == 0, report
+    assert report["dropped"] == 1, report
+    assert report["drops"][0]["predicate"] == "related", report
+
+
+def test_a_direct_dedup_hit_is_a_WRITE_not_a_refusal():
+    """The control the structural fix must not break.
+
+    ``create_direct_edge`` answers ``{"created": created, "deduped": not
+    created}``, and a MERGE dedup hit is ``created: False`` on an edge the graph
+    DOES hold. Both writers are MERGE-based — idempotence is the module's stated
+    property — so reading ``created is False`` on this arm would report every
+    re-capture as a refusal and count a held edge as uncommitted. The test must
+    therefore be arm-scoped, and this is the arm it must not apply to.
+    """
+    report = apply_relation_edges(
+        _DirectDedupWriter(),
+        [{"src": "retry storm", "dst": "deadline slip",
+          "predicate": "causes"}],
+        INDEX)
+    assert report["written"] == 1, report
+    assert report["dropped"] == 0, report
 
 
 class _DeclaringRegistry:

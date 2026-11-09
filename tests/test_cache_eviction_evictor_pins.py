@@ -1215,9 +1215,16 @@ def test_a_journalled_lane_graph_name_must_be_in_the_ownership_vocabulary(monkey
     # inert and left the assignment above as a dead store.
     namespace: dict = {}
     exec(compile(probe_module, "<lane fixture>", "exec"), namespace)
-    # The module's own `from tests import _live_utils` just bound the REAL helper, which
+    # The module's own import of `tests._live_utils` just bound the REAL helper, which
     # would dial a live service. Replace it AFTER the exec — `lane` resolves it from the
     # module globals at CALL time, so the stub is what the fixture actually sees.
+    #
+    # ⛔ This file STUBS the seam; it does not read it. `tests/test_runner_ports_6673.py`
+    # decides seam membership by the IMPORT EDGE (`_imports_the_seam`), not by scanning raw
+    # text (`#11437`), so this file is outside the split-brain census because it imports
+    # nothing — the `_live_utils` mentions above and below it are a comment and a dict key,
+    # which is why they are harmless. A real `import` here WOULD put it back in the census,
+    # and `test_the_mocked_seam_is_really_mocked_and_needs_no_exemption` in that file reds.
     namespace["_live_utils"] = live_utils_stub
 
     def _run_lane():

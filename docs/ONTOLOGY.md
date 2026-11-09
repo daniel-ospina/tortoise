@@ -1,17 +1,17 @@
 ---
-title: "Tortoise — Canonical Ontology v3.31"
+title: "Tortoise — Canonical Ontology v3.32"
 type: data
 domain: data
 status: live
 created: 2026-08-05
-updated: 2026-10-26
+updated: 2026-11-08
 ownedBy: epistemic-team
 aboutSubjects: epistemic-team
 aboutObjects: tortoise
 doc_status: live
 ---
 
-# Tortoise — Canonical Ontology v3.31
+# Tortoise — Canonical Ontology v3.32
 
 > **Status:** LIVE — canonical. Co-located with the code it governs (tortoise repo).
 > **Supersedes:** ONTOLOGY_v2.5.md (eldato repo, deprecated).
@@ -201,7 +201,7 @@ Connector entities (GitHub/Linear/Slack) get Source nodes at the projection chok
 | `participatesIn` | Subject → Event | unidirectional | N-ary | `schema:attendee` | Subjects involved in an event, created by the event write path from the event's participant list — falling back to the event's `subject` when no explicit participants are given |
 | `memberOf` | Subject → Subject | unidirectional | N-ary | `org:membership` | Membership in team/group/organization. **Canonical** — generalizable to teams, orgs, any hierarchy. |
 | `managedBy` | Entity → Subject | unidirectional | N-ary | RACI Responsible | Operational responsibility |
-| `ownedBy` | Entity → Subject | unidirectional | N-ary | RACI Accountable | Accountability, data boundary |
+| `ownedBy` | Entity → (**Subject \| Object**) | unidirectional (per edge) | N-ary | RACI Accountable | Accountability, data boundary. **The target is an Entity (a Subject or an Object).** With one predicate covering "a person owns a thing", "a company owns a thing" and "a holding IS a stake in a company", the predicate alone can no longer say which end owns which — so **the per-edge `direction` carries the sense**: `->` = the TARGET owns the source (`investment --ownedBy--> fund`); `<-` = the SOURCE owns the target, read as a stake in it (`investment --ownedBy--> company`). ⚠️ Accepted residual: no code validates endpoint kinds by semantics, so the ruling is carried per declaration and **reported** (by `pack_registry.effective_direction` and the pack census), not enforced. |
 
 > **memberOf is canonical.** `get_org_structure` queries `memberOf` for membership (Subject→Subject, member→org). `holdsRole` is retained as a distinct concept (person→role is not membership). The legacy `hasMember` predicate (org→member) remains in valid_predicates for backward compatibility with existing graph edges.
 
@@ -349,8 +349,11 @@ Epistemic edges (operators): `IMPL`, `NAND` (+ semantic label).
 > re-transcribed, so it cannot drift from §8's table. **Declaredness is not shape:** the §8
 > reification table governs which edges *ought* to carry an operator, and an undeclared label
 > still warns without blocking (warn-not-block, #1934). A **retired** spelling (`opposes`,
-> `produces`, `holds`, `funds` — the transition map) is deliberately **not** declared, so it
-> keeps warning and the caller learns the canonical word. `measures` is declared nowhere and
+> `holds`, `funds` — the transition map) is deliberately **not** declared, so it keeps warning and
+> the caller learns the canonical word. **`produces` is not one of them**: it is a
+> Layer-2 meaning (§8), so it is declared and does not warn — the transition map is the authority
+> for that list, and `produces` left it when it became a meaning (#11083). `measures` is declared
+> nowhere and
 > was never a §8 meaning — it was invented by a lane that could find no reachable declared
 > predicate, which is what this statement exists to prevent.
 
@@ -1267,7 +1270,7 @@ Operator:      (op-123)                                   ← mitigation anchor
 | Layer | Where | What |
 |-------|-------|------|
 | **Mechanism + direction** | operator (`IMPL`/`NAND`) + the recorded direction | How it acts, and which way it runs: `->` `<-` `<->` `-` |
-| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
+| **Semantics** | `semantics` field | The meaning: `addresses`, `supports`, `mutuallySupportive`, `mutuallyExclusive`, `refutes`, `causes`, `produces`, `hasPart`, `dependsOn`, `transacts`, `related`, `ownedBy`, `managedBy` |
 | **Predicate + tags** | `operator.label` | The specific verb: `fixes`, `implements`, `deploysTo`, `bearsOn`… plus an optional free tag/note |
 | Epistemic | IMPL/NAND edges | Confidence via EP (0-1 continuum) |
 | Operator | Point (is_operator:true) | Mitigation target |
@@ -1287,11 +1290,14 @@ and the answer is the direction the relation records.
 | `mutuallySupportive` | IMPL | `<->` | Each end reinforces the other |
 | `mutuallyExclusive` | NAND | `<->` | They rule each other out — a mutual restatement |
 | `hasPart` | IMPL | `<->` | Composition — a part reinforces the whole and the whole the part |
-| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** `produces` is the encouraged Layer-3 predicate for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` |
+| `causes` | IMPL | `->` | *A brought B about* — **untyped, any kind to any kind, no restriction.** ⛔ Not the same assertion as `produces` (next row) and not its replacement: W3C PROV states that generation does **not** assert a general causal relation. `causes` is the Layer-3-preferred spelling for a happening → the artifact it created, aligned to `schema:result` / `prov:wasGeneratedBy` (§3.8's structural Event→Object `produces` is a separate layer and does not conflict) |
+| `produces` | IMPL | `<-` | **Production, entity → entity** — *the TARGET brought the source into existence.* Direction `<-` because the declared edge is `asset → program` while production runs producer → product, so `->` would assert the asset caused the program. Restored as a Layer-2 meaning by #11083 (owner 2026-11-05, cites `#7848`'s `OVERRIDES:`); the pre-#11083 mapping onto `causes` changed the meaning **and** inverted the direction. ⛔ Not a rename of `causes`: a produced thing may be unrelated to the producer causally, and a cause need not produce anything. |
 | `dependsOn` | IMPL | `->` | A precondition — the condition bears on the dependent, one way |
 | `transacts` | — | `-` | A trade or exchange — association only; no confidence either way |
 | `related` | — | `-` | The deliberately ambiguous generic association, kept rare. **OVERRIDES:** the common practice of typing every association — a deliberate owner ruling, not an accident; no belief path reads it |
-| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning |
+| `ownedBy` / `managedBy` | — | `->` | The core structural rows (§3.6) a pack may name as a relation's meaning. ⚠️ `ownedBy`'s `->` is only the DEFAULT: with its target left open (Subject **or** Object) a declaration carries the sense per edge — see §3.6 |
+
+**A word that fails the layer test is a LABEL, not a meaning** — #2766's rule, which #11083 applies. `funds` is the worked example: nothing in the machine changes behaviour because a relation is a funding relation, so it stays a **Layer-3 predicate** riding on an existing meaning, and it is deliberately **not** in this table (#7848's correction of 2026-11-08 withdrew the earlier promotion). The movement of money is an **event** (`venture:disbursement`), not an edge.
 
 **Same semantics + different predicates is correct.** `fixes`, `implements` and `deploysTo` all
 carry `addresses`; the **predicate** (Layer 3) keeps them distinct. Semantics is a **meaning**

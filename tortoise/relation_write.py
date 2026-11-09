@@ -171,6 +171,7 @@ from __future__ import annotations
 import dataclasses
 
 from .pack_registry import (
+    declared_directions,
     declared_meanings,
     declared_mechanisms,
     relation_write_paths,
@@ -412,9 +413,44 @@ def _declared_meaning_for(predicate: str, registry: object = None) -> str | None
     return None
 
 
+def _declared_direction_for(predicate: str, registry: object = None) -> str | None:
+    """The DIRECTION the pack relation for ``predicate`` RECORDS, else ``None``.
+
+    The third leg of the same row :func:`_mechanism_for` and
+    :func:`_declared_meaning_for` read, and the one this leg used to skip: the
+    row's own ``direction:`` token. ``pack_registry.declared_directions`` walks
+    the same rows and asks the SAME resolver the census asks
+    (``effective_direction``), whose precedence — a DIFFERENTIATING declared
+    token outranks the meaning — is indicator (c) of #11083. Consuming it here is
+    therefore the module's own rule ("the registry decides, this leg does not
+    re-derive") rather than a second opinion.
+
+    ⛔ The bug this closes was measured on the shipped catalog: ``blocks``
+    (``semantics: dependsOn, direction: "<-"``) and ``holds`` (``mechanism:
+    IMPL, direction: "<-"``) both declare ``<-`` and were written ``->``, while
+    ``tools/pack_relation_census.py`` reports ``<-`` for the same rows — *the
+    census and the writer disagreeing about a row*, which is the exact sentence
+    :func:`pack_registry.effective_direction` exists to prevent (#11548 review,
+    P1). ONTOLOGY §3.6 carries the sense per declaration; §8's ``ownedBy`` row
+    says the declared token wins over the default.
+
+    A registry read that RAISES is reported as ``None`` ("the declaration was
+    not obtained"), never an aborted capture — the same defensive arm as its two
+    siblings.
+    """
+    try:
+        found = declared_directions(label=predicate, **_registry_seam(registry))
+    except Exception:  # noqa: BLE001, RUF100 — a registry read must never abort a write
+        return None
+    for direction, _source in found or ():
+        return direction
+    return None
+
+
 def _direction_for(label: str | None, predicate: str,
                    semantics: str | None = None,
-                   declared: str | None = None) -> str:
+                   declared: str | None = None,
+                   declared_direction: str | None = None) -> str:
     """The direction the edge's MEANING records — the ruled table, not a guess.
 
     ``pack_registry.SEMANTICS_DIRECTIONS`` is ONTOLOGY §8's ruled mapping from a
@@ -425,6 +461,14 @@ def _direction_for(label: str | None, predicate: str,
 
     The candidates, in the order the meaning is DECLARED, strongest first:
 
+    0. ``declared_direction`` — the DIRECTION the pack relation row itself
+       records (:func:`_declared_direction_for` →
+       ``pack_registry.declared_directions`` → ``effective_direction``). The row
+       is the declaration: ONTOLOGY §3.6 carries the sense per declaration and
+       §8's ``ownedBy`` row says a declared token outranks the default, so this
+       is not a fifth candidate but the ruling's own precedence, resolved by the
+       ONE resolver the census reads. Its value is already a final token, so it
+       returns before the meaning table is consulted.
     1. ``declared`` — the MEANING the pack relation row fixes for this verb
        (:func:`_declared_meaning_for`). The row is what licensed the write: it
        is the declaration ``_mechanism_for`` reads for the mechanism half of the
@@ -458,6 +502,16 @@ def _direction_for(label: str | None, predicate: str,
     about it is silent.
     """
     from .pack_registry import SEMANTICS_DIRECTIONS, SEMANTICS_TRANSITION
+
+    # ⛔ 0. The row's OWN ``direction:`` — the declaration that licensed the
+    # write, already resolved to a final token by
+    # :func:`pack_registry.effective_direction` (which applies the ruling's own
+    # precedence: a DIFFERENTIATING declared token outranks the meaning). It is
+    # therefore NOT a meaning and must NOT be fed through the transition table
+    # below — it is the answer, not an input. Skipping it wrote ``->`` on
+    # ``blocks``/``holds``, whose rows declare ``<-`` (#11548 review, P1).
+    if isinstance(declared_direction, str) and declared_direction:
+        return declared_direction
 
     for meaning in (declared, label, predicate, semantics):
         if not isinstance(meaning, str) or not meaning:
@@ -688,7 +742,8 @@ def plan_relation_edges(
                 # ``semantics`` gloss only where nothing declares one.
                 direction=_direction_for(
                     label, predicate, semantics,
-                    _declared_meaning_for(predicate, registry))))
+                    _declared_meaning_for(predicate, registry),
+                    _declared_direction_for(predicate, registry))))
             continue
         # ── 3. NOTHING this leg can write — and the reason must be the real one
         #
@@ -765,12 +820,14 @@ def apply_relation_edges(
         """Name a refused edge, and every meaning it was carrying.
 
         ONE shape for BOTH refusal channels: the writer raising AND the writer
-        answering ``False``. ``link_entities`` returns *whatever the chosen
-        writer returns* (`sdk.py:17955`), and the two arms disagree about how
-        they report failure — ``create_edge`` signals a write it did NOT make by
-        returning ``False`` (`projection/edges.py:2919-2920`, when it resolves
-        no endpoint), while ``create_direct_edge`` raises. Reading only the
-        exception made the leg exception-shaped on one arm and
+        answering that it created nothing. ``link_entities`` returns *whatever
+        the chosen writer returns* (`sdk.py:17957-17964`), and the two arms
+        disagree about how they report failure — the STRUCTURAL arm reaches
+        ``TortoiseSDK.create_edge``, which wraps the projection's bool in an
+        envelope (``{"created": False}``, `sdk.py:49406-49412`), while
+        ``create_direct_edge`` RAISES and reports a dedup hit as
+        ``{"created": False, "deduped": True}`` on an edge that exists. Reading
+        only the exception made the leg exception-shaped on one arm and
         return-value-shaped on the other, so a structural refusal was counted as
         a WRITE: a receipt claiming an edge the graph does not hold, with no
         drop row and no warning (#11548 review, ISSUE 1). One function, so the
@@ -809,15 +866,30 @@ def apply_relation_edges(
             # shape (#11548 review, P2).
             _refused(edge, f"{type(exc).__name__}: {exc}")
             continue
-        # ⛔ ``is False``, DELIBERATELY — not a general truthiness test. The
-        # structural arm answers a ``bool`` and its ``False`` means "I resolved
-        # no endpoint and wrote nothing"; the direct arm answers a truthy
-        # envelope (a ``dict``), and a future envelope whose value merely reads
-        # falsey must not be mistaken for a refusal. Both are refusals the leg
-        # must NAME, and both now go through `_refused`.
-        if result is False:
-            _refused(edge, "False — the writer resolved no endpoint for this "
-                           "edge, so nothing was written")
+        # ⛔ Read the refusal channel PER ARM — the two arms do NOT answer in
+        # the same shape, and reading one shape on both is how a structural
+        # refusal was counted as a WRITE (#11548 review, P1/E2's false PASS).
+        #
+        # STRUCTURAL: ``link_entities`` dispatches to
+        # :meth:`TortoiseSDK.create_edge` on this arm, and that door does NOT
+        # return the projection's bare ``bool`` — it WRAPS it
+        # (``sdk.py:49406-49412``): ``{"edge": …, "created": created,
+        # "nudges": […]}``. So ``is False`` was DEAD here, and a write the
+        # projection declined (it resolved no endpoint) was appended to
+        # ``written`` with no drop row and no warning.
+        #
+        # DIRECT: ``create_direct_edge`` answers ``{"created": …, "deduped":
+        # not created}`` (``sdk.py:29283-29284``), and a MERGE dedup hit is
+        # ``created: False`` on an edge the graph DOES hold — so ``created is
+        # False`` must NOT be read on this arm, or every idempotent re-capture
+        # would be reported as a refusal.
+        refused = result is False or (
+            edge.write_path != RELATION_DIRECT
+            and isinstance(result, dict)
+            and result.get("created") is False)
+        if refused:
+            _refused(edge, "the writer answered that it created NOTHING for "
+                           "this edge, so the relation stays uncommitted")
             continue
         if edge.folded:
             # ⛔ Recorded ONLY for an edge that actually LANDED. Building this

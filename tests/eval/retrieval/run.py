@@ -44,6 +44,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import datetime as _dt
 import json
 import os
@@ -156,6 +157,9 @@ def _capture_provenance(proj, is_embedded: bool, extras: dict) -> dict:
         "limit": extras.get("limit", DEFAULT_LIMIT),
         "elevated_timeout_ms": ELEVATED_TIMEOUT_MS,
         "synthetic_query_vectors": extras.get("synthetic_query_vectors", False),
+        "corpus_embedding_space": extras.get("corpus_embedding_space", EMBED_SPACE_UNKNOWN),
+        "corpus_reembedded": extras.get("corpus_reembedded", 0),
+        "corpus_points_unverified": extras.get("corpus_points_unverified", 0),
         "judge_labels": extras.get("judge_labels", "none"),
     }
     if is_embedded:
@@ -431,34 +435,234 @@ def _inject_probe_model(args) -> None:
     inject_model(model, query_prompt=getattr(args, "query_prompt", None))
 
 
-def _query_vecs(oracle, queries, seed: int) -> dict[str, list[float]]:
-    """Precompute one query vector per query (outside the measured window).
+EMBED_SPACE_MODEL = "model"
+EMBED_SPACE_SYNTHETIC = "oracle-synthetic"
+EMBED_SPACE_UNKNOWN = "unknown"
+# The closed set of labels this module can EMIT. `baseline_space` is read from
+# an arbitrary baseline file, so it can carry anything; a pair whose labels are
+# not both in this set is not a comparable pair even when the two strings are
+# equal (two identical pieces of garbage are not one space).
+EMBED_SPACE_KNOWN = frozenset({EMBED_SPACE_MODEL, EMBED_SPACE_SYNTHETIC})
 
-    Embedded mode: synthetic semantic stand-ins derived from the oracle
-    topic structure (see TopicOracle.query_vector_for). Docker mode: the
-    real embedding model when available (tortoise.embeddings.EmbeddingModel),
-    else the same synthetic stand-in (flagged in provenance). When --model
-    was passed, _inject_probe_model already loaded the candidate, so
-    EmbeddingModel.get() returns the candidate here.
-    """
-    use_model = False
+
+def _loaded_embedding_model():
+    """The loaded embedder singleton, or None (no `embeddings` extra / no cache)."""
     try:
         from tortoise.embeddings import EmbeddingModel
-        use_model = EmbeddingModel.get() is not None
     except Exception:
-        use_model = False
+        return None
+    try:
+        return EmbeddingModel.get()
+    except Exception:  # an unloadable model is "no model"
+        return None
+
+
+def _corpus_embedding_space(*, seeded_synthetic: bool):
+    """Decide ONCE per run the ONE vector space corpus and queries share.
+
+    The seeded corpus carries the oracle's SYNTHETIC topic-centroid embeddings
+    (`benchmarks/synthetic_corpus.py`, ``ORACLE_EMBED_ALPHA``). Encoding the
+    QUERY side with a real model compares bge text vectors against centroid
+    vectors — two different spaces — so the vector arm stops measuring
+    retrieval at all. That is not hypothetical: in the canonical dev env
+    (``uv sync --extra embeddings``) the ambient model made the vector arm
+    collapse from nDCG@10 0.855 to 0.108 and drove the pre-registered gate to
+    **BLOCK on an unmodified tree** (measured 2026-11-08), which makes the
+    loop's quality gate unable to pass anything.
+
+    So the space is chosen from the CORPUS side, never from ambient model
+    availability:
+
+    * model loaded + this run seeded the synthetic corpus → re-embed the
+      corpus with that same model; both sides are ``model``.
+    * no model → both sides are the oracle's ``oracle-synthetic`` space (the
+      documented degraded fallback).
+    * ``--no-seed-corpus`` → the vectors already in the graph were not written
+      by THIS run, so their space cannot be established — the graph may hold
+      an earlier eval seed's centroids (the db file keeps them across runs)
+      or embeddings the PRODUCT wrote. ``unknown``, model loaded or not, and
+      the gate must refuse to compare: assuming ``model`` there re-creates the
+      two-space arm on the first ``--no-seed-corpus`` reuse of an eval db,
+      labelled as sound.
+
+    This decides the space of the rows this run WRITES. It cannot decide the
+    space of the whole index on its own — seeding and the re-embed are
+    idempotent ``MERGE``s over the ids this run generated and nothing deletes
+    the rest — so ``run_eval`` completes the rule after the write with
+    ``_uncovered_corpus_points``: a leftover population with vectors of its own
+    makes the run's space ``unknown`` even here.
+    """
+    model = _loaded_embedding_model()
+    if not seeded_synthetic:
+        return EMBED_SPACE_UNKNOWN, None
+    if model is not None:
+        return EMBED_SPACE_MODEL, model
+    return EMBED_SPACE_SYNTHETIC, None
+
+
+@contextlib.contextmanager
+def _documents_are_encoded_like_the_product(model):
+    """Context manager: encode DOCUMENTS the way the product's writer does.
+
+    ``--query-prompt`` is threaded as the candidate's CONSTRUCTOR
+    ``default_prompt_name`` (``tools/embedder_probe.py`` `_CandidateFactory`),
+    and sentence-transformers applies a constructor-level default prompt to
+    *every* ``encode()`` call unless the call overrides it — document text
+    included (sbert ``SentenceTransformer`` model reference: the default "is
+    applied to all `encode()` calls"; only ``prompt``/``prompt_name`` at the
+    call site replaces it). So a ``--model arctic-s --query-prompt query``
+    corpus would carry the vendor's *query* instruction, a vector shape the
+    product never stores: ``embeddings.compute_embeddings`` encodes with no
+    prompt at all (its singleton is built without one).
+
+    ``prompt_name=None`` does NOT disable it — omitting both arguments is
+    exactly what re-applies the default — so the only version-portable disable
+    (pin is ``sentence-transformers>=3,<6``, whose encode APIs differ and whose
+    v5 documents ``{"document": ""}`` for this) is the default itself: clear
+    it for the document encode and restore it afterwards, in a ``finally``, so
+    the query side keeps the instruction it was injected for.
+    """
+    attrs = [a for a in ("default_prompt_name", "default_prompt")
+             if hasattr(model, a)]
+    saved = {a: getattr(model, a) for a in attrs}
+    try:
+        for a in attrs:
+            setattr(model, a, None)
+        yield
+    finally:
+        for a, value in saved.items():
+            setattr(model, a, value)
+
+
+def _reembed_corpus(graph, points: list[dict], model, *, batch_size: int = 200) -> int:
+    """Re-encode the seeded corpus into ``model``'s space (batched, vecf32).
+
+    Mirrors the product's write path so the stored vectors keep the production
+    SHAPE on embedded and docker alike, in both halves of what `encode`
+    composes:
+
+    * the store side is ``seed_corpus``'s (clear-then-set guard + ``vecf32``,
+      ``preserve_on_null=False``), and
+    * the ENCODING side is ``embeddings.compute_embeddings``'s — its
+      ``_truncate_for_embedding`` text composition (512-word cap) and **no
+      prompt**: a corpus re-encoded under the ``--query-prompt`` instruction
+      would not be the vector the product stores for the same text, so the
+      candidate comparison (#1349) would be measured in a shape production
+      never uses (see `_documents_are_encoded_like_the_product`).
+
+    Width is the encoder's own, exactly as ``compute_embeddings`` documents
+    (the store's width constraint belongs to its write path, ``encode_for_store``).
+    Labels are untouched — the oracle grades from HIDDEN topics, never from
+    embeddings, so re-encoding cannot move a relevance judgment. Returns
+    points re-encoded.
+    """
+    from tortoise.embeddings import _truncate_for_embedding
+    from tortoise.vector_write import (
+        clear_then_set_prefix,
+        set_embedding_clause,
+    )
+    written = 0
+    for start in range(0, len(points), batch_size):
+        batch = points[start:start + batch_size]
+        with _documents_are_encoded_like_the_product(model):
+            encoded = model.encode(
+                [_truncate_for_embedding(p["content"], 512) for p in batch])
+        rows = graph.query(
+            "UNWIND $batch AS row "
+            "MERGE (n:Point {id: row.id}) "
+            + clear_then_set_prefix("n", "row.embedding")
+            + "SET "
+            + set_embedding_clause("n", "row.embedding", preserve_on_null=False)
+            + " RETURN count(n) AS n",
+            params={"batch": [
+                {"id": p["id"], "embedding": [float(x) for x in vec]}
+                for p, vec in zip(batch, encoded, strict=True)
+            ]},
+        ).result_set
+        if rows:
+            written += int(rows[0][0])
+    return written
+
+
+def _uncovered_corpus_points(graph, covered_ids, *, chunk_size: int = 500) -> int:
+    """Points the graph holds vectors for that this run did NOT write.
+
+    The one-space invariant (`_corpus_embedding_space`) is a statement about the
+    whole INDEX, not about the rows one run happened to rewrite. Seeding and the
+    re-embed are both ``UNWIND … MERGE`` — nothing deletes — and point ids are a
+    POSITIONAL prefix (``p-{i:07d}``), so a run over an existing db re-writes
+    ``p-0..p-(n-1)`` and leaves the tail of any earlier, larger population
+    (a previous eval seed, or product points on a shared docker graph) holding
+    whatever vectors it was written with. Retrieval is graph-wide
+    (`degradation_chain` has no id filter), so those points are still
+    candidates: their space is part of the arm's space.
+
+    Counts nodes that carry an ``embedding`` and whose ``id`` is NOT in this
+    run's written set (chunked ``IN`` sum against one total — a single
+    ``NOT IN`` list would carry every id in one parameter). A point without an
+    embedding cannot reach the vector arm and is not counted.
+    """
+    rows = graph.query(
+        "MATCH (n:Point) WHERE n.embedding IS NOT NULL RETURN count(n)"
+    ).result_set
+    total = int(rows[0][0]) if rows and rows[0] else 0
+    ids = list(covered_ids)
+    covered = 0
+    for start in range(0, len(ids), chunk_size):
+        chunk = graph.query(
+            "MATCH (n:Point) WHERE n.embedding IS NOT NULL AND n.id IN $ids "
+            "RETURN count(n)",
+            params={"ids": ids[start:start + chunk_size]},
+        ).result_set
+        covered += int(chunk[0][0]) if chunk and chunk[0] else 0
+    return max(total - covered, 0)
+
+
+def _query_vecs(oracle, queries, seed: int, *, space: str):
+    """Precompute one query vector per query, in the CORPUS's space.
+
+    ``space`` is REQUIRED: it is the single space ``_corpus_embedding_space``
+    resolved for this run's corpus, and the query side must never pick a space
+    of its own, or the arm compares two spaces (the defect below). There is no
+    default and no ambient fallback, deliberately: a default of ``None`` that
+    re-derived the space from ``EmbeddingModel.get()`` is the SAME ambient
+    decision this module exists to remove, one call site away, and the
+    omission is invisible where it happens. ``task0_probe.py`` omitted it and
+    scored model-encoded queries against its own centroid corpus in the
+    canonical dev env (``uv sync --extra embeddings``) — the two-space arm at
+    nDCG@10 ≈0.108, with nothing in that tool's output naming the space. Every
+    caller owns its corpus decision and states it here.
+
+    ``space == EMBED_SPACE_UNKNOWN`` encodes nothing (there is no trustworthy
+    corpus space to follow); ``run_eval`` still reports metrics for such a
+    run, but they are declared non-statements and the gate refuses to compare
+    them.
+
+    When ``--model`` was passed, ``_inject_probe_model`` already loaded the
+    candidate, so the loaded singleton IS the candidate.
+
+    There is no partial fallback. ``_reembed_corpus`` runs BEFORE this, so in
+    the model space the corpus is already model-embedded: a query-encode
+    failure that degraded to oracle vectors would rebuild the exact two-space
+    arm this function exists to prevent, while provenance still reported
+    ``corpus_embedding_space: model`` and the gate compared it as sound. A
+    failure therefore propagates. (Nothing to degrade anyway: the synthetic
+    space has no model to encode with, so the branch that used to "degrade the
+    whole arm" was unreachable — a dead path, and its test could not fail.)
+    """
+    model = _loaded_embedding_model() if space == EMBED_SPACE_MODEL else None
+    if space == EMBED_SPACE_MODEL and model is None:
+        raise RuntimeError(
+            "embedding space is 'model' but no model is loaded — the "
+            "corpus would be model-embedded and the queries synthetic"
+        )
     vecs: dict[str, list[float]] = {}
     for q in queries:
-        text = q["query"]
-        if use_model:
-            from tortoise.embeddings import EmbeddingModel
-            try:
-                vecs[q["id"]] = EmbeddingModel.get().encode([text])[0].tolist()
-                continue
-            except Exception:
-                pass
-        vecs[q["id"]] = oracle.query_vector_for(text, seed)
-    return vecs, use_model
+        if model is None:
+            vecs[q["id"]] = oracle.query_vector_for(q["query"], seed)
+        else:
+            vecs[q["id"]] = [float(x) for x in model.encode([q["query"]])[0]]
+    return vecs, model is not None
 
 
 # ── Aggregation ─────────────────────────────────────────────────────────────
@@ -520,9 +724,154 @@ def _rerank_verdict(per_query, rng) -> dict | None:
     return out
 
 
-def _gate_vs_baseline(per_query, baseline_per_query, rng) -> dict | None:
+def _baseline_embedding_space(base: dict) -> str:
+    """The space a baseline measured, derived when the field predates it.
+
+    A baseline that DECLARES ``corpus_embedding_space`` is taken at its word.
+    Otherwise the field predates this rule, and ``embedding_model`` is the only
+    witness — read as the record of what that run DID, never as a statement
+    about what was installed:
+
+    * absent / ``""`` / ``"unavailable"`` → no embedder in that run, so BOTH
+      sides came from the oracle → ``oracle-synthetic``.
+    * anything else → the run had an embedder, and before this rule existed
+      nothing ever re-embedded the corpus (``_reembed_corpus`` did not exist),
+      so the run measured a MIXED corpus-synthetic / query-model arm. That is
+      in no single space: ``unknown``, which makes the gate refuse
+      (INCOMPARABLE) instead of scoring the instrument change as a ~+70-point
+      "improvement".
+    """
+    prov = base.get("provenance") or {}
+    declared = prov.get("corpus_embedding_space")
+    if declared:
+        return str(declared)
+    model = prov.get("embedding_model")
+    if model in (None, "", "unavailable"):
+        return EMBED_SPACE_SYNTHETIC
+    return EMBED_SPACE_UNKNOWN
+
+
+def _gate_vs_baseline(
+    per_query, baseline_per_query, rng,
+    *, space: str | None, baseline_space: str | None,
+    model_id: str | None = None, baseline_model_id: str | None = None,
+) -> dict | None:
+    """The pre-registered SHIP/WARN/BLOCK gate, refusing cross-space compares.
+
+    Paired deltas are only meaningful when both runs measured the same vector
+    space: a model-space run against a synthetic-space baseline differs by the
+    instrument, not by the change under test, and the paired CI then reports a
+    regression that no code produced (measured 2026-11-08: BLOCK, ΔnDCG −37.3
+    points, on an unmodified tree). Cross-space returns ``INCOMPARABLE`` — a
+    refusal that names the remedy (re-baseline in this space), never a BLOCK.
+
+    ``unknown`` on EITHER side refuses too, even when both sides say
+    ``unknown``: two unknown labels are not the same space, they are two
+    absences of the same fact (``--no-seed-corpus`` reuses whatever vectors the
+    db holds — a centroid corpus on one db, a model-embedded one on another —
+    and the label cannot tell them apart). Scoring that pair as comparable is
+    the false PASS this whole change exists to remove, with the added authority
+    of a guard that looked at it and passed it.
+
+    Model IDENTITY is part of the instrument inside the ``model`` space: bge and
+    arctic are different encoders, so a ``--model <candidate>`` run scored
+    against a baseline measured with another model reports the SWAP as the
+    delta — on unmodified code. That is the ``#1349`` workflow the README
+    points at, and it needs its own baseline (measure the candidate on
+    unmodified code, commit that) exactly like any other instrument change, so
+    a differing model id refuses with that remedy named.
+    """
     if not baseline_per_query:
         return None
+    unknown = EMBED_SPACE_UNKNOWN
+    # `space`/`baseline_space` are REQUIRED (no default), for the same reason
+    # `_query_vecs` requires `space`: a `None` default is an ambient decision
+    # taken one call site away and invisible where it happens, and with both
+    # sides omitted every refusal below is skipped and the pair is SCORED —
+    # the two-space-by-omission hole this module exists to close, reopened on
+    # the gate itself. An explicit `None` is an ABSENCE of the fact, not a
+    # space, so it is normalized to `unknown` and refuses below.
+    space = unknown if space is None else space
+    baseline_space = unknown if baseline_space is None else baseline_space
+    if unknown in (space, baseline_space):
+        seeded_advice = (
+            "Re-run with the corpus SEEDED in one space (drop "
+            "--no-seed-corpus) so corpus_embedding_space is a fact on both "
+            "sides"
+        )
+        if space != unknown:
+            seeded_advice = (
+                "Commit a baseline whose space you know (a schema-1 baseline "
+                "with no embedding_model reads as 'oracle-synthetic'; a "
+                "pre-fix one with a real model id reads as 'unknown', because "
+                "it re-embedded nothing)"
+            )
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": (
+                f"the embedding space could not be established for this run "
+                f"('{space}') or its baseline ('{baseline_space}') — "
+                f"'unknown' is an absence of the fact, not a space, and two "
+                f"unknowns do not make a comparable pair. {seeded_advice}."
+            ),
+            "space": space,
+            "baseline_space": baseline_space,
+        }
+    # No `is not None` guard here: the normalization above has already made
+    # both sides concrete labels, so a `None` cannot reach this test. Guarding
+    # it anyway would read as if `None` were still reachable a few lines below
+    # the comment saying it is not — and that is exactly the invitation to
+    # "simplify" the refusal back into the fail-open this commit closes.
+    # Membership, not just equality: a baseline file supplies an ARBITRARY
+    # label, so two identical unrecognised labels must refuse rather than
+    # present themselves as "the same space".
+    if (space != baseline_space
+            or space not in EMBED_SPACE_KNOWN
+            or baseline_space not in EMBED_SPACE_KNOWN):
+        unrecognised = [s for s in (space, baseline_space)
+                        if s not in EMBED_SPACE_KNOWN]
+        if unrecognised and space == baseline_space:
+            reason = (
+                f"the embedding space label '{space}' is not one this runner "
+                f"can emit (known: 'model', 'oracle-synthetic'), so two "
+                f"identical labels are two pieces of the same GARBAGE, not "
+                f"one space. A baseline's label is read from the file, not "
+                f"derived, so it can carry anything — re-baseline with a run "
+                f"of this runner so the label is a fact before gating."
+            )
+        else:
+            reason = (
+                f"run measured the '{space}' embedding space but the baseline "
+                f"measured '{baseline_space}' — paired deltas compare the "
+                f"instrument, not the change. Re-baseline in this space "
+                f"(commit a run of unmodified code with the same "
+                f"corpus_embedding_space) before gating."
+            )
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": reason,
+            "space": space,
+            "baseline_space": baseline_space,
+        }
+    models = (model_id, baseline_model_id)
+    if (space == EMBED_SPACE_MODEL and baseline_space == EMBED_SPACE_MODEL
+            and all(models) and "unavailable" not in models
+            and model_id != baseline_model_id):
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": (
+                f"run measured the 'model' space with '{model_id}' but the "
+                f"baseline measured it with '{baseline_model_id}' — the two "
+                f"runs share a space KIND, not a space. Paired deltas would "
+                f"report the model swap, not the change. Commit a baseline "
+                f"measured with '{model_id}' on unmodified code (that is how "
+                f"an embedder swap gets gated) before comparing."
+            ),
+            "space": space,
+            "baseline_space": baseline_space,
+            "embedding_model": model_id,
+            "baseline_embedding_model": baseline_model_id,
+        }
     ndcg_deltas = []
     p5_deltas = []
     for qid in sorted(per_query):
@@ -588,6 +937,50 @@ def _run_with_sdk(args, sdk) -> dict:
     else:
         if not args.quiet:
             print("[corpus] using existing corpus (--no-seed-corpus)")
+    # ONE-SPACE invariant (`_corpus_embedding_space`): resolved BEFORE the
+    # fingerprint, because the fingerprint HASHES the stored vectors — a
+    # fingerprint taken before the re-embed describes a corpus nothing measured
+    # (it then reads identically in both spaces, so provenance cannot detect
+    # the change it exists to detect).
+    space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
+    reembedded = 0
+    unverified = 0
+    # `unverified` counts the embedded population this run could NOT vouch for.
+    # It is computed on BOTH paths and outside every `--quiet` guard: a
+    # `--no-seed-corpus` run wrote nothing, so that population is the whole
+    # embedded index. Left at its initial 0, the field would tell a reader (or
+    # an automation filtering on `corpus_points_unverified == 0` for "fully
+    # verified") the exact opposite of what happened.
+    if space == EMBED_SPACE_UNKNOWN:
+        unverified = _uncovered_corpus_points(proj.g, [])
+    if space != EMBED_SPACE_UNKNOWN:  # `unknown` is already --no-seed-corpus
+        if space == EMBED_SPACE_MODEL:
+            reembedded = _reembed_corpus(proj.g, points, model)
+            if not args.quiet:
+                print(f"[corpus] re-embedded {reembedded} points in the "
+                      f"'{space}' space (queries and points share one space)")
+        # …but the ONE space is a claim about the WHOLE index: seeding and the
+        # re-embed only rewrite the ids this run generated, and nothing deletes
+        # the rest (`_uncovered_corpus_points`). A leftover tail keeps the space
+        # it was written in, and retrieval is graph-wide — so a run that covered
+        # only part of the population cannot claim either arm's space.
+        unverified = _uncovered_corpus_points(proj.g, [p["id"] for p in points])
+        if unverified:
+            space = EMBED_SPACE_UNKNOWN
+            if not args.quiet:
+                print(f"[corpus] WARNING: {unverified} point(s) in the graph "
+                      f"carry embeddings this run did NOT write (survivors of "
+                      f"an earlier, larger corpus, or product points on this "
+                      f"db). Their space cannot be established, and retrieval "
+                      f"is graph-wide, so this run cannot claim ONE space: it "
+                      f"is 'unknown', the metrics are not a quality "
+                      f"statement, and the gate will refuse to compare.")
+    elif not args.quiet:
+        print("[corpus] WARNING: the embedding space of the corpus already in "
+              "the graph cannot be established (it may be a previous eval "
+              "seed's centroids, a MODEL-space corpus, or product vectors). "
+              "The reported metrics are not a quality statement and the gate "
+              "will refuse to compare.")
     corpus_fp = corpus_fingerprint_from_graph(proj.g)
     # #1348: per-topic live counts come from the oracle generator (the hidden
     # topic key is never written to the graph — seed_corpus SET is
@@ -632,7 +1025,7 @@ def _run_with_sdk(args, sdk) -> dict:
         authored_set = load_authored_queries()
 
     all_queries = oracle_set["queries"] + authored_set["queries"]
-    vecs, use_model = _query_vecs(oracle, all_queries, args.seed)
+    vecs, use_model = _query_vecs(oracle, all_queries, args.seed, space=space)
     tfidf_points = _tfidf_snapshot(proj.g)
     # #1348: ACTIVE strategies tuple — fused_rerank added only when the arm is
     # ON (default runs stay shape-identical to the v1 baseline). k_sweep is a
@@ -730,6 +1123,10 @@ def _run_with_sdk(args, sdk) -> dict:
 
     paired = _paired_vs_fused(oracle_per_query, rng, strategies=tuple(active_strategies))
     rerank_verdict = _rerank_verdict(oracle_per_query, rng) if graph_ranker_arm else None
+    # The instrument's identity, resolved ONCE: provenance records it and the
+    # gate compares it (a differing model id is a different space KIND).
+    embedding_model = _resolved_embedding_model(
+        use_model, getattr(args, "model", None) is not None)
     gate = None
     if args.baseline:
         base = json.loads(Path(args.baseline).read_text())
@@ -739,6 +1136,9 @@ def _run_with_sdk(args, sdk) -> dict:
                   f"{SCHEMA_VERSION} — gating anyway (older baseline always gates)")
         gate = _gate_vs_baseline(
             oracle_per_query, base.get("per_query", {}), rng,
+            space=space, baseline_space=_baseline_embedding_space(base),
+            model_id=embedding_model,
+            baseline_model_id=(base.get("provenance") or {}).get("embedding_model"),
         )
 
     # 6. Authored pool emission (top-50/strategy/query, deduped per query).
@@ -810,6 +1210,13 @@ def _run_with_sdk(args, sdk) -> dict:
         "by_tier": by_tier,
         "paired_vs_fused": paired,
         "gate_vs_baseline": gate,
+        # Whether a baseline was SUPPLIED, independent of whether it could be
+        # compared: `_gate_vs_baseline` returns None both when there is no
+        # baseline and when one was given but nothing paired (no per_query, or
+        # no overlapping query ids). Without this flag the summary reports the
+        # second case as "no --baseline", telling the reader the opposite of
+        # what happened.
+        "baseline_supplied": str(args.baseline) if args.baseline else None,
         "per_query": {qid: oracle_per_query[qid] for qid in sorted(oracle_per_query)},
         "authored_metrics": authored_agg,
         "provenance": _capture_provenance(proj, is_embedded, {
@@ -823,8 +1230,10 @@ def _run_with_sdk(args, sdk) -> dict:
             "graph_ranker_arm": graph_ranker_arm,
             "corpus_variant": getattr(args, "corpus_variant", "plain"),
             "synthetic_query_vectors": not use_model,
-            "embedding_model": _resolved_embedding_model(
-                use_model, getattr(args, "model", None) is not None),
+            "corpus_embedding_space": space,
+            "corpus_reembedded": reembedded,
+            "corpus_points_unverified": unverified,
+            "embedding_model": embedding_model,
             "judge_labels": args.judge_labels or "none",
         }),
         "notes": [
@@ -838,10 +1247,44 @@ def _run_with_sdk(args, sdk) -> dict:
             "On embedded, fused RRF is NOT vector alone — per-query data shows "
             "FTS populated 40/100 queries and fused != vector on 17/100 "
             "(fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0).",
-            "Query vectors on embedded are SYNTHETIC SEMANTIC stand-ins "
-            "(topic-centroid sums from the oracle structure + seeded noise) "
-            "because no embedding model is loaded — same information a real "
-            "embedding model encodes (token semantics), not oracle labels.",
+            "Embedding space (provenance.corpus_embedding_space): whenever the "
+            "space is KNOWN ('model' or 'oracle-synthetic'), corpus and query "
+            "vectors are produced in ONE space. No model loaded "
+            "→ 'oracle-synthetic' (topic-centroid sums from the oracle "
+            "structure + seeded noise; the documented degraded fallback). "
+            "Model loaded → 'model', and the seeded corpus is RE-EMBEDDED "
+            "with that same model (provenance.corpus_reembedded) so the arm "
+            "is real semantic retrieval. Never one side each: that compared "
+            "bge text vectors against centroid vectors and reported a "
+            "37-point nDCG 'regression' on unmodified code. "
+            "The space is a claim about the WHOLE index, not about the rows "
+            "this run rewrote: seeding and the re-embed are MERGEs over the "
+            "ids this run generated (p-{i:07d}, positional) and nothing "
+            "deletes the rest, so a smaller --corpus-size over an existing db "
+            "(or product points on a shared graph) leaves a tail in the space "
+            "it was written in — and retrieval is graph-wide. That run is "
+            "'unknown' too, with provenance.corpus_points_unverified "
+            "counting the population it could not vouch for. "
+            "--no-seed-corpus → 'unknown': the vectors already in the graph "
+            "were not written by this run (an earlier eval seed's centroids, "
+            "a corpus an earlier MODEL-space run re-embedded, and product "
+            "embeddings are indistinguishable here), so no space can be "
+            "claimed and the gate refuses to compare — and the metrics this "
+            "run reports are not a quality statement. The ONE-SPACE claim "
+            "above does NOT hold here: with no trustworthy corpus space to "
+            "follow, the query side falls back to the oracle while the "
+            "corpus keeps whatever vectors it already held, so the arm may "
+            "genuinely span two spaces. That is exactly why the space is "
+            "'unknown' and why the gate refuses — it is a refusal to make a "
+            "statement, not a statement that no comparison was needed.",
+            "The gate REFUSES a cross-space comparison (verdict "
+            "INCOMPARABLE) — paired deltas across two embedding spaces "
+            "measure the instrument, not the change, and the model id is part "
+            "of the instrument: a --model candidate gated against a baseline "
+            "measured with another model is refused too (commit a baseline "
+            "with the candidate on unmodified code — that is how an embedder "
+            "swap is gated). Baseline files carry "
+            "their own space; re-baseline in the space you measure.",
             "R@10 uses the oracle denominator = the grade-2 target set "
             "(~77-84 points at corpus 2000/24 topics) — the ceiling is "
             "10/|target| (~12%), so compare R@10 RELATIVELY across "
@@ -870,7 +1313,7 @@ def _run_with_sdk(args, sdk) -> dict:
             "strategies populate (population_counts self-declare authority). "
             "fused key is the k=60 alias (gate compat).",
             "#1348 fused_rerank arm: fuse -> truncate to limit -> rerank "
-            "(production order sdk.py::TortoiseSDK.tortoise_fts_query); "
+            "(production order TortoiseSDK.tortoise_fts_query); "
             "corpus-variant enhanced "
             "seeds topic-correlated EP (n.confidence + edges, no new nodes); "
             "oracle-proxy = query-conditioned positive control (stub "
@@ -902,14 +1345,55 @@ def _markdown_summary(report: dict) -> str:
             f"| {m['r@10']['value']:.3f} | {m['mrr']['value']:.3f} |"
         )
     g = report.get("gate_vs_baseline")
-    gate_line = f"gate vs baseline: {g['verdict']}" if g else "gate: none (no --baseline)"
+    if not g:
+        supplied = report.get("baseline_supplied")
+        gate_line = (
+            f"gate: NONE — a baseline WAS supplied ({supplied}) but nothing "
+            f"could be compared (no paired query ids, or it carried no "
+            f"per_query). NOT a ship signal."
+            if supplied else "gate: none (no --baseline)"
+        )
+    elif g["verdict"] == "INCOMPARABLE":
+        # The refusal must be ACTIONABLE where the loop reads it. The token
+        # alone reads as "not BLOCK", and "did not block" is not "passed" —
+        # no comparison was made at all. `g["reason"]` carries the remedy
+        # (re-baseline in this space); printing the token without it is how a
+        # refusal gets mistaken for a ship signal.
+        # The reason is appended only when there IS one: `g.get('reason', '')`
+        # returns `None` for an explicit ``None`` (the key exists), so a naive
+        # interpolation prints the literal "None" on the refusal line — junk
+        # exactly where a reader most needs a clear answer — and an empty
+        # reason leaves a dangling ". " separator.
+        reason = (g.get("reason") or "").strip()
+        gate_line = "gate vs baseline: INCOMPARABLE — NO COMPARISON WAS MADE, " \
+                    "so this run carries no quality evidence and is NOT a " \
+                    "ship signal."
+        if reason:
+            gate_line = f"{gate_line} {reason}"
+    else:
+        gate_line = f"gate vs baseline: {g['verdict']}"
+    # The SPACE belongs in the summary too, not only in the JSON/report notes:
+    # `--quiet` suppresses every console warning, so without this the whole
+    # console artifact is a normal-looking metrics table over an index whose
+    # space could not be established — the run the notes call "not a quality
+    # statement".
+    space = (report.get("provenance") or {}).get("corpus_embedding_space")
+    space_line = None
+    if space:
+        space_line = f"embedding space: {space}"
+        if space == EMBED_SPACE_UNKNOWN:
+            space_line += (" — the space could not be established for the "
+                           "whole index, so the table above is NOT a quality "
+                           "statement")
     rv = report.get("rerank_verdict")
+    tail = ["", gate_line]
+    if space_line:
+        tail.append(space_line)
     if rv:
         c = rv.get("ndcg@10_delta_points", {})
-        rv_line = (f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
-                   f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
-        return "\n".join(lines + ["", gate_line, rv_line])  # noqa: RUF005
-    return "\n".join(lines + ["", gate_line])  # noqa: RUF005
+        tail.append(f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
+                    f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
+    return "\n".join(lines + tail)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -987,6 +1471,12 @@ def main(argv: list[str] | None = None) -> int:
     out = write_outputs(report, args.out)
     print("\n" + _markdown_summary(report))
     print(f"\nreport: {out}")
+    # EXIT CODE IS ALWAYS 0, for every verdict — SHIP, WARN, BLOCK and
+    # INCOMPARABLE alike. Deliberate and pre-existing: this is a measurement
+    # tool, and no caller in this repo keys on `$?`. The verdict is read from
+    # the JSON (`gate_vs_baseline.verdict`) and from the summary above, which
+    # is why those two must never let a refusal look like a pass. A shell
+    # wrapper that wants `$?` to mean "gated" would need this changed first.
     return 0
 
 

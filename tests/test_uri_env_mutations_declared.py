@@ -548,15 +548,34 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     #     `count_org_usage` resolves the `org_<org>` URI graph and the
     #     wrong-graph read these guards exist to catch would be invisible (both
     #     sides would agree).
-    #   * one `setenv` + its assertion site (DELIBERATE_URI) pin that
-    #     `_open_sdk` RESTORES a caller's URI — `main()` is called in-process,
-    #     so a leaked mutation re-points the next invocation.
+    #   * one `setenv` (DELIBERATE_URI) pins that `_open_sdk` RESTORES a
+    #     caller's URI — `main()` is called in-process, so a leaked mutation
+    #     re-points the next invocation. Its assertion site is a READ
+    #     (`==`) and is deliberately NOT declared (see the NOTE below).
     # Fixture-param monkeypatch throughout, so pytest auto-undoes every site at
     # teardown — no lane leak.
     "test_4503_edge_relationship_accounting.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"',
-        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"',
-        r'os\.environ\["TORTOISE_DB_URI"\]\s*='],
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
+    # NOTE: this entry used to carry a third arm,
+    # `os\.environ\["TORTOISE_DB_URI"\]\s*=`, documented as covering "its
+    # assertion site". The file's assertion is a READ and never needed
+    # declaring — the arm matched only because the declaration census's
+    # assignment arm also matched `==` (fixed above). Dropped with the
+    # census fix so the entry declares exactly the three `setenv`/`delenv`
+    # mutations the file actually makes (fixture-param `monkeypatch`, so
+    # pytest auto-undoes each at teardown — no lane leak).
+    # #11083 H10 (DELIBERATE_URI): `_sdk("--uri")` must bind the graph the
+    # SDK actually opens — `TORTOISE_DB_URI`, because the constructor's first
+    # positional parameter is the EMBEDDED store's file path — and must
+    # RESTORE the caller's value afterwards (`main()` can be called in
+    # process, so a leaked mutation re-points the next reader, the #5084
+    # residue class). The setenv IS the test input: it plants the "previous"
+    # URI the restore has to return to, and the fake SDK records what
+    # `os.environ` holds at construction. No server is contacted (the SDK is
+    # replaced), and the fixture-param monkeypatch auto-restores at teardown.
+    "test_pack_logic_census_11083.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
     # #4125/#8229: the operator-CLI test forces the EMBEDDED lane deliberately —
     # the target under test is a SCHEME-LESS `--db <path>` store, so the env
     # control IS the test input (a URI-shaped value would send the fixture write
@@ -907,7 +926,16 @@ _MUTATION_RE = re.compile(
     r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'
     r'|monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'
     r'|monkeypatch\.setenv\(\s*$'
-    r'|os\.environ\["TORTOISE_DB_URI"\]\s*='
+    # `=(?!=)` — an ASSIGNMENT, never the comparison `==`. Without the
+    # lookahead this arm censused reads as mutations: a test that pins the
+    # value it just set (`assert os.environ["TORTOISE_DB_URI"] == "…"`)
+    # was reported as an undeclared mutation site, so the only way to keep
+    # it green was to declare an ASSIGNMENT pattern for the file — which
+    # then authorized any future real assignment there. #11083 measured
+    # both: the new H10 restore assertion (red-ed `test (g)`) and
+    # `test_4503`'s declaration arm, which matched nothing but its read.
+    # The restoration guard's RAW regex already spells it this way.
+    r'|os\.environ\["TORTOISE_DB_URI"\]\s*=(?!=)'
     r'|os\.environ\.pop\(\s*["\']TORTOISE_DB_URI["\']'
     r'|del\s+os\.environ\[["\']TORTOISE_DB_URI["\']]'
 )
@@ -2582,6 +2610,29 @@ def test_declaration_regex_census_surface():
     for form in forms:
         assert _MUTATION_RE.search(form), (
             f"_MUTATION_RE must census the form {form!r}")
+    # …and it must NOT census a READ. `os.environ[...] == value` is a
+    # comparison, not an assignment: before the `(?!=)` lookahead the
+    # assignment arm matched its first `=`, so every test that pins the URI
+    # it just planted was reported as an undeclared MUTATION site and the
+    # only green fix was to declare an assignment pattern for the file —
+    # which then authorized a real assignment anywhere in it. Negative
+    # case, so a future widening of the arm reds HERE and not on CI
+    # (#11083: the H10 restore assertion red-ed the required `test (g)`
+    # shard on correct code).
+    for read_form in (
+            'assert os.environ["TORTOISE_DB_URI"] == "docker://h:6379/g",',
+            'assert os.environ["TORTOISE_DB_URI"] == \\',
+            'if os.environ["TORTOISE_DB_URI"] == uri:'):
+        assert not _MUTATION_RE.search(read_form), (
+            f"_MUTATION_RE must not census the READ form {read_form!r} — a "
+            "comparison is not a mutation (a declaration for it would "
+            "authorize a real assignment in the same file)")
+    # the assignment arm must still catch the assignment it is for, including
+    # the augmented-looking neighbourhood (`_os` alias, keyword value).
+    for assign_form in ('os.environ["TORTOISE_DB_URI"] = "docker://h:6379/g"',
+                        'os.environ["TORTOISE_DB_URI"]=uri'):
+        assert _MUTATION_RE.search(assign_form), (
+            f"_MUTATION_RE must census the ASSIGNMENT form {assign_form!r}")
     # and the restoration guard's RAW regex must NOT match the monkeypatch
     # fixture-param forms (auto-undoed by pytest, not raw leaks).
     for form in ('monkeypatch.delenv("TORTOISE_DB_URI")',

@@ -20,6 +20,19 @@ from typing import Any, TypeGuard
 
 import yaml
 
+# The direction vocabulary — the ONE home (#11083 reads it to accept a relation
+# row's declared per-edge `direction`). `live.py` is the LEAF module (no imports
+# of its own), so this costs the extraction path nothing.
+#
+# ⛔ `canonical_direction` is imported too, and `effective_direction` MUST resolve
+# a declared token through it rather than testing membership itself: the write
+# path accepts SIX tokens (`ACCEPTED_DIRECTION_VALUES` = the four model values +
+# the two legacy aliases), so a reader that tested against `DIRECTION_VALUES`
+# alone warned-and-ignored `unidirectional` while `create_operator` honoured it
+# as `->` — the census and the writer disagreeing about one row, which is the
+# divergence `live.py`'s one-normalizer invariant exists to prevent (#7852).
+from .live import ACCEPTED_DIRECTION_VALUES as _ACCEPTED_DIRECTION_VALUES
+from .live import canonical_direction, is_default_direction
 from .source_credibility import SOURCE_KIND_DEFAULTS
 from .status_folds import (
     StatusFoldIndex,
@@ -374,6 +387,21 @@ SEMANTICS_VALUES = frozenset({
     "hasPart", "dependsOn", "transacts", "related",
     # core structural rows (ONTOLOGY §3.6) a pack may name as a meaning
     "ownedBy", "managedBy",
+    # #11083 — `produces` returns as a MEANING (not a label): production is not
+    # causation. Owner ruling 2026-11-05 on epic #5087, relayed to this issue in
+    # comment 6667121779, and recorded as an `OVERRIDES:` on #7848
+    # (comment 6668793463). W3C PROV defines generation as production and states
+    # explicitly that it does NOT assert a general causal relation, so folding
+    # `produces` onto `causes` changed the meaning — and `causes` is `->` while
+    # the shipped declaration (`venture:producedBy`, asset → program) runs the
+    # other way, so the mapping inverted the direction too.
+    #
+    # ⛔ `funds` does NOT come back with it. The 2026-11-05 note promoted both;
+    # #7848's correction (2026-11-08) WITHDREW `funds` on #2766's three-layer
+    # test — nothing in the machine changes behaviour because a relation is a
+    # funding relation, so it is a layer-3 LABEL riding on an existing meaning
+    # (`funds` stays a key of `SEMANTICS_TRANSITION` below). Do not add it here.
+    "produces",
 })
 
 # The direction each ruled semantics value records (ONTOLOGY §8, #7852):
@@ -395,6 +423,12 @@ SEMANTICS_DIRECTIONS: dict[str, str] = {
     "hasPart": "<->",
     "transacts": "-",
     "related": "-",
+    # #11083 — the FIRST table value that produces `<-` (target→source). The
+    # declared edge is `asset → program` and production runs program → asset, so
+    # `->` would assert the asset caused the program. `<-` was already a valid
+    # PER-EDGE token (`live.DIRECTION_VALUES`), so the write path needed no
+    # change — only this row. Pinned by `tests/test_pack_logic_census_11083.py`.
+    "produces": "<-",
 }
 
 # ── Layer 1 — the MECHANISM each meaning declares (#9963) ──────────────
@@ -433,6 +467,10 @@ SEMANTICS_MECHANISMS: dict[str, str] = {
     "mutuallySupportive": "IMPL",
     "refutes": "NAND",
     "mutuallyExclusive": "NAND",
+    # #11083 — a production RAISES the target's confidence (the product exists
+    # because the producer made it), so the mechanism is IMPL. The map stays
+    # COMPARED, never gated (#1934's governance ruling, untouched here).
+    "produces": "IMPL",
 }
 
 # Values shipped packs still declare, ruled to collapse onto the core
@@ -441,8 +479,12 @@ SEMANTICS_MECHANISMS: dict[str, str] = {
 # is #7848; no NEW declaration should use a key of this map.
 SEMANTICS_TRANSITION: dict[str, str] = {
     "opposes": "mutuallyExclusive",
-    "produces": "causes",
     "holds": "ownedBy",
+    # ⛔ `funds` STAYS — it is a layer-3 LABEL, not a meaning (#7848 correction,
+    # 2026-11-08, on #2766's "does the machine have to ACT on it?" test). The
+    # 2026-11-05 note that promoted it into `SEMANTICS_VALUES` was withdrawn;
+    # the durable `funds` relation rides on an existing meaning with `funds` as
+    # its label. `produces` left this map — see `SEMANTICS_VALUES`.
     "funds": "transacts",
 }
 
@@ -462,9 +504,15 @@ SEMANTICS_TRANSITION: dict[str, str] = {
 # to `SEMANTICS_VALUES` or `CORE_PREDICATES` (and to §8's table, which the
 # guard pins) — not a quiet addition here.
 #
-# A RETIRED spelling (`opposes` / `produces` / `holds` / `funds`, see
-# `SEMANTICS_TRANSITION`) is deliberately ABSENT: it must keep warning so the
-# caller learns the canonical word.
+# A RETIRED spelling (`opposes` / `holds` / `funds`, see `SEMANTICS_TRANSITION`)
+# is deliberately ABSENT: it must keep warning so the caller learns the canonical
+# word.
+#
+# ⛔ NOT `produces`. `produces` LEFT `SEMANTICS_TRANSITION` when it became a
+# Layer-2 meaning (#11083; `SEMANTICS_VALUES` above carries the reasoning), so it
+# is in this derived union via `SEMANTICS_VALUES` and is DECLARED — it does not
+# warn. A comment that still listed it as retired survived the change and told
+# the next reader the opposite of what the code does.
 #
 # Declaredness is not shape. §8's reification table governs which edges ought
 # to carry an operator; a `label` outside that shape is odd but still
@@ -610,6 +658,79 @@ def relation_write_verdict(rel: dict) -> tuple[str, tuple[str, ...]]:
     if rel.get("declarationOnly") is True:
         return RELATION_DECLARATION_ONLY, ()
     return RELATION_PREDICATE_NOT_IN_ALLOWLIST, ()
+
+
+def effective_direction(rel: dict) -> str | None:
+    """The direction a declared relation's row ACTUALLY records — per row (#11083).
+
+    Two inputs, and the order between them is the whole point:
+
+    1. the row's own ``direction``, resolved through
+       :func:`tortoise.live.canonical_direction` — the ONE normalizer the write
+       path also uses, so the six tokens a write accepts (the four model values
+       plus the legacy ``unidirectional``/``bidirectional`` aliases) are ALL
+       honoured here and normalized to the model's four. This is ruling (c)'s
+       carrier: ``ownedBy``'s target is deliberately open (Subject **or**
+       Object), so the predicate alone can no longer say whether
+       ``investment --ownedBy--> fund`` means *the fund owns the investment*
+       (`->`) or *the investment is a stake in it* (`<-`).
+
+       ⛔ A membership test against ``live.DIRECTION_VALUES`` here would be a
+       RE-SPELLING of the vocabulary at a call site — which ``live.py`` forbids
+       — and it made the census and the writer disagree: a row declaring
+       ``direction: unidirectional`` is warned-and-ignored here (so the meaning's
+       ``<-`` is reported) while ``create_operator`` honours it as ``->``
+       (``is_default_direction("unidirectional") is False`` → basis ``explicit``).
+       One wrong sign, which is exactly the hazard the load-time warn exists for.
+
+       ⛔ The declared token is honoured only when it DIFFERENTIATES, because
+       that is the condition the writer applies (``sdk.py``: ``derived = …; if
+       derived is not None and is_default_direction(direction): direction =
+       derived``). ``<->``/``bidirectional`` is the signature default that means
+       "not declared" (``live.is_default_direction``), so for a row declaring
+       ``{semantics: produces, direction: <->}`` the MEANING wins and the graph
+       stores ``<-``. Reporting the literal ``<->`` here would restore exactly
+       the divergence above in the opposite direction, on a token a manifest
+       spellings-check allows. ``-`` and the one-way tokens DO differentiate and
+       therefore outrank the meaning, as they do at the writer.
+    2. otherwise the Layer-2 meaning's direction through the SAME chain the write
+       path uses: ``SEMANTICS_TRANSITION`` then ``SEMANTICS_DIRECTIONS``. A
+       retired spelling is resolved here exactly as `sdk.create_operator`
+       resolves it, so the census and the writer cannot disagree about a row.
+
+    ``None`` means the row declares no RESOLVABLE direction: no ``direction`` and
+    no meaning, a meaning outside the closed vocabulary, or a ``direction`` token
+    the vocabulary does not recognise. It is never a default: a caller that needs
+    a token must decide what absence means, which is what stops a plausible-
+    looking `->` from standing in for a declaration nobody made.
+
+    ⛔ This does NOT duplicate `TortoiseSDK._direction_from_semantics`: that one
+    answers "which way does this MEANING run" for a WRITE, and cannot answer
+    "which way did this DECLARED RELATION say". The declaration side needs the
+    per-row override that function has no input for.
+    """
+    declared = rel.get("direction")
+    canonical = canonical_direction(declared)
+    semantics = rel.get("semantics")
+    meaning = None
+    if isinstance(semantics, str) and semantics:
+        meaning = SEMANTICS_DIRECTIONS.get(
+            SEMANTICS_TRANSITION.get(semantics, semantics))
+    # The meaning outranks a NON-DECLARATION; everything else answers from the
+    # declared token. ⛔ TWO RESIDUALS THE `... and not is_default_direction`
+    # SHAPE LEAVES, both measured against `sdk.create_operator`:
+    #   * a declared `<->` with NO meaning resolves to `None` there while the
+    #     writer STORES `<->` (the semantics step never runs, and `direction` is
+    #     not None, so nothing canonicalizes it) — a census cell claiming no
+    #     sense for an edge the graph holds;
+    #   * a junk token (`sideways`) falls through to the meaning, while the
+    #     writer REFUSES it: `is_default_direction` deliberately does not treat a
+    #     typo as absent, so the meaning never overwrites it and `create_operator`
+    #     raises (`direction must be one of …`). A row whose write path raises has
+    #     no sense to report.
+    if meaning is not None and is_default_direction(declared):
+        return meaning
+    return canonical
 
 
 class _Unset:
@@ -1039,6 +1160,70 @@ def declared_meanings(
                 ("declared-meanings", "row", label_key, type(rel).__name__,
                  type(exc).__name__),
                 "declared_meanings: skipped an unreadable pack relation row "
+                "for %s (%s: %s)", label_key, type(exc).__name__,
+                _fact_repr(exc))
+    return found
+
+
+def declared_directions(
+    *,
+    label: str | None = None,
+    registry: object | _Unset | None = _UNSET,
+) -> list[tuple[str, str]]:
+    """The DIRECTION(s) a relation write's own PACK DECLARATION records (#11548).
+
+    The third leg of #7852's triple (mechanism + semantics + direction), and the
+    one a write leg may not re-derive: :func:`effective_direction` is already
+    THE per-row resolver — a DIFFERENTIATING declared token outranks the
+    meaning, and the meaning is the fallback (indicator (c) of #11083, whose
+    docstring states the rule this function exists to keep: *"the census and
+    the writer cannot disagree about a row"*). So this function adds no rule of
+    its own; it walks the SAME rows :func:`declared_mechanisms` and
+    :func:`declared_meanings` walk (:func:`_declared_relation_rows`) and asks
+    each one the resolver that the census already asks
+    (``tools/pack_relation_census.py``'s ``effective_direction`` cell).
+
+    ⛔ Why a leg needs it, measured: without it a writer that consumes the row's
+    MEANING but not its own ``direction:`` writes the meaning's default on a row
+    that declares the opposite — ``blocks`` (``packs/project-management``:
+    ``semantics: dependsOn, direction: "<-"``) and ``holds``
+    (``packs/venture``: ``mechanism: IMPL, direction: "<-"``) both landed ``->``,
+    while the census reports ``<-`` for the same rows. EP then propagates belief
+    the row exists to forbid — for ``holds`` it asserts *the company owns the
+    investment* on a claim stating the reverse. ONTOLOGY §3.6 carries the sense
+    per declaration and §8's ``ownedBy`` row says the declaration wins over the
+    default, so this is the rule, not a refinement of it.
+
+    Returns ``[(direction, human-readable source), …]``; empty means no row
+    declares a RESOLVABLE direction (the three states ``None`` covers are named
+    at :func:`effective_direction`). Matched on the PREDICATE only, for the
+    reasons :func:`declared_meanings` records at length — the same lookup
+    semantics, so the two halves of one declaration cannot diverge.
+
+    ⛔ NEVER raises: a registry that will not load, or a row this walk cannot
+    read, degrades to what COULD be read and is LOGGED (the shared walk's
+    discipline). An exception here would abort a capture that was otherwise
+    fine.
+    """
+    found: list[tuple[str, str]] = []
+    label_key = _fact_repr(label)
+    label_text = _fact_text(label)
+    for rel in _declared_relation_rows(label, registry,
+                                      caller="declared_directions"):
+        try:
+            direction = effective_direction(rel)
+            if not direction:
+                continue
+            pair = (direction,
+                    f"the pack relation '{label_text}' "
+                    f"({rel.get('pack') or 'pack'})")
+            if pair not in found:
+                found.append(pair)
+        except Exception as exc:  # noqa: BLE001, RUF100 — warn-only, per row
+            _warn_packs_once(
+                ("declared-directions", "row", label_key, type(rel).__name__,
+                 type(exc).__name__),
+                "declared_directions: skipped an unreadable pack relation row "
                 "for %s (%s: %s)", label_key, type(exc).__name__,
                 _fact_repr(exc))
     return found
@@ -1906,6 +2091,65 @@ class PackRegistry:
                     errors.append(
                         f"relation '{pred}': 'declarationOnly' must be a boolean"
                     )
+
+                # #11083 — the two fields the census READS to state a row's
+                # disposition. Both are VOCABULARY-shaped, so both are
+                # warn-class (`_warn_packs_once`), never `errors`:
+                # `_load_one` raises on any `_validate` error and `load_all` then
+                # DELETES the pack, so an `errors` arm here would drop a whole
+                # pack's kinds over one direction typo. The distinction is
+                # deliberate and worth stating in the code: **shape errors drop
+                # the pack; vocabulary-shaped fields warn.**
+                #
+                # `direction`: the per-edge sense ruling (c) makes load-bearing
+                # (`ownedBy`'s target is open, so the direction says which end
+                # owns which). A typo must NOT read as "no direction" — that is
+                # a plausible wrong sign in the census — so it is named.
+                # ⛔ The test is `canonical_direction`, not membership in the four
+                # model values: the write path also accepts the two legacy
+                # aliases, and warning those off would be false (the writer
+                # honours them). Only junk returns `None` here — and junk is NOT
+                # silently replaced by the meaning: `is_default_direction`
+                # refuses to treat a typo as absent, so `create_operator` never
+                # overwrites it and then REFUSES the write. The message says that,
+                # because "ignored" was a claim the writer does not honour.
+                if "direction" in rel:
+                    direction_value = rel.get("direction")
+                    if canonical_direction(direction_value) is None:
+                        _warn_packs_once(
+                            ("relation-direction-invalid", ns, pred),
+                            "relation '%s': 'direction' %r is not a recognised "
+                            "direction token (%s) — the write path REFUSES it "
+                            "rather than resolving it from the declared "
+                            "semantics, so this relation has no resolvable "
+                            "sense (#11083)",
+                            pred, direction_value,
+                            ", ".join(sorted(_ACCEPTED_DIRECTION_VALUES)),
+                        )
+
+                # `declarationOnlyReason`: `declarationOnly: true` is an AUTHOR
+                # OPT-IN that silences a real gap, so the reason must exist and
+                # be printable by the census — otherwise the marker is a silencer
+                # (#11083 R7).
+                if "declarationOnlyReason" in rel:
+                    reason = rel.get("declarationOnlyReason")
+                    if not isinstance(reason, str) or not reason.strip():
+                        _warn_packs_once(
+                            ("relation-declaration-only-reason", ns, pred),
+                            "relation '%s': 'declarationOnlyReason' must be a "
+                            "non-empty string — it is what `tortoise pack "
+                            "validate` and the #11083 census print to explain "
+                            "why the declaration is unwritable",
+                            pred,
+                        )
+                    elif rel.get("declarationOnly") is not True:
+                        _warn_packs_once(
+                            ("relation-declaration-only-reason-orphan", ns, pred),
+                            "relation '%s': 'declarationOnlyReason' is recorded "
+                            "but 'declarationOnly' is not true — the reason "
+                            "explains a disposition the row does not claim",
+                            pred,
+                        )
 
                 # Layer 2 (#7852, W2): the semantics vocabulary is CLOSED and
                 # every declared value is checked against it —**warn-not-block**,
@@ -3144,6 +3388,25 @@ class PackRegistry:
                     entry["semantics"] = r["semantics"]
                 if r.get("nearMisses"):
                     entry["nearMisses"] = list(r["nearMisses"])
+                # #11083 — the per-row disposition and sense the census reads.
+                # `direction` is the DECLARED per-edge sense when the manifest
+                # states one (ruling (c): with `ownedBy`'s target left open, the
+                # predicate can no longer say which end owns which);
+                # `effective_direction` is what the row ACTUALLY records once the
+                # declared semantics is resolved through the same transition →
+                # table chain the write path uses. ``None`` = the row declares
+                # neither, and a reader must decide what absence means rather
+                # than receive a plausible default.
+                if r.get("direction"):
+                    entry["direction"] = r["direction"]
+                entry["effective_direction"] = effective_direction(r)
+                # #11083 — `declarationOnly: true` is an author opt-in that
+                # SILENCES the not-writable warning, so the reason is part of the
+                # declaration: without it the marker is a silencer (R7).
+                if r.get("declarationOnly"):
+                    entry["declarationOnly"] = True
+                if r.get("declarationOnlyReason"):
+                    entry["declarationOnlyReason"] = r["declarationOnlyReason"]
                 # #2766: the SAME verdict pack load warns and `pack validate`
                 # prints, surfaced here so the discoverable API cannot assert a
                 # relation is bound to a path its declaration does not bind.

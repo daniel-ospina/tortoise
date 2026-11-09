@@ -119,6 +119,7 @@ import ast
 import asyncio
 import concurrent.futures
 import os
+import sys
 import threading
 import time
 from pathlib import Path
@@ -277,9 +278,12 @@ _CONSTRUCTION_CASES = [c for c in _READ_CASES
 #: These are the four routes that are about to query the DATA plane, so their
 #: SDK handle must arrive with its projection ALREADY attached — the cold open
 #: (``Projection.__init__``: connect, version probe, ``_ensure_indexes()`` and,
-#: on a restored/DR graph, the index BUILD) is budgeted by
-#: ``probe_setup_timeout()`` (20 s, up to 300 s) and belongs to the ``graph``
-#: construction lane, NOT inside the read lane's 8 s saturation bound. A route
+#: on a restored/DR graph, the index BUILD) belongs to the ``graph``
+#: construction lane, whose wait bound is the one ``_graph_offload`` resolves for
+#: a caller that passes no ``timeout=`` — ``graph_offload_timeout_s()``, i.e.
+#: ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S`` (30 s by
+#: default, up to 310 s at the knob's ceiling) — and NOT inside the read lane's
+#: 8 s saturation bound. A route
 #: that never touches the projection (registry / control-plane reads: ``team``,
 #: ``sessions-*``, ``dream-health``) deliberately does NOT pass it — it must not
 #: pay a connect it never uses.
@@ -2901,7 +2905,9 @@ def test_a_record_served_prefer_read_never_opens_the_projection(client):
     this fix the route constructed its handle with ``attach_projection=True``
     *before* the record was consulted, so every record-served read paid a graph
     pool slot for a cold open (connect + version probe + ``_ensure_indexes()``,
-    budgeted by ``probe_setup_timeout()``: 20 s, up to 300 s) it never used —
+    budgeted by the ``graph`` lane's own ``graph_offload_timeout_s()`` —
+    ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``, 30 s
+    by default, up to 310 s) it never used —
     and on a restored/DR graph that open could push an answerable read past the
     10 s transport bound into the 504 -32009 "the work may still complete" body
     this change exists to replace.
@@ -2970,8 +2976,10 @@ def test_the_prefer_fallback_opens_the_projection_construction_first(client):
 
     A ``prefer`` fallback does two things with different legitimate costs: the
     RECORD round trip (bounded by the read lane's 8 s) and the cache's COLD OPEN
-    plus hot query. The open is budgeted by ``probe_setup_timeout()`` (20 s, up
-    to 300 s) on the CONSTRUCTION lane; the query alone stays on the read lane.
+    plus hot query. The open is budgeted by the ``graph`` lane's own
+    ``graph_offload_timeout_s()`` (``probe_setup_timeout()`` + the offload
+    margin: 30 s by default, up to 310 s) on the CONSTRUCTION lane; the query
+    alone stays on the read lane.
     This pins the ordering — attach, then the cache read — so a fix that moved
     the open back inside the read submission (re-breaking cycle-2 finding 6) or
     one that skipped the open (leaving the cache unreadable) is red.
@@ -3146,6 +3154,275 @@ def test_the_anchored_point_read_serves_on_the_read_lane_in_off_mode(client):
         f"OFF mode no longer attaches before its query (events: {events!r})")
 
 
+#: Poll interval for the warm-up's cold-phase-aware wait. The same 50 ms
+#: ``mcp_auth._COLD_SETUP_POLL_S`` uses, because the rule below is that seam's
+#: rule applied at this bound.
+_WARM_UP_POLL_S = 0.05
+
+
+def _one_time_embedder_load_in_progress() -> bool:
+    """Is a one-time embedder load running right now?
+
+    Never raises: the embedder is OPTIONAL (the ``embeddings`` extra may be
+    absent), and a wait bound must not fail because a probe's import did — the
+    same fail-closed-not-fail-open shape ``mcp_auth._cold_setup_ran_during``
+    documents one seam over.
+
+    ⚠️ This is the BARE flag, so it is a predicate STRICTLY WIDER than the one
+    ``hosted_api._read_offload`` re-arms on. That seam asks
+    ``mcp_auth._cold_setup_ran_during(reference, owner)`` →
+    ``EmbeddingModel.one_time_setup_owned_and_started_since(reference, owner)``
+    (``embeddings.py:861-889``), which adds two conjuncts this cannot see: the
+    load must have STARTED at/after the wait began (a load that finished inside
+    the wait is not setup we are still waiting on) and it must be OWNED by this
+    request (the owner token is minted per request inside
+    ``WaitBoundMiddleware`` and never leaves that task, so it is not reachable
+    from here). It also re-arms at most ONCE, where this helper grants a single
+    deferral and then rolls it forward one poll at a time (see the helper).
+
+    The width is acceptable HERE and only here: the warm-up issues ONE request
+    at a time on one client, and a background pre-warm stamps nothing
+    (``EmbeddingModel.background_load``), so the only load this can observe is
+    the one its own request triggered. Do not lift this helper to a concurrent
+    caller without narrowing it to the seam's own predicate.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # noqa: BLE001, RUF100 — the embedder is optional
+        return False
+    return EmbeddingModel.one_time_setup_in_progress()
+
+
+def _one_time_embedder_load_deadline() -> float | None:
+    """The in-flight load's OWN deadline (mono clock), or ``None``.
+
+    ``started_at + _LOAD_TIMEOUT_S``, read per call — the same number
+    ``mcp_auth._drain_cold_setup`` bounds its drain by. This is what keeps the
+    warm-up's deferral FINITE: the load cannot outlive its own join timeout.
+    """
+    try:
+        from tortoise.embeddings import EmbeddingModel
+    except Exception:  # noqa: BLE001, RUF100 — the embedder is optional
+        return None
+    return EmbeddingModel.one_time_setup_deadline()
+
+
+async def _warm_up_paying_the_cold_phases(ac, label: str, handler: str,
+                                          request_kwargs: dict,
+                                          bound: float):
+    """One warm-up request, bounded by ``bound`` — except inside a COLD LOAD.
+
+    ⛔ TWO cold phases can ride a route's FIRST request, and this bound must
+    judge NEITHER. That is the whole point of paying them OUTSIDE the
+    measurement:
+
+    * the **projection cold open** (connect, version probe, ``_ensure_indexes()``
+      and, on a restored/DR graph, the index BUILD) — declared budget the
+      ``graph`` lane's own ``graph_offload_timeout_s()``
+      (``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``,
+      30 s by default), which is ``bound``;
+    * **``/v1/search``'s one-time embedder load** (#4055). ``sdk.tortoise_fts_query``
+      calls ``EmbeddingModel.get()`` synchronously ON THE READ WORKER, so the
+      ``attach_projection`` bundling that assigns the cold open to the
+      construction lane says NOTHING about it, and its ``huggingface_hub``
+      resolve alone can burn a 15 s retry backoff (the hermetic egress guard
+      blocks the HEAD; retries at 1/2/4/8 s) BEFORE the cold bge-small load,
+      which is measured at ~57 s and budgeted by
+      ``EmbeddingModel._LOAD_TIMEOUT_S`` (90 s on a device; 270 s in the test
+      lane, #6960).
+
+    A load is SETUP, not the work this test's bounds measure. The read seam
+    already says so one layer down — ``hosted_api._read_offload`` drains a
+    request-owned in-flight load and RE-ARMS its bound instead of refusing the
+    read as a capacity failure — and this applies that rule at this bound.
+
+    ⚠️ IT APPLIES IT WITH A WIDER PREDICATE, deliberately, and the difference is
+    named here so nobody reads more into it than it is: the seam asks
+    ``_cold_setup_ran_during(reference, owner)`` (in flight AND started after
+    the wait began AND owned by this request, re-armed at most ONCE), while this
+    polls the bare ``one_time_setup_in_progress()`` flag. See
+    :func:`_one_time_embedder_load_in_progress` for why that is sound for a
+    ONE-REQUEST-AT-A-TIME warm-up and must not be widened to a concurrent one.
+
+    Measured, and why this exists: a fresh-context review at ``e26d9890``
+    redded the WARM-UP itself here —
+    ``[search] the WARM-UP search request did not answer within 20.0s`` — and
+    the bound's own message reported it as *"a broken read route or a
+    cold-open regression"*, which it was not: the route was healthy and the
+    cold phase was the embedder's. A bound that does not cover its callee's
+    cold phase is the exact class the seam above already fixed twice.
+
+    ``bound`` stays the cold open's declared budget, so a route that is
+    genuinely wedged still breaches it and says so. The deferral is granted at
+    most ONCE, against the load's OWN deadline (``one_time_setup_deadline()``),
+    so the wait is FINITE by construction: total ≤ ``_LOAD_TIMEOUT_S`` + TWO
+    ``bound``s. The second one is not slack: the deadline is stamped when the
+    load STARTS, which is inside this request and therefore AFTER this wait
+    began, so the grant may begin up to one ``bound`` into it (the projection
+    cold open's own phase, per the first bullet above). ⚠️ Recorded, not hidden: in the test lane ``_LOAD_TIMEOUT_S`` is
+    270 s, so a load that consumed its whole budget would leave this item under
+    ``pytest-timeout``'s own 300 s — in that state the ITEM reports the timeout
+    rather than the route. That is the outcome ``tests/conftest.py`` chose the
+    270 s budget for (the load's budget fires first and names itself a load).
+    """
+    task = asyncio.create_task(ac.request(**request_kwargs))
+    budget = time.monotonic() + bound
+    #: Granted at most ONCE and FROZEN to the load's OWN deadline plus one
+    #: ``bound``, so a second load — or a flag that never clears — cannot extend
+    #: the wait past that cap. Within the cap the ceiling is rolled forward ONE
+    #: POLL at a time, so it follows the load's LIFETIME rather than its BUDGET:
+    #: a load observed on one poll and gone on the next buys one ``bound``, not
+    #: ``_LOAD_TIMEOUT_S``. (Measured on the first version of this helper, which
+    #: anchored to the budget instead: with ``bound=0.05`` an instantly-failing
+    #: attempt moved the breach from 0.05 s to 0.65 s — 13x.)
+    deferral: float | None = None
+    #: The last poll that OBSERVED a load in flight. Read by the message below,
+    #: and what makes the lifetime anchor legible in a failure: the ceiling the
+    #: loop last granted is this stamp plus one ``bound``.
+    last_in_flight: float | None = None
+    try:
+        while True:
+            await asyncio.wait({task}, timeout=_WARM_UP_POLL_S)
+            if task.done():
+                return task.result()
+            now = time.monotonic()
+            if _one_time_embedder_load_in_progress():
+                # The cold phase is SETUP: do not judge it by a bound that was
+                # never meant to cover it. The drain is bounded by the load's
+                # OWN join timeout, not by this loop.
+                last_in_flight = now
+                if deferral is None:
+                    load_deadline = _one_time_embedder_load_deadline()
+                    deferral = ((load_deadline if load_deadline is not None
+                                 else now) + bound)
+                budget = max(budget, min(deferral, now + bound))
+            if now >= budget:
+                _state = ("a one-time embedder load was in flight (last seen "
+                          f"{now - last_in_flight:.2f}s before this breach) and "
+                          "the deferral granted for it has EXPIRED"
+                          if last_in_flight is not None
+                          else "no one-time embedder load is in flight")
+                raise AssertionError(
+                    f"[{label}] the WARM-UP {handler} request did not answer "
+                    f"within {bound}s ({_state}) with the shared pool FREE — so "
+                    f"this is a broken read route or a cold-open regression, "
+                    f"NOT the pool (#10602)")
+    finally:
+        if not task.done():
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+
+
+def test_the_warm_up_does_NOT_judge_a_one_time_load_by_the_cold_open_bound(
+        monkeypatch):
+    """The deferral exists, is BOUNDED, and is granted at most once.
+
+    ⛔ Why this test exists at all: on a lane without the ``embeddings`` extra,
+    ``_one_time_embedder_load_in_progress()`` is always ``False``, so the whole
+    deferral branch is DEAD in every local run — a regression in it would
+    surface only as the very CI red it exists to remove. This exercises the
+    branch directly, against a fake client, with the probe monkeypatched.
+
+    Four arms, one per property:
+
+    1. a request SLOWER than ``bound`` is ABSORBED while a load is in flight
+       (this is the behaviour the warm-up exists for — measured red in CI as
+       ``[search] the WARM-UP ... within 20.0s`` before the deferral landed);
+    2. the deferral is FINITE: once the load's own deadline has passed, a
+       request that never answers breaches with the route NAMED — a flag that
+       never clears cannot extend the wait, which is what "granted at most
+       once, against the load's own deadline" has to mean;
+    3. with NO load in flight there is no free pass at all: the same slow
+       request breaches at ``bound``;
+    4. ⛔ the deferral follows the load's LIFETIME, not its BUDGET: an attempt
+       observed on ONE poll and gone on the next buys one ``bound``, not the
+       whole ``_LOAD_TIMEOUT_S``. The first version of the helper anchored to
+       the budget and this arm is what says so — it is the mutant the review
+       measured (a 0.05 s bound breaching at 0.65 s).
+    """
+    module = sys.modules[__name__]
+
+    class _Client:
+        """A request the caller controls the LATENCY of, counted."""
+
+        def __init__(self, latency: float) -> None:
+            self.latency = latency
+            self.calls = 0
+
+        async def request(self, **_kwargs):
+            self.calls += 1
+            await asyncio.sleep(self.latency)
+            return type("_Resp", (), {"status_code": 200, "text": ""})()
+
+    # (1) absorbed while the load is in flight — the request outruns `bound`
+    # by 6x and still answers.
+    monkeypatch.setattr(module, "_one_time_embedder_load_in_progress",
+                        lambda: True)
+    monkeypatch.setattr(module, "_one_time_embedder_load_deadline",
+                        lambda: time.monotonic() + 0.60)
+    slow = _Client(0.30)
+    resp = asyncio.run(_warm_up_paying_the_cold_phases(
+        slow, "search", "search_route", {}, 0.05))
+    assert resp.status_code == 200, resp
+    assert slow.calls == 1, f"the warm-up issued {slow.calls} requests, not 1"
+
+    # (2) BOUNDED: the load's deadline passes, the flag never clears, and the
+    # wait still ends — with the route named and the state described. The
+    # deadline is a FIXED instant (not a per-call lambda), so this arm cannot
+    # re-arm itself.
+    fixed_deadline = time.monotonic() + 0.05
+    monkeypatch.setattr(module, "_one_time_embedder_load_deadline",
+                        lambda: fixed_deadline)
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        asyncio.run(_warm_up_paying_the_cold_phases(
+            _Client(60.0), "search", "search_route", {}, 0.05))
+    elapsed = time.monotonic() - started
+    assert elapsed < 5.0, (
+        f"the deferral was not bounded — the wait ran {elapsed:.1f}s with a "
+        f"load flag that never clears")
+    assert "[search]" in str(exc.value) and "EXPIRED" in str(exc.value), (
+        f"the breach must name the route and say the deferral expired: "
+        f"{exc.value}")
+
+    # (3) no load, no free pass — the same slow request breaches at `bound`.
+    monkeypatch.setattr(module, "_one_time_embedder_load_in_progress",
+                        lambda: False)
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        asyncio.run(_warm_up_paying_the_cold_phases(
+            _Client(60.0), "points-list", "list_points", {}, 0.05))
+    assert time.monotonic() - started < 5.0, "the plain bound did not fire"
+    assert "no one-time embedder load is in flight" in str(exc.value), (
+        f"with no load in flight the breach must not blame one: {exc.value}")
+
+    # (4) ⛔ ANCHORED TO THE LIFETIME, NOT THE BUDGET. The load is seen on ONE
+    # poll and gone on the next, and its deadline is deliberately 60 s out: if
+    # the ceiling were anchored to that budget the request would sit for a
+    # minute; anchored to the lifetime it is named about one `bound` later.
+    polls: list[float] = []
+
+    def _one_poll_then_clear() -> bool:
+        polls.append(time.monotonic())
+        return len(polls) <= 1
+
+    monkeypatch.setattr(module, "_one_time_embedder_load_in_progress",
+                        _one_poll_then_clear)
+    monkeypatch.setattr(module, "_one_time_embedder_load_deadline",
+                        lambda: time.monotonic() + 60.0)
+    started = time.monotonic()
+    with pytest.raises(AssertionError) as exc:
+        asyncio.run(_warm_up_paying_the_cold_phases(
+            _Client(60.0), "search", "search_route", {}, 0.05))
+    elapsed = time.monotonic() - started
+    assert elapsed < 2.0, (
+        f"the deferral is anchored to the load's BUDGET, not its LIFETIME — a "
+        f"load observed on one poll and gone on the next held the wait for "
+        f"{elapsed:.1f}s instead of about one bound")
+    assert "EXPIRED" in str(exc.value), (
+        f"the breach must still name the load state: {exc.value}")
+
+
 @pytest.mark.parametrize("label,handler,request_kwargs", _PROJECTION_READ_CASES)
 def test_the_cold_projection_open_rides_the_construction_lane(
         client, monkeypatch, label, handler, request_kwargs):
@@ -3155,8 +3432,9 @@ def test_the_cold_projection_open_rides_the_construction_lane(
     an ALREADY-ATTACHED projection (the measured store answer is 41–80 ms). The
     cold half of a read — ``Projection.__init__``'s connect, version probe and
     ``_ensure_indexes()``, which on a restored/DR graph BUILDS the index over the
-    whole graph — is budgeted separately by ``probe_setup_timeout()`` (20 s, up
-    to 300 s) on the ``graph`` construction lane.
+    whole graph — is budgeted separately by the ``graph`` construction lane's own
+    ``graph_offload_timeout_s()`` (``probe_setup_timeout()`` +
+    ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``: 30 s by default, up to 310 s).
 
     If the attach slid back into the read submission, a HEALTHY store's first
     read after a restore would be refused as a capacity failure: the 8 s bound
@@ -3221,7 +3499,7 @@ def test_the_cold_projection_open_rides_the_construction_lane(
         f"[{label}] {handler} submitted its read BEFORE attaching the "
         f"projection (events: {events!r}) — the cold open rides the read lane's "
         f"8 s bound instead of the construction lane's "
-        f"probe_setup_timeout() allowance (#10602 cycle-2 P1)")
+        f"graph_offload_timeout_s() allowance (#10602 cycle-2 P1)")
 
 
 def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
@@ -3262,7 +3540,93 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
     here. So "the reads now answer while the shared pool is stalled" holds for
     the four cases above and for no other route, and this test must not be
     cited as a claim about the read surface as a whole.
+
+    ⛔ THE WARM-UP BELOW IS LOAD-BEARING, and it does not weaken the pin. Every
+    route in `_READ_LANE_CASES` is also in `_PROJECTION_ATTACHING_READS`, so its
+    FIRST request after `_seed_read_surface()` carries the cold open (connect,
+    version probe, `_ensure_indexes()` and, on a restored/DR graph, the index
+    BUILD) — which this module's own `_PROJECTION_ATTACHING_READS` note budgets
+    at the `graph` lane's wait bound, `graph_offload_timeout_s()` (the probe's
+    `probe_setup_timeout()` allowance PLUS a margin: 30 s by default, up to
+    310 s at the knob's ceiling), and assigns to the `graph` construction lane,
+    explicitly "NOT inside the read lane's 8 s saturation bound" (#10602
+    cycle-2 review P1). Measuring that request inside
+    `READ_ANSWER_BOUND_S` judged the cold open by a bound the module says it must
+    not be judged by, and it redded a green build: measured on PR #11535's
+    `test (c)` (run 42470441311, embedded lane, 4,736 tests in 944 s) the FIRST
+    case — `points-list` — exceeded 3.0 s while the other three answered in the
+    same stalled window. That is a first-touch cost, not a read queued on the
+    shared pool: put the read leg BACK on the shared pool and the red set is not
+    one case but an ORDERED PREFIX — each red costs a whole
+    `READ_ANSWER_BOUND_S`, so the cases after the first queue behind the
+    earlier ones' timeouts and keep redding while the hold lasts. Measured
+    `points-list`, `point-get`, `search` red and `topic-summary` passing, but
+    ⛔ THE SHAPE THAT CARRIES THE INFERENCE IS THE PREFIX, NOT THE COUNT.
+    `3 × READ_ANSWER_BOUND_S` (9 s) opens the fourth case's window only 3 s
+    before the 12 s `DEFAULT_EXECUTOR_STALL_S` hold expires, and the measured
+    margin was 10 ms (`topic-summary` answered at t=12.00 s with dt=2.99 s of
+    its 3.00 s bound) — so 4-of-4 is what the SAME mechanism predicts on a host
+    a few tens of ms slower, and nothing here may rest on the last case passing.
+    What is NOT host-dependent is the CI shape: ONE red, and the FIRST — which
+    no pool queue produces.
+
+    ⛔ THERE ARE TWO FIRST-TOUCH VARIABLES ON THIS PATH, AND THE WARM-UP JUDGES
+    NEITHER:
+
+    * the cold open's WORK, which rides a per-request construction submission
+      (`hosted_api._data_sdk_offloaded` bundles `sdk._get_proj()` into the SAME
+      submission), so the `graph` lane's OWN bound is its declared budget —
+      `graph_offload_timeout_s()`, which `_graph_offload` resolves exactly when
+      the caller passes no `timeout=` (#3773): `probe_setup_timeout()` PLUS
+      `CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S`, 30 s by default. It is what the
+      warm-up pays once, with the pool free and outside the measurement;
+    * a request-owned ONE-TIME EMBEDDER LOAD inside `/v1/search`'s callable —
+      `sdk.tortoise_fts_query` calls `EmbeddingModel.get()` synchronously in the
+      worker (`hosted_api._read_offload`'s #4055 note; budgeted
+      `EmbeddingModel._LOAD_TIMEOUT_S`, 90 s and 270 s in the test lane,
+      #6960).
+
+    ⚠️ AND THAT SECOND LOAD IS NOT LEFT AS A RESIDUAL HERE. `warm_up_bound` is
+    the COLD OPEN's budget, and at the shipped default it sits BELOW that load's
+    device budget (30 s vs 90 s), which means
+    the bound must not JUDGE that load, and `_warm_up_paying_the_cold_phases`
+    does not: while a one-time embedder load is in flight it defers the
+    judgement, against the load's OWN deadline (`one_time_setup_deadline()`),
+    granted at most ONCE — so the wait stays FINITE by construction
+    (≤ `_LOAD_TIMEOUT_S` + 2 × `warm_up_bound`: the deadline is stamped when the
+    load STARTS, which is up to one `warm_up_bound` into this wait) rather than
+    growing on every
+    poll. Measured before this, on a healthy route: `[search] the WARM-UP search
+    request did not answer within 20.0s` — reachable because the load's
+    `huggingface_hub` resolve alone can burn a 15 s retry backoff (the suite's
+    hermetic egress guard blocks the HEAD; retries at 1/2/4/8 s) before the cold
+    bge-small load proper.
+
+    ⚠️ The deferral's predicate is WIDER than `_read_offload`'s, and this is the
+    honest statement of the difference: that seam re-arms on
+    `_cold_setup_ran_during(reference, owner)` — in flight AND started after the
+    wait began AND owned by THIS request, at most once — while this polls the
+    bare `one_time_setup_in_progress()` flag. It is sound only because the
+    warm-up issues ONE request at a time and a background pre-warm stamps
+    nothing (`EmbeddingModel.background_load`); the helper's docstring says the
+    same, so this cannot be read as a claim that the two bounds are identical.
+
+    A WEDGED route still breaches and still says so — ONE `warm_up_bound` after
+    the load it overlaps was LAST OBSERVED in flight (the ceiling is rolled
+    forward per poll, so it follows the load's lifetime rather than its budget),
+    and the breach message says how long ago that was. Disclosed rather than
+    hidden: while a load IS in flight the deferral is capped by the load's own
+    deadline, and in the test lane that deadline is 270 s inside
+    `pytest-timeout`'s 300 s item, so a load consuming its whole budget leaves
+    the ITEM to report the timeout. That is the outcome `tests/conftest.py`
+    chose the 270 s budget for.
+
+    It cannot mask the defect it pins: on the pre-#10602 shape the warm-up
+    succeeds too (the shared pool is free), and the MEASURED request still has to
+    wait behind the blockers — measured `1 failed` with `_read_offload` reverted
+    to `asyncio.to_thread` (`shared-pool mutant`), warm-up in place.
     """
+    from tortoise import monitoring
     from tortoise.hosted_api import app
 
     _seed_read_surface()
@@ -3274,28 +3638,68 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
         f"{sorted(_READ_LANE_CASES - {c[0] for c in _READ_CASES})}")
 
     width = _default_executor_width()
+    #: The warm-up's OWN bound, and the bound of the COLD OPEN only — the
+    #: `graph` lane's declared budget for it, ``graph_offload_timeout_s()``
+    #: (= ``probe_setup_timeout()`` + ``CONTROL_PLANE_GRAPH_OFFLOAD_MARGIN_S``:
+    #: 30 s by default, up to 310 s at the knob's ceiling), because
+    #: ``_data_sdk_offloaded(..., attach_projection=True)`` rides ``_graph_offload``
+    #: with no ``timeout=`` override and ``_graph_offload`` resolves exactly that
+    #: (#3773). It must NOT be narrowed to ``probe_setup_timeout()``: that is the
+    #: PROBE lane's allowance, so the cold open would be judged by a number its
+    #: own lane never gave it. Without any bound a hung cold open
+    #: spins until the repo-wide ``pytest-timeout`` (300 s) kills the ITEM with a
+    #: message about a timeout instead of about the route — the same rule the
+    #: occupancy wait below follows. The OTHER cold phase on this path
+    #: (`/v1/search`'s one-time embedder load) is not covered by a larger
+    #: constant here: `_warm_up_paying_the_cold_phases` stops judging the wait
+    #: while that load is in flight, because it is setup and its own
+    #: ``_LOAD_TIMEOUT_S`` is its budget — the same rule `_read_offload` applies.
+    warm_up_bound = monitoring.graph_offload_timeout_s()
+    assert warm_up_bound > READ_ANSWER_BOUND_S, (
+        f"the cold open's declared budget ({warm_up_bound}s) no longer exceeds "
+        f"the read-lane bound ({READ_ANSWER_BOUND_S}s) — the warm-up would then "
+        f"be the STRICTER gate of the two, so the isolation this test rests on "
+        f"is gone and the measured pass would judge a cold open it never paid "
+        f"(#10602)")
     timings: dict[str, float] = {}
     failures: list[str] = []
 
     async def _run() -> None:
         loop = asyncio.get_running_loop()
-        blockers, occupied, release = _stall_the_default_executor(loop, width)
-        try:
-            # BOUNDED occupancy wait: a stall that is never established must
-            # FAIL here, naming its own cause — not spin until the repo-wide
-            # ``pytest-timeout`` (300 s) kills the item and the shard with a
-            # message about a timeout instead of about the premise.
-            occupied_deadline = time.monotonic() + DEFAULT_EXECUTOR_STALL_S
-            while not occupied.is_set():
-                if time.monotonic() >= occupied_deadline:
-                    raise AssertionError(
-                        f"the shared default executor never reached {width} "
-                        f"running blockers, so the pool was never full and this "
-                        f"run proves nothing about the read lane (#10602)")
-                await asyncio.sleep(0.01)
-            transport = httpx.ASGITransport(app=app)
-            async with httpx.AsyncClient(transport=transport,
-                                         base_url="http://test") as ac:
+        transport = httpx.ASGITransport(app=app)
+        async with httpx.AsyncClient(transport=transport,
+                                     base_url="http://test") as ac:
+            # COLD-WARM-UP, with the pool still free and OUTSIDE the
+            # measurement (see the docstring). Each route's first request pays
+            # the projection cold open, which belongs to the construction lane's
+            # `graph_offload_timeout_s()` budget — not to the read-lane bound
+            # below;
+            # `/v1/search` additionally pays a one-time embedder load, which the
+            # helper stops judging while it is in flight.
+            for label, handler, request_kwargs in cases:
+                warm = await _warm_up_paying_the_cold_phases(
+                    ac, label, handler, request_kwargs(), warm_up_bound)
+                assert warm.status_code == 200, (
+                    f"[{label}] the WARM-UP {handler} request answered "
+                    f"{warm.status_code}: {warm.text[:200]} — the read route is "
+                    f"broken before any stall, so the measurement below would "
+                    f"red for a reason that is not the pool (#10602)")
+
+            blockers, occupied, release = _stall_the_default_executor(loop, width)
+            try:
+                # BOUNDED occupancy wait: a stall that is never established must
+                # FAIL here, naming its own cause — not spin until the repo-wide
+                # ``pytest-timeout`` (300 s) kills the item and the shard with a
+                # message about a timeout instead of about the premise.
+                occupied_deadline = time.monotonic() + DEFAULT_EXECUTOR_STALL_S
+                while not occupied.is_set():
+                    if time.monotonic() >= occupied_deadline:
+                        raise AssertionError(
+                            f"the shared default executor never reached {width} "
+                            f"running blockers, so the pool was never full and "
+                            f"this run proves nothing about the read lane "
+                            f"(#10602)")
+                    await asyncio.sleep(0.01)
                 for label, handler, request_kwargs in cases:
                     started = time.monotonic()
                     try:
@@ -3307,16 +3711,19 @@ def test_the_read_path_answers_while_the_default_executor_is_stalled(client):
                             f"[{label}] {handler} did not answer within "
                             f"{READ_ANSWER_BOUND_S}s while all {width} default-"
                             f"executor slots were occupied — its blocking round "
-                            f"trip is still queued on the SHARED pool (#10602)")
+                            f"trip is still queued on the SHARED pool (#10602). "
+                            f"The warm-up above already paid this route's cold "
+                            f"open with the pool free, so a first-touch cost "
+                            f"does not explain this answer")
                         continue
                     timings[label] = time.monotonic() - started
                     if response.status_code != 200:
                         failures.append(
                             f"[{label}] {handler} answered "
                             f"{response.status_code}: {response.text[:200]}")
-        finally:
-            release.set()
-            await asyncio.gather(*blockers, return_exceptions=True)
+            finally:
+                release.set()
+                await asyncio.gather(*blockers, return_exceptions=True)
 
     asyncio.run(_run())
     assert not failures, (

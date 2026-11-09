@@ -49,6 +49,12 @@ O8_SEMANTICS_VOCABULARY = {
     "mutuallyExclusive",
     "hasPart",
     "causes",
+    # #11083 — `produces` is a MEANING, not a label: production is not causation
+    # and the machine acts on the direction (`<-`, target→source). Owner ruling
+    # 2026-11-05, recorded as an `OVERRIDES:` on #7848. `funds` is deliberately
+    # ABSENT — #7848's 2026-11-08 correction withdrew it to Layer 3 on #2766's
+    # "does the machine have to ACT on it?" test.
+    "produces",
     "dependsOn",
     "transacts",
     "related",

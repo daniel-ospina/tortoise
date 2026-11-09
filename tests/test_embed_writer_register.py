@@ -59,7 +59,7 @@ is the product home; this file is its proof.
 |---|---|---|
 | `test_the_register_resolves_at_runtime_from_tortoise` | the issue's first row — *"resolvable at runtime from `tortoise/`"* | the register moves out of `tortoise/`, under `tortoise/projection/`, or stops being importable without the tooling |
 | `test_the_register_imports_without_entering_the_projection_cycle` | `04-plan.md` §5's leaf requirement, EXECUTED | importing the register pulls `tortoise.projection`, `tortoise.pack_state` or `tortoise.sdk` into `sys.modules`, i.e. it re-enters `projection → pack_state → sdk → projection` — the cycle whose config read is a reproduced `ImportError` (`tortoise.projection.__init__::_config_classes` records it). The "imports ONLY the standard library" arm is `test_the_register_is_not_a_second_rule_set`, not this one |
-| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the ONE regex it holds is the `#\\d+` `owner_issue` format check, which is not a rule) |
+| `test_the_register_is_not_a_second_rule_set` | plan risk R2 — *"the register becomes a second source of truth and drifts from `value_gate.RULES`"* | the register's imports leave `{__future__, collections, re, dataclasses, types}` — every `import` / `from` at EVERY level counts, so a relative `from .x import …` is not exempt — or it names `value_gate`/`embed_gate`/`RULES`/`EMBEDDING_RULES` in code (the two regexes it holds are SHAPE checks — the `#\\d+` `owner_issue` format and the Cypher-label shape `_LABEL` — neither a rule) |
 | `test_a_duplicate_key_raises` | the issue's third row (D4) | a second declaration silently wins — the stale row survives a rewrite |
 | `test_a_bypass_declaration_is_refused` | `04-plan.md` §6.2 — *"no `bypass` class; an unclassified writer is a refusal at export time"* | `bypass` becomes declarable, so the class that means *defect* can be asserted as *accepted* |
 | `test_an_undeclared_writer_is_a_refusal_not_a_default` | the same contract, at the LOOKUP | `classify` answers for a writer nobody declared — the fallback that makes "no silent bypass" unkeepable |
@@ -71,6 +71,13 @@ is the product home; this file is its proof.
 | `test_the_three_writers_that_carried_no_declaration_now_carry_one` | **this issue's own objective** (`03-scope.md` S2) | one of the three named writers loses its declaration, or the declaration stops naming `#11085` as the issue that accepted it |
 | `test_every_declaration_cites_a_seam_and_an_owning_issue` | the issue's `{class, reason, owning issue}` shape | an entry carries a claim with no symbol behind it, or an owner that is not an issue |
 | `test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from` | the frozen map is not silently re-derived | `EMBED_WRITER_CLASSES` stops matching `_DECLARATIONS` (a mutation, a second `load()`, a mutable dict slipping in) |
+| `test_a_stores_declaration_that_does_not_answer_is_refused` (`#11492`) | row 2's question — *where does this writer's vector land?* — is ANSWERED by every declaration, never defaulted | a declaration is constructible without `stores`, or `load()` accepts an empty tuple, a mutable list, a non-label string, or a typo'd disposition (any of which would read as an unserved LABEL and hold a correct tree) |
+| `test_every_declared_label_re_derives_at_this_head` (`#11492`) | the declared LABELS are re-derived at HEAD, the `CENSUS_EVIDENCE` discipline one field over | a writer's store clause moves to another label (or the needle stops being in the symbol), so the declaration silently answers about the old one |
+| `test_a_runtime_label_declaration_is_named_not_guessed` (`#11492`) | `LABELS_AT_RUNTIME` is a DECLARED, reviewable statement — `no-live-vector` would be a lie and a guessed label a fabrication | the dump importer (`restore_graph`) is declared as storing nothing or as storing a fixed label |
+| `test_a_no_live_vector_declaration_executes_no_store_clause` (`#11492`) | `NO_LIVE_VECTOR` is a claim about ABSENCE, so it must be checked against the symbol's own body plus one hop of module constants | a `no-live-vector` writer's body (or a constant it names) carries a store clause after all |
+| `test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector` (`#11492`) | the second `LABELS_AT_RUNTIME` entry — a door that EXECUTES a caller-supplied statement — is named, not guessed, and a writer that runs a store cannot be declared as storing nothing | `sdk::_event_raw_write_door` is declared `NO_LIVE_VECTOR`, or its executed statement moves to a label nobody declared |
+| `test_a_declared_label_set_covers_every_label_its_own_store_targets` (`#11492` / `#11530`) | the OTHER direction of the label tuple: `stores` answers WHERE, so it may not UNDER-name | a store clause's alias is bound to a label the declaration omits, or an alias it names is bound to no label at all (both measured: `#11530` and `#11492`'s third review). Scoped to the ALIAS the clause names — a body-wide rule false-reds three correct writers that bind labels with no vector |
+| `test_every_store_alias_pattern_still_sees_a_live_store` (`#11530`) | every member of `_STORE_ALIAS` is a form the writers really use, so no member can be deleted or rot unnoticed | a form (`set_embedding_clause`, `clear_then_set_prefix`, a literal `.embedding =`) is removed, or stops matching every label-declaring writer — which would silently make the completeness pin above inert |
 
 ⛔ **These tests write no graph and flip no gate.** `#11085` changes no writer's behaviour, no schema,
 and no MCP/SDK surface — the register is a declaration, and its proof is a refusal.
@@ -98,7 +105,10 @@ from tortoise.embed_writer_register import (
     CLASSES,
     EMBED_WRITER_CLASSES,
     EXEMPT,
+    LABELS_AT_RUNTIME,
+    NO_LIVE_VECTOR,
     RECOGNISED_PRODUCER,
+    STORES_DISPOSITIONS,
     DuplicateWriterDeclaration,
     UnclassifiedWriterKey,
     UnknownWriterClass,
@@ -215,8 +225,9 @@ def test_the_register_is_not_a_second_rule_set():
 # ── The refusals (§6.2 / §6.3) ─────────────────────────────────────────────
 
 
-def _record(cls: str = EXEMPT, reason: str = "`tortoise.z::_w` reads one", owner: str = "#11085"):
-    return WriterClass(cls, reason, owner)
+def _record(cls: str = EXEMPT, reason: str = "`tortoise.z::_w` reads one", owner: str = "#11085",
+            stores: tuple[str, ...] | str = NO_LIVE_VECTOR):
+    return WriterClass(cls, reason, owner, stores)
 
 
 def test_a_duplicate_key_raises():
@@ -254,6 +265,14 @@ def test_an_undeclared_writer_is_a_refusal_not_a_default():
     with pytest.raises(UnclassifiedWriterKey) as excinfo:
         register.classify(missing)
     assert missing in str(excinfo.value)
+    # The refusal's REMEDY is the only instruction the next declaration's author reads, so it
+    # must name the field that is now REQUIRED. `stores` (#11492) is defaultless: a remedy of
+    # `WriterClass(cls, reason, "#N")` raises a bare TypeError at module import instead of this
+    # register's designed, NAMED refusal — the failure mode the message exists to prevent.
+    assert "stores" in str(excinfo.value), (
+        "the refusal tells an author how to declare a writer; `stores` is required, so a remedy "
+        f"that omits it cannot be followed: {str(excinfo.value)!r}"
+    )
     assert register.undeclared([missing, *EMBED_WRITER_CLASSES]) == (missing,)
 
 
@@ -816,6 +835,742 @@ def test_every_declaration_cites_a_seam_and_an_owning_issue():
     # paths this repo happens to contain adds no killability. (That path cannot be added here in any
     # case: gaining `tortoise/config/__init__.py` fails `tests/conftest.py` at import,
     # `cannot import name 'RELATIVE_PATH_ERROR'`.)
+
+
+def test_a_stores_declaration_that_does_not_answer_is_refused():
+    """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
+
+    Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
+    needs — WHERE the vector lands — cannot be derived for most writers (15 of the 20 outside-gate
+    writers name no usable label in their own Cypher, because a store is not always a
+    `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
+    does not credit, in a module-level constant, behind a property-map merge, behind a store
+    delegated to another writer (`_index_process_unit`), in a writer that only BUILDS a clause
+    (`set_embedding_clause`), or in the caller's own statement — and those are a SAMPLE: the body may
+    hold no store at all (a read, a read into a dict, or comment prose — `_compare_views`,
+    `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a
+    later pass stores (`add_point`, `_journal_event_raw_write`), quote a wipe it does not own
+    (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
+    it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), or interpolate
+    the label at runtime (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
+    declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
+    would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer
+    nobody checked.
+
+    ⛔ The directions are not symmetric and the message says so: a label that is not a Cypher label
+    can never match the served set (the false-hold direction), while an empty tuple or a non-tuple
+    is a declaration that does not answer (the false-pass direction). An out-of-vocabulary string is
+    neither: `tools/dod_5090_probe.py::_store_reading` refuses it independently and records it in
+    `violations`, so row 2 holds at `PARTIAL` and names it — not a `NOT MET`.
+    """
+    # ⛔ No default: the field is REQUIRED, so a new declaration cannot inherit a safe-looking
+    # answer. This is the same pin `test_the_DECLARATIONS_tuple_…` puts on the frozen map.
+    with pytest.raises(TypeError):
+        WriterClass(EXEMPT, "`tortoise.z::_w` reads one", "#11085")  # type: ignore[call-arg]
+    for stores in ((), [], ["Event"], "Event", "", "exmpt", ("Event", ""), ("Ev ent",),
+                   ("Event", "Event"), ("Event", 3), ("Event\n",), ("Event ",)):
+        with pytest.raises(ValueError):
+            register.load([("tortoise.z::_w", _record(stores=stores))])
+    # …and every admissible shape still loads, so the refusal is not a blanket one.
+    for stores in (("Event",), ("Point", "Subject"), NO_LIVE_VECTOR, LABELS_AT_RUNTIME):
+        assert register.load([("tortoise.z::_w", _record(stores=stores))])[
+            ("tortoise.z::_w")].stores == stores
+    # Every LIVE entry states one of them — the population-wide form of the same pin.
+    for key, entry in EMBED_WRITER_CLASSES.items():
+        if isinstance(entry.stores, str):
+            assert entry.stores in STORES_DISPOSITIONS, (key, entry.stores)
+        else:
+            assert entry.stores and all(register._LABEL.match(label) for label in entry.stores), (
+                key, entry.stores)
+
+
+#: `#11492` — WHERE each declared vector lands, as re-derivable evidence:
+#: `(rel_path, symbol, needle, labels)`. The needle is the store clause itself (or the label constant
+#: the clause is built from) and `labels` is the SET OF LABELS THAT CLAUSE NAMES, so the declaration
+#: is compared against the evidence rather than against a second copy of itself: ⛔ `#11492`'s review
+#: proved the first version — needles with no label set — PASSED with a declaration mutated to
+#: `("Batch",)`, i.e. it checked that the store still existed and never that the declaration still
+#: described it. A declaration edited to an unserved label would have read `MET` while the vector
+#: landed elsewhere, which is #5090 row 2's falsifier inverted.
+#:
+#: ⛔ Only writers declared with a label tuple appear here: a `NO_LIVE_VECTOR` entry cannot be proven
+#: by a needle (that is a claim about ABSENCE, and data flow — `UNDECIDABLE_WRITE_SHAPES`), and
+#: `LABELS_AT_RUNTIME` is precisely the entry with no static label to point at. Both are product
+#: judgements the register owns; the `stores` field is where a reviewer reads them.
+LABEL_EVIDENCE: dict[str, tuple[str, str, str, frozenset[str]]] = {
+    # The label and the vector clause in ONE statement.
+    "tortoise.projection.entities::_event_plain_merge": (
+        "tortoise/projection/entities.py", "_event_plain_merge",
+        'MERGE (e:Event {eventId: $eid})', frozenset({"Event"})),
+    "tortoise.sdk::_embedding_repair_attempt": (
+        "tortoise/sdk.py", "_embedding_repair_attempt",
+        'MATCH (e:Event {eventId:$eid})', frozenset({"Event"})),
+    "tortoise.sdk::_write_capture_turns": (
+        "tortoise/sdk.py", "_write_capture_turns",
+        "t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb)",
+        frozenset({"Point"})),
+    # The label is in the enclosing statement, the vector in the shared clause: the needle is the
+    # STORE STATEMENT, and the alias letter it passes is what ties the two together.
+    "tortoise.sdk::_session_event_write": (
+        "tortoise/sdk.py", "_session_event_write",
+        '"MERGE (e:Event {eventId:$eid}) "', frozenset({"Event"})),
+    "tortoise.sdk::ingest_corpus": (
+        "tortoise/sdk.py", "ingest_corpus",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
+    "tortoise.session_indexer::main": (
+        "tortoise/session_indexer.py", "main",
+        '"SET e += $props, " + set_embedding_clause("e")', frozenset({"Event"})),
+    # The two where the label is NOT the enclosing word: `Point` in the MATCH of the restore
+    # (`:Batch`/`:Session` appear in the same body but carry no vector — the pre-wipe snapshot),
+    # and the canonical-label constant for the generic update door (five labels, one tuple).
+    "tortoise.projection::_rebuild_all_replay": (
+        "tortoise/projection/__init__.py", "_rebuild_all_replay",
+        '"MATCH (n:Point {id:$pid}) " + restore_guard', frozenset({"Point"})),
+    "tortoise.sdk::_update_entity": (
+        "tortoise/sdk.py", "_update_entity",
+        "for label, prop in _CANONICAL_ENTITY_ID_PROPS:",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
+}
+
+#: The label sets the label CONSTANT names, cited by the entries that store through them.
+#: `(rel_path, symbol, labels)` — re-derived like `CENSUS_EVIDENCE`, so a canonical label added to
+#: `_CANONICAL_ENTITY_ID_PROPS` reds instead of silently widening what `_update_entity` declares.
+LABEL_CONSTANTS: dict[str, tuple[str, str, frozenset[str]]] = {
+    "tortoise.sdk::_update_entity": (
+        "tortoise/projection/__init__.py", "_CANONICAL_ENTITY_ID_PROPS",
+        frozenset({"Point", "Subject", "Object", "Source", "Event"})),
+}
+
+
+def test_every_declared_label_re_derives_at_this_head() -> None:
+    """`#11492`: a declared LABEL is re-derived at HEAD — the `CENSUS_EVIDENCE` discipline.
+
+    The `stores` field is what `#5090` DoD row 2 is scored on, so it must rot loudly: a writer
+    re-targeted to another label, a store clause that stopped being inside the named symbol, or a
+    DECLARATION that drifts off the label its own store names — all three red here. ⛔ The third is
+    the one `#11492`'s review caught missing: the first version asserted only that the needle was
+    still in the body, so a declaration mutated to `("Batch",)` passed. The label set is now part of
+    the evidence — but note WHICH half each pin closes, because `evidence_labels` above is a
+    hand-written tuple and comparing it to the declaration only proves they were written
+    consistently: THIS pin proves every DECLARED label still exists in the writer, and
+    `test_a_declared_label_set_covers_every_label_its_own_store_targets` proves the opposite
+    direction (no label the writer's own store clause targets is missing) by deriving it from the
+    alias that clause passes — the half a hand-written set cannot close on its own (`#11530`).
+    """
+    labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
+                if not isinstance(entry.stores, str)}
+    assert labelled, "no declaration names a label — row 2 would resolve nothing"
+    assert set(LABEL_EVIDENCE) == labelled, (
+        "every label-tuple declaration needs re-derivable evidence, and evidence for a declaration "
+        f"that no longer names labels is stale: missing={sorted(labelled - set(LABEL_EVIDENCE))} "
+        f"stale={sorted(set(LABEL_EVIDENCE) - labelled)}"
+    )
+    for key, (rel, symbol, needle, evidence_labels) in sorted(LABEL_EVIDENCE.items()):
+        declared = EMBED_WRITER_CLASSES[key].stores
+        assert set(declared) == set(evidence_labels), (
+            f"{key} declares stores={declared} while its evidence names {sorted(evidence_labels)} "
+            "— a declaration that disagrees with its own store clause is what row 2 is scored on"
+        )
+        path = REPO_ROOT / rel
+        assert path.is_file(), (key, rel)
+        source = path.read_text(encoding="utf-8")
+        lines = source.splitlines()
+        tree = ast.parse(source)
+        # A store clause can live in a module-level CONSTANT the writer executes
+        # (`_TURN_WRITE_CYPHER`), so a cited body is the writer's own source PLUS every module-level
+        # constant it names — one hop, which is what a reader following the clause does.
+        constants: dict[str, str] = {}
+        for node in tree.body:
+            if isinstance(node, ast.Assign):
+                text = "\n".join(lines[node.lineno - 1:node.end_lineno])
+                for target in node.targets:
+                    if isinstance(target, ast.Name):
+                        constants[target.id] = text
+            elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+                constants[node.target.id] = "\n".join(
+                    lines[node.lineno - 1:node.end_lineno])
+        bodies: list[str] = []
+        for node in ast.walk(tree):
+            if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and node.name == symbol):
+                own = _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
+                bodies.append(own + "\n" + "\n".join(
+                    _without_comments(text) for text in _constants_named_by(node, constants)
+                ))
+        assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
+        assert any(needle in body for body in bodies), (
+            f"{key} declares stores={declared} but {rel}::{symbol} no longer carries {needle!r} — "
+            "the store moved, so the declaration is stale"
+        )
+    # …and the label CONSTANTS those clauses are built from must still name EXACTLY the same
+    # labels — in BOTH directions. ⛔ The one-directional form ("each declared label still
+    # appears in the constant") is NOT the property: a label ADDED to the constant widens the
+    # set of labels the writer STORES on, while the declaration keeps naming the old ones, so
+    # row 2 would never see the new label as an orphan. That is a false PASS — the exact failure
+    # `#11492` exists to remove — and the set comparison below is what closes it (mutation: adding
+    # `("Batch", "id")` to `_CANONICAL_ENTITY_ID_PROPS` left this test green before it).
+    for key, (rel, symbol, labels) in sorted(LABEL_CONSTANTS.items()):
+        source = (REPO_ROOT / rel).read_text(encoding="utf-8")
+        lines = source.splitlines()
+        # BOTH statement shapes, on purpose: this test's own `constants` map above deliberately
+        # accepts `ast.Assign` as well as `ast.AnnAssign`, and a constant that only DROPS its type
+        # annotation is the SAME constant. Recing on the annotation is a false hold, and it names
+        # the wrong cause ("that file does not define it at module level") — verified by mutation.
+        assigned = [
+            node for node in ast.parse(source).body
+            if (
+                isinstance(node, ast.AnnAssign)
+                and isinstance(node.target, ast.Name)
+                and node.target.id == symbol
+            ) or (
+                isinstance(node, ast.Assign)
+                and any(isinstance(t, ast.Name) and t.id == symbol for t in node.targets)
+            )
+        ]
+        defined = "\n".join(
+            "\n".join(lines[node.lineno - 1:node.end_lineno]) for node in assigned
+        )
+        assert defined, f"{key} cites {rel}::{symbol}, which that file does not define at module level"
+        # The constant is a tuple of `(label, id-prop)` pairs; each pair's FIRST element is a label.
+        identified = {
+            element.elts[0].value
+            for node in assigned
+            if isinstance(node.value, ast.Tuple)
+            for element in node.value.elts
+            if isinstance(element, ast.Tuple) and element.elts
+            and isinstance(element.elts[0], ast.Constant)
+            and isinstance(element.elts[0].value, str)
+        }
+        assert set(EMBED_WRITER_CLASSES[key].stores) == set(labels), key
+        assert identified == set(labels), (
+            f"{rel}::{symbol} names {sorted(identified)} while {key} declares "
+            f"{sorted(EMBED_WRITER_CLASSES[key].stores)} — the two must be the SAME set, in BOTH "
+            f"directions: a label ADDED to the constant is one the writer STORES on and the "
+            f"declaration must name it {sorted(identified - set(labels))}, while a label DROPPED from "
+            f"the constant means the declaration names a store the code no longer has "
+            f"{sorted(set(labels) - identified)}"
+        )
+
+
+#: The clauses that name a store by ALIAS — the only ones this rule can attribute to a label.
+#: Keyed by FORM so `test_every_store_alias_pattern_still_sees_a_live_store` can tell a member that
+#: ROTS from one that was DELETED (a pin that merely iterates the dict cannot see a deletion).
+#:
+#: ⛔ A `= NULL` assignment is deliberately excluded: `SET t.embedding=NULL` REMOVES the property
+#: (`#4194`) and stores nothing, so counting `t` there would invent a store.
+_STORE_ALIAS: dict[str, re.Pattern[str]] = {
+    "set_embedding_clause": re.compile(r"set_embedding_clause\(\s*[\"'](\w+)[\"']"),
+    "clear_then_set_prefix": re.compile(r"clear_then_set_prefix\(\s*[\"'](\w+)[\"']"),
+    "literal-embedding-assignment": re.compile(r"\b(\w+)\.embedding\s*=(?!\s*NULL)"),
+}
+
+#: The forms above are the complete set. Pinned so DELETING a member cannot pass silently — the
+#: failure a member-iterating pin cannot see, and the one that would silently stop the alias rule
+#: from attributing a store written through that helper.
+_STORE_ALIAS_FORMS = frozenset(
+    {"set_embedding_clause", "clear_then_set_prefix", "literal-embedding-assignment"}
+)
+
+#: Writers whose store alias is legitimately bound in a CALLER rather than in the cited symbol, so
+#: the completeness pin cannot attribute it. Keyed `(module::symbol, alias)` -> the reason it cannot
+#: be attributed here. ⛔ PER-ALIAS on purpose: keyed by writer alone, ONE reviewed entry would
+#: excuse every unattributed alias of that writer — including a second, genuinely unserved store
+#: that arrives later — reinstating above the rule exactly the "total, not per-alias" drop that
+#: `#11530`'s fix closed below it.
+#: ⛔ Empty on purpose: every live entry binds its own alias. An entry appears here only by a
+#: deliberate, reviewed decision — never to buy green, because a writer listed here has its `stores`
+#: tuple trusted for what it OMITS, which is the state row 2 must be told about. Pinned live by
+#: `test_every_unattributable_store_alias_is_still_unbound_and_store_shaped`.
+STORE_ALIAS_UNATTRIBUTABLE: dict[tuple[str, str], str] = {}
+
+#: `(alias:Label` — how a Cypher statement binds an alias to a label. `\w+` deliberately does not
+#: match an INTERPOLATED label (`CREATE (n:{safe_labels})`), which no static rule can attribute.
+_ALIAS_LABEL = re.compile(r"(?:MERGE|CREATE|MATCH)\s*\(\s*(\w+)\s*:\s*(\w+)")
+
+
+def test_a_declared_label_set_covers_every_label_its_own_store_targets() -> None:
+    """`#11530` / `#11492` review — a label tuple answers WHERE, so it may not UNDER-name.
+
+    ⛔ The OTHER direction from `test_every_declared_label_re_derives_at_this_head`: that pin
+    proves each DECLARED label still exists in the writer. This one proves no label the writer's
+    own store clause TARGETS is missing from the declaration. Without it, a writer that gains a
+    SECOND store keeps every test green while row 2 prints `stored-without-a-query-path: none`
+    over an unserved label — measured: `MERGE (b:Batch {id: turn.id}) SET b.embedding =
+    vecf32(turn.emb)` inside the real `_TURN_WRITE_CYPHER` kept `tests/test_dod_5090_probe.py`
+    and this suite at 189 passed, 1 skipped, byte-identical to the unmutated run, with `Batch`
+    absent from `scored_labels()`. That is the false PASS `#11492` exists to remove.
+
+    ⛔ Scoped to the ALIAS the store clause passes, never to every `MERGE|CREATE` label in the
+    body: `_rebuild_all_replay` binds `:Batch`/`:Session` for the pre-wipe SNAPSHOT and
+    `_event_plain_merge` binds `:Source`/`:Subject` with no vector, so a body-wide rule
+    false-reds three CORRECT entries. The alias is what ties the label to the store.
+    """
+    covered = 0
+    for key, (_rel, _symbol, _needle, declared) in sorted(LABEL_EVIDENCE.items()):
+        bound: dict[str, set[str]] = {}
+        aliases: set[str] = set()
+        for body in _declared_symbol_bodies(key):
+            for alias, label in _ALIAS_LABEL.findall(body):
+                bound.setdefault(alias, set()).add(label)
+            for pattern in _STORE_ALIAS.values():
+                aliases |= set(pattern.findall(body))
+        if not aliases:
+            # No statically readable store alias: the completeness claim must be carried by a
+            # CONSTANT re-derived in both directions, or this pin is silently INERT for the entry.
+            assert key in LABEL_CONSTANTS, (
+                f"{key} declares {sorted(declared)} but no store clause in its body names an "
+                "alias this pin can attribute, and this branch's ONLY escape is a "
+                "LABEL_CONSTANTS entry (which is re-derived in both directions). "
+                "⛔ `STORE_ALIAS_UNATTRIBUTABLE` does NOT clear this branch — it is read solely in "
+                "the PER-ALIAS branch below — so an entry keyed (key, alias) leaves this "
+                "assertion red; do NOT leave the completeness claim unbacked"
+            )
+            continue
+        # ⛔ PER-ALIAS, never total: an alias named by a store clause but bound to no label in the
+        # cited body contributes an EMPTY set, and dropping it silently is a false PASS — measured,
+        # `SET b.embedding = vecf32(turn.emb)` alongside a resolvable `t` kept this suite at 190
+        # passed while `b` stored on unserved `Batch`. A total check (`any alias resolves`) cannot
+        # see it.
+        unattributed = sorted(
+            alias for alias in aliases if not bound.get(alias)
+            and (key, alias) not in STORE_ALIAS_UNATTRIBUTABLE
+        )
+        assert not unattributed, (
+            f"{key}: store clause(s) name alias/es {unattributed}, which its own body never binds "
+            "to a label, so this pin cannot attribute them and would pass an UNSERVED store "
+            "silently. Bind the alias, or — only where it is legitimately bound in a CALLER — add "
+            "a reasoned STORE_ALIAS_UNATTRIBUTABLE entry keyed (key, alias). ⛔ A `LABEL_CONSTANTS` "
+            "entry does NOT clear this branch (measured): it rescues the no-alias branch above."
+        )
+        stored = set().union(*(bound.get(alias, set()) for alias in aliases if bound.get(alias)))
+        if not stored:
+            # Reachable ONLY through a reviewed `STORE_ALIAS_UNATTRIBUTABLE` entry: the assertion
+            # above already refused every unattributed alias that is not declared there. Such an
+            # entry's `stores` tuple is trusted for what it OMITS — the state row 2 must be TOLD
+            # about, which is what the dict entry is for; it is not papered over here.
+            continue
+        covered += 1
+        assert stored <= set(declared), (
+            f"{key} declares stores={sorted(declared)} but its own store clause writes through "
+            f"alias/es {sorted(aliases)} bound to {sorted(stored)} — "
+            f"{sorted(stored - set(declared))} is STORED and NOT declared, so row 2 would print "
+            "`stored-without-a-query-path: none` over it. Declare the label, or remove the store."
+        )
+    assert covered >= 6, (
+        f"the alias rule resolved only {covered} entries — it is inert for the rest, which is the "
+        "shape this pin must never become"
+    )
+
+
+def test_the_per_alias_refusal_fires_and_its_exemption_is_per_alias(monkeypatch) -> None:
+    """The two branches of the per-alias rule, DRIVEN — a guard with no caller is revertible.
+
+    Measured before this test existed: emptying `unattributed` (the pre-`#11530` "total"
+    behaviour) left this whole file at `29 passed`, and `STORE_ALIAS_UNATTRIBUTABLE` had no
+    caller at all. So both halves of the fix were revertible in silence — the class this file
+    already fixed once for `STORE_CLAUSE_MARKERS`.
+
+    Synthetic bodies, because no LIVE entry has an unattributable alias (that is the point of
+    the dict being empty): a resolvable store on `t` alongside a store on `b`, which the body
+    never binds.
+    """
+    key = "tortoise.sdk::_write_capture_turns"  # declared stores=("Point",)
+    real = _declared_symbol_bodies
+    bound_ok = 'MATCH (t:Point {id:x}) set_embedding_clause("t")'
+    unbound = "\nSET b.embedding = vecf32($e)"
+
+    def only_this_key(k: str) -> list[str]:
+        return [bound_ok + unbound] if k == key else real(k)
+
+    monkeypatch.setattr(sys.modules[__name__], "_declared_symbol_bodies", only_this_key)
+    with pytest.raises(AssertionError, match="never binds"):
+        test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+    # ⛔ PER-ALIAS: exempting a DIFFERENT alias of the same writer must NOT clear it.
+    monkeypatch.setitem(STORE_ALIAS_UNATTRIBUTABLE, (key, "zzz"), "synthetic wrong alias")
+    with pytest.raises(AssertionError, match="never binds"):
+        test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+    # …while exempting the alias the clause actually names clears it.
+    monkeypatch.setitem(STORE_ALIAS_UNATTRIBUTABLE, (key, "b"), "bound in a caller (synthetic)")
+    test_a_declared_label_set_covers_every_label_its_own_store_targets()
+
+
+def test_every_unattributable_store_alias_is_still_unbound_and_store_shaped() -> None:
+    """An exemption must keep earning its place — the sibling `NO_STORE_EXEMPTIONS` standard.
+
+    Keyed `(writer, alias)`, so this asserts both halves of its authority: the alias must still
+    be NAMED by a store clause of that writer (otherwise the entry excuses nothing and the pin
+    has silently stopped covering a store that moved), and it must still be UNBOUND (otherwise
+    the entry now hides a store the alias rule could have attributed, which is strictly worse).
+    """
+    stale: list[str] = []
+    for (key, alias), reason in sorted(STORE_ALIAS_UNATTRIBUTABLE.items()):
+        bodies = _declared_symbol_bodies(key)
+        named = any(
+            alias in found
+            for body in bodies
+            for pattern in _STORE_ALIAS.values()
+            for found in pattern.findall(body)
+        )
+        resolved = any(
+            dict(_ALIAS_LABEL.findall(body)).get(alias) for body in bodies
+        )
+        if not named:
+            stale.append(f"{(key, alias)} — no longer NAMED by a store clause — {reason}")
+        elif resolved:
+            stale.append(f"{(key, alias)} — now BOUND — {reason}")
+    assert not stale, (
+        "these `STORE_ALIAS_UNATTRIBUTABLE` entries no longer excuse an unattributable store: an "
+        "alias that is no longer NAMED by a store clause makes the entry inert, and one that is "
+        "now BOUND hides a store the alias rule could attribute. Re-derive and drop the entry: "
+        + "; ".join(stale)
+    )
+
+
+def test_an_unattributable_exemption_stops_earning_its_place(monkeypatch) -> None:
+    """The liveness pin's own falsifier — neutering it must not be silent.
+
+    Measured before this test existed: turning the pin's only effect into `if False:` left
+    `193 passed, 1 skipped`, and deleting the test outright was equally invisible, because
+    `STORE_ALIAS_UNATTRIBUTABLE` is empty on the live tree. That is the class this file fixed
+    once for `STORE_CLAUSE_MARKERS`, and it matters more here: an undetected stale exemption
+    re-opens the `#11530` hole, because the completeness pin CLEARS its refusal on that key.
+    """
+    key = "tortoise.sdk::_write_capture_turns"
+    module = sys.modules[__name__]
+
+    monkeypatch.setattr(module, "STORE_ALIAS_UNATTRIBUTABLE",
+                        {(key, "t"): "synthetic: `t` IS bound in its own body"})
+    with pytest.raises(AssertionError, match="now BOUND"):
+        test_every_unattributable_store_alias_is_still_unbound_and_store_shaped()
+
+    monkeypatch.setattr(module, "STORE_ALIAS_UNATTRIBUTABLE",
+                        {(key, "zzz"): "synthetic: no store clause names this alias"})
+    with pytest.raises(AssertionError, match="no longer NAMED"):
+        test_every_unattributable_store_alias_is_still_unbound_and_store_shaped()
+
+
+def test_every_store_alias_pattern_still_sees_a_live_store() -> None:
+    """Every member of `_STORE_ALIAS` must still match a store clause of a REAL writer.
+
+    ⛔ Both directions, because they fail differently: a member that ROTS (a helper renamed) stops
+    attributing silently, and a member that is DELETED is invisible to a pin that merely iterates
+    the dict — so the FORM set is asserted first. `clear_then_set_prefix` is currently redundant on
+    every entry (`_write_capture_turns` also carries a literal `t.embedding =`), which is exactly
+    why its deletion would otherwise cost nothing and be noticed by nobody.
+    """
+    assert set(_STORE_ALIAS) == _STORE_ALIAS_FORMS, (
+        "a store-clause form was added without pinning it, or REMOVED — a removed form silently "
+        "stops the completeness pin (`#11530`) from attributing stores written through it. "
+        f"expected={sorted(_STORE_ALIAS_FORMS)} got={sorted(_STORE_ALIAS)}"
+    )
+    bodies = [body for key in LABEL_EVIDENCE for body in _declared_symbol_bodies(key)]
+    dead = sorted(
+        form for form, pattern in _STORE_ALIAS.items()
+        if not any(pattern.search(body) for body in bodies)
+    )
+    assert not dead, (
+        f"{dead} matches no store clause of any label-declaring writer — a form that sees nothing "
+        "cannot attribute the alias it exists for, and every entry using it would pass as 'no "
+        "alias', which the completeness pin reads as covered"
+    )
+
+
+def test_a_runtime_label_declaration_is_named_not_guessed() -> None:
+    """`LABELS_AT_RUNTIME` is DECLARED — `no-live-vector` would be a lie here.
+
+    `tortoise.hosted_backup::restore_graph` recreates nodes as `CREATE (n:{safe_labels})` from a
+    DUMP and then restores each vector with a label-FREE `MATCH (n {__dump_id:r.id})`, so the label
+    it stores on is whatever the file carries. Declaring `no-live-vector` (a lie) or a fixed label
+    (a fabrication) would green `#5090` DoD row 2 over a real hole; the honest declaration holds
+    the row, which is what the row is FOR.
+    """
+    key = "tortoise.hosted_backup::restore_graph"
+    assert EMBED_WRITER_CLASSES[key].stores == LABELS_AT_RUNTIME, (
+        f"{key} declares {EMBED_WRITER_CLASSES[key].stores!r}; the dump's labels are read at "
+        "restore time, so no static label set can be true"
+    )
+    assert any('CREATE (n:{safe_labels})' in own for own in _declared_symbol_bodies(key)), (
+        "the runtime-label reading rests on the dump's own labels; if the restore stops creating "
+        "from `safe_labels`, re-read this declaration rather than deleting the assertion"
+    )
+
+
+def test_a_writer_that_EXECUTES_a_store_is_never_declared_no_live_vector() -> None:
+    """`#11492`'s review finding, pinned: the class is not the answer to WHERE.
+
+    The first revision of this field filled two entries from the writer's CLASS instead of from its
+    STORE: `tortoise.sdk::_write_capture_turns` was declared `no-live-vector` while executing
+    `_TURN_WRITE_CYPHER`, whose `MERGE (t:Point …)` carries
+    `t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) …`, and
+    `tortoise.sdk::_event_raw_write_door` was declared the same while executing a CALLER's
+    `proj.g.query(statement, params={"embedding": …})`. Both are live graph vector stores, so both
+    declarations were false — and `no-live-vector` is not a harmless label: row 2 REMOVES such a
+    writer from the map it audits, so the row would print `stored-without-a-query-path: none` even
+    if that store moved to a label `run_vector_query` does not serve.
+
+    This is the class of mistake `#11492` exists to prevent, so it is pinned on the two writers it
+    was made on: `no-live-vector` may only be declared where no store statement exists.
+    """
+    turns = EMBED_WRITER_CLASSES["tortoise.sdk::_write_capture_turns"]
+    assert turns.stores == ("Point",), turns.stores
+    # ⛔ SCOPED TO THE SYMBOL, not to `sdk.py`. Read whole, this file already contains
+    # `MERGE (t:Point {id: turn.id})` TWICE (the statement at :2460 and a COMMENT at :2927), so a
+    # whole-file `in` check stayed green after the writer's own statement was removed or retargeted
+    # as long as one copy survived anywhere in 50k lines — a pin that did not pin what its message
+    # claimed. `_declared_symbol_bodies` is the reader the sibling pin already uses.
+    turn_bodies = _declared_symbol_bodies("tortoise.sdk::_write_capture_turns")
+    assert any('MERGE (t:Point {id: turn.id})' in own for own in turn_bodies)
+    assert any("t.embedding=CASE WHEN turn.emb IS NOT NULL THEN vecf32(turn.emb) " in own
+               for own in turn_bodies), (
+        "`_TURN_WRITE_CYPHER` stopped writing a vector — re-read this declaration"
+    )
+    door = EMBED_WRITER_CLASSES["tortoise.sdk::_event_raw_write_door"]
+    assert door.stores == LABELS_AT_RUNTIME, door.stores
+    door_bodies = _declared_symbol_bodies("tortoise.sdk::_event_raw_write_door")
+    assert any('proj.g.query(statement, params=query_params)' in own for own in door_bodies), (
+        "the door no longer EXECUTES the caller's statement — re-read this declaration"
+    )
+
+
+#: The clause shapes that mean a writer's OWN body stores a vector: the two builders that render a
+#: store fragment, and the dense constructor that fills one. A `no-live-vector` declaration whose
+#: symbol carries one of these is claiming a store does not exist where the body renders one.
+STORE_CLAUSE_MARKERS = ("vecf32(", "set_embedding_clause(", "clear_then_set_prefix(")
+
+#: The DIRECT property-assignment store — `SET n.embedding = $v` — which is the instrument's own
+#: discovery shape (`tools/dod_5090_probe.py::_EMBED_WRITE`). It must be here or the pin has a hole
+#: exactly as wide as that shape: a writer can enter the population BECAUSE of a clause the literal
+#: markers above never see, then pass this pin when declared `no-live-vector`, and row 2 pops it from
+#: the map it audits while still printing `stored-without-a-query-path: none` (round-2 review, P2).
+#: ⛔ `(?!\s*NULL)` — the whitespace belongs INSIDE the lookahead. Written as `\s*=(?!NULL)` the
+#: pattern matches the wipe too, because `\s*` backtracks to zero characters and the lookahead then
+#: tests the space rather than `NULL` (measured: it flagged `_prewipe_synthetic_write_scope`, whose
+#: only occurrence is a docstring quoting `SET n.embedding = NULL`). The wipe assigns NULL and is a
+#: WIPE, not a store; the dict-key carriers (`record["embedding"] = …`) are a different spelling and
+#: stay out of scope.
+STORE_CLAUSE_PATTERNS = (re.compile(r"\.embedding\s*=(?!\s*NULL)"),)
+
+#: The shapes that legitimately NAME a store clause without storing, each with the reason. Kept as
+#: data so the exemption is read and re-checked rather than being an invisible `if`: every key must
+#: still be a LIVE `no-live-vector` declaration, so the table cannot outlive the shape it exempts.
+NO_STORE_EXEMPTIONS: dict[str, str] = {
+    "tortoise.vector_write::set_embedding_clause": (
+        "the store-clause BUILDER itself: it renders the fragment another (declared) writer "
+        "executes, so it names `set_embedding_clause(` by defining it and `vecf32(` while "
+        "building the string — neither is a store in this body"
+    ),
+}
+
+
+def _without_comments(text: str) -> str:
+    """`text` with whole-line `#` comments removed.
+
+    ⛔ A needle test is a test about what the code EXECUTES. `tortoise/sdk.py:2927` is a COMMENT
+    carrying `MERGE (t:Point {id: turn.id})`, and it sits INSIDE `_write_capture_turns`'
+    line span (2827-3660) — so narrowing the search from the whole file to the symbol did NOT
+    exclude it, and the pin stayed green on a source whose real statement had been removed. Only
+    whole-line comments are dropped (a trailing `#` can live inside a Cypher string, and cutting
+    there would corrupt a needle).
+    """
+    return "\n".join(
+        line for line in text.splitlines() if not line.lstrip().startswith("#"))
+
+
+def _constants_named_by(node: ast.AST, constants: dict[str, str]) -> list[str]:
+    """The module-level constants `node` actually NAMES, resolved through the AST.
+
+    ⛔ This replaced `if name in own` — a SUBSTRING match over the symbol's source text — which was
+    fail-OPEN in exactly the direction the `LABEL_EVIDENCE` pin exists to catch: any constant whose
+    NAME happened to occur anywhere in the symbol's body was concatenated into the searched text, so
+    a needle could be satisfied by a constant the writer never executes and the pin stayed green
+    while the store it describes had moved. Measured inclusion counts under the substring rule:
+    `_rebuild_all_replay` 17 constants, `_event_plain_merge` 2, `_update_entity` 4,
+    `_write_capture_turns` 6 — only the last genuinely needs the hop.
+
+    A name is resolved whether it is read directly, inside an f-string, or from a nested closure,
+    because `ast.walk` descends into all of them.
+    """
+    named = {n.id for n in ast.walk(node) if isinstance(n, ast.Name)}
+    return [text for name, text in constants.items() if name in named]
+
+
+def _declared_symbol_bodies(key: str) -> list[str]:
+    """Every definition of `module::symbol` in its own file, PLUS one hop of module constants.
+
+    One hop because a store clause can be held in a module-level constant the writer executes
+    (`_TURN_WRITE_CYPHER`) — the same reader rule `test_every_declared_label_re_derives_at_this_head`
+    applies to its cited needles. ⛔ Whole-line `#` comments are stripped (`_without_comments`): a
+    comment quoting a clause is not a store, and one such comment sits inside the very span this
+    reader returns, which is how a whole-file `in` check stayed green on a mutated source. ⚠️ The
+    boundary, stated rather than implied: DOCSTRINGS and TRAILING comments are NOT stripped, so a
+    clause quoted in either still satisfies a needle. Closing that needs AST-range blanking of
+    `STRING`/trailing-`COMMENT` tokens, not a line filter; it is a residual, not a claim of coverage.
+    (⚠️ Scope that precisely: the DOCSTRING `STRING` and the trailing `COMMENT` token. Blanking every
+    `STRING` would erase the Cypher held in string CONSTANTS — `_TURN_WRITE_CYPHER` — which is the
+    very text a positive needle must still find.)
+    """
+    module, symbol = key.split("::", 1)
+    if "/" in module or module.endswith(".py"):
+        rel = module
+    else:
+        candidate = module.replace(".", "/")
+        # ⛔ PACKAGE first: `tortoise.projection` is a package whose `__init__.py` defines the
+        # symbol, and a thin `tortoise/projection.py` shim also exists beside it. Taking the
+        # sibling module first made every `tortoise.projection::*` key resolve to the shim, which
+        # defines nothing — so the pin would have read as "the writer is gone" for four entries.
+        rel = (f"{candidate}/__init__.py" if (REPO_ROOT / candidate).is_dir()
+               else f"{candidate}.py")
+    path = REPO_ROOT / rel
+    assert path.is_file(), (key, rel)
+    source = path.read_text(encoding="utf-8")
+    lines = source.splitlines()
+    tree = ast.parse(source)
+    constants: dict[str, str] = {}
+    for node in tree.body:
+        if isinstance(node, ast.Assign):
+            text = "\n".join(lines[node.lineno - 1:node.end_lineno])
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    constants[target.id] = text
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            constants[node.target.id] = "\n".join(lines[node.lineno - 1:node.end_lineno])
+    bodies: list[str] = []
+    for node in ast.walk(tree):
+        if (isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+                and node.name == symbol):
+            own = _without_comments("\n".join(lines[node.lineno - 1:node.end_lineno]))
+            bodies.append(own + "\n" + "\n".join(
+                _without_comments(text) for text in _constants_named_by(node, constants)))
+    assert bodies, f"{key} cites {rel}::{symbol}, which that file does not define"
+    return bodies
+
+
+def test_a_no_live_vector_declaration_executes_no_store_clause() -> None:
+    """`#11492` round-2 review (P2): the OTHER half of `stores` is re-derived at HEAD too.
+
+    `test_every_declared_label_re_derives_at_this_head` covers the eight label-tuple entries,
+    because a label is a value it can compare. The twelve `NO_LIVE_VECTOR` / `LABELS_AT_RUNTIME`
+    entries had no automated check at all — and that is exactly the half round 1 measured **2 of 12
+    WRONG** in (`_write_capture_turns` and `_event_raw_write_door` each declared `no-live-vector`
+    while executing a live vector store). The residual paragraph claimed the label test was the
+    mitigation for a false `NO_LIVE_VECTOR`; it never reached that half. This narrows that half to
+    the shapes it can read — the clause builders, the dense constructor, AND a direct
+    `SET <alias>.embedding = …` (the instrument's own discovery shape).
+
+    ⛔ Stated at its true size: this proves a `no-live-vector` symbol's own body (plus one hop of
+    module constants) executes no store clause. It does NOT prove the writer stores nothing — a door
+    that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no marker and
+    is caught only by review. It narrows the half; it does not close it.
+    """
+    no_vector = sorted(key for key, entry in EMBED_WRITER_CLASSES.items()
+                       if entry.stores == NO_LIVE_VECTOR)
+    assert no_vector, "no declaration is `no-live-vector` — this pin would assert nothing"
+    # The exemption table may not outlive what it exempts: a key that is no longer a
+    # `no-live-vector` declaration is a stale excuse, and a stale excuse is how a real store
+    # gets through later.
+    assert set(NO_STORE_EXEMPTIONS) <= set(no_vector), (
+        "exemptions for writers that are no longer `no-live-vector`: "
+        f"{sorted(set(NO_STORE_EXEMPTIONS) - set(no_vector))}"
+    )
+    offenders: dict[str, list[str]] = {}
+    for key in no_vector:
+        if key in NO_STORE_EXEMPTIONS:
+            continue
+        bodies = _declared_symbol_bodies(key)
+        hits = [m for m in STORE_CLAUSE_MARKERS if any(m in b for b in bodies)]
+        hits += [f"/{p.pattern}/" for p in STORE_CLAUSE_PATTERNS
+                 if any(p.search(b) for b in bodies)]
+        if hits:
+            offenders[key] = hits
+    assert not offenders, (
+        "these writers are declared `no-live-vector` but their own body executes a store clause "
+        f"{offenders} — row 2 REMOVES such a writer from the map it audits, so a real store would "
+        "still print `stored-without-a-query-path: none`. Declare the label, or add a reasoned "
+        "entry to NO_STORE_EXEMPTIONS"
+    )
+
+
+def test_the_store_clause_markers_still_match_a_real_store() -> None:
+    r"""The marker tuple needs a falsifier in the POSITIVE direction (round-3 review, P1).
+
+    ⛔ Measured at `b8ada30ce1b`: setting `STORE_CLAUSE_MARKERS = ()` left this WHOLE file green
+    (26 passed) — so the guard's primary mechanism could be deleted by any later "cleanup" with
+    nothing red. `test_a_no_live_vector_declaration_executes_no_store_clause` asserts only the
+    ABSENCE of offenders, and the sibling positive pin below covers `STORE_CLAUSE_PATTERNS` — not
+    this tuple. Every `set_embedding_clause(`-shaped store is seen ONLY by these markers, so
+    their detection power was the one thing nothing re-derived.
+
+    The property pinned: each marker is still found in the body of a writer that DECLARES a label,
+    through the SAME reader the guard uses (`_declared_symbol_bodies`). A marker that matches no
+    storing writer cannot see the store it exists for, and a dead marker is exactly what a
+    `no-live-vector` declaration would then hide behind.
+    """
+    assert STORE_CLAUSE_MARKERS, (
+        "the store-clause marker tuple is gone — a `no-live-vector` writer storing only via "
+        "`set_embedding_clause(…)` would pass this suite silently"
+    )
+    labelled = {key for key, entry in EMBED_WRITER_CLASSES.items()
+                if not isinstance(entry.stores, str)}
+    assert labelled, "no declaration names a label — the markers have nothing to be measured against"
+    dead = [marker for marker in STORE_CLAUSE_MARKERS
+            if not any(marker in body
+                       for key in labelled for body in _declared_symbol_bodies(key))]
+    assert not dead, (
+        f"{dead} no longer appears in the body of any writer that DECLARES a label — a marker "
+        "that matches nothing cannot see the store it exists for, and the absence-of-offenders "
+        "pin would stay green over it. Re-derive the marker, or name the store it missed"
+    )
+
+
+def test_the_direct_store_pattern_sees_a_store_and_not_a_wipe() -> None:
+    r"""The pattern above needs a falsifier in the POSITIVE direction (round-3 review, P2).
+
+    ⛔ Measured by the reviewer: setting `STORE_CLAUSE_PATTERNS = ()` left
+    `test_a_no_live_vector_declaration_executes_no_store_clause` GREEN — so the guard that closes
+    the direct-`SET` hole could be deleted by any later "cleanup" with nothing red, which is the
+    false pass it exists to prevent. Absence of offenders is not evidence the pattern works; the
+    pattern has to be shown to MATCH. Both directions are pinned here, plus the link to discovery.
+
+    ⛔ Stated residual (do not overclaim this pin): it covers the DOTTED spelling (`n.embedding`),
+    which is the one the `NO_LIVE_VECTOR` declarations are checked against. `_EMBED_WRITE`'s bare
+    alternate (`(?<![\w.])embedding\s*=`, a keyword argument or a local assignment) is NOT covered
+    — such a writer could still enter the population and pass declared `no-live-vector`. The
+    dict-key carriers (`record["embedding"] = …`) are out of scope by design. And the lookahead is
+    case-SENSITIVE, so `SET n.embedding = null` matches — a false RED, never a false pass.
+    """
+    assert STORE_CLAUSE_PATTERNS, (
+        "the direct-store pattern is gone — a `no-live-vector` writer storing only via "
+        "`SET n.embedding = $e` would pass this suite"
+    )
+    def hits(text: str) -> bool:
+        return any(p.search(text) for p in STORE_CLAUSE_PATTERNS)
+
+    # MUST MATCH — the shapes that are a real store.
+    assert hits("SET n.embedding = $e"), "a direct labelled store must be seen"
+    assert hits('SET n.embedding="$x"'), "a quoted store must be seen"
+    assert hits("SET n.embedding=$e"), "a store with no inner spaces must be seen"
+    # MUST NOT MATCH — the wipe, which is not a store. The whitespace sits INSIDE the lookahead on
+    # purpose: `\s*(?!NULL)` backtracks `\s*` to zero characters and then tests the space, so it
+    # matches the wipe too (measured — it flagged `_prewipe_synthetic_write_scope`).
+    assert not hits("SET n.embedding = NULL"), "the wipe must not read as a store"
+    assert not hits("SET n.embedding=NULL"), "the wipe must not read as a store"
+    # …and the two must not DRIFT on a STORE: whatever `_EMBED_WRITE` — the instrument's OWN
+    # discovery clause — calls a write, this pin must also see, or a writer can enter the
+    # population through a clause the pin cannot read. The ONE deliberate divergence is the WIPE:
+    # `_EMBED_WRITE` matches `= NULL` as well (it keys on the assignment, not the value), and this
+    # pin must NOT — so the divergence is asserted rather than assumed.
+    for sample in ("SET n.embedding = $e", "SET n.embedding=$e"):
+        assert probe._EMBED_WRITE.search(sample), sample
+        assert hits(sample), (
+            f"discovery sees a store in {sample!r} but the no-live-vector pin does not — "
+            "a writer can enter the population through a clause this pin cannot read"
+        )
+    assert probe._EMBED_WRITE.search("SET n.embedding = NULL"), (
+        "the wipe is expected to match discovery; if that changed, re-read this divergence"
+    )
+    assert not hits("SET n.embedding = NULL"), "the pin must diverge from discovery on the wipe"
 
 
 def test_the_DECLARATIONS_tuple_is_what_the_live_map_was_built_from():

@@ -20,6 +20,7 @@ import pytest
 
 from tests.eval.write_path import corpus, generate_corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
+from tortoise.session_import import parse_openclaw
 
 
 def _tmp_corpus(tmp_path) -> object:
@@ -68,6 +69,24 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     assert {k for t in conversation for k in t} == {"role", "content"}
 
 
+def test_harness_values_mirror_the_capture_boundary():
+    """The drift ``schema.HARNESS_VALUES``' own comment calls "a review item at
+    W2-b wiring time" — executed instead of remembered.
+
+    The literal had fallen behind the capture boundary (#2120 added ``openclaw``,
+    #2121 added ``hermes``), which is what made an OpenClaw fixture illegal
+    before anyone could write one. A future member added to the boundary and not
+    here fails this row rather than silently rejecting a corpus fixture.
+    """
+    from tortoise import hosted_api
+
+    assert frozenset(hosted_api._SESSION_HARNESS_VALUES) == schema.HARNESS_VALUES, (
+        "schema.HARNESS_VALUES has drifted from hosted_api._SESSION_HARNESS_VALUES: "
+        f"missing={sorted(set(hosted_api._SESSION_HARNESS_VALUES) - schema.HARNESS_VALUES)} "
+        f"extra={sorted(schema.HARNESS_VALUES - set(hosted_api._SESSION_HARNESS_VALUES))}"
+    )
+
+
 def test_parse_roundtrip_drift_raises(tmp_path):
     # #2174-lint F841: the old `conversation` fixture was unused — the drift
     # case builds its own `drifted` transcript below.
@@ -84,6 +103,103 @@ def test_unknown_harness_render_raises(tmp_path):
 
     with pytest.raises(ValueError):
         parse_transcript(tmp_path / "nope.jsonl", "not-a-harness")
+
+
+def test_openclaw_ingest_roundtrip_through_the_matrix_renderer(tmp_path):
+    """#2120's ingestion half, through the replay matrix's OWN renderer.
+
+    The renderer now supports OpenClaw (the plugin's spool shape, written by
+    ``index.mjs::captureRecords`` and filed by ``parse_openclaw``), and this
+    grades that path: a committed corpus conversation renders into it and the
+    REAL parser files it back byte-identically.
+
+    ⛔ SCOPE, stated exactly: this is NOT yet a CORPUS row.  The matrix iterates
+    committed FIXTURES and renders ``fixture["harness"]``; no committed fixture
+    declares ``openclaw``, so ``run_benchmark`` never replays one.  Adding a
+    fixture changes the corpus hash and therefore needs a justified re-bless
+    (``schema.bless`` refuses an unexplained ``fixtures_hash`` change), which is
+    why it is not done here.  ``schema.HARNESS_VALUES`` is widened and pinned by
+    ``test_harness_values_mirror_the_capture_boundary`` so the fixture row is
+    legal when it is written.
+
+    Non-vacuity: the row is asserted to be a DIFFERENT store from the ``pi``
+    row that parses to the SAME conversation, and the rendered record's keys
+    are the plugin's own — a ``pi`` render wearing an ``openclaw`` label, or a
+    renderer that quietly fell back to another harness, fails here.
+    """
+    session_id = "wp03_ember_design"
+    conversation = corpus.load_fixture(session_id)["conversation"]
+
+    runner.parse_roundtrip(
+        session_id, conversation, "openclaw", workdir=tmp_path
+    )
+
+    openclaw_render = runner.render_store_lines(session_id, conversation, "openclaw")
+    pi_render = runner.render_store_lines(session_id, conversation, "pi")
+    assert openclaw_render != pi_render, (
+        "the openclaw row rendered the pi store — the matrix row grades a "
+        "format nothing writes"
+    )
+
+    first = json.loads(openclaw_render.splitlines()[0])
+    # The keys THIS RENDER must carry. The shipped `captureRecords` writes two
+    # more (`session_id`, `agent_id`); `parse_openclaw` accepts either of
+    # `session_key`/`session_id` and ignores `agent_id`, so a faithful widening
+    # of this render is legal and must not red here.
+    assert set(first) >= {"session_key", "role", "text", "ts"}, (
+        f"the rendered record is missing a key the parser needs: {sorted(first)}"
+    )
+    assert first["session_key"] == session_id
+
+    # The spool is the parser's real input, per file (one session per file).
+    spool = tmp_path / f"{session_id}.jsonl"
+    assert parse_openclaw(spool) == [
+        {"role": t.get("role"), "content": t.get("content")} for t in conversation
+    ]
+
+
+def test_openclaw_ts_is_monotonic_past_the_seconds_field(tmp_path):
+    """The `ts` render must sort with the turn index at EVERY index, not just
+    the ones the committed fixtures happen to use.
+
+    `parse_openclaw` sorts a session's records on the raw `ts` STRING, and the
+    corpus is generated to grow (`generate_corpus.py`), so a seconds-field
+    interpolation is a latent trap: measured, ``sorted()`` of
+    ``"…%02dZ" % i`` is already monotonic for i in 0..23 (the 24-turn fixture
+    the ingest row uses, so THAT row cannot see the defect) and stops being
+    monotonic at 100 (``"…00:00:100Z"`` < ``"…00:00:11Z"``). The failure would
+    surface as `parse_roundtrip`'s drift `RunError`, whose message names the
+    PARSER for a renderer bug.
+
+    Reddens on: the pre-fix `f"2026-01-01T00:00:{i:02d}Z"` render, and on any
+    replacement that emits a CONSTANT stamp (a constant round-trips —
+    ``sorted`` is stable — but it is not a timestamp and loses the ordering the
+    parser is told to rely on).
+    """
+    turn_count = 120  # past both the 59-second and the 99-width traps
+    convo = [{"role": "user", "content": f"t{i}"} for i in range(turn_count)]
+
+    stamps = [
+        json.loads(line)["ts"]
+        for line in runner.render_store_lines("mono", convo, "openclaw").splitlines()
+    ]
+    assert len(stamps) == turn_count
+    ordered = sorted(stamps)
+    divergence = next(
+        (i for i, (got, want) in enumerate(zip(stamps, ordered, strict=True))
+         if got != want),
+        None,
+    )
+    assert stamps == ordered, (
+        "the rendered `ts` stops sorting with the turn index past the "
+        f"seconds-field width: first divergence at turn {divergence}"
+    )
+    assert len(set(stamps)) == turn_count, "a constant `ts` is not a timestamp"
+    # …and the CONSEQUENCE, end-to-end: the real parser files all 120 turns in
+    # order (a mis-sorting render fails here as a "parser drift").
+    assert runner.parse_roundtrip("mono", convo, "openclaw", workdir=tmp_path) == [
+        {"role": "user", "content": f"t{i}"} for i in range(turn_count)
+    ]
 
 
 # ── Pre-flight ─────────────────────────────────────────────────────────────

@@ -67,8 +67,8 @@ claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13396-13402`` and
-``result["vet"]`` at ``:13406-13410``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:13515-13521`` and
+``result["vet"]`` at ``:13525-13529``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
 ``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17236``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
@@ -474,7 +474,19 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
                    # (measured: 0.90 -> bound at the defaults, suspected with
                    # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
                    # default, so pinning them UNSET matches today's behaviour.
-                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO")
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO",
+                   # `#11002`: the bounded re-narrate's KEEP-RATE arm
+                   # (`extractor_v2._renarrate_threshold`). UNSET is the shipped
+                   # default and the only state the registered corpus was scored
+                   # under: unset/blank/non-numeric/out-of-range all read as
+                   # DISARMED by construction, while an armed value (0 < v <= 1)
+                   # fires the retry — an EXTRA S1+S2 band whose union can add
+                   # candidates — on any session whose batch keep-rate falls under
+                   # it. So an ambient value changes both the population and the
+                   # cost of what a run measures, under a header that would still
+                   # claim the door held. The other trigger arm
+                   # (`coverage_suspect`) needs no threshold and is not a switch.
+                   "TORTOISE_RENARRATE_KEEP_RATE")
 
 #: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
 #: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
@@ -1766,27 +1778,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12929, the "
-        "flag; :12933, the early return; :12953, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:13043), "
-        "`if vet_enabled and complete_list:` (:13182) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:12944, the "
+        "flag; :12948, the early return; :12979, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:15611), "
+        "`if vet_enabled and complete_list:` (:13301) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :12808-12811)."
+        "returns {} on its fail-open path, :12823-12826)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:12898 (and set False when its classifier cannot "
-        "be constructed, :12923), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:12913 (and set False when its classifier cannot "
+        "be constructed, :12938), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:12949-12952), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:12975-12978), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:13055) around `if items:` "
-        "(:13058), `if classify_later and complete_list:` (:13197) around "
-        "`if items:` (:13207) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:13174) around `if items:` "
+        "(:13177), `if classify_later and complete_list:` (:13316) around "
+        "`if items:` (:13326) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :13071 / :13218)."
+        "empty stats (its fail-open `except` at :13190 / :13337)."
     ),
 }
 
@@ -1798,26 +1810,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:12949-12952, :12953, :13396-13410) — so an acceptance test of "a non-empty dict"
+    {}}`` (:12975-12978, :12979, :13515-13521, :13525-13529) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:12929`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:12932``, whose
-    ``if not edus:`` early return (``:12933``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:12953``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:12944`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:12947``, whose
+    ``if not edus:`` early return (``:12948``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:12979``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:13043``) and ``if vet_enabled and complete_list:``
-    (``:13182``). So a session whose conversation produced no list emits
+    embed_list:`` (``:15611``) and ``if vet_enabled and complete_list:``
+    (``:13301``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:12808-12811``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:12823-12826``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:12898`, its own early-return
+    is different code (``classify_later`` at `:12913`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -2963,7 +2975,7 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:13591-13593`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:13600-13602`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
     `projection/entities.py:2602`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are

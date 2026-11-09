@@ -72,29 +72,26 @@ change that falsifies one of them reds a test instead of being discovered; the
 
 ORDERING OBLIGATION (§4.3 G5's S4 clause, tracked at **#8500**): removing
 ``run_s4`` is a v4 MIGRATION DELIVERABLE, not a cleanup — it must not leave the
-step list before its successor lands, or the pipeline loses gap-filling and the
-E4 merge property in the gap. **Which side is authoritative until that migration
-lands is #8500's OPEN QUESTION — this record does not decide it.** What this
-record does state is the measured shipped state: ``run_s4`` is what runs today,
-so it must not be deleted on the strength of the design doc alone; a lane that
-needs the precedence settled asks the owner on **#8500**.
-
-⚠️ THE SUCCESSOR HAS NOT LANDED — and *"S2.2 and S2.3 already exist in the
-code"* is NOT the test that it has. §4.0 gives S2.2 VET the coverage question
-S4's removal relies on (*"did we account for everything the narrative said?"*),
-and S2.3 CLASSIFY is the fold's other half as this record counts it. Both
-stages are present in the tree (``_vet_gate.apply_vet``,
-``kind_classifier.classify_items``) and both are wired into
-``extract_session_v2`` behind flags: ``TORTOISE_CLASSIFY_LATER`` DEFAULTS OFF, and
-``TORTOISE_VET`` too — but since #10996 S2.2's mechanical half defaults ON.
-Presence is not sufficiency either: the fold's REMEDY half is unimplemented in
-both.
+step list before its successor lands. ⛔ **#8500's precedence question is
+WITHDRAWN, NOT settled** — the owner declined to rule on it (2026-11-08, on
+**#11002**), *"the question is withdrawn"* / *"the precedence was never
+decided"*, and fixed only the WORK ORDER: successor, proof, then removal.
+✅ THE SUCCESSOR HAS LANDED (**#11002**) — and *"S2.2 and S2.3 already exist in
+the code"* is NOT the test that it has: the test is a stage that ADDS a
+candidate a coverage check found missing, and the bounded S2.2 RE-NARRATE is it
+(``_renarrate_trigger`` → ``_arm_extract``, the ``emphasis`` seam in ``run_s1``:
+fires ONCE, re-extracts, UNIONS both arms with ``merge_embed_lists`` under E4's
+identity-key rules; pinned by ``tests/test_selection_step.py``). The FOLD half is
+unchanged: ``apply_vet`` and ``classify_items`` are wired in behind
+``TORTOISE_CLASSIFY_LATER``/``TORTOISE_VET`` (the latter's mechanical half ON
+since #10996), and VET's coverage signal still only DETECTS — the REMEDY is the
+successor above, not a fold stage. The four bullets below still hold:
 
   * VET's coverage signal only DETECTS, and only in one degenerate case.
-    ``check_batch``'s coverage signals are "reported, never acted on":
     ``coverage_suspect`` fires only when a non-empty narrative produced ZERO
-    candidates. The gate itself does act — it records ``DISCARD`` verdicts and
-    ``apply_vet`` removes them — but VET only REMOVES, never adding a candidate
+    candidates, and the gate itself never acts on it — the PIPELINE does.
+    ``apply_vet`` itself only REMOVES (the ``DISCARD`` verdicts, whose
+    counterfactuals it records) and never adds a candidate
     the NARRATIVE did not yield: the one append path is the Layer-1 entity
     RESTORE from ``prior`` (``vet_gate.py`` Rule 4), which re-emits an entity an
     EARLIER pass discarded, needs a surviving candidate to reference the name,
@@ -104,16 +101,19 @@ both.
     kind per EXISTING id) and ``_apply_classify_kinds`` writes that kind onto an
     item already in the list. It adds none.
 
-So **no stage the design folds S4's purpose into — and no successor stage —
-performs S4's gap review-and-fill**: ``run_s4`` is today's gap-filler, and
-deleting it loses that capability outright rather than relocating it. (The
-universal is scoped to the FOLD on purpose: ``run_s4`` itself IS a shipped
-stage and it emits exactly the candidates the folded stages cannot, so an
-unqualified "no shipped stage" denies the very capability its own next clause
-says is lost.) The removal pre-condition is a stage that can ADD a candidate a
-coverage check found missing — building it is the migration deliverable, and
-the absence of that stage is pinned by
-``tests/test_extractor_v4_s4_stage_claims.py``.
+So **no stage the design folds S4's purpose into can ADD** — the FOLD's remedy
+half is still unimplemented in both — and what closes that gap is not a fold
+stage at all but the SUCCESSOR above (`run_s4` is today's gap-filler and adds
+exactly those candidates; #11002's re-narrate now adds them too, which is what
+makes the removal a RELOCATION). The universal is scoped to the FOLD on
+purpose: ``run_s4`` itself IS a shipped stage and it emits exactly the
+candidates the folded stages cannot, so an unqualified "no shipped stage"
+denies the very capability its own next clause says is lost. The removal
+pre-condition is a stage that can ADD a candidate a coverage check found
+missing; since #11002 that stage exists (`tests/test_selection_step.py`), and
+what stood between the pre-condition and the deletion was the §4.4 F3 measurement — MEASURED
+on 2026-11-08, and it FIRES on BOTH arms (4/7 primary, 3/7 re-run, 5/7 union on `legacy`;
+2/7 either run of `delta`): `run_s4` STAYS, removal → #11534; name the arm — see the §4.4 note.
 
 Owner confirmations honored (issue #1350): flash runs 4 prompts (S1-S4), S5
 is execution; temperature 0.0 (via tests.model_adapters MODELS); S3 reads the
@@ -1485,11 +1485,21 @@ def _valid_iso_date(v: str) -> bool:
 def run_s1(model, transcript: str, *,
            session_date: str | None = None,
            stats: dict | None = None,
-           master: dict | None = None) -> str:
+           master: dict | None = None,
+           emphasis: str | None = None) -> str:
     """S1: story summary for ONE segment. Returns the narrative text
     (the validated single-flash path). Generation is bounded at
     ``_S1_MAX_TOKENS`` (M3 #1524, D2 — capped output, truncation detected
     via ``last_finish_reason == "length"``, never silently lost).
+
+    #11002: ``emphasis`` is the RE-NARRATE seam. It appends one bounded block
+    to the granularity slot — the design's *"re-narrate ONCE with the pack's
+    `memory_granularity` emphasised"* (`EXTRACTOR-V4-ARCHITECTURE.md` §4.4).
+    ⛔ ``None`` must render BYTE-IDENTICALLY: the retry is the only caller that
+    passes it, and a re-render that differed with no emphasis would silently
+    move every S1 prompt. That byte-identity is what makes the retry a
+    different question rather than a second ticket for the same one — at
+    temperature 0.0 an identical prompt cannot produce a better narrative.
 
     #2031: ``master`` threads the tenant-scoped vocabulary to the S1
     granularity slot on the hosted path (None → default master).
@@ -1508,8 +1518,13 @@ def run_s1(model, transcript: str, *,
     un-escalatable truncation (esc <= base, P2-15) records the per-seam
     truncation keys only — NO escalation episode (the S2/S4 seam's
     ordering; ``escalated`` counts calls that actually fired)."""
+    granularity = _granularity_text(master)
+    if emphasis:
+        # The emphasis rides the SAME slot as the granularity declaration it
+        # is a re-statement of — not a second, competing instruction block.
+        granularity = f"{granularity}\n\n{emphasis}"
     system = (S1_TMPL
-              .replace("{memory_granularity}", _granularity_text(master))
+              .replace("{memory_granularity}", granularity)
               .replace("{date_anchor}", _date_anchor(session_date)))
     user_msg = "CONVERSATION:\n" + transcript  # ⛔ UNFRAMED BY DESIGN — #10301 (OPEN): S1_TMPL system clause + re-measured S1 request sizes; do NOT wrap in _render_untrusted_block here
     base = _stage_cap(_S1_MAX_TOKENS)
@@ -1717,7 +1732,7 @@ OUTPUT_CONTRACT = """{
     {"src": str, "dst": str, "op_type": "IMPL|NAND"},
     {"src": str, "dst": str, "op_type": "MITIGATES", "target_edge": {"src": str, "dst": str, "op_type": "IMPL"}, "strength": 0.1|0.3|0.5}
   ],
-  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
+  "relations": [{"src": str, "dst": str, "predicate": "IMPL|NAND|addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy", "semantics": "addresses|supports|refutes|causes|produces|mutuallySupportive|mutuallyExclusive|hasPart|dependsOn|transacts|related|ownedBy|managedBy|null"}],  # S5 Job 1 (#10999): an ENTITY↔ENTITY relation the NARRATIVE itself states (e.g. "the retry storm causes the deadline slip"). src/dst are entity NAMES that must ALSO appear in entities[] above — spell one exactly as emitted (a case/whitespace/Unicode-fold-only variant resolves to the emitted spelling); an endpoint is never invented here, and one this emission does not produce is DROPPED. `predicate` is an ALLOWLIST spelled out in full above: those verbs are accepted verbatim, plus any verb a loaded pack declares as a relation. An invented verb is DROPPED. `semantics` is the optional Layer-2 meaning (ONTOLOGY §8) — same vocabulary; a token outside it is dropped from the RECORD (the relation survives). Emit only what the story asserts: a per-item aggregate of coincidences is not a relation.
   "chain_notes": [{"chain": str, "finding": str, "action": "repaired|warned", "note": str}],
   "link_before_create": [{"searched_for": str, "found": bool, "note": str}],
   "retractions": [{"content": str}|"id": str]  # E7: explicit withdrawals — emit when the conversation RETRACTS a previously-stated fact (additive; omit when nothing is withdrawn)
@@ -12941,8 +12956,19 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # relations" from "the key is missing".
                 "relations": [],
                 "warnings": ["empty conversation — nothing extracted"],
-                "minted_kinds": [], "stats": {"llm": llm_stats,
-                                                "recovery": recovery_stats},
+                "minted_kinds": [],
+                # #11002 review (F2): `renarrate` is an EVIDENCE SURFACE about
+                # whether a mechanism acted — the same class as `vet` /
+                # `classify_later` (#1695, #5005, #10999), not a per-run counter
+                # like `failed_chunks`/`edus` — so it obeys the always-present
+                # rule on this hand-enumerated return too. Nothing could have
+                # re-narrated here (no conversation → no S1, no S2, no batch), so
+                # the honest record is the disarmed shape, not a missing key:
+                # a consumer reading `stats["renarrate"]["fired"]` must never
+                # have to tell "did not fire" from "this build has no retry".
+                "stats": {"llm": llm_stats,
+                          "recovery": recovery_stats,
+                          "renarrate": {"fired": False}},
                 "errors": errors, "error_census": error_census,
                 # #1695 Task 5: the evidence surfaces are always present
                 # (additive keys, empty when the flag is off)
@@ -12963,87 +12989,180 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     "rewired": 0, "warned": 0}}}
 
     t0 = time.time()
-    # ── S1: chunked story summary + compile ────────────────────────────────
-    # M3 (#1524, D3): each chunk's per-call stats (attempts/retries/truncated)
-    # roll into ``llm_stats``; a chunk that exhausts retries (or hits a fatal
-    # 4xx) bumps ``error_census`` with its class.
-    chunks = chunk_transcript(edus, target=chunk_size)
-    chunk_stories: list[str] = []
-    failed_chunks = 0
-    for chunk in chunks:
-        stage_stats: dict = {}
-        try:
-            chunk_stories.append(run_s1(model, _edus_to_text(chunk),
-                                        session_date=session_date,
-                                        stats=stage_stats,
-                                        master=master))
-        except Exception as e:  # per-chunk failure is non-fatal
-            failed_chunks += 1
-            errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
-            _bump_census(error_census, e)
-        _rollup_llm(llm_stats, stage_stats, "s1")
-        _rollup_recovery(recovery_stats, stage_stats)
-    if failed_chunks:
-        errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
-        # D1 (#1746): deterministic class for the summary line — one bump per
-        # summary event, fired under the SAME condition as the append, so a
-        # clean run has no stray bump.
-        _bump_census_class(error_census, "s1_chunk_summary")
-    story = compile_stories(chunk_stories)
+    # ── S1 + S2 + S2.2 (mentions, VET) — ONE arm ───────────────────────────
+    # #11002: the pre-S3 prefix is one call (`_arm_extract`) instead of inline
+    # code, because the outcome-triggered RE-NARRATE has to run exactly this
+    # work a second time with the narrative re-rendered at the pack's declared
+    # granularity. One implementation, two arms — never a copy.
+    arm = _arm_extract(model, edus, master=master, session_date=session_date,
+                       chunk_size=chunk_size, classify_later=classify_later,
+                       vet_enabled=vet_enabled, vet_arbiter=vet_arbiter,
+                       llm_stats=llm_stats, recovery_stats=recovery_stats,
+                       errors=errors, error_census=error_census)
+    chunks = arm["chunks"]
+    failed_chunks = arm["failed_chunks"]
+    story = arm["story"]
     story_arc = story
+    embed_list = arm["embed_list"]
+    vet_s2_stats = arm["vet_stats"]
+    vet_s2_pool = arm["vet_pool"]
+    # ⛔ ONE SHAPE ALWAYS (review at `86ed2e9b7`, P2): the ARM keys are
+    # `{first, second}` on BOTH returns, with `second` explicitly `None` when no
+    # retry ran. The old form was the arm's FLAT counter dict on a non-retry run
+    # and `{first, second}` on a retried one, so a consumer had to guess which
+    # shape it held — the conditional-shape failure `renarrate`/`relations`
+    # exist to avoid. The post-S4 union pass may add a THIRD key (`union`, below),
+    # so consumers read the arm keys by membership, never by set equality.
+    mention_s2_stats = {"first": arm["mention_stats"], "second": None}
+    vet_warnings.extend(arm["warnings"])
+    renarrate_stats: dict = {"fired": False}
 
-    # ── S2: map to embed ───────────────────────────────────────────────────
-    embed_list: dict = {}
-    if story:
-        stage_stats: dict = {}
+    # ── S2.2 RE-NARRATE (#11002): the batch verdict's one action ───────────
+    # The design's remedy (§4.4) has always been *"re-narrate ONCE with the
+    # pack's `memory_granularity` emphasised, then re-extract"* — bounded to a
+    # retry, never a loop — and §4.4 fixes the comparison BEFORE the retry
+    # fires. Until this block, `check_batch`'s `coverage_suspect` and VET's
+    # batch-level `RENARRATE` token were both produced and read by nobody, so
+    # the coverage check could not replace the stage that fills gaps.
+    #
+    # ⛔ Placement is load-bearing: the retry sits BEFORE the classify(S2) pass,
+    # so the labelling pass runs once, on the selected arm(s) — not once per arm.
+    trigger = _renarrate_trigger(arm["batch"], arm["metrics"],
+                                 _renarrate_threshold(),
+                                 s2_failed=arm.get("s2_failed", False))
+    if trigger is not None:
+        # `second` and `emphasis` are bound BEFORE the guard so the handler can
+        # report "not computed" instead of raising `UnboundLocalError` from its
+        # own first statement — `emphasis` is the FIRST statement inside the
+        # `try`, so a raise in `_renarrate_emphasis` would otherwise escape
+        # `extract_session_v2` and destroy the completed capture, i.e. exactly
+        # the defect this guard exists to close (review round 1, P2).
+        second = None
+        emphasis = None
+        # Where arm B's warnings would start. `vet_warnings.extend(...)` is
+        # additive and cannot be rolled back per item, so the handler truncates
+        # back to this mark — otherwise a run that SHIPS arm A publishes arm B's
+        # per-item verdicts about a list that did not ship (review round 1, P2;
+        # the mirror of #5005's no-silent-discard, in the misleading direction).
+        _vet_mark = len(vet_warnings)
         try:
-            embed_list = run_s2(model, story, master,
-                                session_date=session_date, edus=edus,
-                                stats=stage_stats,
-                                core_only=classify_later)
-        except Exception as e:
-            errors.append(f"S2 failed: {type(e).__name__}: {e}")
-            _bump_census(error_census, e)
-        # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
-        # dropped) is a recorded ERROR — the embed list is incomplete
-        # (valid=false), never a clean outcome. The partial list IS used.
-        if stage_stats.get("partial"):
-            errors.append("S2 output partial — truncated tail dropped "
-                          "(embed list incomplete)")
-            _bump_census_class(error_census, "partial_parse")
-        _rollup_llm(llm_stats, stage_stats, "s2")
-        _rollup_recovery(recovery_stats, stage_stats)
-
-    # ── S2.2 VET (#5005): the adversarial selection gate. Runs BEFORE the
-    # resolve/embed tail on every arm, and before the classify pass only under
-    # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
-    # the never-classified guarantee holds only on the classify-later arm).
-    # Fail-open: _run_vet_pass returns the list unchanged on any failure.
-    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
-    # end of this function, commented "S2 raw (pre-S4)") is this pass's OUTPUT —
-    # the S2 embedding after VET, still pre-S4. With the flag off it is
-    # unchanged, which is the pre-existing behaviour.
-    vet_s2_stats: dict = {}
-    vet_s2_pool: dict = {}
-    # ── S2.2 referentiality (#11021): a mention is RECORDED ON ITS CLAIM, never
-    # minted. Runs before VET because a mention is not a candidate for VET's
-    # question ("should this exist?") — it is a phrase that never named a thing,
-    # so there is nothing for the gate to decide; and it runs before S3 so the
-    # resolver never sees a phantom referent. Fail-open: any failure returns the
-    # list with a warning, exactly like the VET pass.
-    mention_s2_stats: dict = {}
-    if embed_list:
-        try:
-            embed_list = route_mentions(embed_list, story)
-            mention_s2_stats = embed_list.get("mention_stats") or {}
-        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            emphasis = _renarrate_emphasis(trigger)
+            second = _arm_extract(model, edus, master=master,
+                                 session_date=session_date,
+                                 chunk_size=chunk_size,
+                                 classify_later=classify_later,
+                                 vet_enabled=vet_enabled,
+                                 vet_arbiter=vet_arbiter, emphasis=emphasis,
+                                 llm_stats=llm_stats,
+                                 recovery_stats=recovery_stats, errors=errors,
+                                 error_census=error_census)
+            picked = _renarrate_pick(arm, second)
+            story = story_arc = picked["story"]
+            embed_list = picked["embed_list"]
+            vet_s2_stats = picked["vet_stats"]
+            vet_s2_pool = picked["vet_pool"]
+            mention_s2_stats = picked["mention_stats"]
+            vet_warnings.extend(picked["warnings"])
+            # BOTH S1 passes ran in this run, so the run-level chunk counters cover
+            # both — never the first arm's alone (review at `86ed2e9b7`, P2). Bound
+            # from arm A only, a retry whose SHIPPED narrative came from a second
+            # arm with a failed chunk still reported `failed_chunks == 0`: the
+            # surface said "clean" about the arm that shipped, and disagreed with
+            # `stats["llm"]["calls"]`, which counts both arms. Per-arm counts ride
+            # `stats["renarrate"]["chunks"]`, so the sum stays decomposable.
+            chunks = arm["chunks"] + second["chunks"]
+            failed_chunks = arm["failed_chunks"] + second["failed_chunks"]
+            renarrate_stats = {
+                "fired": True,
+                "trigger": trigger,
+                # The two halves of the selection, named separately because they
+                # are decided by two different recorded rules: the ITEMS are the
+                # union (the owner's 2026-11-08 ruling — E4's merges-not-replaces
+                # survives into the successor), the NARRATIVE is §4.4's tie-break
+                # (keep the first unless the second is strictly better).
+                "items": picked["items"],
+                "narrative": picked["narrative"],
+                "emphasis": emphasis,
+                "first": arm["metrics"],
+                "second": second["metrics"],
+                # The chunk halves of the same two arms — the population behind the
+                # run-level `stats["chunks"]`/`stats["failed_chunks"]` sum.
+                "chunks": {
+                    "first": {"chunks": len(arm["chunks"]),
+                              "failed": arm["failed_chunks"]},
+                    "second": {"chunks": len(second["chunks"]),
+                               "failed": second["failed_chunks"]},
+                },
+                "merged": picked["merged"],
+                # The VERDICT half of the same two arms: which item each arm dropped,
+                # under which rule, with its counterfactual. Counts alone cannot
+                # answer that, and the post-S4 re-vet only re-judges items that
+                # SHIP — so a first-arm DISCARD's verdict exists nowhere else
+                # (#5005 no-silent-discard must not lapse on the retried path).
+                "decisions": picked["decisions"],
+            }
+            # ax-principles: an action names what it did. One line, and it carries
+            # BOTH rates because "both rates are recorded" is the design's rule.
             vet_warnings.append(
-                f"referentiality selection failed ({type(e).__name__}: {e}) — "
-                "candidates kept (fail-open)")
-    if vet_enabled and embed_list:
-        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
-            embed_list, story, arbiter=vet_arbiter)
-        vet_warnings.extend(_w)
+                f"re-narrate fired once ({trigger}) — items kept as the "
+                f"{picked['items']}, narrative {picked['narrative']}; "
+                f"keep-rate {_rate_text(arm['metrics'])} → "
+                f"{_rate_text(second['metrics'])}")
+        except Exception as e:  # never block capture (P1)
+            # FAIL-OPEN (#11569): EVERY binding the block set is restored, not
+            # just `story`. The raise can land AFTER `story`/`embed_list`/the
+            # vet records were re-bound to the second arm, and a partial restore
+            # would ship arm B's LIST beside arm A's NARRATIVE — a run that
+            # looks successful and is internally inconsistent. The first arm's
+            # capture is complete by construction (it returned), so it is the
+            # only state safe to leave behind.
+            story = story_arc = arm["story"]
+            embed_list = arm["embed_list"]
+            vet_s2_stats = arm["vet_stats"]
+            vet_s2_pool = arm["vet_pool"]
+            mention_s2_stats = {"first": arm["mention_stats"], "second": None}
+            # Arm B's warnings were appended before the raise; drop them.
+            del vet_warnings[_vet_mark:]
+            # The run-level counters describe the capture that SHIPPED — arm A's
+            # alone, the same statement `fired: False` makes. The second band's
+            # spend is NOT folded in here; it rides `chunks`/`second` below,
+            # where a per-arm decomposition can be read without misreporting
+            # which narrative shipped (review round 1, P2: the first draft
+            # claimed `second` carried the chunk population and it does not —
+            # `_arm_metrics` has no chunk or call counter).
+            chunks = arm["chunks"]
+            failed_chunks = arm["failed_chunks"]
+            renarrate_stats = {
+                # `fired: False` describes what SHIPPED — the first arm's
+                # capture, unchanged. The spend and the reason are named
+                # separately below, so this is not a silent swallow.
+                "fired": False,
+                "trigger": trigger,
+                "retry_failed": f"{type(e).__name__}: {e}",
+                "emphasis": emphasis,
+                "first": arm["metrics"],
+                "second": second["metrics"] if second is not None else None,
+            }
+            if second is not None:
+                # BOTH S1 passes ran, so say so per arm — the same
+                # decomposable shape the FIRED path publishes, so a reader can
+                # reconcile either path against `stats["llm"]["calls"]`.
+                renarrate_stats["chunks"] = {
+                    "first": {"chunks": len(arm["chunks"]),
+                              "failed": arm["failed_chunks"]},
+                    "second": {"chunks": len(second["chunks"]),
+                               "failed": second["failed_chunks"]},
+                }
+            vet_warnings.append(
+                f"re-narrate retry failed ({type(e).__name__}: {e}) — the "
+                "first arm's capture is kept unchanged (fail-open)")
+            # A sibling fail-open arm here records the error AND its census
+            # class, not only a warning (round 1, P3) — else a run whose retry
+            # exploded reads CLEAN on `result["errors"]`. ⛔ NOT "every": the
+            # `route_mentions` handler below is warning-only (measured, r3).
+            errors.append(
+                f"re-narrate retry failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
 
     # ── classify(S2) (#1695 Task 5): the first classify pass — the pack-
     # domain items the core-only S2 emitted as "unclassified" get their
@@ -13571,6 +13690,11 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     result["stats"]["failed_chunks"] = failed_chunks
     result["stats"]["edus"] = len(edus)  # #2335 WI-1b: EDU(turn) count
     result["stats"]["s4_merge"] = s4_merge_stats  # E4 (#1536): no-silent-drop proof
+    # #11002: the re-narrate's record — ALWAYS present, so a consumer never has
+    # to tell "did not fire" from "this build has no retry". When it fires it
+    # carries both arms' numbers (the design requires BOTH rates), the trigger
+    # that fired and which extraction the run kept.
+    result["stats"]["renarrate"] = renarrate_stats
     # #1789: delta-contract observability — the effective toggle for the
     # session (the choke-point value) + the no-changes signal + the
     # compliance flag. Absent-when-false for the two signals (the
@@ -15151,6 +15275,512 @@ def _parse_json_robust(response: str, *, stats: dict | None = None) -> dict:
     # rung 5 — raise (the deepest failure's message + bounded excerpt)
     raise _ParseError(str(last_err or ValueError("unparseable JSON")),
                       excerpt=_error_excerpt(response, last_err))
+
+
+# ── S2.2 RE-NARRATE (#11002) ──────────────────────────────────────────────
+#
+# The design's remedy for a poor batch verdict has always been *"re-narrate
+# ONCE with the pack's `memory_granularity` emphasised, then re-extract"*
+# (`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` §4.4) — a RETRY, not a
+# loop. What was missing was the ACTION: `vet_gate.check_batch` produced
+# `coverage_suspect` and `vet_gate.RENARRATE` existed as a batch-only outcome
+# token, and neither had a consumer anywhere in the tree. These helpers are
+# that consumer, and nothing more: no new detector, no new prompt stage, no
+# new key on the gate (its `BATCH_SIGNAL_ALLOW` allow-list stays exactly as
+# it is — the boundary that keeps VET a *selector* rather than a producer).
+
+
+def _renarrate_emphasis(reason: str) -> str:
+    """The bounded emphasis block a re-narrate appends to S1's granularity slot.
+
+    It names the failing signal, because a retry that does not differ from the
+    first attempt is a pure cost double: S1 renders from the transcript and the
+    granularity slot only, at temperature 0.0, so an identical prompt cannot
+    return a different narrative. The block therefore re-states the SAME
+    declaration `_granularity_text` already carries, at its foremost strength —
+    it adds no rule the pack did not declare.
+
+    ⛔ ONE PREMISE PER TRIGGER (review at `86ed2e9b7`, P2). Only
+    `coverage_suspect` means the first story *yielded nothing*; the other two
+    fire on a **quality** judgement about a batch that DID produce candidates
+    (`arbiter_renarrate`: an arbiter called it poor; `keep_rate`: it kept less
+    than a hand-set share of what it extracted). Telling the model it "yielded
+    nothing" on those paths hands it a false premise about its own input, and
+    the old form also leaked a raw enum token into prose. The premise is
+    therefore derived from the reason, and an unknown reason gets the neutral
+    sentence rather than a claim about the input.
+    """
+    premise = {
+        "coverage_suspect":
+            "the previous story of this session yielded nothing at extraction",
+        "arbiter_renarrate":
+            "the previous story of this session was judged a poor batch",
+        "keep_rate":
+            "the previous story of this session kept fewer than the configured "
+            "share of the candidates it extracted",
+    }.get(str(reason or "").strip().lower(),
+          "the previous story of this session was judged a poor batch")
+    return (
+        f"**RE-NARRATE — {premise}.** Re-state this conversation at the FOREMOST "
+        "granularity the rules above declare: every decision, every event, "
+        "every durable belief, and the named participants that carry them "
+        "must appear as its OWN self-contained statement, with its subjects "
+        "and objects named. Do not fold several facts into one summary "
+        "sentence, and do not omit a fact because it reads as minor. Keep "
+        "every user-stated value verbatim (the state-value carve-out above)."
+        # The trigger stays machine-readable on its own labelled line instead of
+        # as a parenthetical inside the sentence above: an operator (and the
+        # tests) need to map prompt -> trigger, and prose must not carry an enum.
+        f"\n\nRe-narrate trigger: {str(reason or '').strip() or 'unknown'}."
+    )
+
+
+def _renarrate_threshold() -> float | None:
+    """The keep-rate trigger's threshold — **`None` (disarmed) by default.**
+
+    ⛔ Deliberately NOT chosen in advance. §4.2 is explicit that a threshold is
+    set by hand on tens of real sessions with the owner correcting the rule, so
+    this reader ships the seam and refuses to guess: unset, blank, non-numeric
+    and out-of-range values all read as DISARMED, which is the safe direction
+    (an armed-by-accident threshold doubles capture spend on healthy sessions).
+    The unambiguous `coverage_suspect` arm needs no threshold and is armed by
+    construction.
+    """
+    raw = str(os.environ.get("TORTOISE_RENARRATE_KEEP_RATE", "") or "").strip()
+    if not raw:
+        return None
+    try:
+        val = float(raw)
+    except (TypeError, ValueError):
+        return None
+    if not (0.0 < val <= 1.0):
+        return None
+    return val
+
+
+def _keep_rate(candidates: int, discarded: int) -> float | None:
+    """``1 - discarded/candidates``, and **``None`` when nothing was considered.**
+
+    A rate over zero candidates is not 0% and not 100% — it is unmeasurable,
+    and the tie-break treats an unmeasurable arm as the loser (it can never be
+    *strictly better*), while a tie keeps the first.
+    """
+    candidates = max(0, int(candidates or 0))
+    if not candidates:
+        return None
+    discarded = min(candidates, max(0, int(discarded or 0)))
+    return round((candidates - discarded) / candidates, 3)
+
+
+def _rate_text(metrics: dict) -> str:
+    rate = (metrics or {}).get("keep_rate")
+    return "n/a" if rate is None else f"{float(rate):.3f}"
+
+
+def _arm_metrics(story: str, batch: dict | None, vet_stats: dict | None,
+                 applied_discards: int | None = None, *,
+                 s2_failed: bool = False) -> dict:
+    """One arm's recorded numbers — what the tie-break and the record read.
+
+    ⛔ **Both numbers come from ONE population, and it is the one VET judged.**
+    Three corrections on the same theme, each measured in review:
+
+    1. ``candidates`` is VET's OWN count when the pass ran, **not**
+       `check_batch`'s. Those two read different lists once
+       :func:`route_mentions` runs: the batch is computed before it (deliberately
+       — the coverage signal is a fact about S2's output, and it must exist with
+       every switch off), while VET sees the list AFTER a held mention has been
+       removed from ``entities[]`` and its operators dropped. Dividing one arm's
+       VET removals by the other list's candidate count is not a rate.
+    2. ``discarded`` is what VET **applied**, not what it said
+       (:func:`vet_gate.applied_discards`): `apply_vet` downgrades a DISCARD to
+       KEEP when the entity is still referenced by a survivor, so the verdict
+       count over-states the removal and under-states the yield.
+    3. On the same run, ``vet.s2.stats.discarded`` reports the VERDICT count and
+       therefore **can** legitimately differ from this arm's ``discarded``. That
+       is a difference in questions, not an instrument disagreeing with itself —
+       the gate answered "what did I decide?" and this arm answers "what did
+       that cost?" — and §4.2's hand calibration reads THIS one, because the
+       threshold it sets is compared against a rate over shipped candidates.
+
+    When VET did not run (off-path, or fail-open), nothing was removed *by VET*, so ``discarded`` is 0
+    and the denominator falls back to `check_batch`'s PRE-``route_mentions`` count — that is NOT the same
+    list: a held mention reads as KEPT and the keep-rate arm cannot fire on this path.
+
+    ``coverage_suspect`` is read from ``batch`` in both cases, because it is
+    defined on the S2 output (see :func:`_renarrate_trigger`).
+
+    ⛔ **But it has THREE states on this record, not two.** ``True``/``False``
+    are `check_batch`'s verdict on a call that ANSWERED; ``None`` says there is
+    no verdict because **S2 raised**. A failed call leaves ``embed_list`` empty
+    *without* saying anything about the narrative's yield, so its batch is
+    byte-identical to a genuinely empty one and `check_batch` flags it — the
+    exact conflation :func:`_renarrate_trigger`'s ``s2_failed`` exists to
+    refuse. Refusing it at the TRIGGER only moves the false datum to the record
+    this module publishes: §4.4 points the next lane at
+    ``stats["renarrate"][<arm>]["coverage_suspect"]`` as F3's measurement
+    surface, and F3's flag clause is already an inference rather than a
+    measurement, so a fabricated ``True`` there invents the datum a `run_s4`
+    deletion rests on. ``s2_failed`` is recorded beside the flag so the
+    ``None`` is explained rather than mysterious (review, P2).
+    """
+    b = batch if isinstance(batch, dict) else {}
+    st = (vet_stats or {}).get("stats") if isinstance(vet_stats, dict) else None
+    if isinstance(st, dict) and "candidates" in st:
+        candidates = max(0, int(st.get("candidates") or 0))
+        discarded = max(0, int(applied_discards or 0))
+    else:
+        candidates = max(0, int(b.get("candidates") or 0))
+        discarded = 0
+    return {
+        "narrative_chars": len(story or ""),
+        "candidates": candidates,
+        "discarded": min(candidates, discarded),
+        "kept": max(0, candidates - min(candidates, discarded)),
+        "keep_rate": _keep_rate(candidates, discarded),
+        # The arm's OWN coverage verdict, recorded because §4.4's F3 is defined
+        # over the PRE-retry arm only (review round 3, P2). On a retried run the
+        # SECOND arm is an INDEPENDENT S2 run whose flag can be True again
+        # (measured: an empty second yield flags coverage_suspect on both arms),
+        # so a reader counting "S4 added items while coverage_suspect is False"
+        # against the pipeline's published `result["vet"]["s2"]` — the second
+        # arm's block — would attribute the wrong arm's verdict to the session.
+        # ⛔ A call that THREW has no verdict at all (see the docstring): `None`
+        # is the third state, never `True` for a batch that never existed.
+        "coverage_suspect": None if s2_failed else bool(b.get("coverage_suspect")),
+        # Why the flag above may be `None`, recorded so a reader is not left to
+        # infer it (and so F3's `coverage_suspect is False` filter can be
+        # audited: a failed arm is excluded, which is the fail-closed side).
+        "s2_failed": bool(s2_failed),
+    }
+
+
+def _renarrate_trigger(batch: dict | None, metrics: dict | None,
+                       threshold: float | None, *,
+                       s2_failed: bool = False) -> str | None:
+    """The ONE pure decision: does this arm's outcome trigger the retry?
+
+    Three signals, in the order the design names them:
+
+    1. ``coverage_suspect`` — prose in, ZERO candidates out. Unambiguous, no
+       threshold, armed by construction — **when S2 actually answered**.
+    2. A batch-level ``RENARRATE`` from an injected arbiter — the token
+       `vet_gate.BATCH_OUTCOMES` has always carried and nothing consumed.
+    3. A keep-rate below a CONFIGURED threshold — disarmed unless set by hand.
+
+    ⛔ ``s2_failed`` is not a fourth signal — it is a HARD STOP on the first
+    one. `check_batch` reads `(embed_list, story)`, and a failed S2 call leaves
+    ``embed_list`` empty *without* saying anything about the narrative's yield,
+    so the batch is byte-identical to a genuinely empty one ("prose in, nothing
+    out"). The two are DIFFERENT classes and belong to different layers: a
+    failed call is a transport-class failure, retried and escalated INSIDE
+    :func:`run_s2` (``_PARSE_RETRIES`` + the one-shot escalation), while a
+    successful call that returns nothing is what warrants a content
+    regeneration. Merging them spends the one content-level retry on a
+    transport outage — a second S1+S2 band on every session for the duration of
+    the outage, buying nothing — and it makes this docstring's
+    "*unambiguous*, armed by construction" false on exactly the path where the
+    instrument, not the narrative, was poor. Same class as an empty ``story``
+    (a failed S1), which is already silent here because `check_batch` sees no
+    statements to be uncovered.
+
+    Returns the trigger's name, or ``None``. Pure: no I/O, no model call.
+    """
+    b = batch if isinstance(batch, dict) else {}
+    if b.get("coverage_suspect") and not s2_failed:
+        return "coverage_suspect"
+    if str(b.get("outcome") or "").strip().upper() == _vet_gate.RENARRATE:
+        return "arbiter_renarrate"
+    if threshold is not None:
+        rate = (metrics or {}).get("keep_rate")
+        if rate is not None and float(rate) < float(threshold):
+            return "keep_rate"
+    return None
+
+
+def _arm_extract(model, edus, *, master, session_date, chunk_size,
+                 classify_later, vet_enabled, vet_arbiter=None,
+                 emphasis: str | None = None, llm_stats, recovery_stats,
+                 errors, error_census) -> dict:
+    """One arm of the pre-S3 pipeline: S1 (chunked+compiled) → S2 → S2.2 → VET.
+
+    #11002: this is `extract_session_v2`'s former inline prefix, lifted into a
+    call so the re-narrate can run the SAME steps with ``emphasis`` threaded to
+    :func:`run_s1`. Two arms, one implementation — a copy would drift, and the
+    arm's numbers are what the tie-break compares.
+
+    Returns a bundle; ``batch`` is computed on the arm's **S2 output** (pre
+    mentions, pre VET) so the coverage signal means "S2 produced nothing" and
+    does not depend on whether VET is armed. An arbiter's batch-level verdict is
+    folded in on top, because that verdict is about the batch VET actually saw.
+    """
+    # M3 (#1524, D3): each chunk's per-call stats (attempts/retries/truncated)
+    # roll into ``llm_stats``; a chunk that exhausts retries (or hits a fatal
+    # 4xx) bumps ``error_census`` with its class.
+    chunks = chunk_transcript(edus, target=chunk_size)
+    chunk_stories: list[str] = []
+    failed_chunks = 0
+    for chunk in chunks:
+        stage_stats: dict = {}
+        try:
+            chunk_stories.append(run_s1(model, _edus_to_text(chunk),
+                                        session_date=session_date,
+                                        stats=stage_stats,
+                                        master=master,
+                                        emphasis=emphasis))
+        except Exception as e:  # per-chunk failure is non-fatal
+            failed_chunks += 1
+            errors.append(f"S1 chunk failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
+        _rollup_llm(llm_stats, stage_stats, "s1")
+        _rollup_recovery(recovery_stats, stage_stats)
+    if failed_chunks:
+        errors.append(f"{failed_chunks}/{len(chunks)} S1 chunks failed")
+        # D1 (#1746): deterministic class for the summary line — one bump per
+        # summary event, fired under the SAME condition as the append, so a
+        # clean run has no stray bump.
+        _bump_census_class(error_census, "s1_chunk_summary")
+    story = compile_stories(chunk_stories)
+
+    # ── S2: map to embed ───────────────────────────────────────────────────
+    embed_list: dict = {}
+    # #11002 review (F1): a FAILED S2 is not a poor batch. ``coverage_suspect``
+    # is a fact about the NARRATIVE's yield ("prose in, zero candidates out");
+    # a call that raised produced no such fact, and its empty list is
+    # indistinguishable from one that did. Recorded separately so
+    # `_renarrate_trigger` can refuse the retry — the same way a failed S1
+    # (empty story) already does — instead of paying a second S1+S2 band for a
+    # transport failure `run_s2` has already retried and escalated.
+    s2_failed = False
+    if story:
+        stage_stats = {}
+        try:
+            embed_list = run_s2(model, story, master,
+                                session_date=session_date, edus=edus,
+                                stats=stage_stats,
+                                core_only=classify_later)
+        except Exception as e:
+            s2_failed = True
+            errors.append(f"S2 failed: {type(e).__name__}: {e}")
+            _bump_census(error_census, e)
+        # D4 (#1746): a schema-validated PARTIAL accept (truncated tail
+        # dropped) is a recorded ERROR — the embed list is incomplete
+        # (valid=false), never a clean outcome. The partial list IS used.
+        if stage_stats.get("partial"):
+            errors.append("S2 output partial — truncated tail dropped "
+                          "(embed list incomplete)")
+            _bump_census_class(error_census, "partial_parse")
+        _rollup_llm(llm_stats, stage_stats, "s2")
+        _rollup_recovery(recovery_stats, stage_stats)
+
+    # The batch signal is read from the S2 output itself, so it exists even
+    # when every switch leaves VET off-path (`_run_vet_pass` returns no batch
+    # for an empty list, and the coverage failure IS an empty list).
+    batch = _vet_gate.check_batch(embed_list, story)
+
+    # ── S2.2 referentiality (#11021): a mention is RECORDED ON ITS CLAIM, never
+    # minted. Runs before VET because a mention is not a candidate for VET's
+    # question ("should this exist?") — it is a phrase that never named a thing,
+    # so there is nothing for the gate to decide; and it runs before S3 so the
+    # resolver never sees a phantom referent. Fail-open: any failure returns the
+    # list with a warning, exactly like the VET pass.
+    mention_stats: dict = {}
+    warnings_out: list[str] = []
+    if embed_list:
+        try:
+            embed_list = route_mentions(embed_list, story)
+            mention_stats = embed_list.get("mention_stats") or {}
+        except Exception as e:  # noqa: BLE001, RUF100 — never block capture (P1)
+            warnings_out.append(
+                f"referentiality selection failed ({type(e).__name__}: {e}) — "
+                "candidates kept (fail-open)")
+
+    # ── S2.2 VET (#5005): the adversarial selection gate. Runs BEFORE the
+    # resolve/embed tail on every arm, and before the classify pass only under
+    # TORTOISE_CLASSIFY_LATER (with the flag off, S2.1 emits kinds inline — so
+    # the never-classified guarantee holds only on the classify-later arm).
+    # Fail-open: _run_vet_pass returns the list unchanged on any failure.
+    # Note the rebinding: with the flag on, ``result["s2_embed"]`` (set at the
+    # end of `extract_session_v2`, commented "S2 raw (pre-S4)") is this pass's
+    # OUTPUT — the S2 embedding after VET, still pre-S4. With the flag off it is
+    # unchanged, which is the pre-existing behaviour.
+    vet_s2_stats: dict = {}
+    vet_s2_pool: dict = {}
+    applied_discards = 0
+    pre_vet_list = embed_list
+    if vet_enabled and embed_list:
+        embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(
+            embed_list, story, arbiter=vet_arbiter)
+        warnings_out.extend(_w)
+        # What VET APPLIED, not what it decided: `apply_vet` downgrades a
+        # DISCARD to KEEP for a still-referenced entity, so the verdict count
+        # over-states the loss and the arm's keep-rate would under-state the
+        # yield (#11002 review, P2).
+        applied_discards = _vet_gate.applied_discards(
+            pre_vet_list, embed_list,
+            (vet_s2_stats or {}).get("decisions") or {})
+    vet_batch = (vet_s2_stats or {}).get("batch")
+    if isinstance(vet_batch, dict) and vet_batch.get("outcome"):
+        # An arbiter's batch-level verdict rides on top of the mechanical
+        # signal: it is the only producer of the `RENARRATE` token.
+        batch = {**batch, "outcome": vet_batch.get("outcome"),
+                 "outcome_reason": vet_batch.get("outcome_reason", "")}
+
+    return {
+        "story": story,
+        "embed_list": embed_list,
+        "batch": batch,
+        "vet_stats": vet_s2_stats,
+        "vet_pool": vet_s2_pool,
+        "mention_stats": mention_stats,
+        "warnings": warnings_out,
+        "metrics": _arm_metrics(story, batch, vet_s2_stats, applied_discards,
+                                s2_failed=s2_failed),
+        "chunks": chunks,
+        "failed_chunks": failed_chunks,
+        # A failed S2 call, so the retry's decision can tell "the instrument
+        # broke" from "the narrative yielded nothing" (#11002 review, F1).
+        "s2_failed": s2_failed,
+    }
+
+
+def _merge_arm_pools(first: dict, second: dict) -> dict:
+    """Union two VET removal pools — the carry-forward record for the shipped list.
+
+    Both arms compose the shipped list (the union), so both arms' removals carry:
+    an item either arm discarded must not be resurrected by the post-S4 union
+    pass, and an entity either arm removed must still be restorable when the
+    other arm's narrative references it (`apply_vet`'s rule 4). Fail-open in the
+    same direction as the pool itself: an unreadable pool contributes nothing.
+    """
+    texts: set = set()
+    ents: dict = {}
+    for pool in (first, second):
+        if not isinstance(pool, dict):
+            continue
+        raw_texts = pool.get("removed_texts")
+        if isinstance(raw_texts, (list, tuple, set, frozenset)):
+            texts |= set(raw_texts)
+        raw_ents = pool.get("removed_entities")
+        if isinstance(raw_ents, dict):
+            ents.update(raw_ents)
+    return {"removed_texts": texts, "removed_entities": ents}
+
+
+def _arm_decisions(arm: dict) -> dict:
+    """One arm's per-item VET verdicts, fail-open on an unreadable arm.
+
+    ⛔ Copied per item, not aliased: these entries are the audit trail for a
+    DISCARD (#5005), and an audit trail a consumer can rewrite in place is not
+    evidence.
+    """
+    block = (arm.get("vet_stats") or {}).get("decisions") or {}
+    if not isinstance(block, dict):
+        return {}
+    return {k: dict(v) if isinstance(v, dict) else v for k, v in block.items()}
+
+
+def _renarrate_pick(first: dict, second: dict) -> dict:
+    """Choose what the run commits from the two arms — and prove nothing was lost.
+
+    **Items: the union, always.** The owner's ruling of 2026-11-08 (on #11002)
+    fixed this: *"the retry must union both attempts with the same identity-key
+    collision rules the existing merge uses — that is what makes it a successor
+    rather than a replacement"*, and E4's merges-not-replaces property (#1536)
+    must survive into the successor before `run_s4` may leave. So the shipped
+    list is :func:`merge_embed_lists` over the two arms: the second wins an
+    identity-key collision, the first arm's items are PRESERVED. In the
+    `coverage_suspect` case — the only arm armed by construction — the first
+    list is empty, so the union IS the second arm's list; the merge matters
+    for the disarmed keep-rate arm, where both arms can carry items and a
+    winner-take-all pick would silently drop the loser's.
+
+    ⛔ OVERRIDES: §4.4's *"the losing arm's extraction is discarded with its
+    narrative"* — retired by that ruling, because a successor that discards the
+    first arm's items is a replacement, not a merge. What it overrode is named
+    here so the next lane reading §4.4 finds the ruling instead of re-deriving
+    it. ⚠️ The marker ALSO lives in §4.4 itself (the document a lane reads
+    before it reads this function): a marker only in a private helper's
+    docstring is invisible to the reader holding the spec.
+
+    **The narrative: §4.4's tie-break, verbatim.** There is exactly ONE narrative
+    in a run (`story`/`story_arc` reach S4's prompt and `execute_embed`), so
+    "which narrative" is what the tie-break decides, and the metric is fixed
+    before the retry fires: *keep the FIRST unless the second is STRICTLY better*
+    on the keep-rate. A tie keeps the first — a rule that kept the second on a
+    tie would let a coin flip lower the accepted keep-rate. The arms' items are
+    still unioned either way, and both narratives' numbers are recorded.
+
+    Returns the bundle `extract_session_v2` binds, plus the merge accounting.
+    """
+    merged = merge_embed_lists(first.get("embed_list") or {},
+                               second.get("embed_list") or {})
+    raw = _s4_merge_stats(first.get("embed_list") or {},
+                          second.get("embed_list") or {}, merged)
+    r1 = (first.get("metrics") or {}).get("keep_rate")
+    r2 = (second.get("metrics") or {}).get("keep_rate")
+    # `None` (unmeasurable) can never be STRICTLY better, so an arm that
+    # considered nothing loses the narrative tie-break to one that measured.
+    second_wins = r2 is not None and (r1 is None or float(r2) > float(r1))
+    narrator = second if second_wins else first
+    return {
+        "items": "union",
+        "narrative": "second" if second_wins else "first",
+        "story": narrator["story"],
+        "embed_list": merged,
+        # The S2 pass's stats are the SECOND arm's — the retried pass, whose
+        # list the union is recorded against — or, when that arm produced NONE
+        # (its S2 raised and `_arm_extract` returned an empty block), the FIRST
+        # arm's: the union then IS the first arm's list, so publishing `{}`
+        # would say "the gate did not run" about a pass that DID run and decided
+        # (review round 3, P2). ⛔ Nothing is hidden by either choice: both arms'
+        # full numbers ride `stats["renarrate"]`.
+        # ⛔ SCOPE OF THAT CHOICE: these are the NUMBERS only; the per-item
+        # verdicts ride `decisions` below. Re-derivation is NOT a substitute for
+        # them. The shipped union IS re-vetted wholesale
+        # in the `prior=vet_s2_pool` pass, so a first-arm MERGE flag on an item
+        # that SHIPS is re-derived — but a first-arm DISCARD is not: the item it
+        # removed is absent from `arm["embed_list"]` (post-VET), so absent from
+        # the union, so it never appears in the list that pass judges. The
+        # removed items' verdicts are exactly the ones nothing re-derives, and
+        # leaving them unpublished is the #5005 silent discard reopened on the
+        # retried path. `stats["vet"]["s2"]["decisions"]` is no home for them
+        # either: `vet_stats` is taken from `second` independently of the
+        # tie-break, so a SECOND-ARM WIN still ships the union and that block
+        # still describes one arm. The `coverage_suspect` arm is excluded
+        # because its first list is empty by definition.
+        # ⚠️ `warnings` is deliberately NOT a union of the two arms here: the
+        # call site extends the run-level list with the FIRST arm's warnings
+        # BEFORE the retry is even considered, and with this pick's second arm's
+        # after. Unioning at this function would publish every first-arm line
+        # TWICE — the plausible-looking "fix" that a reviewer of the dropped
+        # line would otherwise apply. What was genuinely missing was the
+        # VERDICT, not the line.
+        "vet_stats": second["vet_stats"] or first["vet_stats"],
+        "vet_pool": _merge_arm_pools(first.get("vet_pool") or {},
+                                     second.get("vet_pool") or {}),
+        # ONE shape with the non-retry path (`{first, second}`); here both arms
+        # are real, so neither side is `None`.
+        "mention_stats": {"first": first.get("mention_stats") or {},
+                          "second": second.get("mention_stats") or {}},
+        "warnings": list(second.get("warnings") or []),
+        # BOTH arms' per-item verdicts, ONE shape — the same `{first, second}`
+        # the arm keys and `mention_stats`/`chunks` use, so a reader never has
+        # to guess which arm a block belongs to. `second` duplicates
+        # `result["vet"]["s2"]["decisions"]` by construction; it is published
+        # here too so the retry's own record is self-contained and a reader need
+        # not know that the pipeline's `vet` block is one arm's.
+        "decisions": {"first": _arm_decisions(first),
+                      "second": _arm_decisions(second)},
+        "merged": {
+            "first_items": raw["s2_items"],
+            "second_items": raw["s4_items"],
+            "merged_items": raw["merged_items"],
+            "added_by_second": raw["added_by_s4"],
+            "corrected_by_second": raw["corrected_by_s4"],
+            "kept_from_first": raw["kept_from_s2"],
+        },
+    }
 
 
 __all__ = [  # noqa: RUF022

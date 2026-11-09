@@ -19543,6 +19543,42 @@ def test_runner_topology_tool_change_selects_core_not_tier1():
     assert "test_ci_runner_topology.py" in r["test_files"], r
 
 
+def test_curate_graph_tool_change_selects_core_not_tier1():
+    # #11469: `tools/curate_graph.py` is the WRITE half of the curation harness — the only
+    # code in the change that can reach `tortoise_ingest`, and the code that decides source
+    # vs target, whether `--apply` was given, and which exit code a refusal produces. Its
+    # only pins are `tests/test_curation_11469.py` (registered `core`), which exercises the
+    # CLI directly (the `--apply`-requires-`--graph` refusal, the inventory write-flag
+    # refusal, the illegal `--page-size` usage exit, the row-artifact flags).
+    #
+    # `tools/` is a flat NON_PYTHON_PREFIXES entry and no SOURCE_PATTERNS row matches this
+    # file, so before the CORE_ALSO entry a CLI-only diff filtered to `changed == []` and
+    # took the docs-only early return. MEASURED at the reviewed head:
+    # `select(["tools/curate_graph.py"])` -> `{"surfaces": [], "full": False, ...}`, 82
+    # tier-1 files, with `test_curation_11469.py` ABSENT from `test_files` — so a PR that
+    # removed the `--apply` gate or the source≠target guard could run GREEN having executed
+    # none of the pins that fence them (the #1349/#3332/#3616 silent-drop class).
+    #
+    # The `core` row in `config/ci-surfaces.yml` is CLASSIFICATION only (#4348): it makes the
+    # suite run once `core` is ALREADY selected (e.g. a `tortoise/curation.py` diff), and it
+    # does NOT make a `tools/` path select `core` — which is why the module-arm assertion
+    # below is paired with the tool-arm one.
+    #
+    # Mutation check: removing the CORE_ALSO entry fails the TOOL arm below (measured).
+    # The MODULE arm still passes — it is carried by the `core` row in
+    # `config/ci-surfaces.yml` via the `tortoise/curation.py` source pattern, not by
+    # CORE_ALSO — which is exactly why both arms are asserted: one entry cannot satisfy
+    # them together, and the tool arm is the one that regresses if the entry goes.
+    r = _sel(["tools/curate_graph.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_curation_11469.py" in r["test_files"], r
+    # The module arm: registering the suite on `core` is what makes the tool arm reachable.
+    m = _sel(["tortoise/curation.py"])
+    assert m["surfaces"] == ["core"], m
+    assert "test_curation_11469.py" in m["test_files"], m
+
+
 def test_cache_eviction_census_runs_on_the_diffs_that_can_weaken_it():
     # #10976: `tests/test_cache_eviction_census.py` pins the egress census —
     # `tortoise/cache_eviction.py` (an unproven population may not be swept) and its

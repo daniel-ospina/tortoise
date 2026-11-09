@@ -76,6 +76,7 @@ def test_mechanism_map_is_ontology_s8s_table():
         "causes": "IMPL",
         "dependsOn": "IMPL",
         "hasPart": "IMPL",
+        "produces": "IMPL",
         "supports": "IMPL",
         "mutuallySupportive": "IMPL",
         "refutes": "NAND",

@@ -139,8 +139,11 @@ claim and not an assertion:
   indexes, i.e. more RAM and a surface change. The later **2026-10-08 billing ruling** removes the COST
   argument rather than granting one: retained bytes are revenue, so removing bytes moves the bill by
   **$0.00**. So the census is filed, the removal is the owner's decision, and the surface rule gates it.
-- ⚠️ **Also in this child:** reconcile `#10976`'s (c) and `#7879`'s *"vectors out"* to **"pending V1"** —
-  both currently read V1 as answered while §12.1c says `NOT DECIDED — owner's call`.
+- ⚠️ **Also in this child — the TARGET is superseded, the reconciliation is still OWED (2026-11-07):** the
+  two comments this item asked for are posted and still read *"pending V1"* (`#10976` comment `6695675706`,
+  `#7879` comment `6695676215`). §12.1c now says the location is DECIDED (Postgres, `#4997`), so what remains
+  is to re-point those two comments at the ruled wording in `S3-VECTOR-CENSUS.md` §6 —
+  *"location decided; the work is `#4051`'s"* — never to *"pending V1"*.
 
 ### C6 — **#11089** `capstone: clickthrough verification for the vector layer`
 
@@ -176,11 +179,11 @@ requests; its census half is not.
 
 | not filed | because |
 |---|---|
-| **"decide where the vector index lives" (V1)** | Home is **§14.3**; architecture owner is **`#4333`**; `#5090` is a **consumer** (changelog records the wrong-owner correction). Its deciding input cannot be measured today (§17.4.6). |
-| **create indexes for the four unindexed labels** | It **is** V1's content, and it commits four further resident HNSW structures. The lane brief forbids it without a stated non-reversal; there is none. |
+| **"decide where the vector index lives" (V1)** | Home is **§14.3**; architecture owner is **`#4333`**; `#5090` is a **consumer** (changelog records the wrong-owner correction). **V1 was answered 2026-11-07** on method grounds (`docs/architecture/SEARCH-ARCHITECTURE.md` §1 — no decision rests on a measured proportion of our graph), so the input §17.4.6 names is **not an input to it**. |
+| **create indexes for the four unindexed labels** | It **is** §14.3 **V3**'s content (V1 settled only WHERE the index lives), and it commits four further resident HNSW structures. The lane brief forbids it without a stated non-reversal; there is none. |
 | **self-host FalkorDB** | **D11 deferred it; owner, 2026-11-05: not now.** Recorded, not scoped. |
 | **embedding compression / quantization** | **§15's do-not-re-invent list** — *"no engine to apply it to"*. |
-| **filtered-ANN recall measurement** | Evidence *for a move*. No move is planned ⇒ no consumer. Parked in `02-research.md` with its numbers, so it is not lost. |
+| **filtered-ANN recall measurement** | It is `#4051`'s (`SEARCH-ARCHITECTURE.md` §9 **M1**, a private-beta gate) — **not parked**: the location is decided (2026-11-07), so it has a consumer. Recorded in `02-research.md` so it is not lost. |
 | **a "state the rule for what earns an embedding" child** | Duplicates **`#5008`** (CLOSED — the mechanism exists). Filing it is the failure the 2026-10-31 lane already refused. |
 | **a DoD-scoring child** | **`#10465`** did it (CLOSED); the instrument is re-runnable. |
 | **an economics child** | **`#4333`** (OPEN, native child) owns it. |
@@ -188,7 +191,7 @@ requests; its census half is not.
 | **ingress** | **`#10000`** (`P0-blocker`). |
 | **record authority** | **`#7879`** / **`#9548`**. |
 | **`_upsert_document` retired-text embed** | **`#8419`** (OPEN) — root is the **D10 fold** (`#5088`). |
-| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md:1553`) records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
+| **the `M1–M4` measurement ids** | Denote **two disjoint sets** across two live docs; §15 (`STORAGE-ARCHITECTURE.md`, "Not worth measuring") records three of `#4333`'s four as *not worth measuring*. Recorded in `03-scope.md` §7.3 (the review-gate notes) rather than re-filed. |
 
 ---
 
@@ -215,6 +218,10 @@ The epic is **not** complete when these six merge. It is complete when:
 2. the capstone (C6) passes against a running system;
 3. the surface map (C1) covers every capability, and each surface was verified through its assigned layer.
 
-Row 4 (V1 decided and implemented) **will remain `NOT MET`**, and that is the correct, recorded outcome:
-it names §14.3, whose owner is the owner. **An epic may close with a row naming a live decision — it may not
-close with a row naming nothing.**
+Row 4 (V1 decided and implemented) **will remain `PARTIAL`**, and that is the correct, recorded outcome —
+not `MET`: `tools/dod_5090_probe.py` scores the `implemented` leg `UNMEASURED`, because a decision record
+proves a decision, not an implementation, so `MET` is unreachable for this row by construction.
+**V1 itself was answered on 2026-11-07**, so what its remainder names is the WORK — the
+`jsonb` → `vector(384)` migration, the index build and the backfill, which are **`#4051`'s** for as long as it
+is open. **An epic may close with a row whose remainder names a live OWNER — it may not close with a row naming nothing.**
+§14.3 **V3** (whether the four labels carry embeddings) is a separate open question and is not what row 4 names.
