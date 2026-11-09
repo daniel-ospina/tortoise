@@ -363,6 +363,16 @@ class MultiWorkerRefused(RuntimeError):
     """Raised at startup when this process may not be one of N>1 workers."""
 
 
+#: The saturation value :func:`_positive_int` reports for a digit string its own
+#: interpreter refuses to CONVERT (the ``except ValueError`` arm). No real worker
+#: count can reach it — it is ``sys.maxsize`` — and every consumer reads it as
+#: "definitely more than one", which is the only distinction the policy can draw
+#: about a count it cannot name. Named here, not inlined, so the refusal text can
+#: RECOGNISE it and describe the input instead of printing a number this build
+#: never read.
+UNREADABLE_COUNT = sys.maxsize
+
+
 def _positive_int(raw: object) -> int | None:
     """``raw`` as a positive int, or None when it does not parse as one.
 
@@ -393,6 +403,16 @@ def _positive_int(raw: object) -> int | None:
 
     None — never a default — so a malformed value cannot be silently read as 1;
     callers fall through to the next source only on None.
+
+    ⛔ ONE input class is not "malformed" and not "unreadable grammar": a digit
+    string longer than ``sys.int_max_str_digits`` (3.11+, 4300 by default). Its
+    GRAMMAR is fine and its VALUE is plainly above 1, but ``int()`` raises
+    ``ValueError`` on it, so nothing converts it here. That returns
+    :data:`UNREADABLE_COUNT` — NOT None: None means "not a positive int", and the
+    callers normalise it to ONE worker, which is the under-report this gate
+    exists to remove. An interpreter WITHOUT the limit converts the same string
+    and the policy refuses the real (absurd) count, so saturating is what makes
+    both interpreters reach the same verdict.
     """
     if raw is None:
         return None
@@ -407,7 +427,24 @@ def _positive_int(raw: object) -> int | None:
         return None
     if value[0] == "_" or value[-1] == "_" or "__" in value:
         return None
-    count = int(body)
+    if not body.strip("0"):
+        # Zero, however many zeros it is spelled with — not a positive count.
+        # Checked BEFORE ``int()`` so the all-zero form of an over-long string is
+        # classified the same way on both sides of the conversion limit.
+        return None
+    try:
+        count = int(body)
+    except ValueError:
+        # ``sys.int_max_str_digits``: this interpreter will not CONVERT the
+        # digit string (it is not a grammar failure — ``body`` passed the ASCII
+        # digit test above). Letting the exception escape meant a boot with a
+        # >4300-digit ``$WEB_CONCURRENCY`` died with a raw ``ValueError`` out of
+        # the pre-exec gate instead of the gate's own diagnosis; MEASURED through
+        # the shipped block (see
+        # ``test_a_count_past_the_interpreters_digit_limit_is_REFUSED_not_a_traceback``).
+        # Saturating keeps the "definitely more than one" polarity — see the
+        # docstring — so the refusal still fires, and fires legibly.
+        return UNREADABLE_COUNT
     return count if count > 0 else None
 
 
@@ -748,6 +785,23 @@ def _guard_list() -> str:
     return "\n".join(f"  [{i}] {row}" for i, row in enumerate(UNLANDED_GUARDS, 1))
 
 
+def _observed_count(topology: Topology) -> str:
+    """The count phrase a refusal uses — never a number this build never read."""
+    if topology.workers >= UNREADABLE_COUNT:
+        return (
+            "more than one uvicorn worker (the configured count is a digit "
+            "string longer than this build can convert to an integer)"
+        )
+    return f"N>={topology.workers} uvicorn workers"
+
+
+def _count_text(topology: Topology) -> str:
+    """The measured count for a log line, or a truthful word for an unreadable one."""
+    if topology.workers >= UNREADABLE_COUNT:
+        return "an unreadable digit string (definitely >1)"
+    return str(topology.workers)
+
+
 def refusal_reason(topology: Topology) -> str | None:
     """Why this topology may not run, or None when it may.
 
@@ -762,7 +816,7 @@ def refusal_reason(topology: Topology) -> str | None:
         # The count is named only when it was actually observed — the
         # supervised-with-count-1 shape must not be described as "N>=2".
         if topology.workers > 1:
-            observed = f"N>={topology.workers} uvicorn workers"
+            observed = _observed_count(topology)
         else:
             observed = "more than one uvicorn worker (a supervisor child was detected)"
         return (
@@ -781,7 +835,7 @@ def refusal_reason(topology: Topology) -> str | None:
         # programmatic-`workers=N` case, and the message must not claim a count
         # it never observed.
         if topology.workers > 1:
-            observed = f"N>={topology.workers} uvicorn workers"
+            observed = _observed_count(topology)
         else:
             observed = (
                 "a uvicorn supervisor child whose SERVED worker count is not "
@@ -821,7 +875,7 @@ def assert_multi_worker_admissible(environ: Mapping[str, str] | None = None,
         logger.warning(
             "multi-worker topology is ACKNOWLEDGED but its guards are still "
             "unlanded (#1677) — workers=%s shared_db=%s:\n%s",
-            topology.workers, topology.shared_db, _guard_list(),
+            _count_text(topology), topology.shared_db, _guard_list(),
         )
     return topology
 

@@ -1049,6 +1049,95 @@ def test_the_banner_never_COMPARES_a_count_the_shell_cannot_read():
     assert "UNVERIFIED" in proc.stdout, proc.stdout
 
 
+#: The interpreter's own ceiling on int()/str conversion, or 0 for "no limit".
+#: Read at import so the arms below build their input from THIS box's rule rather
+#: than a hard-coded 4300.
+_DIGIT_CONVERSION_LIMIT = sys.get_int_max_str_digits()
+
+
+@pytest.mark.skipif(
+    not _DIGIT_CONVERSION_LIMIT,
+    reason=(
+        "this interpreter has no int()/str conversion limit "
+        "(sys.int_max_str_digits == 0), so this input class cannot be built"
+    ),
+)
+def test_a_count_past_the_interpreters_digit_limit_is_REFUSED_not_a_traceback():
+    """⛔ A count string ``int()`` refuses to CONVERT must not escape as ``ValueError``.
+
+    :func:`worker_topology._positive_int` documents "``raw`` as a positive int, or
+    None when it does not parse as one", but the conversion itself has a ceiling:
+    ``sys.int_max_str_digits`` (3.11+, 4300 by default) makes ``int()`` raise on a
+    digit string longer than that. The exception left ``_positive_int``, and
+    therefore ``resolve_effective_workers``, ``observe`` and the shipped pre-exec
+    gate.
+
+    MEASURED through the SHIPPED block (``entrypoint.sh`` executed with the real
+    argv, ``WEB_CONCURRENCY`` = 4301 nines): the boot still exited 1 — so this was
+    never a fail-OPEN — but the operator got
+
+        tortoise: FATAL — #1677 multi-worker admission gate refused this boot
+        Traceback (most recent call last): ...
+        ValueError: Exceeds the limit (4300 digits) for integer string conversion
+
+    instead of the gate's own diagnosis. A gate whose only job is a legible,
+    fail-closed refusal was — on a reachable input — the least legible thing in
+    the boot log.
+
+    ⛔ ``None`` is the WRONG repair, and this pins that too: the callers normalise
+    None to ONE worker, which is the under-report this gate exists to remove. The
+    verdict must stay "definitely more than one" — which is also the verdict an
+    interpreter WITHOUT the limit reaches for the same string (it converts it to
+    the real, absurd count and the policy refuses it).
+    """
+    huge = "9" * (_DIGIT_CONVERSION_LIMIT + 1)
+
+    # The RESOLVER returns a count, not an exception, and the count is >1 from
+    # every one of the four sources (the entrypoint's export, a CLI flag, click's
+    # env value, and uvicorn's default source).
+    assert wt._positive_int(huge) == wt.UNREADABLE_COUNT
+    assert wt.resolve_effective_workers({wt.WORKERS_ENV: huge}) > 1
+    assert wt.resolve_effective_workers({}, ["uvicorn", "a:a", "--workers", huge]) > 1
+    assert wt.resolve_effective_workers({wt.UVICORN_WORKERS_ENV: huge}) > 1
+    assert wt.resolve_effective_workers({"WEB_CONCURRENCY": huge}) > 1
+
+    # …so the gate REFUSES with its typed error and its own diagnosis, never a
+    # ValueError, and it does not print a number it never read.
+    with pytest.raises(wt.MultiWorkerRefused) as refused:
+        wt.assert_multi_worker_admissible(
+            {"WEB_CONCURRENCY": huge}, supervised=False, argv=[])
+    message = str(refused.value)
+    assert "digit string longer than this build can convert" in message, message
+    assert str(wt.UNREADABLE_COUNT) not in message, message
+
+    # ⛔ ZERO is not "more than one": uvicorn's `workers or 1` serves ONE for a
+    # count of zero, however many zeros it is spelled with — and this arm is the
+    # one a blanket `except ValueError: return saturate` would get WRONG.
+    zeros = "0" * (_DIGIT_CONVERSION_LIMIT + 1)
+    assert wt._positive_int(zeros) is None
+    assert wt.resolve_effective_workers({"WEB_CONCURRENCY": zeros}) == 1
+
+
+def test_the_shipped_block_refuses_an_unconvertible_count_without_a_traceback():
+    """The end-to-end half: the SHIPPED gate, over the real argv and the real export.
+
+    ``entrypoint.sh``'s ``_count_is_verifiable`` length bound keeps the count out
+    of bash arithmetic, but it still EXPORTS the raw digit string as
+    ``TORTOISE_WEB_WORKERS`` and execs the pre-exec gate, which is where the
+    unconvertible value arrives. The banner says UNVERIFIED and the gate must
+    refuse with the policy text — the two things an operator needs — and must not
+    emit a Python traceback.
+    """
+    huge = "9" * (_DIGIT_CONVERSION_LIMIT + 1)
+    proc = _run_gate_block(("uvicorn", "app:app"), {"WEB_CONCURRENCY": huge})
+    assert proc.returncode == 1, (proc.returncode, proc.stdout, proc.stderr)
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+    assert "multi-worker admission gate refused this boot" in proc.stderr, proc.stderr
+    assert "Traceback" not in proc.stderr, proc.stderr
+    assert "ValueError" not in proc.stderr, proc.stderr
+    assert "digit string longer than this build can convert" in proc.stderr, proc.stderr
+
+
 def test_the_shipped_block_reports_one_worker_while_reloading():
     """`--reload --workers 4` serves ONE child; the banner must say so.
 
