@@ -6664,11 +6664,13 @@ def _holder_gate_note(read: HolderRead) -> str:
     # CLEAN that read every store, so an INCOMPLETE could be mistaken for "no
     # lanes" — and, worse, a CLEAN could be read as complete. Disclosure only: the
     # gate still keys on `measured`, which the board's own rule decides.
+    # Kept SHORT on purpose: this clause rides a note that is already near the
+    # harness's first-cause window, and every character here is spent before the
+    # per-lane reason that decided a refusal (see `scan_issue_surface`).
     if read.liveness_source:
-        counts += f"; liveness from: {read.liveness_source}"
+        counts += f"; liveness: {read.liveness_source}"
     if read.liveness_unreadable:
-        counts += ("; liveness store(s) UNREADABLE: "
-                   + ", ".join(read.liveness_unreadable))
+        counts += "; unreadable store(s): " + ", ".join(read.liveness_unreadable)
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
@@ -6804,7 +6806,14 @@ def scan_issue_surface(
         detail = "; ".join(
             f"lane {holder.lane!r}: {holder.reason}" for holder in unanswered
         )
-        problem = f"{holder_note}; {detail}"
+        # ⛔ THE DECIDING ARM LEADS (#11202 review). `holder_note` carries the
+        # liveness stores' provenance now, so composing it FIRST pushed the
+        # per-lane reason past the harness's 320-char first-cause window —
+        # measured at cell values: the reason began at char 335 of a roughly
+        # 390-char note, so a bounded reader saw provenance and NO cause at all.
+        # The reason is what decided this refusal, so it comes first; the same
+        # ordering rule `fleet_state.live_sessions` applies to a poisoned store.
+        problem = f"{detail}; {holder_note}"
     if problem:
         # ⛔ NEVER CLOBBER AN EXISTING REASON. `incomplete()` OVERWRITES `note`,
         # so if a caller passes a surface that is ALREADY INCOMPLETE (today's

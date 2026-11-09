@@ -12418,8 +12418,8 @@ class HolderGateTests(unittest.TestCase):
             liveness_source="process-table",
             liveness_unreadable=("cmux-session-store",)))
         self.assertIn("board source: rebuilt", note)
-        self.assertIn("liveness from: process-table", note)
-        self.assertIn("liveness store(s) UNREADABLE: cmux-session-store", note)
+        self.assertIn("liveness: process-table", note)
+        self.assertIn("unreadable store(s): cmux-session-store", note)
         # … and on the ATTRIBUTED arm too: a holder row is exactly where a reader
         # decides whether the CLEAN/holder verdict rests on complete coverage.
         attributed = self.cp._holder_gate_note(self.cp.HolderRead(
@@ -12427,8 +12427,43 @@ class HolderGateTests(unittest.TestCase):
             holders=(self.cp.Holder("L", "e", self.cp.HOLDER_LIVE, ""),),
             liveness_source="process-table",
             liveness_unreadable=("cmux-session-store",)))
-        self.assertIn("liveness from: process-table", attributed)
+        self.assertIn("liveness: process-table", attributed)
         self.assertIn("cmux-session-store", attributed)
+
+    def test_the_declared_cause_leads_the_provenance_in_the_composed_note(self):
+        """⛔ THE DISCLOSURE MUST NOT EAT THE CAUSE (#11202 review, P1).
+
+        `scan_issue_surface` composes the holder note with the per-lane reason, and
+        the harness bounds the first cause at 320 chars. Composing `holder_note`
+        FIRST pushed the reason past that window: measured at cell values the
+        reason began at char 335 of a ~390-char note, so a bounded reader saw
+        board/liveness provenance and NO cause at all — provenance improved, the
+        actionable part gone. The reason decides the refusal, so it leads.
+        """
+        surface = self.cp.Surface("issue assignee/holder")
+        issue_data = {"number": ISSUE, "state": "OPEN"}
+        holders = self.cp.HolderRead(
+            True, "rebuilt", roster_rows=0, workspaces_count=46,
+            workspaces_measured=True,
+            liveness_source="process-table",
+            liveness_unreadable=("cmux-session-store",),
+            holders=(self.cp.Holder(
+                "wt-review-10543", "branch slug", self.cp.HOLDER_UNMEASURED,
+                "the board attributes this issue to a lane it does not "
+                "enumerate, so that lane's liveness cannot be read"),))
+        self.cp.scan_issue_surface(
+            surface, issue_data, self.cp.Identity(), holders)
+        self.assertEqual(surface.status, self.cp.STATUS_INCOMPLETE)
+        reason = "the board attributes this issue to a lane it does not enumerate"
+        self.assertIn(reason, surface.note[:320], (
+            "the per-lane reason must survive the first-cause window: "
+            + surface.note[:320]))
+        self.assertIn("liveness: process-table", surface.note)
+        self.assertIn("unreadable store(s): cmux-session-store", surface.note)
+        self.assertGreater(
+            surface.note.index("liveness: process-table"),
+            surface.note.index(reason),
+            "provenance follows the cause, never precedes it")
 
     def test_an_older_board_prints_no_liveness_claim(self):
         """ABSENT IS NOT EMPTY, for the liveness provenance too (#11202).
@@ -12481,8 +12516,8 @@ class HolderGateTests(unittest.TestCase):
         self.assertEqual(read.liveness_unreadable,
                          (self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,))
         note = self.cp._holder_gate_note(read)
-        self.assertIn("liveness from: process-table", note)
-        self.assertIn("liveness store(s) UNREADABLE: cmux-session-store", note)
+        self.assertIn("liveness: process-table", note)
+        self.assertIn("unreadable store(s): cmux-session-store", note)
         # An OLDER board (no keys) carries the fields as ABSENT, never as a claim.
         _write_board(self.board, _fleet_board_state())
         old = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))

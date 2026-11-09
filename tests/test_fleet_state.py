@@ -2793,7 +2793,7 @@ def test_the_cloud_cli_answers_liveness_from_the_process_store_and_SAYS_SO(
 
     monkeypatch.setattr(fs.subprocess, "run", lambda cmd, **k: _Refusal())
     monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 42, "ppid": 1}], ""))
-    monkeypatch.setattr(fs, "process_cwds", lambda pids: ({42: "/tmp/wt-a"}, ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: ({42: CELL_CWD}, ""))
     monkeypatch.setattr(fs, "pid_alive", lambda pid: True)
     live = fs.live_sessions()
     assert live.measured is True, "the process table answered, so the fleet is measured"
@@ -2803,10 +2803,19 @@ def test_the_cloud_cli_answers_liveness_from_the_process_store_and_SAYS_SO(
     assert list(live) == [f"{fs.PROC_WS_PREFIX}42"]
     assert "--all needs a value" in live.error, (
         "and the refusal is still recorded — never silently dropped")
-
-    # …and the BOARD carries both halves into its reconciliation block, so a
-    # consumer other than the pre-flight can see the same thing.
-    assert fs.LIVE_STORE_CMUX_GROUP not in live.source
+    # ⛔ AND THE BOARD CARRIES BOTH HALVES, driven from THIS read (#11202 review,
+    # P2: an earlier assertion here compared the store name against `source`,
+    # which passes with or without the change and checks no board at all).
+    board = _cell_fleet(monkeypatch, live=live)
+    rec = board["reconciliation"]
+    assert rec["liveness_measured"] is True
+    assert rec["liveness_source"] == fs.LIVE_STORE_PROCESS
+    assert rec["liveness_unreadable"] == [fs.LIVE_STORE_CMUX_GROUP], (
+        "the failing group reaches the board's reconciliation block")
+    assert [lane for lane in board["lanes"]
+            if str(lane["identity"]["workspace"]).startswith(fs.PROC_WS_PREFIX)], (
+        "and the lane the process store attributed is ON the board — not just a "
+        "liveness reading")
 
 
 def test_a_healthy_cmux_store_leaves_nothing_unreadable(monkeypatch) -> None:
