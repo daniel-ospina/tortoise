@@ -1225,15 +1225,22 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tools/longmem_eval/retrieve.py", 1006):
         ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
-    ("tortoise/sdk.py", 38937):
+    # ⛔ Re-derived from CONTENT at this head, never by applying a delta to the
+    # previous values (#11534 review P3): two of the four were already 7 lines
+    # stale when the branch's own `sdk.py` insertions moved the other two by
+    # +7, so shifting all four reproduced the first error and only half-fixed
+    # the second. The two pairs are NOT the same shift — the opener/continuation
+    # pair is a content re-derivation (38937→38944, 38943→38950) and the
+    # comment-block ends move with them (38904→38911, 38920→38927).
+    ("tortoise/sdk.py", 38944):
         ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 38943):
+    ("tortoise/sdk.py", 38950):
         ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
          "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 38904):
+    ("tortoise/sdk.py", 38911):
         ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
          "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 38920):
+    ("tortoise/sdk.py", 38927):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
     ("tortoise/retrieval.py", 3288):
         ("at = _pkg_turn_key(a)",
