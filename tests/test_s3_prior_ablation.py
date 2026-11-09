@@ -1028,6 +1028,13 @@ def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole(
     cut creates by 1 %". A qualifier that survives only in `withdrawn/WITHDRAWN.md` is a qualifier
     nothing links to — which is the defect this pins.
 
+    The bundle's own `README.md` is a FOURTH surface, and it is the one §10's `Bundle:` link lands a
+    reader on: it published `VERDICT: HYPOTHESIS-FALSIFIED (ratio 0.870)` as the settled form, with
+    no reference to the re-measurement at all, so the same defect lived one file over from the one
+    #10557 names (`#10548` r15 F1 made exactly this observation about the same document). The
+    verdict is unchanged either way, so the README keeps its record of run 1 — what it may not keep
+    is the figure unqualified and unsourced.
+
     The qualitative verdict must keep reading as the same verdict, so the check also refuses a
     reversion to the unqualified "MEASURED … and the answer is NO by the margin the design assumed".
     """
@@ -1044,13 +1051,29 @@ def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole(
     doc = (ROOT / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md").read_text()
     assert "0.988" in doc, "§10 must quote the run whose ordering provenance is whole"
     assert off in doc and on in doc, f"run 2's counts ({off}/{on}) must live beside the claim"
-    assert "1.0" in doc or "ratio near 1.0" in doc, "the falsifier rule must survive"
+    # ⛔ NOT `"1.0" in doc`: that substring occurs in passages with nothing to do with this rule
+    # (`0.0 < v <= 1.0`, the knob's range; `weight + 1.0`), so the bare form can never fail and the
+    # falsifier sentence could be deleted with this pin still green. Pin the sentence itself.
+    assert "ratio near 1.0 closes the issue" in doc, (
+        "the falsifier rule must survive in its own words — a ratio near 1.0 closes the issue and is "
+        "never re-run until it agrees; a bare `1.0` substring elsewhere in the document is not it")
     assert "docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md" in doc, (
         "the withdrawal pointer must lead to the note that says what is and is not retracted")
     assert "10.9" in doc and "drift" in doc.lower(), (
         "`0.988` without the untreated-arm drift reads as an effect the run cannot support")
     assert "by the margin the design assumed" not in doc, (
         "the unqualified run-1 reading must not come back")
+
+    bundle = (ROOT / "docs/evidence/5087-hypothesis/README.md").read_text()
+    assert "REMEASUREMENT-a83c23a8.md" in bundle, (
+        "the bundle README is where §10's `Bundle:` link lands; it must route the reader to the "
+        "re-measurement instead of leaving run 1's magnitude as the only figure on the page")
+    assert "0.988" in bundle and off in bundle and on in bundle, (
+        f"the bundle README must carry run 2's figure and its pair ({off} / {on}), derived above "
+        "from the landed log")
+    assert "10.9" in bundle and "drift" in bundle.lower(), (
+        "the README's `0.870` must be qualified by the untreated-arm drift, or it reads as the "
+        "settled magnitude the ruling withdrew")
 
 
 # ── the pin must see the WORKING TREE, and the log must name the bytes that ran (r5 P1) ──

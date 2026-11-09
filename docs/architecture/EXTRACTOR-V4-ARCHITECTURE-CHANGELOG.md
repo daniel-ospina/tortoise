@@ -1661,8 +1661,22 @@ still ships. What changes is which run is *quoted*: `0.988`, with the pair (`253
 beside it, because `0.870` reads as "priors cut creates by about a seventh" and this instrument cannot
 resolve anything below roughly 11 % between runs.
 
+**The bundle's own entry page was the fourth surface, and it had the same defect.** §10's `Bundle:`
+link lands a reader on `docs/evidence/5087-hypothesis/README.md`, which published
+`VERDICT: HYPOTHESIS-FALSIFIED (ratio 0.870)` as the settled form and mentioned the re-measurement
+nowhere — the pre-fix shape `#10557` names, one file over from the three it lists (the same
+observation `#10548` r15 F1 made about that document). It keeps its record of run 1, because the run
+is what it documents and its contents are not retracted; it now states that `0.870` is not the figure
+to quote, carries run 2's `253 → 250` / `0.988` with the `10.9 %` untreated-arm drift, and routes the
+reader to `REMEASUREMENT-a83c23a8.md`.
+
 **Behavioral pin.** `tests/test_s3_prior_ablation.py` gains
 `test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole`, which DERIVES run 2's
 counts and ratio from `s3-ablation-a83c23a8.log` (nothing hardcoded) and reds if the doc drops the
 figure, the `withdrawn/WITHDRAWN.md` pointer or the drift sentence — or if the unqualified
-"by the margin the design assumed" reading returns. Measured with the qualifier removed: it fails.
+"by the margin the design assumed" reading returns. It pins the bundle README on the same three
+things. The falsifier-rule assertion names the rule's own sentence rather than testing for a `1.0`
+substring: that substring occurs in unrelated passages (a `0.0 < v <= 1.0` knob range, a
+`weight + 1.0`), so the substring form can never fail and would have let the rule be deleted with
+the pin still green.
+Measured with the qualifier removed: it fails.
