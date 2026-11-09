@@ -236,6 +236,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    needs and the one `encode_cache.py` acts on — but the qualifier matters for #1779's own question,
    so every live site says "cache hits in one pass" rather than "cross-question hits", and both
    cells are pinned (`within_question_hit_slots` / `cross_question_hit_slots` / `..._share`).
+
 ## 7. Research provenance
 
 - **Internal (before deriving):** issue #1779 + its comment thread; `git log --all --grep` (no prior
