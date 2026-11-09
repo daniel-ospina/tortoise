@@ -5,8 +5,10 @@ conversations through the REAL product seams on hermetic per-cell graphs and
 grade the written/recalled surface with mechanical graders.
 
 > ⛔ **The replay gate this README describes NO LONGER RUNS (#4282).** Its write
-> seam was the SDK's `capture_session`, which #4282 deleted, and no surviving
-> SDK entry point reaches an in-memory conversation capture. `replay_and_grade`,
+> seam was the SDK's PUBLIC `capture_session`, which #4282 retired. (The body
+> survives as the private `TortoiseSDK._capture_session`, so a replay lane CAN
+> be driven again — re-pointing it is a re-registration of this benchmark, not an
+> impossibility; see `runner.py`.) `replay_and_grade`,
 > `run_benchmark` and the receipt/bless CLI were removed with it (see
 > `runner.py`), so the table below is the design record of that gate, not a
 > description of what CI runs today. What still runs from this directory: the
