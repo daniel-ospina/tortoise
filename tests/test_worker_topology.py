@@ -2446,3 +2446,96 @@ def test_a_newline_before_a_reload_spelling_does_not_split_the_banner():
     assert proc.returncode == 0, (proc.stdout, proc.stderr)
     assert "reload" in proc.stdout.lower(), proc.stdout
     assert "MULTI-WORKER" not in proc.stdout, proc.stdout
+
+
+# ─────────────────────────────────────────────────────────────────────────────
+# 6b. A gate that cannot be EVALUATED is not a gate that REFUSED
+# ─────────────────────────────────────────────────────────────────────────────
+#
+# ⛔ The heredoc has exactly one DELIBERATE status; the wrapper used to treat
+# EVERY non-zero as that refusal. An `ImportError` anywhere in the chain the gate
+# imports, a missing interpreter (127) or a usage error (2) all landed on
+# "the multi-worker admission gate refused this boot" — a cause nothing verified,
+# with a fix (drop the worker count) that cannot address an import failure, read
+# first by an operator whose deploy is already down. The boot still exits 1
+# either way: the STATUS is the enforcement contract, the console line is the
+# diagnosis, and this pins that the two cannot be conflated again.
+#
+# MUTATION ATTRIBUTION (agent-infra#3442) — the mutant each NEW assertion reddens:
+#   * `test_a_gate_that_cannot_be_evaluated_...` — revert the wrapper to
+#     `if [ "$_gate_rc" -ne 0 ]` + the refusal sentence: "could not EVALUATE"
+#     disappears from stderr and "admission gate refused this boot" reappears.
+#   * `test_the_refusal_branch_keys_on_...` — change the heredoc's status to 1
+#     (or the wrapper's comparison away from the constant): the refusal text is
+#     lost and the "could not EVALUATE" branch is taken for a real refusal.
+#   The two `returncode == 1` assertions below are REGRESSION pins, not
+#   discriminators: the pre-fix wrapper also exited 1, and it must keep doing so
+#   (that is what `fly.toml`'s `on-failure` sees).
+
+
+def test_a_gate_that_cannot_be_evaluated_is_reported_as_such_not_as_a_refusal(
+        tmp_path):
+    """The REAL failure mode: the gate's own import chain raises.
+
+    A shadowing `tortoise` package that raises on import, with the REAL
+    interpreter and a REAL traceback — so the status the wrapper reads (1) is
+    the one an `ImportError` genuinely produces, not a stub's invention.
+    """
+    pkg = tmp_path / "tortoise"
+    pkg.mkdir()
+    (pkg / "__init__.py").write_text(
+        "raise ImportError('simulated breakage in the import chain')\n")
+
+    script = "set -euo pipefail\n" + _gate_tail(ENTRYPOINT.read_text())
+    env = {
+        "PATH": f"{Path(sys.executable).parent}:{os.environ.get('PATH', '')}",
+        # ⛔ The gate's import must FAIL: PYTHONPATH AND the stdin script's own
+        # sys.path[0] ('', i.e. the cwd) both point at the broken package, so
+        # neither the repo root nor an installed `tortoise` can satisfy it.
+        "PYTHONPATH": str(tmp_path),
+        "_IS_SERVER": "1",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", script, "entrypoint", "uvicorn", "app:app", "--workers", "2"],
+        env=env, cwd=str(tmp_path), capture_output=True, text=True, check=False)
+
+    # The enforcement contract is unchanged — the boot still fails.
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "could not EVALUATE" in proc.stderr, proc.stderr
+    assert "NOT judged" in proc.stderr, proc.stderr
+    # …and the sentence that names an unverified cause is GONE.
+    assert "admission gate refused this boot" not in proc.stderr, proc.stderr
+    # The real cause is still printed underneath: this is a diagnosis fix, not a
+    # claim that the output is suppressed.
+    assert "ImportError" in proc.stderr, proc.stderr
+
+
+def test_the_refusal_branch_keys_on_the_documented_status_not_any_non_zero(tmp_path):
+    """The other direction: a genuine refusal must still read as one.
+
+    `python` is replaced by a stub that exits the documented refusal status, so
+    the wrapper's branch is tested independently of the policy's own arms (which
+    section 6 covers with the real interpreter).
+    """
+    stub = tmp_path / "python"
+    stub.write_text("#!/bin/sh\nprintf 'the refused reason\\n'\nexit 78\n")
+    stub.chmod(0o755)
+
+    script = "set -euo pipefail\n" + _gate_tail(ENTRYPOINT.read_text())
+    env = {
+        # ⛔ This `python` MUST win over any real one, and `bash` must still be
+        # found — so the stub's directory leads a PATH that keeps the rest.
+        "PATH": f"{tmp_path}:{os.environ.get('PATH', '')}",
+        "_IS_SERVER": "1",
+    }
+    proc = subprocess.run(
+        ["bash", "-c", script, "entrypoint", "uvicorn", "app:app"],
+        env=env, cwd=str(REPO_ROOT), capture_output=True, text=True, check=False)
+
+    assert proc.returncode == 1, (proc.stdout, proc.stderr)
+    assert "admission gate refused this boot" in proc.stderr, proc.stderr
+    # The operator is told the BOOT's status, not the interpreter's private
+    # refusal code — 78 is an internal contract, not the deploy's outcome.
+    assert "(exit 1)" in proc.stderr, proc.stderr
+    assert "could not EVALUATE" not in proc.stderr, proc.stderr
+    assert "the refused reason" in proc.stderr, proc.stderr

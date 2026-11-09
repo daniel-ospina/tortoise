@@ -1086,25 +1086,50 @@ fi
 # passed through so `--reload` resolves exactly as the app will resolve it.
 # The in-app gate stays as the backstop for a direct `uvicorn` invocation that
 # bypasses this script.
+#
+# ⛔ A non-zero interpreter exit is NOT a refusal. The heredoc has exactly one
+# DELIBERATE status (`$_GATE_REFUSED_RC` below); everything else that can come
+# back — an `ImportError`/`SyntaxError` anywhere in the import chain the gate
+# pulls in, a missing interpreter (127), a usage error (2), a `ValueError` that
+# escaped the policy — is the gate failing to EVALUATE this boot. Reporting
+# those as "the admission gate refused this boot" hands the operator a cause
+# nothing verified and a fix (drop the worker count) that cannot help, at the
+# moment their deploy is down. The boot still exits 1 either way: the exit
+# STATUS is the enforcement contract (`on-failure`), the console line is the
+# diagnosis, and the two must not be conflated.
 if [ "$_IS_SERVER" = "1" ]; then
     # `|| _gate_rc=$?` is required, not style: this script runs `set -e`, so a
     # bare `_gate_out="$(…)"` would exit on the refusal BEFORE the diagnosis is
     # printed — leaving the operator with the policy text and no statement that
     # the GATE refused.
+    # 78 = `EX_CONFIG` (sysexits(3)): "configuration error", which is exactly
+    # what a refused topology is. It only has to be a status the interpreter
+    # cannot ALSO return for an uncaught exception (Python answers 1 there), so
+    # the refusal is distinguishable from every failure mode of the evaluator.
+    _GATE_REFUSED_RC=78
     _gate_rc=0
     _gate_out="$(python - "$@" <<'PY' 2>&1
 import sys
+
+# ⛔ `78` is the refusal contract with the shell wrapper below (`EX_CONFIG`);
+# changing one without the other turns a refusal into "could not evaluate".
+_GATE_REFUSED_RC = 78
 
 from tortoise.worker_topology import observe, refusal_reason
 
 reason = refusal_reason(observe(argv=sys.argv[1:]))
 if reason:
     print(reason)
-    raise SystemExit(1)
+    raise SystemExit(_GATE_REFUSED_RC)
 PY
     )" || _gate_rc=$?
+    if [ "$_gate_rc" -eq "$_GATE_REFUSED_RC" ]; then
+        echo "tortoise: FATAL — #1677 multi-worker admission gate refused this boot (exit 1):" >&2
+        printf '%s\n' "$_gate_out" >&2
+        exit 1
+    fi
     if [ "$_gate_rc" -ne 0 ]; then
-        echo "tortoise: FATAL — #1677 multi-worker admission gate refused this boot (exit $_gate_rc):" >&2
+        echo "tortoise: FATAL — the #1677 admission gate could not EVALUATE this boot (python exited $_gate_rc); the topology was NOT judged — see the output below:" >&2
         printf '%s\n' "$_gate_out" >&2
         exit 1
     fi
