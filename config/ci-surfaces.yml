@@ -652,8 +652,13 @@ surfaces:
   # the `core` fallback — so a hosted_api.py-only diff would otherwise never run
   # the pin that `_lifespan` calls the gate FIRST. The other subject,
   # `tortoise/worker_topology.py`, matches no named pattern and falls through to
-  # `core`, which is what the second registration covers. `entrypoint.sh` matches
-  # no pattern at all, so it needs both. DB-free, network-free, no app import (the
+  # `core`, which is what the second registration covers. ⛔ `entrypoint.sh` needs
+  # NEITHER row: it is unknown to every SOURCE_PATTERN, and `ci_selection.py`'s
+  # unknown-path branch returns the FULL selection fail-closed (measured on this
+  # head: an `entrypoint.sh`-only diff yields `"full": true, "test_files": "ALL"`),
+  # so it already runs this suite. The two rows exist for the two CLASSIFIED
+  # subjects above; do not read them as the thing that covers `entrypoint.sh`.
+  # DB-free, network-free, no app import (the
   # bash half executes the shipped block the way `test_boot_regressions.py` does).
   - test_worker_topology.py
   # #3811: the client-visible effect on /health — HTTP 200 + the body shape the
