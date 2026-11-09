@@ -2194,8 +2194,8 @@ def run_vector_query(
     scope_kinds: tuple[str, ...] | None = None,
     meter: bool = True,
     provenance: str | None = None,
-    pg_vector: Callable[[str, Sequence[float], int], list[tuple[str, float, Any]]]
-    | None = None,
+    pg_vector: Callable[[str, Sequence[float], int, tuple | None],
+                        list[tuple[str, float, Any]] | None] | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -2506,14 +2506,36 @@ def run_vector_query(
     #             whole label) is allowed to answer instead.
     if pg_vector is not None:
         try:
-            pg_rows = pg_vector(entity_type, query_vec, limit)
+            pg_rows = pg_vector(entity_type, query_vec, limit,
+                                excluded_statuses)
         except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
             index_attempted = True
             logger.info(
                 "record dense leg did not answer (%s: %s) — falling back to "
                 "the graph", type(e).__name__, e)
         else:
-            if pg_rows is not None:
+            if pg_rows is not None and not pg_rows:
+                # ⛔ AN EMPTY RECORD ANSWER IS NOT A COMPLETE ONE (#11642
+                # review P1). The record is a journal FOLD with no backfill, so
+                # a live tenant's record legitimately holds ZERO rows while the
+                # graph holds the whole payload (measured and recorded:
+                # `docs/00_index.md`'s #11469 row — *"the tenant's Postgres
+                # record holds 0 rows, so the graph is the ONLY copy"*). Taking
+                # `[]` as the answer would leave EVERY dense read for such a
+                # tenant reporting "no results, healthy" while the payload sits
+                # in the graph — and it would never reach the zero-row guard
+                # below that distinguishes `no_embeddings` from `empty_results`.
+                # So zero falls THROUGH to the graph, and the fallback is NAMED:
+                # `index_attempted` makes the graph leg record `scan_fallback`,
+                # which is exactly what happened — an ANN was asked and did not
+                # answer (`#4999`: a fallback must report the fallback).
+                index_attempted = True
+                logger.info(
+                    "the record's dense leg returned no rows for %s in scope — "
+                    "consulting the graph (the record is a fold without a "
+                    "backfill, so an empty record is not an empty corpus)",
+                    entity_type)
+            if pg_rows:
                 annotated_pg: list[tuple[float | None, tuple[str, str], object]] = []
                 for row in pg_rows:
                     try:
@@ -3297,7 +3319,7 @@ def degradation_chain(
     min_vector_similarity: float | None = None,
     floored_legs: set[str] | None = None,
     scope_kinds: tuple[str, ...] | None = None,
-    pg_vector: Callable[[str, Sequence[float], int],
+    pg_vector: Callable[[str, Sequence[float], int, tuple | None],
                         list[tuple[str, float, Any]] | None] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.

@@ -180,6 +180,68 @@ def _resolve_scope() -> _Scope | None:
     return _Scope(org_id=org_id, graph_id=graph_id)
 
 
+#: ``entity_type -> (status column, carries the legacy `outdated` flag)`` for the
+#: labels whose dense leg must not leak TERMINAL rows (`#689`).
+#:
+#: ⛔ THIS IS NOT A SECOND VOCABULARY. The values come from
+#: `search_engine._status_vocab_for`, the ONE family→vocabulary dispatcher, at
+#: call time; this map only says WHICH COLUMN holds the status on each table and
+#: whether the legacy `outdated` conjunct applies — facts about the SCHEMA, which
+#: the record owns. `source`/`event` are absent because they carry no status on
+#: the dense leg today: `search_engine._STATUS_FILTERED_LABELS` is
+#: ``("Point", "Object", "Subject")``, and `Source`/`Event` are not in it — so
+#: adding them here would filter rows the graph leg still returns.
+_STATUS_COLUMN: dict[str, tuple[str, bool]] = {
+    "point": ("status", True),
+    "operator": ("status", True),
+}
+
+
+def _status_predicates(entity_type: str,
+                      excluded_statuses: tuple | None) -> list[str]:
+    """The terminal-status predicates the GRAPH branches apply, in SQL.
+
+    ⛔ THE RECORD LEG MUST NOT BE A LOOPHOLE AROUND `#689`. Both graph branches of
+    `run_vector_query` filter retracted/superseded Points out of the dense leg,
+    and nothing downstream re-filters (`sdk.recall_state` applies its kind and
+    scope filters, not the terminal-status one) — so a record leg that skipped
+    this predicate would return exactly the rows `#689` exists to hide, on the
+    branch that now carries production traffic. Measured by review, not by
+    reading: the moved `#6214` pin passes `excluded_statuses=()` (the audit
+    opt-in), so no pin would have caught it.
+
+    ``excluded_statuses is ()`` is the caller's explicit "terminal rows IN" opt
+    (the #1353 supersede-structure surface uses it), and the graph branches honor
+    it by emitting NO clause — mirrored here, because a different reading would
+    make the two legs disagree about the same request.
+    """
+    mapping = _STATUS_COLUMN.get(entity_type)
+    if mapping is None or excluded_statuses == ():
+        return []
+    column, has_outdated_flag = mapping
+    from .search_engine import _status_vocab_for
+
+    vocabulary, include_outdated = _status_vocab_for(
+        "Point" if entity_type == "operator" else entity_type.capitalize())
+    literal = ", ".join(_sql_literal(value) for value in sorted(
+        excluded_statuses or vocabulary))
+    predicates = [f"coalesce(t.{column}, '') NOT IN ({literal})"]
+    if has_outdated_flag and include_outdated:
+        # The legacy flag conjunct, same polarity as the graph clause: a row is
+        # excluded when it carries the flag TRUE.
+        predicates.append("coalesce(t.outdated, false) IS NOT TRUE")
+    return predicates
+
+
+#: A status value is caller-independent data, never SQL — but `_status_vocab_for`
+#: and the enum vocabularies are the only sources, and both are Python string
+#: LITERALS. Quoting them here (rather than binding them) keeps the statement's
+#: parameter count fixed, which the shortfall probe re-uses; the escape is
+#: doubled so a value carrying a quote cannot break out.
+def _sql_literal(value: str) -> str:
+    return "'" + str(value).replace("'", "''") + "'"
+
+
 def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> str:
     """The recency projection, mirroring `search_engine.recency_key_expr`.
 
@@ -239,10 +301,13 @@ def searcher(
     if scope is None:
         return None
 
-    def _search(entity_type: str, query_vec: Sequence[float],
-                limit: int) -> list[tuple[str, float, Any]] | None:
+    def _search(
+        entity_type: str, query_vec: Sequence[float], limit: int,
+        excluded_statuses: tuple | None = None,
+    ) -> list[tuple[str, float, Any]] | None:
         return vector_search(scope, entity_type, query_vec, limit,
-                             record_dsn=record_dsn)
+                             record_dsn=record_dsn,
+                             excluded_statuses=excluded_statuses)
 
     return _search
 
@@ -254,6 +319,7 @@ def vector_search(
     limit: int,
     *,
     record_dsn: str | None = None,
+    excluded_statuses: tuple | None = None,
 ) -> list[tuple[str, float, Any]] | None:
     """The kNN read — ONE statement, tenant-scoped, shortfall asserted.
 
@@ -289,6 +355,7 @@ def vector_search(
     where = ["t.embedding_vec IS NOT NULL"]
     if kind_filter:
         where.append(kind_filter)
+    where.extend(_status_predicates(entity_type, excluded_statuses))
     predicate = " AND ".join(where)
     sql = (
         f"SELECT t.{id_column}, "

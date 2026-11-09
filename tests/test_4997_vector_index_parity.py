@@ -323,6 +323,17 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     return proj
 
 
+def _is_vector_drop(statement: str) -> bool:
+    """Is this the #11642 retirement DROP, and not the fulltext drop→recreate?
+
+    `_fix_point_search_keys` also drops an index on `Point` (the fulltext one),
+    so a bare `"DROP INDEX" in statement` would pass on a store that holds no
+    VECTOR index at all — the exact vacuous assertion this pin exists to avoid.
+    """
+    low = statement.lower()
+    return "drop index" in low and "embedding" in low
+
+
 @pytest.fixture(autouse=True)
 def _reset_vector_gap_warnings_fixture():
     _reset_vector_gap_warnings()
@@ -396,7 +407,11 @@ def test_raising_inventory_read_is_fail_open(caplog):
     assert proj._vector_indexed_labels is None
     # #11087: the served half is None too, so the pair stays coherent.
     assert proj._vector_index_served_labels is None
-    assert "inventory read failed" in caplog.text
+    # #11642: the retirement gate reads the catalogue before the inventory does,
+    # so the failing read may be reported there instead. Either line proves the
+    # same thing — the read was ATTEMPTED, failed, and setup survived.
+    assert ("inventory read failed" in caplog.text
+            or "vector-index catalogue read failed" in caplog.text)
 
 
 # (e) the gate — the predicate is `_ver is None or _ver[0] >= 4`, so None PASSES
@@ -1024,10 +1039,28 @@ def test_distinct_graphs_each_report_once(caplog):
 # path to False — rather than loosening the count, so this still pins the
 # property it owns: the #4997 inventory read adds exactly ONE round trip.
 def test_exactly_one_inventory_read_per_setup(monkeypatch):
-    proj = _bare([_vector_row("Point")])
+    """The steady state costs ONE catalogue round trip — and the sweep that
+    RETIRES an in-graph vector index costs exactly one more (#11642).
+
+    The retirement gate (`_ensure_vector_index_api`) has to read the catalogue
+    to decide whether there is anything to drop, so it hands its rows to the
+    inventory instead of letting it probe again. After a DROP those rows
+    describe a catalogue that no longer exists, so that ONE sweep re-reads — an
+    extra round trip the DROP itself invalidated, not a second opinion.
+    """
+    proj = _bare([_fulltext_row("Point")])
     monkeypatch.setattr(proj, "_schema_is_current", lambda: False)
     proj._ensure_indexes()
     assert sum("db.indexes()" in c for c in proj.g.calls) == 1
+
+    retiring = _bare([_vector_row("Point")])
+    monkeypatch.setattr(retiring, "_schema_is_current", lambda: False)
+    retiring._ensure_indexes()
+    assert sum("db.indexes()" in c for c in retiring.g.calls) == 2, (
+        "the sweep that drops the retired index must re-read the catalogue it "
+        "just invalidated — and only that sweep")
+    assert any(_is_vector_drop(c) for c in retiring.g.calls), (
+        "the store held a vector index and it was not dropped")
 
 
 # (h2) the #4465 fast path must ALSO measure — the steady-state path
@@ -1051,22 +1084,46 @@ def test_fast_path_still_measures_the_catalog(caplog):
     )
 
 
-# (j) write-path non-interference — falsifiable
-def test_report_never_gates_index_creation():
-    """The CREATE VECTOR INDEX fallback (the only way a Point HNSW index is
-    built on this engine) must still be attempted when the inventory is hostile.
+# (j) write-path non-interference — falsifiable, and INVERTED by #11642
+def test_report_never_gates_index_RETIREMENT():
+    """`_record_vector_index_inventory` must not gate the retirement either.
 
-    Falsifiable: if `_record_vector_index_inventory` were placed BEFORE the
-    creation block and returned early, no write form would appear.
+    ⛔ THIS PIN IS THE OPPOSITE CLAIM TO WHAT IT MADE BEFORE #11642, on purpose.
+    It used to require that a hostile inventory could not suppress CREATION of
+    the in-graph index. The owner's 2026-11-07 decision retires that index, so
+    the write form is now a DROP — and the property worth pinning is that the
+    inventory's verdict cannot make a store KEEP an index it should have
+    retired, nor drop one on a store that has none.
+
+    Falsifiable both ways: a hostile inventory must still drop (present case),
+    and an empty catalogue must never emit a DROP (absent case, which is the
+    steady state and the reason the gate exists).
     """
-    for hostile in ([], None):
-        proj = _bare(hostile)
-        proj._ensure_indexes()
-        wrote = any(
-            ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
-            for c in proj.g.calls
-        )
-        assert wrote, f"index creation was gated out (inventory={hostile!r})"
+    # (1) an index IS there and the catalogue is readable -> it is dropped, and
+    #     no write form creates a new one.
+    proj = _bare([_vector_row("Point")])
+    proj._ensure_indexes()
+    assert any(_is_vector_drop(c) for c in proj.g.calls), (
+        "the retirement was gated out by the inventory")
+    assert not any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in proj.g.calls
+    ), "an in-graph vector index was CREATED after #11642 retired it"
+
+    # (2) the catalogue is UNREADABLE -> NO drop. Dropping blind is the failure
+    #     mode this gate exists to prevent (it would be a failing DDL round trip
+    #     on every setup, and on an engine whose catalogue cannot be read at all
+    #     it could target an index the store never had).
+    blind = _bare(None)
+    blind._ensure_indexes()  # must not raise
+    assert not any(_is_vector_drop(c) for c in blind.g.calls), (
+        "an unreadable catalogue must not authorise a DROP")
+
+    clean = _bare([_fulltext_row("Point")])
+    clean._ensure_indexes()
+    assert not any(_is_vector_drop(c) for c in clean.g.calls), (
+        "a store holding no vector index must emit no DROP — an unconditional "
+        "drop is a failing DDL round trip on every setup")
 
 
 # (i) concurrency: the latch holds under two threads
@@ -1153,9 +1210,15 @@ def test_live_store_reports_point_indexed_and_the_rest_not():
     proj = _live_projection(_fresh_graph_name())
     try:
         assert proj._is_embedded is False, "the docker lane must be non-embedded"
-        assert proj._vector_index_api is not None, (
-            "index creation must have succeeded — otherwise this test is "
-            "measuring the wrong thing"
+        # ⛔ #11642 INVERTED THIS EXPECTATION. `_ensure_indexes` no longer creates
+        # the in-graph Point HNSW index; it RETIRES it, so the handle is None by
+        # design and the measured indexed set is empty. What must still hold is
+        # the invariant this test is named for: the REPORT agrees with the
+        # ENGINE. That is asserted against the engine's own catalogue rather
+        # than against a constant, so the pin survives a future change of mind.
+        assert proj._vector_index_api is None, (
+            "an in-graph vector-index API was resolved — #11642 retired that "
+            "index, so a store must not report one"
         )
         indexed = proj._vector_indexed_labels
         assert indexed is not None, "the catalog must be readable on a live store"
@@ -1167,13 +1230,13 @@ def test_live_store_reports_point_indexed_and_the_rest_not():
             f"{sorted(engine_vector_labels)}"
         )
 
-        assert "Point" in indexed, "the Point HNSW index is created by _ensure_indexes"
-        for missing in ("Event", "Object", "Source", "Subject"):
-            assert missing not in indexed, (
-                f"{missing} must NOT be indexed — #4997 records the gap, and "
-                "this issue creates no index"
-            )
-        assert EMBEDDING_DIM > 0  # the dimension the Point index was created at
+        assert "Point" not in indexed, (
+            "the in-graph Point HNSW index was RETIRED by #11642 and must not "
+            "survive a setup — its `vectorset` index is not carried in a graph "
+            "dump, so every cold restore rebuilt it (#7846: 436.5 s at 20k "
+            "nodes, 191.8 s tuned, and it deadlocked the instance)"
+        )
+        assert EMBEDDING_DIM > 0
     finally:
         proj.close()
 
@@ -1195,13 +1258,18 @@ def test_live_inventory_read_is_read_only():
 
 @live
 def test_live_setup_twice_is_harmless_and_the_index_still_serves():
-    """The lane brief's schema-idempotency requirement, PINNED.
+    """The lane brief's schema-idempotency requirement, PINNED — and now the
+    RETIREMENT's idempotency with it (#11642).
 
-    A second `_ensure_indexes()` must not raise, must not drop the Point index,
-    and the index must still serve a vector query afterwards. Asserting only
-    "no exception" would miss a silently dropped index.
+    A second `_ensure_indexes()` must not raise and must not issue a second
+    DROP: the retirement is gated on the catalogue, so the steady state costs
+    zero DDL. The `CALL db.idx.vector.queryNodes` probe asserts the POSITIVE
+    half — the engine really has no vector index to serve from — and the
+    brute-force scan is then asserted to answer, which is what proves the
+    retirement removed an INDEX and not a capability.
     """
     from tortoise.embeddings import EMBEDDING_DIM
+    from tortoise.search_engine import run_vector_query
 
     graph_name = _fresh_graph_name()
     proj = _live_projection(graph_name)
@@ -1217,7 +1285,8 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
         )
         try:
             before = _vector_catalog(proj)
-            assert "Point" in before
+            assert "Point" not in before, (
+                "the first setup must already have retired the Point index")
 
             proj._ensure_indexes()  # the second setup
 
@@ -1226,19 +1295,27 @@ def test_live_setup_twice_is_harmless_and_the_index_still_serves():
                 f"a second setup changed the index catalog: {before} -> {after}"
             )
 
-            # Ask the INDEX directly, not the query layer: run_vector_query
-            # additionally applies the terminal-status/excluded-status WHERE
-            # filters, so a [] there would not distinguish "the index stopped
-            # serving" from "the seed row was filtered out". This assertion
-            # isolates the property under test — the HNSW index still serves.
-            hits = proj.g.query(
-                "CALL db.idx.vector.queryNodes('Point', 'embedding', 5, "
-                "vecf32($vec)) YIELD node, score RETURN node.id",
-                params={"vec": vec},
-            ).result_set
-            assert hits, "the Point vector index must still serve after a re-setup"
-            assert any(row[0] == "test-4997-seed" for row in hits), hits
-            assert proj._vector_indexed_labels is not None
+            # ⛔ ASK THE ENGINE, not the query layer: the index is GONE, so the
+            # procedure has nothing to serve from. This is the retirement made
+            # falsifiable — a store that quietly kept its index fails here.
+            try:
+                proj.g.query(
+                    "CALL db.idx.vector.queryNodes('Point', 'embedding', 5, "
+                    "vecf32($vec)) YIELD node, score RETURN node.id",
+                    params={"vec": vec},
+                )
+            except Exception:
+                pass  # the expected outcome: no index to query
+            else:
+                raise AssertionError(
+                    "CALL db.idx.vector.queryNodes still answered — the "
+                    "in-graph vector index was not retired")
+
+            # …AND THE CAPABILITY IS INTACT: the brute-force scan still finds
+            # the row, so retiring the index cost a mechanism, not an answer.
+            hits = run_vector_query(
+                proj.g, vec, limit=5, is_embedded=False, entity_type="point")
+            assert [pid for pid, _ in hits] == ["test-4997-seed"], hits
         finally:
             proj.g.query("MATCH (p:Point {id: $id}) DELETE p",
                          params={"id": "test-4997-seed"})

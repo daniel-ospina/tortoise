@@ -233,6 +233,7 @@ from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
     "CACHE_FORBIDDEN_COLUMNS",
+    "GENERATED_COLUMNS",
     "DERIVED_FROM_RECORD",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
@@ -1593,6 +1594,17 @@ def _refused(table: str) -> frozenset[str]:
 #: test_the_record_restore_writes_no_story_arc_on_any_node`, whose restore arm
 #: runs over a cache that still holds a legacy copy (`sum(size(n.story_arc))`
 #: must end at 0).
+#: Columns POSTGRES computes, so a record→cache read must skip them (#11642).
+#: ⛔ IMPORTED, never re-listed: `record_projection.GENERATED_COLUMNS` is the ONE
+#: declaration of "the projection must never bind this", and a second copy here
+#: is how the writer and the reader start disagreeing about the same column.
+#: The failure it prevents is not cosmetic: without this entry
+#: `_props_from_row` reaches its final `UnknownRecordColumn` raise, and
+#: `read_record_view`/`record_serve.read_node` both do `SELECT *` — so EVERY
+#: record row read would raise on the first row after the migration applied.
+from .record_projection import GENERATED_COLUMNS as GENERATED_COLUMNS  # noqa: PLC0414
+_GENERATED_COLUMNS = GENERATED_COLUMNS
+
 CACHE_FORBIDDEN_COLUMNS: dict[str, frozenset[str]] = {
     # §9.1/D1 — the S1 narrative, on BOTH anchors the commit path could reach
     # (`public.source.story_arc`, `public.event.story_arc`; the `:Event` half
@@ -2394,6 +2406,18 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             continue
         if column in placed:
             # A placed column the schema does NOT authorise: DERIVED/VOLATILE.
+            continue
+        if column in _GENERATED_COLUMNS:
+            # #11642 — a GENERATED column is DERIVED, and Postgres owns it.
+            # `public.point/source/event.embedding_vec` is
+            # `GENERATED ALWAYS AS (record_embedding_vector(embedding)) STORED`,
+            # so it is not authority the cache may hold: the graph keeps
+            # `embedding`, and a projected copy of the ANN projection would be a
+            # second, unreconciled truth about the same vector. It is skipped
+            # BEFORE the unknown-column raise below rather than added to the
+            # placement table, because the placement table describes what the
+            # RECORD stores and what the CACHE rebuilds — and nothing rebuilds
+            # this: Postgres recomputes it from `embedding` on every write.
             continue
         raise UnknownRecordColumn(
             f"{table}.{column} is not classified by the placement table, not "

@@ -186,8 +186,36 @@ await db.exec(`
 // the directory makes "every migration on disk is applied" a structural
 // property — a new migration cannot ship uncovered.
 const files = readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql')).sort();
+
+// ── Extensions PGlite does not ship ─────────────────────────────────────────
+// ⛔ A MIGRATION THAT NEEDS ONE CANNOT BE APPLIED HERE, AND SAYING SO IS THE
+// POINT — this harness's contract is "every migration on disk is applied or
+// NAMED", never "silently skipped". Measured on `@electric-sql/pglite` 0.5.4
+// AND 0.5.16 (both `npm pack`ed and listed): the package ships 32 contrib
+// extensions and `vector` (pgvector) is not among them, so
+// `CREATE EXTENSION vector` raises and — because `process.exit(1)` is on the
+// first failure — ONE such migration would red this drill for every lane.
+//
+// The compensating control is NOT a comment: `#11642` switched the
+// `test-record-postgres` job's provisioner to the `pgvector/pgvector:pg16`
+// image, so the record legs apply these same files against a REAL Postgres
+// WITH pgvector. This list is the disclosure, that job is the coverage.
+const PGLITE_MISSING_EXTENSIONS = {
+  vector: 'pgvector — applied for real by the test-record-postgres job '
+        + '(pgvector/pgvector:pg16) and by tools/embedding_residual_scan.py',
+};
+const skipped = [];
 for (const f of files) {
   const sql = readFileSync(`${MIG_DIR}/${f}`, 'utf8');
+  const needs = Object.keys(PGLITE_MISSING_EXTENSIONS).filter((ext) =>
+    new RegExp(`CREATE\\s+EXTENSION\\s+(?:IF\\s+NOT\\s+EXISTS\\s+)?["']?${ext}\\b`, 'i')
+      .test(sql));
+  if (needs.length) {
+    skipped.push(`${f} (needs ${needs.join(', ')})`);
+    console.log(`⊘ migration ${f} SKIPPED — needs the \`${needs.join(', ')}\` `
+      + `extension, which this harness cannot provide: ${PGLITE_MISSING_EXTENSIONS[needs[0]]}`);
+    continue;
+  }
   try {
     if (f === '20260813000002_metering_nodes_written.sql') {
       await db.exec('DROP FUNCTION IF EXISTS public.metering_increment(text, text, integer);');
@@ -441,6 +469,14 @@ for (const f of files) {
     console.error(`✗ migration ${f} FAILED:\n  ${e.message.split('\n').slice(0,3).join('\n  ')}`);
     process.exit(1);
   }
+}
+
+if (skipped.length) {
+  console.log(`\n⚠ ${skipped.length} migration(s) NOT applied by this harness: `
+    + `${skipped.join('; ')}`);
+  console.log('  Coverage for them is the test-record-postgres CI job '
+    + '(pgvector/pgvector:pg16), not this drill — do not read a green run here '
+    + 'as those files having been applied.');
 }
 
 // ── #4216: the migration's DEPLOY-TIME repair actually ran ──────────────────

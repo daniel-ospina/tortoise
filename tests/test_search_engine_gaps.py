@@ -1154,7 +1154,7 @@ def test_6214_vector_leg_orders_equal_distance_rows_by_recency_then_id():
     """
     vec = [0.0] * 8
 
-    def _pg(entity_type, query_vec, limit):
+    def _pg(entity_type, query_vec, limit, excluded_statuses=None):
         assert entity_type == "point", entity_type
         return [
             # (id, cosine DISTANCE, recency) — the shape the Cypher YIELD
@@ -1183,6 +1183,73 @@ def test_6214_vector_leg_orders_equal_distance_rows_by_recency_then_id():
         f"key alone would return the inverse: {got}")
 
 
+def test_11642_an_empty_record_answer_is_not_a_complete_one():
+    """Zero rows from the record falls THROUGH to the graph — measured reason.
+
+    The record is a journal fold with NO backfill, so a live tenant's record
+    legitimately holds zero rows while the graph holds the entire payload
+    (`docs/00_index.md`'s #11469 row: *"the tenant's Postgres record holds 0
+    rows, so the graph is the ONLY copy"*). A leg that returned `[]` and
+    recorded `ok` would leave every dense read for such a tenant reporting "no
+    results, healthy" while the payload sat in the graph.
+
+    The fallback must also be NAMED: `scan_fallback`, not a silent `scan`.
+    """
+    class _Graph:
+        result_set = [("from_the_graph", 0.8)]
+
+        def query(self, cypher, params=None, timeout=None):
+            if "CALL db.idx.vector.queryNodes" in cypher:
+                raise RuntimeError(
+                    "Procedure `db.idx.vector.queryNodes` is not registered")
+            return self
+
+    def _pg(entity_type, query_vec, limit, excluded_statuses=None):
+        return []  # the record answered, and it holds nothing
+
+    trace: list[dict] = []
+    out = run_vector_query(
+        _Graph(), [0.0] * 8, limit=5, is_embedded=False,
+        entity_type="point", leg_trace=trace, pg_vector=_pg)
+    assert [pid for pid, _ in out] == ["from_the_graph"], (
+        f"an empty record answer suppressed the graph's payload: {out}")
+    mechanism = next(
+        (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+        None)
+    assert mechanism == MECHANISM_SCAN_FALLBACK, (
+        f"an empty record answer must be a NAMED fallback, got {mechanism}: "
+        f"{trace}")
+
+
+def test_11642_the_record_leg_receives_the_status_filter():
+    """`excluded_statuses` reaches the Postgres leg — `#689` must not be bypassed.
+
+    Both graph branches filter retracted/superseded Points out of the dense leg,
+    and nothing downstream re-filters them, so a record leg that dropped the
+    parameter would return exactly the rows `#689` exists to hide on the branch
+    that now carries production traffic. The moved `#6214` pin passes
+    `excluded_statuses=()` (the audit opt-in), so it cannot see this.
+    """
+    seen: list[object] = []
+
+    class _Graph:
+        result_set = []
+
+        def query(self, cypher, params=None, timeout=None):
+            return self
+
+    def _pg(entity_type, query_vec, limit, excluded_statuses=None):
+        seen.append(excluded_statuses)
+        return [("p1", 0.1, "2026-01-01")]
+
+    run_vector_query(_Graph(), [0.0] * 8, limit=5, is_embedded=False,
+                     entity_type="point", excluded_statuses=("retracted",),
+                     pg_vector=_pg)
+    assert seen == [("retracted",)], (
+        "the record leg was not told which statuses to exclude, so a retracted "
+        f"Point would be returned by it: {seen}")
+
+
 def test_11642_an_unserved_label_falls_through_to_the_graph():
     """``object``/``subject`` are NOT served from the record, and the leg must
     take its graph branch rather than report an empty record answer.
@@ -1202,7 +1269,7 @@ def test_11642_an_unserved_label_falls_through_to_the_graph():
 
     graph = _Graph()
 
-    def _pg(entity_type, query_vec, limit):
+    def _pg(entity_type, query_vec, limit, excluded_statuses=None):
         return None  # not served from the record
 
     trace: list[dict] = []
@@ -1239,7 +1306,7 @@ def test_11642_a_pgvector_failure_is_a_named_scan_fallback():
                     "Procedure `db.idx.vector.queryNodes` is not registered")
             return self
 
-    def _pg(entity_type, query_vec, limit):
+    def _pg(entity_type, query_vec, limit, excluded_statuses=None):
         raise RuntimeError("the record did not answer")
 
     trace: list[dict] = []

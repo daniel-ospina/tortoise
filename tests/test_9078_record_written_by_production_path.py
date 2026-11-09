@@ -274,6 +274,20 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # function is created and dropped inside the file.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261102000002_record_point_search_keys_text.sql", None),
+    # #11642 — the vector move. RE-APPLY SAFE and re-applied here because the
+    # readers PARSE THE FILES: `record_projection.column_types()` now reports
+    # `embedding_vec` on `point`/`source`/`event`, so a container that predates
+    # the file would be told it has three columns it does not have. Every
+    # statement is idempotent by construction — `CREATE EXTENSION IF NOT EXISTS`,
+    # `CREATE OR REPLACE FUNCTION`, `ADD COLUMN IF NOT EXISTS` (a generated
+    # column is NOT rewritten when it already exists: measured, `NOTICE: column
+    # "embedding_vec" of relation "point" already exists, skipping`) and
+    # `CREATE INDEX IF NOT EXISTS`. The index creation is the one statement a
+    # re-apply does not skip for free, so it is a no-op only because the index
+    # already exists — which is exactly the case on an already-migrated
+    # container.
+    (REPO_ROOT / "supabase" / "migrations"
+     / "20261109000001_record_embedding_vector.sql", None),
 ]
 
 #: Record migrations that ship AFTER the base shape yet are deliberately NOT in

@@ -4677,7 +4677,20 @@ jobs:
         # fails and the runner aborts pre-step — a false red with zero tests
         # run). The action binds loopback (#7637) and exports
         # `TEST_RECORD_DB_URI`; paired with the teardown step below.
+        #
+        # ⛔ `pgvector/pgvector:pg16`, NOT the default `postgres:16` (#11642).
+        # `20261109000001_record_embedding_vector.sql` runs
+        # `CREATE EXTENSION vector` and declares three `vector(384)` columns, so
+        # on a plain Postgres image every record leg would fail at
+        # APPLY-MIGRATIONS — and the PGlite schema drill cannot cover it either
+        # (`@electric-sql/pglite` ships no pgvector; `validate.mjs` NAMES the
+        # skip). This job is therefore the ONE place the vector migration is
+        # applied for real, which is why the image is pinned here rather than
+        # skipped: a migration that no CI leg can apply is a migration nobody
+        # has run.
         uses: ./.github/actions/postgres-provision
+        with:
+          image: pgvector/pgvector:pg16
       - name: Provision the DRILL's scratch Postgres — a SECOND server (#9567 D8)
         # D8 is "restore from the record's own backup", and `run_restore_drill`
         # REFUSES a scratch target that is the same database as the record

@@ -708,12 +708,44 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: fallback for the labels the record does not carry (`object`/`subject`) and for
 #: a box with no record armed at all.
 #:
-#: So the pair is still MEASURED and still REPORTED (#11087), and the WARNING is
-#: replaced by one INFO naming the retirement — because a permanent WARNING on a
-#: correct store is how a real gap stops being read. Flipping this to False
-#: restores the pre-#11642 posture and the #4997 warning with it, which is what
-#: a rollback of the move is.
+#: So the pair is still MEASURED and still REPORTED (#11087), and on a store
+#: where the move is LIVE the WARNING is replaced by one INFO naming the
+#: retirement — because a permanent WARNING on a correct store is how a real gap
+#: stops being read.
+#:
+#: ⛔ "Live" is not a constant, it is the deployment: :func:`vector_index_retired`
+#: asks whether the RECORD can serve the dense leg (a DSN resolves —
+#: `record_writer.record_dsn`, the arming surface itself). That split is the
+#: honest one, because the two states are NOT the same fact:
+#:
+#:   * record ARMED — the dense leg is Postgres's job, a graph full scan is the
+#:     documented fallback for the labels the record does not carry
+#:     (`object`/`subject`) and for a store between setups. INFO.
+#:   * record NOT ARMED — nothing serves the dense leg from Postgres, the graph
+#:     has no vector index, and every served label REALLY DOES full-scan. That
+#:     is `#4997`'s defect, unchanged, and it keeps its WARNING.
 VECTOR_INDEX_RETIRED = True
+
+
+def vector_index_retired() -> bool:
+    """Is the in-graph vector index retired for THIS deployment (#11642)?
+
+    ``VECTOR_INDEX_RETIRED`` says the retirement exists; this says whether the
+    deployment has armed the thing that replaced it. A false ``False`` here is
+    not a rollback — it is a store whose dense leg has nowhere else to go, which
+    is why it keeps the #4997 warning rather than inheriting an exemption it did
+    not earn.
+    """
+    if not VECTOR_INDEX_RETIRED:
+        return False
+    try:
+        from ..record_writer import record_dsn
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable arming module is "unarmed"
+        return False
+    try:
+        return bool(record_dsn())
+    except Exception:  # noqa: BLE001, RUF100 — a malformed DSN is "unarmed"
+        return False
 
 # ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
 #
@@ -19006,7 +19038,7 @@ class FalkorProjection(
             with _VECTOR_INDEX_GAP_LOCK:
                 first_report = key not in _VECTOR_INDEX_GAP_WARNED
                 _VECTOR_INDEX_GAP_WARNED.add(key)
-            if first_report and VECTOR_INDEX_RETIRED:
+            if first_report and vector_index_retired():
                 # #11642: the gap IS the design now — say what replaced it,
                 # once, at INFO. A permanent WARNING here would train every
                 # reader to ignore the one line that still means something on a
@@ -19818,9 +19850,14 @@ class FalkorProjection(
             # of this graph; only the vector-index API handle has to be
             # re-derived, because it is a property of the ENGINE's index API
             # (procedure vs Cypher-native) that ``CALL db.indexes()`` does not
-            # report. The existing index is never reconciled here (same as the
-            # sweep) and a MISSING one is still created — so a server graph
-            # that lost only its vector index still gets it back.
+            # report — and, since #11642, so the RETIREMENT runs on the steady
+            # state too: an already-indexed graph still drops an in-graph vector
+            # index it finds, which is the only setup most deployed graphs will
+            # ever take. ⛔ It is NOT re-created any more: a missing vector index
+            # is now the CORRECT state (see `VECTOR_INDEX_RETIRED`), so the
+            # older sentence here — "a server graph that lost only its vector
+            # index still gets it back" — described the pre-move behaviour and
+            # is replaced rather than left to mislead the next reader.
             # #5434: hand over the catalogue rows `_schema_is_current` just
             # read, so the inventory below does not re-probe (one probe per
             # repeat sweep). `getattr` because a projection built with
@@ -20244,6 +20281,7 @@ class FalkorProjection(
         # (#4465) it is. Reading the catalogue first makes the steady state
         # ZERO statements: one read that this method already needs.
         _has_vector_index = False
+        _rows = None
         try:
             _rows = (catalogue_rows if catalogue_rows is not None
                      else self.g.query("CALL db.indexes()").result_set)
@@ -20278,13 +20316,20 @@ class FalkorProjection(
                     _log.debug("#11642: %r did not drop the vector index: %s",
                                _stmt, e)
                     continue
+        # ⛔ ONE CATALOGUE PROBE PER SETUP (#4465/#5434). The gate above had to
+        # read the catalogue on the FULL-SWEEP lane (no rows supplied), so hand
+        # that read to the inventory instead of letting it probe again. After a
+        # DROP the rows describe a catalogue that no longer exists, so that one
+        # case re-reads.
+        if catalogue_rows is None and not dropped:
+            catalogue_rows = _rows
         if dropped:
             _log.info(
                 "#11642: dropped the in-graph Point.embedding vector index on %s "
                 "— the dense leg is served from the Postgres record "
                 "(pgvector), and a retired index is no longer rebuilt on a cold "
                 "restore (#7846: 436.5 s at 20k nodes, 191.8 s tuned, and it "
-                "deadlocked the instance)", self.graph_name)
+                "deadlocked the instance)", self._graph_name)
         _wrote_index = dropped
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation

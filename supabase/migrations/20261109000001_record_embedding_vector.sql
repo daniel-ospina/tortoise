@@ -90,7 +90,25 @@
 -- extensions list carries `vector`; §14.3 V1's decision rests on it) and on the
 -- `pgvector/pgvector:pg16` image the CI job uses. `pgvectorscale`/DiskANN is
 -- NOT available there, which is why this is HNSW and not DiskANN.
-CREATE EXTENSION IF NOT EXISTS vector;
+--
+-- ⛔ `SCHEMA public` IS STATED, AND THE QUALIFICATION ABOVE DEPENDS ON IT. Every
+-- type/opclass reference in this file and in the converter's body is
+-- `public.vector…` (that qualification is not optional — see the pg_restore
+-- note at the top), so the extension MUST live in `public`:
+--   * `IF NOT EXISTS` against an install in ANOTHER schema (Supabase's
+--     documented pattern is `create extension vector with schema extensions`)
+--     is a silent no-op, after which every `public.vector(384)` below fails to
+--     resolve — a deploy that aborts on a TYPE ERROR rather than on a clear
+--     sentence;
+--   * `SCHEMA public` makes a FRESH install deterministic. It cannot repair an
+--     existing install elsewhere, which is why the settling check is stated
+--     rather than implied: on a record database
+--     `SELECT extnamespace::regnamespace FROM pg_extension WHERE extname='vector'`
+--     must answer `public` (measured on `pgvector/pgvector:pg16` — it does).
+--     ⚠️ If it answers something else, the fix is to ALIGN the two — move the
+--     extension, or re-qualify this file's three references — NOT to drop the
+--     clause and rely on `search_path`, which `pg_restore` empties.
+CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
 
 -- ── the one converter: jsonb payload -> indexable vector, NULL when unusable ──
 --
