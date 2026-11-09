@@ -9800,9 +9800,15 @@ def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
         # an UNMEASURED row (still the flat default) may state it
         "  test_b.py: 2.0  # the flat 2.0 UNDERSTATES it until a sweep replaces"
         " this row.\n"
-        # the same sentence with NO landed basis is not falsified by its tail
-        "  test_c.py: 0.4  # the flat 2.0 UNDERSTATED it until this sweep; nothing"
-        " in the tail cites a sweep.")
+        # the same sentence, PRESENT tense, with NO landed basis. The tense arm
+        # MATCHES this row, so only the `_MEASURED_BASIS_RE` conjunct keeps it
+        # quiet — delete that conjunct and this fixture is the one that reds.
+        # ⛔ It must stay present tense: `_FLAT_DEFAULT_STILL_OWED_RE` matches
+        # `UNDERSTATES`, so the PAST-tense wording this fixture first carried
+        # (`UNDERSTATED`) never reached the conjunct at all and the arm was
+        # unpinned (review P3, 2026-11-09).
+        "  test_c.py: 0.4  # the flat 2.0 UNDERSTATES it until a sweep; nothing"
+        " in the tail cites one.")
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
         stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
     assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
