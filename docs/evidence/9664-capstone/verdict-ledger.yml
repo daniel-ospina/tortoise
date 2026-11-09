@@ -302,44 +302,213 @@ criteria_expected: 22
 
 measured_at:
   ref: origin/main
-  sha: e1ba0974ef8452d57ad17ecaff18579d4772cd2b
-  date: 2026-11-07
+  sha: 5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d
+  date: 2026-11-08
 
 # Environment established BEFORE any row was graded (by execution, not by reading):
 #
 #   $ curl -s https://api.premiselabs.co/v1/version
-#   {"version":"0.2.0","commit_sha":"40301bfdb3885d8bab0e40848e98e86a646654c3"}
-#   $ git merge-base --is-ancestor 40301bfdb3885d8bab0e40848e98e86a646654c3 origin/main && echo yes
+#   {"version":"0.2.0","commit_sha":"5938deafefde2a73ba105ab1384f9cff695e9e8b"}
+#   $ git merge-base --is-ancestor 5938deafefde2a73ba105ab1384f9cff695e9e8b origin/main && echo yes
 #   yes                    # the deployed sha IS an ancestor of this tree (no deploy of foreign code)
-#   $ git rev-list --count 40301bfdb3885d8bab0e40848e98e86a646654c3..origin/main
-#   8                      # deploy lag, RE-MEASURED 2026-11-07: 8 commits, not the 1 an earlier draft claimed.
-#                          # main itself moved during this pass (e1ba0974e -> dbbf5d874); the 8 commits are
-#                          # docs/test/CI/refactor and touch NO surface graded below — verified, not assumed:
-#                          #   $ git diff --name-only 40301bfdb..origin/main | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
-#                          #   (no output)
-#                          # So a PRODUCTION observation still stands for the rows it is cited on, and the
-#                          # measured_at sha below is the tree this pass actually executed.
+#   $ git rev-list --count 5938deafefde2a73ba105ab1384f9cff695e9e8b..5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d
+#   60                     # deploy lag, RE-MEASURED 2026-11-08 against THIS pass's tree (5ef5805f0).
+#                          # A lag number means nothing without its endpoint, which is why the sha is
+#                          # re-read here rather than carried: the previous pass recorded 40301bfdb/8,
+#                          # and the deployment had ADVANCED since. It was not wrong, it was older —
+#                          #   $ git merge-base --is-ancestor 40301bfdb 5938deaf && echo yes   -> yes
+#                          # ⛔ AND THE ENDPOINT IS THE SHA, NOT `origin/main` (review finding, this
+#                          # pass). Both the count and the filter below used to read
+#                          # `..origin/main`, a ref that MOVES: re-running the recorded
+#                          # count line later the same day printed 130, seventy above the 60
+#                          # recorded beside it, and reconciling the two required knowing
+#                          # which tree this pass ran on. Pinned to `5ef5805f0` both lines
+#                          # reproduce. ⛔ NO `origin/main` READING BELONGS HERE: that ref MOVES,
+#                          # and an earlier revision of this very sentence asserted the filter was
+#                          # "still empty at the LIVE `origin/main`" — re-measured at `cd79fb0e1e`
+#                          # the same filter returns `tortoise/sdk.py`, so the assertion had rotted
+#                          # into a false claim while the PINNED tree was never wrong. The pin is
+#                          # the claim; the conclusion below rests on it alone.
+#   $ git diff --name-only 5938deafefde2a73ba105ab1384f9cff695e9e8b..5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d \
+#       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
+#   (no output)            # nothing graded moves between the DEPLOYED tree and the graded tree, so a
+#                          # PRODUCTION observation still stands for the rows it is cited on.
+#   $ git merge-base --is-ancestor e1ba0974ef8452d57ad17ecaff18579d4772cd2b 5938deaf && echo yes
+#   yes                    # the PREVIOUS pass's measured tree is itself an ancestor of what is now
+#                          # deployed, so its observations were made on a tree that reached production.
+#   $ git diff --name-only e1ba0974ef8452d57ad17ecaff18579d4772cd2b..5938deaf \
+#       | rg -i 'onboarding|harness|consent|mcp_auth|sdk\.py|tool_registry|dashboard'
+#   tortoise/sdk.py        # ONE graded file moved between the previous measured tree and the deployed
+#                          # one — re-measured because a moved SDK is the one change that could
+#                          # invalidate a `Contract green` row. It cannot:
+#                          #   $ git diff e1ba0974e..5938deaf -- tortoise/sdk.py \
+#                          #       | rg '^[+-] *(async )?def [a-z]'
+#                          #   (no output)   # 434 insertions / 45 deletions, and NOT ONE public method
+#                          #                 # added, removed or renamed. Retrieval internals only
+#                          #                 # (#11459, #11468) — the SDK SURFACE is unchanged.
+#                          # So no row's contract claim is disturbed, and that is measured rather than
+#                          # assumed from the file being "probably irrelevant".
 #   $ for u in api.../v1/version app.premiselabs.co tortoise.premiselabs.co/docs; do curl -o /dev/null -w '%{http_code}\n' "$u"; done
 #   200 / 200 / 200        # no blackout at measurement time (#10660 did not reproduce)
 #   $ curl -s https://app.premiselabs.co/auth | grep -oE 'APP_RETURN_ROUTES *= *\[[^]]*\]'
 #   APP_RETURN_ROUTES = ["/welcome", "/team", "/admin", "/api/consent/start"]   # == main's public/signup.html
 #   $ env | grep -ci -e openai -e chatgpt -e TORTOISE_API_KEY
 #   0                      # no ChatGPT credential, no API key: the browser half is NOT runnable here
+#                          # ⛔ RE-MEASURED 2026-11-08 (review round 13): the same grep now prints
+#                          # **1**, and the 1 is `TORTOISE_API_KEY` — a later pass in this same lane
+#                          # MINTED one (`uv run tortoise signup`, see U1). So there is still no
+#                          # ChatGPT credential (openai/chatgpt alone = 0), while a key IS present,
+#                          # and that presence has a measured consequence recorded at the seven-file
+#                          # run below: with the key the MCP stdio transport refuses by design and
+#                          # one cross-tenant test errors. The keyless reading is the one the
+#                          # contract-layer claim rests on, which is why that command carries
+#                          # `env -u TORTOISE_API_KEY`. Two values for one fact is what a stale
+#                          # environmental line does; recorded rather than overwritten, because
+#                          # the `0` was TRUE of the moment it was taken.
 #
 # Two independent layers are therefore established and NOT re-graded below:
 #   * the product/environment blockers named by the 2026-10-26 run are closed and the
-#     deployed sha is an ancestor of this tree (deploy lag 8, ancestor confirmed above);
-#   * the contract layer is green at this head, MEASURED BY EXECUTION in this pass —
-#     every count below is a line from a run in this worktree's
-#     `.worktree-report/`, not a carried-forward number:
+#     deployed sha is an ancestor of this tree (deploy lag 60 — re-measured ABOVE, in the
+#     version command block; the figure this sentence used to carry, 8, was an older
+#     DEPLOYMENT, not a different fact);
+#   * the contract layer is NOT fully green at this head, and the exact state is MEASURED BY
+#     EXECUTION in this pass: `611 passed / 5 failed` of 616 collected, the 5 being S2's
+#     `TestCreateGraphWithPacks` group refused `503 … default ACL user is open (nopass)` by the
+#     private lane container — an environment refusal this diff cannot reach, so no graded row
+#     moves on them, and S2's own row states it in full (`#10992`/`#10141` track the container's
+#     missing `requirepass`). ⛔ THIS BULLET USED TO READ "the contract layer is green at this
+#     head", which is the exact error S2's row was corrected for — a summary sentence must not
+#     contradict the row it summarises, and a reader taking this line alone got the opposite of
+#     the finding twenty lines below.
+#     PROVENANCE, stated per number rather than as one blanket claim, because a
+#     blanket claim is what a reader cannot check:
+#       - A DIRECT INVOCATION, AND NO ARTIFACT HOLDS IT — named instead of
+#         generalised: the carve-out FOUR-file run
+#         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+#         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
+#         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
+#         -> `1442 passed` at the MERGE head `2f9a3aaf68`, re-measured at `117a5f96bba5`
+#         (`1442 passed in 1115.94s`), and `1441 passed` at `a913fa8ec6` — one
+#         `def test_` less, which is main's own addition (#11548: 473 -> 474 in
+#         `tests/test_ci_selection.py`; the other three files are unmoved at
+#         230 / 270 / 146) and not drift. ⛔ EACH READING IS A DIRECT INVOCATION AND NO ROW
+#         HOLDS IT, measured on this box at this head: `.worktree-report/state.json` carries
+#         TEN rows and NONE of them is this command or either count — rows 1-3 are
+#         356 / 280 / 957 of DIFFERENT `tools/test_lane.py` commands, row 4 is an incomplete
+#         three-file run (`counts: null`), and rows 5-7 are RED (exit 1, the ENOSPC
+#         artefacts described below). `tools/worktree_report.py check` on that export
+#         answers `VALID EVIDENCE, 3 FAILING SUITE(S) RECORDED (exit 3 — not a pass)` — NOT
+#         an all-clean export. So the command above is the check and re-running it is the
+#         reproduction: ⛔ do NOT cite the export for either count.
+#         · the same four files COLLECT `1442` at `2f8e86c9b28c` and `1449` at this file's
+#           head — a `--collect-only` reading, not a test run. The +7 is MAIN's, not a claim
+#           moving under the text: `#11602` (in the merge of `1839535fd509`) took
+#           `tests/test_ci_selection.py` from 474 to 481 `def test_`, and the other three
+#           files are unmoved at 230 / 270 / 146. Every count in this bullet is therefore
+#           re-derived at the head it names, and none is carried across a merge.
+#         ⛔ THIS BULLET HAS NOW BEEN WRONG IN BOTH DIRECTIONS, and the rule is the same
+#         both times: a provenance sentence is a claim ABOUT AN ARTIFACT, so it is re-read
+#         FROM that artifact — never re-worded from memory and never inferred from a
+#         sibling export. One cut asserted both counts were recorded rows; the cut after it
+#         asserted no row records them but named a first-three sequence no export on this
+#         box carries; THIS cut is the measured one (ten rows, none the four-file command,
+#         `check` = exit 3, not a pass).
+#         The docker-lane SEVEN-file runs below are NOT suite rows and never were: 5 of
+#         their tests are environment-red (`TestCreateGraphWithPacks`, refused 503 `default ACL user is
+#         open (nopass)`), and a recorded environment-red row makes the lane-report gate
+#         refuse a PR whose own surface is green — the export's own `not_done` says so
+#         verbatim;
+#       - the per-file collection figures come from separate `pytest --collect-only`
+#         invocations that are NOT in `.worktree-report/` (they produce no suite run),
+#         and are quoted from those invocations' own output;
+#       - `the 5 are`, the census line and the two #7949 suites are this pass's DIRECT
+#         runs (a `pytest`/script invocation whose own output is quoted, not a report).
 #
-#       $ uv run python tools/test_lane.py run -- tests/test_onboarding_auto_complete.py tests/test_cross_tenant_read_isolation.py -q
-#       51 passed                                   # 42 + 9 by collection
-#       $ uv run python tools/test_lane.py run -- tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py -q
-#       239 passed, 5 failed                        # the 5 are `TestCreateGraphWithPacks`, refused by the
-#                                                   # PRIVATE lane container's ACL layer — see S2
+#       $ env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
+#       456 passed, 5 failed                       # 461 collected AT THE HEAD OF THAT RUN,
+#                                                   # which PREDATES this branch's merge of
+#                                                   # `origin/main`. A DIRECT
+#                                                   # `tools/test_lane.py` invocation whose own
+#                                                   # output is quoted — NOT a
+#                                                   # `worktree_report.py` suite row (see the
+#                                                   # provenance bullet above).
+#       ⛔ THIS HEAD DOES NOT COLLECT 461, so the 456/5 split above is stale BY
+#       CONSTRUCTION - a measurement against a denominator that no longer exists - and not
+#       because anyone did the arithmetic wrong. Two independent edits moved the pin suite.
+#       (a) the paired C2/E3 test is GONE: an interim head carried
+#       `test_c2_and_e3_cannot_be_graded_differently`, which made the suite 167, and it was
+#       DELETED because it rested on a false premise (C2 does not subsume E3 - see C2's own
+#       comment) and forbade a legitimate future state. That takes 167 to 166, which is what
+#       a previous revision of this block recorded. (b) the merge of `origin/main` then
+#       landed 89 more parametrized tests in the same file (114 `def test_`, up from 72),
+#       taking it 166 -> 255.
+#       (c) the merge of `origin/main` at THIS head added 42 more to that same file
+#       (125 `def test_`, up from 114; `c5dbd28971`, #11491), taking it 255 -> 297.
+#       (d) a later merge of `origin/main` added 24 more to the same file (146 `def test_`,
+#       up from 125; `f4ecfe6665`, #11474), taking it 297 -> 321. So every number below is
+#       RE-MEASURED at this head rather than carried forward from (c)'s.
+#       ⛔ AND "THIS HEAD" IS NOT `measured_at.sha`, which is the tree the ROWS were graded
+#       on. The 321 does not exist at `measured_at.sha`: the same pin file collects 165 (71
+#       `def test_`) there, so the seven files collect 295 + 165 = 460 THERE and 616 here.
+#       The 156-test gap decomposes along `origin/main` into FOUR landings — measured by
+#       collecting the pin file at each sha, and NOT one landing, which an earlier cut of
+#       this paragraph claimed: +1 at `8f28254ff8` (the #11217 merge), +89 at `844cf46b4b`
+#       (#11506), +42 at `c5dbd28971` (#11491), +24 at `f4ecfe6665` (#11474). Both readings
+#       are true of their own tree, and a reader re-deriving this tally must use the head of
+#       the RUN, not `measured_at`.
+#       Two graded S4-row clauses quote this tally rather than one: the two consent files'
+#       own 124, AND the seven-file `611 passed / 5 failed` split — so moving this tally
+#       moves S4 twice.
+#       So the tally at THIS head is a COLLECTION count, and only that:
+#           per-file collection, summed: 295 (the six contract files: 66 / 54 / 9 / 42 / 65 / 59)
+#                                      + 321 (`test_9664_capstone_verdict_ledger.py`, the ledger pin suite)
+#                                      = 616 COLLECTED at this head.   Counted, not estimated.
+#       ⛔ THE SPLIT IS MEASURED, NOT DERIVED, AND IT DOES NOT CARRY ACROSS HOSTS OR HEADS.
+#       `616 - 5` happens to equal 611 on THIS host, but nothing about the split follows
+#       from the collection count: the 5 are docker-lane-only (S2's ACL group) and do not
+#       reproduce on a carve-out host, so the inference is unsound even when it happens to
+#       land. MEASURED at this head on the private docker lane:
+#           env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- <the seven files> -q
+#                                       ->  611 passed, 5 failed   (616 collected)
+#       The two readings an earlier revision recorded were taken at the head where the
+#       collection was **592** (i.e. BEFORE landing (d) added its 24 tests), so they are
+#       reported as THAT tree's and never re-quoted as this one's:
+#           env -u TORTOISE_API_KEY … -q   ->  587 passed, 5 failed   (592 collected)
+#           (ambient, a key is set)        ->  586 passed, 6 failed   (592 collected)
+#       So the tally at this head is 611 + 5 = 616, and the line above (`456 passed, 5
+#       failed`) is that EARLIER RUN's own output at ITS OWN head — reported, not
+#       re-quoted as this one's.
+#       ⛔ `env -u TORTOISE_API_KEY` IS PART OF THE COMMAND, not noise: with a key in the
+#       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
+#       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
+#       errors `Authentication required. The MCP stdio transport cannot carry auth tokens…`
+#       and the SAME command measured **586 passed, 6 failed** at THAT head — the one whose
+#       collection is 592. At THIS head (616 collected) the ambient reading is **610 passed,
+#       6 failed**: 610 + 6 = 616, whereas 586 + 6 = 592, so the two cannot be the same tree
+#       and the ambient reading is quoted with its own collection rather than the other one's.
+#       Both readings are true of their environment, so the environment is named rather than
+#       left to the reader; the `9 passed` this file records for that unit is the keyless
+#       reading, and it is the one the contract-layer claim rests on.
+#       the 5 are 5 of the 8 `TestCreateGraphWithPacks` tests, refused by the PRIVATE lane container's ACL layer — see S2.
+#       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
+#       304 passed                                 # 24 (the door census, its pinned-ON/refusal arms
+#                                                  # and the one-hop ledger pins) + 280 (the #7949
+#                                                  # cite, idle and registration and cross-file pins)
+#                                                  # = 304. Of these two files only
+#                                                  # `test_7949_capstone_measure.py` is EDITED by this
+#                                                  # change; `test_7949_c2_door.py` is byte-identical to
+#                                                  # `origin/main` and is run for the one-hop pins it
+#                                                  # carries. The two EDITED suites this command does
+#                                                  # NOT run are `test_9664_capstone_verdict_ledger.py`
+#                                                  # (the seven-file run above) and
+#                                                  # `test_capstone_preregistration_9075.py`
+#                                                  # (356 collected at this head, measured on its own),
+#                                                  # so the contract-layer claim is not carried by this
+#                                                  # command alone.
 #       $ uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
 #       MEASURED: 26 premises, 0 unmeasured sections.  (exit 0)
+#       $ uv run python tools/capstone_ledger.py check
+#       CAPSTONE-LEDGER-RESULT: UNCOVERED(12)       # exit 2 — the ONLY clean exit is an empty list
 #
 # ⛔ A previous draft of this preamble claimed "81 passed/2 skipped/1 xfailed" and
 # "190 passed (9340 graph argument + consent step4 + consent BFF)". Both were
@@ -348,10 +517,97 @@ measured_at:
 # removed rather than annotated, because an un-reproducible count in an evidence
 # artifact is exactly as harmful as no count.
 #
-# What is missing is a RUN, and the only thing that blocks one is a credential:
-# steps 1–4 and 6–10 need a signed-in Tortoise session and, from step 4 on, a
-# ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
-# #9664's own step-4 text ("human does the Pro auth").
+# What is missing is a RUN. Two DIFFERENT things block one, and conflating them is
+# how the capstone read as "just mint a credential":
+#   * steps 1-4 and 6-10 need a signed-in Tortoise session and, from step 4 on, a
+#     ChatGPT Plus/Pro session where a HUMAN completes the OAuth consent — which is
+#     #9664's own step-4 text ("human does the Pro auth");
+#   * THREE of the four #9340 ugly cases (U1's accept arm, U2, U4) need, beyond a
+#     credential, a SECOND graph — a minted free org holds only one (its default),
+#     measured 402 "Custom graphs require the Builder plan"
+#     (step11-write-half-trace.txt).
+#     U3 is the exception and is `verified`: its outcome IS a refusal, which the
+#     2026-10-26 run obtained, so it needs neither a credential nor a second graph.
+# A credential WAS minted on 2026-11-08 (`uv run tortoise signup`) and it did not
+# unblock those rows: U1's write half was DELIVERED with it (refused by our resolver,
+# no silent fallback), U2/U4 were not attempted at all, and all three rows stayed
+# unreachable for the tier reason above — U1's ACCEPT arm for want of an existing
+# second graph, U2/U4 for want of one to attempt their refusal against. Measured, not
+# assumed.
+#
+# (The U3 row quotes the SAME function in its pre-#10025 shape — `Reachable graphs:
+# 'default' (default).` — because that is what the 2026-10-26 run observed; the shape
+# changed in `704fd60ee` (2026-10-26 - `feat(10025): a graph's identity is a fixed id`,
+# the commit by which #10025 reached main), AFTER that run's deployed build.
+# ⛔ NOT `347cf03cb8`, which an earlier cut of this paragraph cited: that sha is a
+# TEST-ONLY commit (`tests/test_dry_run_preview.py`, #10167, "count EDGES, not paths")
+# that touches no part of the resolver, and it was cited beside the further false claim
+# that `704fd60ee` is an ancestor of NEITHER `origin/main` NOR the deployed `5938deaf`.
+# The reverse is true and was re-verified this pass: `704fd60ee` IS an ancestor of BOTH.
+# So the earlier citation sent a reader to an unrelated tree AND told them the correct
+# sha was unreachable, which made a TRUE observation look unverifiable. Both halves are
+# the review finding; both are corrected here.
+# `git log -S 'id {stable_id}, graph_id' --all -- tortoise/mcp_auth.py` resolves the
+# reachable commit. The function renders `(id …, graph_id …)` for the DEFAULT row, and —
+# taken when the row's `stable_id` is absent or equals its gid — its OTHER arm renders the
+# name `repr`-quoted with a bare gid, i.e. `'name' (gid)` (the paragraph resumes after the
+# block below).
+# ⛔ WHY A MERGE-BOUNDARY COMMIT GOT CITED AT ALL, kept because the next lane on a
+# shallow checkout will reach for the same command (review round 13). An earlier cut of
+# this paragraph cited `347cf03cb8` and declared `704fd60ee` absent. The checkout that
+# produced that cut was a SHALLOW clone: `git rev-parse --is-shallow-repository` -> true
+# THERE, and `347cf03cb8` is that clone's TRUNCATION BOUNDARY, not a root.
+# ⛔ THE SCOPE MATTERS, AND EVERY EARLIER CUT OF THIS PARAGRAPH GOT IT WRONG THE SAME
+# WAY: each asserted what a COMMAND prints, as though every box holding a clone of this
+# repository were in the same state. Shallow-ness is a property of ONE CLONE, and this
+# record is maintained from more than one, so the "correction" travelled and flipped
+# truth value without the defect it describes ever changing. Measured 2026-11-08, same
+# commands, two boxes, OPPOSITE answers:
+#   $ git -C /home/cmux/tortoise rev-parse --is-shallow-repository  -> false
+#   $ ls /home/cmux/tortoise/.git/shallow                           -> ENOENT
+#   $ git merge-base --is-ancestor 704fd60ee origin/main            -> rc 0 (is an ancestor)
+#   # …and on the cell lane that re-measured it: both checkouts -> `true`, shallow files of
+#   # 2 / 3 / 1 lines, boundaries `68ebaac634` / `3dfd586d65` / `52fa6eb145`.
+# So the sentence states the DEFECT and the clone PROPERTY, never a verdict about the tree
+# in front of you: the cut that cited `347cf03cb8` and called `704fd60ee` absent was made
+# from a SHALLOW clone whose truncation boundary sat past that commit. In such a history
+# `git merge-base --is-ancestor 704fd60ee origin/main` answers "not reachable HERE", and
+# that was read as "does not exist" — which is why `is-shallow-repository` ALONE does not
+# decide it: it says nothing about WHERE the boundary sits. Read the answer WITH the
+# boundary line, and do not treat either `true` or `false` as the finding.
+#   $ gh api repos/daniel-ospina/tortoise/compare/704fd60ee...5938deaf
+#   {"ahead_by":496,"behind_by":0}                        # and of the deployed tree
+# ⛔ NO `...main` COMPARE HERE EITHER (review finding, this pass). An earlier cut
+# quoted a `compare/704fd60ee...main` reading as evidence. That is a reading of a MOVING
+# ref, so it was already stale when it was read — and the FIRST attempt to fix it re-typed
+# a second such number, which did not even agree with itself: read against this checkout's
+# local `origin/main` (which stood at `cd79fb0e1e` when it was taken) it gave one value and
+# against the live ref another, which is precisely the point. Neither number is kept; the
+# sha IS, so the disagreement reproduces by re-running that reading at that endpoint. Two
+# rules decide what may be kept here, and both are STATED rather than pointed at, because
+# every cross-reference in this block has rotted: (a) a MOVING ref may not be quoted at all —
+# it is stale the moment it is read — and (b) a lag number must carry its endpoint. The
+# conclusion needs neither: `--is-ancestor` on a checkout holding both, plus the sha-pinned
+# `...5938deaf` compare above, establish it — and that one IS pinned to a sha, so it
+# reproduces.
+#   $ gh api repos/daniel-ospina/tortoise/commits/704fd60ee
+#   +        return f"{name!r} (id {stable_id}, graph_id {gid!r})"   # it INTRODUCES it
+# `git log -S … --all` then "resolved" the boundary, because a shallow `-S` credits the
+# truncated commit with every line in the tree. The sibling tool already states the rule
+# in code: `tools/capstone_ledger.py::_commit_state` returns `unprovable`, NEVER
+# `absent`, for an ancestor in a shallow checkout — "blaming the record reds the required
+# check on a legitimate ledger (#9075 r4 P1)", pinned by
+# `test_a_shallow_checkout_is_unprovable_never_absent`.
+# Resuming after that block: the two arms are recorded rather than harmonised, because
+# each is a real rendering of the same function. The OTHER arm prints `'name' (gid)` — the
+# name `repr`-quoted and the gid BARE — NOT the unquoted `name (gid)` an earlier cut of
+# this paragraph printed (`mcp_auth._describe_graph`, the `return f"{name!r} ({gid})"` arm).
+# `step11-write-half-trace.txt` block 2 shows the first arm (`'default' (id g_dfa9a45dc4234801,
+# graph_id 'default')`); U1's row quotes the
+# shape-neutral prefix `Reachable graphs: 'default' ...` and deliberately does not
+# assert a tail. Two shapes, two observation dates, one function: recorded rather than
+# harmonised, since rewriting an observation to match a later rendering is the
+# re-typing this ledger refuses.)
 
 criteria:
   # ── §C — the issue's own "Done means" list, VERBATIM ────────────────────────
@@ -369,14 +625,39 @@ criteria:
 
   - id: C2
     text: "Every step has a verdict; the \"not covered\" list is explicit (an empty uncovered list is the only clean exit)."
-    verdict: not-covered
-    reason: >-
-      The uncovered list is non-empty and this ledger is that list, computed:
-      S1-S10 and U1-U4 below carry per-row verdicts and reasons, and
-      `tools/capstone_ledger.py check` exits 2 on this file. Before this ledger the
-      list could only be obtained by re-reading the thread, and three passes got
-      three denominators (14 / 18 / 22) - which is why the criterion could never
-      be answered by anyone but its last reader.
+    # CORRECTED 2026-11-08 — this row said `not-covered`, and that was a FALSE
+    # NEGATIVE, not caution. The criterion asks for (a) a verdict on every step,
+    # (b) an EXPLICIT uncovered list, and (c) that an empty uncovered list be the
+    # only clean exit. It does not ask for the list to be EMPTY. All three clauses
+    # are properties of THIS file, mechanically enforced on every run, and each is
+    # pinned by a test that ALREADY EXISTED before this pass:
+    #   (a) every step has a verdict — `§A` carries all TEN run steps (S1..S10),
+    #       each with a verdict, and `EXPECTED_IDS` pins that row set IN ORDER
+    #       (`test_committed_ledger_*` asserts it), so a dropped step reds;
+    #   (b) the uncovered list is explicit — `render()` prints every uncovered row
+    #       WITH its reason, pinned by
+    #       `test_one_uncovered_row_exits_two_and_names_the_row` and, for a row whose
+    #       reason is missing, by `test_uncovered_row_without_a_reason_is_invalid`;
+    #   (c) empty is the only clean exit — `main()` returns `EXIT_CLEAN` only when
+    #       `uncovered()` is empty, pinned by `test_all_verified_is_the_only_clean_exit`
+    #       (and the `off`/`advisory` switches return 3/4, never 0).
+    #
+    # ⛔ THE RELATION TO E3 IS OVERLAP, NOT SUBSUMPTION. An earlier draft of this
+    # comment claimed E3 "states a strict SUBSET" of C2, and that is FALSE against
+    # the two texts this same file holds. C2's clause (a) IS E3's first clause, but
+    # each row also states something the other does not: E3 requires "never an
+    # aggregate" and "with the reason"; C2 requires the explicit uncovered list and
+    # the empty-only clean exit. Neither contains the other, so C2 is NOT gradable
+    # FROM E3 and a later pass may legitimately regrade one of them alone. It is
+    # graded on its own three clauses above — the stronger argument, and the one
+    # this row stands on.
+    verdict: verified
+    evidence:
+      - docs/evidence/9664-capstone/verdict-ledger.yml
+      - tools/capstone_ledger.py
+      - tests/test_9664_capstone_verdict_ledger.py
+    reason: ""
+    evidence_kind: trace
 
   - id: C3
     text: "Anything that failed has an issue."
@@ -392,9 +673,12 @@ criteria:
     verdict: blocked
     reason: >-
       A gate on other issues, not a deliverable: it cannot be satisfied until C1
-      and C2 are, so it is blocked BY them. Recorded rather than omitted so the
-      ledger's denominator does not silently shrink (an omitted gate reads as a
-      satisfied one).
+      is, so it is blocked BY C1. Recorded rather than omitted so the ledger's
+      denominator does not silently shrink (an omitted gate reads as a satisfied
+      one). C2 was the other half of this block until 2026-11-08, when it was
+      regraded `verified` for the reason recorded on its own row; this row's
+      dependency is updated with it rather than left naming a satisfied criterion
+      as a blocker - a stale dependency list is how a gate reads as open forever.
 
   # ── §A — the ten run steps, VERBATIM from the issue's "The run" table ───────
   - id: S1
@@ -414,8 +698,8 @@ criteria:
       Needs a signed-in dashboard session, so the UI half cannot be graded here.
       The CONTRACT half is also NOT fully green on this box, and a previous draft
       of this row said it was: `tests/test_pack_selection_by_graph.py` collects 54
-      tests and this pass measured **49 passed / 5 failed**. The 5 are the whole
-      `TestCreateGraphWithPacks` group, all refused with HTTP 503
+      tests and this pass measured **49 passed / 5 failed**. The 5 are 5 of that class's
+      **8** tests (the group collects 8, not 5), all refused with HTTP 503
       "Per-graph ACL provisioning failed - ... default ACL user is open (nopass)",
       because `tools/test_lane.py` starts its container WITHOUT `requirepass` by
       design (its own docstring's stated residual, tracked as #10992 / #10141) -
@@ -430,7 +714,14 @@ criteria:
     verdict: blocked
     reason: >-
       The card exists at this head (`website/apps/dashboard/src/harnesses.js` -
-      the `chatgpt` chooser family with its four setup steps), but NO published
+      `HARNESS_STEPS('chatgpt')` at `:271-279`, which holds **seven** entries at this
+      head; that array is the authority for the count, and the family entry at `:880`
+      carries `surfaces: []`, so no surface-chooser row intervenes and the step list
+      renders directly). The card renders MORE than that list - `HARNESS_INTRO.chatgpt`
+      at `:300` and the snippet block `HARNESS_INSTALL.chatgpt` at `:612`, both rendered
+      AFTER the list (`main.jsx:10418` opens the step list, `:10437` the intro, `:10442`
+      the snippet) - so the steps are what renders FIRST, not all that renders, and an
+      earlier cut of this row said "four", which the array denies. But NO published
       run has ever screenshotted it: the 2026-10-26 run drove a build that had no
       ChatGPT card at all. Rendering it needs a signed-in dashboard session, which
       this lane does not have (`env | grep -ci -e chatgpt` -> 0).
@@ -440,10 +731,11 @@ criteria:
     verdict: blocked
     reason: >-
       Server half is green at this head, measured in this pass: the two consent
-      files collect 65 + 59 = **124** tests and all 124 passed (inside a four-file
-      run that reported 239 passed / 5 failed, the 5 being S2's ACL group; a
-      previous draft of this row claimed "190 passed" for these two files, which
-      their collection denies). Live `/auth` serves the
+      files collect 65 + 59 = **124** tests and all 124 passed (within this pass's
+      seven-file run, `611 passed / 5 failed` — the two consent files contributed all of
+      their 124 to that run's 611; the 5 being S2's ACL group, and none
+      of them in these two files) - a previous draft of this row claimed "190 passed"
+      for these two files, which their collection denies. Live `/auth` serves the
       `/api/consent/start` return route, matching main's public/signup.html.
       The ChatGPT half needs a human to complete the OAuth sign-in — the issue's
       own step-4 text says "human does the Pro auth". Missing by name: a ChatGPT
@@ -465,10 +757,16 @@ criteria:
       token issue. Census rows 5a-5e re-measure the gates at this head (26
       premises, 0 unmeasured). A previous draft of this row said `verified` "as
       corrected" - that reads a refuted statement as covered, which is the exact
-      false PASS this ledger exists to refuse. The row needs the criterion
-      RESTATED (what does close, and when) before a run can satisfy it; the
-      server-observation waiver explains why no screenshot can carry it, and does
-      not make a false claim true.
+      false PASS this ledger exists to refuse.
+      WHAT REMAINS IS NOT A RUN: the criterion has to be RESTATED by the issue's
+      owner, because only #9664's own text can say what the step should observe.
+      Proposed wording, offered on the issue and NOT applied here: "both events are
+      observed AFTER the token is issued and neither at it - `connection-written`
+      persists as a client checkpoint, `harness-connected` is filed server-side on
+      the first agent write." That is the shape the shipped gates have (measured
+      above); restating it turns an ungradable row into one a run can carry.
+      `tools/capstone_ledger.py` still exits non-zero on this row, so a later pass
+      cannot read the proposal as an acceptance.
 
   - id: S6
     text: "paste the pointer prompt — the agent calls `tortoise_load_skill`"
@@ -484,9 +782,34 @@ criteria:
       CONFIRMED, 0 of 72). The run's trace shows the real call order instead. A
       previous draft said `verified` "as corrected", which counts a refuted
       observable as covered; `failed` would assert a failure that #9664's own
-      "anything that failed has an issue" row must then back - and no issue names
-      this one - so the honest state is: restate the criterion (which tool, if
-      any) and file the gap, then a run can grade it.
+      "anything that failed has an issue" row must then back.
+      THE ROOT IS NOW NAMED, so this row is actionable rather than dangling: the
+      criterion was transcribed from the served onboarding document, and that
+      document instructs calls the client cannot make. At this head
+      `tortoise/onboarding/SKILL.md` names `tortoise_health` 11 times (both served
+      copies), including `:616` "Call `tortoise_health` (MCP tool, all 6 harnesses
+      once connected)" and `:633` "Never claim connected on a failed
+      `tortoise_health`" - while `:657` in the SAME file states the name is retired
+      and absent from `tools/list`. It is tracked, open, and one name wide:
+      **#5439**, where this pass appended the line-numbered measurements and the
+      finding that the ChatGPT carve-out does not reach `:922`'s decide-protocol
+      verify step. `tortoise_onboarding_state` occupied the same class and has since
+      been removed from both served copies, so the migration is achievable.
+      What remains is (a) #5439's copy fix, then (b) the issue owner restating step
+      6 against a name that exists. ⚠️ The successor is
+      `tortoise_graph_overview(section="health")`, **not** `tortoise_overview` - a
+      previously drafted version of this row cited `RETIRED_USE_INSTEAD` at
+      `tortoise/tool_registry.py:1535` and named `tortoise_overview` as the replacement,
+      and BOTH were wrong: the map is at `:2072` (the `RETIRED_USE_INSTEAD` dict runs
+      `:2072-2159`; `:2099` is the last RANGE MEMBER cited, not the map's end), and `tortoise_overview` is ITSELF
+      retired (`:2094`) into the same container. Measured against the live registry - 72
+      tools, `tortoise_health` ABSENT, `tortoise_overview` ABSENT,
+      `tortoise_graph_overview` LIVE. The module states the rule that catches this at
+      `:2088-2093`: "a replacement must RESOLVE in one hop ... a chain here would send a
+      caller of `tortoise_health` to a name that is itself retired." #5439's own
+      proposed remedy walks into exactly that.
+      Filing a peer issue for the restatement was REFUSED: the criterion text lives on
+      #9664 and only its owner may rewrite an acceptance criterion.
 
   - id: S7
     text: "\"what graphs do I have?\" — `tortoise_list_graphs` returns only entitled graphs"
@@ -542,23 +865,64 @@ criteria:
   # ── §B — the four #9340 ugly cases, VERBATIM ───────────────────────────────
   - id: U1
     text: "an explicit non-default graph"
+    # CORRECTED 2026-11-08 — this row said the journey was blocked by "a hosted-org
+    # credential usable from the SDK/HTTP surface ... plus a second graph to target".
+    # A later draft of this row fixed only the FIRST half (a credential was minted
+    # and the write was delivered over `/mcp`), regraded the row `verified`, and
+    # that was a FALSE PASS: the refusal it measured is indistinguishable from
+    # "an unknown graph is refused", which is not this case — `#9664`'s own "ugly
+    # cases" line (taken from `#9340`) lists the four with NO labels, and it is
+    # `#9340`'s scope-restatement comment that makes this one the case that must be
+    # ACCEPTED: the resolver's order (`id -> namespace -> unique name`, this tree's
+    # `tortoise/mcp_auth.py`) refuses a graph that is ambiguous / unknown / deleted /
+    # other-workspace. Only the other three ugly cases have a refusal as their
+    # outcome (which is why U3 is verified on one).
+    # A half-measured criterion has no home in this
+    # ledger's vocabulary ("there is no `partial`"), so the row stays `blocked` and
+    # the measurement went into the reason instead of into a verdict.
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green at this head (tests/test_9340_graph_tool_argument.py, 66
-      passed). The journey case has never run: from the ChatGPT venue a write
-      carrying `graph` is refused by OpenAI before it reaches us (#10084), so the
-      call must come from a client that can deliver it — missing by name: a
-      hosted-org credential usable from the SDK/HTTP surface (no `tt_` key and no
-      OAuth token on this box) plus a second graph to target.
+      passed). The journey case has never run. TWO things are missing, and this
+      pass closed only one of them: (1) a client that can DELIVER the write — the
+      2026-10-26 run's writes were stopped by OpenAI's safety checks before any
+      Tortoise code ran (#10084) — and (2) a SECOND graph to write INTO. On (1):
+      `uv run tortoise signup` (#663) minted a live org and the step-11 probe was
+      delivered over the served `/mcp` surface, where OUR resolver refused it with
+      `No graph 'capstone-9664-nod' is reachable from this workspace. Reachable
+      graphs: 'default' ...` and the probe string did NOT land in `default` — so
+      the write path is proven present, correctly refusing, and free of silent
+      fallback (`step11-write-half-trace.txt`). On (2), which is what keeps this
+      row uncovered: the ACCEPT arm needs an existing non-default graph, and a
+      minted free org HOLDS exactly one (measured: `tortoise_list_graphs` returns
+      one row, and creating a second is refused `402 "Custom graphs require the
+      Builder plan"`). Missing by name: a paid tier that permits a second graph, or
+      an owner-provided org that already has two. This is the same missing thing as
+      U2/U4, and grading this row `verified` off the refusal half would have graded
+      one blocker two ways.
 
   - id: U2
     text: "a duplicate graph name"
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green (test_a_duplicate_name_is_refused_with_the_candidates, 66
-      passed). Never attempted in a run: the write shape cannot be delivered from
-      the ChatGPT venue. Same missing thing as U1 — a hosted-org credential on a
-      client that is not ChatGPT, plus two graphs sharing a name.
+      passed). Never attempted in a run, and not replayable from a minted org: a
+      duplicate NAME needs a SECOND graph, and creating one on the free tier is
+      refused — measured 2026-11-08, `POST /v1/organizations/<org>/graphs` ->
+      `402 {"detail":"Custom graphs require the Builder plan. Upgrade to create
+      multiple graphs. Need more? Contact support@premiselabs.co."}`
+      (step11-write-half-trace.txt). Missing by name: a paid
+      tier that permits a second graph, or an owner-provided org that already has
+      two. This supersedes THIS row's previous reason — "a hosted-org credential on
+      a client that is not ChatGPT, plus two graphs sharing a name" — since a key
+      exists and was used (the `tt_`-key wording belonged to U1's row, not this one);
+      the wrong reason left on a row is how a blocker reads as unfixable.
 
   - id: U3
     text: "a graph id from another workspace"
@@ -576,11 +940,16 @@ criteria:
   - id: U4
     text: "a soft-deleted graph"
     verdict: blocked
+    evidence:
+      - docs/evidence/9664-capstone/step11-write-half-trace.txt
+    evidence_kind: trace
     reason: >-
       Contract green (test_a_soft_deleted_graph_stops_resolving_on_the_next_call,
       66 passed). Never attempted in a run: it needs a graph that can be created
-      and then deleted from the same client that writes to it — same missing
-      credential as U1, plus a second graph.
+      and then deleted from the same client that writes to it — i.e. a SECOND
+      graph, which the free tier refuses `402 "Custom graphs require the Builder
+      plan"` (measured 2026-11-08, step11-write-half-trace.txt). Same missing
+      thing as U2: a paid tier, or an owner-provided org with two graphs.
 
   # ── §D — the four "Evidence and verdict" requirements, VERBATIM ────────────
   - id: E1
@@ -599,6 +968,7 @@ criteria:
     verdict: verified
     evidence:
       - docs/evidence/9664-capstone/run-2026-10-26/step6e-full-trace.txt
+      - docs/evidence/9664-capstone/run-2026-10-26/step7-graphs-and-step5-onboarding-state.txt
       - docs/evidence/9664-capstone/run-2026-10-26/step8c-write-probe-full-trace.txt
       - docs/evidence/9664-capstone/run-2026-10-26/step9b-decide-full-trace.txt
     evidence_kind: trace

@@ -2041,8 +2041,209 @@ def _materialise(tmp_path: Path, record) -> Path:
 
 
 def test_the_real_machine_record_agrees_with_the_pins():
+    """The record pins its document AND the code lines it cites.
+
+    Round-14 review: this PR added two comment lines inside `DOOR_PINNED_ON`,
+    which moved the `TORTOISE_STATE_VALUE_VERBATIM` entry `:504` -> `:506` (`:518` once
+    main's own insert landed above it), and
+    the record's `door.acceptance_arm.read_back` was left quoting `:504` - a
+    comment line. The field's OWN prose warns that this entry "is NOT
+    cite-neutral" for exactly this reason, and nothing reddened: the checker
+    (`tools/capstone_preregistration_check.py`) never reads `read_back`, and
+    no test or tool cited `capstone_measure.py:506` — measured with the probe's own
+    filename, which is the only spelling that can be a cite of it: `grep -rn
+    'capstone_measure\.py:506' tests/ tools/ docs/` printed this docstring and nothing
+    else (a bare `:506` count is not that measurement — it also matches a sha256
+    fragment, an unrelated `sdk.py:506` in a transcript, and the sentences around this
+    one once a sibling states the number, which is why the count here is scoped to the
+    spelling rather than to the token). A field that warns about cite
+    drift cannot be the one place drift goes unwatched, so its
+    `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
+    census range's own opening and closing lines - never as a window a shift can
+    slide inside. The field carries FOUR cites to files other than the probe, and ONE of
+    them - the live `extractor_v2.py` read of the same switch, whose number nothing in
+    `tests/`, `tools/` or `docs/` re-checked - is pinned here beside the probe cites for
+    the same reason; that gap was recorded as a residual by a fresh-context review at
+    `33109a66184a` and is closed by the arm below rather than left to the next merge. The
+    other three (`sparse.py:226`, `projection/entities.py:1208`,
+    `subject_binding.py:189`) are named in the arm's comment and are STILL unpinned: this
+    pins one of four, not four of four, and an earlier cut of this docstring said "ONE" as
+    if the `extractor_v2.py` cite were the field's only other-file cite - caught by a
+    fresh-context review at `11a18e9da`. Kept inside THIS test rather than added as a new test in
+    `tests/test_7949_capstone_measure.py`, because the thing pinned is THIS
+    file's own subject (`check.check_machine_record` over the machine record),
+    and THIS file's durations row states no case count, so a pin here moves no
+    shard-layout input. (Measured rather than assumed: `config/ci-surfaces.yml`
+    has no `cases` key at all — its rows carry a WEIGHT and a prose comment — and
+    this file's own row states no count.) ⛔ BUT THE OTHER ROW DOES, in that
+    prose: `test_7949_capstone_measure.py`'s row states a case count, re-derived
+    there from `grep -c '^def test_'`, so adding a `def test_` THERE would
+    invalidate it. That is a SECOND and stronger reason to keep this pin here —
+    not a reason it makes no difference either way, which is what an earlier cut
+    of this sentence claimed.
+    """
     pins = check.parse_pins(PREREG.read_text())
     assert check.check_machine_record(PREREG_DIR, pins) == []
+
+    read_back = json.loads((PREREG_DIR / "preregistration.json").read_text())[
+        "door"]["acceptance_arm"]["read_back"]
+    probe = (PREREG_DIR / "probes" / "capstone_measure.py").read_text().splitlines()
+
+    # ⛔ A NEGATIVE LOOKAHEAD, not containment: `":518" in read_back` is satisfied by
+    # `:5180` — a line the 4,361-line probe does not have — so containment certified a
+    # cite pointing at nothing. Measured on this tree: with the containment form in place
+    # and the field re-staled to `:5180`, this row stayed GREEN; under the lookahead it
+    # reds with the message below.
+    assert re.search(r"probes/capstone_measure\.py:518(?!\d)", read_back), (
+        "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on, "
+        "as a complete number")
+    assert probe[518 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
+        f"capstone_measure.py:518 reads {probe[518 - 1].strip()!r}, not the pinned entry")
+
+    # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
+    # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
+    # says the switch is "read PER EMITTED POINT at `extractor_v2.py:9944`", and until this
+    # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/`
+    # returned the field itself and no pin (measured). That is the exact asymmetry #10274
+    # exists to remove, and it was recorded as a residual by a fresh-context review at
+    # `33109a66184a`: the number was right at that head, and the next merge could rot it
+    # silently. `tortoise/extractor_v2.py` is the most-edited file any row here cites, so it
+    # is the likeliest of all these numbers to move.
+    # ⛔ ONE OF FOUR, STATED AS ONE OF FOUR. Enumerating `([A-Za-z0-9_./]+\.py):(\d+)` over
+    # this field gives `sparse.py:226`, `projection/entities.py:1208`,
+    # `subject_binding.py:189`, `extractor_v2.py:9944` and the probe cite
+    # `probes/capstone_measure.py:518` — so three other-file cites remain UNPINNED by this
+    # arm. Measured, scoped so the query cannot match its own prose —
+    # `grep -rnE 'sparse\.py:226|entities\.py:1208|subject_binding\.py:189' tests/ --include='*.py'`
+    # returns exactly six hits: four are the sentences around this one, and the other two
+    # are PROSE COMMENTS in `tests/test_7949_c2_door.py:96-97` — no `assert`, so no pin.
+    # (An earlier cut of this comment said a bare `grep -rn '226\|1208\|189'` over this file
+    # "is empty" — it matched FIVE times, one of them the sentence making the claim, so it
+    # could never be true. A fresh-context review at `9eb23a55` measured that; the claim is
+    # now scoped to something that reproduces.)
+    # They are correct at this head; they rot unwatched. An earlier cut of this comment
+    # called the `extractor_v2.py` cite "the SECOND", as if only two existed, which is the
+    # overclaim a fresh-context review at `11a18e9da` measured and is corrected here rather
+    # than widened: pinning those three is a follow-up, and pretending they are covered is
+    # the defect class this whole bundle exists to remove.
+    #
+    # The NUMBER is read OUT of the citing field and never typed here — a typed number is
+    # the defect this arm catches, which is why `_CROSS_FILE_PROBE_CITES` types none either.
+    # ⛔ AND THE SYMBOL ALONE IS NOT ENOUGH, measured in this very file: the switch's name
+    # occurs FOUR times in `extractor_v2.py` — a comment line naming it, its `def` (`def
+    # _state_value_verbatim_enforced() -> bool:`), a second read assigned to `armed =`, and
+    # the per-emitted-point read assigned to `_value_fidelity_judged`. A cite re-staled onto
+    # the DEFINITION would satisfy a bare `symbol in line` check while pointing at the place
+    # the switch is DECLARED, which cannot be a "read PER EMITTED POINT"; a cite re-staled
+    # onto the `armed =` site would point at a different read than the one this sentence
+    # names. So the shape (not a `def`) and the receiving variable are asserted beside the
+    # symbol. Non-vacuity measured at this head: re-staling the field to the pre-fix
+    # `:9929` reds this arm, because that line is not this read.
+    # ("occurs THREE times" was this comment's earlier count, and the count a review at
+    # `9eb23a55` caught. `grep -c _state_value_verbatim_enforced tortoise/extractor_v2.py`
+    # is 4 — the four sites above, which is what this sentence now says. Corrected to the
+    # measured count because the sentence claims it was measured in this very file and must
+    # therefore survive the grep; an earlier cut of THIS parenthetical still said "the three
+    # the sentence enumerates" while the sentence above it lists four.)
+    _switch_nums = [int(_n) for _n in re.findall(r"extractor_v2\.py:(\d+)(?!\d)", read_back)]
+    assert _switch_nums, (
+        "the record must name where TORTOISE_STATE_VALUE_VERBATIM is read "
+        "(`extractor_v2.py:NNNN`) — dropping the cite is how a live read becomes unmeasured")
+    # ⛔ EVERY `extractor_v2.py:NNNN` IN THE FIELD, not just the first. `re.search` bound only
+    # the first match, so a SECOND, EARLIER cite of the same file could rot to a stale number
+    # while the arm stayed green (measured by a fresh-context review at `11a18e9da`: with
+    # `(see extractor_v2.py:9944)` inserted ahead of a re-staled `extractor_v2.py:9929`, the
+    # `re.search` form passed). The set below is every number the field names, so no mention
+    # can hide behind another.
+    _extractor = (REPO_ROOT / "tortoise" / "extractor_v2.py").read_text(
+        encoding="utf-8").splitlines()
+    for _switch_num in _switch_nums:
+        # A lookahead bounds the DIGITS; the file length bounds the POSITION. `:5180`-style
+        # re-stales pointed past the end of their file and indexed out; a length guard turns
+        # that into the message below instead of an IndexError that names no defect.
+        assert 1 <= _switch_num <= len(_extractor), (
+            f"the record cites extractor_v2.py:{_switch_num}, but that file has "
+            f"{len(_extractor)} lines — the cite points at a line that does not exist")
+        _switch_line = _extractor[_switch_num - 1].strip()
+        assert "_state_value_verbatim_enforced()" in _switch_line, (
+            f"the record cites extractor_v2.py:{_switch_num} as the "
+            "TORTOISE_STATE_VALUE_VERBATIM read, but that line reads "
+            f"{_switch_line!r}, which is not the switch being read. Re-derive the number from "
+            "the tree (grep the symbol); do NOT move the symbol to fit the cite")
+        assert not _switch_line.startswith("def "), (
+            f"the record cites extractor_v2.py:{_switch_num} as a READ, but that line is the "
+            f"DEFINITION ({_switch_line!r}) — a definition is where the switch is declared, "
+            "never where it is read per emitted point")
+        assert "_value_fidelity_judged" in _switch_line, (
+            f"the record cites extractor_v2.py:{_switch_num} as the read 'PER EMITTED POINT … "
+            "handed to the rule as armed=', but that line reads "
+            f"{_switch_line!r} — the per-point read assigns `_value_fidelity_judged`; the other "
+            "call site (assigned to `armed =`) is a different read this sentence does not name")
+
+    # ⛔ A SET OVER THE RANGES CITED, not a count and not a phrase. The first cut of this
+    # arm asserted `count(":2726-2728") == 2`, which false-failed a CORRECT additive edit
+    # (one more accurate mention of the same range) — a false BLOCK, the class this bundle
+    # forbids as much as a false pass — and the second cut pinned the two slots as full
+    # sentences, which false-failed on reworded connectives ("which sits below" ->
+    # "sitting below"). What the field actually claims is WHICH RANGES EXIST and where the
+    # last move went, so the set below is pinned (a fabricated intermediate like `:2722-2724`
+    # reds it) and the two slots are matched with tolerant connectives (a reword with every
+    # number intact passes). Both relaxations were measured: the additive mention and the
+    # `to` spelling each left the earlier cuts RED and this one GREEN, while a re-staled
+    # copy still reds.
+    cited_ranges = set(re.findall(r":(\d+-\d+)", read_back))
+    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2726-2728", "2738-2740"}
+    assert cited_ranges == _expected_ranges, (
+        "the record's cited ranges are "
+        f"{sorted(cited_ranges)}; missing={sorted(_expected_ranges - cited_ranges)} "
+        f"unexpected={sorted(cited_ranges - _expected_ranges)} — an unexpected range is a "
+        "fabricated or re-staled position, a missing one is a claim that left the record")
+    # ⛔ EACH MOVE PINNED BY ADJACENCY, and the live slot by COUNT rather than by its verb.
+    # A set alone cannot tell the two mentions of `:2724-2726` apart (it is `a1dff7cec8`'s
+    # move TARGET and this branch's move SOURCE), so `:2713-2715 -> :2724-2726` swapped to
+    # `-> :2726-2728` stayed GREEN inside the set while crediting that commit with the final
+    # position — the one thing the field's own last clause denies (measured). With ALL
+    # THREE moves adjacency-pinned the duplicate can no longer shield a swap. And `carries` was
+    # itself a prose pin (`cites` redded with every number intact), so the live slot is
+    # `count >= 2`: the move supplies one mention and the live cite must supply the other,
+    # so deleting or re-staling the live one leaves 1 and reds.
+    # ⛔ The SHA is BOUND, not merely mentioned: the previous pattern asserted only the numeric
+    # adjacency, so the record could credit any other commit with the move and this arm stayed
+    # green while its message promised the attribution (measured: swapping `a1dff7cec8` for
+    # `704fd60ee` in the same clause left the row passing). The `[^:]` gap keeps the sha and the
+    # ranges in ONE clause, so a sha elsewhere in the field cannot satisfy it.
+    assert re.search(r"a1dff7cec8[^:]{0,40}:2713-2715\s*(?:->|→|to)\s*:2724-2726\b", read_back), (
+        "the record must attribute the FIRST move to a1dff7cec8 — the SHA in the same clause "
+        "as the ranges — at the intermediate position it actually reached")
+    assert read_back.count(":2738-2740") >= 2, (
+        f"the record states :2738-2740 {read_back.count(':2738-2740')} time(s): the last "
+        "move supplies one mention and the LIVE cite must supply the other")
+    assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
+        "the record must place this branch's move of that window at its intermediate "
+        "position (:2724-2726 -> :2726-2728)")
+    # ⛔ The THIRD move, and it needs the same SHA binding as the first — not a count. When
+    # `main` merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
+    # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2726-2728 -> :2738-2740`
+    # (+12). Before this arm the sha was UNPINNED: the field could credit any other commit
+    # with that +12 and every row here stayed green — the exact defect the first-move arm's
+    # own comment records (`a1dff7cec8` swapped for `704fd60ee`, measured GREEN).
+    assert re.search(r"7dabb59e0f45[^:]{0,80}:2726-2728\s*(?:->|→|to)\s*:2738-2740\b", read_back), (
+        "the record must attribute main's move to 7dabb59e0f45 — the SHA in the same clause "
+        "as the ranges — at the final position the merged tree actually reached")
+    # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
+    # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
+    # mutant that removed the window reddened the set row (`missing=['2713-2715']`) and
+    # never reached it (measured, agent-infra#3442 rule 3: an assertion that can never be
+    # the row that reds is not attribution, it is dead weight). The set pin's message
+    # already names the missing range, so nothing is lost by deleting it.
+    assert probe[2738 - 1].strip() == "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:2738 reads {probe[2738 - 1].strip()!r}, not the census call")
+    # Equality, like its two siblings above: a substring let the closing line's SHAPE
+    # change while the row stayed green (measured: renaming the `AS anchored` alias broke
+    # the very unpacking this arm consumes, and nothing reddened).
+    assert probe[2740 - 1].strip() == '"count(r.sourceVersion) AS anchored ORDER BY t").result_set:', (
+        f"capstone_measure.py:2740 reads {probe[2740 - 1].strip()!r}, not the "
+        "anchored count that closes the query")
 
 
 def test_a_missing_machine_record_fails(tmp_path):

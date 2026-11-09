@@ -138,7 +138,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
 
 EXPECTED_LEGS = {
     "fast_pool", "slow", "env_broken", "carve_out",
-    *(f"test ({c})" for c in "abcdefghi"),
+    *(f"test ({c})" for c in "abcdefghij"),
     *(f"test-slow ({c})" for c in "abcde"),
     *(f"test-carve-out ({c})" for c in "abc"),
     *(f"tier-2 test_files [{c}]" for c in
