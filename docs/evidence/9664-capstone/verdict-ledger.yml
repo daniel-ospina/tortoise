@@ -382,50 +382,39 @@ measured_at:
 #     the finding twenty lines below.
 #     PROVENANCE, stated per number rather than as one blanket claim, because a
 #     blanket claim is what a reader cannot check:
-#       - A SPLIT PROVENANCE, because the export holds SOME of these readings and not
-#         others — stated per reading rather than as one blanket claim:
-#         · the carve-out FOUR-file run
-#           `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
-#           tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
-#           tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
-#           ran to completion THROUGH `tools/worktree_report.py run` THREE times in this
-#           lane, and `.worktree-report/state.json` holds all three as `exit 0` rows whose
-#           bound logs carry the count: `1441 passed` at `aad602392d` (row 1, 07:52Z),
-#           `1441 passed` at `a913fa8ec6` (row 2, 09:30Z), and `1442 passed` at the MERGE
-#           head `2f9a3aaf68` (row 3, 10:16Z). `tools/worktree_report.py check` on that
-#           export answers `VALID (4 suite(s), all exit 0)`. ⛔ THOSE ROWS ARE THE EVIDENCE
-#           for `1441` and `1442` — cite them; do not re-derive either count from this
-#           prose, and do not describe them as unbacked.
-#         · TWO READINGS IN THIS BULLET ARE DIRECT INVOCATIONS AND NO ROW HOLDS THEM, and
-#           saying which is which is the whole point of the split: `1442 passed in
-#           1115.94s` at `117a5f96bba5` (a re-measurement run outside the tool — no row
-#           carries that duration), and the `--collect-only` figure below. ⛔ AND NO LOG
-#           UNDER `.worktree-report/` TRAVELS ANYWAY: the directory is gitignored, so a
-#           reader of this file cannot open the bound logs either — a row names how a
-#           number was PRODUCED, not an artifact you can fetch.
+#       - A DIRECT INVOCATION, AND NO ARTIFACT HOLDS IT — named instead of
+#         generalised: the carve-out FOUR-file run
+#         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+#         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
+#         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
+#         -> `1442 passed` at the MERGE head `2f9a3aaf68`, re-measured at `117a5f96bba5`
+#         (`1442 passed in 1115.94s`), and `1441 passed` at `a913fa8ec6` — one
+#         `def test_` less, which is main's own addition (#11548: 473 -> 474 in
+#         `tests/test_ci_selection.py`; the other three files are unmoved at
+#         230 / 270 / 146) and not drift. ⛔ EACH READING IS A DIRECT INVOCATION AND NO ROW
+#         HOLDS IT, measured on this box at this head: `.worktree-report/state.json` carries
+#         TEN rows and NONE of them is this command or either count — rows 1-3 are
+#         356 / 280 / 957 of DIFFERENT `tools/test_lane.py` commands, row 4 is an incomplete
+#         three-file run (`counts: null`), and rows 5-7 are RED (exit 1, the ENOSPC
+#         artefacts described below). `tools/worktree_report.py check` on that export
+#         answers `VALID EVIDENCE, 3 FAILING SUITE(S) RECORDED (exit 3 — not a pass)` — NOT
+#         an all-clean export. So the command above is the check and re-running it is the
+#         reproduction: ⛔ do NOT cite the export for either count.
 #         · `1442` at `2f8e86c9b28c` and at this file's head is a `--collect-only` reading,
 #           not a test run: the same four files COLLECT `1442` there and here, so the count
 #           did not move with the two later docstring commits.
-#         ⛔ AN EARLIER CUT OF THIS BULLET SAID THE OPPOSITE IN BOTH DIRECTIONS, and BOTH
-#         were measured false this round: one cut claimed both counts were recorded rows
-#         without saying which was which, and the cut this replaces claimed that NO row
-#         records either count and that `the export's own first three rows are
-#         356 / 280 / 957` — no export on this box has that first-three sequence, this
-#         lane's is `1441 / 1441 / 1442` of the command quoted above, and no row here
-#         carries the `1115.94s` duration. A provenance sentence is a claim about an
-#         artifact, so it is re-read FROM THE ARTIFACT — never re-worded from memory.
-#         ⛔ THE SECOND NUMBER IS NOT DRIFT, IT IS MAIN'S: merging `e49788706a` (#11548)
-#         added one `def test_` to `tests/test_ci_selection.py` (473 -> 474; the other three
-#         files are unmoved at 230 / 270 / 146), so the same command legitimately collects
-#         one more case. Re-derive it, and never carry `1441` across a merge of main —
-#         which is why each reading names the head it was taken at rather than one bare
-#         count.
+#         ⛔ THIS BULLET HAS NOW BEEN WRONG IN BOTH DIRECTIONS, and the rule is the same
+#         both times: a provenance sentence is a claim ABOUT AN ARTIFACT, so it is re-read
+#         FROM that artifact — never re-worded from memory and never inferred from a
+#         sibling export. One cut asserted both counts were recorded rows; the cut after it
+#         asserted no row records them but named a first-three sequence no export on this
+#         box carries; THIS cut is the measured one (ten rows, none the four-file command,
+#         `check` = exit 3, not a pass).
 #         The docker-lane SEVEN-file runs below are NOT suite rows and never were: 5 of
 #         their tests are environment-red (`TestCreateGraphWithPacks`, refused 503 `default ACL user is
 #         open (nopass)`), and a recorded environment-red row makes the lane-report gate
 #         refuse a PR whose own surface is green — the export's own `not_done` says so
-#         verbatim, and that entry names the SEVEN-file run, NOT the four-file one, which
-#         IS recorded (it is rows 1–3 above);
+#         verbatim;
 #       - the per-file collection figures come from separate `pytest --collect-only`
 #         invocations that are NOT in `.worktree-report/` (they produce no suite run),
 #         and are quoted from those invocations' own output;
