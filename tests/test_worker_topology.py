@@ -48,8 +48,14 @@ import sys
 from pathlib import Path
 
 import pytest
+from packaging.version import Version
 
 from tortoise import worker_topology as wt
+
+try:  # click's "unset" sentinel; absent (or hoisted) on other click majors
+    from click.core import UNSET as _CLICK_UNSET
+except ImportError:  # pragma: no cover - a click that normalises it away
+    _CLICK_UNSET = None
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 ENTRYPOINT = REPO_ROOT / "entrypoint.sh"
@@ -2003,13 +2009,97 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
 # ARITY — a value that looks like a flag is not a flag
 # ─────────────────────────────────────────────────────────────────────────────
 
-#: Options a uvicorn NEWER than the pin (0.52.1) defines, and that
-#: `UVICORN_FLAG_OPTIONS` therefore carries so the gate is arity-correct there too.
-#: They are INERT on the pin — uvicorn 0.52.1 has no such option, so no argv it
-#: ACCEPTS can contain the token. DECLARED, not tolerated: an entry that is
-#: neither a flag in the installed parser nor listed here still reds, so the
-#: table cannot quietly grow a spelling nobody measured.
-_AHEAD_OF_THE_PIN = frozenset({"--http2"})
+#: Options a uvicorn NEWER than the pin (0.52.1) defines, mapped to the version that
+#: ADDED them — so the declaration is SELF-VERIFYING instead of a free pass.
+#: They are INERT on the pin: uvicorn 0.52.1 has no such option, so no argv it
+#: ACCEPTS can contain the token.
+#:
+#: ⛔ A DECLARATION IS NOT A TOLERANCE, and it used to be one: the frozenset was
+#: subtracted from `undeclared` and asserted against NOTHING. MEASURED — adding
+#: `--bogus` to `UVICORN_FLAG_OPTIONS` AND to the declaration left `missing`,
+#: `overread` and `undeclared` all empty, in BOTH environments (uvicorn
+#: 0.52.1/click 8.4.2 and 0.54.0/click 8.5.1), so the table could quietly grow a
+#: spelling nobody measured — the exact hole the comment here claimed was closed.
+#: Now each name must really be a BOOLEAN FLAG once the installed uvicorn reaches
+#: its stated version (:func:`_ahead_violations`), so a removed, renamed or
+#: retuned flag reds instead of being excused.
+_AHEAD_OF_THE_PIN: dict[str, str] = {"--http2": "0.54.0"}
+
+
+def _installed_version(distribution: str) -> str:
+    """The INSTALLED distribution's version — the parser this run actually reads.
+
+    Read from metadata rather than from `uv.lock` on purpose: the CI test job
+    installs with `pip install -e .` and ignores the lock, so the lock is not
+    what the pin is judging.
+    """
+    from importlib.metadata import version
+
+    return version(distribution)
+
+
+def _ahead_violations(ahead, flags, table, uvicorn_version):
+    """The DECLARATION's own two directions, as messages ([] = clean).
+
+    Pure so the check can be pinned on synthetic inputs: on an installed uvicorn
+    at or above the version that introduced a name, that name must really be a
+    boolean flag in the parser; and every declaration must name something the
+    table actually carries (a declaration for a name the table dropped is either
+    a typo or dead weight, and either way it must not sit there green).
+    """
+    reds = [
+        f"{name} is declared ahead of the pin but is NOT in "
+        f"UVICORN_FLAG_OPTIONS"
+        for name in sorted(set(ahead) - table)
+    ]
+    for name, since in sorted(ahead.items()):
+        if Version(uvicorn_version) >= Version(since) and name not in flags:
+            reds.append(
+                f"{name} is declared a boolean flag from uvicorn {since}, but "
+                f"the installed uvicorn {uvicorn_version} does not expose it as "
+                f"one — the declaration is stale (removed, renamed, or retuned "
+                f"to take a value)"
+            )
+    return reds
+
+
+def _uvicorn_arity(params):
+    """Classify click params into (flags, value_taking, unmodelable).
+
+    ⛔ `is_flag` is ARITY, `flag_value` is not — see the `flag_value` note in
+    :func:`test_the_uvicorn_flag_set_is_uvicorns_own`.
+
+    ⛔ click has a THIRD arity shape this walk cannot express, and it must RED
+    rather than be filed with the value-taking options: `is_flag=False` with a
+    real `flag_value` (click's "optional value"). MEASURED on click 8.4.2 AND
+    8.5.1: `--opt --other Z` parses as `opt="FLAGVALUE", other="Z"` — the BARE
+    form consumes NOTHING — while `_parsed_options` unconditionally takes the
+    next token, so the walk would swallow `--other` as the option's value and
+    under-report the worker count (the direction that PERMITS N workers).
+    MEASURED: 0 of the 55 long params in uvicorn 0.52.1 or 0.54.0 has this
+    shape, so today this is a guard against a future uvicorn, not a live bug.
+    """
+    flags: set[str] = set()
+    value_taking: set[str] = set()
+    unmodelable: dict[str, object] = {}
+    for param in params:
+        opts = [
+            o
+            for o in (*getattr(param, "opts", ()),
+                      *getattr(param, "secondary_opts", ()))
+            if o.startswith("--")
+        ]
+        if not opts:
+            continue
+        if getattr(param, "is_flag", False):
+            flags.update(opts)
+            continue
+        flag_value = getattr(param, "flag_value", None)
+        if flag_value not in (None, _CLICK_UNSET):
+            unmodelable.update(dict.fromkeys(opts, flag_value))
+            continue
+        value_taking.update(opts)
+    return flags, value_taking, unmodelable
 
 
 def test_the_uvicorn_flag_set_is_uvicorns_own():
@@ -2051,24 +2141,26 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
 
     An entry the installed parser does not define AT ALL can never appear in an
     argv that parser accepts, so it is inert rather than dangerous: allowed only
-    when declared in :data:`_AHEAD_OF_THE_PIN`, and still red when a future
-    uvicorn turns one of those names into a VALUE-TAKING option (`overread`).
+    when declared in :data:`_AHEAD_OF_THE_PIN` — where the declaration is ITSELF
+    verified against the installed version (:func:`_ahead_violations`) — and
+    still red when a future uvicorn turns one of those names into a VALUE-TAKING
+    or OPTIONAL-VALUE option (`overread` / `unmodelable`).
     """
     from uvicorn.main import main as uvicorn_main
 
-    flags: set[str] = set()
-    value_taking: set[str] = set()
-    for param in uvicorn_main.params:
-        opts = [
-            o
-            for o in (*getattr(param, "opts", ()),
-                      *getattr(param, "secondary_opts", ()))
-            if o.startswith("--")
-        ]
-        if not opts:
-            continue
-        # ⛔ `is_flag` alone — see the `flag_value` note in this docstring.
-        (flags if getattr(param, "is_flag", False) else value_taking).update(opts)
+    flags, value_taking, unmodelable = _uvicorn_arity(uvicorn_main.params)
+
+    # ⛔ An arity shape the walk cannot read must RED here (see
+    # :func:`_uvicorn_arity`): filed silently with the value-taking options, a
+    # future `is_flag=False` + `flag_value` option would swallow the token after
+    # it and UNDER-report the count, which is the permitting direction.
+    assert not unmodelable, (
+        f"{sorted(unmodelable)} are click options with an OPTIONAL VALUE "
+        f"(`is_flag=False` + a real `flag_value`): their bare form consumes "
+        f"NOTHING, but the arity walk always consumes the next token, so it "
+        f"would swallow a following `--workers N`. Model the shape before "
+        f"trusting the walk"
+    )
 
     # Non-vacuity: a params shape this test cannot read must red, not pass on
     # two empty sets.
@@ -2089,13 +2181,74 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
         f"are listed as flags: their value would be read as a flag (the same "
         f"fail-open, from the other side)"
     )
-    undeclared = (table - flags) - _AHEAD_OF_THE_PIN
+    undeclared = (table - set(_AHEAD_OF_THE_PIN)) - flags
     assert not undeclared, (
         f"{sorted(undeclared)} are in UVICORN_FLAG_OPTIONS but are neither a "
         f"flag in the installed parser nor declared in _AHEAD_OF_THE_PIN — a "
         f"removed/renamed uvicorn flag (or a typo) must be DECLARED, not left "
         f"to drift"
     )
+
+    # ⛔ …and the DECLARATION is verified, not trusted: see _ahead_violations.
+    ahead_reds = _ahead_violations(
+        _AHEAD_OF_THE_PIN, flags, table, _installed_version("uvicorn"))
+    assert not ahead_reds, "\n".join(ahead_reds)
+
+
+def test_the_arity_classifier_reds_on_the_shape_the_walk_cannot_read():
+    """Non-vacuity for the third arity shape, on SYNTHETIC params.
+
+    The live uvicorn parser has no `is_flag=False` + `flag_value` option today, so
+    the guard above can never fire on it — an assertion that only ever sees the
+    clean case cannot fail. These params reproduce the shape click documents and
+    MEASURE (click 8.4.2/8.5.1: bare `--opt` consumes nothing), plus the two
+    shapes that must stay on their own side of the split.
+    """
+
+    class _Param:  # the three attributes the classifier reads, and nothing else
+        def __init__(self, is_flag=False, flag_value=None, opts=(),
+                     secondary_opts=()):
+            self.is_flag = is_flag
+            self.flag_value = flag_value
+            self.opts = list(opts)
+            self.secondary_opts = list(secondary_opts)
+
+    flags, value_taking, unmodelable = _uvicorn_arity([
+        _Param(is_flag=True, opts=("--bool",), secondary_opts=("--no-bool",)),
+        _Param(flag_value=None, opts=("--takes-value",)),
+        _Param(flag_value=_CLICK_UNSET, opts=("--takes-value-2",)),
+        _Param(is_flag=False, flag_value="upper", opts=("--optional-value",)),
+        # a short-only option is not in the walk's vocabulary at all
+        _Param(opts=("-x",), secondary_opts=()),
+    ])
+
+    assert flags == {"--bool", "--no-bool"}
+    assert value_taking == {"--takes-value", "--takes-value-2"}
+    assert unmodelable == {"--optional-value": "upper"}, (
+        "the optional-value shape was filed as value-taking (or dropped), so the "
+        "pin would pass on a parser the arity walk cannot read"
+    )
+
+
+def test_the_ahead_of_the_pin_declaration_is_itself_verified():
+    """A declaration must be checked, or it is a free pass.
+
+    MEASURED on the pre-fix frozenset: `--bogus` added to the table AND to the
+    declaration left every direction green in both environments.
+    """
+    table = {"--reload", "--http2"}
+    flags = {"--reload"}
+
+    # below the declared version the name may legitimately be absent
+    assert _ahead_violations({"--http2": "0.54.0"}, flags, table, "0.52.1") == []
+
+    # at/above it the parser must really expose a boolean flag of that name
+    reds = _ahead_violations({"--http2": "0.54.0"}, flags, table, "0.54.0")
+    assert reds and "--http2" in reds[0], reds
+
+    # a declaration for a name the table does not carry is dead weight -> red
+    reds = _ahead_violations({"--ghost": "0.54.0"}, flags, table, "0.52.1")
+    assert reds and "--ghost" in reds[0], reds
 
 
 def test_a_reload_lookalike_value_is_not_a_reloader():
