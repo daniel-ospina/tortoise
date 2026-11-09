@@ -2663,11 +2663,41 @@ def test_the_site_root_is_a_different_page_per_host() -> None:
     `_document_for_loc` cannot resolve `/` without knowing which document the host root
     serves, and that mapping is copied from `functions/_middleware.ts`. If the middleware
     changes it, a stale copy here would resolve the WRONG page — and pass.
+
+    ⛔ THE WORDS DO NOT PIN IT — the REWRITE does. Both document names appear in the
+    middleware's own comments (`:4-5`, `:9-10`, `:446-450`, `:483`) and in unrelated code
+    (`:153-154` the duplicate-301 guard), so a substring probe over the raw source stays
+    GREEN when the two host branches are SWAPPED — the one mutation that makes this
+    module's mapping wrong, now invisible to the guard that exists to catch it. So the
+    comments are dropped first (only lines that BEGIN with `//`, so a `//` inside a
+    string is never truncated) and the branch that actually fetches the root document
+    is required to name the document `HOST_ROOT_PAGE` claims for that host.
     """
     middleware = _read(WEBSITE / "functions" / "_middleware.ts")
-    assert "product.html" in middleware and "index.html" in middleware, (
-        "the middleware no longer names both root documents — this guard's "
-        "HOST_ROOT_PAGE mapping is stale")
+    code = "\n".join(
+        line for line in middleware.splitlines() if not line.lstrip().startswith("//")
+    )
+    rewrite = re.search(
+        r'if \(host\.startsWith\("tortoise\."\)\) \{\s*'
+        r'const res = await context\.env\.ASSETS\.fetch\(\s*'
+        r'url\.origin \+ "([^"]+)"\s*\);',
+        code,
+    )
+    assert rewrite, (
+        "the tortoise host's ROOT rewrite is no longer the shape this guard reads — "
+        "either it was restructured (re-derive HOST_ROOT_PAGE by hand and re-point this "
+        "guard) or it is gone")
+    assert rewrite.group(1) == "/" + HOST_ROOT_PAGE["tortoise.premiselabs.co"], (
+        f"the tortoise host root now serves {rewrite.group(1)!r} while HOST_ROOT_PAGE "
+        f"claims {HOST_ROOT_PAGE['tortoise.premiselabs.co']!r} — every root <loc> would "
+        "resolve to the wrong document")
+    # The COMPANY host is the fallback: it is named nowhere, because once no rewrite
+    # claims `/` the raw asset is served (`/` -> `index.html`). So its half of the split
+    # is the ABSENCE of a second root rewrite, not the presence of a string.
+    after = code[rewrite.end():]
+    assert not re.search(r'host\.startsWith\("premise', after), (
+        "a premiselabs.co root rewrite now follows the tortoise one — the host split has "
+        "moved, and HOST_ROOT_PAGE no longer describes it")
     for host, page in HOST_ROOT_PAGE.items():
         assert (WEBSITE / page).is_file(), f"{host}'s root document {page} is missing"
 

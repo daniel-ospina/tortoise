@@ -481,6 +481,13 @@ SOURCE_PATTERNS = {
                    "website/sitemap.xml",
                    "website/sitemap-company.xml",
                    "website/sitemap-product.xml",
+                   # The APP origin's own sitemap (#11615). It is advertised by
+                   # `website/robots.txt` and resolved by the contract test, so it is a
+                   # subject of the same guard — but it lives under `apps/`, not at
+                   # `website/` top level, so the `sitemap-*.xml` population does not reach
+                   # it. Without this row, a dashboard reorg that deletes or renames it
+                   # merges with the guard ABSENT and then REDs the next `robots.txt` diff.
+                   "website/apps/dashboard/public/sitemap.xml",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is

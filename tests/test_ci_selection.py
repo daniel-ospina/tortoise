@@ -1404,9 +1404,22 @@ def test_the_crawler_surface_selects_the_guard_that_reads_it():
         "website/sitemap.xml",  # the conventional index (#11615)
     }
     crawler |= {f"website/{p.name}" for p in (REPO / "website").glob("sitemap-*.xml")}
-    assert {"website/sitemap-company.xml", "website/sitemap-product.xml"} <= crawler, (
-        f"the sitemap population collapsed (found {sorted(crawler)}) — the glob stopped "
-        "matching the files this surface exists to cover")
+    # The app origin serves its OWN sitemap out of the dashboard project (#11615).
+    # `robots.txt` advertises it and `test_every_advertised_sitemap_is_servable_from_this_tree`
+    # resolves it, so it is a subject of the same contract even though it is not a
+    # top-level `website/sitemap-*.xml` — the glob above cannot reach it, and leaving it
+    # out is how "every sitemap the tree serves" would quietly mean "the ones we listed".
+    crawler |= {
+        str(p.relative_to(REPO))
+        for p in (REPO / "website").glob("apps/*/public/sitemap*.xml")
+    }
+    assert {
+        "website/sitemap-company.xml",
+        "website/sitemap-product.xml",
+        "website/apps/dashboard/public/sitemap.xml",
+    } <= crawler, (
+        f"the sitemap population collapsed (found {sorted(crawler)}) — a glob stopped "
+        "matching a file this surface exists to cover")
     for changed in sorted(crawler):
         assert (REPO / changed).is_file(), f"the file this test guards is gone: {changed}"
         r = _sel([changed])
