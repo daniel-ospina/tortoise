@@ -13145,6 +13145,50 @@ def _candidate_item_is_content(section: str, item: Mapping) -> bool:
     return bool(str(item.get("name") or item.get("content") or "").strip())
 
 
+def _gap_fill_collisions(base: object, added: object) -> dict[str, int]:
+    """Per-section count of gap-fill items that LANDED ON AN EXISTING identity.
+
+    ⛔ **``added_items`` IS A NET count and cannot answer this on its own**
+    (#11554 review, P3). ``merge_embed_lists`` is a union whose collision rule
+    is CORRECTION (E4 — the later arm wins on ``_merge_key`` identity), so an
+    answer item that restates or corrects an item the batch already carries
+    REPLACES it: the section does not grow, and the arm records ``added_items:
+    0`` with ``flagged_before``/``flagged_after`` present. Nothing in that
+    record is false, but two different runs are indistinguishable in it:
+
+      * "the spans state no claim" — the well-formed EMPTY answer (the `else`
+        branch's documented meaning, and the measured cost of one call); and
+      * "the model emitted content and it REPLACED an existing item" — net
+        growth zero, gross emission non-zero.
+
+    S4 has carried this distinction since `#2408` (``corrected_by_s4`` /
+    ``verbatim_reemissions`` in :func:`_s4_merge_stats`); this is the S2.2b-ADD
+    arm's own net-vs-gross counter, and the operator identity ``(src, dst,
+    op_type, target_edge…)`` is exactly where it bites, since an operator's
+    restatement is invisible to the detector too.
+
+    Scope is ``_CANDIDATE_SECTIONS`` — the same sections ``added_items`` is
+    summed over — so the two numbers are directly comparable and
+    ``replaced_items > 0`` beside ``added_items == 0`` is the case this exists
+    to make readable. A key collision WITHIN the answer is deliberately NOT
+    counted: the claim made here is about an identity the BATCH already
+    carried, and a model repeating itself is a different fact.
+    """
+    counts: dict[str, int] = {}
+    for section in _CANDIDATE_SECTIONS:
+        existing = {_merge_key(section, item)
+                    for item in _section_list(base, section)
+                    if isinstance(item, Mapping)}
+        if not existing:
+            continue
+        n = sum(1 for item in _section_list(added, section)
+                if isinstance(item, Mapping)
+                and _merge_key(section, item) in existing)
+        if n:
+            counts[section] = n
+    return counts
+
+
 def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                        session_id: str | None = None, chunk_size: int = 50,
                        master: dict | None = None,
@@ -13642,6 +13686,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     # of the measurement (1 of 9 operators) `run_s4`'s removal is
                     # gated on. See :func:`_candidate_section_counts`.
                     before_counts = _candidate_section_counts(embed_list)
+                    # ⛔ BEFORE the merge: a collision is measured against the
+                    # batch as it arrived, not against the union it becomes.
+                    replaced_by_section = _gap_fill_collisions(embed_list, added)
                     embed_list = merge_embed_lists(embed_list, added)
                     after = _vet_gate.check_batch(embed_list, story)
                     after_counts = _candidate_section_counts(embed_list)
@@ -13661,6 +13708,16 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                         if after_counts[section] != before_counts[section]}
                     if added_by_section:
                         gap_fill_stats["added_by_section"] = added_by_section
+                    # ⛔ NET-VS-GROSS (review P3). `added_items` is net: an
+                    # answer that REPLACED an existing identity merges and
+                    # still counts 0, which is byte-identical to the empty
+                    # answer that records "the spans state no claim". These
+                    # two keys are what let the record say WHICH it was. See
+                    # :func:`_gap_fill_collisions`.
+                    if replaced_by_section:
+                        gap_fill_stats["replaced_by_section"] = replaced_by_section
+                        gap_fill_stats["replaced_items"] = sum(
+                            replaced_by_section.values())
                 else:
                     # TWO different runs land here, and ONLY ONE of them is
                     # "the spans state no claim" — `malformed_sections` above is

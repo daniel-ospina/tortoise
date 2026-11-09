@@ -494,6 +494,58 @@ def test_an_operator_carrying_only_name_or_content_is_still_counted(
     assert "added_by_section" not in stats
 
 
+def test_an_identity_collision_is_recorded_as_a_replacement_not_a_zero(
+        monkeypatch):
+    """A restatement COLLIDES with an item the batch already carries (P3).
+
+    ``merge_embed_lists``'s collision rule is CORRECTION (E4 — the later arm
+    wins on ``_merge_key``), so an answer that restates or corrects an existing
+    item REPLACES it: the section does not grow and the arm records
+    ``added_items: 0`` with ``flagged_before``/``flagged_after`` present —
+    byte-identical to the well-formed EMPTY answer, which is the branch reserved
+    for "the spans state no claim". Both runs are legitimate; the record simply
+    could not say which one happened, so a measurement could not tell a
+    zero-yield session from a replaced item (the operator identity is where
+    this bites hardest, since the detector cannot see an operator at all).
+
+    Non-vacuity is the second leg: a genuinely NEW item adds and records NO
+    replacement, so the row cannot pass by counting emitted content.
+    """
+    existing = COVERED_ITEMS["points"][0]
+    collision = {"content": existing["content"], "pointKind": "statement"}
+    model = _Model(gap_answer=json.dumps(
+        {"entities": [], "events": [], "operators": [],
+         "points": [collision]}))
+    out = _run(monkeypatch, model)
+    assert model.calls.count("gap_fill") == 1, "the stage must have fired"
+    stats = out["stats"]["partial_gap_fill"]
+    # the two facts the record already carried ...
+    assert stats["added_items"] == 0, "a collision cannot grow the section"
+    assert "flagged_before" in stats and "flagged_after" in stats
+    # ... and the one it could not state.
+    assert stats["replaced_items"] == 1
+    assert stats["replaced_by_section"] == {"points": 1}
+    # The OPERATOR arm: identity is the 7-field `(src, dst, op_type,
+    # target_edge…)` tuple, and an operator restatement moves NEITHER
+    # `added_items` nor the detector's flag counts.
+    op = {"src": "the hydrate stage", "dst": "the wire stage",
+          "op_type": "IMPL"}
+    s2_with_op = {**COVERED_ITEMS, "operators": [dict(op)]}
+    model = _Model(s2_answer=s2_with_op,
+                   gap_answer=json.dumps({"entities": [], "events": [],
+                                          "operators": [dict(op)],
+                                          "points": []}))
+    stats = _run(monkeypatch, model)["stats"]["partial_gap_fill"]
+    assert stats["replaced_by_section"] == {"operators": 1}
+    assert stats["added_items"] == 0
+    assert stats["flagged_before"] == stats["flagged_after"]
+    # non-vacuity: a genuinely new item is an ADD, not a replacement.
+    model = _Model()  # default answer: the missing point, a new identity
+    stats = _run(monkeypatch, model)["stats"]["partial_gap_fill"]
+    assert stats["added_items"] >= 1
+    assert "replaced_items" not in stats
+
+
 def test_coverage_suspect_is_false_on_that_fixture():
     """The precondition the whole test rests on, asserted rather than assumed:
     a batch with candidates cannot fire the old coverage signal."""
