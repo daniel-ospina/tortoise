@@ -642,13 +642,37 @@ export function parseReflexJson(stdout: string): ReflexResult | null {
   return { block, surfaced };
 }
 
-/** A thrown value, as one line safe to put in a trace (never a turn). */
+/** One thrown value as a single line, `code`/`name`/`message` only.
+ *  Never a URL, never a header — a key cannot leak through this. */
+function oneLine(error: unknown): string {
+  if (!(error instanceof Error)) return String(error);
+  const code = (error as { code?: unknown }).code;
+  return typeof code === "string" && code
+    ? `${error.name}/${code}: ${error.message}`
+    : `${error.name}: ${error.message}`;
+}
+
+/** A thrown value as one line safe to put in a trace (never a turn).
+ *
+ *  ⛔ `cause` IS THE MESSAGE (measured on node v24.21.0, and the reason this is
+ *  a second attempt). `fetch` reports EVERY transport failure as the same
+ *  `TypeError: fetch failed` with `code === undefined`; the real reason lives
+ *  ONLY on `cause`:
+ *
+ *    DNS    TypeError: fetch failed  →  cause: getaddrinfo ENOTFOUND …  (ENOTFOUND)
+ *    conn   TypeError: fetch failed  →  cause: bad port                  (no code)
+ *    TLS    TypeError: fetch failed  →  cause: certificate has expired    (CERT_HAS_EXPIRED)
+ *
+ *  Rendering the outer error alone therefore collapses a wrong `apiUrl`, a
+ *  corporate TLS interceptor and a downed host into ONE identical string —
+ *  which is precisely the "diagnosable" claim the caller makes about `refused`.
+ *  One level is enough: undici's cause carries both the code and the sentence.
+ */
 function describeError(error: unknown): string {
-  if (error instanceof Error) {
-    const code = (error as { code?: unknown }).code;
-    return typeof code === "string" && code ? `${error.name}/${code}: ${error.message}` : `${error.name}: ${error.message}`;
-  }
-  return String(error);
+  const own = oneLine(error);
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  if (cause === undefined || cause === null) return own;
+  return `${own} (cause: ${oneLine(cause)})`;
 }
 
 /**
@@ -718,15 +742,15 @@ export async function runReflexHosted(
     if (controller.signal.aborted) {
       return { result: null, timedOut: true, refused: "" };
     }
-    // ⛔ BIND IT (#11584 review finding 4). A bare `catch` discarded the reason,
-    // and the caller then reported `POST <url>/v1/context returned no block` —
-    // which CLAIMS THE ENDPOINT ANSWERED. A DNS failure, a refused connection or
-    // a TLS failure (the documented hosted-transport misconfiguration) was
-    // therefore indistinguishable from a healthy endpoint that carried nothing,
-    // while this file's header promises `refused`'s detail "names the actual
-    // cause … so a persistent misconfiguration is diagnosable". It goes to
-    // stderr through `trace` under `TORTOISE_VOLUNTEER_DEBUG=1`, never to the
-    // canonical `install-inert` slot (see `trace`).
+    // ⛔ BIND IT (#11584 review finding 4), AND ITS CAUSE (round-2 finding).
+    // A bare `catch` discarded the reason, and the caller then reported
+    // `POST <url>/v1/context returned no block` — which CLAIMS THE ENDPOINT
+    // ANSWERED. `describeError` also renders `cause`, because `fetch` wraps
+    // every transport failure in the same `TypeError: fetch failed` and puts
+    // DNS/conn/TLS on `cause` — without that, the three misconfigurations the
+    // header promises are diagnosable stay one indistinguishable string. It
+    // goes to stderr through `trace` under `TORTOISE_VOLUNTEER_DEBUG=1`, never
+    // to the canonical `install-inert` slot (see `trace`).
     return {
       result: null,
       timedOut: false,

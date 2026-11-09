@@ -4569,14 +4569,23 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # finished, not a shipped digest being rewritten.  If generation 18 HAS
     # shipped by the time this is read, this re-pin is a defect and the fix is a
     # bump to 19 in BOTH Pi artifacts plus a new entry here.
-    18: "153a4ff708c15ca9275aced77013385ce7f3e11ed791e39d6e1d6a6a8fd86d29",
+    #
+    # ⛔ THE THIRD RE-PIN IS THE SAME COMMIT, ONE FINDING LATER: the re-review
+    # measured that `fetch` reports EVERY transport failure as the same
+    # `TypeError: fetch failed` with `code === undefined`, putting the real
+    # reason (ENOTFOUND / CERT_HAS_EXPIRED / bad port) on `cause` — so binding
+    # the error was not enough and `describeError` now renders `cause` too.  That
+    # is a byte change to the same unshipped generation.  Three re-pins inside
+    # one unshipped generation is the signal to look for: it is legitimate here
+    # ONLY because the read half has never been reachable from `main`.
+    18: "e2907970f75ee07b1f0ef824bef04a963c71c21852d3ba1c21dfe5a8980b293f",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "153a4ff708c15ca9275aced77013385ce7f3e11ed791e39d6e1d6a6a8fd86d29")
+    18, "e2907970f75ee07b1f0ef824bef04a963c71c21852d3ba1c21dfe5a8980b293f")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

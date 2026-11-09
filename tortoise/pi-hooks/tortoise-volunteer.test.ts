@@ -58,6 +58,7 @@ import tortoiseVolunteer, {
   reflexCandidates,
   resolveBlock,
   runReflexCommand,
+  runReflexHosted,
   sessionKeyOf,
 } from "./tortoise-volunteer.ts";
 
@@ -1131,6 +1132,21 @@ test("a THROWN hosted request names its cause, and does not latch", async () => 
   // The row is also the transient-failure owner for the HOSTED leg: turn 1
   // throws, turn 2 answers, so a latch written into the catch (rather than a
   // `refused` classification) reds the turn-2 assertion.
+  // PRODUCTION-SHAPED fixture (round-2 finding). `fetch` never throws
+  // `Error("getaddrinfo ENOTFOUND …")` at the top level — it throws
+  // `TypeError: fetch failed` with `code === undefined` and puts the reason ON
+  // `cause` (measured on node v24.21.0). A fixture with the code on the outer
+  // error proved a branch the transport cannot emit, and stayed green while
+  // every real DNS/TLS/conn failure rendered as `TypeError: fetch failed`.
+  const dnsFailure = (): never => {
+    const outer = new TypeError("fetch failed");
+    (outer as { cause?: unknown }).cause = Object.assign(
+      new Error("getaddrinfo ENOTFOUND h"),
+      { code: "ENOTFOUND" },
+    );
+    throw outer;
+  };
+
   const home = tmpHome();
   const crumbs = join(home, "capture-errors");
   const cfgPath = join(home, "tortoise-config.json");
@@ -1146,11 +1162,7 @@ test("a THROWN hosted request names its cause, and does not latch", async () => 
     breadcrumbDir: crumbs,
     fetchImpl: (async () => {
       hostedCalls += 1;
-      if (hostedCalls === 1) {
-        const dns = new Error("getaddrinfo ENOTFOUND h") as Error & { code?: string };
-        dns.code = "ENOTFOUND";
-        throw dns;
-      }
+      if (hostedCalls === 1) dnsFailure();
       return {
         ok: true,
         status: 200,
@@ -1178,7 +1190,7 @@ test("a THROWN hosted request names its cause, and does not latch", async () => 
   assert.equal(hostedCalls, 1, "the harness must reach the hosted transport exactly once here");
   assert.match(
     stderr,
-    /request failed: Error\/ENOTFOUND/,
+    /request failed: TypeError: fetch failed \(cause: Error\/ENOTFOUND: getaddrinfo ENOTFOUND h\)/,
     "the trace must name the ACTUAL cause — a discarded error reported as " +
       '"returned no block" claims the endpoint answered, which it never did',
   );
@@ -1202,6 +1214,45 @@ test("a THROWN hosted request names its cause, and does not latch", async () => 
   assert.ok(second?.message, "turn 2 must retry — a transient hosted failure may NOT latch");
   assert.match(String(second?.message?.content ?? ""), /Memory surfaced this turn/);
   assert.equal(hostedCalls, 2);
+});
+
+test("a thrown transport failure carries its CAUSE — DNS and TLS are distinguishable", async () => {
+  // Round-2 finding, as a PROPERTY rather than one sample. `fetch` reports every
+  // transport failure as the same `TypeError: fetch failed` (`code` undefined) and
+  // puts the reason on `cause`; a renderer that ignores `cause` collapses a wrong
+  // `apiUrl`, a corporate TLS interceptor and a downed host into ONE string, while
+  // this file promises `refused` names the actual cause. So the assertion is that
+  // two different causes do NOT render the same.
+  const withCause = (code: string | undefined, message: string): never => {
+    const outer = new TypeError("fetch failed");
+    (outer as { cause?: unknown }).cause = Object.assign(
+      new Error(message),
+      code ? { code } : {},
+    );
+    throw outer;
+  };
+  const run = (thrown: () => never) =>
+    runReflexHosted(
+      "https://h",
+      "k",
+      "q",
+      "sess-1",
+      1000,
+      (async () => thrown()) as unknown as typeof fetch,
+    );
+  const dns = await run(() => withCause("ENOTFOUND", "getaddrinfo ENOTFOUND h"));
+  const tls = await run(() => withCause("CERT_HAS_EXPIRED", "certificate has expired"));
+  assert.equal(dns.timedOut, false, "a thrown request is not a timeout");
+  assert.match(dns.refused, /ENOTFOUND/);
+  assert.match(tls.refused, /CERT_HAS_EXPIRED/);
+  assert.notEqual(
+    dns.refused,
+    tls.refused,
+    "two different transport failures must not render identically — carrying the " +
+      "cause is the whole point, and `TypeError: fetch failed` alone is what every " +
+      "one of them looks like without it",
+  );
+  assert.match(dns.refused, /fetch failed/, "the outer shape stays, so the class is recognisable");
 });
 
 test("sessionKeyOf tolerates every ctx shape Pi may hand a handler", () => {
