@@ -19,6 +19,7 @@ import pytest  # noqa: I001
 from tortoise.pack_registry import CORE_ALIASED_KINDS, CORE_SUBCLASSES
 from tortoise.pack_registry import CANONICAL_EVENT_KINDS, CANONICAL_OBJECT_KINDS
 from tortoise.pack_registry import CANONICAL_POINT_KINDS, PackRegistry
+from tortoise.value_extractor import compile_kind_index_spec
 
 REPO = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO / "packs"
@@ -1588,7 +1589,26 @@ class TestCoreHierarchy:
         §6, reds here and names both sides.
         """
         table = _ontology_s6_table()
-        assert set(table) >= {"Object", "Subject", "Document"}, table
+
+        # §6's row set is pinned EXACTLY, in both directions — a `>=` here would
+        # let a NEW §6 row (say `Source`) land while this pin stayed green, which
+        # is precisely the Leg-B failure mode (declared in the doc, absent from
+        # `CORE_SUBCLASSES`, so it widens nothing). The two non-empty differences
+        # that remain are today's deliberate exceptions, named:
+        #   * `Document` — §6's row is the prose statement that a document is a
+        #     `:Source`, not an Object subclass (§4.4), so there is no code row;
+        #   * `Point` / `Event` — §6 has no row for either, so the code derives
+        #     them from §5 (``CANONICAL_POINT_KINDS`` / ``CANONICAL_EVENT_KINDS``,
+        #     pinned by `test_point_and_event_rows_are_the_s5_vocabularies`).
+        # Giving §6 those rows is an ONTOLOGY edit, which is owner-gated
+        # (`docs/ONTOLOGY.md` — no edit without Daniel's approval), so this pin
+        # reports the gap rather than quietly diverging.
+        assert set(table) - set(CORE_SUBCLASSES) == {"Document"}, (
+            "ONTOLOGY §6 declares a core parentage the code does not carry: "
+            f"{sorted(set(table) - set(CORE_SUBCLASSES))}")
+        assert set(CORE_SUBCLASSES) - set(table) == {"Point", "Event"}, (
+            "CORE_SUBCLASSES carries a row ONTOLOGY §6 does not declare: "
+            f"{sorted(set(CORE_SUBCLASSES) - set(table))}")
 
         assert _kinds_in_cell(table["Object"]) == set(CORE_SUBCLASSES["Object"]), (
             "ONTOLOGY §6's Object row and CORE_SUBCLASSES['Object'] disagree: "
@@ -1608,6 +1628,74 @@ class TestCoreHierarchy:
         # `Object` is the §5 object block, unchanged — the two constants must not
         # diverge now that one is derived from the other.
         assert set(CORE_SUBCLASSES["Object"]) == set(CANONICAL_OBJECT_KINDS)
+
+    def test_the_two_spellings_of_one_kind_answer_a_read_the_same(self, shipped):
+        """A bare short name carries its namespaced forms' WHOLE bucket.
+
+        The failure this prevents: the widening reaching `dev:issue` but not the
+        bare `issue` the same row can be stored under, so `query(kind="issue")`
+        matches strictly less than `query(kind="dev:issue")` for one kind — the
+        spelling asymmetry this PR removes for `core:`, left standing for the
+        bare form. The population is derived (every namespaced kind in the loaded
+        registry), so a new pack kind is covered without touching this test.
+        """
+        def bare_of(full: str) -> str:
+            return full.split(":", 1)[1]
+
+        narrower = []
+        for full in shipped._kind_expansions:
+            if ":" not in full:
+                continue
+            full_bucket = set(shipped.expand_kind(full))
+            bare_bucket = set(shipped.expand_kind(bare_of(full)))
+            if not full_bucket <= bare_bucket:
+                narrower.append((full, bare_of(full),
+                                 sorted(full_bucket - bare_bucket)))
+        assert not narrower, (
+            "a bare kind spelling answers NARROWER than its namespaced form, so "
+            "one kind read two ways returns different sets: "
+            f"{narrower[:10]}")
+
+        # The measured symptoms, so a future reordering is caught by name.
+        assert {"WorkItem", "core:WorkItem"} <= set(shipped.expand_kind("issue"))
+        assert {"Project", "core:Project"} <= set(shipped.expand_kind("program"))
+        # …and the bare form itself is still present (#6146) — the widening is
+        # additive, never a replacement.
+        assert "issue" in shipped.expand_kind("issue")
+
+    def test_every_declared_parent_is_a_classifier_candidate(self, shipped):
+        """The parent `expand_kind` widens to is one the classifier can emit.
+
+        #11000's own indicator is that the index spec includes the parent for
+        every declared `subclassOf` pair (issue #11000, Targets). `expand_kind`
+        is not the only consumer of the hierarchy — the classifier's candidate
+        index is the other — so this MEASURES the indicator instead of asserting
+        it in prose, and names the one exception rather than claiming "no index
+        edit is owed" in general.
+
+        The exception: `product-strategy:architecture` → `Document`. `Document`
+        is deliberately not in `CORE_SUBCLASSES` (a document is a `:Source`,
+        §4.4) and is not a classifiable kind at all — a document is classified
+        by its `documentKind` genre (§5), so no `core:Document` candidate exists
+        or is owed.
+        """
+        spec = compile_kind_index_spec(packs_dir=PACKS_DIR)
+        assert spec, "the classifier kind index came back empty"
+        assert len(spec) > 50, sorted(spec)[:10]
+
+        parents = {parent for p in shipped.packs.values()
+                   for parent in p.kind_subclasses.values()}
+        assert parents >= {"Project", "WorkItem", "Problem", "Document"}, parents
+
+        missing = sorted(parent for parent in parents
+                         if f"core:{parent}" not in spec)
+        assert missing == ["Document"], (
+            "a declared `subclassOf` parent is not a classifier candidate, so a "
+            "narrative of that kind can never be classified to it: "
+            f"{missing}")
+        assert not [k for k in spec if k.split(":", 1)[-1] == "Document"], (
+            "`Document` became a classifiable kind — this pin, and the plan's "
+            "`Document` exception, are stale")
 
     def test_the_subject_row_is_the_one_authority(self):
         """`CORE_SUBCLASSES['Subject']` is `kind_layers.subject_kind_names()`.

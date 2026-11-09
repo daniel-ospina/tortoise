@@ -252,11 +252,21 @@ CORE_SUBCLASSES: dict[str, tuple[str, ...]] = {
     "Event": tuple(sorted(CANONICAL_EVENT_KINDS)),
 }
 
-#: Every core kind that is spelled BOTH ways in this tree — bare (pack
-#: declarations, §5 prose) and `core:`-prefixed (the classifier's candidate index
-#: and the open write doors). `_build_kind_expansions` makes the two spellings of
-#: a kind interchangeable so a read in one spelling reaches rows stored in the
-#: other (#11000).
+#: Every core kind (plus the §5 Subject kinds ``CORE_KINDS`` omits), so the bare
+#: and `core:`-prefixed spellings of a kind form ONE kind and a read in either
+#: reaches rows stored under the other (#11000).
+#:
+#: ⚠️ Membership is deliberately the whole core vocabulary, NOT "the kinds this
+#: tree happens to spell with a `core:` prefix": a majority of the members have
+#: no `core:` spelling anywhere in the tree today. The prefix is LIVE for a subset
+#: — the classifier's candidate index (`extractor_v2.CORE_OBJECT_KEYS` /
+#: ``SUBJECTS`` / ``EVENTS``) and the open write doors
+#: (`create_object(objectKind="core:organization")`) — and inert for the rest,
+#: where the alias names a spelling that matches no stored row (which is harmless
+#: and hash-seed stable). Sizing the set to the live subset was considered and
+#: rejected: it would make the alias's coverage depend on a grep of today's call
+#: sites, so a later door that starts emitting `core:` would silently lose its
+#: rows — the exact defect (#11000) this constant exists to prevent.
 #:
 #: The Subject vocabulary is only in here through ``CORE_SUBCLASSES`` —
 #: `organization`/`team`/`role`/`legalPerson`/`naturalPerson` are §5 Subject kinds
