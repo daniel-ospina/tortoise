@@ -1868,7 +1868,8 @@ class TestCoreHierarchy:
         """§5's Subject block and this row differ by EXACTLY `other`.
 
         The failure this prevents: the doc is NOT internally consistent here —
-        §5's block and §6's prose both list `other`, while §6's TABLE row and
+        §5's block and the "Core subclass model (§6)" paragraph (which lives in
+        §1, not §6) both list `other`, while §6's TABLE row and
         the #9964 authority (`kind_layers.subject_kind_names()`) both omit it.
         Before this pin the code comment claimed "both exclude `other`", which
         was false about §5, and nothing measured the gap — so a reader of §5

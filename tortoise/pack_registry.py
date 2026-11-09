@@ -243,9 +243,11 @@ CORE_SUBCLASSES: dict[str, tuple[str, ...]] = {
     "Object": tuple(sorted(CANONICAL_OBJECT_KINDS)),
     "Subject": (
         # §6's table row == kind_layers.subject_kind_names() (#9964). `other`
-        # is excluded by BOTH (it is the NIL bucket); §5's block and §6's prose
-        # still LIST it, and that doc divergence is pinned exactly rather than
-        # described — see test_the_subject_row_matches_s5_except_the_nil_bucket.
+        # is excluded by BOTH (it is the NIL bucket); §5's block and the
+        # "Core subclass model (§6)" paragraph — which lives in §1, not §6 —
+        # both list it, while §6's TABLE row omits it. That is the divergence,
+        # and it is pinned exactly rather than described — see
+        # test_the_subject_row_matches_s5_except_the_nil_bucket.
         "legalPerson", "naturalPerson", "organization", "role", "team",
     ),
     "Point": tuple(sorted(CANONICAL_POINT_KINDS)),
@@ -3617,10 +3619,14 @@ class PackRegistry:
         # `core:WorkItem` is the spelling the classifier actually emits — the
         # parent would be present in the table and match nothing.
         #
-        # LAST pass on purpose: `LEGACY_KIND_ALIASES` above adds stored
-        # spellings to a bucket, so an alias taken as an earlier snapshot would
-        # silently drop them (`expand_kind("core:deployment")` must still carry
-        # `dev:deployment`).
+        # It runs AFTER `LEGACY_KIND_ALIASES` so the source bucket it copies
+        # already carries stored legacy spellings (`core:deployment` reaching
+        # `dev:deployment`). ⚠️ That is a one-hop convenience, NOT the only
+        # recovery path: the closure above is equivalence-aware, so moving this
+        # block earlier still leaves `core:deployment` carrying `dev:deployment`
+        # (measured). Reordering is therefore safe; what is NOT safe is dropping
+        # the block — without it a kind that exists only `core:`-prefixed keeps
+        # an unwidened bucket.
         for kind in CORE_ALIASED_KINDS:
             core = f"core:{kind}"
             base = expansions.setdefault(kind, [kind])
@@ -3630,22 +3636,6 @@ class PackRegistry:
                     bucket.append(member)
             if core not in base:
                 base.append(core)
-        # …and every bucket that already names a core kind in ONE spelling names
-        # it in BOTH, so `expand_kind("Object")` reaches a `core:WorkItem` row as
-        # well as a `WorkItem` one. One pass suffices: the two spellings of a
-        # kind are the only alias pair, so a member added here needs no second
-        # visit.
-        for bucket in expansions.values():
-            for member in list(bucket):
-                if member in CORE_ALIASED_KINDS:
-                    alias = f"core:{member}"
-                elif (member.startswith("core:")
-                        and member[5:] in CORE_ALIASED_KINDS):
-                    alias = member[5:]
-                else:
-                    continue
-                if alias not in bucket:
-                    bucket.append(alias)
 
         self._kind_expansions = expansions
 
