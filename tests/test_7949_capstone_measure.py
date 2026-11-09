@@ -4591,14 +4591,14 @@ def test_the_bare_continuation_cites_name_what_they_say():
     rows = (
         # `each VET pass is gated on the LIST` — the gate AND its call, twice.
         ("docs/00_index.md", "each VET pass is gated on the LIST", (
-            ("15541", "if vet_enabled and embed_list:"),
-            ("15542", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
-            ("13231", "if vet_enabled and complete_list:"),
-            ("13232", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+            ("15611", "if vet_enabled and embed_list:"),
+            ("15612", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("13301", "if vet_enabled and complete_list:"),
+            ("13302", "complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
         )),
-        # the VET block's start; its lines of keys (13456-13458) close on
-        # line 13459 — DERIVED by content, not by arithmetic: `result["vet"] = {`
-        # opens at 13455 and the block's `}` is 13459. ⚠️ A conflict resolution
+        # the VET block's start; its lines of keys (13526-13528) close on
+        # line 13529 — DERIVED by content, not by arithmetic: `result["vet"] = {`
+        # opens at 13525 and the block's `}` is 13529. ⚠️ A conflict resolution
         # here once kept main's numerals (13256/13257-13259/13260 — correct on
         # main, but in THIS tree 13256 is the `"hold"` key and 13257-13260 is
         # the whole `chain_enforcer` block) next to the branch's post-refactor
@@ -4606,8 +4606,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # which is why every ASSERTED number in this table is verified by
         # content instead.
         ("docs/00_index.md", "emitted unconditionally at", (
-            ("13445", 'result["classify_later"] = {'),
-            ("13455", 'result["vet"] = {'),
+            ("13515", 'result["classify_later"] = {'),
+            ("13525", 'result["vet"] = {'),
         )),
         # ⛔ THE CLASSIFY SWITCH ITSELF (the rebase onto `a1dff7cec8` re-staled it).
         # `#11509` added this bare continuation to the probe's docstring with
@@ -4645,8 +4645,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # this head. A comment asserts nothing, so read the anchors from the row,
         # never from this prose.
         ("docs/00_index.md", "fail-open `except` at", (
-            ("13120", "except Exception as e:  # never block capture (P1)"),
-            ("13267", "except Exception as e:  # never block capture (P1)"),
+            ("13190", "except Exception as e:  # never block capture (P1)"),
+            ("13337", "except Exception as e:  # never block capture (P1)"),
         )),
         # `_IDLE_CITES["vet"]`: the early return and the surface it emits
         ("probes/capstone_measure.py", "its vet surface", (
@@ -4662,8 +4662,8 @@ def test_the_bare_continuation_cites_name_what_they_say():
         )),
         # the S2.2/S2.3 block this probe names as the #9116 seam's subject
         ("probes/capstone_measure.py", 'result["vet"]`` at', (
-            ("13455", 'result["vet"] = {'),
-            ("13459", ("exact", "}")),
+            ("13525", 'result["vet"] = {'),
+            ("13529", ("exact", "}")),
         )),
         # ⛔ The SAME two blocks as the probe's `_pass_ran` docstring names them
         # (#11517 review, finding 3). It said the flag-OFF surfaces live at
@@ -4678,18 +4678,22 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # the wrong range it was added for.
         #
         # ⛔ AND BOTH BLOCK BOUNDS, not a subset: the corrected sentence names
-        # `:13445-13451, :13455-13459`, so `13455`/`13459` are its OWN copy of
-        # the VET bounds and need the same reader. The `13455`/`13459` row on
+        # `:13515-13521, :13525-13529`, so `13525`/`13529` are its OWN copy of
+        # the VET bounds and need the same reader. The `13525`/`13529` row on
         # `probes/capstone_run.py` scopes to THAT document's line; it cannot see
         # this sentence, and a row that pinned 4 of a sentence's 6 numbers would
         # leave the fix's own new cite as the one this leg still cannot see.
+        #
+        # ⚠️ #11587 rebased these six onto the S2.2 fail-open guard (+70 below it,
+        # measured by content on the rebased tree, not by arithmetic); `:12975` and
+        # `:12979` sit ABOVE the guard and did not move.
         ("probes/capstone_measure.py", "so an acceptance test of", (
             ("12975", '"classify_later": {"enabled": classify_later,'),
             ("12979", '"vet": {"enabled": vet_enabled, "s2": {}, "union": {}},'),
-            ("13445", 'result["classify_later"] = {'),
-            ("13451", ("exact", "}")),
-            ("13455", 'result["vet"] = {'),
-            ("13459", ("exact", "}")),
+            ("13515", 'result["classify_later"] = {'),
+            ("13521", ("exact", "}")),
+            ("13525", 'result["vet"] = {'),
+            ("13529", ("exact", "}")),
         )),
         # The E-row audit's cites on the GATE ITSELF. `_BUNDLE_CITE` matches only
         # `sdk|edges|extractor_v2`, so a `tools/*.py` number is invisible to the
@@ -4802,13 +4806,13 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # cannot see it, and no row scoped to it — which is exactly the invisibility
         # this pin exists for. Both rows hold the CALL, not the definition.
         ("README.md", "gap filler", (
-            ("13362", "result = execute_embed(complete_list, search, "
+            ("13432", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ...and the probe's own copy of the same number, which sits in prose a
         # reader is sent to rather than in a table.
         ("probes/capstone_run.py", "ONE cite per symbol", (
-            ("13362", "result = execute_embed(complete_list, search, "
+            ("13432", "result = execute_embed(complete_list, search, "
                       "session_id=session_id,"),
         )),
         # ⛔ The S1 row's CALL SITE, held on its own row (#11517 rebase review).
@@ -4824,7 +4828,7 @@ def test_the_bare_continuation_cites_name_what_they_say():
             # qualifier insert above the call, so the number is re-derived from
             # the tree each time rather than carried from the round that added
             # the row (the row's INTENT is unchanged: pin the CALL).
-            ("15456", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
+            ("15526", "chunk_stories.append(run_s1(model, _edus_to_text(chunk),"),
         )),
         # ⛔ THE FIVE REMAINING BARE STEP CITES ON THE SAME FIVE-LINE CLAIM, and
         # the reason `test (f)` went red on this branch (#11517 review round 5,
@@ -4844,17 +4848,17 @@ def test_the_bare_continuation_cites_name_what_they_say():
         # sentence takes three rows rather than one — the same reason the
         # `README.md` "i.e. BEFORE the" claim above takes two.
         ("probes/capstone_run.py", "(S2.1,", (
-            ("15488", "embed_list = run_s2(model, story, master,"),
-            ("15542", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            ("15558", "embed_list = run_s2(model, story, master,"),
+            ("15612", "embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
         )),
         ("probes/capstone_run.py", "_apply_classify_kinds`` (S2.3,", (
-            ("13108", "out = kind_classifier.classify_items(items)"),
-            ("13109", '_apply_classify_kinds(embed_list, out["assignments"])'),
+            ("13178", "out = kind_classifier.classify_items(items)"),
+            ("13179", '_apply_classify_kinds(embed_list, out["assignments"])'),
         )),
         ("probes/capstone_run.py", "(S3,", (
-            ("13125", "search = search_graph(sdk, embed_list, story, "
+            ("13195", "search = search_graph(sdk, embed_list, story, "
                       "session_id=session_id)"),
-            ("13146", "s4 = run_s4(model, story, search, embed_list, master,"),
+            ("13216", "s4 = run_s4(model, story, search, embed_list, master,"),
         )),
     )
     # The SAME document states two of its claims as the RULE's own text rather than a

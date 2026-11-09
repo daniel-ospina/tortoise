@@ -106,6 +106,11 @@ class _Scripted:
         self.s1_prompts: list[str] = []
         self.s2_prompts: list[str] = []
         self.other_stages: list[str] = []
+        # S4's `user` prompt carries the NARRATIVE the run shipped, so it is the
+        # one observable that separates `story` from `story_arc` (a handler that
+        # restored only one of the pair leaves the other on arm B, and only S4
+        # reads `story`).
+        self.s4_prompts: list[str] = []
 
     def complete(self, *, system, user, max_tokens=None):
         self.last_finish_reason = "stop"
@@ -117,6 +122,9 @@ class _Scripted:
             # S4 — the live gap-filler, untouched by #11002. It answers "no
             # gaps" so this file measures the E4 arm union, not S4's merge.
             self.other_stages.append("s4")
+            # The rendered S4 prompt (with the narrative block) arrives in
+            # `system`; `user` is the short instruction. Keep both.
+            self.s4_prompts.append(system + "\n" + user)
             return _EMPTY_EMBED
         self.s2_prompts.append(system)
         idx = min(len(self.s2_prompts), len(self.s2_answers)) - 1
@@ -1284,3 +1292,405 @@ def test_the_first_arms_verdicts_ride_the_renarrate_record(monkeypatch):
         "ONE shape for both arms — a reader must not have to guess which arm "
         "the block belongs to"
     )
+
+
+# ── 9. the retry is FAIL-OPEN (#11569) ────────────────────────────────────
+
+def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
+        monkeypatch):
+    """A raise in the retry's tail must not take a COMPLETED capture with it.
+
+    Every other stage in `extract_session_v2` fails open (`run_s1` per chunk,
+    `run_s2`, `route_mentions`, `_run_vet_pass`, the classify pass). The retry
+    did not: it runs *after* a complete first arm, and by the time its tail runs
+    it has already re-bound `story`, `embed_list` and the vet records to arm B.
+    So an exception there escaped `extract_session_v2` and destroyed a capture
+    that had already succeeded — and a PARTIAL restore is worse than the raise,
+    because it ships arm B's LIST beside arm A's NARRATIVE and reports success.
+
+    ⛔ The seam is chosen deliberately: `_rate_text` is called from exactly ONE
+    place — the retry's own final warning — and that place sits **after** every
+    re-bind. A raise planted in `_renarrate_pick` (the other candidate) fires
+    BEFORE the bindings move, so it would pass against a handler that restored
+    nothing at all. Planting it here is what makes the restore load-bearing.
+
+    ⛔ NON-VACUITY: on the pre-guard tree this test does not assert — the run
+    raises out of `extract_session_v2`. Deleting a restore line reds on the
+    assertion that names it — `story`, `story_arc`, `embed_list`,
+    `mention_s2_stats`, `vet_s2_stats`, `vet_s2_pool`, `chunks`/`failed_chunks`,
+    the warning truncation, `fired`, `trigger`, `retry_failed`, `emphasis`,
+    `"first"`, `errors` and the census bump were each measured that way, one
+    mutant at a time — which is the "restores only some bindings" mutant this
+    exists to catch. ⛔ **No exception.** An earlier version of this docstring
+    and an earlier version of the fixture both declared `vet_s2_pool`
+    UNOBSERVABLE here; that declaration was WRONG and is falsified by
+    measurement, not by argument — see the fixture's own comment below for the
+    call log that settles it.
+
+    ⛔ AND THE TWO ARM COUNTERS MUST DISAGREE (review round 2, P3). The first
+    fixture chunked the transcript ONCE per arm and neither chunk failed, so
+    arm A, arm B and their sum were all `0` and deleting
+    `failed_chunks = arm["failed_chunks"]` left this test GREEN — the exact
+    `0 + 0 == 0` trap `test_the_chunk_counters_cover_BOTH_arms` documents. Arm
+    B's FIRST chunk now raises (caught by `_arm_extract`'s own handler) while
+    its SECOND still yields a narrative, so the restored `failed_chunks` is the
+    only way to read `0` instead of `0 + 1`.
+    """
+    def _boom(_metrics):
+        # `_ParseError`, not `RuntimeError` (review round 2, P3): the census
+        # class this raises is `parse_error`, which NOTHING ELSE in this run can
+        # produce — `_classify_error` never returns it (its own docstring says
+        # the stage callers produce it), and arm B's failed S1 chunk is a
+        # `RuntimeError` landing in `transient_unknown`. With a `RuntimeError`
+        # here, "some census bump happened" is satisfied BY THAT ARM, so a
+        # census assertion would pass with the handler's own `_bump_census`
+        # deleted — a false pass, measured.
+        raise extractor_v2._ParseError("the retry's tail exploded")
+
+    monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
+    monkeypatch.setattr(extractor_v2.time, "sleep", lambda _s: None)
+    monkeypatch.delenv("TORTOISE_RENARRATE_KEEP_RATE", raising=False)
+    # VET is armed so `vet_s2_stats` is arm-dependent: arm A's list is empty
+    # (nothing to judge) while arm B's is not, so the restore is OBSERVABLE.
+    # With VET off both arms record `{}` and the mutation is invisible.
+    monkeypatch.setenv("TORTOISE_VET", "1")
+    # ⛔ `vet_s2_pool` IS observable on this fixture — the residual below said
+    # otherwise and was WRONG (measured at `a7f928cbd`: `_run_vet_pass` is called
+    # THREE times and the third, the post-S4 union pass, is reached with a
+    # non-None `prior`). What made it look unobservable is that BOTH arms'
+    # pools are empty here (`{'removed_texts': set(), 'removed_entities': {}}`),
+    # so no CONTENT can separate them — the fix is to stamp arm B's pool at the
+    # seam the retry really goes through and read what the union pass is handed.
+    # The line is load-bearing: `_run_vet_pass`'s `prior` docstring calls it
+    # "required for correctness, not cosmetic", and `apply_vet` RULE 4 can
+    # restore an entity out of the pool it is given.
+    _real_pick = extractor_v2._renarrate_pick
+    _real_vet = extractor_v2._run_vet_pass
+    priors: list[object] = []
+
+    def _pick_stamped(first, second):
+        _picked = _real_pick(first, second)
+        _picked["vet_pool"] = {"removed_texts": {"FROM-ARM-B"},
+                              "removed_entities": {}}
+        return _picked
+
+    def _vet_recording(embed_list, narrative, **kw):
+        priors.append(kw.get("prior"))
+        return _real_vet(embed_list, narrative, **kw)
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_pick", _pick_stamped)
+    monkeypatch.setattr(extractor_v2, "_run_vet_pass", _vet_recording)
+
+    class _SecondArmFirstChunkFails(_Scripted):
+        """Arm B's first chunk raises; its second chunk still yields a story.
+
+        Keyed on the prompt, never on a call counter: `_complete` retries the
+        SAME prompt, so a counter would take the retries — and arm B's second
+        chunk — down with it, emptying the arm that must re-bind `embed_list`.
+        """
+
+        def __init__(self, *args, **kwargs):
+            super().__init__(*args, **kwargs)
+            self._seen: list[str] = []
+            self._fail: str | None = None
+
+        def complete(self, *, system, user, max_tokens=None):
+            if "STORY SUMMARIZER" not in system:
+                return super().complete(system=system, user=user,
+                                        max_tokens=max_tokens)
+            key = system + "\x00" + user
+            if key not in self._seen:
+                self._seen.append(key)
+            if self._fail is None and len(self._seen) == 3:
+                self._fail = key
+            if key == self._fail:
+                self.s1_prompts.append(system)
+                raise RuntimeError("S1 chunk exploded on the retried arm")
+            return super().complete(system=system, user=user,
+                                    max_tokens=max_tokens)
+
+    model = _SecondArmFirstChunkFails(
+        # One answer per surviving chunk: arm A's two, then arm B's second (its
+        # first raised). Arm A's narrative is "Alice"; arm B's is "Carol".
+        ["Alice set a budget. Bob ships Friday.",
+         "Alice set a budget. Bob ships Friday.",
+         "Carol signs the contract. Dave reviews it."],
+        # Arm A yields NOTHING (the coverage trigger), arm B yields a candidate
+        # — so `embed_list` after the run says which arm shipped.
+        [_EMPTY_EMBED, _embed("SecondOnly")],
+    )
+    result = extract_session_v2(model, list(CONVERSATION), sdk=None,
+                                session_id="11002-test",
+                                session_date="2026-11-08", chunk_size=1)
+    assert len(model.s2_prompts) == 2, "the retry really did run and pay"
+
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is False, (
+        "`fired` describes what SHIPPED — the first arm's capture, unchanged"
+    )
+    assert renarrate["trigger"] == "coverage_suspect"
+    assert "the retry's tail exploded" in renarrate["retry_failed"], (
+        "the reason must be recorded, not swallowed"
+    )
+    assert renarrate["second"] is not None, (
+        "arm B's metrics are the only record of the spend `stats['llm']['calls']` "
+        "already counted — dropping them hides that a second band was paid"
+    )
+    # ⛔ EACH ARM'S OWN NUMBERS, named separately: the record's contract is that
+    # a reader can reconcile EITHER path against `stats["llm"]["calls"]`, and
+    # deleting `"first": arm["metrics"]` left this test green (measured). Arm A
+    # is the empty, coverage-suspect arm — the trigger's own fact — and arm B is
+    # the band that judged candidates; a record with the two collapsed cannot be
+    # decomposed, and swapping them is caught here too.
+    assert renarrate["first"]["candidates"] == 0, (
+        "the record must carry ARM A's own metrics — it is the empty, "
+        f"coverage-suspect arm: {renarrate['first']!r}"
+    )
+    assert renarrate["first"]["coverage_suspect"] is True, (
+        f"arm A is the arm the trigger fired on: {renarrate['first']!r}"
+    )
+    assert renarrate["second"]["candidates"] > 0, (
+        f"and ARM B's, the band that paid: {renarrate['second']!r}"
+    )
+    # ax-principles: the failure is on the caller's surface, not only in stats.
+    assert any("re-narrate retry failed" in w
+               for w in result.get("warnings") or []), (
+        f"a fail-open path that says nothing is a silent swallow: "
+        f"{result.get('warnings')}"
+    )
+
+    # ── the restore, binding by binding ───────────────────────────────────
+    assert _entity_names(result) == set(), (
+        "arm A's list is the one that must ship — a restore that skips "
+        f"`embed_list` ships arm B's: {_entity_names(result)}"
+    )
+    story = result["story_arc"]
+    assert "Alice set a budget" in story, "arm A's narrative must survive"
+    assert "Carol signs the contract" not in story, (
+        "a restore that skips `story` ships arm B's narrative beside arm A's "
+        f"list — the half-restored shape: {story!r}"
+    )
+    # ⛔ `story` and `story_arc` are ONE line but TWO variables, and the pair is
+    # only separable through S4's prompt: `story_arc` is published on the result,
+    # `story` is what `run_s4` and `_clamped_mention(narrative=...)` actually read.
+    # Restoring one and not the other SURVIVES every assertion above (measured),
+    # so this is the leg that makes the split visible.
+    assert model.s4_prompts, "S4 ran, so it saw a narrative"
+    # ⛔ A phrase UNIQUE TO THE NARRATIVE, never the bare entity name (review round
+    # 6, P3). `run_s4` appends `_render_source_transcript(edus)` to its prompt
+    # (`extractor_v2.py:3627`, called with the run's `edus` at `:13216`), and this
+    # fixture's transcript opens "Alice decided the budget is 40k" — so
+    # `"Alice" in s4_prompts[0]` is satisfied by the TRANSCRIPT regardless of
+    # `story`, and the positive leg pinned nothing. "Alice set a budget" is arm A's
+    # own S1 answer and appears nowhere in the transcript.
+    assert "Alice set a budget" in model.s4_prompts[0], (
+        "S4 must be handed ARM A's narrative — `story_arc` can be right while the "
+        f"`story` S4 reads is arm B's: {model.s4_prompts[0][:200]!r}"
+    )
+    assert "Carol" not in model.s4_prompts[0], (
+        "arm B's narrative must not reach S4 on a fail-open run: "
+        f"{model.s4_prompts[0][:200]!r}"
+    )
+    assert result["mentions"]["stats"]["second"] is None, (
+        "a restore that skips `mention_s2_stats` leaves the retry's "
+        f"`{{first, second}}` arm pair behind: {result['mentions']['stats']!r}"
+    )
+    # ⛔ AND THE ARM-A HALF, not only the `second: None` that clears arm B
+    # (review round 5, P3). `mention_s2_stats` is a PAIR — the record's own
+    # contract (`extractor_v2.py:13009-13016`) is "ONE SHAPE ALWAYS:
+    # `{first, second}` on BOTH returns" — and the assertion above is satisfied
+    # by a PARTIAL restore that drops arm A's half entirely (measured: replacing
+    # the handler's dict with `{"second": None}` left 464 tests green). That is
+    # the same half-restore this PR exists to forbid, one level down: the
+    # shipped arm's mention stats vanish while `second: None` still reads right.
+    assert set(result["mentions"]["stats"]) == {"first", "second"}, (
+        "`{first, second}` is the contract on BOTH returns — a restore that "
+        "keeps only `second: None` silently drops ARM A's statistics: "
+        f"{result['mentions']['stats']!r}"
+    )
+    assert result["mentions"]["stats"]["first"] == {}, (
+        "arm A shipped nothing, so its mention stats are the empty dict — an "
+        "absent or arm-B value here means the restore read the wrong arm: "
+        f"{result['mentions']['stats']!r}"
+    )
+    # ⛔ `vet_s2_stats` (the `batch` block) AND `vet_s2_pool` (the removal pool
+    # the union pass prunes against) are two different bindings, and this
+    # assertion pins the first. `vet_s2_stats` is arm-dependent even for an
+    # EMPTY arm: VET records a `batch` block either way, so `candidates` is 0
+    # for arm A and 2 for arm B.
+    assert result["vet"]["s2"]["stats"]["candidates"] == 0, (
+        "a restore that skips `vet_s2_stats` publishes arm B's judgement "
+        "(2 candidates) about a list that did not ship — the vet surface "
+        f"would describe an arm nobody chose: {result['vet']['s2']!r}"
+    )
+    # ⛔ AND `vet_s2_pool`, through its ONE consumer (`prior=`), which is why the
+    # fixture stamps it. This is the gap the previous note DECLARED as an
+    # unclosable residual; it is closed, and the declaration was wrong — the
+    # union pass does run on this fixture (see the stamping block above).
+    assert priors and priors[-1] is not None, (
+        "the post-S4 union VET pass must have run and been handed a `prior` "
+        f"pool on this fixture: {priors!r}"
+    )
+    assert "FROM-ARM-B" not in json.dumps(priors[-1], default=str), (
+        "a restore that skips `vet_s2_pool` hands ARM B's removal pool to the "
+        "post-S4 union pass, which prunes and restores against discards from a "
+        f"list that did not ship: {priors[-1]!r}"
+    )
+    # The run-level chunk counters are the only observable that pins
+    # `chunks`/`failed_chunks`: both arms ran, so a restore that skips them (or
+    # doubles them) reads differently from arm A's own count.
+    # ⛔ NON-VACUITY FIRST: the arms must DISAGREE, or `0 + 0 == 0` satisfies
+    # the `failed_chunks` leg without the restore. Arm B really did fail a
+    # chunk (see the fixture), so arm A's `0` and the sum `0 + 1` are separable.
+    arms = renarrate["chunks"]
+    assert arms["second"]["failed"] == 1, (
+        "arm B must really have failed exactly one chunk — without this the "
+        f"`failed_chunks` leg cannot discriminate: {arms}"
+    )
+    assert arms["first"]["failed"] == 0, f"arm A's chunks all returned: {arms}"
+    assert arms["first"]["chunks"] > 0 and arms["second"]["chunks"] > 0, (
+        f"both arms really chunked the transcript: {arms}"
+    )
+    assert result["stats"]["chunks"] == arms["first"]["chunks"], (
+        "arm A's chunk count must ship alone — a mutant that keeps the sum "
+        f"publishes {arms['first']['chunks'] + arms['second']['chunks']}: "
+        f"{result['stats'].get('chunks')!r} vs {arms}"
+    )
+    assert result["stats"]["failed_chunks"] == 0, (
+        "arm A had no failed chunk; a mutant that keeps arm B's count would "
+        f"publish 0 + 1 = 1: {result['stats'].get('failed_chunks')!r}"
+    )
+    # ⛔ THE ASYMMETRY IS DELIBERATE, AND IT IS PINNED HERE RATHER THAN LEFT
+    # IMPLICIT (review round 4, P3). The run-level counters describe the capture
+    # that SHIPPED — arm A's alone — but `errors`/`error_census` are a LOG of
+    # what happened and are deliberately NOT restored, so arm B's chunk failure
+    # survives there. Publishing `failed_chunks == 0` beside an `errors` line
+    # reading "1/2 S1 chunks failed" is therefore the intended shape, not a
+    # contradiction, and it is readable through `renarrate["chunks"]`. Asserting
+    # it keeps the shape from being "fixed" by someone who reads the pair as a
+    # bug and restores the failure counters to match.
+    assert any("S1 chunks failed" in e for e in result["errors"]), (
+        "the second arm's chunk failure must stay on the error log even though "
+        "its COUNTER is restored — `errors`/`error_census` are a record of what "
+        f"happened, not a description of the shipped capture: {result['errors']}"
+    )
+    assert result["error_census"].get("s1_chunk_summary") == 1, (
+        "the arm-B chunk failure's census class survives the restore for the "
+        f"same reason: {result['error_census']}"
+    )
+    # P3 (review round 1): the failure must reach the ERROR surface and the
+    # census, like every sibling fail-open arm in this function — not only the
+    # warnings list, or the run reads clean on `result["errors"]`.
+    assert any("re-narrate retry failed" in e for e in result["errors"]), (
+        f"a fail-open path that is silent on `errors` hides the failure: "
+        f"{result['errors']}"
+    )
+    # ⛔ AND THE CENSUS ITSELF (review round 2, P3). Asserting only `errors`
+    # left `_bump_census(error_census, e)` unpinned — deleting it from the
+    # handler left this whole suite GREEN (measured). The record's own comment
+    # says the failure must reach "the ERROR surface and the census"; this is
+    # the half that reads the census. `parse_error` is attributable because
+    # nothing else in the run produces it (see `_boom`).
+    assert result["error_census"].get("parse_error") == 1, (
+        "a fail-open path that never reaches the census is invisible to the "
+        f"report census, which is what triage reads: {result['error_census']}"
+    )
+
+
+def test_arm_bs_vet_warnings_do_not_survive_a_failed_retry(monkeypatch):
+    """Arm B's per-item verdicts must not be published on an ARM A run.
+
+    `vet_warnings.extend(picked["warnings"])` is additive and runs BEFORE the
+    raise point, and `picked["warnings"]` is arm B's list alone. Without
+    truncation the run publishes verdicts about a list that did not ship — the
+    mirror of #5005's no-silent-discard, in the misleading direction.
+
+    ⛔ NON-VACUITY: the marker is injected through `_renarrate_pick`, i.e. it
+    enters the run the same way a real arm-B warning does (the pick's own
+    `warnings` list), so deleting the handler's truncation line reds here.
+
+    ⛔ AND ARM A MUST OWN A WARNING TOO (review round 5, P3). The truncation's
+    POSITION was unpinned: `_vet_mark = len(vet_warnings)` sits after arm A's
+    `extend` so the mark is A's line count, but BOTH fail-open fixtures observed
+    `_vet_mark == 0`, where "truncate from the mark" and "clear everything" are
+    indistinguishable. Replacing the mark with `0` therefore left 464 tests green
+    while it would `del` the SHIPPED arm's warnings on every fail-open run. Arm
+    A now carries a marker of its own, injected where arm A's warnings really
+    come from (its `_arm_extract` bundle), and it must SURVIVE.
+    """
+    real_pick = extractor_v2._renarrate_pick
+    real_arm = extractor_v2._arm_extract
+    arm_calls = {"n": 0}
+
+    def _pick_marked(first, second):
+        picked = real_pick(first, second)
+        picked["warnings"] = [*picked["warnings"],
+                               "SECOND-ARM-ONLY: vet discarded entities 'SecondOnly'"]
+        return picked
+
+    def _arm_marked(*args, **kwargs):
+        bundle = real_arm(*args, **kwargs)
+        arm_calls["n"] += 1
+        if arm_calls["n"] == 1:  # arm A — the capture that SHIPS
+            bundle["warnings"] = [*bundle["warnings"],
+                                  "FIRST-ARM-ONLY: arm A's own line"]
+        return bundle
+
+    def _boom(_metrics):
+        raise RuntimeError("the retry's tail exploded")
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_pick", _pick_marked)
+    monkeypatch.setattr(extractor_v2, "_arm_extract", _arm_marked)
+    monkeypatch.setattr(extractor_v2, "_rate_text", _boom)
+    result = extract_session_v2(
+        _Scripted(["Alice set a budget. Bob ships Friday.",
+                   "Carol signs the contract. Dave reviews it."],
+                  [_EMPTY_EMBED, _embed("SecondOnly")]),
+        list(CONVERSATION), sdk=None, session_id="11002-test",
+        session_date="2026-11-08")
+    warnings = result.get("warnings") or []
+    assert arm_calls["n"] == 2, f"both arms ran: {arm_calls}"
+    assert not any("SECOND-ARM-ONLY" in w for w in warnings), (
+        "a run that ships arm A must not publish arm B's per-item verdicts: "
+        f"{warnings}"
+    )
+    # ⛔ THE MARK'S POSITION: arm A's line sits BELOW `_vet_mark`, so it must
+    # survive. A mark taken before arm A's own extend deletes it (measured).
+    assert any("FIRST-ARM-ONLY" in w for w in warnings), (
+        "truncation must remove ARM B's lines only, never the SHIPPED arm's — "
+        "a `_vet_mark` taken before arm A's warnings deletes them: "
+        f"{warnings}"
+    )
+    assert any("re-narrate retry failed" in w for w in warnings), (
+        "the FAILURE line must still be published — truncation removes arm B's "
+        f"lines, not the record of the failure: {warnings}"
+    )
+
+
+def test_a_raise_in_the_emphasis_lookup_still_fails_open(monkeypatch):
+    """`_renarrate_emphasis` is the FIRST statement in the guarded block.
+
+    If it raises and `emphasis` is not pre-bound, the handler itself raises
+    `UnboundLocalError` and the capture is destroyed — the exact defect #11569
+    removes, reintroduced by the guard's own first line.
+
+    ⛔ NON-VACUITY: with `emphasis = None` removed, this reds with
+    `UnboundLocalError`; with it present, the run returns and records
+    `emphasis: None` (never computed).
+    """
+    def _boom(_trigger):
+        raise RuntimeError("emphasis lookup exploded")
+
+    monkeypatch.setattr(extractor_v2, "_renarrate_emphasis", _boom)
+    result = extract_session_v2(
+        _Scripted(["Alice set a budget. Bob ships Friday."],
+                  [_EMPTY_EMBED, _embed("SecondOnly")]),
+        list(CONVERSATION), sdk=None, session_id="11002-test",
+        session_date="2026-11-08")
+    renarrate = result["stats"]["renarrate"]
+    assert renarrate["fired"] is False
+    assert renarrate["emphasis"] is None, (
+        "the record must say the emphasis was never computed"
+    )
+    assert "emphasis lookup exploded" in renarrate["retry_failed"]
+    assert _entity_names(result) == set(), "arm A's capture survives"

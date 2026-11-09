@@ -69,16 +69,34 @@ asks *"is every stored vector on a label the query leg can serve?"* — a fact a
 its CLASS cannot express (the `EXEMPT` docstring above says so in its own words: *"a consumer that
 needs the difference must carry it"*). Each declaration therefore also carries `stores`: the graph
 labels the writer's vector is stored on, or :data:`NO_LIVE_VECTOR` / :data:`LABELS_AT_RUNTIME`.
-⛔ It is declared here rather than derived by the instrument because the derivation cannot reach it:
-of the twenty outside-gate writers, the writer's own Cypher names a single label for three, two
-conflicting labels for two, and NO `MERGE|CREATE (:Label` for fifteen. ⚠️ Of those fifteen the label
-is in the writer's OWN `MATCH` for five (`_embedding_repair_attempt` writes
-`set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})` — the derivation credits
-`MERGE|CREATE` only, because a `MATCH` is a read); nine name no label statement in their own body at
-all (a journal entry, a read, a delegated store, a clause builder, an interpolated label); and one —
-the caller's-statement door — has its store written by whoever calls it. A second derivation in the
-grader would be a second owner of one fact; the field is that fact, declared once (the
-policy-as-data shape `#11444` applies to row 1).
+⛔ It is declared here rather than derived by the instrument because the derivation does not reach
+most of them: of the twenty outside-gate writers, a `MERGE|CREATE (:Label` scan over the writer's own
+body names a single label for three and two conflicting labels for two, and no usable label for the
+other fifteen — and of those five readings the INSTRUMENT hands out only one
+(`session_indexer::main`, the one `ungated` writer), because `_embedding_writers` short-circuits
+`unresolved_write` before its own-literal scan. ⚠️ Those fifteen fail for SEVERAL different
+reasons, so list none of them as "the" reason: the label sits in a `MATCH` the
+derivation deliberately does not credit, because a `MATCH` is a read (`_embedding_repair_attempt`
+writes `set_embedding_clause("e")` inside its own `MATCH (e:Event {eventId:$eid})`); or the store
+clause is held in a module-level constant the per-writer scan does not open (`_write_capture_turns`
+executes `_TURN_WRITE_CYPHER`); or it is a property-map merge over a constant tuple
+(`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`); or the store is delegated to another writer
+(`_index_process_unit` → `_session_event_write`); or the writer only BUILDS a clause
+(`set_embedding_clause`); or — one of them — the statement belongs to its caller
+(`_event_raw_write_door`). ⛔ Those six are a SAMPLE, NOT the set — the other NINE of the fifteen
+fail for reasons none of them names, and a list of six presented as complete leaves the majority
+unexplained: a carrier whose value a later pass stores (`add_point`, `_journal_event_raw_write`), a
+writer whose body issues no store at all — a read, a read into a dict, comment PROSE
+(`_compare_views`, `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or
+a docstring QUOTING one (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the
+`SET n.embedding = NULL` it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these
+fifteen because its own Cypher names two labels), and a label interpolated at runtime
+(`restore_graph`'s `(n:{safe_labels})`) — which is why the `NO_LIVE_VECTOR` /
+`LABELS_AT_RUNTIME` dispositions below exist at all. Note the two-label pair is NOT in this list:
+`_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
+why their own Cypher NAMES two labels instead of none. A second derivation in the grader would be a
+second owner of one fact; the field is that fact, declared once (the policy-as-data shape `#11444`
+applies to row 1).
 ⚠️ **Its residual, stated rather than implied:** a `NO_LIVE_VECTOR` or label-tuple declaration is
 accepted **by name** once `load()` validates it — the instrument cannot re-derive "this writer
 stores nothing" (that is `UNDECIDABLE_WRITE_SHAPES`, data flow, the same limit `exempt` has on row
@@ -322,20 +340,33 @@ CLASSES: tuple[str, ...] = (RECOGNISED_PRODUCER, EXEMPT)
 #: `#11492`'s first review round closed.
 #:
 #: ⛔ Why this belongs in the declaration and NOT in a derivation inside the instrument: of the
-#: twenty outside-gate writers, the instrument's own label derivation (a `MERGE|CREATE (:Label`
-#: literal in the writer's own body) resolves a single label for three, two conflicting labels for
-#: two, and **no label at all for fifteen**. ⚠️ Not "because the label lives in the caller" — that is
-#: true of ONE of them (`_event_raw_write_door`, which executes its caller's statement). Five name it
-#: in their OWN `MATCH`, which the derivation deliberately does not credit because a `MATCH` is a
-#: read: `_embedding_repair_attempt` writes `set_embedding_clause("e")` inside its own
-#: `MATCH (e:Event {eventId:$eid})`, and `_rebuild_all_replay`'s vector write is
-#: `MATCH (n:Point {id:$pid})` + `set_embedding_clause("n", "$emb")`. The other nine name no label
-#: statement in their own body at all — a journal entry, a read, a delegated store, a clause
-#: builder, an interpolated label. A second derivation in the grading instrument would be a second
-#: owner of the same fact; the field below makes the fact ONE declaration that every consumer reads
-#: (the policy-as-data shape `#11444` already applies to row 1, and the shape OPA's *Philosophy*
-#: states: policy is decoupled from the service so those responsible can read, write, version and
-#: distribute it).
+#: twenty outside-gate writers, a `MERGE|CREATE (:Label` literal scan over the writer's OWN body
+#: NAMES a single label for three and two conflicting labels for two, and **no usable label at all
+#: for the other fifteen** — and the instrument hands only ONE of those five readings out as a
+#: label: `_embedding_writers` short-circuits `unresolved_write` before that scan (the
+#: `unresolved_write` branch `continue`s ahead of the own-literal one), so four of the five reach
+#: `written_labels` flattened to `UNKNOWN(unresolved producer)` and only `session_indexer::main`
+#: (the one `ungated` writer) reaches it as a label. ⚠️ Those fifteen fail for SEVERAL reasons —
+#: do not name one as "the" reason, and do not cite the two-label pair among them:
+#: `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies (that is
+#: exactly why their own Cypher NAMES TWO), while the fifteen include a label in a `MATCH` the
+#: derivation does not credit (`_embedding_repair_attempt`'s own `MATCH (e:Event {eventId:$eid})` +
+#: `set_embedding_clause("e")`), a store clause held in a module constant (`_write_capture_turns`
+#: executing `_TURN_WRITE_CYPHER`), a property-map merge over a constant tuple
+#: (`_update_entity`'s `_CANONICAL_ENTITY_ID_PROPS`), a store delegated to another writer
+#: (`_index_process_unit` → `_session_event_write`), a writer that only BUILDS a clause
+#: (`set_embedding_clause`), and one whose statement is its caller's (`_event_raw_write_door`).
+#: ⛔ Those six are a SAMPLE, NOT the set — the other NINE fail for none of them: a carrier whose
+#: value a later pass stores (`add_point`, `_journal_event_raw_write`), a writer whose body issues no
+#: store at all — a read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
+#: (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
+#: it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a label
+#: interpolated at runtime (`restore_graph`'s `(n:{safe_labels})`). A
+#: second derivation in the grading instrument would be a second owner of the same fact; the field
+#: below makes the fact ONE declaration that every consumer reads (the policy-as-data shape `#11444`
+#: already applies to row 1, and the shape OPA's *Philosophy* states: policy is decoupled from the
+#: service so those responsible can read, write, version and distribute it).
 #: ⛔ It is still NOT a rule set: a label is a fact about a writer, not a predicate about what
 #: earns a vector — `value_gate.RULES` stays the one rule set (§12.2a).
 NO_LIVE_VECTOR = "no-live-vector"
