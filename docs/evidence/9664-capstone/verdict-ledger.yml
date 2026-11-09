@@ -400,9 +400,12 @@ measured_at:
 #         answers `VALID EVIDENCE, 3 FAILING SUITE(S) RECORDED (exit 3 — not a pass)` — NOT
 #         an all-clean export. So the command above is the check and re-running it is the
 #         reproduction: ⛔ do NOT cite the export for either count.
-#         · `1442` at `2f8e86c9b28c` and at this file's head is a `--collect-only` reading,
-#           not a test run: the same four files COLLECT `1442` there and here, so the count
-#           did not move with the two later docstring commits.
+#         · the same four files COLLECT `1442` at `2f8e86c9b28c` and `1449` at this file's
+#           head — a `--collect-only` reading, not a test run. The +7 is MAIN's, not a claim
+#           moving under the text: `#11602` (in the merge of `1839535fd509`) took
+#           `tests/test_ci_selection.py` from 474 to 481 `def test_`, and the other three
+#           files are unmoved at 230 / 270 / 146. Every count in this bullet is therefore
+#           re-derived at the head it names, and none is carried across a merge.
 #         ⛔ THIS BULLET HAS NOW BEEN WRONG IN BOTH DIRECTIONS, and the rule is the same
 #         both times: a provenance sentence is a claim ABOUT AN ARTIFACT, so it is re-read
 #         FROM that artifact — never re-worded from memory and never inferred from a
