@@ -646,6 +646,60 @@ test("reflexCandidates: PATH, the src-dir record, and $VIRTUAL_ENV — never a C
   assert.deepEqual(reflexCandidates({ PATH: "" }, bare), []);
 });
 
+test("pathLookup: a win32 PATH splits on `;` and tries $PATHEXT — a literal `:` shredded it", () => {
+  // ⛔ #11584 review finding 3: the win32 fix had NO row that could red, because
+  // `process.platform` and `delimiter` were read straight from the host and
+  // `delimiter` is `:` on the posix CI. Both are injected here through
+  // `PathSeams`, so reverting the split to a literal `:` — or dropping the
+  // `$PATHEXT` suffixes — REDs instead of staying 38/38 green.
+  const home = tmpHome();
+  // A posix filesystem can hold the literal win32-shaped directory name, so the
+  // candidate is a REAL file and `isFile` is genuinely exercised, not stubbed.
+  const winDir = join(home, "C:\\Python312\\Scripts");
+  mkdirSync(winDir, { recursive: true });
+  writeFileSync(join(winDir, "tortoise.EXE"), "");
+
+  const win = reflexCandidates(
+    { PATH: winDir, PATHEXT: ".EXE;.CMD" },
+    home,
+    { platform: "win32", delimiter: ";" },
+  );
+  assert.deepEqual(
+    win,
+    [join(winDir, "tortoise.EXE")],
+    "the colon inside a `C:\\…` entry must NOT split it, and win32 must try $PATHEXT " +
+      "(the bare name does not exist there)",
+  );
+
+  // A second `;` entry is still reachable, and PATHEXT order picks the suffix.
+  const cmdDir = join(home, "cmdbin");
+  mkdirSync(cmdDir, { recursive: true });
+  writeFileSync(join(cmdDir, "tortoise.CMD"), "");
+  assert.deepEqual(
+    reflexCandidates(
+      { PATH: `${join(home, "absent")};${cmdDir}`, PATHEXT: ".EXE;.CMD" },
+      home,
+      { platform: "win32", delimiter: ";" },
+    ),
+    [join(cmdDir, "tortoise.CMD")],
+  );
+
+  // …and the SAME env under posix seams resolves nothing (the `:` inside the
+  // single entry shreds it before any suffix is tried), so the result above is
+  // produced by the injected branch, not by the fixture. POSIX seams are named
+  // explicitly rather than left to the host: on a win32 host the bare seam
+  // would resolve this path, and a row that reds on one developer's box is the
+  // same defect in the other direction.
+  assert.deepEqual(
+    reflexCandidates(
+      { PATH: winDir, PATHEXT: ".EXE" },
+      home,
+      { platform: "linux", delimiter: ":" },
+    ),
+    [],
+  );
+});
+
 test("readVolunteerConfig: file-sourced key never takes the env URL (co-source, #2369 D1)", () => {
   const home = tmpHome();
   const cfgPath = join(home, "tortoise-config.json");

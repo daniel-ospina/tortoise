@@ -408,9 +408,10 @@ function trace(detail: string, env: Env): void {
 export function reflexCandidates(
   env: Env = typeof process === "undefined" ? {} : process.env,
   home: string = homedir(),
+  seams: PathSeams = {},
 ): string[] {
   const candidates: string[] = [];
-  const which = pathLookup("tortoise", env);
+  const which = pathLookup("tortoise", env, seams);
   if (which) candidates.push(which);
 
   const explicit = String(env.TORTOISE_SRC_DIR ?? "").trim();
@@ -455,9 +456,28 @@ function venvOwnerOf(moduleDir: string): string | null {
   return null;
 }
 
+/** How a POSIX-shaped or win32-shaped PATH is resolved. Injected so a test can
+ *  drive the win32 shape from a posix CI — `delimiter` is `":"` on posix, so
+ *  the platform ALONE cannot discriminate, and a row that faked only
+ *  `platform` would still have its `C:\…` entry shredded by a literal colon.
+ *  Defaults are the host's own.
+ *
+ *  ⛔ WITHOUT THIS the win32 fix had NO row that could red (review finding 3):
+ *  `process.platform` and `delimiter` were read straight from the host, so
+ *  reverting the split to `":"`, deleting the `$PATHEXT` loop, or breaking
+ *  the suffix join all stayed 38/38 green. Every other host-shaped input in
+ *  this file is injected for exactly this reason (`env`, `home`, `fetchImpl`,
+ *  `breadcrumbDir`). */
+export interface PathSeams {
+  platform?: string;
+  delimiter?: string;
+}
+
 /** `which` without a dependency, honouring the env a test injects. */
-function pathLookup(name: string, env: Env): string {
+function pathLookup(name: string, env: Env, seams: PathSeams = {}): string {
   const path = String(env.PATH ?? "");
+  const platform = seams.platform ?? process.platform;
+  const sep = seams.delimiter ?? delimiter;
   // ⛔ `delimiter`, never a literal `":"`: on win32 the separator is `;`, and a
   // literal colon shreds `C:\\Python312\\Scripts` into `C` + `\\Python312\\Scripts`
   // — EVERY candidate misses, `reflexCandidates` returns `[]`, and a machine
@@ -466,10 +486,10 @@ function pathLookup(name: string, env: Env): string {
   // install (the exact confusion the inert slot exists to prevent). On win32 an
   // executable also carries a `PATHEXT` suffix, so the bare name is not the
   // file that exists there.
-  const suffixes = process.platform === "win32"
+  const suffixes = platform === "win32"
     ? String(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
     : [""];
-  for (const dir of path.split(delimiter)) {
+  for (const dir of path.split(sep)) {
     if (!dir) continue;
     for (const suffix of suffixes) {
       const candidate = join(dir, name + suffix);

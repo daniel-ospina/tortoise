@@ -5507,8 +5507,7 @@ def _cmd_install_hooks(args) -> int:
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
       sessionStart cold-context injection hook, #2122) and pi (the in-repo
       capture extension, written in the SAME run as the per-turn read
-      extension — ``pi`` is the one harness whose install writes both, and the
-      pair is graded as one contract number, #2119).
+      extension, and the pair is graded as ONE contract number, #2119).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -5610,8 +5609,8 @@ def _cmd_install_hooks(args) -> int:
     # root, a foreign cline hook) the command must fail with NOTHING written,
     # not leave a project with capture installed and the read registration
     # refused.  The read half's own dry run performs the exact checks the real
-    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
-    # capture.
+    # run does and writes nothing.  ``pi`` has no *shell-hook* read
+    # registration (its read half is the extension); ``cline`` no capture.
     if harness in ("claude", "codex"):
         refusal = _read_hook_refusal(args)
         if refusal != 0:
