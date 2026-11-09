@@ -70,7 +70,15 @@ def _run_probe(args) -> dict:
 
 
 def _probe(sdk, args) -> dict:
-    from tests.eval.retrieval.run import retrieve_per_strategy, _query_vecs  # noqa: I001
+    from tests.eval.retrieval.run import (
+        EMBED_SPACE_MODEL,
+        EMBED_SPACE_UNKNOWN,
+        _corpus_embedding_space,
+        _query_vecs,
+        _reembed_corpus,
+        _uncovered_corpus_points,
+        retrieve_per_strategy,
+    )
 
     proj = sdk._get_proj()
     is_embedded = getattr(proj, "_is_embedded", True)
@@ -81,6 +89,31 @@ def _probe(sdk, args) -> dict:
     seeded = seed_corpus(proj.g, points)  # noqa: F841
     seed_operator_edges(proj.g, random.Random(args.seed), n_edges_per_op=200)
 
+    # ONE-SPACE invariant (#1144): this tool SEEDS its own corpus, so it OWNS the
+    # corpus decision and states it to `_query_vecs` — the space is never
+    # re-derived from `EmbeddingModel.get()` at the query side. Before this, the
+    # probe seeded the oracle's centroid corpus and then let `_query_vecs`
+    # resolve the space from ambient model availability: in the canonical dev env
+    # (`uv sync --extra embeddings`) that scored bge-encoded queries against
+    # centroid corpus vectors — the two-space arm at nDCG@10 ≈0.108 — and this
+    # tool's output carried no space field at all, so a reader of the JSON could
+    # not tell the vector arm was dead.
+    space, model = _corpus_embedding_space(seeded_synthetic=True)
+    reembedded = 0
+    if space == EMBED_SPACE_MODEL:
+        reembedded = _reembed_corpus(proj.g, points, model)
+    # …and the one space is a claim about the WHOLE index, not only the rows this
+    # run rewrote: a probe over an existing db (`--db` defaults to a persistent
+    # `reports/task0.db`) leaves any earlier, larger corpus in its old space.
+    unverified = _uncovered_corpus_points(proj.g, [p["id"] for p in points])
+    if unverified:
+        space = EMBED_SPACE_UNKNOWN
+    if space != EMBED_SPACE_MODEL and not getattr(args, "quiet", False):
+        print(f"[space] WARNING: corpus/query vectors are in the '{space}' "
+              f"space ({reembedded} point(s) re-embedded, {unverified} "
+              f"unverified). The nDCG verdicts below are not a statement about "
+              f"a model-backed arm.")
+
     live_ids_by_topic = {k: [] for k in oracle.core}
     for p in points:
         if p["is_operator"] or p["status"] == "retracted":
@@ -89,7 +122,7 @@ def _probe(sdk, args) -> dict:
 
     oracle_set = load_oracle_queries()
     queries = oracle_set["queries"]
-    vecs, use_model = _query_vecs(oracle, queries, args.seed)  # noqa: RUF059
+    vecs, use_model = _query_vecs(oracle, queries, args.seed, space=space)
     tfidf_points = []
 
     # Populate the tfidf snapshot like run.py does (point content only).
@@ -177,6 +210,13 @@ def _probe(sdk, args) -> dict:
         "corpus_size": args.corpus_size,
         "depth": depth,
         "is_embedded": is_embedded,
+        # The arm's space, and what this run did about it. Without these a
+        # reader cannot tell a model-backed arm from the documented synthetic
+        # fallback — or from a dead vector arm.
+        "corpus_embedding_space": space,
+        "corpus_reembedded": reembedded,
+        "corpus_points_unverified": unverified,
+        "synthetic_query_vectors": not use_model,
         "n_queries": len(per_query),
         "population_counts": pop_counts,
         "fused_ndcg10_at_depth": _mean(fused_ndcg),
