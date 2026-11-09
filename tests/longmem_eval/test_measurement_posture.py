@@ -79,6 +79,41 @@ def test_the_headline_ratio_is_unknown_over_an_empty_population():
     assert summary["questions_with_ep_ratio"] is None
 
 
+def test_an_unread_census_is_the_live_11650_boundary():
+    """#11645 review P2: the gate this cell does NOT have is REACHABLE on two
+    paths the CURRENT producer takes — which is why #11650 is a live shape and not
+    the hypothetical the comment one paragraph above it used to assert.
+
+    (1) a FAILED post-pass census read: ``ep_activation._census`` degrades to
+    ``None``, so an ARMED pass publishes ``points_with_ep: None``; (2) a question
+    whose activation RAISED, whose fail-open manifest is
+    ``{"ep_ran": False, "error": ...}``. Both classify ``measured=False``, so they
+    count in the denominator and NEVER in the numerator — the unread population is
+    what makes the ratio ``0.0``, not something it inflates.
+
+    ⛔ The ``0.0`` asserted below is the BOUNDARY, not the contract: when #11650's
+    companion cell lands, this must publish ``None`` (UNKNOWN) instead and this is
+    the assertion to change. Non-vacuous: flipping ``_classify_question``'s
+    ``with_ep is None`` arm to ``measured=True`` puts the question in the numerator
+    and reds here on ``1 != 0``.
+    """
+    armed_failed_census = {"belief_activation": {
+        "ep_ran": True, "points_with_ep": None, "operators": 3, "factor_edges": 4}}
+    activation_raised = {"belief_activation": {
+        "ep_ran": False, "error": "RuntimeError: boom"}}
+    for outcome, reason in ((armed_failed_census, mp.INERT_UNMEASURED),
+                            (activation_raised, mp.INERT_ACTIVATION_FAILED)):
+        summary = mp.summarize_belief_activation([outcome], requested=True)
+        assert summary["questions"] == 1           # it IS in the denominator
+        assert summary["questions_with_ep"] == 0   # and never in the numerator
+        assert summary["inert_questions"][0]["reason"] == reason
+        assert summary["questions_with_ep_ratio"] == 0.0  # #11650: → None
+    mixed = mp.summarize_belief_activation(
+        [armed_failed_census, _covered_outcome()], requested=True)
+    assert (mixed["questions_with_ep"], mixed["questions"]) == (1, 2)
+    assert mixed["questions_with_ep_ratio"] == 0.5
+
+
 def test_the_headline_ratio_rides_into_the_posture_block_a_report_carries():
     """#11645 review P3: the ride from the summary into the block a REPORT carries
     was an unpinned single assignment, so a whitelist added in ``build()`` (the
