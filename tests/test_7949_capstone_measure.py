@@ -11591,8 +11591,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #   `:12929` at `HEAD` REPLACING the base-qualified cite -> RED  (the PAIR is what is gone)
     #   `:12929` at `62248db88`, one-sided                   -> RED
     #   `:12929` at `HEAD` ADDED beside the base-qualified   -> GREEN in §2 — NOT an acceptance:
-    #       cite                                                §2 has no live-number arm by design
-    #                                                           (below), and the §5 block REDS.
+    #       cite                                                §2's live-number arm binds the LIVE
+    #                                                           number it DERIVES from the tree
+    #                                                           (`12944` at this head), so a
+    #                                                           HEAD-relative `:12929` is not its
+    #                                                           subject at all; the §5 block
+    #                                                           classifies that qualifier and REDS.
     # ⚠️ WHAT THE PAIR DOES NOT DO: `a1dff7cec8` is a CONSTANT in this file, so the arm proves the
     # record agrees with that constant — never that the constant is where `vet_enabled` actually
     # sat. Re-reading `extractor_v2.py` AT that base needs history a `fetch-depth: 1` checkout does
