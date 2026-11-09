@@ -3891,11 +3891,11 @@ def parse_manifest_text(text: str) -> dict:
     return parsed
 
 
-#: `(path, st_mtime_ns, st_size)` + the parsed manifest. Keyed on the FILE'S
-#: IDENTITY, never on call order, so a rewrite of `config/ci-surfaces.yml` (or a
-#: `monkeypatch.setattr(cs, "MANIFEST", other_path)` in a test) is a cache MISS
-#: and never a stale read — the failure mode this cache could otherwise introduce.
-_LOAD_MANIFEST_CACHE: tuple[tuple[str, int, int], dict] | None = None
+#: `(path, st_mtime_ns, st_size)` + the RAW BYTES the parse was made from + the
+#: parsed manifest. Keyed on the file's identity, never on call order, so a
+#: rewrite of `config/ci-surfaces.yml` (or a `monkeypatch.setattr(cs,"MANIFEST",
+#: other_path)` in a test) is a cache MISS rather than a stale read.
+_LOAD_MANIFEST_CACHE: tuple[tuple[str, int, int], bytes, dict] | None = None
 
 
 def load_manifest() -> dict:
@@ -3920,20 +3920,40 @@ def load_manifest() -> dict:
     and turn a passing pin green for the wrong reason. `deepcopy` of this
     structure is ~1 ms, i.e. ~700x cheaper than the parse it replaces.
 
-    WHY THE KEY IS `(path, mtime_ns, size)`. A cache in a module whose input file
-    is routinely REWRITTEN must not be able to serve bytes that are no longer on
-    disk. `st_mtime_ns` moves on every write, so a rewrite invalidates; the path
-    is in the key because tests point `MANIFEST` at temp files. Only a rewrite
-    preserving BOTH `mtime_ns` and size could go stale, and that is not a state
-    this repo can produce.
+    WHY THE KEY CARRIES THE RAW BYTES, AND NOT JUST `(path, mtime_ns, size)`.
+    A metadata key alone is NOT sufficient proof of freshness, and the first
+    version of this cache shipped on the assumption that it was — which is the
+    classic RACY TIMESTAMP problem (git's index and rsync both handle it, for the
+    same reason). A rewrite that lands within the filesystem's mtime GRANULARITY
+    and keeps the byte length re-uses the key, so the cache serves the PREVIOUS
+    parse. MEASURED here: with the metadata-only key, a full
+    `tests/test_ci_selection.py tests/test_ci_timing.py tests/test_ci_new_failure_gate.py
+    tests/test_10194_eval_suite_non_gating.py tests/test_ci_check_repair.py
+    tests/test_ci_manifest.py` run went from 991 passed to 8 FAILED — every one a
+    test reading a FIXTURE manifest where the real (or another fixture) one was
+    expected (`duplicate manifest entries: ['core: test_top.py']`,
+    `half a entry test_init_apikey_validation is not in any manifest surface`).
+    Each of those suites alone was green, which is what made it a cross-test
+    contamination rather than a broken tree.
+
+    So the freshness test is now the CONTENT: the file is read every call (1.18 MB,
+    ~1 ms) and the bytes are compared against the bytes the cached parse came from.
+    A rewrite cannot be missed at ANY timestamp granularity, because the digest is
+    the thing being compared. The expensive half — `parse_manifest_text` +
+    `_normalize_surfaces`, ~0.73 s — still runs once. 1 ms of read against 730 ms
+    of parse is the whole win, and it is a win with no freshness assumption in it.
     """
     global _LOAD_MANIFEST_CACHE
+    raw = MANIFEST.read_bytes()
     st = MANIFEST.stat()
     key = (str(MANIFEST), st.st_mtime_ns, st.st_size)
-    if _LOAD_MANIFEST_CACHE is None or _LOAD_MANIFEST_CACHE[0] != key:
-        _LOAD_MANIFEST_CACHE = (
-            key, _normalize_surfaces(parse_manifest_text(MANIFEST.read_text())))
-    return copy.deepcopy(_LOAD_MANIFEST_CACHE[1])
+    cached = _LOAD_MANIFEST_CACHE
+    if cached is None or cached[0] != key or cached[1] != raw:
+        cached = (key, raw,
+                  _normalize_surfaces(
+                      parse_manifest_text(raw.decode("utf-8"))))
+        _LOAD_MANIFEST_CACHE = cached
+    return copy.deepcopy(cached[2])
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
