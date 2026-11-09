@@ -2108,7 +2108,14 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # this field gives `sparse.py:226`, `projection/entities.py:1208`,
     # `subject_binding.py:189`, `extractor_v2.py:9944` and the probe cite
     # `probes/capstone_measure.py:518` — so three other-file cites remain UNPINNED by this
-    # arm (`grep -rn '226\|1208\|189' tests/test_capstone_preregistration_9075.py` is empty).
+    # arm. Measured, scoped so the query cannot match its own prose —
+    # `grep -rnE 'sparse\.py:226|entities\.py:1208|subject_binding\.py:189' tests/ --include='*.py'`
+    # returns exactly six hits: four are the sentences around this one, and the other two
+    # are PROSE COMMENTS in `tests/test_7949_c2_door.py:96-97` — no `assert`, so no pin.
+    # (An earlier cut of this comment said a bare `grep -rn '226\|1208\|189'` over this file
+    # "is empty" — it matched FIVE times, one of them the sentence making the claim, so it
+    # could never be true. A fresh-context review at `9eb23a55` measured that; the claim is
+    # now scoped to something that reproduces.)
     # They are correct at this head; they rot unwatched. An earlier cut of this comment
     # called the `extractor_v2.py` cite "the SECOND", as if only two existed, which is the
     # overclaim a fresh-context review at `11a18e9da` measured and is corrected here rather
@@ -2127,10 +2134,12 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # names. So the shape (not a `def`) and the receiving variable are asserted beside the
     # symbol. Non-vacuity measured at this head: re-staling the field to the pre-fix
     # `:9929` reds this arm, because that line is not this read.
-    # ("occurs THREE times" was this comment's earlier count; `grep -c
-    # _state_value_verbatim_enforced tortoise/extractor_v2.py` is 4, and the three the
-    # sentence enumerates are the CODE occurrences. Corrected to the measured count — the
-    # sentence says "measured in this very file" and must therefore survive the grep.)
+    # ("occurs THREE times" was this comment's earlier count, and the count a review at
+    # `9eb23a55` caught. `grep -c _state_value_verbatim_enforced tortoise/extractor_v2.py`
+    # is 4 — the four sites above, which is what this sentence now says. Corrected to the
+    # measured count because the sentence claims it was measured in this very file and must
+    # therefore survive the grep; an earlier cut of THIS parenthetical still said "the three
+    # the sentence enumerates" while the sentence above it lists four.)
     _switch_nums = [int(_n) for _n in re.findall(r"extractor_v2\.py:(\d+)(?!\d)", read_back)]
     assert _switch_nums, (
         "the record must name where TORTOISE_STATE_VALUE_VERBATIM is read "
