@@ -2292,6 +2292,35 @@ def _cell_fleet(monkeypatch, *, live, registry=(), wts=None, issues=(8999,),
                           sample_s=0.0, do_pane=False)
 
 
+def test_the_board_publishes_which_liveness_stores_were_unreadable(
+        monkeypatch) -> None:
+    """#11202: the board's RECONCILIATION block must carry the store groups that did
+    not answer, beside the one that did.
+
+    Measured on a cell: the board answered `process-table` while both cmux grammars
+    refused, and every surface printed `board source: rebuilt` — a CLEAN resting on
+    one store that read exactly like a CLEAN that read them all. The field is the
+    datum the pre-flight's claim-gate note publishes (#11202).
+    """
+    live = fs.LiveSessions(
+        {f"{fs.PROC_WS_PREFIX}4242": [_proc_live(4242)]},
+        measured=True, source=fs.LIVE_STORE_PROCESS,
+        error="cmux session store: `cmux sessions list --json --all` exited 2: "
+              "'usage.invalid: --all needs a value'",
+        unreadable=(fs.LIVE_STORE_CMUX_GROUP,),
+    )
+    st = _cell_fleet(monkeypatch, live=live)
+    rec = st["reconciliation"]
+    assert rec["liveness_measured"] is True
+    assert rec["liveness_source"] == fs.LIVE_STORE_PROCESS
+    assert rec["liveness_unreadable"] == [fs.LIVE_STORE_CMUX_GROUP], (
+        "a JSON list on the wire, naming the store that did not answer")
+    # ABSENT IS NOT EMPTY: a plain dict (a fixture, an older caller) declares no
+    # store, so the board says nothing rather than "everything was read".
+    st = _cell_fleet(monkeypatch, live={})
+    assert st["reconciliation"]["liveness_unreadable"] == []
+
+
 def test_a_cell_lane_started_by_nohup_is_a_lane_the_board_can_answer_for(
         monkeypatch) -> None:
     """THE #8999 DEFECT, end to end. The cell launch path starts a lane as a
@@ -2736,6 +2765,70 @@ def test_a_guest_cli_error_object_is_not_a_session_store(monkeypatch) -> None:
         assert len(said) <= fs._CMUX_SAID_BOUND
     assert fs._cmux_said("usage.invalid: --all needs a value") == (
         "'usage.invalid: --all needs a value'"), "a plain cause is untouched"
+
+
+def test_the_cloud_cli_answers_liveness_from_the_process_store_and_SAYS_SO(
+        monkeypatch) -> None:
+    """THE CELL'S END-TO-END POLARITY (#11202), with the CLI's OWN payloads.
+
+    Measured on the cell 2026-11-09 (`origin/main` 86aaef8f02, cmux 0.1.0 guest CLI):
+
+        cmux sessions list --json --all  → rc 2 'usage.invalid: --all needs a value'
+        cmux session list --json         → rc 1 'validation.invalid: request
+                                            contains unknown parameters'
+
+    Both grammars are Mac-only and NO grammar on that CLI can supply a per-lane
+    session store (every `session list` / `machine list` request comes back
+    `request contains unknown parameters` — the guest CLI and the daemon are
+    version-skewed). The board therefore answers from the PROCESS TABLE alone, and
+    that is measured and legitimate (#8999). What must ALSO be true is that the
+    read says WHICH store answered and WHICH could not be read, because a CLEAN
+    resting on one store must not read as a CLEAN that read them all.
+    """
+    class _Refusal:
+        returncode = 2
+        stdout = ""
+        stderr = json.dumps({"code": "usage.invalid",
+                             "message": "--all needs a value"})
+
+    monkeypatch.setattr(fs.subprocess, "run", lambda cmd, **k: _Refusal())
+    monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 42, "ppid": 1}], ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: ({42: CELL_CWD}, ""))
+    monkeypatch.setattr(fs, "pid_alive", lambda pid: True)
+    live = fs.live_sessions()
+    assert live.measured is True, "the process table answered, so the fleet is measured"
+    assert live.source == fs.LIVE_STORE_PROCESS
+    assert live.unreadable == (fs.LIVE_STORE_CMUX_GROUP,), (
+        "the store that did NOT answer travels beside the one that did")
+    assert list(live) == [f"{fs.PROC_WS_PREFIX}42"]
+    assert "--all needs a value" in live.error, (
+        "and the refusal is still recorded — never silently dropped")
+    # ⛔ AND THE BOARD CARRIES BOTH HALVES, driven from THIS read (#11202 review,
+    # P2: an earlier assertion here compared the store name against `source`,
+    # which passes with or without the change and checks no board at all).
+    board = _cell_fleet(monkeypatch, live=live)
+    rec = board["reconciliation"]
+    assert rec["liveness_measured"] is True
+    assert rec["liveness_source"] == fs.LIVE_STORE_PROCESS
+    assert rec["liveness_unreadable"] == [fs.LIVE_STORE_CMUX_GROUP], (
+        "the failing group reaches the board's reconciliation block")
+    assert [lane for lane in board["lanes"]
+            if str(lane["identity"]["workspace"]).startswith(fs.PROC_WS_PREFIX)], (
+        "and the lane the process store attributed is ON the board — not just a "
+        "liveness reading")
+
+
+def test_a_healthy_cmux_store_leaves_nothing_unreadable(monkeypatch) -> None:
+    """The complement: when a grammar ANSWERS, the store is not reported as
+    unreadable — the new field must not become a permanent complaint (#11202)."""
+    monkeypatch.setattr(fs, "cmux_session_records", lambda: (
+        [], fs.LIVE_STORE_CMUX_PLURAL, ""))
+    monkeypatch.setattr(fs, "pi_processes", lambda: ([{"pid": 42, "ppid": 1}], ""))
+    monkeypatch.setattr(fs, "process_cwds", lambda pids: ({42: "/tmp/wt-a"}, ""))
+    live = fs.live_sessions()
+    assert live.measured is True
+    assert live.unreadable == (), "no store refused, so nothing is reported unreadable"
+    assert live.source == f"{fs.LIVE_STORE_CMUX_PLURAL}+{fs.LIVE_STORE_PROCESS}"
 
 
 def test_a_session_store_from_a_FAILED_command_is_named_and_refused(
