@@ -442,19 +442,29 @@ measured_at:
 #       environment the MCP stdio transport refuses BY DESIGN (it cannot carry the token),
 #       so `test_cross_tenant_read_isolation.py::test_negative_control_graph_listing_scoping_is_detected`
 #       errors `Authentication required. The MCP stdio transport cannot carry auth tokens…`
-#       and the SAME command measures **586 passed, 6 failed** at this head. Both readings
-#       are true of their environment, so the environment is named rather than left to the
-#       reader; the `9 passed` this file records for that unit is the keyless reading, and
-#       it is the one the contract-layer claim rests on.
+#       and the SAME command measured **586 passed, 6 failed** at THAT head — the one whose
+#       collection is 592. At THIS head (616 collected) the ambient reading is **610 passed,
+#       6 failed**: 610 + 6 = 616, whereas 586 + 6 = 592, so the two cannot be the same tree
+#       and the ambient reading is quoted with its own collection rather than the other one's.
+#       Both readings are true of their environment, so the environment is named rather than
+#       left to the reader; the `9 passed` this file records for that unit is the keyless
+#       reading, and it is the one the contract-layer claim rests on.
 #       the 5 are 5 of the 8 `TestCreateGraphWithPacks` tests, refused by the PRIVATE lane container's ACL layer — see S2.
 #       $ TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest tests/test_7949_c2_door.py tests/test_7949_capstone_measure.py -q
 #       304 passed                                 # 24 (the door census, its pinned-ON/refusal arms
 #                                                  # and the one-hop ledger pins) + 280 (the #7949
 #                                                  # cite, idle and registration and cross-file pins)
-#                                                  # = 304. These
-#                                                  # are the two files this change EDITS, so the
-#                                                  # contract-layer claim above is not carried by
-#                                                  # the seven-file run alone.
+#                                                  # = 304. Of these two files only
+#                                                  # `test_7949_capstone_measure.py` is EDITED by this
+#                                                  # change; `test_7949_c2_door.py` is byte-identical to
+#                                                  # `origin/main` and is run for the one-hop pins it
+#                                                  # carries. The two EDITED suites this command does
+#                                                  # NOT run are `test_9664_capstone_verdict_ledger.py`
+#                                                  # (the seven-file run above) and
+#                                                  # `test_capstone_preregistration_9075.py`
+#                                                  # (356 collected at this head, measured on its own),
+#                                                  # so the contract-layer claim is not carried by this
+#                                                  # command alone.
 #       $ uv run python docs/evidence/9664-capstone/probes/step_premise_census.py
 #       MEASURED: 26 premises, 0 unmeasured sections.  (exit 0)
 #       $ uv run python tools/capstone_ledger.py check
