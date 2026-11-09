@@ -453,4 +453,686 @@ else
     echo "tortoise: using embedded redislite (local/dev mode)" >&2
 fi
 
+# ── #1677: multi-worker topology — MEASURE the count, then hand it to the app ──
+# `Dockerfile.hosted` passes no `--workers`, so this deployment runs ONE uvicorn
+# worker. Nothing makes that visible: uvicorn resolves its worker count as
+# CLI flag -> $UVICORN_WORKERS -> $WEB_CONCURRENCY -> 1, so ANY actor that can set
+# one Fly env var moves the machine to N workers with no code change and no
+# signal.
+#
+# The REFUSAL is not here. It lives in `tortoise/worker_topology.py`, because it
+# has to be reachable by a direct `uvicorn tortoise.hosted_api:app --workers N`
+# too — an invocation that never runs this script. One implementation of the
+# policy, one place to change it.
+#
+# What this block adds is the half those callers cannot know: the count uvicorn
+# WILL run, measured from the CMD argv the way uvicorn resolves it, exported so
+# the app's refusal can name the real number, and logged once at boot so an
+# ambient WEB_CONCURRENCY stops being an invisible fact.
+#
+# ⚠️ `TORTOISE_WEB_WORKERS` is an OUTPUT of this script, never an operator input:
+# uvicorn does not read it, so setting it by hand cannot raise the count.
+# ── #1677: the worker-count measurement, from here to the gate sentinel ──
+# ⛔ THIS LINE IS A TEST SENTINEL (tests/test_worker_topology.py lifts the block
+# between it and the gate sentinel and EXECUTES it). Keep it directly above the
+# first of the block's functions, and add any new helper INSIDE the block — a
+# helper defined above this line is invisible to the lifted block, which is how a
+# refactor once made the shell arm answer 1 for every input and only the pytest
+# suite noticed.
+_uvicorn_flag_option() {
+    # ⛔ ONE list, because two copies drifted and the drift was a FAIL-OPEN.
+    # `uvicorn.main.main.params` marks these `is_flag=True` (pinned 0.52.1): they
+    # consume NO value, so the token after them is still a token. Every OTHER
+    # long option consumes the next token as its value, which is what makes
+    # `--host --workers=1` a host of "--workers=1" rather than a workers flag.
+    # The count reader had its own copy of this list and omitted `--reload`, so
+    # `--reload --workers 4` read as "no workers value" (the reloader swallowed
+    # it) and the exported count fell through to `$WEB_CONCURRENCY` — caught by
+    # `_AGREEMENT_TABLE`, which is exactly why both arms run one table.
+    #
+    # ⛔ PRIMARY **AND** SECONDARY opts. Five of uvicorn's options are `--x/--no-x`
+    # PAIRS, and click files the negative half in `param.secondary_opts`, not
+    # `param.opts` — so a list carrying only the primary half is short by five,
+    # and each `--no-*` fell through to "consumes the NEXT token":
+    #   uvicorn app:app --no-server-header --app-dir --reload --workers 2
+    # MEASURED (click's parser, pinned 0.52.1): reload=False, workers=2,
+    # app_dir="--reload" — NO reloader, TWO workers, which this walk read as
+    # "reloading" and the gate PERMITTED. Mirror shape
+    # (`--no-access-log --reload --workers 4`) was refused although uvicorn
+    # serves one reloader child. Same list, same pin, as the Python twin.
+    #
+    # ⛔ `--http2` is AHEAD of the pin: uvicorn 0.53.0 added it as a boolean flag
+    # (`is_flag=True`, MEASURED present in the 0.53.0 tag and absent from 0.52.4),
+    # and the test job's `pip install -e .` resolves a newer uvicorn
+    # (0.54.0 while this was measured) while `uv.lock` pins 0.52.1. Reading it as
+    # value-taking would swallow the token after it — the same fail-open as the
+    # `--no-*` half. On the pin it is inert (0.52.1 has no such option, so it
+    # cannot appear in a boot it accepts).
+    case "$1" in
+        --reload|--access-log|--no-access-log|--use-colors|--no-use-colors\
+        |--proxy-headers|--no-proxy-headers|--server-header|--no-server-header\
+        |--date-header|--no-date-header|--version|--reset-contextvars\
+        |--factory|--http2) return 0 ;;
+    esac
+    return 1
+}
+
+
+_trim_edges() {
+    # Strip surrounding whitespace from "$1" — LINE-AGNOSTIC, unlike
+    # `sed -e 's/^[[:space:]]*//'`, which is line-oriented: a value whose LEADING
+    # whitespace contains a newline is split into records, the first run is never
+    # removed, and the count then fails the digit test and normalises to 1 while
+    # Python (`str.strip`) and uvicorn (`int`) read the same value as N — measured:
+    # `WEB_CONCURRENCY=$'\n2'` -> shell 1 / Python 2, and the pre-exec gate then
+    # reads the script's own `1` and PERMITS a two-worker boot.
+    #
+    # Only bash pattern expansion is line-agnostic here; `[[:space:]]` matches a
+    # newline inside a bracket expression, which is what makes this correct.
+    local _v="$1"
+    _v="${_v#"${_v%%[![:space:]]*}"}"
+    _v="${_v%"${_v##*[![:space:]]}"}"
+    printf '%s' "$_v"
+}
+
+_resolve_raw_requested_workers() {
+    # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
+    # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
+    # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
+    # is what a hand-edited CMD usually carries.
+    #
+    # The RAW value, split out from `_resolve_requested_workers` below so the
+    # `--lifespan off` guard can ask a DIFFERENT question of the same input —
+    # "is this a value the shell can VERIFY?" rather than "what number is it?" —
+    # without a second copy of this precedence chain.
+    local _args=("$@") _i=0 _count="" _arg="" _skip=0
+    # ⛔ ARITY, exactly as the reload scan below does it. A `--workers=1` token is
+    # a workers FLAG only when click reaches it as a TOKEN; `--host --workers=1`
+    # makes it `--host`'s VALUE, so uvicorn reads `$WEB_CONCURRENCY` and runs N
+    # while a membership scan reports 1 — MEASURED on the pinned 0.52.1:
+    # `--host --workers=1` (and `--uds` / `--root-path` / `--app-dir` /
+    # `--forwarded-allow-ips` / `--loop` with it) leaves `Config.workers = 4`
+    # under `WEB_CONCURRENCY=4`. That masked count then certified "one worker"
+    # to the `--lifespan off` guard, which is the fail-open this whole block
+    # exists to close.
+    while [ "$_i" -lt "${#_args[@]}" ]; do
+        _arg="${_args[$_i]}"
+        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
+        case "$_arg" in
+            --workers)
+                _i=$((_i + 1))
+                _count="${_args[$_i]:-}"
+                ;;
+            --workers=*)
+                _count="${_arg#--workers=}"
+                ;;
+            --*=*) : ;;
+            -*)
+                # A long option with no inline value consumes the NEXT token as
+                # its value — unless it is one of uvicorn's FLAGS.
+                _uvicorn_flag_option "$_arg" || _skip=1
+                ;;
+        esac
+        _i=$((_i + 1))
+    done
+    if [ -z "$_count" ]; then
+        _count="${UVICORN_WORKERS:-}"
+    fi
+    if [ -z "$_count" ]; then
+        _count="${WEB_CONCURRENCY:-1}"
+    fi
+    printf '%s' "$_count"
+}
+
+_count_is_verifiable() {
+    # ⛔ TRUE only when the raw value is an ASCII-integer spelling this shell can
+    # actually READ. `_resolve_requested_workers` normalises anything it cannot
+    # parse to 1, and that normalisation is NOT a measurement: uvicorn's
+    # `int($WEB_CONCURRENCY)` (`config.py:353`) also accepts non-ASCII decimal
+    # digits and Unicode whitespace — MEASURED, `WEB_CONCURRENCY=$'\xc2\xa02'`
+    # starts TWO children while both resolvers report 1. Harmless while the app
+    # gate runs (the children are `supervised` and refused); NOT harmless with
+    # the lifespan off, which is the only caller of this predicate.
+    # ⛔ The locale pin is what makes "ASCII-integer spelling" TRUE rather than
+    # hoped for: `[0-9]` is a collating range, so under `en_US.UTF-8` this same
+    # regex accepts U+0661 U+0662 ("12") and ADMITS a boot that starts twelve
+    # ungated workers. MEASURED on this host, both locales.
+    local LC_ALL=C
+    export LC_ALL
+    local _raw
+    _raw="$(_trim_edges "$(_resolve_raw_requested_workers "$@")")"
+    case "$_raw" in
+        +*) _raw="${_raw#+}" ;;
+    esac
+    [[ "$_raw" =~ ^[0-9]+(_[0-9]+)*$ ]] || return 1
+    # ⛔ LENGTH, because "is an ASCII-integer spelling" is not yet "this shell can
+    # READ it": bash arithmetic is `intmax_t` (19 digits at most), so a longer
+    # digit string passes the regex and then makes every `-gt 1` comparison on
+    # it fail with `integer expression expected` — which reads as FALSE, i.e. as
+    # "1 worker", while the count is 21 digits. MEASURED on the pre-fix block:
+    # `WEB_CONCURRENCY=s/9x21/` printed "the count is verified as ONE worker, so
+    # there is nothing to gate" AND leaked a raw `integer expression expected`
+    # line into the boot log. Not a fail-open (the pre-exec gate still refuses,
+    # exit 1, because Python's `int()` is arbitrary-precision and DOES read it) —
+    # a false verdict on a fail-closed path, which is the same class of lie this
+    # block exists to remove. 18 keeps the bound strictly inside `intmax_t`.
+    [ "${#_raw}" -le 18 ]
+}
+
+_app_env_file_in_play() {
+    # ⛔ uvicorn's FOURTH count input. `Config.__init__` runs
+    # `load_dotenv(dotenv_path=env_file)` BEFORE it reads `$WEB_CONCURRENCY`
+    # (`config.py:348-353`), so `--env-file` / click's `$UVICORN_ENV_FILE`
+    # (`main.py:191-197`) can set the count AFTER this script measured it.
+    # MEASURED on the pinned 0.52.1: `UVICORN_ENV_FILE=four.env`
+    # (`WEB_CONCURRENCY=4`) with `UVICORN_LIFESPAN=off` started FOUR server
+    # processes with the gate never entered, while this block reported one
+    # worker. With an env file in play, NO count measured here is the count
+    # uvicorn will run.
+    for _arg in "$@"; do
+        case "$_arg" in
+            --env-file) return 0 ;;
+            --env-file=*) return 0 ;;
+        esac
+    done
+    [ -n "${UVICORN_ENV_FILE:-}" ]
+}
+
+_argv_is_shell_wrapped() {
+    # ⛔ TRUE when the server is launched through a SHELL STRING rather than as
+    # a direct argv — `CMD ["sh","-c","uvicorn app:app --workers 4"]`, a compose
+    # / k8s `command:` override, a Fly `[processes]` entry. There the `--workers`
+    # / `--lifespan` flags live INSIDE one argv token, so every reader above sees
+    # a single opaque word: the count resolves to 1, `_app_lifespan_disabled`
+    # finds no flag, and the block then reports "uvicorn workers = 1" for a boot
+    # uvicorn will run with N. MEASURED (the shipped block lifted verbatim):
+    #   ("sh","-c","uvicorn app:app --lifespan off --workers 4")
+    #     -> "tortoise: uvicorn workers = 1", rc=0, real uvicorn = 4 workers,
+    #        lifespan never runs, so NEITHER gate is installed and an embedded DB
+    #        opens four divergent copies of one file.
+    # Reachability: NOT produced by `Dockerfile.hosted`'s exec-form CMD, `fly.toml`
+    # or `docker-compose.yml` — it needs a CMD override. Reported rather than
+    # refused silently: an unmeasurable command line is treated exactly like
+    # `--env-file`, which is the same "I cannot see the count" shape.
+    # The signature is deliberately narrow (a token carrying BOTH whitespace and
+    # a command word, or a bare `-c`-style shell flag) so a legitimate spaced
+    # VALUE does not trip it.
+    #
+    # ⛔ ARITY, so that "spaced VALUE" includes a spaced PATH. The first-word list
+    # below carries `/*`, `./*` and `../*` because a shell string's command word
+    # is usually a path (`/usr/local/bin/uvicorn app:app --workers 4`). A path
+    # VALUE hit the same arm: `--root-path "/srv/my app"` has the first word
+    # `/srv/my`, so an exec-form CMD (the shape `Dockerfile.hosted` ships) was read
+    # as "launched through a shell string" — a FALSE refusal under `--lifespan off`
+    # and a degraded banner otherwise, with a cause that is not true. MEASURED
+    # through the shipped block: `--root-path "/srv/my app"` rc=1 "the server is
+    # launched through a shell string", while `--root-path /srv/my-app` rc=0.
+    # The walk therefore CONSUMES the token a long option takes as its value, so a
+    # value is never tested as a command. The shapes this predicate exists for are
+    # unaffected: `sh -c "…"` is still caught by the `-c` bundle arm, which runs in
+    # the SHELL's own namespace ahead of the skip, and a whole-command token is at
+    # an index no option consumed.
+    local _args=("$@") _i=0 _arg="" _skip=0
+    while [ "$_i" -lt "${#_args[@]}" ]; do
+        _arg="${_args[$_i]}"
+        # ⛔ "IS THIS A SHELL FLAG BUNDLE CARRYING `c`" — expressed as two arms,
+        # not one glob. A first cut used `-[[:alpha:]]*c`, which matches only a
+        # bundle that ENDS in `c`, so `-cl` (i.e. `sh -cl "..."`) stopped
+        # matching while the enumerated list it replaced HAD covered it — a
+        # fail-OPEN regression (`bash -cl "./serve.sh --lifespan off"` went from
+        # refused to permitted). A second cut, `-[[:alpha:]]*c[[:alpha:]]*`, still
+        # missed `-cl`, because the `c` is the FIRST letter and the leading
+        # `[[:alpha:]]` needs a character before it.
+        # Globs cannot say "contains"; so: a LONG option is never a bundle (the
+        # `--*` arm), and any single-dash token that CONTAINS `c` is one.
+        #
+        # ⛔ THIS ARM RUNS BEFORE THE ARITY SKIP, because it belongs to a
+        # DIFFERENT NAMESPACE: a SHELL's own flags. The skip below consults
+        # `_uvicorn_flag_option`, which knows uvicorn's `--flag` names and nothing
+        # else — so applied to a SHELL's argv it reads `--login` / `--noprofile`
+        # (value-LESS bash flags) as value-taking and CONSUMES the `-c` after
+        # them, hiding the very launch this predicate exists to find:
+        #   CMD ["bash","--noprofile","-c","./entrypoint.sh"]
+        # MEASURED: pre-arity this REFUSED (--lifespan off, exit 1, "launched
+        # through a shell string"); a first cut of the arity walk PERMITTED it
+        # with "the count is verified as ONE worker" — a FAIL-OPEN on a
+        # fail-closed path, the exact defect class this PR removes. A `-c`
+        # bundle is therefore never treated as some uvicorn option's value, and
+        # this arm keeps its pre-arity semantics unchanged.
+        case "$_arg" in
+            --*) ;;
+            -*)
+                case "$_arg" in
+                    *c*) return 0 ;;
+                esac
+                ;;
+        esac
+        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
+        # ⛔ ARITY — `--*` NAMESPACE ONLY, so that "spaced VALUE" includes a
+        # spaced PATH. A long option consumes the NEXT token as its VALUE — even
+        # when that token looks like a flag — unless it is one of uvicorn's own
+        # FLAGS (the one list, `_uvicorn_flag_option`).
+        case "$_arg" in
+            --*=*) : ;;
+            --*)
+                _uvicorn_flag_option "$_arg" || _skip=1
+                ;;
+        esac
+        case "$_arg" in
+            *[[:space:]]*)
+                # ⛔ A whitespace-bearing token is a shell STRING only when its
+                # FIRST WORD is a command. Testing `*uvicorn*` anywhere in the
+                # token was an OVER-BLOCK: an exec-form CMD with
+                # `--header "X-Served-By: uvicorn 0.52.1"` is a direct argv whose
+                # count is provably ONE, and it was REFUSED with the false cause
+                # "the server is launched through a shell string" (MEASURED at
+                # 606029b21db7). A header value is not a command line.
+                case "${_arg%%[[:space:]]*}" in
+                    sh|bash|dash|ash|zsh|ksh|exec|uvicorn|python|python3\
+                    |/*|./*|../*) return 0 ;;
+                esac
+                ;;
+        esac
+        _i=$((_i + 1))
+    done
+    return 1
+}
+
+_wrapped_argv_disables_lifespan() {
+    # ⛔ A shell-wrapped CMD that turns the lifespan off INSIDE the string.
+    # This is the one wrapped shape that must REFUSE rather than merely report,
+    # because with the lifespan off no gate is installed on either side: the app
+    # gate is the first statement of `_lifespan`, and the pre-exec gate cannot
+    # read a count that lives inside one opaque token. Every OTHER wrapped shape
+    # stays a REPORT, because there the app gate does run and refuses the
+    # children.
+    _argv_is_shell_wrapped "$@" || return 1
+    # ⛔ NORMALIZE THE SHELL STRING INSTEAD OF LISTING SPELLINGS. `/bin/sh -c`
+    # word-splits on ANY whitespace run and strips quotes, so `--lifespan  off`
+    # (two spaces), `--lifespan<TAB><TAB>off` and `--lifespan "off"` all reach
+    # uvicorn as `--lifespan off`. An enumerated pattern list matched only the
+    # one-space form, and the rest fell through to the REPORT arm with rc=0 — a
+    # real uvicorn of 4 workers, the lifespan never run, and NEITHER gate
+    # installed (MEASURED on the shipped 8e53978395 block, 2026-11-09).
+    # So: strip the quotes, collapse every whitespace run to one space, and match
+    # the RESULT. That is one rule instead of a spelling table.
+    #
+    # ⛔ AND IT MUST NOT REFUSE ON A MERE MENTION. A first cut refused any string
+    # naming `--lifespan` at all, which hard-refused `--lifespan on` and even
+    # `--lifespan auto` (uvicorn's DEFAULT, so a compose `command:` that merely
+    # restates it) under a message asserting "the APP LIFESPAN IS DISABLED" — a
+    # false diagnosis on a legitimate boot. A wrapped lifespan that is ON is the
+    # REPORT arm's job, because there the app gate does run and refuses the
+    # children.
+    local _arg="" _norm="" _word="" _ifs=""
+    for _arg in "$@"; do
+        case "$_arg" in
+            --*) ;;
+            -*)
+                case "$_arg" in
+                    *c*) ;;
+                    *) continue ;;
+                esac
+                ;;
+            *[[:space:]]*) ;;
+            *) continue ;;
+        esac
+        # ⛔ APPLY THE SHELL'S OWN ESCAPING RULE BEFORE THE SPLIT. `sh -c` removes
+        # a backslash-newline BEFORE word-splitting and unescapes `\<char>`, so a
+        # wrapped multi-line compose/k8s command — `--lifespan \<newline> off`,
+        # the ordinary way to wrap a long `command:` — reached uvicorn as
+        # `--lifespan off` while the normalised text still held the backslash and
+        # missed the literal match: rc=0, UNVERIFIED, FOUR workers, the lifespan
+        # never run, NO gate on either side (MEASURED at 606029b21db7). Same hole
+        # for `--lifespan \off`. Normalising quotes and whitespace but not
+        # BACKSLASHES was one more spelling of the same mistake.
+        _arg="${_arg//\\$'\n'/}"
+        _arg="${_arg//\\/}"
+        _arg="${_arg//\"/}"
+        _arg="${_arg//\'/}"
+        # `set -f` so a literal `*` in the string is not glob-expanded.
+        _ifs="$IFS"; IFS=$' \t\n'
+        set -f
+        for _word in $_arg; do _norm="$_norm $_word"; done
+        set +f
+        IFS="$_ifs"
+    done
+    # ⛔ TWO INDEPENDENT TESTS, IN THIS ORDER. First: does the string mention the
+    # lifespan input AT ALL? If not, this is not the wrapped-off shape and the
+    # ordinary REPORT arm handles it — a wrapped `--app-dir $D` must stay a
+    # report, not become a refusal.
+    case "$_norm" in
+        *--lifespan*|*UVICORN_LIFESPAN*) ;;
+        *) return 1 ;;
+    esac
+    # Then, given it does: refuse when the value is an expansion this block
+    # cannot resolve (the genuinely unreadable case — with the lifespan off no
+    # gate is installed on either side), or when it is a literal `off`.
+    case "$_norm" in
+        *'$'*) return 0 ;;
+        *--lifespan=off*|*'--lifespan off'*) return 0 ;;
+        *UVICORN_LIFESPAN=off*) return 0 ;;
+    esac
+    return 1
+}
+
+_resolve_requested_workers() {
+    # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
+    # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
+    # $WEB_CONCURRENCY, else 1. Both flag forms are handled because `--workers=N`
+    # is what a hand-edited CMD usually carries.
+    # ⛔ Locale-pinned for the same measured reason as the two predicates below:
+    # the `case`/`=~` classes on `_count` are COLLATING ranges, so under a UTF-8
+    # locale they treat U+0661 as a digit and this function stops normalising a
+    # value uvicorn's `int()` reads as 12.
+    local LC_ALL=C
+    export LC_ALL
+    local _count
+    _count="$(_resolve_raw_requested_workers "$@")"
+    # Trim ENDS only (never interior whitespace — `1 2` is not 12, it is a value
+    # uvicorn's `int()` REJECTS), then drop a leading `+`.
+    #
+    # Both are required for this measurement to agree with the server that
+    # actually starts: uvicorn parses the flag and `$WEB_CONCURRENCY` through
+    # `int()`, whose grammar is an optional sign, then digits, with surrounding
+    # whitespace tolerated. Measured on the pinned uvicorn (0.52.1): `--workers +2` starts
+    # TWO children and `WEB_CONCURRENCY=' 2 '` starts two as well. A digit-only
+    # test rejected both and reported 1 — the measurement lying about the very
+    # topology it exists to report, in the direction that reads as "safe".
+    #
+    # ⛔ The grammar below is `int()`'s own EXCEPT for non-ASCII decimal digits:
+    # `int()` accepts `_` separators BETWEEN digits (`1_0` -> 10) and Unicode
+    # decimals (`١٢` -> 12). The separators are reproduced here (bash `=~`, this
+    # script is `#!/bin/bash`) so the number matches the server that starts;
+    # Unicode digits are NOT (bash arithmetic cannot evaluate them), and stay a
+    # DECLARED RESIDUAL in the under-report direction — pinned by
+    # `_AGREEMENT_TABLE` in `tests/test_worker_topology.py`, which EXECUTES both
+    # this block and `worker_topology._positive_int` on the same input, so the two
+    # cannot drift. Do not "simplify" one arm without the other.
+    _count="$(_trim_edges "$_count")"
+    case "$_count" in
+        +*) _count="${_count#+}" ;;
+    esac
+    # Strip PEP 515 separators FIRST, and only in the shape `int()` accepts:
+    # `_10`, `10_` and `1__0` all raise ValueError there, so they must keep
+    # falling through to the normalise-to-1 arm rather than being reinterpreted
+    # as a count uvicorn would refuse to start.
+    if [[ "$_count" =~ ^[0-9]+(_[0-9]+)*$ ]]; then
+        _count="${_count//_/}"
+    fi
+    # `0`, a negative and a non-numeric value are not ours to reinterpret:
+    # uvicorn treats `workers > 1` as the supervisor's switch (so `0` and `-2`
+    # run in-process) and would raise on the non-numeric. Normalise them to 1 so
+    # this measurement can never DISAGREE with the server that starts.
+    case "$_count" in
+        ''|*[!0-9]*) _count=1 ;;
+    esac
+    # `00`-style zero is still zero.
+    if [ "$_count" -eq 0 ] 2>/dev/null; then _count=1; fi
+    printf '%s' "$_count"
+}
+
+TORTOISE_WEB_WORKERS="$(_resolve_requested_workers "$@")"
+export TORTOISE_WEB_WORKERS
+
+# ── The count predicates are LOCALE-PINNED, and that pin is load-bearing ────
+# `[0-9]` is a COLLATING RANGE, not a byte class: under a UTF-8 locale whose
+# collation folds digits, `[[ "١٢" =~ ^[0-9]+$ ]]` is TRUE and
+# `case … *[!0-9]*` does not match — MEASURED on this host:
+#   LC_ALL=C            -> regex FALSE, `case` matches  -> the count is unreadable
+#   LC_ALL=en_US.utf8   -> regex TRUE,  `case` misses   -> the count reads 12
+# `int("١٢") == 12` too, so an unpinned pair AGREES on a topology nobody
+# measured: with the lifespan off, uvicorn starts twelve ungated children while
+# this block reports one. Same defect class, and the same pin, as `_redact_uri`'s
+# note at the top of this file. The pin lives INSIDE each of the three helpers
+# (`local LC_ALL=C; export LC_ALL`) rather than once here, because `local`
+# restores the caller's value on return — a script-wide `export` would silently
+# change every later command's behaviour, which is a bigger claim than the
+# measurement supports (pinned by
+# `test_the_count_predicates_are_LOCALE_PINNED`).
+
+# ── Is the reloader going to serve instead of N workers? ──────────────────
+# uvicorn IGNORES `--workers` while reloading — measured on the pinned 0.52.1:
+# `--reload --workers 4` prints `"workers" flag is ignored when reloading is
+# enabled` and starts exactly ONE server process. Reporting 4 here would be the
+# fourth instance of the class this block exists to close (a measurement lying
+# about the topology, in the direction that reads as "safe").
+#
+# Both of uvicorn's inputs for that flag are checked: the token, and click's
+# `auto_envvar_prefix="UVICORN"` value `$UVICORN_RELOAD` — read through CLICK's
+# vocabulary (`t`/`y` are TRUE there), which is the parity contract with
+# `worker_topology._CLICK_TRUE`, pinned by `_AGREEMENT_TABLE`'s reload rows and
+# `test_the_shipped_block_reports_one_worker_while_reloading`.
+_reload_requested=0
+# ⛔ ARITY, not token membership. MEASURED on the pinned 0.52.1:
+# `--reload-include --reload --workers 2` makes `--reload` the INCLUDE PATTERN —
+# uvicorn starts NO reloader ("Current configuration will not reload …") and TWO
+# workers. A membership loop reads that as reloading and prints `workers = 1`,
+# which is the fail-open class the gate exists to close. Every long option other
+# than the FLAGS consumes the next token as its value, so that token is never
+# re-read as a flag. The flag list lives in `_uvicorn_flag_option` — ONE list
+# shared with the count reader, so a flag can never be a value-taking option in
+# one loop and a flag in the other — and is pinned against
+# `uvicorn.main.main.params` (primary AND secondary opts — the `--no-*` halves
+# live in `secondary_opts`) by `test_the_uvicorn_flag_set_is_uvicorns_own`.
+_reload_skip=0
+for _arg in "$@"; do
+    if [ "$_reload_skip" = "1" ]; then _reload_skip=0; continue; fi
+    case "$_arg" in
+        --reload) _reload_requested=1 ;;
+        --*=*) : ;;
+        -*)
+            # Same predicate the count reader uses — one list, so `--reload` can
+            # never be a value-taking option in one loop and a flag in the other.
+            _uvicorn_flag_option "$_arg" || _reload_skip=1
+            ;;
+    esac
+done
+_reload_env_undecidable=0
+case "$(printf '%s' "$(_trim_edges "${UVICORN_RELOAD:-}")" | tr '[:upper:]' '[:lower:]')" in
+    1|true|yes|on|t|y) _reload_requested=1 ;;
+    *)
+        # ⛔ click reads this value with `str_to_bool`, i.e. Python's
+        # `value.strip().lower()` — and Python's `str.strip()` ALSO strips the
+        # Unicode spaces that bash's `[[:space:]]` cannot match in ANY locale
+        # (MEASURED: NBSP survives `_trim_edges` under C, C.UTF-8 and
+        # en_US.UTF-8, while `'\xa0y'.strip()` is `'y'`, so click reads TRUE).
+        # A non-ASCII value this case does not recognise may therefore still be
+        # a reloader, and asserting "MULTI-WORKER" from it is the very lie this
+        # block exists to remove. REPORT-ONLY: `_reload_requested` is unchanged,
+        # so a boot that is not PROVABLY reloading keeps the `--lifespan off`
+        # refusal — this can only weaken a claim, never permit a boot.
+        case "${UVICORN_RELOAD:-}" in
+            *[!\ -~]*) _reload_env_undecidable=1 ;;
+        esac
+        ;;
+esac
+
+# ── Will the app's LIFESPAN run at all? ─────────────────────────────────
+# The multi-worker admission gate is the FIRST statement of
+# `hosted_api._lifespan` (`tortoise/worker_topology.py`, #1677), so turning the
+# lifespan off removes it completely: uvicorn starts N workers, none of them
+# runs the gate, and on an embedded DB they open N DIVERGENT copies of one file.
+# MEASURED on the pinned 0.52.1: `UVICORN_LIFESPAN=off WEB_CONCURRENCY=2` (no
+# TORTOISE_DB_URI) served two server processes and the gate never ran.
+#
+# uvicorn's `<flag> --lifespan` is `type=LIFESPAN_CHOICES` = (auto, on, off),
+# click `Choice` is case-SENSITIVE, and a CLI value beats the envvar — so an
+# exact `off` from either source is the only disabling value that starts.
+_app_lifespan_disabled() {
+    # ⛔ ARITY, exactly as the count and reload readers do it. `--lifespan=auto`
+    # is a lifespan FLAG only when click reaches it as a TOKEN; `--app-dir
+    # --lifespan=auto` makes it `--app-dir`'s VALUE, so uvicorn keeps the REAL
+    # `--lifespan off` while a membership scan reads "auto", concludes the
+    # lifespan runs, and skips the only gate that exists with it off.
+    # MEASURED on the pinned 0.52.1: `--lifespan off --app-dir --lifespan=auto`
+    # plus a count the shell cannot read (NBSP/Unicode digits) or an --env-file
+    # starts N server processes, runs the lifespan ZERO times, and exits 0 —
+    # N divergent embedded databases certified as "one worker".
+    local _want_value=0 _arg="" _value="" _skip=0
+    # A wrapped command line that disables the lifespan INSIDE its shell string is
+    # a disabled lifespan. The walk below deliberately skips that string (it
+    # follows `-c`, which consumes a value), so it is answered here — otherwise
+    # `sh -c "uvicorn app:app --lifespan off --workers 4"` reads as "lifespan on"
+    # and boots four workers with NO gate installed on either side.
+    if _wrapped_argv_disables_lifespan "$@"; then return 0; fi
+    for _arg in "$@"; do
+        if [ "$_want_value" = "1" ]; then _value="$_arg"; _want_value=0; continue; fi
+        if [ "$_skip" = "1" ]; then _skip=0; continue; fi
+        case "$_arg" in
+            --lifespan=*) _value="${_arg#--lifespan=}" ;;
+            --lifespan) _want_value=1 ;;
+            --*=*) : ;;
+            -*)
+                # ONE flag list, shared with the count and reload readers, so a
+                # flag can never be value-taking in one loop and a flag in
+                # another (`--no-access-log --lifespan off` must still see off).
+                _uvicorn_flag_option "$_arg" || _skip=1
+                ;;
+        esac
+    done
+    if [ -z "$_value" ]; then _value="${UVICORN_LIFESPAN:-}"; fi
+    [ "$_value" = "off" ]
+}
+
+if [ "$_IS_SERVER" = "1" ]; then
+    if [ "$_reload_requested" = "1" ]; then
+        echo "tortoise: uvicorn workers = 1 (reload; --workers is ignored while reloading)"
+    elif _app_lifespan_disabled "$@"; then
+        # ⛔ With the lifespan off, NOTHING in the app can gate the topology, so
+        # this block must refuse unless the count is PROVABLY one from inputs it
+        # can see. Two ways it may not be:
+        #   * `--env-file` / `$UVICORN_ENV_FILE` — uvicorn loads a dotenv AFTER
+        #     this measurement, so the real count is unknown here (measured: four
+        #     workers served under a banner that said one);
+        #   * a raw count this shell cannot parse (Unicode digits/whitespace).
+        # ⛔ THE COUNT'S READABILITY COMES FIRST. It is the cheapest test and the
+        # only one that must precede arithmetic: `[ "$TORTOISE_WEB_WORKERS" -gt 1 ]`
+        # on a digit string longer than `intmax_t` errors out (reads as FALSE, and
+        # leaks `integer expression expected`), so an unreadable count would fall
+        # through to "nothing to gate" — the false verdict `_count_is_verifiable`'s
+        # length guard closes. Ordered first so the comparison never runs on a
+        # value bash cannot evaluate.
+        if ! _count_is_verifiable "$@"; then
+            _refuse_why="a worker count this boot script cannot evaluate (the value is not an ASCII integer, or it is an integer too large for this shell's arithmetic — bash is intmax_t, so past 18 digits it cannot be compared), which uvicorn's int() may still turn into N"
+        elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+            _refuse_why="${TORTOISE_WEB_WORKERS} uvicorn workers"
+        elif _app_env_file_in_play "$@"; then
+            _refuse_why="a --env-file / \$UVICORN_ENV_FILE that sets the worker count AFTER this measurement"
+        elif _argv_is_shell_wrapped "$@"; then
+            _refuse_why="a command line this boot script cannot read (the server is launched through a shell string, so --workers/--lifespan are inside one argv word)"
+        else
+            _refuse_why=""
+        fi
+        if [ -n "$_refuse_why" ]; then
+            {
+                echo "tortoise: REFUSING to start — the APP LIFESPAN IS DISABLED (--lifespan off / \$UVICORN_LIFESPAN=off) and this boot has ${_refuse_why}."
+                echo "tortoise: the multi-worker admission gate is the first statement of hosted_api._lifespan (tortoise/worker_topology.py, #1677), so with the lifespan off it never runs — and N workers on an EMBEDDED database open N divergent copies of one file."
+                echo "tortoise: fix: drop the lifespan override so the gate runs, or run ONE worker (unset WEB_CONCURRENCY / drop --workers / drop --env-file and set the count in the environment)."
+            } >&2
+            exit 1
+        fi
+        echo "tortoise: lifespan DISABLED (--lifespan off) — the multi-worker admission gate cannot run; the count is verified as ONE worker, so there is nothing to gate"
+        echo "tortoise: uvicorn workers = 1"
+    elif _app_env_file_in_play "$@"; then
+        # Truthful, and not a second gate: the app's lifespan gate still runs here
+        # and refuses the spawned children, so this is the REPORT being honest
+        # about what it cannot see (`load_dotenv` happens after this measurement).
+        echo "tortoise: uvicorn workers = UNVERIFIED — --env-file / \$UVICORN_ENV_FILE can set \$WEB_CONCURRENCY AFTER this measurement, so the count above is not the count uvicorn will run; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif _argv_is_shell_wrapped "$@"; then
+        # Same honesty for the wrapped-command shape: this block cannot read the
+        # count, and it must not print one it did not measure.
+        echo "tortoise: uvicorn workers = UNVERIFIED — the server is launched through a shell string, so the count cannot be read from this argv; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif ! _count_is_verifiable "$@"; then
+        # ⛔ SAME AUTHORITY as the refusal chain above, for the same reason: an
+        # unreadable count must never REACH arithmetic. Without this arm the two
+        # `-gt 1` tests below evaluate it, fail with `integer expression
+        # expected` (which reads as FALSE, i.e. "1 worker"), and leak two raw
+        # shell diagnostics into every server boot log. MEASURED at the pre-fix
+        # head on a boot the gate PERMITS (shared DB + $TORTOISE_MULTI_WORKER=1,
+        # WEB_CONCURRENCY=s/9x21/): rc=0, "tortoise: uvicorn workers = 1", plus
+        # two `integer expression expected` lines — a measurement lying about the
+        # topology in the direction that reads as safe, which is the failure
+        # class this whole block was written to remove.
+        echo "tortoise: uvicorn workers = UNVERIFIED — the count is not a value this boot script can read (a digit string the shell cannot compare), so it cannot be compared to 1; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ] && [ "$_reload_env_undecidable" = "1" ]; then
+        echo "tortoise: uvicorn workers = UNVERIFIED — \$UVICORN_RELOAD holds a value this boot script cannot classify the way click does (click trims with Python's str.strip(), which strips Unicode spaces a shell cannot), so this may be ONE reloader child instead of ${TORTOISE_WEB_WORKERS} workers; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+        echo "tortoise: uvicorn workers = ${TORTOISE_WEB_WORKERS} — MULTI-WORKER topology, admission-gated at app startup (tortoise/worker_topology.py, #1677)"
+    else
+        echo "tortoise: uvicorn workers = 1"
+    fi
+fi
+
+# ── #1677: the admission gate, BEFORE exec — so a refusal EXITS NON-ZERO ─────
+# The block above closes the `--lifespan off` BYPASS. This one closes the
+# ENFORCEMENT hole that remains when the lifespan DOES run: a refusal raised from
+# a worker's startup exits **0**.
+#
+# MEASURED (uvicorn 0.52.1, a lifespan that raises): `--workers 3` -> exit 0;
+# one worker -> exit 3. uvicorn's Multiprocess supervisor handles a worker's
+# STARTUP_FAILURE by setting `should_exit` and RETURNING
+# (`supervisors/multiprocess.py::keep_subprocess_alive`) — it never calls
+# `sys.exit`; only the single-process path raises `SystemExit(3)`. This repo's
+# `fly.toml` is `restart policy = "on-failure"` and records that a stopped
+# machine is ZERO healthy instances (#2850). So the in-app refusal is loud and
+# non-zero exactly when 1 worker runs, and silent-and-zero exactly when N>1
+# runs — inert in the one case it exists for.
+#
+# Running the SAME policy pre-exec fixes that: it is the shipped image's path
+# (`Dockerfile.hosted` ENTRYPOINT), the count is already measured above, and the
+# refusal becomes `exit 1`, which `on-failure` sees. `refusal_reason` is the one
+# policy — this is not a second copy of the rules — and the real uvicorn argv is
+# passed through so `--reload` resolves exactly as the app will resolve it.
+# The in-app gate stays as the backstop for a direct `uvicorn` invocation that
+# bypasses this script.
+#
+# ⛔ A non-zero interpreter exit is NOT a refusal. The heredoc has exactly one
+# DELIBERATE status (`$_GATE_REFUSED_RC` below); everything else that can come
+# back — an `ImportError`/`SyntaxError` anywhere in the import chain the gate
+# pulls in, a missing interpreter (127), a usage error (2), a `ValueError` that
+# escaped the policy — is the gate failing to EVALUATE this boot. Reporting
+# those as "the admission gate refused this boot" hands the operator a cause
+# nothing verified and a fix (drop the worker count) that cannot help, at the
+# moment their deploy is down. The boot still exits 1 either way: the exit
+# STATUS is the enforcement contract (`on-failure`), the console line is the
+# diagnosis, and the two must not be conflated.
+if [ "$_IS_SERVER" = "1" ]; then
+    # `|| _gate_rc=$?` is required, not style: this script runs `set -e`, so a
+    # bare `_gate_out="$(…)"` would exit on the refusal BEFORE the diagnosis is
+    # printed — leaving the operator with the policy text and no statement that
+    # the GATE refused.
+    # 78 = `EX_CONFIG` (sysexits(3)): "configuration error", which is exactly
+    # what a refused topology is. It only has to be a status the interpreter
+    # cannot ALSO return for an uncaught exception (Python answers 1 there), so
+    # the refusal is distinguishable from every failure mode of the evaluator.
+    _GATE_REFUSED_RC=78
+    _gate_rc=0
+    _gate_out="$(python - "$@" <<'PY' 2>&1
+import sys
+
+# ⛔ `78` is the refusal contract with the shell wrapper below (`EX_CONFIG`);
+# changing one without the other turns a refusal into "could not evaluate".
+_GATE_REFUSED_RC = 78
+
+from tortoise.worker_topology import observe, refusal_reason
+
+reason = refusal_reason(observe(argv=sys.argv[1:]))
+if reason:
+    print(reason)
+    raise SystemExit(_GATE_REFUSED_RC)
+PY
+    )" || _gate_rc=$?
+    if [ "$_gate_rc" -eq "$_GATE_REFUSED_RC" ]; then
+        echo "tortoise: FATAL — #1677 multi-worker admission gate refused this boot (exit 1):" >&2
+        printf '%s\n' "$_gate_out" >&2
+        exit 1
+    fi
+    if [ "$_gate_rc" -ne 0 ]; then
+        echo "tortoise: FATAL — the #1677 admission gate could not EVALUATE this boot (python exited $_gate_rc); the topology was NOT judged — see the output below:" >&2
+        printf '%s\n' "$_gate_out" >&2
+        exit 1
+    fi
+fi
+
 exec "$@"
