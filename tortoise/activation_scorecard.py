@@ -132,6 +132,12 @@ from collections.abc import Iterable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Any
 
+# The ONE owner of the reserved sample-session prefix (`session_demo_…`, derived
+# from the mint shape, never a re-spelled literal). Imported here because a
+# module-level QUERY has to interpolate it; `stage_counts` imports the predicate
+# locally for the same reason.
+from tortoise.session_schema import DEMO_SESSION_ID_PREFIX
+
 _logger = logging.getLogger(__name__)
 
 SCHEMA_VERSION = 2
@@ -324,9 +330,32 @@ FUNNEL_QUERY = (
 # deliberate: a ``WHERE`` after a required ``MATCH`` IS a filter (the
 # absorption hazard in (1) applies only to a predicate on an ``OPTIONAL
 # MATCH``). Because this query spans all time it is intentionally unwindowed.
+#
+# ⛔ AND IT EXCLUDES THE SAMPLE SESSION AT THE QUERY, not one surface over
+# (review of #8290, P2). This is the SIBLING of the funnel: ``stage_counts``
+# filters the funnel's rows through the shared predicate, but ``first_memory_at``
+# and ``sessions_with_memory`` come from HERE and are load-bearing — a non-NULL
+# ``first_memory_at`` is what moves stage 4 off ``no_memory_produced_in_lifetime``
+# onto a measured recall count, so a demo Session carrying a non-``event`` point
+# would move the baseline back to the sample's creation date. No product writer
+# builds that shape today (the seeder wires only ``pointKind='event'`` turn
+# nodes), which is exactly why the exclusion has to be at the query rather than
+# in a reader's assumption.
+#
+# The prefix is INTERPOLATED, from its one owner, rather than bound as a
+# parameter: this query is executed at two call sites with no parameters, and
+# adding one there would move every absolute ``hosted_api.py:<line>`` cite above
+# it. ``STAGE3_PREDICATE`` is interpolated for the same reason. ``toString`` is
+# what keeps a legacy non-string id from ABORTING the query (``STARTS WITH``
+# raises ``Type mismatch`` on an integer id), and the explicit NULL arm keeps a
+# NULL-id Session counted: the demo set is exactly the prefixed ids.
+_SESSION_NOT_DEMO = (
+    "(s.id IS NULL OR NOT toString(s.id) STARTS WITH "
+    f"'{DEMO_SESSION_ID_PREFIX}')"
+)
 LIFETIME_MEMORY_QUERY = (
     "MATCH (s:Session)-[:CONTAINS]->(p:Point) "
-    f"WHERE {STAGE3_PREDICATE} "
+    f"WHERE ({STAGE3_PREDICATE}) AND {_SESSION_NOT_DEMO} "
     "RETURN min(s.created_at) AS first_memory_at, "
     "count(DISTINCT s) AS sessions_with_memory"
 )
