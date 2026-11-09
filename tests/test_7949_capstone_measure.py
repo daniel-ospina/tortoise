@@ -11479,9 +11479,14 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # and nothing in §2 refuses a BARE `:N` cite outside the two the arms beside this one hold —
         # the `:12929` base PAIR and `:12779` at `62248db88` (measured — injecting `:12944` at
         # `HEAD` into §2 leaves the whole leg GREEN; re-staling §2's `:12779` to `HEAD` reds, at
-        # the `:12779` arm). ⛔ FILE-QUALIFIED §2 cites are NOT in that hole: §2's
-        # `identity_hold.py:125`, `tortoise/value_gate.py:81` and `sdk.py:16516-16530` each
-        # re-stale to RED against the arms below (`_cite` loop, and the count-3 range arm).
+        # the `:12779` arm). ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — do not read the
+        # previous clause as "file-qualified §2 cites are watched": §2 carries NINE of those and
+        # only THREE red. Held: `identity_hold.py:125` and `tortoise/value_gate.py:81` (`_cite`
+        # loop below) and `sdk.py:16516-16530` (the count-3 range arm) — re-staling each inside §2
+        # reds, measured. UNHELD, measured GREEN on a §2 re-stale: `extractor_v2.py:1154`,
+        # `:8880`, `:9617`, `:11731-11732`, and the `research-brief.md`/`02-research-brief.md`
+        # cites — the same cites this file's own SCOPE paragraph names as watched by nothing
+        # (`test_the_reconcile_cites_resolve_where_the_record_says_they_do`, #11173).
         # The one row that reads the number holds the capstone bundle's
         # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
         # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
@@ -11490,9 +11495,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
         # of a number NO ARM HOLDS (`:13011` at HEAD) reds NOTHING (measured: whole file green).
         # `:12929` and `:12779` are the two §2 BARE numbers the arms beside this one DO hold — by
-        # the base PAIR and by `62248db88` — so those two red; the hole is every OTHER BARE `:N`
-        # cite §2 carries (`:10052`→`:10053` measured GREEN), NOT every cite: the three
-        # file-qualified ones red, measured. The §5 block is NOT that hole — its qualified cites are
+        # the base PAIR and by `62248db88` — so those two red; the hole is every OTHER §2 number
+        # that no arm holds — bare (`:10052`→`:10053`) AND file-qualified
+        # (`extractor_v2.py:8880`→`:8881`), both measured GREEN — with the three held
+        # file-qualified cites named above as the exceptions.
+        # The §5 block is NOT that hole — its qualified cites are
         # classified below. Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
