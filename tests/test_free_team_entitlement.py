@@ -1003,10 +1003,16 @@ class TestAtomicProvisionBackstop:
         orgs row is not").
 
         So the drop is gated on ATTRIBUTION: a 402 (this PR's marker, raised
-        before any write) or a 409 (PostgREST's unique-violation response) are
-        server answers that prove nothing landed. Anything else is ambiguous
-        and keeps the pre-#1981 behaviour — the namespace survives, and the
-        #3390 write-ahead journal is what makes it attributable to a sweep.
+        before any write) or a 4xx (PostgREST's unique-violation / bad-request
+        response) are server REJECTIONS that prove nothing landed. Anything else
+        — a 5xx, a transport failure — is ambiguous and keeps the pre-#1981
+        behaviour: the namespace survives. Nothing sweeps it in production
+        (`_journal_append_product` no-ops outside a test session and
+        `_sweep_team_strays` lives in `tests/_embedded.py`); what bounds the
+        accumulation is the per-user org-create rate limit, and an empty leaked
+        namespace is the deliberately cheaper failure mode (round-3 review, P2 —
+        the first draft of this docstring named the write-ahead journal as the
+        sweeper, which was fiction).
         """
         import tortoise.hosted_api as ha
         import tortoise.supabase_control as sc
@@ -1433,22 +1439,36 @@ class TestNamespaceReclaimAttribution:
     drifting copies of the judgement.
     """
 
-    def test_only_a_server_answer_proves_nothing_landed(self):
+    def test_only_a_server_REJECTION_proves_nothing_landed(self):
+        """A 5xx is NOT proof — it is the ambiguous case (round-4 review).
+
+        A 5xx reaching the caller may be PostgREST's own (its raise rolls the
+        transaction back, so reclaiming would be safe) **or a gateway's** 502/504
+        for an upstream timeout, which can be generated AFTER the transaction
+        COMMITTED. The two are indistinguishable from the message, so the
+        predicate must answer only for the class where the answer is certain.
+        """
         from tortoise.hosted_api import _rpc_failure_proves_nothing_landed
 
-        # PostgREST ANSWERED with a status: the transaction did not commit.
+        # The server REJECTED it inside the transaction → nothing landed.
         for msg in (
             "Supabase control-plane RPC failed (provision_team): HTTP 402: "
             "one_free_org_limit:org-a",
             "Supabase control-plane RPC failed (provision_team): HTTP 409: "
             "duplicate key value violates unique constraint",
-            "Supabase control-plane RPC failed (provision_team): HTTP 500: "
-            "boom",
+            "Supabase control-plane RPC failed (provision_team): HTTP 400: "
+            "bad request",
         ):
             assert _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
 
-        # TRANSPORT: the RPC may have committed and only the reply was lost.
+        # AMBIGUOUS: a 5xx (PostgREST's own vs a gateway answering after a
+        # COMMIT) or a TRANSPORT failure — the RPC may have committed.
         for msg in (
+            "Supabase control-plane RPC failed (provision_team): HTTP 500: "
+            "boom",
+            "Supabase control-plane RPC failed (provision_team): HTTP 502: "
+            "An invalid response was received from the upstream server",
+            "Supabase control-plane RPC failed (provision_team): HTTP 504",
             "Supabase control-plane RPC failed (provision_team): "
             "ReadTimeout('')",
             "Supabase control-plane RPC failed (provision_team): "
@@ -1457,6 +1477,83 @@ class TestNamespaceReclaimAttribution:
             "",
         ):
             assert not _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
+
+    def test_a_provision_refusal_still_reclaims_in_the_register_lane(
+            self, client, monkeypatch):
+        """NON-VACUITY for the pin below: the register lane must STILL reclaim
+        when the PROVISION itself is refused.
+
+        Without this leg, "never drop on the register lane" would pass the
+        attribution pin while silently re-opening the namespace leak the drop
+        exists to prevent (a 402 marker from `provision_team` is raised before
+        any write and rolls the transaction back, so nothing landed).
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, _fake = client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_team): "
+                "HTTP 402: one_free_org_limit:org-blocker")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/register", json={"email": "refused@example.com",
+                                          "password": "password123"})
+        assert r.status_code == 500, r.text
+        assert len(dropped) == 1, (
+            "a PROVABLY-refused provision left its eagerly-materialized "
+            "namespace behind — the reclaim is the reason the drop exists")
+        assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
+
+    def test_a_post_provision_failure_does_not_reclaim_the_committed_org(
+            self, client, monkeypatch):
+        """#1981 (round-4 review, P1): the reclaim must answer for the
+        PROVISION, not for whatever raised last.
+
+        `register_user` ran `provision_org` AND `set_dashboard_key_login` inside
+        ONE `try`, so the gated reclaim was evaluated against the SECOND call's
+        exception. A PostgREST answer on `set_dashboard_key_login` (e.g. HTTP
+        500) therefore read as "nothing landed" — while the provision had
+        already COMMITTED — and `GRAPH.DELETE`d the namespace of a LIVE
+        account, destroying its `TeamMeta`/`OnboardingState`.
+
+        The predicate answers "did THIS call prove nothing landed", so it may
+        only ever grade the call whose effects it compensates. The saga framing
+        confirms the scope: a compensation restores consistency for a step whose
+        effects are reversible, and there is no deprovision RPC — the orgs row
+        survives, so deleting the graph leaves a live-but-graphless account
+        rather than a compensated one (the lane's own ordering: "an orphaned
+        graph namespace is harmless, an orphaned orgs row is not").
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, _fake = client
+        provisioned: list[dict] = []
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda cp, **kw: provisioned.append(kw))
+        monkeypatch.setattr(
+            sc, "set_dashboard_key_login",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (set_dashboard_key_login): "
+                "HTTP 500: rpc set_dashboard_key_login failed")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/register", json={"email": "postcommit@example.com",
+                                          "password": "password123"})
+        assert provisioned, (
+            "the provision step never ran — this pin would be vacuous")
+        assert r.status_code == 500, r.text
+        assert dropped == [], (
+            "a failure AFTER a committed provision reclaimed the org's "
+            "namespace — that `GRAPH.DELETE`s a LIVE account's "
+            "TeamMeta/OnboardingState (round-4 review, P1)")
 
     def test_a_free_or_absent_tier_cannot_reach_the_paid_provision(self):
         """The paid-new-org lane must never carry a free tier into
