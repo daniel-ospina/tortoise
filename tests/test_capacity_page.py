@@ -578,3 +578,69 @@ def test_the_unmeasured_dimensions_are_still_named():
             f"docs/capacity.md no longer names the unmeasured dimension "
             f"'{gap}'"
         )
+
+
+# ── The held cap says so, at the cap (#10175) ───────────────────────────────
+
+#: The clause that stops a lane meeting a 402 from clearing it. Each entry is a
+#: distinct part of the ruling, not a wording of one part: the marker itself,
+#: the three prohibitions by name, and the terminal-vs-retryable distinction —
+#: a 402 from a *stock* cannot be retried, a 429 from a *flow* can, and a page
+#: that drops that sentence invites exactly the backoff loop it warns against.
+_HELD_CAP_CLAUSES = (
+    "OVERRIDES:",
+    "max_points",
+    "refill of the capped graph",
+    "unblocking",
+    "402",
+    "429",
+    "#10175",
+)
+
+#: Prose re-wraps; a clause must not depend on where a line broke. Matching is
+#: done on whitespace-collapsed text so reflowing a paragraph cannot red the
+#: guard into a false alarm — a guard that cries wolf gets deleted, which is the
+#: outcome it exists to prevent.
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _collapsed(text: str) -> str:
+    return _WHITESPACE.sub(" ", text)
+
+
+def test_the_held_capture_cap_states_that_clearing_it_is_refused():
+    """#10175 is an owner ruling in force, and §4 is where a lane MEETS the cap.
+
+    The ruling lives on the issue; the cap it protects is documented here. A
+    lane holding a 402 arrives through this page — it names the cap, its value,
+    and its enforcement — so a page that states the enforcement without stating
+    the refusal hands that lane the remedy (`max_points`) and withholds the
+    prohibition. That asymmetry is the failure: the reflex it triggers is a
+    `max_points` override, a refill for headroom, or a prune, and all three
+    destroy the only sample of what the old extractor produced (`#11469`).
+    Nothing about the ruling is mine to change; the clause is only relayed here
+    so the artifact that owns the cap also carries it.
+    """
+    text = _collapsed(_read(CAPACITY))
+    dropped = [clause for clause in _HELD_CAP_CLAUSES if clause not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer carries the #10175 refusal clause — "
+        f"missing: {dropped}. The page still documents the cap's value and its "
+        "402 enforcement, so a lane reading it is told the cap is real and is "
+        "not told that clearing it is refused (owner ruling 2026-10-27). Relay "
+        "the clause back instead of deleting it: an OVERRIDES line on a closed "
+        "issue is invisible to the lane that meets the refusal."
+    )
+
+
+def test_the_held_cap_clause_is_in_the_section_that_owns_the_cap():
+    """Relocated into §9 or the appendix, it stops being read at the cap."""
+    text = _read(CAPACITY)
+    start = text.index("## 4. Graph size (hosted node cap)")
+    end = text.index("## 5. Retrieval latency")
+    section = text[start:end]
+    assert "OVERRIDES:" in section, (
+        "the #10175 refusal clause is no longer inside §4 (Graph size, the "
+        "hosted node cap) — it is the section a lane holding a 402 reads, and "
+        "the clause is load-bearing only where the cap is documented"
+    )

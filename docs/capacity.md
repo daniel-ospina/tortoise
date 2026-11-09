@@ -15,6 +15,10 @@ related:
     note: "The root this page belongs to: a written claim must stay bound to the system it describes. Every measured row below is pinned by tests/test_capacity_page.py."
   - issue: 6211
     note: "The measured belief-propagation failure threshold recorded in §7."
+  - issue: 10175
+    note: "The owner ruling that one tenant is deliberately HELD at this cap: the refusal is the correct state, and clearing it is refused. §4 carries the clause so the lane holding a 402 meets it here, at the cap, not only on that issue."
+  - issue: 11469
+    note: "Why the held graph is evidence rather than mess: it is the only copy of what the old extractor produced."
 ---
 
 # Capacity and limits
@@ -153,6 +157,46 @@ Two properties of the cap matter more than its value:
 
 Self-hosted and embedded deployments have **no node cap applied** — there the
 bound is the host's own FalkorDB sizing.
+
+### A held cap is not a defect — one tenant is refused on purpose
+
+⚠️ **Before clearing a 402 from this cap, read this.** At least one org is
+**deliberately held at its cap** by owner ruling: the nodes
+`count_org_usage(org_id, "points")` counts are the *old* extractor's output, and
+headroom would only accumulate more of it. The refusal is the correct state, not
+an outage to remediate.
+
+**OVERRIDES:** the default engineering reflex to treat a 402 refusal as a bug and
+clear it — a `max_points` override, a refill of the capped graph, or "unblocking"
+the tenant — is **refused** (owner ruling 2026-10-27 on `#10175`, which carries
+the full record and its amendments). Three properties bind whoever meets the
+refusal:
+
+- **It is a stock, not a flow — so the refusal is terminal.** A rate limit
+  answers `429` with a `Retry-After` and clears on its own (§3). This cap answers
+  `402`, and the counted set only grows, so a retry cannot succeed and backoff is
+  not a remedy. The two must not share a retry branch: a client that backs off on
+  this 402 retries forever.
+- **The capped graph is the evidence, not the mess.** It is the only sample of
+  what the old extractor actually produced, and the tenant's Postgres record
+  holds no rows for it, so the graph is the only copy. Pruning it for headroom
+  deletes the measurement that justifies the architecture replacing it
+  (`#11469`), which is why the prohibition is stronger than its cost saving.
+- **The only lever is the plan.** `tortoise/billing.py::apply_limits` is the
+  stored cap's sole writer — `max_points := tier_limits(tier)["max_graph_nodes"]`
+  — so it moves on a **tier change**, never on an operator override.
+
+What lifts the hold is a conjunction, not a fix: the new extractor live
+(`#5087`, `#7949`), and a plan with unlimited graphs (`#9341`), after which the
+switchover runs as a **new graph** promoted to default (`#10180`, the verb that
+moves it) and is then *measured* — extractor signal-vs-noise, and hosting cost in
+**bytes**, never nodes (`#4051`). Half a conjunction is still false, so the hold
+stands until all of it is true.
+
+`#10175` stays open **on purpose** while it holds: it is the artifact that carries
+the clause, and an `OVERRIDES:` line on a closed issue is invisible to the lane
+that meets the 402. Closing it is not bookkeeping — it is how the next 402 starts
+looking like a bug again.
 
 ## 5. Retrieval latency
 
