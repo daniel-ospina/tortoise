@@ -436,7 +436,7 @@ jobs:
         # the non-gating lane (each entry → its resolved file count) and the
         # shard → file-count map the run is about to expand. A reader can then
         # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
-        # nine shards instead of inferring it from a total.
+        # ten shards (nine when #11602 wrote this) instead of inferring it from a total.
         #
         # Report-only on purpose: it reads the same `push_legs()` derivation the
         # matrix step above emits, and it exits 0 on every path. The gate on this
@@ -746,12 +746,12 @@ jobs:
     strategy:
       fail-fast: false
       # #6744: BOUND THE FAN-OUT. Unset, a matrix ADMITS its whole shard set at
-      # once — a PR that selects all three lanes requests 17 matrix jobs at the
-      # same instant (9 fast + 5 slow + 3 carve-out). The `test-slow` and
+      # once — a PR that selects all three lanes requests 18 matrix jobs at the
+      # same instant (10 fast + 5 slow + 3 carve-out). The `test-slow` and
       # `test-carve-out` matrices are `if:`-guarded on the diff, but `test` is
       # NOT conditionally skippable: `changes` writes `python=true` on every
       # pull request (`# tier-1 smoke runs on every PR`), so every PR hands the
-      # pool all 9 fast legs at once — which is the fan-out this bounds.
+      # pool all 10 fast legs at once — which is the fan-out this bounds.
       # Measured over 9 `python-ci` runs (2026-10-30T21:48Z ..
       # 2026-10-31T02:54Z, jobs API `filter=all`, completed jobs only): ONE PR's
       # peak simultaneous jobs was p50 11 / **max 18** against a 12-runner pool
