@@ -6661,8 +6661,13 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     continued across five indented lines, with the `2026-11-02` basis appended in the
     MIDDLE (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded
     (…) lane …`), where an end-anchored match finds nothing. The `2026-11-09` refresh
-    flattened that note, so the row is now ONE line whose only basis ENDS it
-    (`config/ci-surfaces.yml:11133`; `spans[-1][1] == len(note.rstrip())`). The
+    flattened that note, so the row is now ONE line whose only basis ENDS it (its row
+    under `durations:` in `config/ci-surfaces.yml`; `spans[-1][1] == len(note.rstrip())`).
+    ⛔ Cited by MECHANISM, never by line number (#11602 review P3): this sentence
+    carried a line number that was correct when written and rotted **in this same PR**,
+    when the `origin/main` merge pushed the row 77 lines down onto the `durations:`
+    preamble. `test_any_ci_surfaces_line_citation_here_resolves_to_a_durations_row`
+    is the executable pin on that convention. The
     flattening is the writer's documented CUT behaviour (see
     `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), not a
     defect — but its consequence is that a module whose `_prior_basis_spans` is
@@ -6674,6 +6679,112 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     """
     _assert_a_re_base_supersedes_the_newest_basis(
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+
+
+_CITED_MANIFEST_LINE_RE = re.compile(r"config/ci-surfaces\.yml:(\d+)")
+
+# The row this file's wrapped-row docstrings cite by KEY. A mechanism citation is
+# only durable if the key it names is still a row, so the pin below checks that too.
+_MECHANISM_CITED_ROW = "test_source_staleness_sweep_5038.py"
+
+
+def _cited_manifest_lines_that_are_not_durations_rows(
+    source: str, manifest_lines: list[str]
+) -> list[int]:
+    """Every 1-based line cited as `config/ci-surfaces.yml:<n>` that is NOT a row.
+
+    A citation resolves only when it lands on the line that CARRIES a `durations:`
+    key — not on the preamble between two rows, and not past the end of the file.
+    """
+    _block_start, entries = ci_timing._locate_durations_block(manifest_lines)
+    row_lines = set(entries.values())
+    offenders = []
+    for match in _CITED_MANIFEST_LINE_RE.finditer(source):
+        number = int(match.group(1))
+        if not 0 < number <= len(manifest_lines) or (number - 1) not in row_lines:
+            offenders.append(number)
+    return offenders
+
+
+def test_any_ci_surfaces_line_citation_here_resolves_to_a_durations_row() -> None:
+    """A `config/ci-surfaces.yml` LINE citation must land on a `durations:` row.
+
+    #11602 review (P3), executed. The docstring of
+    `test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits` cited the row it
+    describes by LINE NUMBER, and that number rotted **inside the PR that wrote it**:
+    at `05026c4` the row sat where the number said, and at the head `1dc63b1` merged
+    `origin/main` into the branch and the 22 added rows pushed it down — so the
+    citation landed on unrelated `durations:` PREAMBLE prose, while the sentence it
+    was the evidence for stayed put. No pin read citations inside a test docstring, so
+    it would have shipped silently; the map pins its OWN §5 citations for exactly this
+    reason (`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes`)
+    and `tests/test_deploy_workflow.py` pins its own the same way.
+
+    The fix is the manifest's own rule — *named by mechanism, not by line number* —
+    plus this pin, so a re-introduced `:<n>` citation is CHECKED rather than banned.
+    ⚠️ **The pin is CONDITIONAL, and says so:** it verifies the citations that EXIST,
+    and the sentence that prompted it now cites by mechanism, so a green run means
+    *"no rotten pointer here"*, not *"a pointer was verified"* — a scanner matching
+    nothing looks identical to one that checked everything. The non-vacuity arm below
+    is therefore SYNTHETIC (so it cannot rot): it reds the resolver on the exact shape
+    that fooled the original — an indented preamble line between two rows — and greens
+    it on a row line and reds it past the end of the file.
+
+    ⛔ Quoting a rotten pointer as HISTORY: write it without the `:<n>` suffix, or this
+    pin (and the sibling in `test_deploy_workflow.py`) will read the quotation as a live
+    claim.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    manifest_lines = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text(
+        encoding="utf-8").splitlines()
+    _block_start, entries = ci_timing._locate_durations_block(manifest_lines)
+
+    offenders = _cited_manifest_lines_that_are_not_durations_rows(source, manifest_lines)
+    detail = "\n  ".join(
+        f"line {n}: "
+        + (manifest_lines[n - 1].strip()[:120] if 0 < n <= len(manifest_lines)
+           else "<beyond the file>")
+        for n in offenders
+    )
+    assert not offenders, (
+        "a `config/ci-surfaces.yml` line citation in this file does not resolve to a "
+        "`durations:` row — it points at preamble prose (or past EOF):\n  " + detail + "\n"
+        "Cite the row by KEY (e.g. `its row under `durations:` in "
+        "config/ci-surfaces.yml`) — a line number here has already rotted once, in the "
+        "very PR that wrote it (#11602 review P3)"
+    )
+
+    # The mechanism arm: a key citation is durable only while the key is a row.
+    assert _MECHANISM_CITED_ROW in entries, (
+        f"the docstrings in this file cite the `durations:` row for "
+        f"{_MECHANISM_CITED_ROW} by KEY, and that key is not a row of the map — a "
+        f"mechanism citation that names nothing is the same defect as a rotten line "
+        f"number"
+    )
+
+    # NON-VACUITY, on a synthetic map (a committed-map arm would rot with the next
+    # sweep, the failure mode the sibling test's docstring describes).
+    synthetic = [
+        "durations:",
+        "  test_alpha.py: 1.0  # a row",
+        "  # indented preamble between two rows — the shape the original citation hit",
+        "  test_beta.py: 2.0",
+    ]
+
+    def cite(number: int) -> str:
+        return "`" + "config/ci-surfaces.yml" + f":{number}`"
+
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(2), synthetic) == []
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(4), synthetic) == []
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(3), synthetic) == [3], (
+        "the resolver would stay GREEN on the very shape that rotted this docstring: an "
+        "indented preamble line between two `durations:` rows"
+    )
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(99), synthetic) == [99]
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(1), synthetic) == [1], (
+        "the `durations:` key line itself carries no row, so a citation onto it is a "
+        "citation onto nothing"
+    )
 
 
 def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> None:
