@@ -734,11 +734,13 @@ def test_D3_order_the_record_write_follows_the_journal_append(traced):
     # direction D3 forbids. Measured (review round 9): writing
     # `TurnsRecorded`'s record ahead of its own append (`seq=None`) left all
     # four D3_order legs passing. Compare POSITIONS, pairwise.
-    journal_pos = [i for i, e in enumerate(traced.entries) if e.door == "journal"]
-    applied_pos = [
-        i for i, e in enumerate(traced.entries)
-        if e.door == "record" and e.outcome is record_writer.RecordWriteOutcome.APPLIED
-    ]
+    # Positions come from the SAME objects the `zip` above paired, via one index
+    # map — not from a re-filtered copy. A second copy of the predicate would
+    # silently decouple identity pairing from position pairing the day someone
+    # edits one filter and not the other.
+    index_of = {id(e): i for i, e in enumerate(traced.entries)}
+    journal_pos = [index_of[id(e)] for e in journal]
+    applied_pos = [index_of[id(e)] for e in applied]
     assert all(j < r for j, r in zip(journal_pos, applied_pos, strict=True)), (
         "a record write preceded its own journal append — the record was written "
         "from something other than the journal's append (D3's cache-only shape, "

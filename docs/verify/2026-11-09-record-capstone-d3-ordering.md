@@ -431,11 +431,15 @@ the pairwise order its name and docstring claim.
 |---|---|---|---|
 | 1 | **P1** — `test_D3_order_the_record_write_follows_the_journal_append` asserts the k-th APPLIED record's `event_id` equals the k-th append's, then that the FIRST append precedes the FIRST record. A door that pre-writes **one event kind's** record ahead of its own append keeps both: identity pairing survives, and `first_journal < first_record` is satisfied by pair #1. The docstring claims it fails on *"a record write with no journal append behind it"*, and it did not | reproduced: `_emit_event`, `TurnsRecorded` only, `self._write_record_projection(event, seq=None)` before `log.append(event)` and the post-append write skipped → **`4 passed`** (`-k D3_order`), every leg green while a record write precedes the append it answers. Tree restored from a byte-exact copy (`git diff --exit-code` clean) | assert pairwise **position**: `journal_pos`/`applied_pos` from `traced.entries`, then `all(j < r for j, r in zip(journal_pos, applied_pos, strict=True))`. Re-measured with the mutation still applied: leg 1 **reds** (F9, §6.2); mutation reverted, clean run **`5 passed`** with the census unchanged |
 
-**Why the three prior clean verdicts at this head did not contradict it:** they measured a **total**
+**Why the one clean verdict at this head did not contradict it:** `6752998977` (round 8,
+`verdict=clean`) attributed no mutation to this class. Its seven attribution rows — dropping the record
+write, forcing the unarmed seam, reordering the fold inside `_apply_and_journal`, a cache-ahead
+statement on that door, a lane rename, the lane-less ahead injection and the top-of-region cache
+injection (comment `6752996181`) — contain no per-event journal/record inversion. The **total**
 inversion (the record write moved ahead of the journal for *every* event), which legs 1 and 2 both
-detect. The gap is the **per-event** shape, which only a positional assertion sees. A `clean` verdict
-and a `P1` on the same head are compatible when they measure different mutation classes — which is
-why the mutation, not the verdict, is the evidence.
+detect, was measured by the **not-clean** review itself (`6753089977`), and it is a different mutation
+class from the per-event shape. A `clean` verdict and a `P1` on the same head are therefore compatible
+when they measure different mutations — which is why the mutation, not the verdict, is the evidence.
 
 **This is an assertion added, never a weakened one.** Every existing assertion is kept (receipt `ok`,
 counts equal, APPLIED count equal, `event_id` pairing, the global floor); the positional check is
