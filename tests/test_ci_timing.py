@@ -4273,6 +4273,63 @@ def test_ci_timing_workflow_is_the_durations_bridge_scheduler() -> None:
             "config/ci-surfaces.yml" in open_pr["run"])
 
 
+def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
+    """#11602 review, P1 — AN INERT-ENFORCER PIN for #11607.
+
+    `collected_test_counts()` is the only thing that lets a `parametrize` file's
+    durations row ever move DOWN, and it works by shelling out to
+    `python -m pytest --collect-only`. That makes `pytest` an INSTALL-TIME
+    dependency of the weekly writer, and the job installed PyYAML alone — so the
+    probe exited 1 there, contributed no denominator, and the whole capability was
+    a no-op in its only scheduled caller while every gate read green (measured at
+    PR #11602: the committed 545.1 -> 103.8 re-base came from a hand-run on a box
+    with the venv, not from this workflow).
+
+    `tests/conftest.py` imports `httpx` at module scope, so pytest alone is not
+    enough to COLLECT anything. Both are asserted, because either one missing puts
+    the capability back to inert — and the second is the non-obvious half.
+    """
+    wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
+    steps = wf["jobs"]["measure"]["steps"]
+    installs = " ".join(str(s.get("run") or "") for s in steps)
+    assert "pytest" in installs, (
+        "the `measure` job no longer installs pytest, so `collected_test_counts` "
+        "cannot run there and a parametrised row is silently back to "
+        "raisable-never-lowerable (#11607) — this is the inert state, not a "
+        "style problem")
+    assert "httpx" in installs, (
+        "`tests/conftest.py` imports httpx at module scope, so `pytest "
+        "--collect-only` fails without it and contributes no denominator; "
+        "pytest alone is not enough to make the probe runnable")
+
+
+def test_a_failed_collection_probe_is_loud_and_fails_closed(capsys) -> None:
+    """The other half of the inert-enforcer finding: the probe must SAY when it
+    cannot produce a denominator.
+
+    It stays fail-closed — the key is absent, so the row remains UNKNOWN and a
+    lower reading cannot re-base it — but a capability that switches itself off
+    with no output is indistinguishable from one that works, which is how #11607
+    shipped inert. Non-vacuity: the pre-review code `continue`d silently, so this
+    capture would be empty.
+    """
+    real = ci_timing.subprocess.run
+
+    def _no_pytest(cmd, *a, **kw):
+        raise FileNotFoundError("No module named pytest")
+
+    ci_timing.subprocess.run = _no_pytest
+    try:
+        counts = ci_timing.collected_test_counts(
+            ["test_dialog_tile_key.py"], Path(__file__).resolve().parent.parent)
+    finally:
+        ci_timing.subprocess.run = real
+    assert counts == {}, "a failed probe must contribute NO denominator"
+    err = capsys.readouterr().err
+    assert "::warning::" in err and "test_dialog_tile_key.py" in err, (
+        f"a probe that cannot run must say so, naming the file: {err!r}")
+
+
 # ── The refresh job's missing token + its fail-open swallow (#3092) ──────
 #
 # `refresh` is the ONLY job in the whole workflow set that called `gh` with no

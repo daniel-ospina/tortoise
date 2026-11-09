@@ -254,7 +254,7 @@ not fit — but on the measured rates, not on an assumption: this run's degraded
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
 class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
-~57 m+ degraded against the ~10.4 m of room the SUM leaves. Splitting the payload is what brings it
+~57 m+ degraded against the ~8.4 m of room the SUM leaves. Splitting the payload is what brings it
 inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
 that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
@@ -534,9 +534,12 @@ committed `durations` map — and
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
 double it, which is the false PASS this pin exists to prevent. The fast
-matrix's band is pinned at `ceil(9/3)` = 3 waves — inside the 2–4 wave band invariant 1 protects,
-but on the runs where the pool delivered those 9 shards in 2, the third wave is new wall. No saving
-is claimed on the runs where it took 4. The pair is what the simulation's **matrix-band end delta
+matrix's band is pinned at `ceil(10/3)` = **4** waves after #11602 raised `fast_shards` to 10
+(it was `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
+protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for
+the arithmetic below: the `+17.9 m p50 / +23.2 m max` band delta was simulated on the 3-wave shape,
+so it is a LOWER bound on the shipped 4-wave one, not a measurement of it — re-derive before
+quoting it as the current figure. No saving is claimed on the runs where it took the full 4. The pair is what the simulation's **matrix-band end delta
 of +17.9 m p50 / +23.2 m max** (table above) records, and that — not the slow matrix's ~9 m in
 isolation — is the figure a keep-vs-rollback reading must use (see "The re-derivation cannot use
 per-job queue wait", below). Capping slow at
@@ -574,9 +577,9 @@ matrices, so it applies to a fold's validation run exactly as to any other PR. T
 a fold is the one run this repo deliberately gives extra capacity to:
 `docs/ops/batch-integration.md` mechanism 3 ("CI priority for the fold") gives the fold's matrix
 rows their own runner class, and `tools/ci_selection.py::fast_matrix_include` states that
-exemption's scope in its own words — "A fold gets priority on the eight legs that carry the wall",
-the fast matrix's 9 shards minus the `canary_producer` row, which stays on the hosted label for the
-streak. Those eight are legs this cap bounds, so while the class seam is engaged (it is OFF by
+exemption's scope in its own words — "A fold gets priority on the nine legs that carry the wall",
+the fast matrix's 10 shards minus the `canary_producer` row, which stays on the hosted label for the
+streak. Those nine are legs this cap bounds, so while the class seam is engaged (it is OFF by
 default: with `CI_FOLD_RUNNER_LABELS` unset every row resolves to its own runner) a fold with
 dedicated capacity for all 8 still runs them **3 at a time**, and its own validation run carries the
 matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN COST of #6744, not
