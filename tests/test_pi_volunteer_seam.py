@@ -95,6 +95,29 @@ _SEEDED_CLAIM = "CI pipeline deploys via GitHub Actions"
 
 
 def _base_env(home: Path) -> dict:
+    # ⛔ The seam's OWN switches are BLANKED here, not merely deleted from
+    # `os.environ` in the fixture (#11584 review round 12). `{**os.environ}`
+    # copies them in, and `_run_driver` hands this dict straight to node where
+    # the seam reads it — so an operator or CI runner with
+    # `TORTOISE_VOLUNTEER_DISPLAY=1` exported (a switch the seam documents)
+    # REDS the W4 "silent by default" row: a verdict about the HOST, not the
+    # artifact, and indistinguishable from a real regression. Measured:
+    #
+    #   $ TORTOISE_VOLUNTEER_DISPLAY=1 pytest tests/test_pi_volunteer_seam.py \
+    #         -q -k installed_extension_injects_the_real_reflex_block
+    #   E  AssertionError: silent by default (W4 posture)
+    #   E  assert True is False
+    #
+    # This is the same root the sibling `hermetic()` helper names verbatim in
+    # `tortoise-volunteer.test.ts` ("a Pi user who followed the SHIPPED README
+    # reds the silent-default row"), closed one layer over. Empty is falsy for
+    # both `truthy()` and the `||`/`??` chains, so the SHIPPED default stays
+    # the path under test rather than being skipped.
+    #
+    # `VIRTUAL_ENV` is deliberately NOT blanked: `_run_driver` supplies the
+    # interpreter on `PATH`, and `VIRTUAL_ENV` is a legitimate candidate in the
+    # seam's module-dir resolution — blanking it would test a different path
+    # than a real install takes.
     return {
         **os.environ,
         "TORTOISE_DB_PATH": str(home.parent / "seams.db"),
@@ -106,6 +129,12 @@ def _base_env(home: Path) -> dict:
         # assertions vacuous. Nothing here is ever transmitted.
         "TORTOISE_API_KEY": "",
         "TORTOISE_API_URL": "",
+        # The seam's own switches — see this function's header.
+        "TORTOISE_VOLUNTEER_DISPLAY": "",
+        "TORTOISE_VOLUNTEER_DEBUG": "",
+        "TORTOISE_VOLUNTEER_DISABLE": "",
+        "TORTOISE_COMMAND": "",
+        "TORTOISE_SRC_DIR": "",
     }
 
 
@@ -114,10 +143,13 @@ def home(tmp_path, monkeypatch):
     """An isolated HOME with a seeded embedded graph beside it."""
     h = tmp_path / "home"
     h.mkdir()
-    env = _base_env(h)
     for key in ("TORTOISE_API_KEY", "TORTOISE_API_URL",
                 "TORTOISE_VOLUNTEER_DISABLE", "TORTOISE_COMMAND"):
         monkeypatch.delenv(key, raising=False)
+    # AFTER the `delenv` loop on purpose: built before it, `env` still carried
+    # the operator's values even though `os.environ` had been cleaned, so the
+    # two could silently disagree (#11584 review round 12).
+    env = _base_env(h)
     # `PATH.home()` is what the INSTALLER and the `--uninstall` verb resolve
     # their root from, so the fixture must move it too or `_uninstall_pi_volunteer`
     # would act on the developer's real `~/.pi`.
