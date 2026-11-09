@@ -8438,10 +8438,12 @@ def _full_selection_claim_violations(
 ) -> list[str]:
     """Every full-selection count stated in `sources` that disagrees with the shipped shape.
 
-    `total` is the max a run can request (legs + non-matrix), `typical` is what a PR run actually
-    requests (total minus the push-gated jobs). Both are checked: a doc may state one half
-    correctly and the other half wrongly, which is exactly how `20 jobs (max 29)` survived the
-    9 -> 10 raise.
+    `total` is the max a run can request (legs + non-matrix). `typical` is what a PR run actually
+    requests, and it is NOT `total` minus the push-gated jobs: the `test-slow` and
+    `test-carve-out` matrices are PATH-gated, so a typical PR run emits neither. It is the fast
+    shards plus the always-eligible non-matrix jobs (`21 = 10 + 11` at this head). Both are
+    checked: a doc may state one half correctly and the other half wrongly, which is exactly how
+    `20 jobs (max 29)` survived the 9 -> 10 raise.
 
     Pure, so the non-vacuity control below can feed it the PRE-FIX text instead of trusting a
     comment that the pin would catch the numbers it was written to catch.
