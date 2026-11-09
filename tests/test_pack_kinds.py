@@ -1197,14 +1197,17 @@ class TestWorkedExampleV3Fixture:
         # for stored data (LEGACY_KIND_ALIASES); it is not a declared kind.
         #
         # #11000: the bucket is now ALSO widened by the kind's declared
-        # `subclassOf: WorkItem` — both spellings of the parent — so this is an
-        # additive-content pin, not an exact list (an exact list here re-encodes
-        # "the parent is missing" and would have to be re-broken by hand to
-        # widen the expansion again).
+        # `subclassOf: WorkItem` (transitively: `WorkItem ⊑ Object`) — both
+        # spellings of each. This is an EXACT set, deliberately order-insensitive
+        # (`set(...) ==` rather than `list(...) ==`): an exact LIST here re-encodes
+        # the pre-#11000 bucket and would have to be re-broken by hand for any
+        # legitimate widening, whereas the set is equally strict about unexpected
+        # members while a new member is a conscious one-line edit. It is NOT a
+        # `⊇` pin on purpose — it also has to catch a member going MISSING.
         _req = registry.expand_kind("product-strategy:requirement")
         assert set(_req) == {
             "product-strategy:requirement", "dev:requirement",
-            "WorkItem", "core:WorkItem",
+            "WorkItem", "Object", "core:WorkItem", "core:Object",
         }, _req
         assert "dev:requirement" not in registry._all_known_kinds()
 

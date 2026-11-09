@@ -229,8 +229,14 @@ CORE_KINDS = (
 CORE_SUBCLASSES: dict[str, tuple[str, ...]] = {
     "Object": tuple(sorted(CANONICAL_OBJECT_KINDS)),
     "Subject": (
-        # ONTOLOGY §5 Subject Kind Vocabulary = §6's Subject row. Both exclude
-        # `other` (the NIL bucket, which declares nothing about the layer).
+        # ONTOLOGY §6's Subject row. ⚠ §6 EXCLUDES `other`; §1 (line 55) and
+        # §5's Subject block both INCLUDE it — the doc disagrees with itself.
+        # §6 is followed here because this brief names it as the source of core
+        # parentage, and because `other` is the NIL bucket (`kind_layers
+        # .NIL_KINDS`: it declares nothing about the layer). **Consequence,
+        # recorded rather than implied:** `subjectKind='other'` is the
+        # projection's ON CREATE default, so `expand_kind("Subject")` does NOT
+        # match the modal Subject — a propose-and-wait §6 edit is on #11000.
         "legalPerson", "naturalPerson", "organization", "role", "team",
     ),
     "Point": tuple(sorted(CANONICAL_POINT_KINDS)),
@@ -3354,38 +3360,6 @@ class PackRegistry:
                     full = f"{ns}:{kind}"
                     expansions[full] = [full]
 
-        # Apply subclassOf: a pack child ALSO expands to its declared parent.
-        #
-        # #11000 (Leg A): `parent` was bound and never read — the B007
-        # (unused-loop-variable) suppression on the loop was the tell — so the
-        # comment above promised a widening the loop did not do. `expand_kind("dev:issue")` therefore carried only
-        # its `equivalentTo` peer (`pm:issue`) and never `WorkItem`, i.e. a
-        # pack's declared business vocabulary was loaded, validated, and then
-        # invisible to every read that depends on it.
-        #
-        # ONE level IS the transitive closure here, and that is a property of
-        # the DECLARATION model, not a simplification: `_validate` restricts a
-        # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`,
-        # so a pack can never parent another pack kind, and no core kind carries
-        # a parent of its own (`CORE_SUBCLASSES` rows are a forest of depth 1).
-        # Both premises are pinned by
-        # ``tests/test_pack_registry_gaps.py::TestCoreHierarchy`` — relax either
-        # and the closure stops being one level, which reds those pins rather
-        # than silently under-widening. (RDFS §3.4 makes `rdfs:subClassOf`
-        # transitive and SHACL's `sh:class` validates against the transitive
-        # closure of `rdf:type`; here the closure of a depth-1 forest is the
-        # forest, so a fixpoint walk would compute the same table.)
-        #
-        # The PARENT NAME only, never the parent's bucket: a `dev:issue` is a
-        # `WorkItem`, but it is not a `dev:pullRequest`.
-        for p in self.packs.values():
-            ns = p.namespace
-            for child, parent in p.kind_subclasses.items():
-                full_child = f"{ns}:{child}"
-                bucket = expansions.setdefault(full_child, [full_child])
-                if parent not in bucket:
-                    bucket.append(parent)
-
         # Apply equivalentTo: bidirectional
         for p in self.packs.values():
             ns = p.namespace
@@ -3439,6 +3413,86 @@ class PackRegistry:
                 old_bucket = expansions.setdefault(old_kind, [old_kind])
                 if new_kind not in old_bucket:
                     old_bucket.append(new_kind)
+
+        # ── #11000: the declared SUPERTYPE closure ────────────────────────
+        # ONE mechanism for the widest half of the expansion:
+        #
+        #     expand_kind(K) ⊇ {K} ∪ supertypes*(K) ∪ same-kind*(theirs)
+        #
+        # Before #11000 this direction did not exist at all (a pack child
+        # carried only its `equivalentTo` peer: `expand_kind("dev:issue")` was
+        # `['dev:issue', 'pm:issue']` and never `WorkItem`), and the loop that
+        # was supposed to apply it bound `parent` without ever reading it. The
+        # edges come from THREE declared sources, and each one was missing:
+        #
+        #   * a pack's `subclassOf` — `dev:issue ⊑ WorkItem` (Leg A);
+        #   * §6's core rows — `WorkItem ⊑ Object`. The table declares that
+        #     parentage (§6 is titled "Core subclasses"), so ignoring its
+        #     upward half would leave the table stating a hierarchy it then
+        #     refuses to apply;
+        #   * `equivalentTo` / `LEGACY_KIND_ALIASES` peers — they are the SAME
+        #     kind, so they are the same SUBTYPE. Without this the legacy
+        #     `dev:requirement` spelling (a STORED kind, #7848) misses the
+        #     `WorkItem` its current spelling carries, and one read spelling is
+        #     narrower than the other — the read-path asymmetry #6146 forbids.
+        #
+        # A FIXPOINT rather than one hop, because the edges chain:
+        # `dev:issue → WorkItem → Object`. It terminates: every pass only adds a
+        # name that some closure set already holds, and the union of the three
+        # edge sets is finite and cycle-free by `_validate` (a `subclassOf`
+        # parent must be a CORE kind) plus §6's own shape.
+        #
+        # ⚠️ Copies the parent's SUPERTYPES, never the parent's BUCKET. A root's
+        # bucket holds that root's CHILDREN (see the loop above), so appending
+        # `expand_kind("WorkItem")` wholesale would make a `dev:issue` "a
+        # dev:pullRequest". The two directions are deliberately different
+        # relations and only the supertype half is transitive.
+        parents: dict[str, set[str]] = {}
+        for parent_kind, core_children in CORE_SUBCLASSES.items():
+            for core_child in core_children:
+                parents.setdefault(core_child, set()).add(parent_kind)
+        for p in self.packs.values():
+            ns = p.namespace
+            for child, parent in p.kind_subclasses.items():
+                parents.setdefault(f"{ns}:{child}", set()).add(parent)
+
+        # The one-hop supertype sets, grown to a fixpoint (transitively, then
+        # across every same-kind edge in both directions — two names for one
+        # kind have identical supertypes).
+        supertypes: dict[str, set[str]] = {
+            kind: set(parents_set) for kind, parents_set in parents.items()
+        }
+        same_kind: list[tuple[str, str]] = []
+        for p in self.packs.values():
+            ns = p.namespace
+            for kind, targets in p.kind_equivalences.items():
+                same_kind.extend((f"{ns}:{kind}", target) for target in targets)
+        for new_kind, legacy_kinds in LEGACY_KIND_ALIASES.items():
+            same_kind.extend((new_kind, old_kind) for old_kind in legacy_kinds)
+
+        changed = True
+        while changed:
+            changed = False
+            for supers in supertypes.values():
+                inherited = set(supers)
+                for parent in supers:
+                    inherited |= supertypes.get(parent, set())
+                if inherited != supers:
+                    supers |= inherited
+                    changed = True
+            for one, other in same_kind:
+                # Same kind: the union goes BOTH ways, so the pair ends equal.
+                merged = supertypes.setdefault(one, set()) | supertypes.setdefault(other, set())
+                if merged != supertypes[one] or merged != supertypes[other]:
+                    supertypes[one] = merged
+                    supertypes[other] = merged
+                    changed = True
+
+        for kind, supers in supertypes.items():
+            bucket = expansions.setdefault(kind, [kind])
+            for parent in sorted(supers):
+                if parent not in bucket:
+                    bucket.append(parent)
 
         # ── #11000: ONE kind, TWO live spellings ──────────────────────────
         # A core kind is spelled BARE (`WorkItem`) by pack declarations and
