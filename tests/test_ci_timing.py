@@ -1148,9 +1148,21 @@ def test_a_skipped_case_cannot_be_counted_as_a_measured_one(
     the #9651 under-weight `coverage` exists to prevent, and reachable for a
     `parametrize` file only since #11607 gave that class a denominator at all.
 
-    Non-vacuity: with the witness built from `m["tests"]` — the shape that shipped
-    — coverage is (3, 3), `observed >= declared` holds and the row re-bases to
-    0.1 s, so both assertions below fail.
+    TWO ARMS, and neither stands in for the other (#11602 review, P3 — this
+    docstring used to claim the arms below it red on the witness swap, which they
+    cannot: they read the READING, not the witness):
+
+    * HERE — the divergence is real in the collector (`tests` 3 beside `ran` 2 for
+      this junit) and the renderer HOLDS a `ran` witness: measured, swapping this
+      call's witness to `(entry["tests"], 0)` makes coverage (3, 3) against 3
+      collected, `observed >= declared` holds, the row re-bases to 0.1 s and the
+      two assertions BELOW THIS PARAGRAPH (the 545.1 hold and
+      `kept_as_lower_bound == 1`) red. Reverting the renderer's
+      `observed >= declared` rule reds them too;
+    * `test_the_cli_witness_counts_executed_testcases_not_reported_ones` — the
+      CALLER wiring (`main` reading `m["ran"]`), measured by reverting it to
+      `m["tests"]`: that pin reds with `(4, 4)` against `(3, 4)`. This test cannot
+      see that swap, because it supplies its own witness.
     """
     repo = tmp_path / "repo"
     (repo / "tests").mkdir(parents=True)
