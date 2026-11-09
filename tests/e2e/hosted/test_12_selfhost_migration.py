@@ -166,6 +166,14 @@ def _boot_selfhost(tmpdir: str):
         # and the 30s fail-fast is left intact rather than raised (raising it
         # would hide a genuinely wedged server instead).
         for _attempt in range(_WARM_ATTEMPTS):
+            # Re-checked here, not only in phase 1: the expensive first write is
+            # now a BOOT step, so a daemon that dies inside it (OOM/segfault, the
+            # window this commit moved into boot) must surface as "died" with its
+            # log tail — `_warm_write_path` swallows every exception into a
+            # write-path string, and the log in the tmpdir is unreachable from CI.
+            if proc.poll() is not None:
+                tail = log_path.read_text(errors="replace")[-2000:]
+                raise RuntimeError(f"selfhost died during boot:\n{tail}")
             warmed, last_err = _warm_write_path(base, deadline)
             if warmed:
                 return base, proc
