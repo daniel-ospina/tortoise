@@ -337,15 +337,28 @@ FUNNEL_QUERY = (
 # and ``sessions_with_memory`` come from HERE and are load-bearing — a non-NULL
 # ``first_memory_at`` is what moves stage 4 off ``no_memory_produced_in_lifetime``
 # onto a measured recall count, so a demo Session carrying a non-``event`` point
-# would move the baseline back to the sample's creation date. No product writer
-# builds that shape today (the seeder wires only ``pointKind='event'`` turn
-# nodes), which is exactly why the exclusion has to be at the query rather than
-# in a reader's assumption.
+# would move the baseline back to the sample's creation date.
 #
-# The prefix is INTERPOLATED, from its one owner, rather than bound as a
-# parameter: this query is executed at two call sites with no parameters, and
-# adding one there would move every absolute ``hosted_api.py:<line>`` cite above
-# it. ``STAGE3_PREDICATE`` is interpolated for the same reason. ``toString`` is
+# REACHABILITY, STATED HONESTLY: no seeded graph builds that shape. The demo
+# seeder wires NO ``CONTAINS`` edge to the sample Session at all, and the turn
+# nodes an earlier seeder did wire carried ``pointKind='event'``, which
+# ``STAGE3_PREDICATE`` already excludes. So the hazard is reachable only from a
+# writer that wires a NON-``event`` claim point to a demo-id Session — the
+# extraction lane's ``CONTAINS`` wiring is such a writer (`sdk._capture_turn_ids`
+# says so) — which is exactly why the exclusion belongs at the query rather
+# than in a reader's assumption about what today's seeder does.
+#
+# The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
+# as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
+# the one PRODUCTION execution is ``hosted_api.py:23128`` (the module's own test
+# is the only other one), and a ``params=…`` argument there does not fit in 100
+# columns, so it wraps and pushes later lines down. Measured over every
+# ``hosted_api.py:<line>`` cite in the tree: **14** cite targets have a line
+# number LARGER than 23128 (23284 … 99999) and those are the ones that shift;
+# **418** have a line number smaller than it (22 … 22292) and cannot move.
+# ``STAGE3_PREDICATE`` is interpolated for the same reason. The
+# value is a module constant with no quote, backslash, ``$`` or backtick in it,
+# so it cannot break out of the single-quoted Cypher literal. ``toString`` is
 # what keeps a legacy non-string id from ABORTING the query (``STARTS WITH``
 # raises ``Type mismatch`` on an integer id), and the explicit NULL arm keeps a
 # NULL-id Session counted: the demo set is exactly the prefixed ids.
