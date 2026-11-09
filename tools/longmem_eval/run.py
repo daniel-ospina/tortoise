@@ -7379,8 +7379,9 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
         # compute_embedding (ingest-time interception) AND sets the
         # _ACTIVE_CACHE global that encode_query reads (query-encode
         # persistence across questions/processes). Without .active() the
-        # cache is dead code — every question re-encodes the overlapping
-        # haystack (the 5-10x redundancy the cache exists to eliminate).
+        # cache is dead code — every question re-encodes the haystack text
+        # whose vectors a previous question already produced (measured 1.299x
+        # / 23.0% of encode units in one pass — #1779 haystack_overlap).
         with cache.active():
             outcomes, _report = run_evaluation(
                 instances, reader=None, judge=None, ks=ks, top_k=top_k,
