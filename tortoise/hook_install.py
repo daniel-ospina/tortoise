@@ -833,6 +833,14 @@ def get_layout_optional(harness: str) -> HarnessLayout | None:
 #: two can never name different files (#4680).
 PI_EXTENSION_NAME = "tortoise-capture.ts"
 
+#: Pi's per-turn READ extension (#2119) — the second artifact ``tortoise
+#: install pi`` writes into the same directory.  Declared here for the same
+#: reason as ``PI_EXTENSION_NAME``: writer (``capture_install._install_pi``),
+#: uninstaller (``__main__._uninstall_pi_volunteer``) and the version contract
+#: all derive from ONE declaration, so no consumer can name a file the
+#: installer does not write.
+PI_VOLUNTEER_EXTENSION_NAME = "tortoise-volunteer.ts"
+
 #: The OpenClaw seam (#2120): a plugin DIRECTORY, not a single file.  The
 #: directory name is the manifest `id` (OpenClaw's own identity rule), and the
 #: entry file is the one `package.json#openclaw.extensions` declares.  Declared
@@ -880,16 +888,33 @@ class ArtifactContract:
     #: the artifact peer of ``HarnessLayout.root_env``, resolved with the same
     #: rules (tilde-expanded; a relative value anchored at ``home``).
     root_env: str | None = None
+    #: (#2119) The READ half's artifact, when the seam has one, installed as a
+    #: SIBLING of ``source`` in the same root.  Deliberately NOT part of what
+    #: ``detect_artifact_install`` inspects: a user who installed only the
+    #: capture half has no drift, and grading its absence would manufacture a
+    #: blocking finding for an OPTIONAL seam.  It joins the ONE contract number
+    #: instead (:func:`contract_version_for`), which is the defect this field
+    #: exists to catch — a half-upgraded pair whose two files declare different
+    #: generations, silently half-working.
+    volunteer_source: Path | None = None
 
 
 def _pi_artifact_contract() -> ArtifactContract:
     """Pi's seam — the TypeScript extension installed at
     ``~/.pi/agent/extensions/tortoise-capture.ts`` (#3575)."""
+    #: (#2119) The read half ships as its own extension file: Pi loads every
+    #: top-level file under ``~/.pi/agent/extensions/`` as an INDEPENDENT
+    #: extension, and folding the two halves into one file would make an
+    #: `install pi` that a user ran for capture silently start injecting
+    #: context too — an exposure change nobody asked for.  Two files, one
+    #: install command, one contract number.
     return ArtifactContract(
         harness="pi",
         source=Path(__file__).resolve().parent / "pi-hooks" / PI_EXTENSION_NAME,
         install_name=PI_EXTENSION_NAME,
         root_relpath=Path(".pi") / "agent" / "extensions",
+        volunteer_source=(Path(__file__).resolve().parent / "pi-hooks"
+                          / PI_VOLUNTEER_EXTENSION_NAME),
     )
 
 
@@ -1117,7 +1142,17 @@ def contract_version_for(harness: str) -> int | None:
     artifact = ARTIFACT_CONTRACTS.get(harness)
     if artifact is None:
         return None
-    return read_hook_version(artifact.source)
+    sources = [artifact.source]
+    if artifact.volunteer_source is not None:
+        sources.append(artifact.volunteer_source)
+    versions = {read_hook_version(path) for path in sources}
+    if len(versions) != 1:
+        # The same "one contract, one number" invariant the layout half
+        # enforces (:func:`contract_version`): a pair whose two artifacts
+        # declare different generations — or one of which is unmarkered — is a
+        # REPO defect pinned by tests, never an install's problem.
+        return None
+    return versions.pop()
 
 
 @dataclass(frozen=True)
@@ -2900,6 +2935,137 @@ def detect_install(root: str | os.PathLike[str], harness: str = "claude",
     return findings
 
 
+def _grade_optional_artifact(installed: Path, source: Path,
+                             harness: str) -> list[Finding]:
+    """Grade a PRESENT-ONLY sibling artifact (Pi's read seam, #2119).
+
+    ``[]`` when the file is absent — an optional seam that was never installed
+    is not drift (see the call site).  When it IS present the classification is
+    the same vocabulary :func:`detect_artifact_install` uses for the primary
+    artifact, minus the checks that need ownership sniffing the optional half
+    does not warrant: a stale/incompatible read seam is repaired by the same
+    one command, so the finding only has to name it and say so.
+
+    ⛔ "OWNERSHIP SNIFFING" IS NOT WHAT THE THREE STRUCTURAL CHECKS ARE
+    (#11584 review, round 2). An earlier version of this docstring justified
+    dropping them and they are NOT droppable — none needs ownership evidence,
+    and each one changes the VERDICT a user acts on:
+
+    * an UNREADABLE seam (``chmod 000``) fell through to the markerless branch,
+      where ``read_hook_version`` and ``_looks_like_our_script`` both swallow the
+      ``OSError`` — so a perfectly good Tortoise seam that merely lost its read
+      bit was reported ``foreign-artifact``, whose advice is "move it aside",
+      instead of the primary's ``not-readable`` ("chmod it");
+    * a SYMLINK whose target is byte-identical graded ``[]`` — CLEAN — while
+      ``tortoise install``/``upgrade`` refuse that same leaf through
+      ``_symlink_escape``, so status said current and the repair said
+      "Refusing: … resolves to … outside the install home". That is the #5351
+      "advice the installer contradicts" class, which the primary's own comment
+      spells out ("without this note `doctor` would recommend `tortoise install
+      <harness>` for a command that refuses");
+    * a BROKEN symlink graded ``not-a-regular-file`` ("is not a regular file")
+      where the primary says "is a broken symlink — remove or re-point it".
+
+    The ``-artifact`` kind names are SHARED with the primary on purpose: the
+    manual-fix predicate (:func:`is_manual_fix`) then covers both artifacts
+    with one entry, and a caller that groups by kind groups the pair together.
+    """
+    try:
+        if not installed.exists() and not installed.is_symlink():
+            return []
+    except OSError:  # pragma: no cover - an unreadable parent is not our call
+        return []
+    findings: list[Finding] = []
+    if installed.is_symlink() and not installed.exists():
+        # `.exists()` follows the link, so a broken pointer would otherwise fall
+        # through to `not-a-regular-file` and name the wrong shape and remedy.
+        return [Finding(
+            "symlinked-artifact",
+            f"{installed} is a broken symlink — remove or re-point it",
+            script=source.name,
+        )]
+    if not installed.is_file():
+        return [Finding(
+            "not-a-regular-file",
+            f"{installed} exists and is not a regular file",
+            script=source.name,
+        )]
+    expected = read_hook_version(source)
+    if expected is None:
+        return []  # repo defect (pinned by tests), not this install's problem
+    if installed.is_symlink():
+        # A note, never a reason to skip the version checks below: the grader
+        # reads the RESOLVED bytes, and a symlink to an older checkout IS stale.
+        findings.append(Finding(
+            "symlinked-artifact",
+            f"{installed} is a symlink — it tracks its target, so a stale "
+            "target is reported below; re-point or copy it to upgrade",
+            script=source.name, blocking=False,
+        ))
+    if not os.access(installed, os.R_OK):
+        # BEFORE the markerless branch, which would otherwise read the swallowed
+        # `OSError` as "not ours" and send the user to move aside their own file.
+        findings.append(Finding(
+            "not-readable",
+            f"{installed} is not readable — chmod it so the seam can load",
+            script=source.name,
+        ))
+        return findings
+    found = read_hook_version(installed)
+    if found is None:
+        # ⛔ THE PRIMARY ARTIFACT'S TWO-WAY SPLIT, not one branch (review finding
+        # 4): a markerless file is either OURS from before the contract
+        # (`unversioned-artifact` — reinstall repairs it) or NOT OURS
+        # (`foreign-artifact` — reinstall REFUSES it, because
+        # `_foreign_install_refusal` and `_uninstall_pi_volunteer` both refuse a
+        # file they cannot prove they wrote). Collapsing them sent a user with
+        # someone else's extension at this path to a command that fails without
+        # naming the one step that works — the "installer-command clause the
+        # installer would refuse" class (#5351).
+        if _looks_like_our_script(installed):
+            return [*findings, Finding(
+                "unversioned-artifact",
+                f"{installed} carries no {HOOK_VERSION_TOKEN} marker "
+                f"(expected {expected}) — it was installed before the version "
+                f"contract, so the read seam runs with older logic; reinstall "
+                f"with `tortoise install {harness}`",
+                script=source.name,
+            )]
+        return [*findings, Finding(
+            "foreign-artifact",
+            f"{installed} is not a Tortoise read seam — move it aside, then "
+            f"re-run `tortoise install {harness}` to install ours",
+            script=source.name,
+        )]
+    if found < expected:
+        return [*findings, Finding(
+            "stale-artifact",
+            f"{installed} is {HOOK_VERSION_TOKEN} {found}, current is "
+            f"{expected} — the per-turn read seam runs older logic; "
+            f"reinstall with `tortoise install {harness}`",
+            script=source.name,
+        )]
+    if found > expected:
+        return [*findings, Finding(
+            "ahead-artifact",
+            f"{installed} is {HOOK_VERSION_TOKEN} {found}, newer than this "
+            f"CLI's {expected}; `tortoise install {harness}` would replace it "
+            f"with {expected}",
+            script=source.name, blocking=False,
+        )]
+    try:
+        if installed.read_bytes() != source.read_bytes():
+            return [*findings, Finding(
+                "modified-artifact",
+                f"{installed} marker matches ({found}) but its bytes differ "
+                "from the shipped read seam (local edit)",
+                script=source.name,
+            )]
+    except OSError:  # pragma: no cover - read raced a delete; nothing to say
+        return findings
+    return findings
+
+
 def detect_artifact_install(root: str | os.PathLike[str],
                             harness: str) -> list[Finding]:
     """Report drift for a NON-shell capture seam — the artifact half.
@@ -2941,6 +3107,18 @@ def detect_artifact_install(root: str | os.PathLike[str],
     root_path = Path(root)
     installed = root_path / contract.install_name
     findings: list[Finding] = []
+    # (#2119) The OPTIONAL sibling (Pi's per-turn read extension) is graded
+    # ONLY when it is present.  Absent is not drift: a user who ran `install
+    # pi` for capture alone never opted into per-turn injection, and a
+    # "missing" finding for a seam they never asked for would be a false block
+    # on a healthy install.  PRESENT-but-stale is the real defect — a read seam
+    # that injects nothing (or injects per an older contract) is
+    # indistinguishable from an empty graph at the agent turn, which is exactly
+    # the install-inert class #4314 exists for.
+    if contract.volunteer_source is not None:
+        findings.extend(_grade_optional_artifact(
+            root_path / contract.volunteer_source.name,
+            contract.volunteer_source, harness))
     # The install HOME is the ancestor `root_relpath` names, so the symlink
     # check covers EVERY component the installer walks — `.pi`, `agent`,
     # `extensions` and the artifact leaf itself.  `install_capture` refuses a
