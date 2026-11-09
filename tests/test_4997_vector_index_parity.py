@@ -460,8 +460,16 @@ def test_bare_projection_without_db_does_not_raise():
 # the documented rollback switch (#11660 review F9) and a pin hard-coding INFO
 # would fail on a rolled-back store it is supposed to protect.
 def _gap_level() -> int:
-    from tortoise.projection import VECTOR_INDEX_RETIRED
-    return logging.INFO if VECTOR_INDEX_RETIRED else logging.WARNING
+    """The level the gap report is emitted at, read from the posture itself.
+
+    ⛔ It asks `vector_index_retired()`, NOT the constant: the constant says the
+    retirement EXISTS, the function asks whether this deployment armed the thing
+    that replaced it. An unarmed box has no record to serve the dense leg, so
+    its gap is #4997's defect unchanged and it keeps the WARNING — the split
+    `vector_index_retired()` exists for.
+    """
+    from tortoise.projection import vector_index_retired
+    return logging.INFO if vector_index_retired() else logging.WARNING
 
 
 def _gap_records(caplog, *, at_least_warning=False):
@@ -491,61 +499,72 @@ def test_warning_is_latched_but_the_measurement_is_not(caplog):
 
 
 def test_warning_names_the_gap_and_the_open_question(caplog):
-    """The gap report names the labels AND what replaced the index.
+    """The UNARMED store's warning names the labels AND the open question.
 
-    ⛔ RETARGETED (#11660 review F1), not weakened. Pre-move this pin asserted
-    the WARNING named the OPEN question (§14.3 V3 — whether the other served
-    labels should carry an index at all), because the warning's job was to
-    pressure that question. The retirement INFO has a different job: it must say
-    the gap is the DESIGN and name what serves the read instead, or an operator
-    reads "no index" as a regression. The V3 attribution is still owed — by the
-    rolled-back store, whose WARNING this test now drives explicitly below.
+    ⛔ This is the default lane for a box with no record DSN: `vector_index_retired()`
+    is False because nothing replaced the index, so the gap is #4997's defect
+    unchanged and it keeps its WARNING — and the WARNING's job is still to
+    pressure §14.3 V3 (whether the other served labels should carry an index at
+    all). The retirement INFO's own wording is pinned in
+    `test_the_armed_store_gets_the_retirement_info` below; the two lanes say
+    different things because they are different facts.
     """
+    from tortoise.projection import vector_index_retired
+    assert not vector_index_retired(), (
+        "this lane is the UNARMED one — a stray record DSN in the environment "
+        "would silently move the assertion below to a different posture")
     proj = _bare([_vector_row("Point")])
     with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
     msgs = [r.getMessage() for r in _gap_records(caplog)]
     assert len(msgs) == 1
-    assert "RETIRED, not missing" in msgs[0], (
-        "the retirement INFO must say the gap is the design, not a regression"
-    )
-    # What replaced it, named concretely — the whole point of not leaving it at
-    # "no index": the reader must be able to find the leg that answers.
-    assert "pgvector" in msgs[0] or "Postgres record" in msgs[0]
-    assert msgs[0].rstrip().endswith(
-        "restore the #4997 warning and the in-graph index."), (
-        "the report must name the way back (the rollback switch) — an operator "
-        "who reads a gap and no remedy is where F9 came from"
+    assert "§14.3 V3" in msgs[0], (
+        "the warning must name the OPEN question (§14.3 V3); V1 is settled and "
+        "must not be presented as governing it"
     )
     for missing in ("Event", "Object", "Source", "Subject"):
         assert missing in msgs[0]
 
 
-def test_the_rolled_back_store_still_gets_the_4997_warning_and_the_v3_question(
+def test_the_armed_store_gets_the_retirement_info_naming_the_replacement(
         caplog, monkeypatch):
-    """F9's LOG half: `VECTOR_INDEX_RETIRED = False` restores the WARNING.
+    """The gap on an ARMED store is the DESIGN, and the line has to say so.
 
-    This is the assertion that makes the flag's promise true rather than
-    documented: a rollback must put the operator back in the pre-#11642 posture,
-    which includes the warning that names §14.3 V3. The fixture's catalogue
-    holds NO vector index (so the measured state is a genuine gap) while
-    the real creation block still runs — a stubbed-out creation would also skip
-    the inventory and assert nothing.
+    `vector_index_retired()` is what decides this lane (the record answers the
+    dense leg), so it is patched rather than resolved: what is under test is the
+    WORDING and LEVEL of the report, not the arming resolution, which
+    `record_writer`'s own pins own. Before #11660 review F1 this lane's pins
+    captured at WARNING and asserted on the `#4997` WARNING — the level moved, so
+    they failed for a reason none of them stated, and the fix is to pin what the
+    line must now do: name the retirement, name what serves the read, name the
+    way back.
     """
     import tortoise.projection as projection_mod
 
-    monkeypatch.setattr(projection_mod, "VECTOR_INDEX_RETIRED", False)
-    proj = _bare([])                  # no vector index in the catalogue
+    monkeypatch.setattr(projection_mod, "vector_index_retired", lambda: True)
+    proj = _bare([_vector_row("Point")])
     with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-    warnings = _gap_records(caplog, at_least_warning=True)
-    assert len(warnings) == 1, (
-        "VECTOR_INDEX_RETIRED=False must restore the #4997 WARNING")
-    assert warnings[0].levelno == logging.WARNING
-    msg = warnings[0].getMessage()
-    assert "§14.3 V3" in msg, (
-        "the restored warning must name the OPEN question (§14.3 V3); V1 is "
-        "settled and must not be presented as governing it"
+    records = _gap_records(caplog)
+    assert len(records) == 1
+    assert records[0].levelno == logging.INFO, (
+        "an armed store's gap is the design — a WARNING here trains every "
+        "reader to ignore the one line that still means something")
+    msg = records[0].getMessage()
+    # The marker is deliberately kept: it is what a log reader, an alert and
+    # every pin in this file key on. A renamed token would make each of them
+    # green-by-absence.
+    assert "#4997" in msg and "#11642" in msg
+    assert "RETIRED, not missing" in msg, (
+        "the retirement INFO must say the gap is the design, not a regression"
+    )
+    # What replaced it, named concretely — the whole point of not leaving it at
+    # "no index": the reader must be able to find the leg that answers.
+    assert "pgvector" in msg or "Postgres record" in msg
+    assert msg.rstrip().endswith(
+        "restore the #4997 warning and the in-graph index."), (
+        "the report must name the way back (the rollback switch) — an operator "
+        "who reads a gap and no remedy is where F9 came from"
     )
     for missing in ("Event", "Object", "Source", "Subject"):
         assert missing in msg

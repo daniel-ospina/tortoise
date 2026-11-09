@@ -230,13 +230,27 @@ from .security import validate_rel_type
 from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
+#: Columns POSTGRES computes, so a record→cache read must skip them (#11642).
+#: ⛔ ALIASED from `record_projection`, never re-listed: `GENERATED_COLUMNS` is
+#: the ONE declaration of "the projection must never bind this", and a second
+#: copy here is how the writer and the reader start disagreeing about the same
+#: column. The failure it prevents is not cosmetic: without the skip,
+#: `_props_from_row` reaches its final `UnknownRecordColumn` raise, and
+#: `read_record_view` / `record_serve.read_node` both do `SELECT *` — so EVERY
+#: record row read would raise on the first row after the migration applied.
+_GENERATED_COLUMNS = _rp.GENERATED_COLUMNS
+#: The same object under its public name, so a caller outside this module reads
+#: the ONE declaration rather than a copy (`tests/test_cache_projection.py`'s
+#: unclassified-column pin reads it, and `__all__` re-exports it).
+GENERATED_COLUMNS = _GENERATED_COLUMNS
+
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
     "CACHE_FORBIDDEN_COLUMNS",
-    "GENERATED_COLUMNS",
     "DERIVED_FROM_RECORD",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
+    "GENERATED_COLUMNS",
     "KEY_PROPERTY",
     "NODE_TABLES",
     "PACKAGED_PLACEMENT_TABLE",
@@ -1594,17 +1608,6 @@ def _refused(table: str) -> frozenset[str]:
 #: test_the_record_restore_writes_no_story_arc_on_any_node`, whose restore arm
 #: runs over a cache that still holds a legacy copy (`sum(size(n.story_arc))`
 #: must end at 0).
-#: Columns POSTGRES computes, so a record→cache read must skip them (#11642).
-#: ⛔ IMPORTED, never re-listed: `record_projection.GENERATED_COLUMNS` is the ONE
-#: declaration of "the projection must never bind this", and a second copy here
-#: is how the writer and the reader start disagreeing about the same column.
-#: The failure it prevents is not cosmetic: without this entry
-#: `_props_from_row` reaches its final `UnknownRecordColumn` raise, and
-#: `read_record_view`/`record_serve.read_node` both do `SELECT *` — so EVERY
-#: record row read would raise on the first row after the migration applied.
-from .record_projection import GENERATED_COLUMNS as GENERATED_COLUMNS  # noqa: PLC0414
-_GENERATED_COLUMNS = GENERATED_COLUMNS
-
 CACHE_FORBIDDEN_COLUMNS: dict[str, frozenset[str]] = {
     # §9.1/D1 — the S1 narrative, on BOTH anchors the commit path could reach
     # (`public.source.story_arc`, `public.event.story_arc`; the `:Event` half

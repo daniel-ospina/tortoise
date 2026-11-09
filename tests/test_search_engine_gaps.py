@@ -1197,7 +1197,10 @@ def test_11642_an_empty_record_answer_is_not_a_complete_one():
     The fallback must also be NAMED: `scan_fallback`, not a silent `scan`.
     """
     class _Graph:
-        result_set = [("from_the_graph", 0.8)]
+        # A class attribute on a FAKE, read off the instance and never mutated.
+        # Annotated `ClassVar` — rather than a noqa suppression — so the
+        # exemption states what it is.
+        result_set: ClassVar[list[tuple[str, float]]] = [("from_the_graph", 0.8)]
 
         def query(self, cypher, params=None, timeout=None):
             if "CALL db.idx.vector.queryNodes" in cypher:
@@ -1234,7 +1237,7 @@ def test_11642_the_record_leg_receives_the_status_filter():
     seen: list[object] = []
 
     class _Graph:
-        result_set = []
+        result_set: ClassVar[list[tuple[str, float]]] = []
 
         def query(self, cypher, params=None, timeout=None):
             return self

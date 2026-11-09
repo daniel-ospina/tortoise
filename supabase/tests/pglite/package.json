@@ -3,8 +3,7 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@electric-sql/pglite": "^0.5.16",
-    "@electric-sql/pglite-pgvector": "^0.0.17"
+    "@electric-sql/pglite": "^0.5.4"
   },
   "scripts": {
     "validate": "node validate.mjs"
