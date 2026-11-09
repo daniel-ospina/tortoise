@@ -1676,6 +1676,36 @@ surfaces:
   # operator topology losing its eventId / dropping back out of the
   # retrievable memory layer) + the cross-session CORRECTS audit leg.
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237 (S5 Job 1 remainder): the narrative relation WRITE lane — the
+  # channel #10999 left as transport only. Pins that a stated entity↔entity
+  # relation lands as an Object→Object edge through the REAL capture commit
+  # (resolved names → ids, the registry's own write-path verdict, the direction
+  # it was told to write, idempotent re-finalise), that a refused relation is
+  # NAMED, that the fold/refusal accounting reconciles on every arm, and that no
+  # narrative text reaches an edge property (⛔ #10000, P0).
+  #
+  # ⚠️ WHAT THIS REGISTRATION DOES AND DOES NOT DELIVER (#11548 review, P2 —
+  # corrected twice): it is BOOKKEEPING ONLY. Measured on this head:
+  # `eval/**` is on-demand (`ci_selection.on_demand_files()` contains this
+  # path), and an on-demand file is exempt from BOTH halves of the gate —
+  # `select()` subtracts it, and `integrity()` skips it
+  # (`tools/ci_selection.py`, the `on_demand` branch), so removing every row
+  # that lists it still leaves `--integrity` clean. It does not make the lane
+  # run on a PR and it is not what keeps `--integrity` green. The lane itself
+  # is deliberately NON-GATING — owner decision **#10194**, guarded by
+  # `tests/test_10194_eval_suite_non_gating.py::test_no_subtree_file_is_in_any_gating_leg`
+  # — and it runs in `eval-suite-manual.yml`. Do not restore a "runs on this
+  # change" or an "integrity needs this row" claim: the first is coverage the
+  # selector does not deliver, the second is false, and asserting either is how
+  # a reader comes to believe #10194 was reverted.
+  #
+  # ⚠️ THIS FILE IS `on_demand` (via `eval/**`, #10194), so it runs on the
+  # manual eval lane and never on a merge: the guards that must bite a
+  # `tortoise/relation_write.py`-only diff live in `test_relation_write_11237.py`
+  # (registered on `core`). The lane's assertions still name exactly the writers
+  # they reach: `tortoise/sdk.py` (the commit leg), `tortoise/extractor_v2.py`
+  # (the producer) and `tortoise/relation_write.py`.
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -6722,6 +6752,21 @@ surfaces:
   # `select()`'s early return — the #9076 placement for `test_e1_e2_measurement.py`.
   # Hermetic: a scripted model, no DB, no graph, no network.
   - test_referentiality_11021.py
+  # #11237 review P1: `tortoise/relation_write.py` matches no `SOURCE_PATTERNS`
+  # row, so a change to it ALONE resolves through the `tortoise/` fallback to
+  # THIS surface — and the module's guards must therefore be reachable from
+  # `core`. ⛔ NOT the eval lane: `eval/**` is `on_demand` by an owner decision
+  # (#10194 decision A — "the eval subtrees do not gate a merge … they run on
+  # demand, never on a merge"), so registering
+  # `eval/write_path/test_write_path_relation_lane.py` here would be a row that
+  # can never select it (measured: `select(["tortoise/relation_write.py"])`
+  # subtracts the on-demand set, so the eval lane is in NO pre-merge leg). The
+  # pure-plan guards — the `#11235` ambiguity refusal, the `#10000` typed-only
+  # rule, the declared-hierarchy branch, the collapse accounting and the
+  # inverted-predicate refusal — live in this file instead: hermetic, no graph,
+  # no corpus, no model. The graph-level lane stays on demand. Pinned by
+  # `tests/test_ci_selection.py::test_relation_write_leg_runs_on_the_module_that_carries_it`.
+  - test_relation_write_11237.py
   ep:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #7951 (remaining doors) / review P1: DUAL-REGISTERED with `core` (below)
@@ -6794,6 +6839,10 @@ surfaces:
   # once the fix-wave creates headroom.
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237: see the `api` registration above — the relation WRITE lane also
+  # grades `extractor_v2.py`'s producer half (the `_assemble_relations` record
+  # the leg consumes), which is this surface's source.
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -8161,6 +8210,9 @@ surfaces:
   - eval/write_path/test_write_path_prescreen.py
   - eval/write_path/test_write_path_benchmark.py
   - eval/write_path/test_write_path_operator_lane.py
+  # #11237: see the `api` registration above — the relation WRITE lane lives in
+  # `tests/eval/write_path/`, which is this surface's own tree.
+  - eval/write_path/test_write_path_relation_lane.py
   # #9077 (E4): the operator-receipt EVIDENCE gate — the checker that refuses a
   # numerator (`tools/operator_receipt_check.py`) plus the runner/grading
   # emission it reads. It pins that a receipt names the extractor that RAN (so
@@ -9303,6 +9355,8 @@ durations_floors:
   test_calibration.py: {value: 355.0, pinned: true}
   eval/write_path/test_write_path_operator_lane.py: {value: 355.0, pinned: true}
 durations:
+  test_relation_write_11237.py: 2.0  # new in #11237 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so nothing but this row records the weight — which is why the review that found the gap was right that only the row can close it (#11548 round 3, nit). What the weight covers: hermetic — the pure-plan guards for `tortoise/relation_write.py` (the `#11235` ambiguity refusal, the `#10000` typed-only rule, the declared-hierarchy branch, the fold and refusal accounting, the direction consumed from `SEMANTICS_DIRECTIONS`, and the inverted-predicate refusal); no DB, no graph, no corpus, no network, no model call. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: ~6 s whole-file on a contended fixer box. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
+  eval/write_path/test_write_path_relation_lane.py: 2.0  # new in #11237 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api`/`ep`/`eval` registrations above put it in `fast_pool()`. ⚠️ Its absence would red nothing on its own — `duration_coverage_issues()` is a ratio with headroom, so the row is written by hand rather than discovered by a red; `tools/ci_selection.py --integrity` is the authority. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: 7 passed in ~140 s whole-file on a shared lane box — each case builds its own throwaway embedded FalkorDB (`TortoiseSDK(db_path=…)`), which is the cost, and a fixer-box wall reading is exactly the input #2818/#3419 forbids. So the flat 2.0 UNDERSTATES it until a sweep replaces the row; the point of the row is existence + coverage, not an accurate shard weight. ⚠️ THE KEY IS THE PATH RELATIVE TO `tests/`, not a basename: `split_fast_gate`/`build_shard_entries` look the weight up as `durations.get(<file minus the tests/ prefix>)` (`tools/ci_selection.py`), and `duration_issues` requires the key to be a CLASSIFIED file — a bare basename satisfies neither (measured: it raised `durations key test_write_path_relation_lane.py is not classified in the manifest`, and it would silently take `DEFAULT_FAST_WEIGHT` in the pack). The 48 sibling `eval/...` rows are path-qualified for this reason. What the weight covers: hermetic otherwise — the eval corpus's own fixtures, a monkeypatched `extract_session_v2` seam (the WIRE half) and the REAL `execute_embed` (the fold half); no docker, no network, no model call, no `gh`. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds (`test_10360`/`test_10513` each record that), and this row is refreshed from junit by `tools/ci_timing.py`.
   test_haystack_overlap_1779.py: 2.0  # unmeasured — new in #1779 (PR #11577) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `eval` registration above puts it in `fast_pool()`, because the file was MOVED to `tests/` ROOT — where `on_demand`'s `longmem_eval/**` no longer subtracts it — and that same move is what makes the earlier "it is an `on_demand` subtree, so no weight applies" rebuttal FALSE rather than merely stale. 2.0 is exactly the weight it already packed at as a default, so this row moves no shard and its absence reds no gate (`duration_coverage_issues()` is a ratio against the pool's own size with headroom; `--integrity` exits 0 both ways) — what it buys is the RECORD, not a pass. What the weight covers: pure-unit and hermetic — no DB, no server, no network, no model, no dataset read: it recomputes the published overlap arithmetic over hand-built instances, drives the CLI/JSON round-trip and the three empty-population refusals in process, and reads `tools/longmem_eval/ingest.py`/`ingest_v2.py` as TEXT (`str.count`) for the `_turn_text` ratchet, and parses its OWN `ast` for the published-test-count pin; the single `@slow` real-split pin SKIPS in CI (no lane provisions `~/.cache/tortoise-longmemeval`), so that leg's cost there is a skip. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds, which this file has already done twice. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   test_why_snapshot_8099.py: 2.0  # new in #8099 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api` registrations above classify it, and the `carve_out` entry routes it to the URI-unset leg the embedded marker needs. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~17-22 s whole-file wall on a warm box (~10 s at the file's first commit, before its review rounds added cases) — every case builds and seeds a real embedded SDK, and one drives the real `_dream_worker` drain — so the flat 2.0 UNDERSTATES it until a refresh replaces the row (the same understatement every embedded-lane file carries). ⛔ The CASE COUNT is deliberately NOT quoted: this file gained cases in every review round, which is exactly how a hand-written count re-stales (#8099 review F4 quoted a count from the first commit next to a body quoting the current one). `tools/ci_selection.py --integrity` is the authority and `tools/ci_timing.py --refresh-durations` replaces this row from junit once a push-to-main sweep includes it.
   test_s4_reeemit_tax.py: 2.0  # new in #11385 (review P1) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. What the weight covers: hermetic — a `_FakeModel` returning canned JSON and `tmp_path` receipt files, driven through `run_s4`/`render_s4_prompt`/`merge_embed_lists` in process, plus reads of the two committed `ab-*.json` evidence artifacts; no DB, no graph, no network, no model call, no `gh`. ⛔ NOT a local reading, deliberately: a host measurement on a contended review box was ~18 s whole-file, which is a HOST reading and not a shard-layout input. ⛔ The CASE COUNT is deliberately not quoted: the file has gained cases in every review round, which is exactly how a hand-written count re-stales. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
