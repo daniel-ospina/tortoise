@@ -696,7 +696,7 @@ ON CONFLICT (id) DO NOTHING;
 --
 -- The marker pin matches the RAISE STATEMENT, not the bare token: `prosrc` is
 -- the body only, but it still carries the body's own COMMENTS, and the comment
--- above the gate names `one_free_org_limit:<org_id>` (`provision_team`'s
+-- in the refusal branch names `one_free_org_limit:<org_id>` (`provision_team`'s
 -- `IF v_blocking_org_id IS NOT NULL` block — cited by SYMBOL: the offset form
 -- drifted `:190` → `:265` → `:267` inside a single push, which is the drift
 -- this very comment warns about). A
