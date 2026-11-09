@@ -82,6 +82,7 @@ from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
+from tortoise.capture_receipts import may_keep_entry
 from tortoise.capture_spool import (
     PostOutcome,
     _atomic_write,
@@ -89,7 +90,6 @@ from tortoise.capture_spool import (
     _normalise_machine_id,
     _normalise_model,
     _normalise_session_id,
-    classify_failure,
 )
 
 __all__ = [
@@ -1173,8 +1173,12 @@ def _file_one(post: PostFn, store: Path, key: str, index: int, line: str,
             summary["degraded"] += 1
             summary["detail"] = f"stored without extraction ({reason})"[:300]
         return "filed", sid
-    verdict = classify_failure(outcome.status, outcome.detail)
-    if verdict == "retry":
+    if may_keep_entry(outcome.status, outcome.detail):
+        # ``retryable`` AND ``policy`` both keep the day: #5051's one contract
+        # (``capture_receipts.capture_outcome``). A 401/403/407 is a reversible
+        # authorization/entitlement state, so dead-lettering it would strand a
+        # session that a fixed key re-ships — and this leg's dead letter is
+        # terminal (#4895).
         summary["detail"] = str(outcome.detail or outcome.status or "deferred")[:300]
         return "retry", sid
     return dead("http_rejected", str(outcome.detail or ""), session_id=sid,

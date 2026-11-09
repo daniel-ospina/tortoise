@@ -611,7 +611,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 **✅ `DECIDED (narrowed)` — the owner ruled:** the lookup sits **after** extraction, and it is consumed by the salience judgment and by S3 only. **Extraction does not consume it.** This follows from D4's own stated reason — the extraction consumer was never covered by it.
 
 >
-> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO by the margin the design assumed:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. Bundle: `docs/evidence/5087-hypothesis/`.
+> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. ⚠️ **That is run 1, whose log the `#10463` ruling WITHDREW from the checked set; the base-registered re-measurement (`#10554`) is `253 → 250` (ratio `0.988`) with the untreated arm drifting `10.9 %` between runs, so the effect is below what the instrument resolves.** Bundle: `docs/evidence/5087-hypothesis/` — read its *"Which run's number"* block (§10) before quoting a figure.
 
 ### S2.1 — EXTRACT
 
@@ -1750,7 +1750,11 @@ two-arm ablation on the frozen `tests/eval/write_path` corpus (`fixtures_hash
 sha256:dd7e8520…`, 7 sessions), pre-registration commit `a1075dfc2`, bundle
 `docs/evidence/5087-hypothesis/`.
 
-**RESULT: `HYPOTHESIS-FALSIFIED (ratio 0.870)`.**
+**RESULT: `HYPOTHESIS-FALSIFIED`.** Two runs on this corpus report **`0.870`** (run 1) and **`0.988`**
+(run 2, the run whose ordering provenance is whole); **neither clears the pre-registered `<= 0.75`
+bar.** ⛔ **Quote `0.988` — run 1's log was withdrawn from the checked set by the ruling on `#10463`,
+and the `0.870` magnitude overstates the effect.** Read *"Which run's number"* below before quoting
+either figure; the table that follows is run 1's, retained because it is what the withdrawn log says.
 
 | | S3-OFF | S3-ON | bar |
 |---|---:|---:|---|
@@ -1767,11 +1771,50 @@ created-per-real-fact moves 6.04 → 6.18 — a smaller extraction, not a leaner
 (range 0.706–1.029; 5 of 7 sessions fell, one rose, one flat), and the one session that is blind in both arms
 (`wp01`, fresh graph) still shows −13 %, which is the run-to-run noise floor at this n.
 
+### ⚠️ Which run's number — run 1's log was WITHDRAWN, and run 2's `0.988` is the figure the epic quotes
+
+**Run 1** (`s3-ablation-a1075dfc.log`, ratio `0.870`, the table above) was ruled **withdrawn from the
+checked set** (`#10463`, ruling comment `6564634454`, carried by PR `#10544` as `108cec779`): its
+pre-registration and its log landed in ONE squash commit (`cfa3de857`), so the ordering property —
+the registration strictly precedes the scored log — could not be shown from the merged history. Its
+**contents are untouched** and **no number in it is retracted**; it sits in
+`docs/evidence/5087-hypothesis/withdrawn/` beside a note,
+`docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md`, that states exactly what is and is not
+retracted, and the guard's glob does not read that directory.
+
+**Run 2** is the re-measurement the ruling ordered — the registration already published on the base
+branch, bars read from the registration *commit* (`--prereg a1075dfc2`), corpus hash re-derived, fresh
+graph per arm (`s3-ablation-a83c23a8.log`, PR `#10554` as `45120abbd`):
+
+| | S3-OFF | S3-ON | bar |
+|---|---:|---:|---|
+| `created_new_nodes` | **253** | **250** | ratio `<= 0.75` → **0.988, NOT met** |
+| planted units recovered (of 90) | 41 | 44 | must not fall → met |
+| operator-type edges | 141 | 166 | must not fall → met |
+| model calls | 21 | 27 | `<= 2.00 ×` → 1.29 × |
+| arm integrity | 7/7 suppressed | 7/7 resolved | 14/14 |
+
+**The verdict agrees; the magnitude does not, and `0.870` overstated it.** `0.870` reads as *"priors
+cut creates by about a seventh"*; `0.988` reads as *"no measurable effect — 253 vs 250"*. The reason
+the second reading is the honest one is a fact about the INSTRUMENT, not a preference for a friendlier
+number: the **untreated** arm drifted **284 → 253** between the two runs (**31** nodes, **10.9 %**),
+about **ten times** the 3-node ON−OFF difference the second run measured, so this instrument cannot
+resolve an effect below roughly **11 %** between runs. The defensible sentence is therefore *"no
+measurable effect at ~0.99, well inside the ~11 % between-run drift this instrument shows on its
+untreated arm"* — ⛔ **not** *"priors cut creates by 1 %"*. If one number is needed, quote the pair
+(`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the range this corpus
+supports. `0.988` is the figure the epic's record quotes (`#5087`).
+
 ⚠️ **A verdict is a verdict, not a prompt for a re-run.** `#10463`'s own falsifier rule applies: a
 ratio near 1.0 closes the issue and changes the epic's plan. It is **never re-run until it agrees**.
-The epic's plan point that assumed prior-injection buys volume must now argue from something else —
-and the tension rule it registered as a guard is exactly what failed: the smaller writes were
-smaller, not better.
+The one re-run that happened after the first was ordered by the ruling on `#10463` and existed to
+repair an **ordering provenance**, not to chase a number — and it came back *worse* for the hypothesis
+(`0.988` against `0.870`), which is what a sanctioned re-measurement looks like and what an
+agreement-seeking one could not have produced. The epic's plan point that assumed prior-injection buys
+volume must now argue from something else — and the tension rule it registered as a guard is exactly
+what failed in run 1: the smaller writes were smaller, not better. **Run 2 does not reproduce even
+that**: its guards met (real facts rose 41 → 44, edges 141 → 166), so on the base-registered run the
+treatment neither bought volume nor cost it — it did nothing measurable.
 
 ⚠️ **One instrument gap this run found and did NOT fix here** (it is a follow-up, not a production
 edit in the measurement PR): the `capture_session` lane's receipt carries **no `search` block**, so
@@ -1962,7 +2005,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 14. Not established — do not treat as known
 
-- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not, by the margin the design assumed (§10, `#10463`).** Created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction, so *"extraction no longer consumes the lookup"* is now backed by a number rather than by an argument. The lookup is not load-bearing either: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
+- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not (§10, `#10463`).** Run 1: created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction. ⚠️ **Run 1's log was WITHDRAWN from the checked set by that issue's ruling; the base-registered re-measurement (`#10554`) reports `253 → 250` (ratio `0.988`), guards MET rather than fallen — an effect too small for this instrument to resolve against a `10.9 %` between-run drift on the untreated arm.** Either way *"extraction no longer consumes the lookup"* is backed by a number rather than by an argument, and the design conclusion is unchanged: the lookup is not load-bearing, S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
 - The `~8.6 Objects/session` figure is **inferred**, not directly measured — `extractedFrom` points at `:Source`, which carries no `id`, so Objects could not be grouped per session.
 - **Nothing measures how much of the surviving 2,963 non-`the` Objects is still junk** — `PR #465` proves a non-`the` Object can also be a bare reference.
 - The `^the <X>` **pattern** is a **floor**, not the whole fix.
