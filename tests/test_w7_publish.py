@@ -8,7 +8,9 @@ run_status / verdict / failure_origin / commit / corpus hash / judge pin).
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
@@ -27,6 +29,16 @@ from tools.longmem_eval.w7_publish import (
     validate_receipt,
     variant_rows,
 )
+
+
+def _dataset_digest(path) -> str:
+    """The corpus hash ``w7_publish`` DERIVES from the sealed dataset.
+
+    #2105: the receipt's corpus hash is no longer an unchecked operator
+    string — the CLI binds it to ``--dataset``, so every fixture here passes
+    the digest of the file it actually sealed.
+    """
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _outcome(qid: str, session5: float | None) -> dict:
@@ -430,7 +442,7 @@ def _cli_artifact(tmp_path, judge_model: str) -> dict:
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
            "--out", str(out)])
     return json.loads(out.read_text(encoding="utf-8"))
 
@@ -522,7 +534,7 @@ def test_retrieval_only_run_records_partial_not_failed(tmp_path):
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "0.0",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "0.0",
            "--out", str(out)])
     receipt = json.loads(out.read_text(encoding="utf-8"))["receipt"]
     assert receipt["run_status"] == "partial"
@@ -673,11 +685,13 @@ def test_cli_emits_valid_artifact(tmp_path):
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
            "--out", str(out)])
     artifact = json.loads(out.read_text(encoding="utf-8"))
     assert artifact["receipt_valid"] is True
-    assert artifact["receipt"]["corpus_hash"] == "sha256:" + "0" * 64
+    # #2105: the recorded corpus hash is the digest of the SEALED dataset, not
+    # the flag echoed back — the two are bound at the producer boundary.
+    assert artifact["receipt"]["corpus_hash"] == _dataset_digest(ds)
     assert artifact["receipt"]["metrics"]["official_recall_all@5"] == 0.5
     assert artifact["seal"]["n_questions"] == 1
     assert artifact["variants"]["official_recall_all@5"]["n"] == 2
@@ -691,6 +705,54 @@ def test_cli_emits_valid_artifact(tmp_path):
     for cat in ("multi-session", "knowledge-update",
                 "single-session-preference"):
         assert cat in by_cat["rows"]
+
+
+def test_cli_refuses_a_corpus_hash_that_is_not_the_sealed_dataset(tmp_path):
+    """#2105 (indicator 3) — the receipt's corpus hash is the comparability
+    claim, so it must name the corpus the command SEALED.
+
+    The defect this pins, measured before the fix: ``--corpus-hash`` was an
+    operator string that ``validate_receipt`` only shape-checks
+    (``sha256:…``), so a receipt could record a corpus nobody sealed and still
+    print ``receipt valid: True`` / exit 0. Nothing tied the flag to
+    ``--dataset`` — the artifact was sealed from one file while the receipt
+    named another.
+
+    RED mutation: delete the ``declared_corpus_hash != sealed_corpus_hash``
+    refusal in ``_main`` → this test fails (no SystemExit, artifact written).
+    """
+    from tools.longmem_eval.w7_publish import _main
+    rp = tmp_path / "report.json"
+    rp.write_text(json.dumps({
+        "outcomes": [_outcome("q1", 1.0)],
+        "retrieval": {"session_recall_paper@k": {"5": 1.0},
+                      "session_recall@k": {"5": 1.0}},
+        "methodology": {
+            "judge_model": "openai/gpt-4o-2024-08-06",
+            "judge_rubric_id_hash": "hash",
+            "reader_model_spec": "openrouter:deepseek/deepseek-v4-flash",
+            "reader_pinned": True, "ingest_mode": "deterministic",
+            "run_at_utc": "2026-09-04T12:00:00Z",
+            "measurement_posture": _posture("deterministic"),
+            "dataset_semantics_audit": {"verdict": "trusted"}},
+        "integrity": {"valid": True}, "accuracy": {"overall": 1.0},
+        "split": "s", "updated_at_utc": "2026-09-04T12:00:00Z",
+    }), encoding="utf-8")
+    ds = tmp_path / "data.json"
+    ds.write_text(json.dumps([{"question_id": "q1", "answer": "a",
+                               "answer_session_ids": ["s1"]}]),
+                  encoding="utf-8")
+    out = tmp_path / "artifact.json"
+    with pytest.raises(SystemExit) as exc:
+        _main(["--report", str(rp), "--dataset", str(ds),
+               "--commit", "abc123",
+               # a well-formed sha256 that is NOT this dataset's
+               "--corpus-hash", "sha256:" + "a" * 64,
+               "--cost-usd", "1.5", "--out", str(out)])
+    assert exc.value.code != 0
+    # fail-closed BEFORE the write: no artifact may claim a corpus it did not
+    # seal (unlike the receipt-issue gate, where the artifact is the evidence)
+    assert not out.exists()
 
 
 def _invalid_report_and_dataset(tmp_path) -> tuple[str, str, str]:
@@ -744,7 +806,7 @@ def test_cli_fails_the_process_when_the_receipt_is_invalid(tmp_path):
     rp, ds, out = _invalid_report_and_dataset(tmp_path)
     with pytest.raises(SystemExit) as exc:
         _main(["--report", rp, "--dataset", ds, "--commit", "abc123",
-               "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+               "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
                "--out", out])
     assert exc.value.code == 1
     artifact = json.loads((tmp_path / "artifact.json").read_text(
