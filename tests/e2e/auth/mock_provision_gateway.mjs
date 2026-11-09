@@ -22,9 +22,11 @@
  *
  * The emulated contract is copied from the REAL Edge Function
  * (`supabase/functions/tenant-provision/index.ts`): POST only (405 otherwise),
- * a Bearer credential required (401), a body whose identity matches the caller
- * required (403), 201 `{org_id, org_name, api_key, graph_name}` on success, and
- * 500/502 on provisioning failure.
+ * SERVER-ONLY — a request carrying an `Origin` header is refused 403 before the
+ * credential is even looked at (#1120) — a Bearer credential required (401), a
+ * body whose identity matches the caller required (403), 201 `{org_id,
+ * org_name, api_key, graph_name}` on success, and 500/502 on provisioning
+ * failure.
  */
 import { createServer, request as httpRequest } from "node:http";
 
@@ -106,14 +108,24 @@ const server = createServer((req, res) => {
       };
 
       if (req.method !== "POST") {
-        return json(res, 405, { error: "Method not allowed" });
+        return json(res, 405, { error: "Method not allowed" }, { Allow: "POST" });
+      }
+      // SERVER-ONLY (#1120): the real function refuses any origin-bearing
+      // request 403 BEFORE authenticating, because the dashboard BFF strips
+      // `Origin` and a browser caller is not a supported caller. Emulated here
+      // so a BFF that starts forwarding `Origin` reds this suite at the same
+      // point production would 403 every signup.
+      if (req.headers.origin) {
+        return json(res, 403, {
+          error: "Forbidden: this endpoint is server-only",
+        });
       }
       const auth = req.headers.authorization ?? "";
       if (!auth.startsWith("Bearer ") || !auth.slice(7).trim()) {
         return json(res, 401, {
           error:
-            "Unauthorized: expected a signed Supabase auth-hook request or " +
-            "a user JWT matching the provisioning target",
+            "Unauthorized: a user JWT matching the provisioning target is " +
+            "required",
         });
       }
       // Injected fault: a real status from the provision endpoint. Used to
