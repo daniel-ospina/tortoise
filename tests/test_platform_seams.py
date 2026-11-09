@@ -1196,6 +1196,68 @@ def test_install_cline_dry_run_declares_the_legacy_unlink_it_will_perform(
     r = _run(["install", "cline", "--dir", str(proj)], env)
     assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
     assert not legacy.exists(), "the real run did not perform the predicted unlink"
+def test_uninstall_claude_does_not_refuse_a_settings_json_it_only_reads(
+        tmp_path):
+    """Guard a path iff the run WRITES or DELETES it (#11588 review cycle 11).
+
+    A `settings.json` symlinked into a dotfiles repo is a path the run only
+    READS when it holds nothing of ours, so #2383 promises the clean no-op
+    (`nothing to remove`, rc 0). Pre-guarding `target` on every uninstall
+    refused it with rc 1 and a message about a symlink the run never needed to
+    touch — the over-block class the PR declares closed, on the shared JSON
+    path.
+
+    MUTATION: move the JSON-seam guard back above the ownership read → rc 1
+    and a `Refusing:` line → RED.
+    """
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    settings = dotfiles / "settings.json"
+    settings.write_text('{"model": "x"}\n')
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").symlink_to(settings)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "nothing to remove" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert "Refusing" not in r.stderr, r.stderr
+    assert settings.read_text() == '{"model": "x"}\n'
+
+
+def test_uninstall_claude_still_refuses_to_rewrite_through_an_escaping_symlink(
+        tmp_path):
+    """The other half of the same rule: moving the guard must not weaken it.
+
+    A registration of OURS behind an out-of-root `settings.json` is a real
+    REWRITE through the link, so the guard still fires — before the write, and
+    with the out-of-root file untouched (#11588 review cycle 11).
+
+    MUTATION: delete the `_escape_refusal([target])` call at the write site →
+    the uninstall rewrites the dotfiles copy → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "claude", "--dir", str(donor)], env).returncode == 0
+    shipped = (donor / ".claude" / "settings.json").read_text()
+
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    settings = dotfiles / "settings.json"
+    settings.write_text(shipped)
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").symlink_to(settings)
+
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert settings.read_text() == shipped, (
+        "the out-of-root settings.json was rewritten")
 
 
 def test_install_cline_refuses_directory_target(tmp_path):

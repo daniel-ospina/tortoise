@@ -6175,17 +6175,18 @@ def _install_read_hook_impl(args) -> int:
         return False
 
     # `target` is WRITTEN by an install, so it is always guarded there. On an
-    # uninstall the JSON-seam harnesses (codex/claude/devin) REWRITE the
-    # document, so an existing target is written either way and stays guarded;
-    # cline only ever UNLINKS what is OURS, so its candidates — target AND
-    # legacy — are guarded inside the cline branch, where ownership is known
-    # (#11588 review cycles 5, 8, 9). Guarding a cline path the run only READS
-    # blocked an uninstall that removes nothing there and left our in-root
-    # registration installed.
+    # uninstall it is guarded only where the run would really touch it: the
+    # JSON-seam harnesses (codex/claude/devin) guard it at the WRITE itself,
+    # inside their uninstall branch and after `deletable` is established, and
+    # cline guards target and legacy through `_uninstall_verdict`, where
+    # ownership is known (#11588 review cycles 5, 8, 9, 10, 11). A guard placed
+    # HERE cannot see whether the run will write: two reachable uninstall
+    # branches only READ `target` — `No … registration in {target} — nothing to
+    # remove` (rc 0) and `… that this installer did not write — refusing to
+    # remove them` (rc 1) — so pre-guarding it turned #2383's promised clean
+    # no-op into a misleading `Refusing: …` with rc 1 (measured, #11588 review
+    # cycle 11). Guard a path iff the run WRITES or DELETES it.
     if not uninstall and _escape_refusal([target]):
-        return 1
-    if (uninstall and harness != "cline"
-            and _escape_refusal([p for p in (target,) if p.exists()])):
         return 1
 
     # #2383: uninstall with NO registration present must be a clean no-op —
@@ -6784,6 +6785,17 @@ def _install_read_hook_impl(args) -> int:
             # emptied document is left as ``{}`` and the FILE is never
             # deleted — we did not necessarily create it.
             out = _json.dumps(existing_json, indent=2) + "\n"
+            # `deletable` is non-empty, so this run WILL rewrite the document —
+            # THAT is the operation the guard protects, so it lives here, after
+            # the ownership read has established the write will happen
+            # (#11588 review cycle 11). Pre-guarding `target` refused a run that
+            # only READ it — a `settings.json` symlinked into a dotfiles repo
+            # with no registration of ours got `Refusing: …` + rc 1 where #2383
+            # promises the clean no-op `nothing to remove` (measured). It sits
+            # before the dry-run report so the prediction agrees with the real
+            # run.
+            if _escape_refusal([target]):
+                return 1
             if dry:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
