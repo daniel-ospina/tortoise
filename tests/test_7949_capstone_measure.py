@@ -11091,6 +11091,18 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     endpoints, which is sufficient because an interior insertion moves the closing
     endpoint), never a window that a shift can slide inside.
 
+    ⛔ The `sdk.py` and probe numbers are DERIVED FROM THE RECORD, never typed here.
+    They were typed, and they rotted twice more before this comment existed: `#11237`
+    inserted nine lines above `_extract_session_v2`, 48 above the meta fold and 56
+    above the `references` writer, so a test that carried its own copy of the numbers
+    redded on a HEAD whose RECORD was stale for the same reason — and the repair is a
+    hand re-derivation either way. Reading the number FROM the record keeps every
+    arm's strength exactly (the record's number must land on the claim, so a stale
+    cite or an insertion above it still reds) while removing the second copy that
+    has to be re-derived. A1's `extractor_v2.py` cites stay typed: that file is not
+    touched by this lane and its two numbers are asserted against a token no
+    insertion can slide inside.
+
     ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
     carries FURTHER live cites this leg does NOT pin — among them
     `pack_hierarchy.py:59`/`:78`/`:365`/`:459` and `extractor_v2.py:1154`, each stated once
@@ -11819,30 +11831,43 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # must agree; the parenthetical is pinned by its NUMBER because it is the only one
     # that has no `sdk.py:` token or `sed` command for the arms below to catch
     # (measured: re-staling it to `17472` left every arm True).
-    # ⛔ No backticks in the needle: `tortoise/sdk.py:17574` is the citation, and the code
-    # span around it is Markdown styling. The `16516-16530` arm below has always allowed
-    # optional backticks (`r"`?(?:tortoise/)?sdk\.py:16516-16530`?"`); this one arm did not,
+    #
+    # ⛔ The number is DERIVED FROM THE RECORD, never typed here. `#11237` inserted
+    # nine lines above `_extract_session_v2`, 48 above the meta fold and 56 above this
+    # writer, so a typed copy redded on a HEAD whose RECORD was stale for the same
+    # reason. Reading it FROM the record keeps every arm's strength (the record's
+    # number must still land on the claim, so a stale cite or an insertion above it
+    # reds) without a second copy to re-derive.
+    ref_cites = re.findall(r"the capture path at `tortoise/sdk\.py:(\d+)`\)", text)
+    assert len(ref_cites) == 1, (
+        "the record must cite the capture path ONCE, by its live number; "
+        f"found {ref_cites}")
+    ref_line = int(ref_cites[0])
+    # ⛔ No backticks in the needle: `tortoise/sdk.py:<n>` is the citation, and the code
+    # span around it is Markdown styling. The `mint_cites` arm below has always allowed
+    # optional backticks (`r"`?(?:tortoise/)?sdk\.py:(\d+)-(\d+)`?"`); this one arm did not,
     # so an unstyled citation redded the same way (measured).
-    assert re.search(r"`?tortoise/sdk\.py:17574`?", text), (
+    assert re.search(rf"`?tortoise/sdk\.py:{ref_line}`?", text), (
         "the record must cite the capture path by its live number")
     # ⛔ Pinned as the BARE occurrence of the NUMBER, not as the sentence around it: the
     # claim is that this paragraph states the same line the prose and the `sed` do.
-    # The prose carries it as `sdk.py:17574` and the recipe as `sed -n '17574p'`, so the
+    # The prose carries it as `sdk.py:<n>` and the recipe as `sed -n '<n>p'`, so the
     # amendment paragraph is the ONE remaining bare statement of it. A literal
-    # `"both now read `17574`"` needle redded on every number-preserving reword
-    # (`the two now agree on `17574``, `both now read `:17574`` — measured), which is the
+    # `"both now read `<n>`"` needle redded on every number-preserving reword
+    # (`the two now agree on `<n>``, `both now read `:<n>`` — measured), which is the
     # same false-block this PR fixed for the `# §0/§2` heading one arm above.
-    _bare = [c for c in re.findall(r".{0,12}17574", text)
-             if not c.endswith("sdk.py:17574") and "sed -n '" not in c]
+    _bare = [c for c in re.findall(rf".{{0,12}}{ref_line}", text)
+             if not c.endswith(f"sdk.py:{ref_line}") and "sed -n '" not in c]
     assert len(_bare) == 1, (
-        "the amendment paragraph must state the live number `17574` exactly ONCE as a BARE "
-        f"cite — it is the only one of the three statements that carries neither a `sdk.py:` "
-        f"token nor a sed (found {_bare}); re-derive it with `grep -n '^ *proj\\.link_source_to_event' "
-        "tortoise/sdk.py`")
-    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == ["17574"], (
+        f"the amendment paragraph must state the live number `{ref_line}` exactly ONCE as a "
+        "BARE cite — it is the only one of the three statements that carries neither a "
+        f"`sdk.py:` token nor a sed (found {_bare}); re-derive it with "
+        "`grep -n '^ *proj\\.link_source_to_event' tortoise/sdk.py`")
+    assert re.findall(r"sed -n '(\d+)p' tortoise/sdk\.py", text) == [str(ref_line)], (
         "the record's reproduction command must name the SAME line the prose does")
-    assert sdk[17574 - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
-        f"sdk.py:17574 reads {sdk[17574 - 1].strip()!r}, not the references writer")
+    assert sdk[ref_line - 1].strip() == "proj.link_source_to_event(source_key, event_id)", (
+        f"sdk.py:{ref_line} reads {sdk[ref_line - 1].strip()!r}, not the references "
+        "writer — re-derive the record's cite from the tree")
 
     # ── The four LIVE cites a fresh review found STILL unwatched ─────────────────────
     #
@@ -11876,9 +11901,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         text) == [("275", "283")], (
         "the record's reproduction command must name the SAME window the cite and the arms "
         "above do — it is the second statement of these two numbers")
-    assert "tortoise/sdk.py:17574" in _probe_win, (
-        "the cited probe window must still carry the `sdk.py:17574` cite it states — one "
-        "number in two places cannot be allowed to drift apart silently")
+    assert f"tortoise/sdk.py:{ref_line}" in _probe_win, (
+        f"the cited probe window must still carry the `sdk.py:{ref_line}` cite it states — "
+        "one number in two places cannot be allowed to drift apart silently")
     assert pack_hierarchy[431 - 1].strip() == "def apply_hierarchy_edges(", (
         f"tortoise/pack_hierarchy.py:431 reads {pack_hierarchy[431 - 1].strip()!r}, not the "
         "declaration the record names as the thing that writes the hierarchy edges")
@@ -11911,31 +11936,59 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # A2's Object mint: the write seam that routes creation by kind, cited THREE
     # times as a range. Both endpoints are claims — the classifier opens it, the
     # object arm's `is_episodic=False)` closes it.
-    assert len(re.findall(r"`?(?:tortoise/)?sdk\.py:16516-16530`?", text)) == 3, (
+    mint_cites = re.findall(r"`?(?:tortoise/)?sdk\.py:(\d+)-(\d+)`?", text)
+    assert len(mint_cites) == 3 and len(set(mint_cites)) == 1, (
         "the record names this seam three times — the mint, the route, and the "
-        "reproduction command — and all three must move together")
-    assert sdk[16516 - 1].strip() == "_ekind = _payload_entity_kind(e)", (
-        f"sdk.py:16516 reads {sdk[16516 - 1].strip()!r}, not the classifier call")
-    assert sdk[16530 - 1].strip() == "is_episodic=False)", (
-        f"sdk.py:16530 reads {sdk[16530 - 1].strip()!r}, not the object arm's close")
+        f"reproduction command — and all three must carry the same range: {mint_cites}")
+    mint_start, mint_end = (int(n) for n in mint_cites[0])
+    assert sdk[mint_start - 1].strip() == "_ekind = _payload_entity_kind(e)", (
+        f"sdk.py:{mint_start} reads {sdk[mint_start - 1].strip()!r}, not the "
+        "classifier call — re-derive the record's range from the tree")
+    assert sdk[mint_end - 1].strip() == "is_episodic=False)", (
+        f"sdk.py:{mint_end} reads {sdk[mint_end - 1].strip()!r}, not the object "
+        "arm's close — re-derive the record's range from the tree")
+    # The claim is the RANGE, so the range must actually SPAN the two arms it
+    # claims to cover: an endpoint that happens to sit on the right token while the
+    # middle moved out from under it would otherwise pass.
+    span = sdk[mint_start - 1:mint_end]
+    for arm in ('"subject", name,', '"object", name,'):
+        assert any(arm in line for line in span), (
+            f"the record's `sdk.py:{mint_start}-{mint_end}` does not span the {arm} "
+            "arm it claims to cover")
 
     # A5: the census query the "cannot observe the edge" gap rests on. All THREE
     # lines of the cited range are pinned, because the claim is the RANGE: the
     # `g.query(` call opens it, the `MATCH` enumeration is its middle, and the
     # anchored count closes it. A one-line insertion above the call therefore moves
     # every endpoint and reds — a window test on the MATCH token alone did NOT
-    # (measured in review: one inserted line above the window left this arm GREEN while
-    # the record's number was stale at both ends). ⛔ The number is the MERGED tree's:
-    # main's #11517 landed +12 above the window, so the same query now opens at `:2738`.
-    assert "`probes/capstone_measure.py:2738-2740`" in text
-    assert probe[2738 - 1].strip() == "for name, count, anchored in projection.g.query(", (
-        f"capstone_measure.py:2738 reads {probe[2738 - 1].strip()!r}, not the census call")
-    assert "MATCH ()-[r]->() RETURN type(r)" in probe[2739 - 1], (
-        f"capstone_measure.py:2739 reads {probe[2739 - 1].strip()!r}, not the "
-        "relationship census query")
-    assert "count(r.sourceVersion)" in probe[2740 - 1], (
-        f"capstone_measure.py:2740 reads {probe[2740 - 1].strip()!r}, not the "
-        "anchored count that closes the query")
+    # (measured in review: one inserted line above :2724 left this arm GREEN while
+    # the record's census range was stale at both ends).
+    # The record cites this probe's `link_source_to_event` handler as `:275-283`
+    # too, so the census arm is selected by what the START line IS, not by being
+    # the only probe range in the document.
+    census_cites = [
+        (int(a), int(b))
+        for a, b in re.findall(r"`probes/capstone_measure\.py:(\d+)-(\d+)`", text)
+        if probe[int(a) - 1].strip()
+        == "for name, count, anchored in projection.g.query("]
+    assert len(census_cites) == 1, (
+        "the record must cite the census query ONCE, as a range whose first line "
+        f"is the `g.query(` call — found {census_cites}")
+    census_start, census_end = census_cites[0]
+    assert census_end - census_start == 2, (
+        f"the record's census cite is the THREE-line range {census_start}-"
+        f"{census_end}; the call, the MATCH and the anchored count are one claim")
+    assert probe[census_start - 1].strip() == \
+        "for name, count, anchored in projection.g.query(", (
+        f"capstone_measure.py:{census_start} reads "
+        f"{probe[census_start - 1].strip()!r}, not the census call — re-derive "
+        "the record's range from the probe")
+    assert "MATCH ()-[r]->() RETURN type(r)" in probe[census_start], (
+        f"capstone_measure.py:{census_start + 1} reads {probe[census_start].strip()!r}, "
+        "not the relationship census query")
+    assert "count(r.sourceVersion)" in probe[census_end - 1], (
+        f"capstone_measure.py:{census_end} reads {probe[census_end - 1].strip()!r}, "
+        "not the anchored count that closes the query")
 
 
 def test_the_records_zero_is_rederived_at_the_bases_it_names():

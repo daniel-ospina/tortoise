@@ -1452,3 +1452,122 @@ def test_edge_function_only_caller_is_the_same_origin_bff():
     assert "${API_BASE}/provision" in main, (
         "the dashboard's provisioning call must target the same-origin BFF"
     )
+
+
+# ── #1981: the one-free-org refusal is TERMINAL, so it may not read as a retry ─
+
+
+def _entitlement_branch(src: str) -> str:
+    """The body of the `if (markerAt >= 0) { … }` branch, brace-balanced.
+
+    Scoped on purpose: asserting these literals against the WHOLE file would
+    pass if the 402 were returned unconditionally (every unrelated RPC failure
+    laundered into an entitlement refusal), which is the inverse defect of the
+    one this guards.
+    """
+    opener = "if (markerAt >= 0) {"
+    at = src.find(opener)
+    assert at != -1, (
+        "the Edge Function no longer routes the one-free-org marker: a terminal "
+        "refusal answered with 502 'try again' is a dead end the user can never "
+        "retry out of (#1981)"
+    )
+    depth = 0
+    for i in range(at + len(opener) - 1, len(src)):
+        if src[i] == "{":
+            depth += 1
+        elif src[i] == "}":
+            depth -= 1
+            if depth == 0:
+                return src[at : i + 1]
+    raise AssertionError("unbalanced braces in the entitlement branch")
+
+
+def test_entitlement_refusal_is_mapped_to_the_product_402():
+    """#1981: `tenant-provision` is a DIRECT `provision_team` caller, and it is
+    the one caller the first audit of this change omitted.
+
+    It passes a non-NULL `p_user_id` and no `p_tier`, so the RPC's in-transaction
+    one-free-org backstop DOES engage here. Its only mapping was
+    `502` + "Provisioning failed. Please try again." — a dead end, because the
+    refusal is the user's EXISTING org and no retry can clear it. #2789 makes
+    `code` the contract the dashboard dialog reads, so this lane must emit the
+    same payload the Python lanes do.
+
+    Non-vacuity: BOTH literals are read from the Python authority rather than
+    restated here — the marker from `_ONE_FREE_ORG_RPC_MARKER`, the message from
+    `_one_free_org_detail` (which is what `with_limit_contact` produces) — so
+    moving either side of the SQL↔Python↔TS chain reddens this.
+    """
+    from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER, _one_free_org_detail
+
+    src = EDGE_FN.read_text()
+    branch = _entitlement_branch(src)
+
+    # The marker the RPC's RAISE text carries, byte for byte.
+    assert f'const marker = "{_ONE_FREE_ORG_RPC_MARKER}";' in src, (
+        "the Edge Function must match the marker `provision_team` actually "
+        f"raises ({_ONE_FREE_ORG_RPC_MARKER!r}) — a near-miss never matches and "
+        "the refusal silently keeps its 502"
+    )
+
+    # REACHABILITY: the marker must be searched in the error's MESSAGE, which is
+    # where PostgREST carries the RAISE text. Pinning the payload literals alone
+    # was NOT enough — at `577ed5822fe5` a review built the `provisionError.details`
+    # mutant and *that* pin survived it, leaving the branch unreachable. The two
+    # assertions below are the fix for exactly that gap and they do discriminate
+    # on their own (re-measured: the mutant reds the first, a `markerAt` derived
+    # from `.details` reds the second).
+    #
+    # Matched with a whitespace-tolerant pattern, not an exact literal: the point
+    # is which FIELD the marker is read from, and an exact string would red on a
+    # semantically null reformat (`?? ""` -> `|| ""`, a prettier line break)
+    # with a message claiming the branch is dead code — a false block for a real
+    # editor. What a STATIC pin cannot have is runtime reachability: the
+    # behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives the
+    # real handler, so THE HARNESS reds if the branch stops being reachable at
+    # all — measured: an early `return json({error: …}, 502)` before the marker
+    # branch leaves every static assertion GREEN (24 passed) and the harness
+    # exits 1 at its `code`-payload assertion for the 402 row. It prints NO row
+    # when it does: the report loop runs after that throw, so not even a `✗`.
+    assert re.search(r"const\s+provisionMessage\s*=\s*String\(\s*provisionError\s*\.\s*message", src), (
+        "the marker must be read from the RPC error's `message` (PostgREST puts "
+        "the RAISE text there) — reading another field makes the branch dead code"
+    )
+    marker_at = re.search(r"const\s+markerAt\s*=\s*provisionMessage\s*\.\s*indexOf\(\s*marker\s*\)", src)
+    assert marker_at, (
+        "markerAt must be derived from that message, not from another field of "
+        "the RPC error (which leaves the branch dead code while every payload "
+        "assertion still passes)"
+    )
+    assert marker_at.start() < src.index("if (markerAt >= 0) {"), (
+        "markerAt must be computed BEFORE the branch that tests it"
+    )
+
+    # The product payload, read from the Python builder.
+    want = _one_free_org_detail("org-blocker")
+    assert f'code: "{want["code"]}",' in branch, (
+        "#2789: the dashboard dialog is driven by `code`, so the refusal must "
+        f"carry code {want['code']!r}"
+    )
+    assert f'message: "{want["message"]}",' in branch, (
+        "the message must be the SAME string the Python lanes send (it goes "
+        "through `with_limit_contact`, so it carries the #5425 contact route): "
+        f"expected {want['message']!r}"
+    )
+    assert "org_id: blockingOrgId," in branch, (
+        "org_id must name the blocking org so the dialog's 'Upgrade current "
+        "organization' action targets it instead of guessing"
+    )
+    assert "}, 402);" in branch, (
+        "the refusal must be a 402 — a 500 hides the product rule behind a "
+        "generic failure"
+    )
+
+    # The generic branch survives: only the marker is a 402, every other RPC
+    # failure keeps its 502 (the inverse laundering guard).
+    tail = src[src.index(branch) + len(branch) :]
+    assert (
+        'return json({ error: "Provisioning failed. Please try again." }, 502);'
+        in tail
+    ), "an unrelated RPC failure must still be a 502, not laundered into a 402"
