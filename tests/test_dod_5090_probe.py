@@ -435,9 +435,20 @@ def test_every_embedded_label_has_a_query_path():
 #: ── `#11492`: row 2 resolves labels from the SAME product register row 1 reads ──────────────
 #: The issue required the reading to be DECIDED, not assumed: the register classified writers but
 #: carried NO label (Case B), and the label is not derivable per writer either (15 of the 20
-#: outside-gate writers name none in their own Cypher — it lives in the caller's `MATCH`). So the
-#: product DECLARES it (`WriterClass.stores`) and this row reads that declaration. The tests below
-#: pin the three falsifiers the issue names, and the two guards implementation made necessary.
+#: outside-gate writers name no USABLE label in their own Cypher, and they fail for SEVERAL
+#: different reasons — a `MATCH` the derivation does not credit, a module constant, a property-map
+#: merge over a constant tuple, a delegated store (`_index_process_unit` → `_session_event_write`),
+#: a clause builder (`set_embedding_clause`), or ONE carrying the caller's
+#: statement, and those six are a SAMPLE rather than the set: the other NINE are a carrier a later
+#: pass stores (`add_point`, `_journal_event_raw_write`), a body that issues no store at all — a
+#: read, a read into a dict, comment PROSE (`_compare_views`, `_graph_fingerprint`,
+#: `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), or a docstring QUOTING one
+#: (`_prewipe_synthetic_write_scope`, whose whole body is a `return`; the `SET n.embedding = NULL` it
+#: quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), and a
+#: runtime-interpolated label (`restore_graph`) — so no single one of them may be named as "the"
+#: reason). So the product DECLARES it (`WriterClass.stores`) and this row reads that declaration.
+#: The tests below pin the three falsifiers the issue names, and the two guards implementation made
+#: necessary.
 def _store_declared(name: str, stores, *, cls: str = probe.CENSUS_EXEMPT) -> dict:
     """One register entry in the shape row 2 reads — with an explicit `stores`."""
     return {**_declared(name, cls), "stores": stores}
@@ -473,8 +484,10 @@ def test_row_two_reads_MET_when_the_register_resolves_every_writer(monkeypatch):
     Three ways a writer gets there, all present at once: through the gate (label derived), from a
     declared label, or by a declaration that it stores no live graph vector. ⛔ The third is what
     makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: ten of
-    this tree's twenty outside-gate writers never store a node vector at all (reads, carriers, the
-    clause builder), and two more store on a label chosen at RUNTIME — those two are held as
+    this tree's twenty outside-gate writers issue no vector store of their own (reads, comment
+    prose — `_compare_views`, `_apply_one` — carriers, a store DELEGATED to `_session_event_write`
+    — `_index_process_unit` — a docstring QUOTING a wipe, the clause builder), and two more store on
+    a label chosen at RUNTIME — those two are held as
     `PARTIAL`, never as `no-live-vector`, so twelve is the size of the two holds together and NOT
     the count of writers that never store. A row that held those ten forever was measuring its own
     vocabulary.

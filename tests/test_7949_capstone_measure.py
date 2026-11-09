@@ -10990,7 +10990,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     ⛔ SCOPE, stated so this docstring does not claim more than the arms bind: the record
     carries FURTHER live cites this leg does NOT pin — among them
-    `pack_hierarchy.py:59`/`:78`/`:353`/`:447` and `extractor_v2.py:1154`, each stated once
+    `pack_hierarchy.py:59`/`:78`/`:365`/`:459` and `extractor_v2.py:1154`, each stated once
     or twice and watched by nothing (measured: re-staling any of them leaves this file
     green). They are recorded on #11173, the open root for capstone cite drift, whose
     durable fix is putting RECONCILE in a sweep (`_BUNDLE_DOCS`) rather than growing this
@@ -11395,13 +11395,45 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # ⚠️ The NUMBER is the claim, not the region. A region-only check passed with §1 re-staled to
     # `:12853` while an unrelated `:12929` sat earlier in the record (measured) — the record states
     # one number at several places, so "appears somewhere before the block" is not "§1 quotes it".
-    # Bound to the base-qualified cite instead, and MADE wording-free rather than described as
-    # such: an earlier `at (?:HEAD|here)` pinned the two spellings the record happened to use, so a
-    # third qualifier (`at the head`) redded with a diagnostic asserting the WRONG NUMBER while
-    # `:12929` was present (measured — the comment claimed a tolerance the code did not have).
-    # The qualifier is now any word run, and "base-qualified" is expressed as its opposite: the
-    # qualifier must NOT be a base (`at 62248db88` / `at `62248db88`` are excluded), which is what
-    # separates the LIVE cite from the historical one in the same sentence.
+    # HISTORY, because this paragraph describes an arm that no longer ships — the shipping pair is
+    # bound to the literal `at` connector plus a 7–40 hex base (see the regex below), NOT
+    # "wording-free". What it records about the arms before it: an even earlier `at (?:HEAD|here)`
+    # pinned the two spellings the record happened to use, so a third qualifier (`at the head`)
+    # redded with a diagnostic asserting the WRONG NUMBER while `:12929` was present (measured —
+    # the comment claimed a tolerance the code did not have).
+    # ⛔ WHAT THIS ARM BINDS, re-measured at the head that carries it — not described from memory.
+    # The region must carry the base-qualified PAIR (`:12929` at `a1dff7cec8`), and EVERY `:12929`
+    # in it must sit within 60 characters of that base. The §5 block additionally classifies each
+    # qualifier it parses and refuses one that is not a base.
+    # ⚠️ A SUPERSEDED arm is PINNED by nothing here any more — it is described a few lines down,
+    # as history, because an earlier revision of this comment explained that the qualifier was
+    # "any word run" accepting both the live and the base spelling: the arm then read was
+    # `_found == ["12929"]` over a `(?!`?\d)` lookahead.
+    # ⛔ NOT "a lookahead that excluded bases" — that misreads it in the direction this file keeps
+    # having to correct. Measured on that arm's own regex (`7dabb59e0^`): `:12929 at a1dff7cec8`
+    # MATCHES, `:12929 at 62248db88` does not, and the record's `` at `a1dff7cec8` `` does not
+    # either. It excluded a base that STARTS WITH A DIGIT and could not read a BACKTICKED one at
+    # all — which is why §2 read `[]` against a record that states the number correctly. The
+    # "qualifier must NOT be a base" prose was therefore true only of the digit-initial spelling;
+    # `#11555`/`#11002` then replaced the arm with the base-qualified pair, retiring the tolerance
+    # and that sentence together. Keeping either would have this file grading a policy the record
+    # retired, which is the rot it exists to catch.
+    # Probed at this head, record restored after each (SERIAL — two parallel runs that both mutate
+    # this shared artifact produce a false red):
+    #   `:12929` at `HEAD` REPLACING the base-qualified cite -> RED  (the PAIR is what is gone)
+    #   `:12929` at `62248db88`, one-sided                   -> RED
+    #   `:12929` at `HEAD` ADDED beside the base-qualified   -> GREEN in §2 — NOT an acceptance:
+    #       cite                                                §2 has no live-number arm by design
+    #                                                           (below), and the §5 block REDS.
+    # ⚠️ WHAT THE PAIR DOES NOT DO: `a1dff7cec8` is a CONSTANT in this file, so the arm proves the
+    # record agrees with that constant — never that the constant is where `vet_enabled` actually
+    # sat. Re-reading `extractor_v2.py` AT that base needs history a `fetch-depth: 1` checkout does
+    # not have, so the residual is NAMED here rather than implied closed; the durable fix is
+    # #11564's (with #11571/#11173 for the neighbouring arms).
+    # ⚠️ NOR does it grade OCCURRENCE COUNT or POSITION: a correct `:12929` at `a1dff7cec8` that is
+    # DUPLICATED, or RELOCATED out of the sentence introducing it, is GREEN (measured). Nothing
+    # false passes — both shapes carry the right number and the right base — so this is a coverage
+    # gap in the record's structure, not a hole a wrong cite can climb through.
     # ⛔ The boundary is located by the SECTION MARKER alone (`^# §0/§2`) — no typography and no
     # extra word: the em-dash reword redded once (measured), and `sha-pinned` in the needle made
     # the word do work it was not doing (only one line matches `^# §0/§2`, verified) while a reword
@@ -11437,16 +11469,40 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             f"{_label} must quote the vet_enabled line as a BASE-QUALIFIED pair "
             f"(`:12929` at `a1dff7cec8`) — it reads {_found}; re-derive it with "
             "`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py`")
-        # ⛔ WORDING-INDEPENDENT, because a deny-list of qualifiers is not a pin (#11519 review):
-        # binding the check to the literal word `at` meant a re-stale written ANY other way
-        # shipped green — measured, `` `:12944` (HEAD) `` in §2 passed. So the arm asserts the two
-        # things a wording cannot dodge: the LIVE number never appears in these regions at all, and
-        # every `:12929` there carries the base it was true at within 60 characters — the same
-        # idiom the neighbouring `:12779` arm already uses for its own number.
+        # ⛔ THE SHIPPING PAIR ARM IS NOT "WORDING-INDEPENDENT" — it is bound to the literal `at`
+        # connector and to a 7–40 lowercase-hex base, so a citation written any other way
+        # (`` `:12929` (a1dff7cec8) ``) reds it. What it DOES assert is the one claim a reword
+        # cannot fake: every `:12929` in the region carries the base it was true at within 60
+        # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
+        # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
+        # at all" was asserted here and is FALSE: no rule here refuses the number `:12944` itself,
+        # and nothing in §2 refuses a BARE `:N` cite outside the two the arms beside this one hold —
+        # the `:12929` base PAIR and `:12779` at `62248db88` (measured — injecting `:12944` at
+        # `HEAD` into §2 leaves the whole leg GREEN; re-staling §2's `:12779` to `HEAD` reds, at
+        # the `:12779` arm). ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — do not read the
+        # previous clause as "file-qualified §2 cites are watched": §2 carries NINE of those and
+        # only THREE red. Held: `identity_hold.py:125` and `tortoise/value_gate.py:81` (`_cite`
+        # loop below) and `sdk.py:16516-16530` (the count-3 range arm) — re-staling each inside §2
+        # reds, measured. UNHELD, measured GREEN on a §2 re-stale: `extractor_v2.py:1154`,
+        # `:8880`, `:9617`, `:11731-11732`, and the `research-brief.md`/`02-research-brief.md`
+        # cites. ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's
+        # SCOPE paragraph (`:10991-10999`); the other five are recorded HERE and nowhere else,
+        # so they belong on #11173 beside it
+        # (`test_the_reconcile_cites_resolve_where_the_record_says_they_do`). Do not read the
+        # pointer as "the docstring already lists all six" — it does not.
+        # The one row that reads the number holds the capstone bundle's
+        # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
+        # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
+        # grammar leaves open is stated in the paragraph below.
         # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
-        # of any number OTHER than `:12929` to the live/HEAD shape (`:13011` at HEAD) reds NOTHING
-        # (measured: whole file green). The §5 block is NOT that hole — its qualified cites are
+        # of a number NO ARM HOLDS (`:13011` at HEAD) reds NOTHING (measured: whole file green).
+        # `:12929` and `:12779` are the two §2 BARE numbers the arms beside this one DO hold — by
+        # the base PAIR and by `62248db88` — so those two red; the hole is every OTHER §2 number
+        # that no arm holds — bare (`:10052`→`:10053`) AND file-qualified
+        # (`extractor_v2.py:8880`→`:8881`), both measured GREEN — with the three held
+        # file-qualified cites named above as the exceptions.
+        # The §5 block is NOT that hole — its qualified cites are
         # classified below. Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a

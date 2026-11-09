@@ -73,13 +73,21 @@ it was written with, so the run is `unknown` (`provenance.corpus_points_unverifi
 counts it) and the gate refuses. Use a fresh db path per smoke, or keep the
 corpus size at or above what the db already holds.
 
-## One embedding space, always
+## One embedding space — whenever the space is known
 
 The vector arm is only a measurement if the query vectors and the corpus point
 embeddings live in the SAME space. The seeded corpus ships the oracle's
 **synthetic** topic-centroid embeddings (`benchmarks/synthetic_corpus.py`,
 `ORACLE_EMBED_ALPHA`), and a `model`-space run RE-EMBEDS it (`_reembed_corpus`)
 so both sides share one space.
+
+⚠️ The claim is scoped: it holds for the two KNOWN spaces. In the third and
+fourth rows a
+run has no trustworthy corpus space to follow, so the query side falls back to
+the oracle against whatever vectors the graph already held — the arm may
+genuinely span two spaces, which is why the space is `unknown` and the gate
+refuses to compare. "Refuses" is the honest outcome there, not a reassurance
+that the two sides matched.
 So the space is decided from the CORPUS side, once per run
 (`_corpus_embedding_space`), never from ambient model availability:
 
@@ -139,7 +147,16 @@ Gate (pre-registered): **SHIP** iff the paired 90% CI on ΔnDCG@10 (points,
 vs baseline, paired on identical query ids) does not exclude −2; **WARN**
 −2…−4; **BLOCK** < −4 or a significant P@5 drop (paired CI below 0). The
 loop ships a change only when speed improved (the #316 arm) AND this gate
-does not block.
+returns **SHIP**.
+
+⚠️ **`INCOMPARABLE` is NOT a pass.** It is the gate declining to make a
+statement — the run and its baseline did not share one instrument (space, or
+model id inside the `model` space), so no delta was computed and **no
+quality evidence exists for this cycle**. A cycle that ends `INCOMPARABLE`
+has measured nothing: re-baseline in the run's own space and re-run before
+shipping anything. Reading it as "did not block, therefore ships" is the
+same defect this gate exists to remove, mirrored — the pre-fix gate could
+never pass, and this verdict could never fail.
 
 **A cross-space comparison is refused, not scored.** A run and its baseline in
 different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`

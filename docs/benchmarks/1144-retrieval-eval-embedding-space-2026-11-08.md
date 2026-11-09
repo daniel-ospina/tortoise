@@ -16,7 +16,7 @@ the loop's yardstick, and the yardstick was measuring its own instrument.
 
 **Evidence:** `tests/eval/retrieval/baseline/baseline-embedded-model-2026-11-08.json`
 (the new model-space baseline) and `tests/eval/retrieval/README.md` §"One
-embedding space, always".
+embedding space — whenever the space is known".
 
 ---
 

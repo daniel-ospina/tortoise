@@ -14,6 +14,7 @@ import pytest
 
 from tools.longmem_eval import measurement_posture
 from tools.longmem_eval.w7_publish import (
+    GOLD_CUTOFF_ROW,
     JUDGE_PIN,
     MOCK_JUDGE_PIN,
     OFFICIAL_JUDGE_MODEL_ID,
@@ -95,6 +96,129 @@ def test_missing_outcome_fraction_is_excluded_not_zero():
     assert rows["official_recall_all@5"]["value"] == 1.0
     assert rows["official_recall_all@5"]["n"] == 2
     assert rows["official_recall_all@5"]["n_excluded"] == 1
+
+
+def _gold_outcome(qid: str, session5: float | None,
+                  gold_fraction: float | None,
+                  qtype: str | None = None) -> dict:
+    """An outcome carrying BOTH cutoffs: ``session_recall@k["5"]`` (the
+    official one) and ``session_recall@n_gold`` (the #10538 variant's
+    per-question fraction)."""
+    out = _outcome(qid, session5)
+    if gold_fraction is not None:
+        out["session_recall@n_gold"] = gold_fraction
+    if qtype is not None:
+        out["question_type"] = qtype
+    return out
+
+
+def test_recall_all_at_5_is_blind_to_a_spread_question_and_n_gold_sees_it():
+    """#2516 (C1) seals the #10538 variant: ``recall_all@5`` is identically
+    0.0 for a question whose evidence set exceeds five, at ANY ranking
+    quality, so the multi-session class this gate exists for cannot register
+    an improvement under it. ``recall_all@N_gold`` measures the SAME official
+    all-or-nothing binary at a cutoff equal to the question's own gold count,
+    so it can. RED mutation: drop the variant row and the blind-spot
+    assertion stops being observable.
+
+    The official row is NOT replaced or re-derived (R12): it still reports
+    its own blinded number beside the variant.
+    """
+    # 6 gold sessions, all six retrieved: 5/6 in top-5 → official 0.0;
+    # 6/6 at the question's own cutoff → the variant reads 1.0.
+    spread = _gold_outcome("q_spread", 5 / 6, 1.0)
+    single = _gold_outcome("q_single", 1.0, 1.0)
+    rows = variant_rows([spread, single], k=5)
+    assert rows["official_recall_all@5"]["value"] == 0.5   # blinded
+    assert rows[GOLD_CUTOFF_ROW]["value"] == 1.0           # can see it
+    # both aggregations ran over the same population
+    assert rows["official_recall_all@5"]["n"] == 2
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 2
+    # the label must say what it is — an unlabelled row is an R12 trap
+    assert "NOT official" in rows[GOLD_CUTOFF_ROW]["label"]
+    assert "n_gold" in rows[GOLD_CUTOFF_ROW]["semantics"]
+
+
+def test_gold_cutoff_variant_counts_absence_rather_than_zero():
+    """A report that predates the variant (or a question with no gold
+    session → ``None``) must not read as a 0.0 miss: absent is counted in
+    ``n_excluded``, exactly like a missing ``@k`` record."""
+    rows = variant_rows([_outcome("q_older_report", 1.0)], k=5)
+    assert rows[GOLD_CUTOFF_ROW]["value"] is None
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 0
+    assert rows[GOLD_CUTOFF_ROW]["n_excluded"] == 1
+    # …and a mixture averages over the ones that DO carry it
+    rows2 = variant_rows([_gold_outcome("q1", 1.0, 1.0),
+                          _gold_outcome("q2", 1.0, 0.0),
+                          _outcome("q3", 1.0)], k=5)
+    assert rows2[GOLD_CUTOFF_ROW]["value"] == 0.5
+    assert rows2[GOLD_CUTOFF_ROW]["n"] == 2
+    assert rows2[GOLD_CUTOFF_ROW]["n_excluded"] == 1
+
+
+def test_category_rows_carry_the_gold_variant_per_class():
+    """The per-category gate surface carries the variant too — a per-class
+    breakdown is what the #10538 relay asks for, and the OFFICIAL coverage
+    arithmetic is unchanged (a gate category with no questions stays
+    legitimate, pinned by
+    ``test_receipt_completed_requires_the_per_category_rows``)."""
+    outcomes = [
+        _gold_outcome("m1", 5 / 6, 1.0, "multi-session"),
+        _gold_outcome("m2", 0.0, 0.0, "multi-session"),
+        _gold_outcome("p1", 1.0, 1.0, "single-session-preference"),
+    ]
+    block = category_variant_rows(outcomes, 5)
+    msr = block["rows"]["multi-session"]
+    # both questions are spread-sensitive: the official row reads 0.0 for
+    # the pair (5/6 is still a miss at k=5, and 0.0 is a miss anywhere)
+    # while the gold cutoff credits the one that WAS complete.
+    assert msr["official_recall_all@5"] == 0.0
+    assert msr[GOLD_CUTOFF_ROW] == 0.5      # (1.0 + 0.0)/2
+    assert msr["n"] == 2 and msr["n_gold"] == 2
+    # an ABSENT gate category reads n == 0 for BOTH rows, never fabricated
+    ku = block["rows"]["knowledge-update"]
+    assert ku["n"] == 0 and ku[GOLD_CUTOFF_ROW] is None
+    assert ku["n_gold"] == 0
+    # coverage still reads off the OFFICIAL rows only
+    assert block["coverage"]["gate_categories_with_questions"] == 2
+    assert block["coverage"]["coverage"] == 2 / 3
+    assert "NOT official" in block["variant_semantics"]
+
+
+def test_recall_metrics_computes_the_gold_cutoff_on_the_same_ranking():
+    """The fraction feeding the variant is computed by the retrieval layer at
+    a cutoff equal to ``len(answer_sessions)`` — the SAME ranking the official
+    ``@5`` fraction is measured on, so the two cutoffs are comparable
+    question-for-question.
+
+    Imported lazily: ``retrieve`` pulls the tortoise SDK (seconds), and this
+    module is deliberately a publication-layer unit suite.
+    """
+    from tools.longmem_eval.retrieve import _recall_metrics
+
+    hits = [{"id": f"p{i}", "session_id": f"s{i}", "has_answer": False}
+            for i in range(6)]
+    # 6 gold sessions, all of them retrieved: 5/6 at the fixed cutoff 5,
+    # 6/6 at the question's own cutoff 6.
+    sr, _tr, _er, _cer, at_gold = _recall_metrics(
+        hits, ks=(5,), answer_sessions={f"s{i}" for i in range(6)},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert sr["5"] == 5 / 6
+    assert at_gold == 1.0
+    # a spread question that MISSES one piece is below 1.0 at its own cutoff
+    # too — the variant is a wider cutoff, never a cheaper bar
+    sr2, _t2, _e2, _c2, at_gold2 = _recall_metrics(
+        hits[:2], ks=(5,), answer_sessions={"s0", "s9"},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert sr2["5"] == 0.5
+    assert at_gold2 == 0.5
+    # no gold session → NOT ELIGIBLE (None), never a fabricated 1.0 from the
+    # official ``all([]) == 1.0`` edge
+    assert _recall_metrics(
+        hits, ks=(5,), answer_sessions=set(), evidence_turn_ids=set(),
+        evidence_point_count=0, chunk_evidence_point_count=0)[4] is None
 
 
 def test_fraction_at_k_rejects_malformed_shapes():
@@ -674,9 +798,13 @@ def test_category_rows_report_absent_categories_as_covered_zero():
     outcomes = [dict(_outcome("m1", 1.0), question_type="multi-session")]
     block = category_variant_rows(outcomes, 5)
     for cat in ("knowledge-update", "single-session-preference"):
+        # both cutoff rows are present-and-empty: the official one and the
+        # #10538 gold-cutoff variant (#2516), each with its own counts
         assert block["rows"][cat] == {"official_recall_all@5": None,
                                       "fraction_paper@5": None,
-                                      "n": 0, "n_excluded": 0}
+                                      GOLD_CUTOFF_ROW: None,
+                                      "n": 0, "n_excluded": 0,
+                                      "n_gold": 0, "n_excluded_gold": 0}
     assert block["coverage"] == {"gate_categories_total": 3,
                                  "gate_categories_with_questions": 1,
                                  "coverage": pytest.approx(1 / 3)}

@@ -2,9 +2,8 @@
 
 Runs the official **LongMemEval-S** benchmark (500 questions, ~40-session
 histories) against Tortoise as an external comparability measurement: ingest
-each question's chat history into the graph → hybrid retrieval (graph points
-
-+ raw session transcripts) → reader LLM answers from retrieved context →
+each question's chat history into the graph → hybrid retrieval (graph points +
+raw session transcripts) → reader LLM answers from retrieved context →
 answer-check judge (our own pinned model by default since the #8486 owner
 ruling of 2026-10-27; the **official GPT-4o** judge is one explicit override
 away — see the env table below). Reports overall + per-category accuracy,
@@ -402,12 +401,68 @@ count surfaced (`report['dropped']`), never silently counted as recall 0.
 
 Encode cache (`encode_cache.py`): model-keyed
 (`sha256(model_id + prompt_name + text)`), disk-persisted, namespaced per
-(model, prompt) under the cache dir — the cross-question haystack redundancy
-is 5-10×, and the cache is what makes the 12-45h burn feasible. Active when
-`--model` is set. Concurrency model: **sequential workers** (one question at
-a time) — the simplest correct choice; per-question isolated graphs + the
-shared encode cache make parallelism a coordination cost with no correctness
-benefit.
+(model, prompt) under the cache dir. The haystack redundancy across a pass is
+**measured** (#1779, `haystack_overlap.py`): **1.299×** — 371,095 encode units
+over the 500-Q S split, 285,608 distinct, i.e. **23.0%** of units are hits in
+one pass (the dataset-derivable units — turn Points + raw chunks; a `v2` run's
+LLM-derived extraction texts are outside the census, which cannot see them)
+— and the cache is what makes the 12-45h burn feasible (it also serves
+REPEAT passes with the same `(model, prompt)` ~entirely, and survives a crash).
+Active when `--model` is set. Concurrency model: **sequential workers** (one
+question at a time) — the simplest correct choice; per-question isolated graphs
+and the shared encode cache make parallelism a coordination cost with no
+correctness benefit.
+
+### Cross-question overlap — measured, and what it does NOT buy (#1779)
+
+`python -m tools.longmem_eval.haystack_overlap` re-derives the census from the
+dataset alone (no DB, no LLM, no keys) and reports the granularity verdict.
+It **refuses with exit 2 and prints no census** when the read population has
+nothing to measure — 0 instances, 0 session slots, or 0 encode units (sessions
+present but carrying no turns). A verdict computed over zero units is not a
+measurement: the empty-transcript identity repeats, so it would publish an
+avenue as `REALIZABLE` on no text at all.
+
+| avenue | reuse | realizable? |
+|---|---|---|
+| text→embedding (`encode_cache.py`, built) | **1.299×** (23.0% of units) | yes |
+| session-level extraction reuse | **1.000×** | **no** |
+| prompt-level response cache | **1.0002×** (27 of 124,345 S1 chunk prompts = 0.02%) | **no** |
+
+The **23.0% is a HIT share, not a strictly cross-question rate** — both cells are published. Of the
+85,487 repeat units, **1,064 repeat inside a single question's own haystack** (965 turn + 99 chunk),
+so the strict cross-question reuse is **84,423 units = 22.75%**. Deriving that from the turn leg's
+count alone would publish 22.78% and quietly count 99 chunk repeats as cross-question (#1779's own
+question), so the split is a measured, pinned cell (`within_question_hit_slots` /
+`cross_question_hit_slots`) rather than prose.
+
+Cross-question *sessions* do repeat — 5,403 of 23,867 slots repeat another
+slot's content (1.293×, and all 500 questions hold at least one repeat) — but
+**0 of the 6,660 repeated pairs share a session date**. The date is
+prompt-visible (`extractor_v2._date_anchor` injects "today is `<session_date>`"
+into the S1/S2/S4 system prompt), so a session-level extraction cache has
+nothing to hit.
+
+The **response cache is a finer unit than the session**, and it is measured as
+its own cell rather than inferred from the session one: `extract_session_v2`
+splits a session into EDU chunks and calls `run_s1` **per chunk** with the
+session date, so the identity is `(chunk text, session date)` — 124,318
+distinct over 124,345 chunk prompts, **27 repeats**. `realizable` therefore
+requires the reuse to be *material* (`MATERIAL_HIT_SHARE`, 1% of the avenue's
+own unit population), not merely > 1.0: 27 of 124,345 is a rounding error of
+the LLM work. The numbers are pinned by
+`tests/test_haystack_overlap_1779.py::test_census_on_real_s_split`
+(@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
+instead of silently re-basing them.
+
+**Recorded residual — NOT reducible by dedup:** the chunk leg is 124,345 of the 371,095 encode
+units (33.5%) and **no chunk text is ever a turn text** (`distinct` per leg sums to `distinct` for
+the total: 189,522 + 96,086 = 285,608), because a chunk renders `_session_transcript(window)` while
+its turn Points render `_turn_text` (`[role] content`). Those units therefore cannot be served from
+the turn Points' cache entries. The cache still serves **28,259 of them** (22.7% of the leg — 33.1%
+of every cross-unit cache hit in the corpus); what a cache cannot do is remove the **96,086 distinct
+chunk texts**, which is a chunking/rendering decision (retrieval semantics — the `chunk_turns` knob
+of #1540).
 
 ## Dataset
 

@@ -45,7 +45,7 @@ on:
       - 'tests/e2e/test_welcome_page.py'
       - 'tests/test_waitlist_form.py'
       - 'tests/test_waitlist_subscribe.mjs'
-      - 'tests/test_tenant_provision_cors.mjs'
+      - 'tests/test_tenant_provision_server_only.mjs'
       # `tests/test_waitlist_form.py` READS these: it derives the expected
       # endpoint from `supabase/config.toml`'s project_id and asserts against a
       # migration + a function definition. Without them a supabase-only push
@@ -129,10 +129,11 @@ jobs:
           fi
       - name: Run waitlist edge-function behavioral harness (#373)
         run: node --experimental-strip-types tests/test_waitlist_subscribe.mjs
-      - name: Run tenant-provision CORS runtime harness (#1110)
+      - name: Run tenant-provision server-only runtime harness (#1120)
         # Preserved from the old ci.yml welcome-e2e job when it moved here
-        # (#1181/#1189) — this is its only runner.
-        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+        # (#1181/#1189) — this is its only runner. Renamed from the #1111 CORS
+        # harness: the browser caller that harness existed for is gone (#1120).
+        run: node --experimental-strip-types tests/test_tenant_provision_server_only.mjs
       - name: Auto-file issue on failure (monitor signal — never blocks merges)
         if: failure()
         # #2706/#2850: ONE issue per failing streak, never one per run. The old

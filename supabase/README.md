@@ -9,41 +9,42 @@ migrations and function changes as production operations.
 
 | Function           | Purpose                         | verify_jwt        |
 |--------------------|---------------------------------|-------------------|
-| tenant-provision   | Auth hook (after_user_created)  | false (self-auth) |
+| tenant-provision   | Dashboard BFF only (server-side) | false (self-auth) |
 | waitlist-subscribe | Landing waitlist capture (#373) | false (anon POST) |
 | deck-view          | Gated deck view capture (#8732) | false (anon POST) |
 
-### tenant-provision caller auth (#802)
+### tenant-provision caller auth (#802, #1120)
 
-`verify_jwt=false` is required because the `after_user_created` auth hook
-sends NO user JWT — Supabase Auth signs the hook request itself. Caller
-auth is enforced inside the function:
+`verify_jwt=false` remains because the caller is verified **inside** the
+function, and because the public anon key must never be sufficient to mint an
+org or an API key. There is exactly ONE caller and ONE auth path today:
 
-- **Auth-hook calls** — the Standard-Webhooks signature (`webhook-id` /
-  `webhook-timestamp` / `webhook-signature` headers) is verified against
-  `AUTH_HOOK_SECRET` (the hook secret configured on `after_user_created`,
-  format `v1,whsec_...`).
-- **Direct calls** — must present a user JWT (`Authorization: Bearer`)
-  whose `id` + `email` match the `user_id`/`email` being provisioned
-  (a user can only provision for themselves).
-- Everything else (incl. bare anon-key POSTs) → **401**.
+- **The dashboard's same-origin BFF** (`website/apps/dashboard/functions/api/
+  provision.ts`, #3501/#4054) mints the signed-in user's access token from the
+  HttpOnly `__Host-session` cookie and sends it as `Authorization: Bearer`. The
+  function requires that JWT's `id` + `email` to match the `user_id`/`email`
+  being provisioned — a user can only provision for THEMSELVES.
+- Everything else (bare anon-key POSTs, a missing/invalid token, a caller
+  minting for someone else) → **401/403**.
 
-Set the secret (dashboard step, #802):
+**No CORS surface (#1120).** The browser no longer calls this function: the
+welcome page's provisioning pipeline is dead (#1566) and the dashboard posts to
+its own origin. So the origin allowlist, the OPTIONS preflight answer and every
+`Access-Control-*` header are DELETED, and an origin-bearing request is refused
+403 — a browser caller is not a supported caller. Do not add CORS back without
+re-opening #1120.
 
-```bash
-supabase secrets set --project-ref ybetwichurajbfswfeqa \
-  AUTH_HOOK_SECRET='v1,whsec_...'   # value from Dashboard → Auth → Hooks
-```
-
-> **Status (post-#832):** the auth hook is DISABLED and `AUTH_HOOK_SECRET`
-> is not set in production — the JWT path is the only live consumer. The
-> hook path fails CLOSED (401) while the secret is unset, so re-enabling the
-> hook is a dashboard step + `secrets set` away (see #1120).
+**The `after_user_created` hook path is gone (#1120).** `after_user_created` is
+not a supported Supabase auth hook (the supported ones are Before User Created,
+Custom Access Token, Send SMS, Send Email, MFA Verification Attempt, Password
+Verification Attempt), so #839's 500 was a platform-capability gap rather than a
+configuration gap. The dead `AUTH_HOOK_SECRET` / Standard-Webhooks branch was
+deleted rather than left inert — there is no secret to set and no dashboard step
+that would make it work.
 
 ### tenant-provision required secrets (#1121)
 
-Beyond `AUTH_HOOK_SECRET` (hook path only, currently unset), the success
-(201) path reads these secrets — the deploy workflow
+The success (201) path reads these secrets, and the deploy workflow
 (`.github/workflows/supabase-deploy.yml`) verifies the three app-managed
 ones exist before shipping (hard fail); `SUPABASE_SERVICE_ROLE_KEY` is a
 platform-reserved secret auto-injected into edge functions (warn-only in
