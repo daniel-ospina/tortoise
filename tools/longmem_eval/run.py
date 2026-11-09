@@ -4121,6 +4121,39 @@ def _hard_gate_red(outcome: dict) -> list[str]:
     return [r for r in _gate_red(outcome) if r in HARD_GATE_REASONS]
 
 
+def _breaker_dropped_outcome(
+    question: dict, qid: str, ks: tuple[int, ...],
+) -> dict[str, Any]:
+    """#1349: the outcome recorded when the vector-arm breaker DROPS a
+    question — a drop, never a failure, and never recall 0 in the means.
+
+    #2516 (C1): the two recall rows do NOT share a drop convention, because
+    they do not share an empty-gold-set convention in band. The official
+    ``session_recall@k`` dict is 0.0 for a gold-less question
+    (``retrieve.py::_recall_metrics``), so a drop mirrors that with 0.0. The
+    gold-cutoff VARIANT is ``None`` there — in band and in
+    ``w7_publish`` — because an empty denominator is NOT ELIGIBLE rather than
+    a fabricated perfect score, and absence becomes ``n_excluded``. Mirroring
+    the VARIANT's in-band ``None`` here is what keeps ``n_gold`` a property of
+    the DATA: hard-coding 0.0 counted a gold-less question as a 0.0 miss on a
+    dropped question and as unmeasured on a graded one, so the variant's
+    denominator moved with whether a breaker happened to open.
+    """
+    return {
+        "question_id": qid,
+        "question_type": question.get("question_type", ""),
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None,
+        "hypothesis": None,
+        "session_recall@k": {str(k): 0.0 for k in ks},
+        "session_recall@n_gold": (
+            0.0 if (question.get("answer_session_ids") or []) else None),
+        "turn_recall@k": {str(k): 0.0 for k in ks},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+
+
 def _activate_beliefs_for_question(
     sdk, *, namespace: str | None, qid: str,
 ) -> dict[str, Any]:
@@ -5630,22 +5663,8 @@ def run_evaluation(
                     # means (count surfaced in report["dropped"]). Never
                     # recall 0.
                     with _lock:
-                        dropped_outcome = {
-                            "question_id": qid,
-                            "question_type": question.get("question_type", ""),
-                            "breaker_open": True,
-                            "dropped_reason": "breaker_open",
-                            "label": None,
-                            "hypothesis": None,
-                            "session_recall@k": {str(k): 0.0 for k in ks},
-                            # #2516 (C1): same drop convention as above —
-                            # nothing was retrieved, so the gold-cutoff
-                            # fraction is 0.0 too (mirroring recall_all@5's
-                            # 0.0 for this outcome, never a silent absence).
-                            "session_recall@n_gold": 0.0,
-                            "turn_recall@k": {str(k): 0.0 for k in ks},
-                            "ndcg@10": None, "p@10": None, "p@5": None,
-                        }
+                        dropped_outcome = _breaker_dropped_outcome(
+                            question, qid, ks)
                         outcomes.append(dropped_outcome)
                         done[qid] = dropped_outcome
                         # #2185: breaker-open spend is OVERHEAD (Am 20/24) —
@@ -6250,7 +6269,26 @@ def outcomes_to_report(
         "outcomes": [
             {k: o.get(k) for k in (
                 "question_id", "question_type", "question_date", "label",
-                "hypothesis", "session_recall@k", "turn_recall@k",
+                "hypothesis", "session_recall@k",
+                # #2516 (C1) — the labelled ``recall_all@N_gold`` variant's
+                # per-question fraction MUST ride this projection: it is the
+                # ONLY path a real run's outcome takes into the published
+                # report (``build_report`` spreads this projected list over
+                # its raw one under ``extra["outcomes"]``, and
+                # ``w7_publish --report`` reads THAT list), so a variant key
+                # missing here is stripped from every receipt forever while
+                # the aggregate still looks right — ``GOLD_CUTOFF_ROW`` reads
+                # ``value: None, n: 0, n_excluded: <all non-_abs>`` on a real
+                # run and nothing goes red (the #10137 failure mode the
+                # ``belief_activation`` entry below already records: a
+                # published aggregate DROPPED the per-question cells it was
+                # counted from).
+                # Unconditional, like ``evidence_recall@k``/``breaker_open``
+                # beside it: the value is legitimately ``None`` for a question
+                # with no gold session, and ``w7_publish`` counts a null as
+                # ``n_excluded`` — never a fabricated 0.0.
+                "session_recall@n_gold",
+                "turn_recall@k",
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "ingest_error_text",
