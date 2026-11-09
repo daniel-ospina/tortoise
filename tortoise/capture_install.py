@@ -1837,6 +1837,31 @@ def _install_pi(
 
     actions: list[str] = []
     changed = False
+    # ⛔ TWO FLAGS, NOT ONE, AND NEITHER IS `changed` (#11584 review round 8).
+    # `changed` unions THREE things — a legacy-extension disable, the capture
+    # artifact write, and the read-seam write — so neither artifact's own
+    # verdict can be recovered from it:
+    #   * keying the capture flag off `changed` (round 7) captured the legacy
+    #     disable, which mutates Pi's capture BEHAVIOUR without writing
+    #     `tortoise-capture.ts` at all — so `install pi` over a byte-identical
+    #     capture file printed "Pi capture extension installed." on the #3713
+    #     legacy path, the same #3808 R13 over-claim one level down;
+    #   * and `changed` is True before any artifact write on some paths, so a
+    #     field built from it disagrees with the actions on the error returns.
+    # These are set at the WRITE and read through `_written()` below, so every
+    # return — success and error alike — reports the same, true set.
+    capture_written = False
+    read_seam_written = False
+
+    def _written() -> tuple[str, ...]:
+        """The artifacts THIS run WROTE, by install name."""
+        return tuple(
+            name for name, did_write in (
+                (PI_EXTENSION_NAME, capture_written),
+                (PI_VOLUNTEER_EXTENSION_NAME, read_seam_written),
+            ) if did_write
+        )
+
     # Same split as ``_install_claude`` (#3808 R25): the write-free probe runs
     # under ``--dry-run`` too, so the two halves agree on an impossible home.
     unwritable = _preflight_probe([ext_dir])
@@ -1873,7 +1898,8 @@ def _install_pi(
         elif legacy.is_dir():
             if legacy_disabled.exists() or legacy_disabled.is_symlink():
                 return InstallResult(harness, changed=changed,
-                                     actions=tuple(actions), error=(
+                                     actions=tuple(actions),
+                                     changed_artifacts=_written(), error=(
                                          f"cannot disable the legacy extension "
                                          f"{legacy}: {legacy_disabled} already "
                                          "exists. Move one of them aside and "
@@ -1904,6 +1930,11 @@ def _install_pi(
             else:
                 _atomic_bytes(dst, payload, 0o644)
                 actions.append(f"installed {dst}")
+            # The ONLY place the capture artifact is actually written. A
+            # legacy-extension disable above sets `changed` but NOT this, so
+            # the user-facing "capture extension installed" sentence stays
+            # tied to a write of that file (#11584 review round 8).
+            capture_written = True
             changed = True
     except OSError as e:
         # A write-time failure on a VIRGIN home lands NOTHING — the seam
@@ -1917,7 +1948,8 @@ def _install_pi(
                  if actions else
                  "the capture seam is NOT installed — nothing was written.")
         return InstallResult(harness, changed=changed,
-                             actions=tuple(actions), error=(
+                             actions=tuple(actions),
+                             changed_artifacts=_written(), error=(
                                  f"install failed at "
                                  f"{getattr(e, 'filename', None) or dst}: "
                                  f"{e.__class__.__name__}: {e} — {state} "
@@ -1940,7 +1972,8 @@ def _install_pi(
                                        require_present=True)
         if divergence:
             return InstallResult(harness, changed=changed,
-                                 actions=tuple(actions), error=divergence)
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=divergence)
 
     # (#2119) The seam's SECOND artifact — the per-turn READ extension. Written
     # after the capture half is verified, so a refused/failed capture install
@@ -1967,29 +2000,19 @@ def _install_pi(
     # any shape => let `_install_pi_volunteer_artifact` apply its guards, which
     # is where those shapes are classified.
     read_seam_present = os.path.lexists(ext_dir / PI_VOLUNTEER_EXTENSION_NAME)
-    # The capture half's OWN verdict, taken BEFORE the union below: `changed`
-    # answers "did this install write anything", which is the wrong question
-    # for a caller that names one of the two artifacts in a sentence.
-    capture_changed = changed
-    read_seam_changed = False
     if introduce_read_seam or read_seam_present:
         v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
             ext_dir, home, dry_run=dry_run)
         changed = changed or v_changed
-        read_seam_changed = v_changed
+        read_seam_written = v_changed
         actions.extend(v_actions)
         if v_error:
             return InstallResult(harness, changed=changed,
-                                 actions=tuple(actions), error=v_error)
+                                 actions=tuple(actions),
+                                 changed_artifacts=_written(), error=v_error)
 
-    changed_artifacts = tuple(
-        name for name, did_change in (
-            (PI_EXTENSION_NAME, capture_changed),
-            (PI_VOLUNTEER_EXTENSION_NAME, read_seam_changed),
-        ) if did_change
-    )
     return InstallResult(harness, changed=changed, actions=tuple(actions),
-                         changed_artifacts=changed_artifacts)
+                         changed_artifacts=_written())
 
 
 def openclaw_home(home: Path) -> Path:

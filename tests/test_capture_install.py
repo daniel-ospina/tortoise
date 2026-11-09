@@ -3583,6 +3583,71 @@ def test_cli_install_pi_names_only_the_half_it_actually_installed(cli):
     assert "Pi capture extension installed" not in again.stdout, again.stdout
 
 
+def test_cli_install_pi_disabling_a_legacy_extension_is_not_a_capture_install(cli):
+    """Disabling a legacy extension MUTATES behaviour but writes neither
+    artifact — so it must not be reported as installing the capture one
+    (#11584 review round 8).
+
+    The round-7 fix keyed the capture flag off `changed`, which unions THREE
+    things: the legacy disable, the capture write, and the read-seam write.
+    On this shape the capture file is byte-identical and never written, yet
+    `changed` is True from the legacy rename — so the old gate printed "Pi
+    capture extension installed.", the same #3808 R13 over-claim one level
+    down. The action line below still reports the disable truthfully.
+
+    Mutation: set the capture flag from `changed` again (rather than at the
+    write) — this REDs.
+    """
+    run, _root, home = cli
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    capture = ext_dir / capture_install.PI_EXTENSION_NAME
+
+    first = run("install", "pi")
+    assert first.returncode == 0, first.stderr
+    before = capture.stat().st_mtime_ns
+
+    # A legacy agent-infra extension at the directory form Pi also loads
+    # (#3713): the installer renames it aside and writes neither artifact.
+    (ext_dir / "tortoise-capture").mkdir(parents=True)
+    second = run("install", "pi")
+
+    assert second.returncode == 0, second.stderr
+    assert "disabled legacy capture extension" in second.stdout, second.stdout
+    assert capture.stat().st_mtime_ns == before, "the capture file was rewritten"
+    assert "Pi capture extension installed" not in second.stdout, (
+        "the capture artifact was byte-identical and untouched; only a legacy "
+        "extension was disabled:\n" + second.stdout)
+
+
+def test_a_failed_read_seam_still_reports_the_capture_half_it_wrote(
+        cli, monkeypatch):
+    """`changed_artifacts` must be true on the ERROR returns too (#11584
+    review round 8).
+
+    Its docstring tells callers to ask it which artifacts a run changed rather
+    than the union `changed`; left empty on an error return, a caller that
+    follows that instruction reports "nothing was installed" for exactly the
+    runs where a user most needs to be told what landed — here the capture
+    half, written before the read seam failed.
+
+    Mutation: omit `changed_artifacts` from the read-seam error return — REDs.
+    """
+    _run_cli, root, home = cli
+
+    def boom(ext_dir, home_, dry_run=False):
+        return False, [], "the read seam could not be written (injected)"
+
+    monkeypatch.setattr(capture_install, "_install_pi_volunteer_artifact", boom)
+
+    result = capture_install.install_capture("pi", root=root, home=home)
+
+    assert not result.ok, result
+    assert result.changed is True, "the capture half was written"
+    assert result.changed_artifacts == (capture_install.PI_EXTENSION_NAME,), (
+        "the error return must still name the artifact that DID land, or the "
+        "field's own contract is false on exactly the failure paths")
+
+
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
     """A second `tortoise install pi` is a no-op: it must report the no-op and
     NOT claim it installed the extension.
