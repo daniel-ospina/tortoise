@@ -532,6 +532,13 @@ def test_summary_presents_incomparable_as_a_refusal_not_a_pass():
         assert "NOT a ship signal" in bare, (
             "a refusal must stay a refusal even when its reason is missing"
         )
+        assert "None" not in bare, (
+            "a missing reason must not render as the literal 'None' (or leave a "
+            "dangling separator) on the refusal line the loop reads"
+        )
+        assert not bare.rstrip("\n").endswith(". "), (
+            "an absent reason must not leave a dangling separator"
+        )
 
 
 def test_summary_still_prints_a_plain_verdict_token():

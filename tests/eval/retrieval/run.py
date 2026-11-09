@@ -1359,9 +1359,17 @@ def _markdown_summary(report: dict) -> str:
         # no comparison was made at all. `g["reason"]` carries the remedy
         # (re-baseline in this space); printing the token without it is how a
         # refusal gets mistaken for a ship signal.
-        gate_line = (f"gate vs baseline: INCOMPARABLE — NO COMPARISON WAS "
-                     f"MADE, so this run carries no quality evidence and is "
-                     f"NOT a ship signal. {g.get('reason') or ''}")
+        # The reason is appended only when there IS one: `g.get('reason', '')`
+        # returns `None` for an explicit ``None`` (the key exists), so a naive
+        # interpolation prints the literal "None" on the refusal line — junk
+        # exactly where a reader most needs a clear answer — and an empty
+        # reason leaves a dangling ". " separator.
+        reason = (g.get("reason") or "").strip()
+        gate_line = "gate vs baseline: INCOMPARABLE — NO COMPARISON WAS MADE, " \
+                    "so this run carries no quality evidence and is NOT a " \
+                    "ship signal."
+        if reason:
+            gate_line = f"{gate_line} {reason}"
     else:
         gate_line = f"gate vs baseline: {g['verdict']}"
     # The SPACE belongs in the summary too, not only in the JSON/report notes:
