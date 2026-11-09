@@ -5500,11 +5500,15 @@ def _cmd_install_hooks(args) -> int:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
       cline / devin — and, for pi, the in-repo ``tortoise-volunteer.ts``
-      EXTENSION (#2119) and, for openclaw, the native plugin DIRECTORY
-      (``~/.openclaw/extensions/tortoise/``, #2120) — none of which is a
-      shell hook at all;
+      EXTENSION (#2119), for openclaw the native plugin DIRECTORY
+      (``~/.openclaw/extensions/tortoise/``, #2120) and, for hermes, the
+      in-repo Python plugin DIRECTORY (``<dir>/.hermes/plugins/
+      tortoise-volunteer/``, the ``pre_llm_call`` surface, #2121) — none of
+      which is a shell hook at all;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
-      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      (``session-start.sh`` / ``session-end.sh`` / ``session-turn.sh``, the
+      per-turn spool added by #3963 so a killed session still files, plus
+      their merged ``settings.json`` entries at timeouts 60 / 60 / 30),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
       sessionStart cold-context injection hook, #2122), pi (the in-repo
@@ -6178,8 +6182,9 @@ def _install_read_hook_impl(args) -> int:
               "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
-              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
-              "with a merged SessionStart/SessionEnd entry (timeout 60)")
+              "session-start.sh / session-end.sh / session-turn.sh into "
+              "<dir>/.claude/hooks with merged SessionStart/SessionEnd/"
+              "UserPromptSubmit entries (timeout 60 / 60 / 30)")
         print("  tortoise install cline   → <dir>/.clinerules/hooks/"
               "UserPromptSubmit (→ volunteer-turn.sh cline)")
         # Devin's file is the ONE JSON seam with no ``"hooks"`` wrapper: the
@@ -6210,6 +6215,11 @@ def _install_read_hook_impl(args) -> int:
               "install needs HERMES_ENABLE_PROJECT_PLUGINS=1 AND "
               "`hermes plugins enable tortoise-volunteer` — Hermes plugins "
               "are opt-in, so the directory alone injects nothing)")
+        print("  tortoise install openclaw → ~/.openclaw/extensions/"
+              "tortoise/ (the plugin DIRECTORY: its before_prompt_build hook "
+              "is the per-turn READ seam and its llm_output hook the capture "
+              "seam) + plugins.entries.tortoise.enabled in "
+              "~/.openclaw/openclaw.json — discovered is not loaded (#2120)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
