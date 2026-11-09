@@ -10934,7 +10934,16 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     # `at` branch on exactly the wrapped typography this record uses — measured, and it is the
     # state the same review caught in the second round.
     for n, at_q, paren_q in re.findall(
-            r":(\d+)`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])",
+            # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
+            # cite in the spelling §2 ALREADY USES three times (`extractor_v2.py:11731-11732` at
+            # `80c912244`, `:12302-12303` at `d69faaf38`, `sdk.py:16516-16530`), and without the
+            # optional `(?:-\d+)?` tail the helper reported every one of them as UNQUALIFIED — a
+            # false BLOCK of a conformant edit whose own message told the author to add the base
+            # they had already added (measured by a fresh-context review at `f885a51663`).
+            # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
+            # yields no qualifier and still reds, so the range spelling cannot become a false
+            # PASS — the qualifier is what this group captures, never the tail.
+            r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])",
             region):
         q = (at_q or paren_q).strip("*`().,;")
         if q:
@@ -10959,7 +10968,10 @@ def _unqualified_number_cites(region: str, number: str) -> list[int]:
 
     One qualifier discharges ONE occurrence, in the two spellings `_cite_qualifiers` reads — so a
     bare re-stale printed beside a base-qualified cite of the same number still reds. Returns `[]`
-    when every occurrence is base-qualified, or when the region cites `number` at all.
+    when every occurrence is base-qualified, or when the region cites `number` NOWHERE (the
+    inverted reading of this sentence — "or when the region cites `number` at all" — was the
+    opposite of the code and is corrected here; measured by a fresh-context review at
+    `f885a51663`).
     """
     sites = [m.start() for m in re.finditer(rf":{re.escape(number)}\b", region)]
     if not sites:
