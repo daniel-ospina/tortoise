@@ -10,7 +10,8 @@ Covers the SHIPPED seam surfaces (issues #2123 Codex / #2126 Claude-family /
 3. ``tortoise/claude-hooks/volunteer-turn.sh`` — the SHIPPED UserPromptSubmit
    hook script, executed for real, asserting the per-harness OUTPUT
    contracts (codex/claude ``hookSpecificOutput.additionalContext``, cline
-   ``contextModification.context``) carry the reflex block; empty graph →
+   ``contextModification`` as a FLAT STRING — Cline rejects any other shape)
+   carry the reflex block; empty graph →
    empty stdout + exit 0 (content fail-open).
 
 The reflex only surfaces EP-MEASURED points (neutral Beta(1,1) = 0.5 sits
@@ -29,6 +30,7 @@ import contextlib
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import threading
@@ -342,16 +344,22 @@ def test_install_cline_writes_hook_file(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(tmp_path)], env)
     assert r.returncode == 0, r.stderr
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     assert hook.exists()
     assert os.access(hook, os.X_OK)  # Cline hooks are executed files
     assert "volunteer-turn.sh cline" in hook.read_text()
+    # #2124: `.clinerules/hooks` is the ONE workspace hooks dir every Cline
+    # surface reads (`apps/vscode/src/core/storage/disk.ts` ships
+    # `hooksDir: ".clinerules/hooks"`). `.cline/hooks` is read by Cline's
+    # SDK/CLI only, so writing there alone left the VS Code extension — the
+    # surface a project install targets — with no hook at all.
+    assert not (tmp_path / ".cline" / "hooks" / "UserPromptSubmit").exists()
 
 
 def test_install_cline_refuses_overwrite_of_foreign_hook(tmp_path):
     """A pre-existing cline UserPromptSubmit hook that is NOT ours is
     refused (never overwritten)."""
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     hook.write_text("#!/usr/bin/env bash\necho user-authored\n")
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
@@ -368,11 +376,285 @@ def test_install_cline_refuses_overwrite_of_foreign_hook(tmp_path):
 def test_install_cline_uninstall_removes_own_hook(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     _run(["install", "cline", "--dir", str(tmp_path)], env)
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     assert hook.exists()
     r = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
     assert r.returncode == 0, r.stderr
     assert not hook.exists()
+
+
+def test_install_cline_migrates_the_legacy_registration(tmp_path):
+    """#2124: an earlier release wrote `<dir>/.cline/hooks/UserPromptSubmit`,
+    which Cline's VS Code extension never reads. Install must move to
+    `.clinerules/hooks` AND remove OUR OWN legacy file, or the SDK/CLI (which
+    reads both) would inject twice.
+
+    MUTATION: drop the migration → a stale legacy file survives → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    os.chmod(legacy, 0o755)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").exists()
+    assert not legacy.exists(), "our own legacy registration was left behind"
+    assert "legacy registration" in r.stdout
+
+
+def test_install_cline_leaves_a_FOREIGN_legacy_hook_alone(tmp_path):
+    """A user's own `.cline/hooks/UserPromptSubmit` is not ours to delete —
+    ownership is the marker LINE (#2383), so migration must skip it and say so
+    rather than fail the install.
+
+    MUTATION: migrate without the ownership check → a user hook is destroyed
+    → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    user_text = "#!/usr/bin/env bash\necho my own hook\n"
+    legacy.write_text(user_text)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert legacy.exists() and legacy.read_text() == user_text
+    assert "left untouched" in r.stderr
+
+
+def test_install_cline_reports_a_failed_legacy_cleanup_as_a_note(tmp_path,
+                                                               monkeypatch, capsys):
+    """A best-effort cleanup must not turn a WORKING install into
+    `Install failed:` (#2124 review P2).
+
+    The live registration is written and reported installed FIRST; when the
+    legacy file then cannot be unlinked (root-owned `.cline/hooks`, a read-only
+    mount, root-squashed NFS) the run must say so and still exit 0. Aborting
+    with `Install failed:` names nothing that was actually left behind, and is
+    inconsistent with the migration's own ownership READ, which already treats
+    an unreadable legacy file as merely reportable.
+
+    MUTATION: drop the `except OSError` around the legacy unlink → the boundary
+    turns PermissionError into `Install failed:` and exit 1 → RED.
+    """
+    import tortoise.__main__ as tmain
+
+    root = tmp_path / "proj"
+    legacy = root / ".cline" / "hooks" / "UserPromptSubmit"
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    real_unlink = Path.unlink
+
+    def _refuse(path, *a, **kw):
+        if path == legacy:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    rc = tmain._install_read_hook_impl(_read_hook_args(root, harness="cline"))
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"a working install was reported as a failure: {err}"
+    assert "Install failed" not in err
+    assert live.exists(), "the live registration must still be installed"
+    assert "could not remove the legacy registration" in err
+    assert legacy.exists(), "the unremovable path must be named, not dropped"
+
+
+def test_install_cline_reports_a_failed_legacy_cleanup_on_uninstall_as_a_note(
+        tmp_path, monkeypatch, capsys):
+    """The uninstall half of the best-effort delete (#11588 review cycle 3).
+
+    The install-side test covers the migration; this covers the uninstall loop,
+    where the same `except OSError` exists for the same reason — and where its
+    ABSENCE used to escape to the catch-all as
+    `Install failed: PermissionError` (exit 1) after the other path had already
+    been removed.
+
+    The summary must key on OWNERSHIP, not on `removed`: with the only
+    registration unremovable, `removed` is empty, and the old summary then said
+    "No cline registration of ours … — nothing to remove" over our SURVIVING
+    hook — the same false success in a different message.
+
+    MUTATION: drop the `except OSError` → RED on `Install failed`; restore a
+    `if not removed:` summary → RED on the "nothing to remove" assertion.
+    """
+    import tortoise.__main__ as tmain
+
+    root = tmp_path / "proj"
+    legacy = root / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    real_unlink = Path.unlink
+
+    def _refuse(path, *a, **kw):
+        if path == legacy:
+            raise PermissionError(13, "Permission denied", str(path))
+        return real_unlink(path, *a, **kw)
+
+    monkeypatch.setattr(Path, "unlink", _refuse)
+    rc = tmain._install_read_hook_impl(
+        _read_hook_args(root, harness="cline", uninstall=True))
+    out, err = capsys.readouterr()
+
+    assert rc == 0, f"a best-effort cleanup was reported as a failure: {err}"
+    assert "Install failed" not in err
+    assert legacy.exists(), "the unremovable path must be named, not dropped"
+    assert "could not remove" in err
+    assert "nothing to remove" not in out, (
+        "the summary claimed there was nothing of OURS to remove while our own "
+        "hook survived the failed unlink")
+
+
+def test_install_cline_does_not_retire_the_registration_it_just_wrote(tmp_path):
+    """When `.cline` and `.clinerules` are the SAME path (a symlink either
+    way — the natural way to give both Cline surfaces one hooks dir), the
+    legacy migration must not run: it would delete the file this run wrote.
+
+    Measured before the fix (#11588 review cycle 3), with `.cline ->
+    .clinerules`: rc 0, `Installed …` AND `Removed the legacy registration …`,
+    and `.clinerules/hooks/` EMPTY — a false PASS that left NO hook on any
+    path, so the reflex silently never fired.
+
+    MUTATION: drop the same-file guard → RED on `live.is_file()`.
+    """
+    root = tmp_path / "proj"
+    root.mkdir()
+    (root / ".cline").symlink_to(".clinerules")
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(root)], env)
+    assert r.returncode == 0, r.stderr
+    assert live.is_file(), (
+        "the registration was written and then retired through the symlink — "
+        "no hook exists on any path")
+    assert "Removed the legacy registration" not in r.stdout
+    assert "SAME file" in r.stderr
+
+
+def test_install_cline_refuses_a_FOREIGN_live_hook_at_the_live_target(
+        tmp_path):
+    """The LIVE target keeps STRICT identity (#11588 review cycle 3).
+
+    The LEGACY path is judged by provenance (see its test); the live path must
+    not be, or a user's own `.clinerules/hooks/UserPromptSubmit` invoking a
+    DIFFERENT, still-existing `volunteer-turn.sh` would be overwritten on
+    install and deleted on uninstall. Both sibling foreign-hook tests use text
+    that fails the 2-token predicate under EITHER rule, so this is the only
+    case that distinguishes them — and it pins the distinction.
+
+    MUTATION: pass `relocated_ok=True` for every path → RED (install would
+    succeed and clobber the user's file).
+    """
+    root = tmp_path / "proj"
+    other = tmp_path / "other-install"
+    other.mkdir()
+    other_script = other / "volunteer-turn.sh"
+    other_script.write_text(_HOOK.read_text())
+    os.chmod(other_script, 0o755)
+    user_text = ("#!/usr/bin/env bash\n"
+                 f"exec {other_script} cline\n")
+    live = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+    live.parent.mkdir(parents=True)
+    live.write_text(user_text)
+    os.chmod(live, 0o755)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(root)], env)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "already exists and is not our" in r.stderr
+    assert live.read_text() == user_text, "the user's live hook was overwritten"
+
+    u = _run(["install", "cline", "--dir", str(root), "--uninstall"], env)
+    # rc 1: a refusal is still a refusal (#2383). What changed in cycle 9 is
+    # that the refusal no longer SKIPS the cleanup — see the legacy test below.
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "refusing to delete it" in u.stderr
+    assert live.read_text() == user_text, "the user's live hook was deleted"
+
+
+def test_uninstall_cline_still_removes_our_legacy_hook_past_a_FOREIGN_live_one(
+        tmp_path):
+    """A foreign file at the LIVE target must not strand OUR legacy
+    registration (#11588 review cycle 9).
+
+    The live and legacy paths became different files in #2124, so a user's own
+    `.clinerules/hooks/UserPromptSubmit` no longer implies ours at
+    `.cline/hooks/UserPromptSubmit` is absent. Returning 1 on the foreign live
+    hook skipped the uninstall loop entirely, leaving OUR file installed and
+    still fired by Cline's SDK/CLI, while the message named only the live
+    target — the R5 leak, in the one shape this change created.
+
+    Also covers the same command when the live `target` sits behind an
+    OUT-OF-ROOT `.clinerules` symlink holding a foreign hook: that path is only
+    READ (never unlinked, ownership fails), so it must not block either.
+
+    MUTATION: return 1 on a non-owned live target → RED on both rcs; guard the
+    target on `exists()` alone → RED on the symlink case.
+    """
+    outside = tmp_path / "shared-clinerules"
+    (outside / "hooks").mkdir(parents=True)
+    foreign_outside = outside / "hooks" / "UserPromptSubmit"
+    foreign_outside.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) an in-root foreign live target
+    proj = tmp_path / "proj"
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    foreign_live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    foreign_live.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), "OUR legacy registration was stranded"
+    assert foreign_live.exists(), "a foreign live hook was deleted"
+    assert "refusing to delete it" in u.stderr
+
+    # (b) the same, with the live target behind an out-of-root symlink
+    proj2 = tmp_path / "proj2"
+    (proj2 / ".cline" / "hooks").mkdir(parents=True)
+    legacy2 = proj2 / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy2.write_text("#!/usr/bin/env bash\n"
+                       "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj2 / ".clinerules").symlink_to(outside)
+
+    u2 = _run(["install", "cline", "--dir", str(proj2), "--uninstall"], env)
+    assert u2.returncode == 1, (u2.returncode, u2.stdout, u2.stderr)
+    assert not legacy2.exists(), "OUR legacy registration was stranded"
+    assert foreign_outside.exists(), "a FOREIGN file was deleted"
+
+
+
+def test_install_cline_uninstall_removes_a_legacy_only_registration(tmp_path):
+    """A user whose only registration is the legacy one can still uninstall —
+    the `no registration → clean no-op` guard must not fire over a legacy
+    file, or `--uninstall` becomes a silent leak.
+
+    MUTATION: the pre-#2124 guard (`uninstall and not target.exists()`) →
+    returns 0 without touching the legacy file → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+
+    r = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert r.returncode == 0, r.stderr
+    assert not legacy.exists(), "a legacy-only registration leaked"
 
 
 # ── Devin CLI (#2124) — `.devin/hooks.v1.json`, the ONE JSON seam whose
@@ -580,13 +862,13 @@ def test_install_refuses_symlink_escape(tmp_path):
 
 
 def test_install_refuses_symlinked_intermediate_dir(tmp_path):
-    """A symlinked INTERMEDIATE dir (.cline/ → outside) must refuse even when
+    """A symlinked INTERMEDIATE dir (.clinerules/ → outside) must refuse even when
     the leaf file does not exist yet — no write-through outside the root."""
     outside = tmp_path / "outside-hooks"
     outside.mkdir()
     proj = tmp_path / "proj"
-    (proj / ".cline").parent.mkdir(parents=True, exist_ok=True)
-    (proj / ".cline").symlink_to(outside)
+    (proj / ".clinerules").parent.mkdir(parents=True, exist_ok=True)
+    (proj / ".clinerules").symlink_to(outside)
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(proj)], env)
     assert r.returncode == 1
@@ -594,16 +876,762 @@ def test_install_refuses_symlinked_intermediate_dir(tmp_path):
     assert not (outside / "hooks" / "UserPromptSubmit").exists()  # untouched
 
 
+def test_uninstall_cline_ignores_an_outside_symlink_on_the_untouched_path(
+        tmp_path):
+    """The symlink-escape guard covers only paths the operation WRITES or
+    DELETES (#11588 review cycle 5).
+
+    With an in-root legacy registration and `.clinerules` symlinked to a dir
+    OUTSIDE the root, an `--uninstall` used to refuse with
+    "… resolves to … outside the install dir" and leave OUR OWN hook in place
+    (measured: rc 1, hook still there; the base removed it, because the legacy
+    path was not a candidate at all). Nothing was at risk: the file being
+    deleted was in-root.
+
+    The guard must still refuse the INSTALL in that same project — that one
+    would write through the out-of-root symlink.
+
+    MUTATION: guard every candidate unconditionally → RED on the uninstall rc.
+    """
+    outside = tmp_path / "shared-clinerules"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules").symlink_to(outside)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), (
+        "an unrelated out-of-root symlink blocked the removal of OUR OWN "
+        "in-root registration")
+
+    # …while the write side of the SAME guard still holds.
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr
+    assert not (outside / "hooks" / "UserPromptSubmit").exists()
+
+
+def test_uninstall_cline_removes_the_live_hook_when_dot_cline_leaves_the_root(
+        tmp_path):
+    """Install, then the user symlinks `.cline` to a shared dir outside the
+    root: `--uninstall` must still remove the LIVE registration it just
+    installed (nothing of ours lives under the symlink), or the reflex keeps
+    firing after the user asked to remove it (#11588 review cycle 5).
+
+    MUTATION: guard every candidate unconditionally → RED (rc 1, hook kept).
+    """
+    outside = tmp_path / "shared-cline"
+    outside.mkdir()
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    (proj / ".cline").symlink_to(outside)
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), (
+        "the live registration survived an uninstall because of a symlink on "
+        "the path it does not use")
+def test_install_refuses_a_symlinked_LEGACY_path_before_deleting_through_it(
+        tmp_path):
+    """#2124: the escape guard must cover the LEGACY target too.
+
+    The legacy registration is not merely READ during migration — it is
+    UNLINKED, so a symlinked `<dir>/.cline` would send that delete OUTSIDE the
+    install dir, exactly as a write would (and the old `.cline/hooks` path is
+    precisely the one a user is most likely to have symlinked to a shared hooks
+    directory).
+
+    The file outside is OURS by the marker rule (a dead `exec` line, which
+    `_cline_marker_owns` accepts), so the ownership check passes and the escape
+    guard is the ONLY thing standing between the migration and a delete outside
+    the root. That is what makes this the pin for the guard extension and not
+    for the ownership check.
+
+    MUTATION: drop `legacy_target` from the guard's candidate list
+    (`for candidate in [target]:`) → the install proceeds and unlinks
+    `outside/hooks/UserPromptSubmit` → RED. Before this test existed, all 27
+    cline/symlink cases stayed GREEN under that mutation (measured).
+    """
+    outside = tmp_path / "outside-hooks"
+    (outside / "hooks").mkdir(parents=True)
+    victim = outside / "hooks" / "UserPromptSubmit"
+    victim.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj = tmp_path / "proj"
+    (proj / ".clinerules").parent.mkdir(parents=True, exist_ok=True)
+    (proj / ".cline").symlink_to(outside)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Refusing" in r.stderr
+    assert victim.exists(), "the legacy DELETE reached outside the install dir"
+
+
+def test_uninstall_refuses_a_symlinked_LEGACY_path_before_deleting_through_it(
+        tmp_path):
+    """The UNINSTALL half of the legacy-escape guard (#11588 review cycle 7).
+
+    The install half is pinned above; the uninstall arm deletes the same
+    out-of-root file and was unpinned — a mutant that drops `legacy_target`
+    from the uninstall candidate list removed `outside/hooks/UserPromptSubmit`
+    OUTSIDE the install root and exited 0, silently, with every existing test
+    green (both other uninstall symlink tests point at an EMPTY outside dir, so
+    the arm is skipped there).
+
+    MUTATION: drop the existing-candidate scope on the uninstall arm → the
+    outside file is deleted → RED.
+    """
+    outside = tmp_path / "outside-hooks"
+    (outside / "hooks").mkdir(parents=True)
+    victim = outside / "hooks" / "UserPromptSubmit"
+    victim.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(outside)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, r.stdout + r.stderr
+    assert "Refusing" in r.stderr
+    assert victim.exists(), "the uninstall DELETE reached outside the install dir"
+
+
+def test_install_cline_survives_a_symlink_loop_at_the_legacy_path(tmp_path):
+    """A loopy `<dir>/.cline` (the classic `ln -s .cline .cline` mistake) must
+    not turn a COMPLETED install into a failure (#11588 review cycle 7).
+
+    `_legacy_is_live_target()` compares `resolve()`d paths and is consulted
+    AFTER the hook is written; `resolve()` raises RuntimeError — not OSError —
+    on a loop, so the boundary reported
+    `Install failed: RuntimeError: Symlink loop` with exit 1 while the 0755 hook
+    sat on disk. That is the "working install reported as a failure" class
+    R10 declares closed.
+
+    MUTATION: let RuntimeError escape `_legacy_is_live_target` → RED on rc.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(".cline")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "Install failed" not in r.stderr
+    assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
+def test_install_cline_refuses_a_symlink_loop_at_the_primary_target(tmp_path):
+    """A loop on `.clinerules` — or on `.clinerules/hooks` — is a clean
+    REFUSAL, not `Install failed: RuntimeError: Symlink loop` (#11588 review
+    cycle 9).
+
+    `_escape_refusal()` calls `Path.resolve()` on every symlinked component
+    between the root and the target, and `resolve()` raises RuntimeError — NOT
+    OSError — on a loop. That exception escaped the guard, so an install into a
+    project whose PRIMARY target was the loop died at the boundary with an
+    internal type name and exit 1. Cycle 7 closed exactly this class for
+    `.cline`, but that fix cannot reach here: `exists()` is False for a loop,
+    so the legacy guard is never even called in this shape. An unresolvable
+    path is not PROVEN to be inside the root, so it fails CLOSED.
+
+    MUTATION: drop the `try/except` around `cp.resolve()` → RED on both
+    params (`Install failed: RuntimeError: Symlink loop from '…'`).
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    for loopy, make in (
+        ("clinerules", lambda proj: (proj / ".clinerules").symlink_to(
+            ".clinerules")),
+        ("hooks", lambda proj: (
+            (proj / ".clinerules").mkdir(),
+            (proj / ".clinerules" / "hooks").symlink_to("hooks"),
+        )),
+    ):
+        proj = tmp_path / f"proj-{loopy}"
+        proj.mkdir()
+        make(proj)
+
+        r = _run(["install", "cline", "--dir", str(proj)], env)
+
+        assert r.returncode == 1, (loopy, r.returncode, r.stdout, r.stderr)
+        assert "Refusing" in r.stderr, (loopy, r.stderr)
+        assert "Symlink loop" not in r.stderr, (loopy, r.stderr)
+        assert "Traceback" not in r.stderr, (loopy, r.stderr)
+        # Nothing was written: the refusal happens before any write.
+        assert not (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
+def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
+        tmp_path):
+    """The legacy candidate is guarded only when the run would really DELETE
+    it (#11588 review cycle 8).
+
+    A FOREIGN `hooks/UserPromptSubmit` behind an out-of-root `.cline` is only
+    ever READ — the migration and the uninstall both skip it — so letting it
+    block refused an install that writes nothing there and an uninstall that
+    left OUR in-root hook installed (measured: rc 1 both ways, with nothing
+    outside the root at risk).
+
+    MUTATION: guard the legacy path on `exists()` alone → RED on both rcs.
+
+    ⛔ The out-of-root `.cline` must exist BEFORE the install, not after: it
+    used to be created between the two arms, so the install arm asserted on a
+    tree with NO legacy path at all and the refusal cycle 8 removed could have
+    come back with this suite green (#11588 review cycle 9). Both arms now run
+    against the same tree that actually holds the foreign registration.
+    """
+    outside = tmp_path / "shared-cline"
+    (outside / "hooks").mkdir(parents=True)
+    foreign = outside / "hooks" / "UserPromptSubmit"
+    foreign.write_text("#!/usr/bin/env bash\necho my own hook\n")
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(outside)
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # Install writes only in-root: it must succeed and leave the foreign file be.
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    assert foreign.read_text() == "#!/usr/bin/env bash\necho my own hook\n"
+
+    # Uninstall deletes only ours: it must succeed, and the foreign file stays.
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), "our in-root hook survived an uninstall"
+    assert foreign.exists(), "a FOREIGN file was deleted"
+
+
+def test_uninstall_cline_removes_our_hook_despite_a_blocked_OTHER_candidate(
+        tmp_path):
+    """A refusal on ONE candidate must not strand our OTHER registration
+    (#11588 review cycle 10).
+
+    The pre-loop guards (a directory at the legacy path; our file behind an
+    out-of-root symlink) returned 1 before the uninstall loop ran, so the
+    registration that WAS removable stayed installed and still fired while the
+    message named only the blocked path. R8 keeps the refusal; what it must not
+    do is skip the rest of the work.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) a DIRECTORY sits at the legacy path; ours is at the live target.
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks" / "UserPromptSubmit").mkdir(parents=True)
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "is a directory" in u.stderr
+    assert not live.exists(), "our live hook was stranded by a blocked legacy path"
+
+    # (b) ours is at the legacy path; our live path sits behind an OUTSIDE
+    #     symlink, so deleting through it would escape the root.
+    outside = tmp_path / "shared"
+    (outside / "hooks").mkdir(parents=True)
+    our_outside = outside / "hooks" / "UserPromptSubmit"
+    our_outside.write_text("#!/usr/bin/env bash\n"
+                           "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj2 = tmp_path / "proj2"
+    legacy = proj2 / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj2 / ".clinerules").symlink_to(outside)
+    u2 = _run(["install", "cline", "--dir", str(proj2), "--uninstall"], env)
+    assert u2.returncode == 1, (u2.returncode, u2.stdout, u2.stderr)
+    assert "Refusing" in u2.stderr
+    assert not legacy.exists(), "our legacy hook was stranded by a blocked live path"
+    assert our_outside.exists(), "the delete escaped the install root"
+
+
+def test_uninstall_cline_dry_run_predicts_the_uninstall_not_a_write(tmp_path):
+    """`--dry-run --uninstall` must model the UNINSTALL (#11588 review cycle 10).
+
+    It used to print `[dry-run] would write <target>` — a write the operation
+    never performs — and, after the legacy line moved into the install arm, it
+    also promised a legacy removal that only an install does.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    proj = tmp_path / "proj"
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+
+    d = _run(["install", "cline", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove" in d.stdout
+    assert "would write" not in d.stdout
+    assert live.is_file(), "a dry run deleted the registration"
+
+    # A refusal is predicted too: foreign live hook, nothing of ours.
+    foreign = tmp_path / "foreign"
+    (foreign / ".clinerules" / "hooks").mkdir(parents=True)
+    (foreign / ".clinerules" / "hooks" / "UserPromptSubmit").write_text(
+        "#!/usr/bin/env bash\necho mine\n")
+    fd = _run(["install", "cline", "--dir", str(foreign), "--uninstall",
+               "--dry-run"], env)
+    fr = _run(["install", "cline", "--dir", str(foreign), "--uninstall"], env)
+    assert fd.returncode == fr.returncode == 1, (fd.returncode, fr.returncode)
+    assert "would write" not in fd.stdout
+
+
+def test_uninstall_cline_removes_an_aliased_registration_once(tmp_path):
+    """When `.cline` and `.clinerules` are ONE file, the uninstall must not
+    schedule two removals of it (#11588 review cycle 11).
+
+    Both paths got a `remove` verdict, so the second unlink failed with ENOENT
+    and the run told the user to manually remove a file it had just removed —
+    a success reported as a cleanup failure — while `--dry-run` predicted two
+    removals that could not both happen.
+    """
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".cline").symlink_to(".clinerules")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+
+    d = _run(["install", "cline", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert d.stdout.count("would remove") == 1, d.stdout
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists()
+    assert "could not remove" not in u.stderr, (
+        "a successful uninstall reported a cleanup failure for a file it had "
+        "just removed")
+    assert u.stdout.count("Removed") == 1, u.stdout
+
+
+def test_install_cline_dry_run_declares_the_legacy_unlink_it_will_perform(
+        tmp_path):
+    """The dry arm must predict the POST-write state (#11588 review cycle 11).
+
+    With a leaf symlink at the live target pointing at the legacy file, the
+    atomic write REPLACES the link, so afterwards the two paths are different
+    files and the migration unlinks the legacy one. Evaluating the predicate
+    before the write made `--dry-run` print only `would write` while the real
+    run also performed an UNDECLARED delete.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    (proj / ".clinerules" / "hooks" / "UserPromptSubmit").symlink_to(
+        "../../.cline/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    d = _run(["install", "cline", "--dir", str(proj), "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove the legacy registration" in d.stdout, d.stdout
+    assert legacy.exists(), "the dry run deleted the legacy registration"
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not legacy.exists(), "the real run did not perform the predicted unlink"
+def test_uninstall_claude_does_not_refuse_a_settings_json_it_only_reads(
+        tmp_path):
+    """Guard a path iff the run WRITES or DELETES it (#11588 review cycle 11).
+
+    A `settings.json` symlinked into a dotfiles repo is a path the run only
+    READS when it holds nothing of ours, so #2383 promises the clean no-op
+    (`nothing to remove`, rc 0). Pre-guarding `target` on every uninstall
+    refused it with rc 1 and a message about a symlink the run never needed to
+    touch — the over-block class the PR declares closed, on the shared JSON
+    path.
+
+    MUTATION: move the JSON-seam guard back above the ownership read → rc 1
+    and a `Refusing:` line → RED.
+    """
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    settings = dotfiles / "settings.json"
+    settings.write_text('{"model": "x"}\n')
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    (proj / ".claude" / "settings.json").symlink_to(settings)
+
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert "nothing to remove" in r.stdout + r.stderr, r.stdout + r.stderr
+    assert "Refusing" not in r.stderr, r.stderr
+    assert settings.read_text() == '{"model": "x"}\n'
+
+
+def test_uninstall_claude_still_refuses_to_rewrite_through_an_escaping_symlink(
+        tmp_path):
+    """The other half of the same rule: moving the guard must not weaken it.
+
+    A registration of OURS behind an out-of-root `settings.json` means the run
+    really WOULD rewrite, so the guard still fires and nothing is touched
+    (#11588 review cycles 11, 12).
+
+    ⛔ The mechanism, stated correctly: `_atomic_write_text` writes a temp in
+    `dst.parent` and `os.replace`s it onto `dst`, so for a LEAF symlink it
+    REPLACES the link rather than writing through it — the dotfiles copy is
+    safe even unguarded (the code's own note at `_install_read_hook_impl` says
+    so). What the guard protects in THIS shape is the user's symlink: unguarded,
+    the link is destroyed and a divergent in-root copy is planted. The shape
+    where an unguarded write really lands OUTSIDE the root is a symlinked
+    INTERMEDIATE DIRECTORY — pinned by the test below.
+
+    MUTATION: delete the `_escape_refusal([target])` call at the write site →
+    rc 0 and the symlink is replaced by a regular in-root file → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "claude", "--dir", str(donor)], env).returncode == 0
+    shipped = (donor / ".claude" / "settings.json").read_text()
+
+    dotfiles = tmp_path / "dotfiles"
+    dotfiles.mkdir()
+    settings = dotfiles / "settings.json"
+    settings.write_text(shipped)
+    proj = tmp_path / "proj"
+    (proj / ".claude").mkdir(parents=True)
+    link = proj / ".claude" / "settings.json"
+    link.symlink_to(settings)
+
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert link.is_symlink(), "the user's symlink was replaced by a local copy"
+    assert settings.read_text() == shipped, (
+        "the out-of-root settings.json was rewritten")
+
+
+def test_uninstall_claude_refuses_to_write_through_a_symlinked_DIR_that_escapes(
+        tmp_path):
+    """A symlinked INTERMEDIATE directory is where an unguarded uninstall really
+    writes OUTSIDE the root (#11588 review cycle 12).
+
+    `_atomic_write_text` creates its temp in `dst.parent` and `os.replace`s it
+    onto `dst`. When `.claude` itself is the symlink, `dst.parent` resolves
+    outside the root, so the temp — and the replace — land there. That is a
+    genuine out-of-root write, and the guard is the only thing that refuses it.
+
+    MUTATION: delete the `_escape_refusal([target])` call at the write site →
+    the outside `settings.json` is rewritten to the uninstalled document → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "claude", "--dir", str(donor)], env).returncode == 0
+    shipped = (donor / ".claude" / "settings.json").read_text()
+
+    outside = tmp_path / "dotfiles" / ".claude"
+    outside.mkdir(parents=True)
+    settings = outside / "settings.json"
+    settings.write_text(shipped)
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".claude").symlink_to(outside)
+
+    r = _run(["install", "claude", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert settings.read_text() == shipped, (
+        "the out-of-root settings.json was rewritten through the dir symlink")
+
+
+def test_uninstall_hermes_refuses_a_plugin_dir_that_escapes_the_root(tmp_path):
+    """⛔ REGRESSION PIN for a deleted guard (#11588 review cycle 12).
+
+    The escape guard's uninstall arm used to live in ONE shared pre-check,
+    `if uninstall and harness != "cline" and _escape_refusal(...)`, which
+    covered `hermes` as well as the JSON seams. Cycle 11 moved the guard to
+    the JSON seams' write site and to the cline branch and left HERMES with
+    none — so the branch that `unlink`s the bundled files, `rmtree`s
+    `__pycache__` and `rmdir`s the plugin directory deleted a shared plugin
+    OUTSIDE the install dir and exited 0 (measured). This pins the branch that
+    was missed, not the rule that was followed.
+
+    MUTATION: drop `if uninstall and _escape_refusal([target])` from the hermes
+    branch → rc 0 and the out-of-root plugin files are DELETED → RED.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    donor = tmp_path / "donor"
+    donor.mkdir()
+    assert _run(["install", "hermes", "--dir", str(donor)], env).returncode == 0
+    plugin = donor / ".hermes" / "plugins" / "tortoise-volunteer"
+    assert plugin.is_dir(), "the donor install produced no plugin dir"
+
+    outside = tmp_path / "shared" / ".hermes"
+    (outside / "plugins").mkdir(parents=True)
+    victim = outside / "plugins" / "tortoise-volunteer"
+    shutil.copytree(plugin, victim)
+
+    proj = tmp_path / "proj"
+    proj.mkdir()
+    (proj / ".hermes").symlink_to(outside)
+
+    r = _run(["install", "hermes", "--dir", str(proj), "--uninstall"], env)
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert victim.is_dir(), "the out-of-root plugin was deleted"
+    assert (victim / "plugin.yaml").is_file(), "files were deleted outside root"
+
+    # The dry run must predict the same refusal, not a successful deletion.
+    d = _run(["install", "hermes", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == r.returncode, (d.returncode, d.stdout, d.stderr)
+    assert "would uninstall" not in d.stdout, d.stdout
+
+
+def test_uninstall_cline_removes_a_leaf_alias_on_BOTH_entries(tmp_path):
+    """A symlink LEAF and the file it points at are two directory entries, so
+    an uninstall must remove BOTH (#11588 review cycle 12, P1).
+
+    De-duplicating by resolved path alone collapsed them, `unlink` removed only
+    the link, and the run printed `Removed …` and exited 0 with our
+    registration still live and still fired by Cline's SDK/CLI. `is_symlink()`
+    is part of the identity for exactly this reason.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    legacy = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    (proj / ".clinerules" / "hooks" / "UserPromptSubmit").symlink_to(
+        "../../.cline/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not legacy.exists(), (
+        "the file behind the leaf symlink survived an uninstall that reported "
+        "it had removed the registration")
+    assert not (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_symlink()
+
+
+def test_uninstall_cline_judges_an_aliased_registration_by_provenance(tmp_path):
+    """Two path strings that are ONE file must not change the OWNERSHIP verdict
+    (#11588 review cycle 12).
+
+    With `.cline -> .clinerules`, the live path is the representative, and its
+    STRICT identity rule declared a registration written by an older release
+    (its script path still exists) foreign — `rc 1`, "nothing to remove", hook
+    left live — while the SAME physical file at `.cline/hooks` without the
+    alias is removed by the legacy path's provenance rule. Ownership is the OR
+    of the rules across the collapsed entries.
+    """
+    old_install = tmp_path / "old-install"
+    old_install.mkdir()
+    old_script = old_install / "volunteer-turn.sh"
+    old_script.write_text(_HOOK.read_text())
+    os.chmod(old_script, 0o755)
+    proj = tmp_path / "proj"
+    (proj / ".clinerules" / "hooks").mkdir(parents=True)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    live.write_text(f"#!/usr/bin/env bash\nexec {old_script} cline\n")
+    (proj / ".cline").symlink_to(".clinerules")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
+    assert not live.exists(), (
+        "an aliased registration was declared foreign by the live path's strict "
+        "rule and left installed")
+
+
+def test_install_cline_retires_a_legacy_SYMLINK_into_the_live_path(tmp_path):
+    """A legacy path that is itself a SYMLINK is its own directory entry, so
+    retiring it removes only the link (#11588 review cycle 12).
+
+    The same-file skip was written for the DIRECTORY alias (where unlinking the
+    legacy path unlinks the registration); applied to a leaf symlink it left
+    `.cline/hooks/UserPromptSubmit` live, pointing at the registration — so
+    Cline's SDK/CLI still saw two hook paths — while the note claimed there was
+    nothing to retire. Unlinking the link cannot touch the registration.
+    """
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks").mkdir(parents=True)
+    link = proj / ".cline" / "hooks" / "UserPromptSubmit"
+    link.symlink_to("../../.clinerules/hooks/UserPromptSubmit")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    d = _run(["install", "cline", "--dir", str(proj), "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove the legacy registration" in d.stdout, d.stdout
+    assert link.is_symlink(), "the dry run removed the legacy link"
+
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not link.is_symlink() and not link.exists(), (
+        "the legacy symlink survived, so the SDK/CLI still sees a second hook")
+    assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.mkdir(parents=True)
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     r = _run(["install", "cline", "--dir", str(tmp_path)], env)
     assert r.returncode == 1
     assert "is a directory" in r.stderr
     assert "Traceback" not in r.stderr
+
+
+def test_install_cline_refuses_when_clinerules_is_a_rules_file(tmp_path):
+    """`.clinerules` is ALSO Cline's rules-FILE convention, so a project can
+    hold a regular file at that name — and then `.clinerules/hooks/` is
+    unrepresentable.
+
+    At the PR head the write died inside ``mkdir`` with
+    ``NotADirectoryError: [Errno 20] Not a directory`` — an errno naming
+    neither the cause nor the remedy — while ``--dry-run`` printed
+    `[dry-run] would write …` and exited 0 for an install that cannot happen.
+    So the assertion is the PAIR: both runs refuse, with the same actionable
+    message, and the dry run promises nothing.
+    """
+    rules = tmp_path / ".clinerules"
+    rules.write_text("Always use TypeScript.")
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    dry = _run(["install", "cline", "--dir", str(tmp_path), "--dry-run"], env)
+    real = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    for r in (dry, real):
+        assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+        assert "Install failed:" in r.stderr
+        assert "not a directory" in r.stderr
+        assert "Traceback" not in r.stderr
+    assert "would write" not in dry.stdout
+    # Nothing was created, and the user's rules file is untouched.
+    assert rules.is_file()
+    assert rules.read_text() == "Always use TypeScript."
+
+
+def test_install_cline_refuses_a_dangling_clinerules_symlink(tmp_path):
+    """An IN-ROOT DANGLING symlink at a directory the install must CREATE —
+    either `.clinerules` or `.clinerules/hooks`: the symlink-escape guard lets
+    it through (its target resolves inside the root), `exists()` reports it
+    ABSENT, and `mkdir` still refuses to create a directory over the link.
+
+    So an existence-only check was a FALSE PASS for this shape — `--dry-run`
+    printed `would write` and exited 0 while the real run died on
+    `FileExistsError` (measured, #11588 review cycles 2 and 4). ``is_symlink()``
+    over BOTH components closes it, which is what makes R7's "prediction and
+    real run agree" invariant true for every shape — and it was only true for
+    `.clinerules` until the second component was added.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    for blocking in (".clinerules", ".clinerules/hooks"):
+        root = tmp_path / blocking.replace("/", "-")
+        (root / ".clinerules").mkdir(parents=True, exist_ok=True)
+        link = root / blocking
+        if blocking == ".clinerules":
+            link.rmdir()
+        link.symlink_to("nope")
+        dry = _run(["install", "cline", "--dir", str(root), "--dry-run"], env)
+        real = _run(["install", "cline", "--dir", str(root)], env)
+        for r in (dry, real):
+            assert r.returncode == 1, (blocking, r.returncode, r.stdout, r.stderr)
+            assert "Install failed:" in r.stderr
+            assert "not a directory" in r.stderr
+            assert "Traceback" not in r.stderr
+        assert "would write" not in dry.stdout, blocking
+
+
+def test_install_cline_migrates_a_legacy_registration_whose_script_path_lives(
+        tmp_path):
+    """A pre-#2124 registration names the script path of the release that
+    wrote it — and that path still EXISTS whenever the old install does (an
+    upgrade that recreates the venv, a second checkout, a retained `uv tool`
+    environment).
+
+    The sibling tests all use `/nonexistent/volunteer-turn.sh` (a DEAD path),
+    where identity and provenance agree. For a LIVE old path they disagree,
+    and the strict rule reads OUR OWN file as foreign: install leaves BOTH
+    hooks live — the SDK/CLI reads both dirs, so the reflex injects twice —
+    and `--uninstall` exits 0 over a hook that still fires. The legacy path is
+    judged by PROVENANCE for exactly this reason; the LIVE target keeps the
+    strict rule, which `test_install_cline_refuses_overwrite_of_foreign_hook`
+    pins.
+
+    MUTATION: judge the legacy path by identity → RED on both assertions.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    old_install = tmp_path / "old-install"
+    old_install.mkdir()
+    old_script = old_install / "volunteer-turn.sh"
+    old_script.write_text(_HOOK.read_text())
+    os.chmod(old_script, 0o755)
+    marker = f"#!/usr/bin/env bash\nexec {old_script} cline\n"
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text(marker)
+    os.chmod(legacy, 0o755)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+    assert not legacy.exists(), (
+        "our own legacy registration (its script path still on disk) was left "
+        "live alongside the new one — the reflex would inject twice")
+
+    # …and an uninstall must not report success over it either.
+    legacy.write_text(marker)
+    os.chmod(legacy, 0o755)
+    u = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert u.returncode == 0, u.stderr
+    assert not legacy.exists(), "uninstall leaked a live-path legacy marker"
+
+
+def test_install_cline_ignores_a_directory_at_the_legacy_path(tmp_path):
+    """A DIRECTORY at the LEGACY path is only reported by an install (which
+    never unlinks it), so it must not refuse an install that does not touch
+    it — before #2124 the legacy path was not an install input at all.
+
+    MUTATION: guard `cline_paths` (target AND legacy) → RED: an otherwise
+    perfect install refuses with "is a directory" (measured rc=1).
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    legacy = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.mkdir(parents=True)
+
+    r = _run(["install", "cline", "--dir", str(tmp_path)], env)
+    assert r.returncode == 0, r.stderr
+    assert (tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+    assert legacy.is_dir(), "a directory at the legacy path was not left alone"
+
+    # …while an UNINSTALL still refuses: `.unlink()` on a directory raises.
+    u = _run(["install", "cline", "--dir", str(tmp_path), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "is a directory" in u.stderr
+    assert "Traceback" not in u.stderr
 
 
 def test_volunteer_turn_hook_no_interpreter_fails_open(tmp_path):
@@ -738,12 +1766,99 @@ def test_volunteer_turn_hook_codex_contract(env, tmp_path):
 
 
 def test_volunteer_turn_hook_cline_contract(env, tmp_path):
-    """Cline UserPromptSubmit → contextModification.context."""
-    stdin = json.dumps({"prompt": "How is CI deploy triggered?"})
+    """Cline `UserPromptSubmit` → `{"cancel": false, "contextModification": "…"}`.
+
+    Both shapes here are Cline's OWN, re-derived from its source (#2124), not
+    from our earlier guess — this test graded a fabricated contract until then:
+
+    * stdin is NESTED: `hooks.proto` declares
+      `UserPromptSubmitData user_prompt_submit = 12`, and `hook-factory.ts`
+      serialises `jsonObj.userPromptSubmit` (defaulting `.prompt` to "").
+    * stdout must carry `contextModification` as a **flat string**:
+      `hooks.proto` `string context_modification = 1`, and
+      `hook-factory.ts:74-84` returns
+      "Invalid hook output: 'contextModification' must be a string" for
+      anything else — so the `{"context": …}` object this arm used to emit
+      reached no model on any Cline surface.
+
+    MUTATION: emit the object shape → RED on the exact predicate Cline's
+    validator applies. The INPUT half is NOT observable here — see
+    ``test_volunteer_turn_hook_cline_stdin_prompt_is_extracted`` for why (the
+    envelope CONTAINS the question, so retrieval still matches) and for the
+    test that does discriminate it.
+    """
+    stdin = json.dumps({
+        "userPromptSubmit": {
+            "prompt": "How is CI deploy triggered?",
+            "attachments": [],
+        }
+    })
     r = _hook_run(env, "cline", stdin, tmp_path)
     assert r.returncode == 0, r.stderr
     out = json.loads(r.stdout)
-    assert "point/" in out["contextModification"]["context"]
+    # The predicate Cline's validator applies, verbatim.
+    assert isinstance(out["contextModification"], str), (
+        "Cline rejects a non-string contextModification — got "
+        f"{type(out['contextModification']).__name__}: {out!r}")
+    assert out.get("cancel") is False
+    # The reflex must see the QUESTION, never the JSON envelope. Asserted on
+    # WHAT IT RECEIVED, not on the reflex block: this test's reflex is the real
+    # graph-seeded one, whose output never echoes the query — so an
+    # "envelope not in the block" assertion here could never fire (measured:
+    # reverting the nested read leaves this test GREEN). That discrimination
+    # lives in test_volunteer_turn_hook_cline_stdin_prompt_is_extracted, where
+    # the reflex is stubbed to echo its input.
+    assert "point/" in out["contextModification"]
+    assert "CI pipeline deploys" in out["contextModification"]
+
+
+def test_volunteer_turn_hook_cline_stdin_prompt_is_extracted(tmp_path):
+    """The reflex must be handed the QUESTION, not Cline's JSON envelope.
+
+    Cline nests the prompt (`hooks.proto` declares
+    `UserPromptSubmitData user_prompt_submit = 12`, and `hook-factory.ts`
+    serialises `jsonObj.userPromptSubmit`), so a top-level-only extractor
+    silently falls back to the whole stdin blob and queries the graph with
+    JSON syntax instead of the user's question.
+
+    The reflex is STUBBED here on purpose. The graph-seeded contract test
+    CANNOT see this defect: the envelope CONTAINS the question text, so the
+    retrieval leg still matches on the blob and the test stays green —
+    measured, by reverting the nested read and re-running it. Only asserting
+    what the reflex RECEIVED discriminates.
+
+    MUTATION: drop the `userPromptSubmit` read → the echo carries the
+    envelope → RED.
+    """
+    utils = _minimal_path(tmp_path)
+    stub = tmp_path / "stubbin" / "tortoise"
+    stub.parent.mkdir()
+    # A Python stub so the hook's interpreter guard (`_tortoise_bin_qualifies`
+    # reads the shebang) accepts it, exactly as it would a real console script.
+    stub.write_text(
+        f"#!{sys.executable}\n"
+        "import sys\n"
+        "print('REFLEX-PROMPT=[' + sys.stdin.read() + ']')\n")
+    stub.chmod(0o755)
+
+    question = "How is CI deploy triggered?"
+    stdin = json.dumps({"userPromptSubmit": {"prompt": question,
+                                             "attachments": []}})
+    env = {
+        **os.environ,
+        "PATH": f"{stub.parent}:{utils}",
+        "HOME": str(tmp_path / "home"),
+        "VIRTUAL_ENV": "",
+        "TORTOISE_DB_URI": "",
+        "TORTOISE_DB_PATH": str(tmp_path / "nope.db"),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
+    r = _hook_run(env, "cline", stdin, tmp_path)
+    assert r.returncode == 0, r.stderr
+    out = json.loads(r.stdout)
+    assert out["contextModification"] == f"REFLEX-PROMPT=[{question}]", (
+        "the reflex did not receive the user's question — it was handed "
+        f"{out['contextModification']!r}")
 
 
 def test_volunteer_turn_hook_devin_contract(env, tmp_path):
@@ -784,7 +1899,7 @@ def test_install_uninstall_when_absent_is_clean_noop(tmp_path):
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
     for harness, rel in (("codex", ".codex/hooks.json"),
                          ("claude", ".claude/settings.json"),
-                         ("cline", ".cline/hooks/UserPromptSubmit")):
+                         ("cline", ".clinerules/hooks/UserPromptSubmit")):
         target = tmp_path / rel
         r = _run(["install", harness, "--dir", str(tmp_path), "--uninstall"],
                  env)
@@ -988,7 +2103,7 @@ def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
 
     # (c) cline: a user hook that merely MENTIONS the script survives.
     men_dir = tmp_path / "mention"
-    men_hook = men_dir / ".cline" / "hooks" / "UserPromptSubmit"
+    men_hook = men_dir / ".clinerules" / "hooks" / "UserPromptSubmit"
     men_hook.parent.mkdir(parents=True)
     user_text = ("#!/usr/bin/env bash\n"
                  "# I also have the tortoise volunteer-turn.sh installed\n"
@@ -1025,7 +2140,7 @@ def test_uninstall_never_deletes_config_the_installer_did_not_write(tmp_path):
     r = _run(["install", "cline", "--dir", str(own_cline), "--uninstall"],
              env)
     assert r.returncode == 0, r.stderr
-    assert not (own_cline / ".cline" / "hooks" / "UserPromptSubmit").exists()
+    assert not (own_cline / ".clinerules" / "hooks" / "UserPromptSubmit").exists()
 
 
 # ── #3808 R27 — the read-half failure boundary is TOTAL, not a list ──────
@@ -1068,9 +2183,18 @@ _BOUNDARY_CASES = [
                             b'{"hooks": {"note": "\xff\xfe"}}'),
      ["Install failed:"]),
     # RuntimeError — a symlink cycle, where Path.resolve() raises RuntimeError
-    # (deliberately, not OSError) on CPython.
-    ("symlink-loop-runtimeerror", "claude", _loop_leaf,
-     ["Install failed:", "RuntimeError", "Symlink loop"]),
+    # (deliberately, not OSError) on CPython. Since #11588 review cycle 9 the
+    # ESCAPE GUARD refuses it FIRST: a path whose destination cannot be
+    # established is not PROVEN to be inside the root, so it fails CLOSED with
+    # the guard's own `Refusing:` line instead of letting RuntimeError reach
+    # the boundary and render as `Install failed: RuntimeError: Symlink loop`.
+    # The observable contract is unchanged (exit 1, a populated refusal, no
+    # traceback); the refusal is now EARLIER — it also fires in the write-free
+    # dry run, so the capture half never writes — and it names the remedy.
+    # The boundary's RuntimeError-family arm keeps its own coverage from
+    # `deep-json-recursionerror` below.
+    ("symlink-loop-refused-by-escape-guard", "claude", _loop_leaf,
+     ["Refusing:", "symlink that cannot be resolved"]),
     # RecursionError (a RuntimeError subclass) — a deeply nested document.
     ("deep-json-recursionerror", "claude",
      lambda r: _write_bytes(r / ".claude" / "settings.json",
@@ -1080,15 +2204,22 @@ _BOUNDARY_CASES = [
     ("directory-where-file-isadirectoryerror", "codex",
      lambda r: (r / ".codex" / "hooks.json").mkdir(parents=True),
      ["Install failed:", "IsADirectoryError"]),
-    # FileExistsError — a regular FILE where an intermediate dir belongs.
-    ("cline-hooks-as-file-fileexistserror", "cline",
-     lambda r: ((r / ".cline").mkdir(),
-                (r / ".cline" / "hooks").write_text("x")),
-     ["Install failed:", "FileExistsError"]),
-    # NotADirectoryError — a regular FILE where a parent dir belongs.
-    ("cline-dotdir-as-file-notadirectoryerror", "cline",
-     lambda r: (r / ".cline").write_text("x"),
-     ["Install failed:", "NotADirectoryError"]),
+    # `.clinerules/hooks` as a regular FILE — the component the install has to
+    # create. The read half refuses UP FRONT (#11588 review cycle 4): letting
+    # ``mkdir`` raise meant ``--dry-run`` printed `would write` and exited 0
+    # while the real run refused with FileExistsError.
+    ("cline-hooks-as-file", "cline",
+     lambda r: ((r / ".clinerules").mkdir(),
+                (r / ".clinerules" / "hooks").write_text("x")),
+     ["Install failed:", "not a directory"]),
+    # `.clinerules` as a regular FILE — Cline's rules-FILE convention, so the
+    # hooks DIRECTORY cannot be created there. The read half refuses UP FRONT
+    # with the cause and the remedy (#11588 review) instead of letting
+    # ``mkdir`` raise ``NotADirectoryError``, and before the ``--dry-run``
+    # report, so the prediction never promises a write that cannot happen.
+    ("cline-clinerules-as-rules-file", "cline",
+     lambda r: (r / ".clinerules").write_text("x"),
+     ["Install failed:", "not a directory"]),
 ]
 
 
@@ -1372,7 +2503,7 @@ def test_cline_marker_failure_leaves_the_marker_and_its_mode(tmp_path,
     """
     import tortoise.__main__ as tmain
 
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     # A DEAD two-token marker — structurally ours, so the installer proceeds
     # to the repair write instead of refusing a foreign hook.
@@ -1402,7 +2533,7 @@ def test_cline_marker_is_installed_atomically_with_its_exec_bit(tmp_path):
     """
     import tortoise.__main__ as tmain
 
-    hook = tmp_path / ".cline" / "hooks" / "UserPromptSubmit"
+    hook = tmp_path / ".clinerules" / "hooks" / "UserPromptSubmit"
     hook.parent.mkdir(parents=True)
     hook.write_text("#!/usr/bin/env bash\n"
                     "exec /nonexistent/volunteer-turn.sh cline\n")
