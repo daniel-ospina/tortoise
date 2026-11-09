@@ -3996,7 +3996,7 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     slow_selected subset to slow_gating_files(); the tier-2 intersection
     tests pin the per-surface splits."""
     # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
-    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # :2516-2518; :1243-1245 for the fast job — URI is set only when full==true),
     # and they build their collect-only input from `slow_selected`. A
     # `uri_requiring` file in `slow_selected` therefore contributes no tests to
     # that step, and when it is the leg's ONLY file the collect step exits 5 and
@@ -4302,8 +4302,8 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
     # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
     # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
-    # (it arms only when full==true, where both are set; python-ci.yml:600-602
-    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # (it arms only when full==true, where both are set; python-ci.yml:1243-1245
+    # and 2516-2518; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
     # a reversal of a recorded
     # decision, not an available fix. Handed to such a leg each of these
     # module-skips at import, so it collects ZERO tests and `pytest
@@ -4312,8 +4312,8 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # no `FAILED <nodeid>` for the merge rail to attribute — it refuses for want
     # of a failure identity (the #6798 shape; #6390 was clean-reviewed AT HEAD,
     # `mergeable=true`, `behind=0`, and still unlandable). A shard left with no
-    # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
-    # for this shard - no manifest (guard skips)') and greys out green having run
+    # files hits the empty-shard branch at python-ci.yml:1283 ('no selected files
+    # for this shard — no manifest (guard skips)') and greys out green having run
     # nothing — honest only because a tier-2 selection cannot get that small
     # (`tier1` is FAR larger than `fast_shards:` 10 — 73 rows at the commit that
     # re-derived this, and re-derive it rather than trust that count), which is a

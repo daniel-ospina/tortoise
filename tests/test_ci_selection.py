@@ -13959,6 +13959,96 @@ def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
         "restore@v4` is the fix for #11063, not deletion: without it every "
         "shard downloads torch's 140 wheels cold.")
 
+
+#: The citation the `cache:`-family enumeration in
+#: `test_the_test_job_carries_no_unbounded_cache_post_step` carries, keyed on the token that
+#: makes it unique in this file (`test-track-b`). It is read OUT of the source rather than
+#: repeated as a literal here: a pin that hard-codes the number it is guarding only ever
+#: agrees with itself, and the number is the thing that drifts.
+_CACHE_FAMILY_CITATION_RE = re.compile(r"`python-ci\.yml:(\d+)-(\d+)`, `test-track-b`")
+
+
+def test_the_cache_family_citation_lands_on_the_setup_python_input_it_names():
+    """#11602 review (P3): the citation named a span two lines short of its construct.
+
+    The comment enumerates the ways a cache save can be armed and cites the ONE live
+    instance in this workflow — `setup-python`'s `cache:` input, in `test-track-b`. That
+    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at this
+    head `3226` is `- uses: actions/checkout@v4`, `3227` the `setup-python` step, `3228`
+    its `with:` — the `cache:` input itself is `3230`. So a reader following the citation
+    landed one line ABOVE the offending input and saw no `cache:` key at all, which is
+    exactly the "resolves, but to the wrong construct" shape the window's other citation
+    pins exist to prevent (`tests/test_ci_runner_x64_install.py::_WALL_CLOCK_CITATION_ANCHORS`
+    pins `python-ci.yml:3230`, so one construct had two locations in the tree and only one
+    of them was under a pin).
+
+    Three arms, because the sentence makes three claims:
+
+    1. the span NAMES the construct — its first line is the `setup-python` step's `uses:`
+       and it contains that step's `cache:` input;
+    2. "the ONLY `cache:`-family input in this workflow" — checked by PARSING every job's
+       steps (not by trusting the citation, and not by grepping for one spelling);
+    3. the span ENDS on that input's own line, so "resolves somewhere in the step" cannot
+       stand in for "resolves on the key the sentence is about".
+
+    Non-vacuity is DERIVED from the citation rather than hard-coded (a hard-coded pre-fix
+    span rots with the next insert above it): the two-lines-short shape this fix replaced
+    is `(start - 1, end - 2)`, and the last arm asserts that span FAILS arm 1.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    match = _CACHE_FAMILY_CITATION_RE.search(source)
+    assert match is not None, (
+        "the `cache:`-family enumeration no longer cites `python-ci.yml:<span>`, "
+        "`test-track-b` — if the sentence was reworded, re-point "
+        "`_CACHE_FAMILY_CITATION_RE` at the new wording so the citation stays pinned "
+        "instead of becoming an unchecked claim")
+    start, end = int(match.group(1)), int(match.group(2))
+    lines = (REPO / ".github" / "workflows" / "python-ci.yml").read_text(
+        encoding="utf-8").splitlines()
+    assert 1 <= start <= end <= len(lines), (
+        f"the citation `python-ci.yml:{start}-{end}` is outside the workflow "
+        f"(1-{len(lines)} lines) — an insert above it moved the step")
+
+    def _names_the_construct(a: int, b: int) -> bool:
+        """Is `a-b` the `setup-python` step's `uses:` through its `cache:` input?"""
+        span = lines[a - 1:b]
+        if not span:
+            return False
+        return (span[0].strip().startswith("- uses: actions/setup-python@")
+                and any(re.match(r"\s+cache:\s*['\"]?pip\b", _l) for _l in span))
+
+    assert _names_the_construct(start, end), (
+        f"the cache-family citation `python-ci.yml:{start}-{end}` does not name the "
+        "`actions/setup-python` step AND its `cache:` input. The span at this head is "
+        + repr("\n".join(lines[start - 1:end]))
+        + ". A citation that resolves to the `with:` header (or to the `checkout` step) "
+        "sends the reader one line short of the construct it is about (#11602 review, P3)")
+
+    workflow = _load_python_ci()
+    armed = [(job_name, str(step.get("uses") or ""))
+             for job_name, job in (workflow.get("jobs") or {}).items()
+             for step in (job.get("steps") or [])
+             if any(str(_k).strip().lower() == "cache"
+                    for _k in (step.get("with") or {}))]
+    assert armed == [("test-track-b", "actions/setup-python@v5")], (
+        "the enumeration says `test-track-b` carries the ONLY `cache:`-family input in "
+        f"`python-ci.yml`; the parsed workflow carries {armed}. Either the comment's "
+        "claim or the workflow moved — the citation below is only correct for the shape "
+        "the sentence describes")
+
+    input_lines = [_i for _i, _l in enumerate(lines, 1)
+                   if re.match(r"\s+cache:\s*['\"]?pip\b", _l)]
+    assert input_lines == [end], (
+        f"the `cache:` input this sentence is about sits at python-ci.yml:{input_lines}, "
+        f"but the citation ends at :{end} — the span does not land on the key it names "
+        "(#11602 review, P3: `3226-3228` stopped at the `with:` header of `3230`)")
+
+    assert not _names_the_construct(start - 1, end - 2), (
+        "the two-lines-short span this fix replaced now PASSES the guard above, so the "
+        "guard no longer distinguishes a citation that names the construct from one "
+        "that stops above it (#11602 review, P3)")
+
+
 def test_the_test_job_carries_no_unbounded_cache_post_step():
     """#11063: the `test` job must carry NO unbounded cache post step, and each
     dependency-cache writer must be bounded twice — in SIZE and in TIME.
@@ -14057,7 +14147,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3226-3228`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3227-3230`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
