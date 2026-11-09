@@ -17,6 +17,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -222,7 +223,9 @@ class TestVersionProbeCached:
             _reset_falkordb_version_cache()
 
     def test_unidentified_client_never_cached(self):
-        """No endpoint attrs (unit mocks) → probed fresh every call."""
+        """No endpoint identity at all — no connection attrs AND no pool kwargs
+        (unit mocks) → probed fresh every call. A client with no ATTRS but a pool
+        IS identified now (#11328), which is the whole fix."""
         _reset_falkordb_version_cache()
         try:
             class _Conn:
@@ -240,6 +243,151 @@ class TestVersionProbeCached:
             assert conn.calls == 4
         finally:
             _reset_falkordb_version_cache()
+
+
+class TestVersionProbeCacheKeyServerMode:
+    """The cache key must resolve on the client shape a HOSTED REQUEST builds
+    (#11328).
+
+    redis-py 7.4.1's client carries NO ``.host``/``.port``/``._host`` of its
+    own — the configured endpoint lives in
+    ``connection_pool.connection_kwargs``. Reading only the connection's
+    attributes therefore answered ``None`` here, so ``_get_falkordb_version``
+    never read or wrote ``_FALKORDB_VERSION_CACHE`` and the 2-RTT probe
+    (MODULE LIST + INFO server) ran on **every** projection construction —
+    i.e. per hosted request on the paid tier, which is the exact cost the
+    cache exists to remove.
+
+    The tests below use the REAL client object (a ``redis.Redis`` built without
+    connecting) wherever the claim is about a real client SHAPE — a fake with
+    ``.host``/``.port`` bolted on would pin a client that does not exist and
+    would stay green through this defect. Where a test deliberately exercises a
+    shape no real client produces (a partially-resolving pool), it builds that
+    shape explicitly and says so.
+    """
+
+    def _proj(self, db) -> FalkorProjection:
+        proj = object.__new__(FalkorProjection)
+        proj.db = db
+        return proj
+
+    def _pool_only_client(self, host: str = "10.0.0.5", port: int = 6379):
+        import redis
+
+        client = redis.Redis(host=host, port=port)
+        # The premise of the whole class: assert the shape, not the assumption.
+        assert not hasattr(client, "host") and not hasattr(client, "_host"), (
+            "the pinned redis-py now exposes .host — the defect this pins is gone, "
+            "so re-measure rather than leaving a test that proves nothing"
+        )
+        return client
+
+    def test_pool_only_client_resolves_a_server_key(self):
+        """A client whose endpoint lives only in the pool kwargs still keys."""
+        db = type("_Db", (), {"connection": self._pool_only_client()})()
+        assert self._proj(db)._falkordb_version_cache_key() == (
+            "server", "10.0.0.5", 6379)
+
+    def test_the_key_is_the_same_bucket_as_the_store_identity(self):
+        """One store must not land in two buckets: the key the version cache uses
+        and the endpoint the `#4997`/`#11087` registers key on are the SAME tuple
+        for a resolved server client.
+
+        ⛔ The projection's `_host` is deliberately set to a DIFFERENT host than
+        the pool's (only a real projection keeps them equal — `__init__` uses one
+        `host` local for both). With them equal this test could not fail for the
+        property it names: `_stable_endpoint()` delegates to this key, so equality
+        would be guaranteed by construction and a future edit that sent the
+        registers to `_host` while the cache keyed on the pool would still pass.
+        Divergent is the only discriminating shape, and it also pins WHICH source
+        wins: the pool's, because a redis-py client carries no endpoint
+        attributes at all.
+        """
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
+        proj._host = "a-different-host"
+        assert proj._falkordb_version_cache_key() == ("server", "10.0.0.5", 6379)
+        assert proj._stable_endpoint() == proj._falkordb_version_cache_key()
+
+    def test_second_projection_of_a_pool_only_client_skips_the_probe(self):
+        """The consequence, end to end: two projections of ONE store probe the
+        version ONCE. This is the per-request cost #11328 removes."""
+        _reset_falkordb_version_cache()
+        try:
+            probes = {"n": 0}
+
+            def _counting_probe(self):
+                probes["n"] += 1
+                return (4, 18, 3)
+
+            first = self._proj(
+                type("_Db", (), {"connection": self._pool_only_client()})())
+            first._probe_falkordb_version = _counting_probe.__get__(first)
+            assert first._get_falkordb_version() == (4, 18, 3)
+            assert probes["n"] == 1
+
+            second = self._proj(
+                type("_Db", (), {"connection": self._pool_only_client()})())
+            second._probe_falkordb_version = _counting_probe.__get__(second)
+            assert second._get_falkordb_version() == (4, 18, 3)
+            assert probes["n"] == 1, (
+                "a second projection of the same store must hit the cache, not "
+                "re-run the 2-RTT probe (this is the per-hosted-request cost)"
+            )
+        finally:
+            _reset_falkordb_version_cache()
+
+    def test_embedded_still_keys_on_the_path(self):
+        """Regression pin: the embedded lane must not be re-keyed as a server
+        bucket by the pool fallback.
+
+        ⛔ The client here is deliberately a SERVER-shaped one (`_pool_only_client`,
+        whose pool kwargs DO carry host/port), not `object()`: with a pool-less
+        mock the fallback branch is never entered, so deleting the `and path is
+        None` guard leaves the key unchanged and this pin stays GREEN through the
+        mutation it advertises (#11360 review, measured). A real embedded client's
+        pool carries `path` alone, so pinning the STRONGER shape is the only
+        version whose failure is attributable to the guard: `_path` must win over
+        a resolvable pool, because `_path` is the attribute the embedded key is
+        built from.
+        """
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
+        proj._path = "/tmp/embedded.db"
+        proj._is_embedded = True
+        assert proj._falkordb_version_cache_key() == (
+            "embedded", "/tmp/embedded.db")
+
+    def test_the_embedded_guard_reads_the_same_attribute_as_the_fallthrough(self):
+        """`_is_embedded` and `_path` are two attributes for one fact, and
+        `__init__` sets them together — but a guard that reads one while the
+        fallthrough reads the other disagrees on the shape where they diverge,
+        silently re-keying an embedded store as a network store (#11360 review
+        P3). The guard must read `_path`, the attribute the embedded key is
+        BUILT from, so the two cannot disagree. Divergence is staged here on
+        purpose: `_path` present, `_is_embedded` left False."""
+        proj = self._proj(
+            type("_Db", (), {"connection": self._pool_only_client()})())
+        proj._path = "/tmp/embedded-but-flagged-server.db"
+        proj._is_embedded = False
+        assert proj._falkordb_version_cache_key() == (
+            "embedded", "/tmp/embedded-but-flagged-server.db")
+
+    def test_a_partial_connection_does_not_mint_a_hybrid_endpoint(self):
+        """Both identity fields must come from ONE source (#11360 review P3):
+        host from the connection and port from the pool would mint
+        `('server', pool-host, conn-port)`, a tuple matching NEITHER source —
+        which can equal a different store's real endpoint, serving its version
+        to this store and merging the two stores' registers. A redis-py client
+        never resolves half an endpoint, but a partial fake does."""
+        partial = SimpleNamespace(connection=SimpleNamespace(port=7000))
+        partial.connection.connection_pool = SimpleNamespace(
+            connection_kwargs={"host": "pool-host", "port": 6399})
+        key = self._proj(partial)._falkordb_version_cache_key()
+        assert key == ("server", "pool-host", 6399), (
+            f"expected the pool's complete pair, got {key!r} — a hybrid sources "
+            "the two fields from different places and matches no real store"
+        )
 
 
 # ── _ensure_indexes vector branch ───────────────────────────────────────────

@@ -47,6 +47,95 @@ ARMED_LEG_FILES = frozenset({
     "test_9555_narrative_carrier",
 })
 
+#: ⛔ THE CASES WITH NO `ARMED_LEG_PREFIX` NAME, required BY NAME (#11429 review
+#: cycle 2). The capstone's legs are named per DoD item (`test_D8_…`), so neither
+#: rule above can see them: a whole-file deselect is caught by
+#: `ARMED_LEG_FILES` only for the two files named there, and for the capstone
+#: nothing catches it at all — the workflow still LISTS the file, so a
+#: `-k "not D8"` / `--deselect …::test_D8_…` (the ordinary way a flaky leg is
+#: quarantined) leaves `tests/test_9567_record_capstone.py` in the pytest argument
+#: list, records NO skip, and the required job goes green with D8 — the only
+#: restore drill on any CI leg — never executed. Measured before this rule: a
+#: junit from the job's own armed legs plus the capstone run `-k "not D8"`
+#: (tests=133, skipped=0, no D8 case) was CERTIFIED, exit 0.
+#:
+#: ⛔ AND THE RULE MUST MATCH THE CATEGORY IT STATES (#11429 review cycle 4).
+#: Enumerating ONE entry fixed D8 and left the other eleven DoD legs — `test_D1_…`
+#: .. `test_D12_…` — visible to the same `-k`: measured `-k "not D10"` (the drill
+#: that `DROP POLICY`s on the live record, i.e. the leg most likely to be
+#: quarantined) still CERTIFIED at exit 0. An enumeration is the defect whether it
+#: holds one name or twelve, so the required set is DERIVED from the capstone's
+#: own source (`test_D*`) and a new DoD leg is protected the day it is named.
+#: Fails CLOSED: if the file cannot be read, nothing is certified.
+#:
+#: Each entry here is `case name` -> the wrong outcome its absence produces; it
+#: carries the rationale for legs whose absence is a specific, named loss and is
+#: UNIONED with the derived set (it is a subset today).
+REQUIRED_CASES = {
+    "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires":
+        "the record's restore drill (#9567 D8) never ran — the durable artifact "
+        "is not proven restorable on this leg, and a `-k` filter hides it",
+}
+
+#: The capstone file whose `test_D*` legs are required by construction.
+CAPSTONE_TEST_FILE = (Path(__file__).resolve().parents[2]
+                      / "tests" / "test_9567_record_capstone.py")
+
+#: ⛔ A REQUIRED LEG MUST COME FROM THE CAPSTONE'S OWN MODULE (#11429 cycle 6).
+#: Matching on the case NAME alone let a same-named stub in ANY module the job
+#: runs satisfy the requirement: measured, moving the single `test_D8_…` case to
+#: `classname="tests.test_other"` and deselecting the capstone CERTIFIED (exit 0).
+#: pytest allows the same function name in several modules, so nothing else
+#: objects — the gate has to say where the leg must live. `_leg_module` is the
+#: same reduction the armed-leg rule uses, so a `file=`/`classname=` shape resolves
+#: identically here.
+CAPSTONE_LEG_MODULE = CAPSTONE_TEST_FILE.stem
+
+#: ⛔ THE STATIC HALF OF THE REQUIRED SET (#11429 review cycle 5). Deriving the
+#: required legs ONLY from the capstone's source is circular: the rule exists to
+#: stop a DoD leg vanishing, and deleting the `def test_D10_…` line deletes the
+#: requirement with it — measured, a junit with every remaining leg, both armed
+#: files, 0 skips and 0 failures CERTIFIED (exit 0) once D10 was deleted, and
+#: again once it was merely renamed. So the requirement is `STATIC ∪ DERIVED`:
+#: the tuple below catches a deletion or a rename (as `required leg … did not
+#: run`), and the derivation keeps a NEW `test_D*` protected the day it is
+#: written without a second edit here. Renaming a leg on purpose therefore reds
+#: this gate — update this tuple in the same commit, which is the point.
+EXPECTED_CAPSTONE_LEGS = (
+    "test_D1_every_record_table_exists_on_the_armed_record",
+    "test_D1_an_unset_dsn_reports_NOT_ARMED_and_writes_nothing",
+    "test_D2_one_capture_writes_the_record_with_zero_write_failures",
+    "test_D3_no_write_path_bypasses_the_record",
+    "test_D4_the_restore_runs_with_the_journal_gone",
+    "test_D5_D6_the_restore_reproduces_the_record_per_label_and_per_predicate",
+    "test_D7_the_raw_turn_text_reads_back_from_the_record_only",
+    "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires",
+    "test_D9_a_cross_tenant_read_is_empty_and_a_cross_tenant_write_is_refused",
+    "test_D10_a_record_table_without_its_policy_fails_closed",
+    "test_D11_the_gate_refuses_at_the_org_limit_and_the_refusal_is_visible",
+    "test_D12_a_gate_with_no_usage_reading_fails_closed",
+)
+
+
+def _capstone_leg_names() -> list[str]:
+    """Every DoD leg the capstone FILE defines, read from its source with `ast`.
+
+    Source, not a list: a hand-maintained enumeration is how eleven of the twelve
+    legs stayed invisible (#11429 review cycle 4), and a leg added later must not
+    need a second edit here to be protected. `ast` rather than a regex so a name
+    mentioned in a docstring or a comment is not mistaken for a definition.
+
+    ⛔ Raises rather than returning `[]`: an unreadable or unparseable capstone is
+    NOT "no required legs", it is "this gate cannot answer" — the same fail-closed
+    rule as a missing junit XML (`main`).
+    """
+    import ast
+
+    tree = ast.parse(CAPSTONE_TEST_FILE.read_text(encoding="utf-8"))
+    return [node.name for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_D")]
+
 
 def _leg_module(case) -> str:
     """The MODULE an armed leg belongs to — bare name, no path, no package.
@@ -131,6 +220,52 @@ def decide(xml_path: Path) -> tuple[dict[str, int], list[str]]:
             "(#9551)")
     if failed:
         problems.append(f"{failed} failing/erroring leg(s) — see the run step")
+    # ⛔ "PRESENT" MUST MEAN "PRODUCED A VERDICT", not "a testcase with this
+    # name exists" (#11429 review cycle 3). A case that did not run carries a
+    # `<skipped>` child — and `type="pytest.xfail"` is deliberately EXCLUDED from
+    # the `skipped` counter above, because one ARMED leg carries a measured xfail.
+    # Composed, a `@pytest.mark.xfail` on the D8 case — the ordinary quarantine
+    # idiom, and the most likely thing anyone would quarantine here since the leg
+    # runs a second container over the network — satisfied name-presence, recorded
+    # no real skip, and CERTIFIED (exit 0) a run in which the record's only restore
+    # drill never produced a verdict: the exact fail-open this rule exists to close,
+    # one line away. No `REQUIRED_CASES` entry has a legitimate xfail.
+    # ⛔ (NAME, MODULE), not name alone — see `CAPSTONE_LEG_MODULE`. A case that did
+    # not run carries a `<skipped>` child, so it is not present (a skip is not a
+    # verdict, and an `xfail` is a `<skipped type="pytest.xfail">`).
+    present = {(case.get("name", ""), _leg_module(case))
+               for case in root.iter("testcase")
+               if case.find("skipped") is None}
+    # UNIONED: the explicit rationales plus every DoD leg the capstone DEFINES.
+    # A `-k "not D<k>"` deselects exactly one name and records no skip, so only a
+    # per-name requirement can see it — and it has to be the whole set, not one
+    # entry (#11429 review cycles 3 and 4).
+    try:
+        required = dict(REQUIRED_CASES)
+        for leg in EXPECTED_CAPSTONE_LEGS:
+            required.setdefault(
+                leg,
+                "a capstone DoD leg this gate names statically did not run — it "
+                "was deleted or renamed, or a `-k`/`--deselect` filter hid it")
+        for leg in _capstone_leg_names():
+            required.setdefault(
+                leg,
+                f"the capstone's DoD leg {leg} never ran — a `-k`/`--deselect` "
+                "filter hid it, and no other CI leg proves this item")
+    except (OSError, SyntaxError, ValueError) as exc:
+        problems.append(
+            f"cannot read the capstone's DoD legs from {CAPSTONE_TEST_FILE} "
+            f"({exc}) — nothing was certified (#11429)")
+        required = dict(REQUIRED_CASES)
+    for required_leg, why in sorted(required.items()):
+        if (required_leg, CAPSTONE_LEG_MODULE) not in present:
+            elsewhere = any(
+                name == required_leg for name, _module in present)
+            problems.append(
+                f"required leg {required_leg} did not run in {CAPSTONE_LEG_MODULE}"
+                + (" (a case of that NAME ran in another module — a required leg "
+                   "must be the capstone's own)" if elsewhere else "")
+                + f" — {why} (#11429)")
     return stats, problems
 
 

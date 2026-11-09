@@ -37,6 +37,7 @@ import pytest
 
 from tortoise.exceptions import BundleValidationError
 from tortoise.sdk import (
+    _KEY_INDEX_TRIM_SET,
     _POINT_ITEM_MINT_STATUS_DEPTH,
     TortoiseSDK,
     _content_candidate_resolution,
@@ -45,6 +46,7 @@ from tortoise.sdk import (
     _item_effective_status,
     _item_stored_key,
     _item_stored_point_kind,
+    _key_seek_terms,
 )
 
 
@@ -2157,3 +2159,498 @@ class TestContentCandidateReadMatchesThePerItemHelpers:
         assert sdk._validate_bundle({"points": [{"content": only}]}) == []
         out = sdk.ingest({"points": [{"content": only}]})
         assert out, "the ingest must commit, not raise"
+
+
+# ═══════════════════════════════════════════════════════════════════════════
+# #10481 — a padded-but-REAL key is invisible to the indexed key seek
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# `tortoise/projection._POINT_RANGE_INDEX_PROPS` declares the `key` index
+# (#8400), and FalkorDB's equality seek stores the TRIMMED term while the query
+# side is not trimmed (#9599, measured). So a node stored under `"  PK  "` is
+# unfindable by its own spelling — and `create_point(dedup=True, key="  PK  ")`
+# therefore MINTED a second carrier of one key, the exact #6110 duplicate the
+# key-identity machinery exists to prevent. It is not only the writer: the
+# #6110/#8400/#9819 Phase-1 guard asks `_key_holder_state` the SAME seek and
+# gets the same empty answer, so it CERTIFIED the duplicate write.
+#
+# ⛔ DIRECTION, and why this is not a reopen of #9553: the recorded position
+# says padded identities are LEGITIMATE, so this does NOT refuse them and does
+# NOT trim what is STORED. It normalises only the SEARCH TERM to the term the
+# engine already indexes and already matches — `_find_points_by_key` is the one
+# key-identity seek, so the writer and the Phase-1 guard are fixed together at
+# the boundary rather than at each call site. Stored bytes are untouched, which
+# is what makes the fix backward-compatible (see the module note below).
+
+
+def test_a_padded_key_is_found_by_its_OWN_spelling(sdk):
+    """The recorded defect, writer half: the seek answers the spelling it was
+    given, so the second padded write folds instead of minting a carrier."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    assert sdk._find_points_by_key("  PK  ", pointKind="statement") == [a["id"]]
+    # …and the trimmed spelling still resolves the same node (it always did).
+    assert sdk._find_points_by_key("PK", pointKind="statement") == [a["id"]]
+
+
+def test_a_padded_key_is_visible_to_the_Phase_1_GUARD(sdk):
+    """The recorded defect, guard half: `_key_holder_state` is what
+    `_check_endpoints` asks before certifying a key-bearing write, and it asked
+    the same unfindable seek."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    holders, _terminal = sdk._key_holder_state("statement", "  PK  ")
+    assert holders == [a["id"]], "the Phase-1 key-identity guard cannot see the holder"
+
+
+def test_two_padded_writes_of_ONE_key_mint_ONE_node(sdk):
+    """The #6110 duplicate this issue measured: two carriers, one key."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    b = sdk.create_point("statement", "PAD-B", key="  PK  ", dedup=True)
+    assert a["id"] == b["id"], "dedup=True minted a second carrier of one key"
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.key ENDS WITH 'PK  ' RETURN n.id").result_set
+    assert len(rows) == 1, f"{len(rows)} carriers of one padded key"
+
+
+def test_a_padded_key_is_still_STORED_VERBATIM(sdk):
+    """BACKWARD COMPATIBILITY, asserted rather than promised: the fix normalises
+    the SEARCH TERM only. The stored value is the value the caller passed —
+    #9553's recorded position is untouched, and no migration is implied."""
+    a = sdk.create_point("statement", "PAD-A", key="  PK  ", dedup=True)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == "  PK  ", stored
+
+
+def test_a_preexisting_twin_pair_is_SURFACED_never_silently_merged(sdk):
+    """An ALREADY-stored graph may hold both spellings as two carriers (that is
+    what the defect minted). They collide at the engine level regardless — the
+    index stores one trimmed term — so the fix's only obligation is to SURFACE
+    the pair rather than fold silently: the seek returns EVERY holder, which is
+    what `create_point`'s pre-#6110-collision warning counts."""
+    for key, content in (("PK", "TWIN-TRIM"), ("  PK  ", "TWIN-PAD")):
+        sdk._get_proj().g.query(
+            "CREATE (n:Point {id:$id, content:$c, content_hash:$ch, "
+            "pointKind:'statement', key:$k, status:'live'})",
+            params={"id": f"twin-{content}", "c": content,
+                    "ch": _content_hash(content), "k": key})
+    # Both spellings now resolve the SAME two-node set — no row changes
+    # identity on its own, and the collision is reported, not absorbed.
+    assert sorted(sdk._find_points_by_key("PK", pointKind="statement")) == [
+        "twin-TWIN-PAD", "twin-TWIN-TRIM"]
+    assert sorted(sdk._find_points_by_key("  PK  ", pointKind="statement")) == [
+        "twin-TWIN-PAD", "twin-TWIN-TRIM"]
+
+
+def test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling(sdk):
+    """THE TRIM SET IS THE ENGINE'S, NOT PYTHON'S (#10481 review finding).
+
+    Measured on the embedded engine: the ``key`` index trims exactly
+    ``{space, tab, newline, vtab, formfeed, CR}``. A pad the engine does NOT
+    trim (NBSP here, and the same holds for em/ideographic space and ``\\x1f``)
+    is indexed VERBATIM, so its raw spelling must stay the seek term. Bare
+    ``str.strip()`` — Python's much wider ``str.isspace()`` class — rewrote it
+    to ``"PK3"`` and sent a term the index does not hold, which made a row that
+    was findable BEFORE the fix lose its findability and let two ``dedup=True``
+    writes mint a duplicate pair — the defect inverted, and worse.
+    """
+    nb = "\u00a0"
+    key = f"{nb}PK3{nb}"
+    a = sdk.create_point("statement", "NBSP-A", key=key, dedup=True)
+    assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
+        "an NBSP-padded key lost the findability it had before the fix")
+    # …and it still FOLDS, so the guard cannot certify a duplicate.
+    b = sdk.create_point("statement", "NBSP-B", key=key, dedup=True)
+    assert b["id"] == a["id"], "an NBSP-padded re-run minted a second carrier"
+    holders, _terminal = sdk._key_holder_state("statement", key)
+    assert holders == [a["id"]], "the Phase-1 guard cannot see the NBSP holder"
+    # The stored value is still the caller's, pad and all.
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == key, stored
+
+
+def test_a_padded_key_never_REASSIGNS_the_stored_spelling(sdk):
+    """THE FIRST-WRITER SPELLING STANDS (#10481 × #6110).
+
+    The seek is trim-aware, so a padded key now HITS a holder minted with the
+    trimmed spelling — and the fold must NOT write the caller's spelling over it.
+    Relaying it would rewrite the stored value on a pure dedup hit (the #6110
+    postcondition "a dedup hit never reassigns an existing key"), bump
+    ``updatedAt`` on every alternating re-run (#490 churn), and be LIVE-ONLY —
+    ``PointRevised`` folds no ``key`` arm, so a rebuild reverts it (#9732).
+
+    ⛔ THE FOLD ITSELF IS ASSERTED (#10481 review, finding 2). Without it this
+    test could not tell "folded onto the trimmed holder WITHOUT relaying" from
+    "did not fold at all": on the PRE-FIX tree both stored-value assertions
+    below hold for the opposite reason — the padded seek missed, a SIBLING was
+    minted under ``"  PK  "`` carrying ``SPELL-B``, and the re-runs landed on
+    that sibling — so the property named in the title held while the primary
+    fix was absent (a surviving mutant, per the file's own discrimination
+    posture). With the fold asserted, reverting the seek reddens this test.
+    """
+    a = sdk.create_point("statement", "SPELL-A", key="PK", dedup=True)
+    before = sdk.get_point(a["id"]).get("updatedAt")
+    folds = [sdk.create_point("statement", "SPELL-B", key="  PK  ", dedup=True)
+             for _ in range(3)]
+    assert [f["id"] for f in folds] == [a["id"]] * 3, (
+        "a padded re-run did not fold onto the trimmed holder: "
+        f"{[f['id'] for f in folds]} vs {a['id']} — so the spelling assertions "
+        "below would hold for the wrong reason (no fold at all)")
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key, n.updatedAt",
+        params={"id": a["id"]}).result_set
+    assert stored[0][0] == "PK", (
+        f"a padded re-run rewrote the stored spelling to {stored[0][0]!r}")
+    assert stored[0][1] == before, (
+        "a pure dedup hit bumped updatedAt (#490 churn)")
+
+
+def test_a_TRIMMED_key_never_REASSIGNS_a_PADDED_stored_spelling(sdk):
+    """THE MIRROR DIRECTION — a PRE-EXISTING reassignment, not a #10481 one.
+
+    The other half of the same fold. On the PRE-FIX tree the seek sent the raw
+    term and the index holds the TRIMMED one, so a TRIMMED supplied key already
+    hit a holder stored PADDED — #10481's own measurement, taken on pre-fix
+    code. That arm had no ``key`` pop, so ``props`` kept ``key="PK"`` and
+    ``create_point`` ran ``update_point(pid, key="PK", updatedAt=now)``: a
+    pure dedup hit silently REWROTE the stored spelling and bumped
+    ``updatedAt`` (#6110 first-writer-wins violated; live-only, since
+    ``PointRevised`` folds no ``key`` arm — a rebuild reverts it, #9732).
+
+    ⛔ Both directions are asserted for the same reason the bundle pair is
+    (``test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction``):
+    the commentary explains the padded-supplied case at length, so a future
+    narrowing of the condition to "only when the SUPPLIED spelling is padded"
+    would read as consistent with it and silently restore the overwrite with
+    the suite green.
+    """
+    a = sdk.create_point("statement", "MIRROR-A", key="  PK  ", dedup=True)
+    before = sdk.get_point(a["id"]).get("updatedAt")
+    folds = [sdk.create_point("statement", "MIRROR-B", key="PK", dedup=True)
+             for _ in range(3)]
+    assert [f["id"] for f in folds] == [a["id"]] * 3, (
+        "a trimmed re-run did not fold onto the padded holder: "
+        f"{[f['id'] for f in folds]} vs {a['id']}")
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key, n.updatedAt",
+        params={"id": a["id"]}).result_set
+    assert stored[0][0] == "  PK  ", (
+        "a trimmed dedup hit rewrote the PADDED stored spelling to "
+        f"{stored[0][0]!r} — the first-writer spelling must stand (#6110)")
+    assert stored[0][1] == before, (
+        "a pure dedup hit bumped updatedAt (#490 churn)")
+
+
+def test_a_bundle_naming_ONE_key_by_TWO_paddings_is_the_SAME_identity(sdk):
+    """#10481 (review finding 1) — the bundle-order SIMULATION and the seek must
+    agree on what one key IS.
+
+    ``_item_dedup_key`` returns the term ``_find_points_by_key`` seeks, so
+    ``PK`` and ``"  PK  "`` are one identity inside a bundle exactly as they are
+    in the graph. Keying the simulation's maps by the RAW spelling certified the
+    later padded item as a FRESH mint, and the writer then folded it onto the
+    terminal point the first item had just minted — the #8400 mutation, one
+    statement inside the bundle.
+    """
+    assert _item_dedup_key({"key": "  PK  "}) == "PK"
+    assert _item_dedup_key({"key": "PK"}) == "PK"
+    with pytest.raises(BundleValidationError, match="FRESH key"):
+        sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "PAD-A",
+                 "key": "PK", "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PAD-B",
+                 "key": "  PK  "},
+            ]},
+            promotion_policy="auto",
+        )
+    assert _points_with_key(sdk, "PK") == [], (
+        "Phase-1 must reject BEFORE any write — the padded variant is the SAME "
+        "key, so the later item folds onto the terminal point just created")
+
+
+def test_the_bundle_key_identity_holds_in_the_OTHER_padding_direction(sdk):
+    """The mirror of the pair above: a TERMINAL item minted under the PADDED
+    spelling, then a later item under the trimmed one. Both directions are
+    asserted so a future edit cannot break one while the suite stays green
+    (#10481 review, coverage finding)."""
+    with pytest.raises(BundleValidationError, match="FRESH key"):
+        sdk.ingest(
+            {"points": [
+                {"ref": "p1", "kind": "statement", "content": "PAD-C",
+                 "key": "  PK2  ", "status": "retracted"},
+                {"ref": "p2", "kind": "statement", "content": "PAD-D",
+                 "key": "PK2"},
+            ]},
+            promotion_policy="auto",
+        )
+    assert _points_with_key(sdk, "PK2") == []
+
+
+#: The pads the ENGINE's key index trims, measured **per character** on the
+#: embedded engine (2026-11-05): a Point written under ``f"{c}PK{c}"`` is found
+#: by the TRIMMED term and NOT by the raw one for every character below, while
+#: NBSP (U+00A0), U+2003 and U+001F are found by the raw term (verbatim).
+#:
+#: ⛔ A LITERAL on purpose — never derived from ``_KEY_INDEX_TRIM_SET``. Iterating
+#: the constant would make a NARROWED set drop its own cases and stay green; the
+#: equality assertion below reds instead, and each case then proves the trimmed
+#: term is the one the INDEX serves.
+_ENGINE_TRIMMED_PADS = (" ", "\t", "\n", "\v", "\f", "\r")
+
+
+def test_every_ENGINE_trimmed_pad_is_found_by_its_OWN_spelling(sdk):
+    """ALL SIX of the engine's trimmed pads are seekable — not just the space.
+
+    #10481's review recorded this as an observation, not a finding: of the six
+    characters in ``_KEY_INDEX_TRIM_SET``, CI pinned only the OUTER boundary
+    (space trimmed by ``test_a_padded_key_is_found_by_its_OWN_spelling``; NBSP
+    NOT trimmed by ``test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling``), so
+    ``\\t\\n\\v\\f\\r`` were undefended. They are not cosmetic: a seek that sends
+    the RAW term for any of them misses the holder (the engine indexed the
+    trimmed one), which is the #6110 duplicate this whole fix exists to prevent
+    — a key padded with a TAB would mint twice while the suite stayed green.
+
+    Red on the pre-fix seek for every case (it sent the raw spelling), and red on
+    a NARROWED ``_KEY_INDEX_TRIM_SET`` — the two directions CI did not have.
+    """
+    assert "".join(_ENGINE_TRIMMED_PADS) == _KEY_INDEX_TRIM_SET, (
+        f"_KEY_INDEX_TRIM_SET is {_KEY_INDEX_TRIM_SET!r}; the engine's measured "
+        f"set is {' '.join(repr(c) for c in _ENGINE_TRIMMED_PADS)}. Changing it "
+        f"needs a fresh per-character measurement, and the cases below must move "
+        f"with it (#10481)"
+    )
+    for i, pad in enumerate(_ENGINE_TRIMMED_PADS):
+        key = f"{pad}PKT{i}{pad}"
+        a = sdk.create_point("statement", f"TRIMPAD-{i}", key=key, dedup=True)
+        assert sdk._find_points_by_key(key, pointKind="statement") == [a["id"]], (
+            f"the engine trims {pad!r} in the key index, so a key padded with it "
+            f"must be findable by its OWN spelling — sending the raw term missed "
+            f"the holder before #10481"
+        )
+        holders, _terminal = sdk._key_holder_state("statement", key)
+        assert holders == [a["id"]], (
+            f"the Phase-1 guard cannot see a {pad!r}-padded holder")
+        stored = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+            params={"id": a["id"]}).result_set
+        assert stored and stored[0][0] == key, stored
+
+
+# ── #10481 review P2: the seek has TWO engine forms and must hold in both ──
+#
+# `n.key = $term` normalises differently depending on whether the
+# `:Point(key)` RANGE index serves it:
+#
+#   index-served : the index holds the ENGINE-TRIMMED term, so the seek must
+#                  send the trimmed term (that is #10481's fix);
+#   label scan    : the predicate compares the STORED bytes, with no
+#                  normalisation at all — and index creation is BEST-EFFORT
+#                  (`projection._ensure_indexes_declared` logs and continues),
+#                  so this is a reachable steady state, not a hypothetical.
+#
+# Measured on the embedded engine (2026-11-06) over one Point stored as
+# `"  PK  "`: with the index, `seek("  PK  ") == []` and `seek("PK") == [id]`;
+# with the index DROPPED, exactly the opposite. So the trimmed term ALONE was
+# a new-miss in the scan form — the #6110 duplicate re-created there while the
+# suite stayed green. `_key_seek_terms` sends both terms when the spelling is
+# padded, which makes the predicate a strict superset of the pre-fix one in
+# BOTH forms, and the tests below pin that parity by DROPPING the index.
+
+
+def _drop_key_index(sdk) -> str:
+    """Drop the `:Point(key)` index and RETURN the seek's own plan, so a test
+    asserts the label-scan state really happened instead of trusting the DDL
+    to have taken effect (a silent no-op would make the case vacuous)."""
+    proj = sdk._get_proj()
+    proj.g.query("DROP INDEX ON :Point(key)")
+    return str(proj.g.explain(
+        "MATCH (n:Point) WHERE (n.key = 'PK' OR n.key = '  PK  ') RETURN n.id"))
+
+
+def test_the_seek_terms_are_the_TRIMMED_term_plus_the_RAW_one(sdk):
+    """The helper's shape, pinned literally: a padded spelling offers BOTH
+    terms (trimmed first — the one the index serves), an unpadded or
+    engine-untrimmed one offers exactly ONE so the seek keeps its existing
+    shape."""
+    assert _key_seek_terms("  PK  ") == ("PK", "  PK  ")
+    assert _key_seek_terms("PK") == ("PK",)
+    # NBSP is NOT in the engine's trim set, so trimmed == raw: one term, raw.
+    assert _key_seek_terms("\u00a0PK\u00a0") == ("\u00a0PK\u00a0",)
+    assert _key_seek_terms(None) == (None,)
+    assert _key_seek_terms(7) == (7,)
+
+
+def test_the_seek_holds_when_the_key_INDEX_is_ABSENT(sdk):
+    """#10481 review P2 — the LABEL-SCAN form, which the fix as first written
+    broke.
+
+    Pre-fix (trimmed term only) this FAILS on every assertion below: with no
+    index the predicate compares stored bytes, so the trimmed term misses the
+    padded holder, `_key_holder_state` certifies the vacancy, and the second
+    `dedup=True` write mints a second carrier of one key — the exact #6110
+    duplicate, in the one engine state where the trimmed-only seek was right
+    before. Post-fix the raw disjunct keeps it findable.
+    """
+    a = sdk.create_point("statement", "SCAN-A", key="  PK  ", dedup=True)
+    # A DIFFERENT key, same kind — the identity-safety half: the raw disjunct
+    # must never reach outside the caller's own trimmed identity class.
+    other = sdk.create_point("statement", "SCAN-OTHER", key="  QK  ",
+                             dedup=True)
+    plan = _drop_key_index(sdk)
+    assert "Node By Label Scan" in plan, (
+        f"the :Point(key) index was not actually dropped, so this case would "
+        f"be vacuous (plan={plan!r})")
+
+    assert sdk._find_points_by_key("  PK  ", pointKind="statement") == [a["id"]], (
+        "the padded key is unfindable by its OWN spelling with the index "
+        "absent — the #6110 duplicate is re-created in the label-scan form")
+    # ⚠️ RECORDED BOUNDARY, pinned so it is a stated limit and not a silent one:
+    # the scan form has no normaliser on the STORED side, so a caller who spells
+    # the key UNPADDED does not reach a padded-stored row there. That is the
+    # PRE-FIX behaviour for this state (``stored == raw`` was the only hit
+    # then), so the two-term seek is a strict superset of it and never a
+    # regression; it is not closable without a normalising predicate on the
+    # stored side, which cannot use the index (the 40x label scan #8400's index
+    # exists to remove). ``test_the_seek_answers_the_SAME_with_and_without_the
+    # _key_INDEX`` pins what IS owed: each spelling finds its own row in both
+    # forms.
+    assert sdk._find_points_by_key("PK", pointKind="statement") == [], (
+        "the label-scan form now normalises the STORED side — that is a much "
+        "wider change than this fix (it would need `trim(n.key)`, which no "
+        "key index can serve): if it landed deliberately, delete this pin "
+        "and say so, otherwise a stray normaliser just widened key identity")
+    holders, _terminal = sdk._key_holder_state("statement", "  PK  ")
+    assert holders == [a["id"]], (
+        "the Phase-1 guard cannot see the padded holder with the index absent, "
+        "so it CERTIFIES the duplicate write")
+    assert a["id"] not in sdk._find_points_by_key("QK", pointKind="statement")
+    assert other["id"] not in sdk._find_points_by_key("PK", pointKind="statement")
+    assert other["id"] not in sdk._find_points_by_key("  PK  ",
+                                                     pointKind="statement")
+
+    b = sdk.create_point("statement", "SCAN-B", key="  PK  ", dedup=True)
+    assert b["id"] == a["id"], (
+        "dedup=True minted a second carrier of one key in the label-scan form")
+    rows = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.key ENDS WITH 'PK  ' RETURN n.id").result_set
+    assert len(rows) == 1, f"{len(rows)} carriers of one padded key"
+
+
+def test_the_seek_answers_the_SAME_with_and_without_the_key_INDEX(sdk):
+    """PARITY — the property the whole fix rests on, pinned in both
+    directions rather than one.
+
+    One Point is written per spelling (its own `pointKind`, so the identity
+    classes cannot interfere), the seek is answered with the index present, the
+    index is dropped, and the SAME seeks are answered again. A correct fix
+    answers identically; the trimmed-only seek fails on the SAME spelling under
+    a different pad, and the ORIGINAL raw-only seek fails it in the index form
+    — so this reds whichever direction the term is argued to, which is what
+    makes it a property pin rather than a restatement of the fix.
+    """
+    proj = sdk._get_proj()
+    spellings = ["PK", "  PK  ", "\tPK\n", "\u00a0PK\u00a0"]
+    for i, spelling in enumerate(spellings):
+        proj.g.query(
+            "CREATE (n:Point {id:$id, key:$k, pointKind:$kind, "
+            "content_hash:$ch, status:'live'})",
+            params={"id": f"parity-{i}", "k": spelling,
+                    "kind": f"parityKind{i}", "ch": _content_hash(f"parity-{i}")})
+
+    def answers() -> dict[str, list[str]]:
+        return {s: sorted(sdk._find_points_by_key(s, pointKind=f"parityKind{i}"))
+                for i, s in enumerate(spellings)}
+
+    with_index = answers()
+    # Non-vacuity: every spelling must resolve in the index form FIRST, or the
+    # parity comparison below could pass on two empty answers.
+    assert all(v == [f"parity-{i}"] for i, v in enumerate(with_index.values())), (
+        f"the index-served form did not resolve every spelling: {with_index}")
+
+    plan = _drop_key_index(sdk)
+    assert "Node By Label Scan" in plan, plan
+    scan_form = answers()
+    assert scan_form == with_index, (
+        "the key-identity seek answers DIFFERENTLY in the index-served and "
+        f"label-scan forms — {scan_form} vs {with_index}. A padded key must "
+        "stay findable by its own spelling where no index is served, or the "
+        "#6110 duplicate is re-created in that state")
+
+
+def test_a_padded_spelling_that_was_NOT_applied_is_AUDIBLE(sdk, caplog):
+    """#10481 review P3 — the KEY-hit branch popped the stale spelling SILENTLY
+    while the CONTENT-hit branch warns, so a caller whose spelling was not
+    applied was told on one path and not the other.
+
+    Same content on purpose: that keeps the content-collision warning out of
+    the log, so the assertion can only pass on the SPELLING warning. Pre-fix
+    (silent pop) this FAILS — the fold happened, the stored key stayed ``"PK"``
+    and the caller was told nothing.
+    """
+    a = sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        caplog.clear()
+        b = sdk.create_point("statement", "AUDIBLE-A", key="  PK  ", dedup=True)
+    assert b["id"] == a["id"], "the padded re-run did not fold"
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == "PK", (
+        f"the stored spelling changed to {stored!r} — a dedup hit must never "
+        "reassign an existing key (#6110)")
+    assert any("not applied" in r.getMessage() for r in caplog.records), (
+        "the caller's spelling was refused SILENTLY: "
+        f"{[r.getMessage() for r in caplog.records]}")
+    # …and an EXACT spelling stays quiet — the warning is about a refusal, not
+    # about every dedup hit (#490 churn is the reason the pop exists at all).
+    with caplog.at_level(logging.WARNING, logger="tortoise.sdk"):
+        caplog.clear()
+        sdk.create_point("statement", "AUDIBLE-A", key="PK", dedup=True)
+    assert not [r for r in caplog.records if "not applied" in r.getMessage()], (
+        "an exact-spelling dedup hit warned that a key was not applied")
+
+
+def test_a_blank_to_PYTHON_key_agrees_across_the_simulation_and_the_writer(sdk):
+    """OBSERVATION PINNED (recorded by the #10481 review, not charged as a
+    finding): ``_item_dedup_key`` gates PRESENCE with Python's ``str.strip()``
+    while normalising the TERM with the engine's set — two strip classes in one
+    expression — and nothing in the suite pinned what happens for a key that is
+    whitespace to Python but REAL to the engine (NBSP-only).
+
+    Pinned because the two halves must move TOGETHER, and because "the bundle
+    simulation models the writer AS IT IS" is the invariant the whole bundle
+    path rests on. Today both answer the same way, and the answer is SPLIT by
+    design: PRESENCE (Python's class) decides ABSENT — ``_item_dedup_key``
+    returns ``None``, mirroring the writer's own ``_has_key`` gate — while
+    STORAGE keeps the caller's bytes verbatim (``_item_stored_key`` and the
+    node agree), which is #9599's recorded position.
+
+    ⛔ NOT decided here, and not decided by #10481: whether a present-but-blank
+    key is "no key at all" (then it must not be STORED either) or "an identity
+    the engine indexes verbatim" (then the PRESENCE gate must use the engine's
+    set and the key leg must run). That is the open owner question on #11044 /
+    #9599 (comment 6342343424) — this test only pins that the simulation and
+    the writer give the SAME answer while it is open.
+    """
+    nb = "\u00a0"  # NBSP: whitespace to Python, REAL to the engine's index
+    # The simulation's two halves — presence says ABSENT, storage keeps bytes.
+    assert _item_dedup_key({"key": nb}) is None, (
+        "the PRESENCE gate must mirror the writer's own `.strip()` gate; if it "
+        "became engine-aware here, #11044 was decided and the writer's gate "
+        "must have moved with it")
+    assert _item_stored_key({"key": nb}) == nb
+    # …and the writer agrees with BOTH halves of that same answer.
+    a = sdk.create_point("statement", "BLANKISH-A", key=nb, dedup=True)
+    stored = sdk._get_proj().g.query(
+        "MATCH (n:Point) WHERE n.id = $id RETURN n.key",
+        params={"id": a["id"]}).result_set
+    assert stored and stored[0][0] == nb, stored
+    b = sdk.create_point("statement", "BLANKISH-B", key=nb, dedup=True)
+    assert b["id"] != a["id"], (
+        "this FOLDED, so the presence gate became engine-aware — that is "
+        "#11044's decision to make, and `_item_dedup_key({'key': NBSP})` must "
+        "then return the NBSP term instead of None (the two halves move "
+        "together; this test is the change-detector for that)")

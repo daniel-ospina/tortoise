@@ -547,10 +547,291 @@ def test_a_fold_on_create_default_is_not_an_invention():
     assert diff.clean, diff.as_dict()
 
 
+def test_a_not_projectable_column_is_EXPLAINED_and_not_a_projection_gap():
+    """#10394 door 2, from the SERVED side: the deny must not read as a gap.
+
+    ⛔ WHY THIS IS ITS OWN ARM AND NOT A RESTATEMENT OF THE CARVE-OUT ONE. The
+    carve-out (`_refused`) explains a field the SCHEMA forbids the record to
+    hold. `cache_projection.CACHE_FORBIDDEN_COLUMNS` is the opposite case — a
+    field the record DOES hold and the projection must not materialise (§9.1/D1
+    on `source`/`event`, `#10394`) — and without its own explanation here a cache
+    node that still holds the pre-purge prose is reported as an
+    `unexplained_missing` PROJECTION GAP, whose only sanctioned repair in this
+    module is a re-projection. That is an instruction to re-open the door the
+    projection exists to keep shut, on the very pair this change closes.
+
+    The control arm is the other half: a genuinely unexplained field still
+    reddens, so the new explanation is one declared class and not a blanket
+    amnesty.
+    """
+    from tortoise.cache_projection import cache_forbidden_columns, node_from_row
+
+    prose = "the S1 narrative"
+    row = {"url": "docs/door-2.md", "title": "door 2", "story_arc": prose}
+    # The map the serve path returns for that row.
+    served = dict(node_from_row("Source", row).props)
+
+    diff = rs.parity_difference(dict(row), served, label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) == {"story_arc"}, diff.as_dict()
+    # The explanation is the DECLARATION's, not a list curated here.
+    assert set(diff.explained_missing) <= cache_forbidden_columns("source")
+
+    # ⚠️ AND IT IS SPELLED IN GRAPH VOCABULARY: `parity_difference` compares
+    # `cache_props` keys (GRAPH property names) while `CACHE_FORBIDDEN_COLUMNS`
+    # holds RECORD COLUMN names, so the arm widens through the placement table —
+    # the contract `cache_projection.cache_forbidden_columns` states and the
+    # `props`-tail filter honours.
+    # ⛔ NON-VACUOUS BY CONSTRUCTION, not by promise. A leg over the DECLARED set
+    # would pass on a column-names-only comparison too: today's only entry
+    # (`story_arc`) spells one way on both tables, so it would pin nothing and a
+    # revert of the widen would stay green. This leg installs a real AMBIGUOUS
+    # column as a stand-in — `source.session_id` → `sessionId` / `session_id` —
+    # and asserts BOTH spellings, the same shape
+    # `test_9555_narrative_cache_rebuild.py` arm (2c) uses, so the two graph-side
+    # consumers are pinned by one method rather than by two promises.
+    import tortoise.cache_projection as _cp
+
+    original = _cp.CACHE_FORBIDDEN_COLUMNS
+    ambiguous_spellings = _cp.placement_spellings().get("source", {}).get(
+        "session_id", ())
+    assert len(ambiguous_spellings) > 1, (
+        "`source.session_id` is no longer a multi-spelled column, so this leg's "
+        f"stand-in proves nothing about ambiguity (spellings: {ambiguous_spellings})")
+    try:
+        _cp.CACHE_FORBIDDEN_COLUMNS = dict(original)
+        _cp.CACHE_FORBIDDEN_COLUMNS["source"] = (
+            frozenset(original.get("source", frozenset())) | {"session_id"})
+        for spelled in ambiguous_spellings:
+            only_cache = rs.parity_difference({spelled: "S"}, {"url": "u"},
+                                              label="Source")
+            assert spelled in only_cache.explained_missing, (
+                "the parity arm matched only the COLUMN spelling, so an AMBIGUOUS "
+                "not-projectable column is reported as an unexplained PROJECTION "
+                "GAP — whose only sanctioned repair is a re-projection, i.e. "
+                f"#10394's door re-opened. spelling={spelled!r} "
+                f"got {only_cache.as_dict()}")
+    finally:
+        _cp.CACHE_FORBIDDEN_COLUMNS = original
+
+    # …and the amnesty is exactly that class, not every absence.
+    gap = rs.parity_difference({"url": "u", "unexplained_prop": "x"},
+                               {"url": "u"}, label="Source")
+    assert set(gap.unexplained_missing) == {"unexplained_prop"}, gap.as_dict()
+
+
+def test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention():
+    """#10394 door 2, the MIRROR: a declared asymmetry has TWO directions.
+
+    ⛔ WHY THE ARM ABOVE DOES NOT COVER THIS. It hands the RAW row to
+    ``cache_props`` and the projector's map to ``record_props`` — the direction a
+    legacy cache node produces. The INVERSION is what a RAW-SQL audit of a
+    production pair is handed (the record read with the auditor's own SQL; the
+    cache answer is the projector's map), and the ``invented`` loop said *"a
+    record field the cache lacks ⇒ the record path made up a field"* without
+    asking either declaration. Measured before this arm existed: ``invented:
+    ['story_arc']``, ``clean: False`` — i.e. this rule reported the exact state
+    the projection exists to create as a RED, and the only sanctioned repair for
+    ``invented`` is a re-projection, which re-opens the door. A declaration that
+    explains one direction has to explain both, or it is a rule that forbids the
+    fix.
+
+    ⚠️ DEFENSIVE for the SANCTIONED shape, and operative for that raw-SQL one
+    (#11184 review, P3): `read_node`'s map is the projector's `node_from_row`
+    map (plus the event-stream `status` fold for the labels that have one), so a
+    caller using the module's own reader cannot produce `story_arc` in this
+    loop at all. Stated so the arm is not read as evidence that the `read_node`
+    path needs it — it does not, and a raw row also drags the record's COLUMN
+    spellings in (the false reds the module's contract sentence warns about).
+
+    The control arm is the other half: a genuinely made-up name still reddens, so
+    this is one declared class and not a blanket amnesty on the record side.
+    """
+    from tortoise.cache_projection import cache_forbidden_columns, node_from_row
+
+    prose = "the S1 narrative"
+    row = {"url": "docs/door-2.md", "title": "door 2", "story_arc": prose}
+    served = dict(node_from_row("Source", row).props)
+
+    diff = rs.parity_difference(served, dict(row), label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) == {"story_arc"}, diff.as_dict()
+    # The explanation is the DECLARATION's, not a list curated here.
+    assert set(diff.explained_missing) <= cache_forbidden_columns("source")
+
+    # …and the amnesty is that class only, in this direction too.
+    invented = rs.parity_difference(served,
+                                   {**row, "aFieldTheRecordMadeUp": 1},
+                                   label="Source")
+    assert set(invented.invented) == {"aFieldTheRecordMadeUp"}, invented.as_dict()
+
+
+def test_the_DECLINED_prose_in_the_RECORD_is_not_an_invention():
+    """The SAME mirror rule, applied to the OTHER declared class (#10853).
+
+    ⛔ WHY THIS IS NOT A RESTATEMENT OF THE ARM ABOVE. That one covers
+    ``CACHE_FORBIDDEN_COLUMNS``; this one covers
+    ``episodic_source_declined_properties()`` — §9.1/D1's turn prose on an
+    EPISODIC Source, which the record KEEPS and the projection declines. The
+    ``explained_missing`` loop has known that class since #10867; the ``invented``
+    loop did not, so the mirror direction reported ``invented: ['summary']`` —
+    *"the record path made up a field"* — for the state #10853 deliberately
+    creates. Same false RED, same wrong repair, one class over; it was found by
+    measuring the general claim this change's own docstring makes about which
+    classes are mirrored, not by reading the code.
+
+    The control arms keep it honest: a name outside BOTH declarations still
+    reddens, and the SAME name on a NON-episodic (document) Source is still
+    explained by nothing — the decline is scoped by the node's identity, so
+    blanket-explaining the pair here would decouple this arm from that scoping.
+
+    ⚠️ DEFENSIVE for the `summary` spelling only — and MEASURED twice over
+    (#11224's review, P2/P3). (1) ⛔ THIS PIN DOES NOT EXERCISE THE DENY:
+    emptying `cache_projection.CACHE_FORBIDDEN_COLUMNS` leaves every assertion
+    below green (MEASURED), because this pin's record side carries the DECLINE
+    pair only; the deny's mirror direction has its own pin,
+    `test_a_not_projectable_column_in_the_RECORD_is_NOT_an_invention` (ABOVE).
+    (2) ⛔ And the mirror BRANCH it pins is NOT "defensive for the sanctioned
+    shape" either: `summary` is absent from `read_node`'s map by construction,
+    but `_searchText` is NOT — a post-#10000 row derives it from the topic
+    lexicon, so `node_from_row` PROJECTS it (`#10965`; MEASURED: props
+    `['_searchText', 'sourceKind', 'topics', 'url']`). On that population the
+    SANCTIONED path reaches this branch and it FORGIVES a real gap: a cache
+    answer that lost `_searchText` — the one field the Source FTS index is
+    declared on — reads `clean` with `explained_missing {'_searchText'}`
+    (MEASURED). That false GREEN is `#11233`'s, not this pin's; the pin's job is
+    the `summary` half, where the record keeps the prose and the projection
+    declines it. ⚠️ The mirror is the right SHAPE for a caller that hands the
+    record side RAW (an audit that opened the record with its own SQL), exactly
+    as the sibling arm ABOVE is for the deny; this pin does not feed that shape —
+    its record side is the projection's own vocabulary (`{**served, …}`),
+    whereas a raw row would additionally red on the record's COLUMN spellings
+    (`source_kind` vs `sourceKind`, measured) — so the arm pins the decline
+    MIRROR, not the raw-row contract.
+    """
+    from tortoise.cache_projection import episodic_source_declined_properties, node_from_row
+
+    # ⚠️ BOTH sides are the PROJECTION's own vocabulary, which is what
+    # `parity_difference` documents its arguments as (the record's answer IS
+    # `node_from_row`'s map). A raw row's COLUMN spelling (`source_kind`) would
+    # differ from the property's (`sourceKind`) on the five ambiguous columns and
+    # the arm would then be testing the placement table, not this rule.
+    episodic_row = {"url": "session:s-1", "source_kind": "agentSession",
+                   "summary": "the captured turns", "_search_text": "a, b"}
+    served = dict(node_from_row("Source", episodic_row).props)
+    assert "summary" not in served, sorted(served)   # the decline, pre-condition
+    assert served.get("sourceKind") == "agentSession", served  # the identity arm
+
+    diff = rs.parity_difference(served, {**served, "summary": "the captured turns"},
+                                label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) <= episodic_source_declined_properties()
+    assert set(diff.explained_missing) == {"summary"}, diff.as_dict()
+
+    # …and it is still THAT class only, in this direction.
+    invented = rs.parity_difference(
+        served, {**served, "aFieldTheRecordMadeUp": 1}, label="Source")
+    assert set(invented.invented) == {"aFieldTheRecordMadeUp"}, invented.as_dict()
+
+    # The control that keeps the mirror SCOPED: the decline is decided by the
+    # node's OWN identity, so on a DOCUMENT Source the same name is not declared
+    # at all — a record that claims one there has genuinely invented it.
+    doc_served = dict(node_from_row(
+        "Source", {"url": "docs/transcript.md",
+                   "source_kind": "document"}).props)
+    assert "summary" not in doc_served, sorted(doc_served)
+    doc_diff = rs.parity_difference(doc_served, {**doc_served, "summary": "a label"},
+                                    label="Source")
+    assert set(doc_diff.invented) == {"summary"}, doc_diff.as_dict()
+
+
 def test_a_record_served_read_carries_no_derived_name():
     conn = _FakeConn(rows=[_row(content_hash="abc", ep_dirty=True)])
     props = rs.read_point(conn, org_id="org_t", graph_id="g_t", point_id="p-1")
     assert not (set(props) & _refused("point")), set(props) & _refused("point")
+
+
+# ── the THIRD explanation: §9.1/D1's decline (#10867 review ISSUE 1) ────────
+#
+# `record_serve.parity_difference` and `record_reconcile.scan_cache_view` are two
+# of the tree's THREE record↔cache field-comparison instruments (the third,
+# `tools/turn_parity_census.py`, compares turn rows rather than Source nodes and
+# so is not touched by this decline). #10853 taught `scan_cache_view` that an
+# episodic Source's turn prose is CACHE-OWNED; leaving `parity_difference`
+# unaware made a DECLARED asymmetry and a real projection gap the same red — the
+# "signal indistinguishable from noise" class this change grades P1 elsewhere.
+
+#: A legacy episodic Source as it actually sits in the CACHE: the capture still
+#: writes and journals the prose at this head, so the node carries the pair.
+LEGACY_SESSION_NODE = {
+    "id": "s-1",
+    "url": "session:abc",
+    "sourceKind": "agentSession",
+    "title": "a session",
+    "summary": "the user asked for the record to hold the turn text",
+    "_searchText": "the user asked for the record to hold the turn text",
+}
+
+
+def _narrowed_record_source(**over: object) -> dict:
+    """The record's answer for that node — built through the PROJECTION itself.
+
+    Not a hand-written map on purpose: the record side of this comparison is
+    ``cache_projection.node_from_row`` (the same map ``read_node`` returns), so
+    the leg exercises the real narrowing instead of restating its outcome.
+    """
+    from tortoise.cache_projection import node_from_row
+
+    row = {"id": "s-1", "url": "session:abc", "source_kind": "agentSession",
+           "title": "a session",
+           "summary": "the user asked for the record to hold the turn text",
+           "_search_text": "the user asked for the record to hold the turn text"}
+    row.update(over)
+    return dict(node_from_row("Source", row).props)
+
+
+def test_parity_explains_the_episodic_source_decline_instead_of_reddening():
+    """The recorded prose is DECLINED by the projection, so it is not a gap."""
+    record = _narrowed_record_source()
+    assert "summary" not in record and "_searchText" not in record, (
+        "the projection did not narrow the row — this leg would then prove "
+        "nothing about the explanation it is here to pin")
+
+    diff = rs.parity_difference(LEGACY_SESSION_NODE, record, label="Source")
+    assert diff.clean, diff.as_dict()
+    assert set(diff.explained_missing) >= {"summary", "_searchText"}, diff.as_dict()
+    # The explanation is the PROJECTION's declaration, not a list this test
+    # curates — a name added to the decline is explained without touching here.
+    from tortoise.cache_projection import episodic_source_declined_properties
+    assert set(diff.explained_missing) <= episodic_source_declined_properties()
+
+
+def test_parity_reddens_on_the_same_names_for_a_document_source():
+    """The decline is keyed on the two IDENTITY arms, so a document keeps its own.
+
+    This is the negative direction, and it is the one that matters: a rule that
+    fired on every Source would explain away a REAL projection gap on every
+    transcript document in the cache — the mirror of the defect the decline
+    exists to avoid.
+    """
+    document_node = {"id": "s-2", "url": "corpus://notes/session.md",
+                     "sourceKind": "agentSession", "title": "a document",
+                     "summary": "a document abstract", "_searchText": "abstract"}
+    record = {"id": "s-2", "url": "corpus://notes/session.md",
+              "sourceKind": "agentSession", "title": "a document"}
+    diff = rs.parity_difference(document_node, record, label="Source")
+    assert not diff.clean, (
+        "a DOCUMENT Source's own summary was explained away — the decline is "
+        "not scoped to the identity arms")
+    assert set(diff.unexplained_missing) == {"summary", "_searchText"}, diff.as_dict()
+
+
+def test_parity_explains_only_the_declined_names_on_a_session_source():
+    """Scoped by NAME too: the identity opens the decline, it does not blanket it."""
+    node = dict(LEGACY_SESSION_NODE, aFieldTheRecordMadeUp="x")
+    diff = rs.parity_difference(node, _narrowed_record_source(), label="Source")
+    assert not diff.clean, diff.as_dict()
+    assert set(diff.unexplained_missing) == {"aFieldTheRecordMadeUp"}, diff.as_dict()
 
 
 # ── the mode ───────────────────────────────────────────────────────────────

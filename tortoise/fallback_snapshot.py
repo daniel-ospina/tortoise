@@ -145,6 +145,15 @@ class FallbackSnapshotStore:
             return snap
 
     def put(self, key: tuple, snap: dict) -> None:
+        """Insert unconditionally — TEST-ONLY since #10602 (review P2).
+
+        No production caller uses this any more: the read path goes through
+        ``put_if_generation``, which refuses a snapshot a write has overtaken.
+        Left public because the store's own tests seed and evict through it, but
+        an UNGUARDED insert beside the guarded one is exactly the stale-put bug
+        the generation guard exists to stop, so a new production caller should
+        reach for ``put_if_generation`` instead.
+        """
         with self._lock:
             self._put_locked(key, snap)
 

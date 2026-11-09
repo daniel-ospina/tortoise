@@ -44,38 +44,75 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    forbids, and `rebuild_from_record`'s report is about the RECORD's coverage,
    not a census of what the wipe destroyed.
 2. **The cache is never authoritative.** A property is projected **iff** the
-   schema declares a column for it and does not refuse it. The property→column
+   schema declares a column for it, does not refuse it, **and** the projection
+   does not declare that column not-projectable (:data:`CACHE_FORBIDDEN_COLUMNS`
+   — a THIRD class, neither PRIMARY-and-projectable nor schema-refused; the
+   record may hold it as authority and the cache must not materialise it).
+   The property→column
    decision is **read from disk** — the schema (#7968) and the placement table
    (#7955) — never restated here, so a new column is a loud failure rather than
-   a silent drop. ⛔ **One declared NARROWING (#10853):** an EPISODIC Source —
-   EITHER identity arm, `_EPISODIC_SOURCE_URL_PREFIX` or
-   `_EPISODIC_SOURCE_KIND` — never carries the COLUMNS in
-   :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`; graph
-   property `_searchText`) onto its node, because §9.1/D1 places captured turn
-   text in the record and never on a graph node — see that table for the rule,
-   its bound, and its costs.
+   a silent drop. ⛔ **A declared NARROWING, one of TWO (#10853, narrowed again
+   by #10965; the second is :data:`CACHE_FORBIDDEN_COLUMNS`, stated as
+   exception (5) under point 3 below):** an EPISODIC Source — EITHER identity arm,
+   `_EPISODIC_SOURCE_URL_PREFIX` or `_EPISODIC_SOURCE_KIND` — never carries the
+   COLUMNS in :data:`_EPISODIC_SOURCE_PROSE_COLUMNS` (`summary`, `_search_text`;
+   graph property `_searchText`) onto its node **when the row holds the
+   pre-#10000 derivation**, because §9.1/D1 places captured turn text in the
+   record and never on a graph node. The authority for the pair is
+   `STORAGE-ARCHITECTURE.md` §9.1: *"`summary`/`title` stay on the node — they
+   are §4.6 metadata, not the S1 narrative"*. That sentence is why a
+   post-#10000 row's lexicon `_searchText` IS projected — it is that §4.6
+   metadata value, not the narrative — and why this test is on the row's
+   PROVENANCE rather than on the column's NAME. ⛔ It does NOT sanction refusing
+   `summary`: that is a DEPARTURE from §9.1's own sentence, taken deliberately
+   and recorded at that table (#10965 — the declared set exists for the FTS
+   field, and restoring a display label gains no retrieval), never something the
+   authority implies.
+   The decision is per ROW, from the row's own
+   values (#10000's rows carry the topic lexicon there — token-shaped, not a copy of the row's prose, though a space-less CJK run arrives whole and a Thai one fragments) — see that
+   table for the rule, its bound, and its costs.
 3. **Rebuildable from the record alone.** The plan is a pure function of the
    record view: same view ⇒ same statements (idempotent), and the written field
-   set equals the record view's field set exactly (never a superset). ⚠️ One
-   declared, named exception: the properties in
-   :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the fold, not the
-   record — a record row that is silent about a kind materializes the same
-   constant the live fold would have written (#9634). Named honestly, including
-   its cost: the exactness test (:mod:`tests.test_cache_projection`) compares the
-   plan against the VIEW, so it cannot see a property the VIEW carries — the
-   bound on the exception is the drift pin, not that test. A **second** declared
-   exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half, #9974): a
-   property the record is FORBIDDEN to store and the cache must COMPUTE from the
-   columns it does carry — `status` from a supersession carrier
-   (`supersededBy`/`supersededAt`). Same bound, same pin shape; the divergences
-   from the record's own `public.*_current_status` views (their `ELSE 'live'`
-   branch, and their `IS NOT NULL` reading of an empty carrier) are measured and
-   named at that table, as is the residue it deliberately does NOT derive. A
-   **third** declared exception is :data:`EVENT_STREAM_FOLDS` (#10198): the same
-   `status`, derived not from a COLUMN but from the record's own EVENT STREAM
-   (`public.journal_event`), because the connector/pack lifecycle vocabulary is
-   declared at RUNTIME by packs and is not reconstructible from any row. Its
-   source is ordered by `seq`, its vocabulary is imported from
+   set never EXCEEDS the record view's (a superset would make the cache a second
+   authority) — that direction has no class-level exception, because every
+   property the declared classes below add is materialised in the VIEW-BUILDING
+   path and is therefore already IN the view: :func:`node_from_row` applies the
+   fold and derived classes, and :func:`apply_event_stream_folds` (reached from
+   :func:`read_record_view` and ``FalkorProjection.rebuild_from_record``) applies
+   the stream class. ⚠️ Two MECHANICAL adjustments in :func:`node_statement` are
+   not projection classes and can make the written set NARROWER than the view:
+   ``embedding`` is written in its own clause rather than in ``$props``, and a
+   FALSY :data:`VERBATIM_MARKER` is popped and not re-added (reachable only from
+   a row written outside the SDK's ``'true'``/``NULL`` writer, so it is named
+   rather than feared). ⚠️ The five declared classes are exceptions to a
+   DIFFERENT
+   identity — *the view against the record's PRIMARY column set* — and they run
+   in BOTH directions (the count and the classification are stated once here and
+   mirrored by §17.2 of `STORAGE-ARCHITECTURE.md` and by
+   :mod:`tests.test_cache_projection`'s own enumeration):
+   ONE **value-filling** class does not widen the field set at all — the
+   properties in :data:`FOLD_ON_CREATE_DEFAULTS`, whose DEFAULT belongs to the
+   fold, not the record: a record row that is silent about a kind materializes the
+   same constant the live fold would have written (#9634), for a column the
+   record HAS (the placement table spells `subjectKind`/`objectKind`/`title` `P`),
+   so only a silent row's VALUE is supplied. Reading it as a widening is the
+   field-set/value conflation this paragraph exists to avoid. Its bound is the
+   drift pin, not an exactness test: the plan is compared against the VIEW, and a
+   constant the VIEW carries is on both sides of that comparison. A **second**
+   declared exception is :data:`DERIVED_FROM_RECORD` (§2.6's DERIVED half,
+   #9974): a property the record is FORBIDDEN to store and the cache must COMPUTE
+   from the columns it does carry — `status` from a supersession carrier
+   (`supersededBy`/`supersededAt`), for which `public.object` has NO column at
+   all, so this one DOES widen the field set. Same bound, same pin shape; the
+   divergences from the record's own `public.*_current_status` views (their
+   `ELSE 'live'` branch, and their `IS NOT NULL` reading of an empty carrier) are
+   measured and named at that table, as is the residue it deliberately does NOT
+   derive. A **third** declared exception is :data:`EVENT_STREAM_FOLDS` (#10198):
+   the same `status`, derived not from a COLUMN but from the record's own EVENT
+   STREAM (`public.journal_event`), because the connector/pack lifecycle
+   vocabulary is declared at RUNTIME by packs and is not reconstructible from any
+   row — also a widening, for the same reason.
+   Its source is ordered by `seq`, its vocabulary is imported from
    :mod:`tortoise.status_folds` (never restated here), and its bound — the
    terminal statuses the record has no carrier for — is stated at the table.
    That exception reads THREE writers of the field (`EventRecorded` connector/
@@ -83,35 +120,73 @@ THE FOUR PROPERTIES, AND WHERE EACH LIVES
    field is covered on every writer the record can carry — with the residues the
    table names (birth-on-ON-MATCH, ordering, ambiguous names, a null clear).
    A **fourth** declared exception is :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`
-   (#10853), and unlike the three above it narrows the field set instead of
-   widening it: an EPISODIC Source's `summary` and `_search_text` columns
-   (graph property `_searchText`) are §9.1/D1 turn prose, the record keeps them
-   and the cache declines them. Three costs, named here and at that table rather
-   than implied:
+   (#10853, narrowed by #10965), and unlike the two WIDENING classes above it
+   narrows the field set instead of widening it (the fold class neither widens nor
+   narrows — it supplies a value for a column that exists): an EPISODIC Source's `summary` and `_search_text`
+   columns (graph property `_searchText`) are §9.1/D1 turn prose **on a
+   pre-#10000 row**, the record keeps them and the cache declines them. The drop
+   is decided per ROW, from the row itself, because #10000 replaced the
+   derivation: a post-#10000 `_search_text` is the session's topic lexicon —
+   exactly `", ".join(topics)` — and it IS projected, because it is the only field
+   the Source FTS index is declared on and dropping it would un-index a restored
+   session (#3518). `summary` stays declined on every row. Costs, named here and
+   at that table rather than implied:
 
-   * the **journal fold** still projects the value until #10000's capture-side
-     change lands, so the two rebuild paths disagree on that one column until
-     then — in the ruling's direction, and converging with it;
-   * **graph-side FTS** over a session Source's own utterances goes with the
-     prose. The value survives in the record and is retrievable by a column read
-     (`record_serve.read_node`, `record-text`); there is no record-side text
-     INDEX;
-   * **`record-reconcile`** builds its RECORD side through this same projector,
-     so its truth side omits what the cache holds. The population is NOT
-     "legacy": at this head the capture still writes and journals the pair, so
-     every session this build captures is in it. That is why the pair is marked
-     CACHE-OWNED for an episodic Source
-     (:func:`episodic_source_prose_properties`, consumed by
-     `record_reconcile.scan_cache_view`) and counted under its own `graph_only`
-     bucket — visible, and not a divergence against a record that is correct.
-     The graph side is repaired by a record-sourced re-projection
-     (`record-restore` / `rebuild_from_record`, which re-materialise through this
-     projector) — **for a node the projection CREATES**. The write is additive
-     (`MERGE … SET n += $props`, :func:`node_statement`), so a node that ALREADY
-     carries the pair keeps it across a re-projection; this arm stops the pair
-     being re-written, it does not clear an existing one. Clearing a populated
-     cache's stale pair needs an explicit property clear, and the sweep is
-     #10000's capture change.
+   * the **journal fold** projects the pair the capture wrote, and the record fold
+     now projects the same post-#10000 pair, so the two rebuild paths agree on
+     `_searchText`; they disagree only on `summary` (declined on the record door);
+   * **graph-side FTS** survives on a post-#10000 row (the lexicon is restored) and
+     goes, with the prose, on a legacy one — where there is no non-prose value to
+     keep;
+   * **`record-reconcile`** builds its RECORD side through this same projector, so
+     its truth side HOLDS `_searchText` for a post-#10000 row, and
+     `_partition_cache_owned` keeps every name the record side holds — so a
+     drifted `_searchText` is COMPARED and reds. `summary`, and a legacy row's
+     whole pair, stay CACHE-HELD — ⛔ NOT "cache-owned": that term is §17.5's for
+     the scalars the record CANNOT hold, and this pair the record DOES hold
+     (`record_reconcile.RecordReconcileResult.graph_only_total` is the retraction)
+     — via :func:`episodic_source_prose_properties`,
+     consumed by `record_reconcile.scan_cache_view`, counted under their
+     own `graph_only` bucket — visible, and not a divergence against a record that
+     is correct. ⛔ The repair for a legacy node is NOT a re-capture: re-capturing
+     an already-captured session id is the #1727 no-op replay, so
+     ``_materialize_session_source`` — whose only caller sits behind the fresh
+     capture gate — never runs and the stale pair survives (measured:
+     `#10852` review, P1). THREE routes clear an existing node's pair: a retry
+     of a prior FAILED capture (that arm re-runs the mint for the SAME `url`
+     — `retry_failed_capture`, #2335 — so the capture's SETs overwrite the
+     pair); ``session_source_prose_migration.reconcile_session_source_prose``
+     (#11070, shipped via `#11152` — repairs/clears the PAIR IN PLACE from the
+     record, the only NON-destructive route); and a full ``record-restore``,
+     whose wipe is whole-graph (see below). Two things that read like repairs are NOT (#10852 review, P3): a
+     capture under a NEW `session_id` MERGEs a DIFFERENT node and leaves the old
+     one alone; and a record-sourced re-projection for a node the projection
+     CREATES is a PREVENTION route — its write is additive
+     (`MERGE … SET n += $props`, :func:`node_statement`) and `summary` is
+     declined on this door, so a node that ALREADY carries the old pair keeps
+     it. ⛔ That is the INCREMENTAL path only (`project_records` on a live graph):
+     ``record-restore`` / ``rebuild_from_record`` WIPE first
+     (``_wipe_all_nodes``, *"unconditional and whole-graph"*), so a FULL restore
+     CLEARS the pair rather than preserving it — measured by
+     ``test_the_record_restore_writes_no_story_arc_on_any_node`` arm (3), which
+     creates a legacy node carrying the prose, restores, and asserts the total
+     prose size is 0. Anything else needs an explicit property clear (#11070).
+   A **fifth** declared exception is :data:`CACHE_FORBIDDEN_COLUMNS` (#10394),
+   and it is the one that is NOT per-row: a COLUMN the record holds as authority
+   and the cache must never materialise, because §9.1/D1 places the text in
+   Postgres and forbids it in the graph — and the record IS the Postgres half.
+   `story_arc` on `public.source` and `public.event` is the case, and it is ONE
+   DECLARATION with ONE ENTRY PER TABLE (`CACHE_FORBIDDEN_COLUMNS` is keyed by
+   table and consulted by `projected_columns`), so the placement rows keep their PRIMARY
+   class (the record does store it) and state `not projected` beside it. ⛔ The
+   distinction from the fourth exception is the point: that one decides per ROW
+   from the row's provenance because a LATER build made the column legitimate
+   again; this one is a stable statement about the two stores, so a row-derived
+   test would answer the wrong question. Consumers are aligned rather than
+   assumed: `record_reconcile` counts a legacy cache copy as `graph_only` (not a
+   divergence), and `record_serve.parity_difference` EXPLAINS it (not a
+   projection gap) — both pinned, because either rule, left alone, would tell an
+   operator to re-project a field the projection exists to keep out.
 4. **A cold region reads ``not-hot``, never ``empty``.** ``declaration_for``
    writes the known-hot set **after** the writes and as a function of what was
    materialized, so a record key the projection did not write is not claimed
@@ -152,19 +227,24 @@ from .residency import (
     declare_residency,
 )
 from .security import validate_rel_type
+from .session_source_display import SESSION_SOURCE_SUMMARY_PREFIX
 from .stored_form import STORED_VECTOR_PROPS, VERBATIM_MARKER, is_verbatim
 
 __all__ = [
     "ADDITIONAL_PRIMARY_COLUMNS",
+    "CACHE_FORBIDDEN_COLUMNS",
     "DERIVED_FROM_RECORD",
     "EVENT_STREAM_FOLDS",
     "FOLD_ON_CREATE_DEFAULTS",
     "KEY_PROPERTY",
     "NODE_TABLES",
+    "PACKAGED_PLACEMENT_TABLE",
+    "PLACEMENT_DOC",
     "RELATION_TABLE",
     "AmbiguousRecordColumn",
     "CacheProjectionError",
     "LifecycleEvent",
+    "PlacementTableUnavailable",
     "ProjectionPlan",
     "ProjectionReport",
     "RecordNode",
@@ -177,14 +257,17 @@ __all__ = [
     "ambiguities",
     "apply_event_stream_folds",
     "bookkeeping_columns",
+    "cache_forbidden_columns",
     "canonical_property",
     "declaration_for",
     "declaration_is_sound",
     "declared_key",
+    "episodic_source_declined_properties",
     "episodic_source_prose_properties",
     "is_episodic_source_node",
     "node_from_row",
     "node_statement",
+    "parse_placement_rows",
     "placement_columns",
     "placement_spellings",
     "project_records",
@@ -735,7 +818,7 @@ DERIVED_FROM_RECORD: dict[str, tuple[tuple[str, tuple[str, ...], Any], ...]] = {
 #: scope, exactly as the other two exceptions are pinned.
 EVENT_STREAM_FOLDS: dict[str, tuple[str, ...]] = {
     # BOTH families. `status` is a projection-owned cache on each — §2.6 rules on
-    # `Object.status` explicitly; the Subject twin is `ONTOLOGY.md:421`
+    # `Object.status` explicitly; the Subject twin is `ONTOLOGY.md:424`
     # ("Projection-owned since #1423") and `03-schema.md:95` ("Deliberately
     # absent: `status` on both (a projection-owned cache)"). And an
     # explicit state-op write reaches `:Subject` through the same `_ENTITY_MUTATION_
@@ -866,13 +949,53 @@ class LifecycleEvent:
         return tuple(out)
 
 #: The placement table (#7955) — the field contract the schema is pinned to.
-_PLACEMENT_DOC = (
+#: THE SOURCE OF TRUTH: prose is where this contract is ruled and reviewed, and
+#: :data:`PACKAGED_PLACEMENT_TABLE` is GENERATED from it
+#: (``tools/gen_placement_table.py``), never hand-edited.
+PLACEMENT_DOC = (
     Path(__file__).resolve().parent.parent
     / "docs"
     / "epics"
     / "2026-10-10-7879-postgres-record"
     / "02-identity-and-placement.md"
 )
+
+#: The same table as PACKAGE DATA (#10663) — the runtime read.
+#:
+#: WHY IT EXISTS. The doc above is a `docs/` file, and **the deployed image ships
+#: no `docs/` tree** (`Dockerfile.hosted` Layer 2 COPYs `tortoise/`, `packs/`,
+#: `tests/sample_transcript.txt`, `product/pricing.json`,
+#: `supabase/migrations/`, and nothing else) — so every verb that reads the
+#: placement table refused in production with *"the placement table is not on
+#: disk at /app/docs/…"*, wrapped as *"the record is unreadable"*, exit 2,
+#: divergence UNKNOWN. Measured in the shipped image: `record-reconcile` could
+#: not run at all (#10663).
+#:
+#: A contract a production verb reads is a RUNTIME DEPENDENCY, and a runtime
+#: dependency must live in the package. Shipping `docs/` instead would keep a
+#: prose file load-bearing at runtime and grow the image; embedding the table in
+#: a `.py` literal would make a SECOND declaration, the one that goes stale. So
+#: the doc stays the one declaration and this file is its generated carrier —
+#: the same shape `record_projection.RECORD_MIGRATIONS` uses to keep the record's
+#: schema read from disk rather than restated.
+#:
+#: PARITY IS PINNED, not hoped for: `tests/test_10663_placement_table_packaged.py`
+#: re-derives these rows from `PLACEMENT_DOC` and reds on any difference, so the
+#: two files cannot drift — and `deploy-hosted.yml`'s `packaging-smoke` asserts
+#: the table RESOLVES INSIDE THE IMAGE, which is the check that would have caught
+#: #10663 before it shipped.
+PACKAGED_PLACEMENT_TABLE = Path(__file__).resolve().parent / "_placement_table.json"
+
+#: The carrier's generator version — BUMP it when the emitted SHAPE changes.
+#:
+#: ONE value, shared: ``tools/gen_placement_table.py`` imports it and stamps it
+#: into ``_generated_by``, and :func:`_read_packaged_placement_rows` REFUSES a
+#: carrier that carries any other value (#10663 review, P2). It lives here, in
+#: the package, rather than in ``tools/`` because the READER is the one that has
+#: to enforce it: a provenance stamp written by the generator and read by nobody
+#: is decoration, so a carrier produced by a different generator version — or
+#: from a different doc — was accepted as authoritative.
+PLACEMENT_TABLE_GENERATOR = "gen_placement_table/2"
 
 #: section heading in the placement table → the physical table.
 _PLACEMENT_SECTION_TABLE: dict[str, str] = {
@@ -884,6 +1007,13 @@ _PLACEMENT_SECTION_TABLE: dict[str, str] = {
     "Point": "point",
     "Edges": "relation",
 }
+
+#: The physical tables a carrier row may name — the allowed `row[0]` set.
+#: DERIVED from the section map, never restated: a new section must not be able
+#: to leave the reader refusing a table the generator emits, and a row naming
+#: anything else is a silent partial namespace (the property lands under a key
+#: no accessor asks for, with the row count still matching).
+_DECLARED_TABLES = frozenset(_PLACEMENT_SECTION_TABLE.values())
 
 _SECTION_RE = re.compile(r"^## (Event|Source|Session|Object|Subject|Point) \(node\)")
 _EDGES_RE = re.compile(r"^## Edges / operators")
@@ -898,6 +1028,76 @@ _KEY_DDL = Path(__file__).resolve().parent.parent / "supabase" / "migrations" / 
 
 class CacheProjectionError(RuntimeError):
     """Base class for every refusal on this path."""
+
+
+class PlacementTableUnavailable(CacheProjectionError):
+    """The placement table could not be resolved — an INSTALL or CALLER-PATH fault.
+
+    Raised on EVERY arm that leaves the runtime without a property namespace.
+    Arms 1-5 are packaging faults and none of them is a record fault (#10663);
+    arm 6 is a caller-supplied path, which is neither an install nor a record
+    fault (the preamble says so because a docstring that calls every arm an
+    install fault would contradict the one arm whose purpose is to keep a bad
+    path from being read as a broken install):
+
+    1. **neither carrier** — no packaged table (:data:`PACKAGED_PLACEMENT_TABLE`)
+       AND no source document (:data:`PLACEMENT_DOC`);
+    2. **a present-but-corrupt carrier** — the packaged file exists and does not
+       parse, or does not DECODE, or cannot be READ at all (EACCES / EISDIR /
+       ELOOP — NOT absence: only ENOENT takes the doc fallback). Undecodable
+       bytes raise `UnicodeDecodeError`, a `ValueError` and not an `OSError`, so
+       they are caught here explicitly; left alone they escaped to the caller's
+       "record is unreadable" wrapper, which is the misdiagnosis this type
+       exists to end. The doc is deliberately NOT consulted: papering a corrupt
+       carrier over with a fallback hides the packaging fault instead of
+       reporting it;
+    3. **a present-but-EMPTY carrier** — the packaged file parses to zero rows.
+       An empty carrier is never legitimate, and accepting it would project
+       every record property as unmapped, silently, in production;
+    4. **a stale or malformed carrier** — written by another generator version,
+       carrying a row that is not two non-empty strings or names no declared
+       table, or holding a row count that differs from its own `_row_count`
+       (truncated by a bad merge, or hand-edited);
+    5. **the source document fails in the same three ways** — it is undecodable,
+       it cannot be read (EACCES / EISDIR / ELOOP), or it parses to zero rows.
+       A checkout is not exempt from the checks an image's carrier gets: the doc
+       IS the declaration the carrier is generated from, and a doc that lost its
+       table projected every record property as unmapped with no error at all.
+       ⚠️ The doc arm is NOT at full parity: a doc has no `_row_count` and no
+       per-row provenance, so a row LINE the parser cannot match is dropped
+       silently (`parse_placement_rows` skips it). What catches that is
+       `tests/test_record_schema_placement.py`'s ABSOLUTE count —
+       `EXPECTED_TOTALS` (192 primary / 29 derived / 0 unclassified) and
+       `EXPECTED_TOTAL_NAMES` (221) — NOT `test_cache_projection.py`,
+       which derives from the same doc through the same regex and so shrinks with
+       it (its unclassified-column pin catches a lost PRIMARY row only, via the
+       migrations). Stated because an unqualified "refuses exactly like the
+       carrier" is how the next reader concludes this arm is closed;
+    6. **an explicitly named doc that is not on disk** — the `doc=` arm. NOT arm
+       1 and NOT a broken install: arm 1 is the no-arg read ("neither
+       location"), while a caller-supplied path that does not exist is a BAD
+       PATH. It raises this type only so a public accessor cannot leak a class
+       no out-of-module handler can name.
+
+    It is a distinct type because the message it replaces — *"the record is
+    unreadable"* — sent an operator to Postgres credentials for a file that was
+    never shipped.
+
+    It subclasses :class:`CacheProjectionError` so every existing handler keeps
+    its behaviour (a structural refusal, never an availability event).
+    """
+
+
+class _PlacementDocAbsent(PlacementTableUnavailable):
+    """INTERNAL: the source document is not on disk — the only ABSENCE arm.
+
+    Separate from the other refusals (:class:`PlacementTableUnavailable` is
+    public and stays the handler's type) so `_read_placement_rows` can tell
+    "neither location" from "the doc is right there and is broken". Collapsing
+    the two told an operator the table was missing while they were looking at
+    it — the same false-absence that `Path.exists()` produced at the carrier
+    path (#10663 review, P3), one arm over.
+    """
 
 
 class UnknownRecordLabel(CacheProjectionError):
@@ -953,8 +1153,13 @@ def _read_key_property() -> dict[str, str]:
 KEY_PROPERTY: dict[str, str] = _read_key_property()
 
 
-def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
-    """`(table, property)` for every row the placement table declares.
+def parse_placement_rows(text: str) -> list[tuple[str, str]]:
+    """`(table, property)` parsed from the placement table's markdown.
+
+    The ONE parser: the runtime reads the same rows from the generated
+    :data:`PACKAGED_PLACEMENT_TABLE`, and `tools/gen_placement_table.py`
+    generates that file through this function — so the artefact cannot describe
+    a table the doc does not, in either direction.
 
     EVERY class is read (`P`, `D`, `U`) — the class decides whether a field is
     *authoritative*, and the schema decides that (#7968's pin), while the NAME
@@ -962,14 +1167,6 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
     the `D`/`U` rows too is what lets the suite assert that a DERIVED column is
     never projected: the name must be known to be refused.
     """
-    path = doc or _PLACEMENT_DOC
-    try:
-        text = path.read_text(encoding="utf-8")
-    except OSError as e:
-        raise CacheProjectionError(
-            f"the placement table is not on disk at {path} — the cache "
-            f"projection reads the property namespace from it: {e}"
-        ) from e
     rows: list[tuple[str, str]] = []
     section: str | None = None
     for line in text.splitlines():
@@ -1000,9 +1197,234 @@ def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
                 rows.append((_PLACEMENT_SECTION_TABLE[section], part.strip()))
         else:
             rows.append((_PLACEMENT_SECTION_TABLE[section], prop))
-    for table, extra in ADDITIONAL_PRIMARY_COLUMNS.items():
-        rows.extend((table, prop) for prop in extra.values())
     return rows
+
+
+def _placement_rows_from_doc(path: Path) -> list[tuple[str, str]]:
+    """Parse `path` (an explicit doc, or :data:`PLACEMENT_DOC`).
+
+    Refuses the states the packaged arm refuses: bytes that do not decode, a
+    read that fails (EACCES / EISDIR / ELOOP), and a table that parses to ZERO
+    rows are all install faults, never an empty namespace. The EMPTY guard
+    landed with the carrier (#11210, closing #10663) and this arm kept the hole
+    one file over, where a doc that lost its table projected every record
+    property as unmapped with no error at all — which is what #11227 filed.
+
+    NOT at full parity with the carrier, and the difference is named rather than
+    implied: a doc declares no row count and carries no per-row provenance, so a
+    single row LINE the parser cannot match is dropped silently. The pin that
+    catches that is `tests/test_record_schema_placement.py`'s ABSOLUTE count
+    (`EXPECTED_TOTALS`), not `test_cache_projection.py` — that file derives from
+    the same doc through the same regex, so it shrinks with a lost row.
+    """
+    try:
+        text = path.read_text(encoding="utf-8")
+    except FileNotFoundError as e:
+        # ABSENCE is its own type, so `_read_placement_rows` can turn it into
+        # the "in NEITHER location" message. Any other read fault is reported
+        # here as itself, naming a file the operator can see.
+        raise _PlacementDocAbsent(
+            f"the placement table is not on disk at {path} — the cache "
+            f"projection reads the property namespace from it: {e}"
+        ) from e
+    except OSError as e:
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} is unreadable "
+            f"({type(e).__name__}: {e}) — a fault in the INSTALL, not in the "
+            f"record"
+        ) from e
+    except UnicodeDecodeError as e:
+        # `read_text(encoding="utf-8")` raises this — a `ValueError`, NOT an
+        # `OSError` — so it bypassed every handler and reached the CLI as
+        # "record is unreadable (UnicodeDecodeError)": the #10663 misdiagnosis.
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} is unreadable "
+            f"(UnicodeDecodeError: {e}) — a fault in the INSTALL, not in the "
+            f"record"
+        ) from e
+    rows = parse_placement_rows(text)
+    if not rows:
+        raise PlacementTableUnavailable(
+            f"the placement table at {path} parsed to ZERO rows — a table "
+            f"with no rows would project every record property as unmapped, "
+            f"silently. The DOC is the fault here: restore its table and "
+            f"regenerate the carrier with `uv run python "
+            f"tools/gen_placement_table.py`"
+        )
+    return rows
+
+
+def _placed_rows_with_extras(
+        rows: list[tuple[str, str]]) -> list[tuple[str, str]]:
+    """The parsed rows PLUS :data:`ADDITIONAL_PRIMARY_COLUMNS`.
+
+    Those columns are PRIMARY by decision but are spelled only in the schema, so
+    they are appended here rather than in either carrier — the doc does not
+    name them and the generated table must not invent them.
+    """
+    out = list(rows)
+    for table, extra in ADDITIONAL_PRIMARY_COLUMNS.items():
+        out.extend((table, prop) for prop in extra.values())
+    return out
+
+
+def _read_packaged_placement_rows() -> list[tuple[str, str]] | None:
+    """The generated table's rows, or `None` when the package does not carry it.
+
+    `None` is the SOURCE-CHECKOUT-without-regeneration case (a `git clean` that
+    dropped the generated file): the doc is on disk there and is read instead.
+
+    EVERY OTHER state of a PRESENT carrier is a packaging fault and is reported
+    as one, never papered over with a fallback that hides it (#10663 review):
+
+    * **unparseable** — not JSON, not an object, or bytes that do not DECODE
+      (`UnicodeDecodeError` is a `ValueError`, so it needs its own arm);
+    * **from another generator** — `_generated_by` is not
+      :data:`PLACEMENT_TABLE_GENERATOR`, so its SHAPE is unknown here;
+    * **shape-wrong** — a row that is not exactly two strings, or that names a
+      table outside :data:`_DECLARED_TABLES`. The old
+      ``[(str(a), str(b)) for a, b in rows]`` was the silent one: iterating a
+      DICT row yields its **keys**, so ``{"table": "point", …}`` became
+      ``("table", "property")`` for every row and every record column then
+      projected as unmapped, with no exception anywhere. A row under an
+      undeclared table is the same silence one step quieter: it parses, the
+      count can still match, and the property lands under a key no accessor
+      asks for;
+    * **EMPTY** — zero rows. An empty namespace is never legitimate;
+    * **row-count mismatch** — `_row_count` != the rows held (fewer: truncated by
+      a bad merge; more: hand-edited). `!=`, not `<`.
+
+    `_source_sha256` is deliberately NOT enforced here: it can only be checked
+    against the doc, and the deployed image ships no `docs/` tree — the whole
+    reason this carrier exists. It is for the parity pin (which HAS the doc) and
+    for a human reading a bad carrier, and saying so is the point: a provenance
+    field that looks enforced but is not is how the next reader concludes the
+    carrier is validated when only its syntax is.
+
+    The two RELATIVE pins in `tests/test_10663_placement_table_packaged.py`
+    (carrier vs the same parser over the doc, generator vs the committed bytes)
+    cannot see any of these: an artefact that agrees with itself keeps them —
+    and `--check` — green. This function is the only thing that reads the
+    SHIPPED artefact for what it is (the #1929/#9231 silent-empty class).
+    """
+    import json
+
+    def _fault(reason: str) -> PlacementTableUnavailable:
+        return PlacementTableUnavailable(
+            f"the packaged placement table at {PACKAGED_PLACEMENT_TABLE} {reason} "
+            f"— regenerate it with `uv run python tools/gen_placement_table.py`. "
+            f"This is a fault in the INSTALL, not in the record."
+        )
+
+    # NOT `Path.exists()`. It swallows ELOOP/EBADF and reports a carrier that IS
+    # there as ABSENT — which does not merely lose the message, it takes the
+    # DOC FALLBACK, so in an image the operator is told the table is not on disk
+    # and told to regenerate a file that is on disk. Only ENOENT is the benign
+    # source-checkout case; every other read error (ELOOP, EACCES, ENOTDIR, …)
+    # is a fault in the INSTALL and is reported as one.
+    try:
+        text = PACKAGED_PLACEMENT_TABLE.read_text(encoding="utf-8")
+    except FileNotFoundError:
+        return None
+    except OSError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+    except UnicodeDecodeError as e:
+        # NOT an `OSError` (it is a `ValueError`), so a bare `except OSError`
+        # let it escape to the CLI's "record is unreadable" wrapper — a
+        # packaging fault reported as a record fault, which is the exact
+        # misdiagnosis #10663 exists to end.
+        raise _fault(f"is unreadable (UnicodeDecodeError: {e})") from e
+
+    try:
+        payload = json.loads(text)
+    except ValueError as e:
+        raise _fault(f"is unreadable ({type(e).__name__}: {e})") from e
+    if not isinstance(payload, dict):
+        raise _fault(
+            f"is unreadable (its top level is {type(payload).__name__}, not an "
+            f"object)")
+
+    # PROVENANCE FIRST: it decides what the rest of the file is even supposed to
+    # look like, so a shape check running before it would report a version skew
+    # as a malformed row.
+    if payload.get("_generated_by") != PLACEMENT_TABLE_GENERATOR:
+        raise _fault(
+            f"was generated by {payload.get('_generated_by')!r}, not by "
+            f"{PLACEMENT_TABLE_GENERATOR!r} — it is STALE against the reader")
+
+    rows = payload.get("rows")
+    if not isinstance(rows, list):
+        raise _fault(
+            f"is unreadable (`rows` is {type(rows).__name__}, not a list)")
+    parsed: list[tuple[str, str]] = []
+    for index, row in enumerate(rows):
+        if (not isinstance(row, list) or len(row) != 2
+                or not all(isinstance(part, str) and part for part in row)):
+            raise _fault(
+                f"has a MALFORMED row at index {index} ({row!r}) — every row "
+                f"must be a two-element list of non-empty strings")
+        if row[0] not in _DECLARED_TABLES:
+            # A table name nothing reads is a SILENT partial namespace: the row
+            # parses, the count can still match, and the property lands under a
+            # key no accessor asks for. `parse_placement_rows` cannot produce
+            # one (it maps through _PLACEMENT_SECTION_TABLE), so a carrier is
+            # strictly weaker without this check.
+            raise _fault(
+                f"has a row naming {row[0]!r}, which is not one of the declared "
+                f"tables {sorted(_DECLARED_TABLES)} at index {index} — its "
+                f"SHAPE is unknown here")
+        parsed.append((row[0], row[1]))
+
+    if not parsed:
+        raise _fault(
+            "is EMPTY (it parsed to zero rows) — an empty table would project "
+            "every record property as unmapped, silently; if the doc itself "
+            "parsed empty, the doc is the fault")
+
+    declared_count = payload.get("_row_count")
+    if declared_count != len(parsed):
+        raise _fault(
+            f"declares `_row_count` = {declared_count!r} but holds {len(parsed)} "
+            f"rows — it is TRUNCATED or was hand-edited")
+
+    return parsed
+
+
+def _read_placement_rows(doc: Path | None = None) -> list[tuple[str, str]]:
+    """`(table, property)` for every row the placement table declares.
+
+    THE PACKAGED TABLE IS PREFERRED (#10663). That is the read the deployed
+    image performs, so it is also the read every test performs — a path only the
+    image takes is a path nothing exercises, which is exactly how a docs/ file
+    became a production verb's dependency with CI green.
+
+    `doc=` (a fixture, or a caller reading a specific revision) still parses
+    markdown directly. With neither carrier present the refusal is
+    :class:`PlacementTableUnavailable` and names BOTH locations.
+    """
+    if doc is not None:
+        try:
+            return _placed_rows_with_extras(_placement_rows_from_doc(doc))
+        except _PlacementDocAbsent as e:
+            # The private absence type is for INSPECTION here, never for escape:
+            # a caller of a public accessor must be able to NAME what it catches,
+            # and the no-arg form of this same function raises the public type
+            # for the identical condition.
+            raise PlacementTableUnavailable(str(e)) from e
+    packaged = _read_packaged_placement_rows()
+    if packaged is not None:
+        return _placed_rows_with_extras(packaged)
+    try:
+        return _placed_rows_with_extras(_placement_rows_from_doc(PLACEMENT_DOC))
+    except _PlacementDocAbsent as e:
+        raise PlacementTableUnavailable(
+            f"the cache projection's placement table is in NEITHER location — "
+            f"this is a PACKAGING fault, not a record fault: no packaged table "
+            f"at {PACKAGED_PLACEMENT_TABLE} and no source document at "
+            f"{PLACEMENT_DOC} ({e}). A checkout regenerates the carrier with "
+            f"`uv run python tools/gen_placement_table.py`; an image must ship "
+            f"`tortoise/_placement_table.json` as package data (#10663)."
+        ) from e
 
 
 #: NOTE on caching: the parsers below read FILES, and every accessor is memoized.
@@ -1079,7 +1501,7 @@ def projected_columns(table: str) -> frozenset[str]:
     pin), and a name the schema REFUSES as a `props` key is DERIVED/VOLATILE by
     that refusal. So:
 
-        projected = schema columns  −  refused  −  bookkeeping
+        projected = schema columns  −  refused  −  bookkeeping  −  not-projectable
 
     with the placement table supplying only the SPELLING. That is what makes
     the eight `U` rows resolve correctly without a second copy of §2.7: the
@@ -1087,16 +1509,25 @@ def projected_columns(table: str) -> frozenset[str]:
     `baseline_source`, `temporal_reviewed`, `IMPL.confidence`, `IMPL.weight`),
     and the three that become DERIVED are refused by name (`version`,
     `inherited_at`, `baseline_set` — all in `chk_point_props_no_derived`).
+
+    ⛔ The last subtraction is `CACHE_FORBIDDEN_COLUMNS` and it is a THIRD
+    category, not a fourth spelling of `refused`: those columns stay authoritative
+    in the record and are simply not projectable into the cache (§9.1/D1's
+    narrative is the case, `#10394` door 2). Folding them into `refused` would
+    say the record must not store them, which is false — and would red the
+    record's own `props`-tail CHECK.
     """
     from .record_projection import table_columns
 
     columns = table_columns().get(table, frozenset())
     refused = _refused(table)
+    forbidden = cache_forbidden_columns(table)
     placed = placement_columns().get(table, {})
     extra = ADDITIONAL_PRIMARY_COLUMNS.get(table, {})
     return frozenset(
         c for c in columns
         if c not in bookkeeping_columns(table) and c not in refused
+        and c not in forbidden
         and (c in placed or c in extra)
     )
 
@@ -1122,6 +1553,68 @@ def _refused(table: str) -> frozenset[str]:
     from .record_projection import refused_props_names
 
     return frozenset(refused_props_names().get(table, ()))
+
+
+#: Columns the RECORD holds **authoritatively** and the CACHE must NEVER
+#: materialise: `{table: {column}}`.
+#:
+#: ⛔ THIS IS NOT `_refused`, AND THE DIFFERENCE IS THE WHOLE POINT. `_refused`
+#: (`record_projection.refused_props_names`) is derived from the schema's own
+#: CHECK constraints and means *"the record must not store this name as
+#: authority"*. These columns ARE authority in the record — §9.1/D1 puts the S1
+#: narrative in **Postgres** and forbids it in the **graph**, and the record is
+#: the Postgres half. Authority in the source store is not projectability into
+#: this cache, and a projection with no vocabulary for that distinction
+#: re-materialises the prose on every RESTORE — which is `#10394` door 2, and it
+#: undoes `#10000` (the write deletions) at once: a write deletion that the next
+#: routine recovery reverses is not a deletion. ⚠️ `#10017`'s purge is NOT the
+#: lane this undoes (#11325): its single destructive statement deletes legacy
+#: episodic turn `:Point`s, never `:Source`/`:Event`, and names no `story_arc` —
+#: so this class's targeted repair is a graph-side `REMOVE` that no instrument
+#: ships, or the full restore's whole-graph wipe (itself refused pre-wipe on a
+#: production server graph name, `#2944`'s L2 guard). ⚠️ BOTH are destructive, and
+#: the WIPE cannot be row-scoped — `_wipe_all_nodes` is `MATCH (n) DETACH DELETE n`,
+#: so it cannot be restricted to the rows whose prose the record still carries: a
+#: graph holding ANY row whose PROSE neither `public.{source,event}.story_arc` nor
+#: `public.session_narrative.narrative` carries must NOT be restored at all — copy
+#: that prose out first, because the wipe destroys the only copy
+#: (STORAGE-ARCHITECTURE.md §17.2, `#11325`).
+#:
+#: So an entry here is a statement about the CACHE, not about the record: the
+#: placement table keeps the row's class (`P` — the record does store it) and
+#: its note says `not projected` with the reason, so a reader cannot take this
+#: for an omission and `#7968`'s two-way pin (PRIMARY ⇒ column) still holds.
+#:
+#: ⛔ The fix is HERE — at the seam — and deliberately not a purge pass after
+#: the restore: a sweep would still rent the RAM for the duration of the write
+#: and would have to run on every restore forever. Stop the write.
+#:
+#: Pinned per table by `tests/test_9555_narrative_cache_rebuild.py::
+#: test_the_record_restore_writes_no_story_arc_on_any_node`, whose restore arm
+#: runs over a cache that still holds a legacy copy (`sum(size(n.story_arc))`
+#: must end at 0).
+CACHE_FORBIDDEN_COLUMNS: dict[str, frozenset[str]] = {
+    # §9.1/D1 — the S1 narrative, on BOTH anchors the commit path could reach
+    # (`public.source.story_arc`, `public.event.story_arc`; the `:Event` half
+    # was measured in `#10389`'s review and is why this is not a
+    # `:Source`-only entry). Its ONE home is `public.session_narrative`, which
+    # `record_text.serve_from_record` reads and this module never touches — so
+    # nothing a reader sees is lost by denying the projection.
+    "source": frozenset({"story_arc"}),
+    "event": frozenset({"story_arc"}),
+}
+
+
+def cache_forbidden_columns(table: str) -> frozenset[str]:
+    """The COLUMN names of `table` that are authoritative and NOT projectable.
+
+    ⚠️ Column names, not graph property names. The two coincide for `story_arc`
+    (which the placement table spells once) and do NOT in general — callers that
+    compare against graph-property keys must widen the set through
+    :func:`placement_spellings`, which is what the `props`-tail filter in
+    :func:`_props_from_row` does (#10394 review).
+    """
+    return CACHE_FORBIDDEN_COLUMNS.get(table, frozenset())
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1190,57 +1683,80 @@ def _scalar(value: Any) -> Any:
     return value
 
 
-#: ⛔ §9.1/D1 AT THE PROJECTION DOOR (#10853) — the columns an EPISODIC
-#: (`session:`) Source may **not** carry onto its node, however the row was
-#: written.
+#: ⛔ §9.1/D1 AT THE PROJECTION DOOR (#10853, narrowed by #10965) — the columns an
+#: EPISODIC (`session:`) Source may **not** carry onto its node **when the row
+#: holds the PRE-#10000 derivation**.
 #:
-#: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. `sdk._session_source_metadata`
-#: derives a *summary* from the transcript's first substantive utterance, and the
-#: capture writes it on the session `:Source` (`s.summary=$sum`). #10000's ruling
-#: (§9.1/D1) is that captured turn text lives in the RECORD, not on a graph node.
-#: The capture side of that is #10000's own change. This table is the OTHER door:
-#: every record-sourced READ and rebuild goes through :func:`node_from_row` —
+#: WHY THIS IS HERE AND NOT ONLY IN THE CAPTURE. A pre-#10000 capture derived BOTH
+#: columns from the transcript's first substantive utterance
+#: (`_session_source_metadata`, then `_source_search_text(summary=…)` — the
+#: capture path has no title) and wrote them on the session `:Source`
+#: (`s.summary=$sum`). #10000's ruling (§9.1/D1) is that captured turn text lives
+#: in the RECORD, not on a graph node. This table is the OTHER door: every
+#: record-sourced READ and rebuild goes through :func:`node_from_row` —
 #: `tortoise record-restore` and `rebuild_from_record` MATERIALISE a node with it,
 #: and `record_serve.read_node` answers the graph-engine-down read with
 #: the same map *because its contract is that the two cannot drift*. So a row
-#: written by a build that still placed the key would either re-materialise the
-#: prose **whatever build is reading it**, or make the served answer disagree
-#: with what a rebuild can carry — and nothing reds either way: a one-way
-#: divergence (`#10853`). Clearing the legacy rows would be a sweep that decays:
-#: at this head the capture still places the key, so the next capture of the same
-#: session writes the value straight back. A rule cannot decay.
+#: written by a build that still placed the sentence would re-materialise the
+#: prose **whatever build is reading it** — a one-way divergence (`#10853`). The
+#: rule cannot be a one-off sweep either: a session nobody re-captures keeps its
+#: row, so the decision belongs at the door.
 #:
-#: ⛔ THE PAIR IS ONE DATUM, which is why both COLUMNS are here (`summary`,
-#: `_search_text` — the graph property its mapping produces is `_searchText`). On
-#: the capture path there is no title, so `_source_search_text(summary=…)`
-#: resolves to the summary itself — dropping `summary` alone would leave the
-#: identical sentence on the node under `_searchText`, the "column next door" this
-#: module's own `_CONTENT_COLUMNS` note (record_projection) names as *"the SAME
-#: datum"*.
+#: ⭐ WHAT #10000 CHANGED, AND WHY THE PAIR IS NO LONGER ONE RULE. The capture now
+#: derives the session's TOPIC LEXICON — the most frequent content words of the
+#: (already redacted) transcript — and writes `summary` = a display DESCRIPTOR
+#: over it and `_searchText` = `", ".join(topics)`, both from the SAME list in ONE
+#: statement (`sdk._materialize_session_source`). So on a post-#10000 row
+#: `_search_text` is **not a CHOSEN utterance**: in a word-delimited script it is the lexicon — TOKEN-shaped, so
+#: a space-less CJK run arrives WHOLE, i.e. that member IS the turn's prose verbatim; a Thai one FRAGMENTS at its combining
+#: (the residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source
+#: FTS index is declared on (`_FULLTEXT_INDEX_LABEL_FIELDS`), i.e. #3518's findability.
+#: Dropping it by column NAME on such a row silently UN-INDEXES the session on the recovery door (#10965).
 #:
-#: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word
-#: lexicon (its most frequent content words), not a transcript slice, and it
-#: survives; every non-episodic Source keeps both columns untouched — a
-#: document's `summary` is its own metadata and its `_searchText` is the shared
-#: title+summary+topics rule, so a guard that fired on every Source would
-#: un-index every document in the cache. The drop is a **projection** decision:
-#: the row is not mutated, so the record stays the authority for the value.
+#: ⛔ SO THE DROP IS DECIDED PER ROW, FROM THE ROW — and the test is EXACT, never a
+#: shape heuristic: the value IS `", ".join(topics)`, the join the capture computes
+#: from the very column that survives, **and** `summary` carries that join behind
+#: `_SESSION_SOURCE_SUMMARY_PREFIX`. The join alone is not enough: a legacy
+#: utterance that IS a comma-space list satisfies it word for word (#10852 review,
+#: P2), so the display column is the WITNESS that the derivation is the post-#10000
+#: one. A prefix/suffix/"looks like a word list" test alone would re-index a legacy
+#: sentence whose opening words happened to match — and a join-only test DOES
+#: re-index one whose whole body does. See
+#: :func:`_episodic_source_search_text_is_the_lexicon`.
+#:
+#: ⛔ `summary` STAYS DECLINED ON EVERY ROW, and that is the stated residual
+#: (#10965), not an oversight: it is the same lexicon BEHIND
+#: `_SESSION_SOURCE_SUMMARY_PREFIX`, and restoring it would put the whole
+#: descriptor on the node for no retrieval gain (the Source FTS index is declared
+#: on `_searchText`). The column is therefore READ AS THE WITNESS and never
+#: projected — its home is the leaf module `tortoise/session_source_display.py`,
+#: which imports nothing, precisely so this door does not import the capture (the
+#: layering inversion this module refuses). Cost, named: a record-restored (or
+#: served) session `:Source` carries no `summary` while a live one does.
+#:
+#: ⚠️ WHAT THIS DELIBERATELY DOES NOT TOUCH. `topics` is the capture's word lexicon (its most frequent content
+#: words) — in a word-delimited script not a CHOSEN transcript slice, though a space-less (CJK) run arrives
+#: as ONE member verbatim (the residual in `sdk._session_source_metadata`) — and it survives; every
+#: non-episodic Source keeps both columns untouched — a document's `summary` is its own metadata and its
+#: `_searchText` is the shared title+summary+topics rule, so a guard that fired on every Source would
+#: un-index every document in the cache. The drop is a **projection** decision: the row is not mutated, so
+#: the record stays the authority for the value.
 #:
 #: ⚠️ THE THIRD COST, and it is an OBSERVATION instrument, where a permanent
 #: non-clean reads as noise: `python -m tortoise record-reconcile` builds its
 #: RECORD side through :func:`read_record_view` → `node_from_row`, so the truth
-#: side omits these two properties while the CACHE side holds them. That
-#: population is not "legacy" — at this head the capture still writes and
-#: journals them, so EVERY session this build captures would report
-#: `field_mismatches=2` forever. Left alone that is the class the reconciler
-#: itself grades P1 (*"a signal indistinguishable from noise is not
-#: observability"*), so the comparison is not left to carry it:
+#: side omits what this door declines while the CACHE side may hold it. Left as a
+#: `field_mismatch` that is the class the reconciler's own docstring grades P1
+#: (*"a signal indistinguishable from noise is not observability"*), so
 #: :func:`episodic_source_prose_properties` and
-#: `record_reconcile.scan_cache_view` mark the pair CACHE-OWNED for an episodic
-#: Source, and the reconciler counts them under `graph_only` — visible, and not
-#: a divergence against a record that is correct. The repair for the graph side
-#: is a record-sourced re-projection (`record-restore` / `rebuild_from_record`,
-#: which re-materialise through this projector), then #10000's capture change.
+#: `record_reconcile.scan_cache_view` mark the pair CACHE-HELD for an episodic
+#: Source and count it under `graph_only` — visible, and not a divergence against
+#: a record that is correct. ⭐ And the partition stays provenance-correct without
+#: a second predicate: `_partition_cache_owned` KEEPS every name the RECORD side
+#: holds, so on a post-#10000 row — where the record door now projects
+#: `_searchText` — the value is COMPARED (a drifted `_searchText` reds), while
+#: `summary`, and a legacy row's whole pair, stay cache-held (≠ "cache-owned",
+#: §17.5's term for what the record cannot hold at all).
 _EPISODIC_SOURCE_PROSE_COLUMNS: frozenset[str] = frozenset({
     "summary", "_search_text",
 })
@@ -1311,7 +1827,178 @@ def _episodic_source_kind_property() -> str:
     return canonical_property("source", "source_kind")
 
 
-def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
+#: Distinguishes "the caller did not decode the tail" from an EMPTY tail.
+_UNRESOLVED_TAIL: Any = object()
+
+
+def _tail_payload(raw: Any) -> Any:
+    """The row's `props` tail DECODED, in whatever shape the row holds it.
+
+    ONLY `None` and the EMPTY STRING answer `{}` — the two spellings of ABSENT.
+    ⛔ `''` is handled explicitly: `props` is `jsonb NOT NULL DEFAULT '{}'`, so the
+    common shapes are a mapping or `None`, but the pre-existing read accepted a
+    STRING tail and wrote `json.loads(tail) if tail else {}` — i.e. it treated the
+    empty string as an ABSENT tail on purpose. `json.loads('')` RAISES, so keeping
+    that case is what stops the projection from turning an empty tail into a
+    `JSONDecodeError` (pinned by
+    :func:`test_the_DROP_SET_itself_is_exactly_the_declared_pair`, whose row
+    populates every column).
+
+    ⛔ IT DOES NOT COERCE, AND THE ABSENCE TEST IS NOT FALSINESS (#10867 review,
+    second pass). `props` is `jsonb NOT NULL DEFAULT '{}'` with no CHECK that it is
+    an OBJECT, so a corrupt row can carry a scalar or an array. Answering those
+    verbatim is what lets the WRITER path (:func:`_props_from_row`) refuse them
+    loudly — and a `not raw` test defeated exactly the shapes it says it covers:
+    a DECODED `[]`/`0`/`False` is FALSY, so it would have been coerced to `{}` and
+    projected clean while the same row as TEXT (`'[]'`, `'0'`) was refused. That
+    split is decided by the SHAPE the tail arrives in — JSON TEXT or already
+    DECODED — never by the row, and BOTH shapes are reachable here: the record
+    layer reads through `psycopg2`, whose `jsonb` typecaster answers Python
+    objects, while JSON TEXT is what a `::text` cast, a pre-serialised tail or a
+    fixture hands over. So the test is IDENTITY against the two absent spellings,
+    never truthiness.
+
+    ⛔ DECLARED RESIDUAL — TWO DEGENERATE SCALARS STILL SPLIT ON THE TAIL'S SHAPE.
+    PostgreSQL's `jsonb` maps JSON `null` and JSON `""` onto the SAME Python
+    values as the absent spellings above (`null` → `None`, `""` → `''`), so a
+    DECODED tail cannot be told apart from an absent one — those two project as
+    absence while the identical row as TEXT (`'null'`, `'""'`) is refused below.
+    That asymmetry is not closable at this
+    operator: the decoded values ARE the mandated lenient spellings, and
+    widening the lenient set to admit `'null'`/`'""'` as well would re-spell
+    ABSENCE rather than detect it. It is declared rather than fixed because it
+    carries NO content: neither a JSON `null` nor a JSON empty string has keys,
+    so no tail property is lost either way (`test_a_MALFORMED_props_tail_is_
+    REFUSED_not_dropped_in_silence` pins the split so it cannot be read as
+    parity).
+    """
+    if raw is None or raw == "":
+        return {}
+    return json.loads(raw) if isinstance(raw, str) else raw
+
+
+def _decoded_tail(raw: Any) -> Mapping[str, Any]:
+    """The row's `props` tail as a MAPPING — the IDENTITY read's view.
+
+    A `None`/empty tail and anything that is not an object answer `{}`, because
+    this feeds the row predicate, which must answer for every shape a row can
+    hold. That leniency is deliberately NOT shared with :func:`_props_from_row`:
+    the writer path decodes through :func:`_tail_payload` and RAISES on a
+    non-object, so a malformed tail is refused where it would otherwise be
+    projected (and silently dropped).
+
+    ⛔ IT MUST NOT RAISE, AND A DECODED JSON STRING IS NOT JSON TEXT (#10867
+    review, closing pass). `_tail_payload` routes any `str` through `json.loads`,
+    which is right for a JSON-TEXT tail — where a `jsonb` string arrives as its
+    JSON SOURCE (`'"hello"'`). A DECODED tail (what `psycopg2`'s `jsonb`
+    typecaster answers) hands the same column back as the Python `str` `'hello'`,
+    which is not JSON text at all: `json.loads` raised `JSONDecodeError` out of
+    the ROW PREDICATE, so `_is_episodic_source_row` — the function whose whole
+    contract is to ANSWER for every shape a row can hold — raised on the DECODED
+    shape and answered on the JSON-TEXT one. Unparseable non-objects answer
+    `{}` here (the DOCUMENT arm, which is
+    this module's declared safe asymmetry: a missed legacy session keeps its
+    prose, a false positive strips a document's metadata). The WRITER path is
+    untouched and stays LOUD — `_props_from_row` decodes through
+    :func:`_tail_payload` directly, so `props='{not json'` still raises."""
+    try:
+        tail = _tail_payload(raw)
+    except (ValueError, TypeError):
+        # Unparseable, i.e. not JSON text — a decoded string tail, which a
+        # decoding read spells as a bare `str`. NOT `CacheProjectionError` (a
+        # RuntimeError) and NOT the writer path, which must keep raising.
+        return {}
+    return tail if isinstance(tail, Mapping) else {}
+
+
+def _row_identity_view(row: Mapping[str, Any],
+                       tail: Mapping[str, Any]) -> Mapping[str, Any]:
+    """The row's identity AS THE NODE WILL CARRY IT: the columns + `props` tail.
+
+    ⛔ THE TAIL CARRIES IDENTITY, NOT ONLY PROSE (#10867 review). The tail's
+    property names reach the node UNMAPPED — they are not routed through the
+    placement table — although a column value overwrites the same coordinate and
+    an EPISODIC Source's declined names are popped (see :func:`_props_from_row`,
+    which applies the whole rule). So a row whose `source_kind` column is NULL
+    while the tail carries `sourceKind='agentSession'` produces an EPISODIC
+    node — `is_episodic_source_node` says so, because it reads the MERGED map.
+    A predicate that read the COLUMNS alone therefore answered "document" for a
+    node the reconciler classifies as a captured session: the prose reached the
+    node through the column door (which never fired) — R1 ("from any row shape")
+    failing OPEN, and the same hazard the declined-name tail filter exists for,
+    defeated from the other side.
+
+    ⛔ AND NOTHING DOWNSTREAM REDACTS IT, which is why the failure was SILENT and
+    why it has to be caught HERE. `record_reconcile` builds its RECORD side
+    through this same projector, so the re-projected record carries the prose
+    too; `keep` includes ``record_props`` — that module says a name the record
+    side carries "is always compared" (`record_reconcile.py:449-451`, `:540`) —
+    so the pair compares EQUAL and the reconciler reports neither a field
+    mismatch nor a `graph_only` occurrence. It is not a divergence the reconciler
+    hid under another bucket: it is one it structurally CANNOT see, because both
+    sides are wrong the same way. The harm is the prose itself, sitting on a node
+    §9.1/D1 says must not carry it.
+
+    A COLUMN VALUE WINS over the tail's spelling of the same coordinate, which
+    preserves the asymmetry :func:`_is_episodic_source_row` declares: an
+    AMBIGUOUS row is read as a DOCUMENT, so it keeps its prose (the pre-existing
+    defect) rather than stripping a document's own metadata.
+
+    ⛔ THE KIND IS READ IN THE CANONICAL SPELLING ONLY, AND THAT IS DELIBERATE
+    — it is NOT the same rule as :func:`episodic_source_declined_properties`,
+    which covers BOTH spellings (`sourceKind` and the COLUMN's `source_kind`)
+    because the `props` tail is an open set. (#10962 review.) The two sets are
+    asymmetric because their FAILURE DIRECTIONS are opposite, and this function
+    is the one that moves the dangerous way:
+
+    * popping a name that is not there costs nothing, so the decline set can
+      afford to be generous — it is also why it is the safe place to be wrong;
+    * answering EPISODIC here strips a row's metadata and un-indexes it, which
+      is the false positive this module refuses everywhere else.
+
+    And a tail-carried `source_kind` CANNOT make the node episodic anyway:
+    `_props_from_row` seeds the tail verbatim, so the node gets a literal
+    `source_kind` property while :func:`is_episodic_source_node` reads
+    `sourceKind` — the node is a DOCUMENT by the graph's own vocabulary. Reading
+    the snake spelling here would therefore make this view answer EPISODIC for a
+    node the projector and the node predicate both call a document: the same
+    row-predicate/node-predicate divergence this function exists to close, only
+    mirrored. (The shape is unreachable through the writer regardless —
+    `record_projection._split_properties` classifies `source_kind` as a COLUMN —
+    so this is an invariant on hand-built rows, declared rather than assumed.)
+
+    ⛔ AND THAT RULE IS THE *NODE MAP's* RULE TOO — `_props_from_row` seeds `out`
+    from the tail and lets the column loop overwrite it, for this reason (#10867
+    review ISSUE 1). The rule is stated here once and applied in both places on
+    purpose: it is the same collision, and resolving it twice is how the two
+    functions came to disagree.
+
+    `None` is SILENCE, and nothing else is: a column that carries a value (an
+    empty string included) wins the coordinate, because `_props_from_row` writes
+    it. An empty key is refused downstream anyway (`node_from_row`'s
+    `UnprojectableRecord`, and the schema's own CHECK), so the two agree on every
+    shape that can become a node.
+
+    The row itself is NEVER mutated — a FRESH mapping is returned, on every
+    branch. ⛔ The empty-tail branch used to `return row`, so `is` identity held
+    and a caller mutating the "view" mutated the RECORD ROW — a false guarantee
+    on the one object R3 leans on to prove the record is untouched (#10867 review
+    P3). One shallow copy on a branch the live path does not take is the whole
+    cost.
+    """
+    if not tail:
+        return dict(row)
+    merged: dict[str, Any] = {k: v for k, v in row.items() if k != "props"}
+    kind_property = _episodic_source_kind_property()
+    if merged.get("source_kind") is None and kind_property in tail:
+        merged["source_kind"] = tail[kind_property]
+    if merged.get("url") is None and "url" in tail:
+        merged["url"] = tail["url"]
+    return merged
+
+
+def _is_episodic_source_row(row: Mapping[str, Any],
+                            tail: Any = _UNRESOLVED_TAIL) -> bool:
     """Is this `public.source` row a captured session's Source?
 
     The two identity arms are declared at :data:`_EPISODIC_SOURCE_URL_PREFIX`,
@@ -1335,12 +2022,80 @@ def _is_episodic_source_row(row: Mapping[str, Any]) -> bool:
     `session_source_migration._LEGACY_CANDIDATES` — and a record-sourced rebuild
     writes `sourceKind` from the column). Fail-closed by direction, and left
     named.
+
+    The identity is read through :func:`_row_identity_view`, so the `props` tail
+    participates: a tail-carried `sourceKind`/`url` is an identity the NODE will
+    carry, and a predicate that ignored it disagreed with the reconciler on that
+    row shape (see the view's docstring).
     """
-    url = row.get("url")
+    if tail is _UNRESOLVED_TAIL:
+        tail = _decoded_tail(row.get("props"))
+    view = _row_identity_view(row, tail) if tail else row
+    url = view.get("url")
     if isinstance(url, str) and url.startswith(_EPISODIC_SOURCE_URL_PREFIX):
         return True
-    return (row.get("source_kind") == _EPISODIC_SOURCE_KIND
+    return (view.get("source_kind") == _EPISODIC_SOURCE_KIND
             and isinstance(url, str) and "://" not in url and "/" not in url)
+
+
+def _episodic_source_search_text_is_the_lexicon(row: Mapping[str, Any]) -> bool:
+    """Is this row's `_search_text` the post-#10000 LEXICON derivation (#10965)?
+
+    The ONE mechanical question that separates the two derivations of the session
+    `:Source`'s pair, asked of the ROW rather than of the build that wrote it:
+    #10000's capture writes `_searchText = _source_search_text(topics=topics)` and
+    `summary = _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics)`, both from the
+    SAME list in ONE statement. So the derivation is present iff the stored text
+    IS the join — compared as a STRING, exactly — **and** the display column
+    carries that join behind the declared prefix.
+
+    ⛔ TWO TERMS, NOT ONE (#10852 review, P2). The join alone is NOT the
+    derivation: a pre-#10000 capture wrote `summary` as the transcript's first
+    substantive utterance and derived `_searchText` FROM it, so on a transcript
+    whose utterance is itself a comma-space list
+    (`"milk, eggs, bread, cheese, apples, oranges"`) the legacy row satisfies
+    `_search_text == ", ".join(topics)` with its PROSE, word for word. `summary`
+    is what tells the two apart — the post-#10000 value carries
+    `SESSION_SOURCE_SUMMARY_PREFIX`, which a prose utterance does not. Without
+    that second term this predicate re-indexes the sentence it exists to decline,
+    and nothing reds (the cost `:data:`_EPISODIC_SOURCE_PROSE_COLUMNS`` names).
+
+    ⛔ EXACT EQUALITY, never a shape test. `startswith`, "contains no sentence",
+    "few words", or a case-folded compare would accept a legacy row's sentence
+    whose opening words happen to match the join, and re-index it — the §9.1/D1
+    prose this module declines, smuggled back by a heuristic. The near-miss shapes
+    are pinned in `tests/test_10853_session_source_prose.py`.
+
+    ⛔ FAIL-CLOSED ON EVERY UNCERTAIN SHAPE. A `topics` column that is not a list
+    of non-empty strings (NULL, a JSON string, a list with a hole, empty) cannot
+    prove the derivation; neither can a `summary` that is absent, empty, or
+    missing the declared prefix. Each such row is treated as legacy and the pair
+    stays declined. The cost of a false negative is a session that stays
+    unfindable on the recovery door until it is re-captured (visible, and named at
+    the table); the cost of a false POSITIVE is turn prose on a graph node, which
+    nothing reds — so the polarity is not a preference. ⚠️ The prefix's own home
+    is `tortoise/session_source_display.py`, a leaf module: the projection must
+    not import the capture for it (the layering inversion the table refuses).
+    """
+    search_text = row.get("_search_text")
+    if not isinstance(search_text, str) or not search_text:
+        return False
+    topics = row.get("topics")
+    if not isinstance(topics, (list, tuple)) or not topics:
+        return False
+    tokens = [t for t in topics if isinstance(t, str) and t]
+    if len(tokens) != len(topics):
+        return False
+    joined = ", ".join(tokens)
+    if search_text != joined:
+        return False
+    # ⛔ THE WITNESS — `summary` is DECLINED on the node below, and this is why it
+    # is still read: on the post-#10000 row it carries the lexicon behind the
+    # display prefix, which is what a legacy prose row cannot carry.
+    summary = row.get("summary")
+    if not isinstance(summary, str):
+        return False
+    return summary == f"{SESSION_SOURCE_SUMMARY_PREFIX}{joined}"
 
 
 def is_episodic_source_node(props: Mapping[str, Any]) -> bool:
@@ -1364,9 +2119,11 @@ def episodic_source_prose_properties() -> frozenset[str]:
     """The narrowing in the CACHE's vocabulary — the GRAPH property names.
 
     What :func:`tortoise.record_reconcile.scan_cache_view` must treat as
-    cache-owned for an episodic Source, so the reconciler reports it under
+    cache-held for an episodic Source, so the reconciler reports it under
     `graph_only` instead of counting it as a `field_mismatch` against a record
-    that is correct.
+    that is correct. ⛔ The term is CACHE-HELD, never "cache-owned": the record
+    holds this pair (post-#10000 it even projects `_searchText`), so the repair
+    is a record-sourced clear (#11070), not nothing.
 
     Derived, never typed: `canonical_property` is the one declaration of a
     column's property name, so a hand-written `"_searchText"` here could drift
@@ -1374,57 +2131,262 @@ def episodic_source_prose_properties() -> frozenset[str]:
     silent no-match). Cached, and resolved at CALL time — see
     :func:`_episodic_source_kind_property` for why a module-level evaluation is
     forbidden here.
+
+    ⭐ It stays the FULL pair even though `_searchText` is now projected for a
+    post-#10000 row (#10965): the exclusion is what keeps a LEGACY row's prose
+    from being counted as divergence, and on a post-#10000 row it costs nothing —
+    `_partition_cache_owned` keeps every name the RECORD side holds, so the
+    projected `_searchText` is compared there regardless of this set.
     """
     return frozenset(canonical_property("source", column)
                      for column in _EPISODIC_SOURCE_PROSE_COLUMNS)
+
+
+def episodic_source_declined_properties() -> frozenset[str]:
+    """EVERY spelling the declared decline covers — the one home for the set.
+
+    Two spellings of the same datum reach a cache node: the graph property name
+    (:func:`episodic_source_prose_properties`, ``summary`` / ``_searchText``)
+    and the raw COLUMN spelling (``_EPISODIC_SOURCE_PROSE_COLUMNS``:
+    ``_search_text``), which the ``props`` tail is an open set over — see
+    :func:`_props_from_row`'s open-set door, where the tail can carry the snake
+    spelling because ``_search_text`` IS a real column.
+
+    ⛔ ONE declaration, because the decline is read by THREE consumers and a
+    second list is how they drift. Two need BOTH spellings and take this
+    function: :func:`_props_from_row`'s open-set door (what it pops — the tail
+    is an open set, so the snake spelling really can appear there) and
+    `record_serve.parity_difference` (what it EXPLAINS instead of reddening —
+    #10867 review ISSUE 1). The third, `record_reconcile.scan_cache_view`,
+    compares two GRAPH-vocabulary name sets, so it takes
+    :func:`episodic_source_prose_properties` — the subset — deliberately: a
+    snake name is not in either side's vocabulary there, and subtracting it from
+    a graph-name set would suggest a comparison this module does not make.
+
+    What must NOT happen is the drift #10867 caught: before this function
+    existed, `_props_from_row` spelled the union inline and the parity
+    instrument spelled nothing at all, so it reported a legacy session node's
+    own prose as an unexplained projection gap — a sanctioned decline and a real
+    defect as the same red.
+
+    Derived, resolved at CALL time for the same reasons as
+    :func:`episodic_source_prose_properties`. ⛔ NOT `lru_cache`d like that
+    sibling, deliberately: this composes two frozensets, so a call is free, and a
+    cache would be state every consumer has to clear — the suite clears the two
+    REAL caches by calling `.cache_clear()`, and a decorator copied onto this one
+    to match the sentence that used to be here would only add an attribute to
+    remember.
+    """
+    return episodic_source_prose_properties() | _EPISODIC_SOURCE_PROSE_COLUMNS
 
 
 def _props_from_row(table: str, row: Mapping[str, Any], *,
                     skip: frozenset[str] = frozenset()) -> dict[str, Any]:
     """Project a record row's columns + `props` tail into graph properties.
 
-    Three destinations, and no fourth:
+    FIVE destinations, and no sixth. The first three were the contract before
+    §9.1/D1; the fourth is #10853's declared NARROWING and the fifth is
+    #10394's declared NON-PROJECTABILITY. Both of the last two are destinations
+    rather than absences ON PURPOSE — a name either one refuses must be nameable
+    here, or the next reader takes "no further destination" as proof that a
+    property cannot be lost on this door:
 
-    * a column the placement table spells → that property, under its name;
+    * a column the placement table spells → that property, under its name —
+      **unless** the row is an EPISODIC Source and the column is in
+      :data:`_EPISODIC_SOURCE_PROSE_COLUMNS`, which is the fourth destination
+      below (`episodic_source_declined_properties()` is its declared set);
     * a column the schema REFUSES (the EP carve-out, the projection caches) →
       dropped, by name — never stored as authority (S3's contract clause);
-    * the `props` tail → verbatim, unmapped (the open-set surface);
+    * a column `CACHE_FORBIDDEN_COLUMNS` names → dropped, by name, and for the
+      OPPOSITE reason to the line above: it IS authority in the record and the
+      cache is the one place it must not land (§9.1/D1, `#10394` door 2);
+    * the `props` tail → the open-set surface, unmapped. ⚠️ It is not written
+      "verbatim" any more, and the order matters: the tail is seeded **first**
+      and a column value **overwrites** it (the row-ordering collision resolved
+      once — see the seed comment below). TWO name sets are filtered out of that
+      seed: for an EPISODIC Source the declined names, in both spellings, and
+      the not-projectable set in every spelling the placement table declares
+      (#10394 — the tail is an open set keyed by GRAPH names, so a column-name
+      deny alone would leave the back door open);
+    * an EPISODIC Source's §9.1/D1 turn prose (`summary`, `_search_text` /
+      `_searchText`) → **declined**, whatever build wrote the row, from the
+      column door AND from the tail door;
     * anything else → :class:`UnknownRecordColumn`, loudly.
     """
     placed = placement_columns().get(table, {})
     refused = _refused(table)
+    forbidden = cache_forbidden_columns(table)
     projected = projected_columns(table)
-    # §9.1/D1 (#10853): resolved ONCE per row, from the row itself.
-    episodic_source = table == "source" and _is_episodic_source_row(row)
+    # The tail is decoded ONCE: it feeds the identity read below AND the verbatim
+    # seed of `out`, and decoding is what decides whether the identity participates.
+    # ⛔ A NON-OBJECT TAIL IS REFUSED HERE, NOT SWALLOWED (#10867 review P3).
+    # `props` is `jsonb NOT NULL DEFAULT '{}'` with NO CHECK that it is an object,
+    # so a corrupt row can carry a scalar or an array; `_decoded_tail` answers
+    # `{}` for those by design (it also feeds the predicate, which must answer for
+    # every shape), and seeding `out` from that would drop the tail's whole
+    # content with no signal — the silent loss this module refuses by name
+    # everywhere else. The pre-#10867 block this replaces was gated on `if tail:`,
+    # so the class split by TRUTHINESS rather than by shape: a TRUTHY non-object
+    # still raised `TypeError` out of the tail block — `set(tail)` for a
+    # non-iterable scalar (`7`, `3.5`, `True`), `dict(tail)` for an iterable of
+    # the wrong shape (`[1, 2]`) — loud, and kept loud here in this module's own
+    # error type, while a FALSY one (`[]`, `0`,
+    # `False`, and the text/decoded spelling of each) was skipped entirely and
+    # projected CLEAN. Both are refused now, so for the falsy half this is NEW
+    # loudness, not preserved loudness.
+    tail = _tail_payload(row.get("props"))
+    if not isinstance(tail, Mapping):
+        raise CacheProjectionError(
+            f"{table}.props is a {type(tail).__name__}, not a JSON object — the "
+            f"column is `jsonb NOT NULL DEFAULT '{{}}'` with no CHECK, so a row "
+            f"can carry a scalar or an array; refusing to drop its content "
+            f"silently"
+        )
+    # §9.1/D1 (#10853): resolved ONCE per row, from the row's identity AS THE
+    # NODE WILL CARRY IT — the columns AND the `props` tail — and from the tail
+    # already decoded above, never a second decode.
+    # ⛔ ONE assignment. The #10852 forward-merge left main's pre-#10867 form
+    # (`_is_episodic_source_row(row)`, which re-decoded `props` itself) beside
+    # this branch's tail-aware one, so the second statement silently replaced the
+    # first and the pair of comments contradicted each other about what the read
+    # is FROM. The two were measured to agree on every tail shape — a Mapping
+    # tail reaches both paths identically and `_decoded_tail` falls back to `{}`
+    # only for shapes already refused above — so the duplicate was dead, not
+    # wrong; it is removed because a reader deciding what the predicate reads
+    # must not have two answers.
+    episodic_source = (table == "source"
+                       and _is_episodic_source_row(row, tail))
+    # ⛔ PROVENANCE, PER ROW (#10965) — never the column's NAME. On a post-#10000 row `_search_text` is the topic
+    # lexicon (exactly `", ".join(topics)`) — not a CHOSEN utterance, though a space-less CJK run arrives whole (the
+    # residual in `sdk._session_source_metadata`) — and it is the ONLY field the Source FTS index is declared on, so
+    # dropping it un-indexes a restored session. The proof is TWO-TERM (#10852
+    # review, P2): the join equality AND a `summary` that is that same join behind
+    # `SESSION_SOURCE_SUMMARY_PREFIX`, because a legacy PROSE value can itself BE
+    # the join (a list-shaped utterance) while a legacy row's two columns are
+    # literally equal. `summary` is NOT relaxed: the door READS it as the WITNESS
+    # and never projects it — it now classifies the descriptor exactly, and still
+    # declines it, because restoring a display label gains no retrieval (the index
+    # reads `_searchText`) and widening the projected field set is its own
+    # decision. The table above states that residual and its cost.
+    prose_columns = _EPISODIC_SOURCE_PROSE_COLUMNS
+    if episodic_source and _episodic_source_search_text_is_the_lexicon(row):
+        prose_columns = prose_columns - {"_search_text"}
+    # ⛔ THE TAIL IS SEEDED FIRST, AND A COLUMN VALUE WINS (#10867 review ISSUE
+    # 1). Ordering here is not cosmetic: `props` is declared LAST in every
+    # record table (`CREATE TABLE public.source` … `props jsonb NOT NULL DEFAULT
+    # '{}' :189), and Postgres yields `SELECT *` columns in DDL order
+    # (`pg_attribute.attnum` — "ordinary columns are numbered from 1 up"), so on
+    # a REAL row the tail used to be iterated last and `out.update(dict(tail))`
+    # made it the WINNER — of every coordinate it carried, not just the identity.
+    # The winner was therefore the row's MAPPING ORDER (`sorted()` in a test
+    # fixture puts `props` early, `SELECT *` puts it last), while
+    # `_row_identity_view` declares the opposite rule — *"a COLUMN VALUE WINS
+    # over the tail's spelling of the same coordinate"*. On a row whose
+    # `source_kind` COLUMN and `sourceKind` tail disagreed, the row predicate
+    # read the column (document) and the node carried the tail (agentSession):
+    # R1 failed OPEN on a node `is_episodic_source_node` itself calls a session,
+    # with the turn prose on it — and nothing downstream caught it, because the
+    # reconciler re-projects the record through this same projector, so both
+    # sides carry the prose and compare EQUAL (`record_reconcile.py:449-451`).
+    # Seeding `out` from the tail and letting the column loop
+    # overwrite it resolves the collision ONCE, in the direction both functions
+    # already declare: the record's COLUMN is the authority for a column-backed
+    # property (the writer routes it there — `record_projection._split_properties`
+    # — so the tail never legitimately carries one), and the tail stays the
+    # open-set surface for the names no column spells.
     out: dict[str, Any] = {}
-    tail_keys: set[str] = set()
+    if tail:
+        refused_tail = sorted(set(tail) & refused)
+        if refused_tail:
+            raise CacheProjectionError(
+                f"{table}.props carries DERIVED/VOLATILE name(s) "
+                f"{refused_tail} — the record must not hold them as "
+                f"authority, so the cache must not either (the "
+                f"schema's own CHECK refuses this row)"
+            )
+        # ⛔ THE TAIL DOOR IS CLOSED FOR A NOT-PROJECTABLE COLUMN TOO (#10394).
+        # `props` is copied VERBATIM below, so a legacy row that carried the
+        # name there would reach the graph by the back door while the column
+        # door stayed shut. Not reachable through today's writer
+        # (`record_projection` classifies `story_arc` as a COLUMN, so it never
+        # reaches the tail) — filtered rather than assumed, exactly as the
+        # episodic pair is one block below (the tail's declined names are popped
+        # in the same seed).
+        # ⚠️ BOTH SPELLINGS. `forbidden` holds RECORD COLUMN names and the tail
+        # is keyed by GRAPH PROPERTY names, which coincide only for a column the
+        # placement table spells one way. Five columns in this projection are
+        # AMBIGUOUS (`ambiguities()`: `event.session_id` →
+        # `sessionId`/`session_id`, …), so filtering on the column name alone
+        # would let a forbidden AMBIGUOUS column walk through the tail while the
+        # column door stayed shut — a deny that stops denying without reddening.
+        # Both spellings, derived from the same table the column door reads.
+        tail_denied = forbidden | {
+            spelled for column in forbidden
+            for spelled in placement_spellings().get(table, {}).get(column, ())
+        }
+        out.update({k: v for k, v in dict(tail).items()
+                    if k not in tail_denied})
+        # ⛔ THE TAIL'S DECLINED NAMES ARE POPPED **BEFORE** THE COLUMN LOOP.
+        # Popping them AFTER it removed the coordinate the COLUMN had just
+        # legitimately written (#10962 review, P2): a post-#10000 row whose
+        # caller-controlled tail also carries the canonical `_searchText` lost
+        # the lexicon, i.e. the restored session was left un-indexed — the
+        # un-indexing this whole narrowing exists to prevent. Measured at the
+        # parent: tail `{"_searchText": "SMUGGLED"}` → `_searchText is None`,
+        # with no tail the same row keeps `', '.join(topics)`.
+        #
+        # Popping here makes the two rules agree, which is what the docstrings
+        # already claimed and the code did not do: a COLUMN value WINS the
+        # coordinate (`_row_identity_view`'s rule, applied to the node map), and
+        # the tail's spelling of a declined name never reaches the node because
+        # it was never seeded.
+        #
+        # ⭐ THE TAIL DOOR STAYS UNCONDITIONAL — it is NOT narrowed by the
+        # per-row provenance test (#10965): nothing DERIVES this pair into the
+        # tail (the writer classifies both names as COLUMNS), so a tail key is by
+        # construction unclassified prose the row smuggled round the column door.
+        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
+        # said, so a `_search_text` tail key is the snake spelling of the same
+        # datum and must go too.
+        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED, now literally: it is scoped
+        # to the tail's own keys and runs before anything else touches `out`, so
+        # it cannot subsume the column-loop guard BELOW it (deleting that guard
+        # still reds — measured, 14 legs; deleting THIS pop reds 3).
+        if episodic_source:
+            for name in set(tail) & episodic_source_declined_properties():
+                out.pop(name, None)
     for column, value in row.items():
         if column == "props":
-            tail = value
-            if isinstance(tail, str):
-                tail = json.loads(tail) if tail else {}
-            if tail:
-                tail_keys = set(tail)
-                refused_tail = sorted(set(tail) & refused)
-                if refused_tail:
-                    raise CacheProjectionError(
-                        f"{table}.props carries DERIVED/VOLATILE name(s) "
-                        f"{refused_tail} — the record must not hold them as "
-                        f"authority, so the cache must not either (the "
-                        f"schema's own CHECK refuses this row)"
-                    )
-                out.update(dict(tail))
             continue
         if column in bookkeeping_columns(table) or column in skip:
             continue
-        if episodic_source and column in _EPISODIC_SOURCE_PROSE_COLUMNS:
+        if episodic_source and column in prose_columns:
             # ⛔ §9.1/D1: a session `:Source` never carries turn prose, whatever
-            # build wrote the row. See `_EPISODIC_SOURCE_PROSE_COLUMNS` for the
-            # rule, its pre-existing-capture cost, and its bound.
+            # build wrote the row — decided by the row's own provenance, not by
+            # the column's name (#10965). See `_EPISODIC_SOURCE_PROSE_COLUMNS` for
+            # the rule, its pre-existing-capture cost, and its bound.
             continue
         if column in refused:
             # The EP carve-out and the projection-owned caches. Dropped BY NAME
             # rather than by the CHECK's later refusal (S3's contract clause).
+            continue
+        if column in forbidden:
+            # Authoritative in the RECORD, forbidden in the CACHE (§9.1/D1: text
+            # in Postgres, not in the graph). ⛔ **DEFENSIVE, not the operative
+            # deny, and the distinction is measured rather than assumed**:
+            # `projected_columns` already subtracts the same set, so deleting
+            # these lines reds NOTHING (measured by review: the seam suites stay
+            # green, whose counts depend on which files are selected — so the
+            # property is the claim here, not a number) — `story_arc` is a PLACED
+            # column, so it reaches the `placed` fallback below either way. It is
+            # kept because that fallback means *"DERIVED/VOLATILE"*, a DIFFERENT
+            # statement about the same absence: without this line an auditor
+            # reading a `story_arc` drop is told the column is derived, which is
+            # false (§9.1/D1 makes it authority the record keeps). The operative
+            # denies are `projected_columns` for the column and the TAIL filter
+            # ABOVE (in the seed) for the open set — and the tail filter IS
+            # load-bearing
+            # (deleting it reds `test_the_record_restore_writes_no_story_arc…`).
             continue
         if column in projected:
             if value is not None:
@@ -1438,28 +2400,6 @@ def _props_from_row(table: str, row: Mapping[str, Any], *,
             f"refused by the schema, and not record bookkeeping — refusing to "
             f"drop it silently"
         )
-    if episodic_source and tail_keys:
-        # ⛔ THE OPEN-SET DOOR (#10853 review). `props` is written verbatim, so a
-        # row whose tail carries the pair would land it on the node and the
-        # guard's own claim — *"whatever build wrote the row"* — would be false
-        # on that door. Not reachable through today's writer (`record_projection`
-        # classifies both names as COLUMNS, so they never reach the tail), and
-        # exactly for that reason it is filtered here rather than assumed: a
-        # classification that moves is the #9710 class, and a guard that stops
-        # guarding without reddening is worse than no guard.
-        # ⚠️ BOTH spellings: the tail is an OPEN set keyed by whatever the payload
-        # said, so a `_search_text` tail key is the snake spelling of the same
-        # datum and would otherwise survive (`_search_text` IS a real column, so
-        # the tail can carry that spelling where it cannot carry `_searchText`).
-        # ⛔ AND IT UNDOES ONLY WHAT THE TAIL ADDED. Rebuilding `out` wholesale
-        # made this filter SUBSUME the column-loop guard above: deleting that
-        # guard reddened nothing at all (measured — 20 passed), so the two doors
-        # were one door and the mutation-check claim covered a branch that no
-        # longer mattered. Scoped by `tail_keys`, each door is independently
-        # exercised, which is the only way "each door is pinned" is true.
-        declared = episodic_source_prose_properties()
-        for name in tail_keys & (declared | _EPISODIC_SOURCE_PROSE_COLUMNS):
-            out.pop(name, None)
     return out
 
 
@@ -1485,7 +2425,10 @@ def node_from_row(label: str, row: Mapping[str, Any]) -> RecordNode:
     # The fold's `ON CREATE` constants, applied where the record is SILENT
     # (#9634). `None` counts as silence, not as a value: it is a FALLBACK, so a
     # value the record states — a named kind, from the column or from the
-    # `props` tail, which `_props_from_row` keeps verbatim — is never replaced.
+    # `props` tail, which `_props_from_row` seeds FIRST and then lets a column
+    # value overwrite (and, for an EPISODIC Source, pops the declined names out
+    # of — :func:`_props_from_row`'s own docstring states the rule in full) — is
+    # never replaced.
     #
     # On the OBJECT side null-as-silence IS the fold's own rule: both clauses
     # COALESCE (`coalesce($ok, 'other')`, `coalesce($title, '')`), so an

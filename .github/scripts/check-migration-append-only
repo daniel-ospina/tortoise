@@ -462,7 +462,7 @@ EOF
   if [ -n "$VIOLATIONS" ]; then
     echo "::error::Migrations are append-only (#1095): a change to an already-merged migration must be a NEW timestamp file (do not edit/rename/delete an applied migration):"
     printf '%s\n' "$VIOLATIONS" | sed '/^$/d' | sed 's/^/  /'
-    echo "::error::Historical violations of this rule caused the #1001 P0 (applied-migration edits diverged repo from prod). Use: supabase migration repair --linked --status applied <version> for repair."
+    echo "::error::Historical violations of this rule caused the #1001 P0 (applied-migration edits diverged repo from prod). Use: supabase migration repair --linked --status applied <version> --yes for repair."
     exit 1
   fi
   if [ -n "$EXEMPT_RENAMES" ]; then

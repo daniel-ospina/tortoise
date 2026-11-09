@@ -3305,6 +3305,13 @@ POSTGRES_PROVISION = (REPO_ROOT / ".github" / "actions"
 RECORD_LEG_GATE = (REPO_ROOT / ".github" / "scripts"
                    / "record-postgres-leg-gate.py")
 
+#: The capstone file, by the path the job's pytest argument list spells. It is a
+#: SEPARATE requirement from this file's own presence: the capstone's D8 leg is the
+#: only restore drill on any CI leg, and its self-pin
+#: (`test_ci_runs_this_file_in_the_armed_record_job`) cannot fire when the file is
+#: not collected at all — a file that does not run cannot assert that it ran.
+CAPSTONE_FILE = "tests/test_9567_record_capstone.py"
+
 
 def _record_ci_job():
     """(job name, job) for the python-ci leg that ARMS the record database.
@@ -3344,15 +3351,37 @@ def test_ci_arms_the_record_against_a_real_postgres():
     steps = job.get("steps") or []
     runs = "\n".join(str(step.get("run", "")) for step in steps)
 
-    assert "TEST_RECORD_DB_URI=" in POSTGRES_PROVISION.read_text(), (
-        f"{name} provisions a database but the action never exports "
-        f"{RECORD_DB_ENV}: the legs still skip (#9551)")
+    # The DEFAULT must still be `TEST_RECORD_DB_URI` (the name every existing
+    # caller and every leg in this file reads), and the write must go through the
+    # variable rather than a second literal — the action now takes the exported
+    # name as an input so a job can provision a SECOND server (#9567 D8), and a
+    # pin on the raw literal `TEST_RECORD_DB_URI=` would pass while the default
+    # silently changed. Both halves are asserted, so neither can drift alone.
+    provision = POSTGRES_PROVISION.read_text()
+    assert 'DSN_VAR="${POSTGRES_DSN_VAR:-TEST_RECORD_DB_URI}"' in provision, (
+        f"{name} provisions a database but the action's exported DSN name no "
+        f"longer defaults to {RECORD_DB_ENV}: the legs still skip (#9551)")
+    assert 'echo "${DSN_VAR}=' in provision, (
+        "the provisioning action no longer writes the DSN under the variable it "
+        "resolved — a name passed by a caller would be ignored and the second "
+        "server would overwrite the first")
     assert re.search(r"\.\[[^\]]*\bpostgres\b[^\]]*\]", runs), (
         f"{name} does not install the `postgres` extra, so `_record_db()`'s "
         "`importorskip('psycopg2')` skips the legs for the OTHER half of the "
         f"reason and the job passes by skipping (#9551)")
     assert Path(__file__).name in runs, (
         f"{name} arms a database but runs none of this file's legs")
+    # ⛔ AND THE CAPSTONE FILE, asserted from HERE rather than only from inside it
+    # (#11429 review, fail-open): a pin living in the capstone cannot fire when the
+    # capstone is deselected, so dropping one line from the job's pytest list would
+    # leave the required job green with D8 — the only restore drill on any CI leg —
+    # never executed. This file IS required by the zero-skip gate
+    # (`ARMED_LEG_FILES` in `record-postgres-leg-gate.py`), so the two pins chain:
+    # deselect the capstone → red here; deselect this file → red at the gate.
+    assert CAPSTONE_FILE in runs, (
+        f"{name} no longer runs {CAPSTONE_FILE}: its D8 leg is the only restore "
+        "drill the record has on a CI leg, and a file that is not collected cannot "
+        "red itself")
     # ⛔ The assertion that was here — `"skipped" in runs and "exit 1" in runs`
     # — did not discriminate, and #9772's review PROVED it by mutation: delete
     # the clause that fails the job on a real skip and both substrings survive
@@ -3376,6 +3405,141 @@ def test_ci_arms_the_record_against_a_real_postgres():
         "the zero-skip step carries its own inline junit parser again: that "
         "decision is untestable inside YAML (it was — #9772 review P2), so it "
         f"belongs in {RECORD_LEG_GATE.name} and nowhere else")
+
+    # ⛔ PROVISION↔TEARDOWN PAIRING, asserted structurally (#11429 review cycle 3).
+    # Two Postgres instances share this one job, so the SECOND provision carries
+    # `with.label_var`/`with.dsn_var` to stop `$GITHUB_ENV` (last-one-wins) from
+    # making the drill point at itself. Nothing pinned the pairing: both ways to
+    # get it wrong are silent. (a) A teardown whose `label_var` differs from its
+    # provision's LEAKS the scratch container with no red anywhere. (b) A dropped
+    # `dsn_var` makes the second provision overwrite `TEST_RECORD_DB_URI`, so D8
+    # skips and the zero-skip gate reports "the record database did not arm" — a
+    # red that blames the WRONG database. The rule is structural, so extending the
+    # job with a third instance stays green while an unpaired one does not.
+    def _uses(step, action: str) -> bool:
+        return str(step.get("uses", "")).endswith(f"actions/{action}")
+
+    provisions = [s for s in steps if _uses(s, "postgres-provision")]
+    teardowns = [s for s in steps if _uses(s, "postgres-teardown")]
+
+    #: The action's own DEFAULT names (`provision.sh`): a step that omits the input
+    #: resolves to these, so a comparison over EXPLICIT inputs only cannot tell a
+    #: distinct pair from two steps that both name the default (#11429 cycle 6).
+    DEFAULT_LABEL_VAR = "TORTOISE_CI_POSTGRES_LABEL"
+    DEFAULT_DSN_VAR = "TEST_RECORD_DB_URI"
+
+    def _resolved(batch, key, default):
+        return [(s.get("with") or {}).get(key) or default for s in batch]
+
+    assert len(provisions) == len(teardowns), (
+        f"{name} provisions {len(provisions)} Postgres instance(s) but tears "
+        f"down {len(teardowns)}: an unmatched provision leaves a container behind "
+        f"until the job's runner is reused (#9567 D8)")
+    # ⛔ EVERY INSTANCE BEYOND THE FIRST MUST CARRY ITS OWN `label_var` — asserted
+    # per step, not only by set equality. `_labels` filters out steps that carry no
+    # `label_var`, so dropping the input from BOTH the second provision and its
+    # teardown satisfied a bare `==` comparison vacuously: `$GITHUB_ENV` is
+    # last-one-wins, so both teardowns then select the SCRATCH label — the scratch
+    # container is removed twice and the RECORD container is never removed, which
+    # is exactly the leak this pin's docstring claims to catch (#11429 cycle 5,
+    # measured: the test still passed with both inputs dropped).
+    for kind, batch in (("provision", provisions), ("teardown", teardowns)):
+        for position, step in enumerate(batch[1:], start=2):
+            assert (step.get("with") or {}).get("label_var"), (
+                f"{name}'s {kind} #{position} carries no `label_var`: two "
+                "instances would share the default name, so one teardown removes "
+                "whichever container the other labelled last and the remaining "
+                "one leaks (#9567 D8)")
+    # ⛔ THE INVARIANT IS ON RESOLVED NAMES, NOT ON THE EXPLICIT SUBSET. Two
+    # spellings are behaviourally identical to the leak rule and must both pass:
+    #   (a) the first pair omits its inputs (the default), or
+    #   (b) the first pair names the default explicitly.
+    # While this compared only explicit values with `len(...) - 1`, (b) REDDENED a
+    # correct workflow, and naming the DEFAULT label on the second pair PASSED —
+    # with `$GITHUB_ENV` last-one-wins both teardowns would then read the scratch
+    # label, removing the scratch container twice and never the record's
+    # (#11429 review cycle 6, both measured).
+    provision_labels = _resolved(provisions, "label_var", DEFAULT_LABEL_VAR)
+    teardown_labels = _resolved(teardowns, "label_var", DEFAULT_LABEL_VAR)
+    assert len(set(provision_labels)) == len(provision_labels), (
+        f"{name}'s provisions resolve to labels {provision_labels}, which are not "
+        "pairwise DISTINCT — two provisions sharing a label make the paired "
+        "teardowns ambiguous, and `$GITHUB_ENV` is last-one-wins, so the record's "
+        "container would never be removed (#9567 D8)")
+    assert sorted(provision_labels) == sorted(teardown_labels), (
+        f"{name}'s provision/teardown labels do not pair "
+        f"(resolved provision {sorted(provision_labels)}, teardown "
+        f"{sorted(teardown_labels)}): a teardown selected by a different label "
+        "than its provision removes the WRONG container — or none — and nothing "
+        "reds")
+    assert DEFAULT_LABEL_VAR not in provision_labels[1:], (
+        f"{name}'s instance #2+ resolves to the DEFAULT label "
+        f"({DEFAULT_LABEL_VAR}): the second instance must name its own, or the "
+        "first instance's teardown removes whichever container was labelled last "
+        "(#9567 D8)")
+    for teardown in teardowns:
+        if (teardown.get("with") or {}).get("label_var"):
+            assert str(teardown.get("if")) == "always()", (
+                f"{name}'s second teardown is not `if: always()`: when the armed "
+                "leg fails, the scratch container outlives the job it was made "
+                "for (#9567 D8)")
+
+    # The DSN a provision exports must be the env the DRILL reads. Read from the
+    # capstone's own constant rather than restated, so the workflow and the test
+    # cannot drift apart silently.
+    capstone_src = (REPO_ROOT / CAPSTONE_FILE).read_text()
+    scratch_match = re.search(
+        r'^SCRATCH_DB_ENV = "([A-Z0-9_]+)"', capstone_src, re.MULTILINE)
+    assert scratch_match is not None, (
+        f"{CAPSTONE_FILE} no longer declares SCRATCH_DB_ENV — re-anchor this pin")
+    scratch_env = scratch_match.group(1)
+    dsn_vars = _resolved(provisions, "dsn_var", DEFAULT_DSN_VAR)
+    assert sorted(dsn_vars) == sorted([RECORD_DB_ENV, scratch_env]), (
+        f"{name}'s provisions resolve to dsn_var {dsn_vars}, but the pair must be "
+        f"{{{RECORD_DB_ENV}, {scratch_env}}} (the drill reads {scratch_env}): if "
+        "the second container answers to a name nothing reads, D8 skips and the "
+        "zero-skip gate blames the record database for it (#9567 D8)")
+    assert dsn_vars[0] != dsn_vars[1], (
+        f"{name}'s two provisions export the SAME dsn_var ({dsn_vars[0]}): with "
+        "`$GITHUB_ENV` last-one-wins the first DSN is overwritten and D8 would "
+        "refuse its own target as `refuse_same_database` (#9567 D8)")
+    assert scratch_env != RECORD_DB_ENV, (
+        f"the drill's scratch env is {RECORD_DB_ENV}, the record's own name: the "
+        "second provision would overwrite the first and D8 would refuse its own "
+        "target as `refuse_same_database` (#9567 D8)")
+
+
+def test_the_provision_action_refuses_a_name_bash_cannot_indirect(tmp_path):
+    """A NAME input must be a SHELL variable name, not merely alphanumeric.
+
+    `dsn_var`/`label_var` are consumed as INDIRECT references (`${!LABEL_VAR}` in
+    the paired teardown), and bash refuses a name beginning with a digit. The
+    original identifier check accepted `1FOO` — every character is legal — so such
+    a name passed validation, was written into `$GITHUB_ENV`, and then aborted
+    `cleanup.sh` under `set -u`, reddening a job on a diff that never touched it
+    against the teardown's own contract (#11429 review cycle 5).
+
+    Runs the REAL action script; it validates before any pull or container, so no
+    Docker daemon is needed. Mutation: restore the `''|*[!A-Za-z0-9_]*` pattern
+    for the name inputs -> `1FOO` is accepted and this test reds.
+    """
+    env_file = tmp_path / "github_env"
+    result = subprocess.run(
+        ["bash", str(POSTGRES_PROVISION)],
+        capture_output=True, text=True, timeout=120,
+        env={**os.environ,
+             "POSTGRES_IMAGE": "mirror.gcr.io/postgres:16",
+             "POSTGRES_DSN_VAR": "1FOO",
+             "GITHUB_ENV": str(env_file)},
+    )
+
+    combined = result.stdout + result.stderr
+    assert result.returncode == 1, (
+        "the provision action accepted a name bash cannot indirect-ref:\n" + combined)
+    assert "valid shell variable name" in combined, combined
+    assert "1FOO" not in (env_file.read_text() if env_file.exists() else ""), (
+        "the invalid name was written into $GITHUB_ENV before the refusal — every "
+        "later step of the job would see it")
 
 
 def test_the_armed_record_leg_can_block_a_merge():
@@ -3418,7 +3582,7 @@ def yaml_jobs():
 #: because the gate attributes an armed leg to its FILE and requires one from each
 #: — a fixture whose classnames collapse to one module would certify a run the
 #: gate exists to refuse (PR #9862 review round 3).
-_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="0">
   <testcase classname="tests.test_9078_record_written_by_production_path" \
             name="test_the_public_capture_path_writes_the_record"/>
@@ -3426,6 +3590,25 @@ _JUNIT_GREEN = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
             name="test_the_public_capture_path_writes_the_epistemic_layer"/>
   <testcase classname="tests.test_9555_narrative_carrier" \
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone" \
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
+</testsuite></testsuites>"""
+
+#: ⛔ THE `-k "not D8"` SHAPE (#11429 review cycle 2): every other rule is
+#: satisfied — both armed files ran, nothing skipped, nothing failed — and the
+#: capstone FILE is still in the job's pytest argument list, so the workflow-text
+#: pin is green too. Only a required CASE can see it. This is exactly what a lane
+#: does to quarantine a flaky leg.
+_JUNIT_D8_QUARANTINED = """<testsuites><testsuite name="pytest" tests="3" \
+ failures="0" errors="0" skipped="0">
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone" \
+            name="test_D1_every_record_table_exists_on_the_armed_record"/>
 </testsuite></testsuites>"""
 
 #: ⛔ THE HOLE a flat leg count cannot see: three armed legs, ALL from one file.
@@ -3445,7 +3628,7 @@ _JUNIT_ONE_FILE = """<testsuites><testsuite name="pytest" tests="3" failures="0"
 #: SKIPPED and pytest exited 0 — a run that certified nothing. One green leg from
 #: the OTHER file keeps the per-file rule satisfied, so the ONLY problem this
 #: fixture can produce is the skip itself.
-_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="2">
   <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record">
@@ -3457,13 +3640,15 @@ _JUNIT_REAL_SKIP = """<testsuites><testsuite name="pytest" tests="3" failures="0
   </testcase>
   <testcase classname="tests.test_9555_narrative_carrier"
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
 </testsuite></testsuites>"""
 
 #: A strict xfail of one armed leg (the engine-dependency pin). It is recorded
 #: as `type="pytest.xfail"` AND counted in the suite's `skipped` attribute, so a
 #: gate that read the attribute would red this required job for a database that
 #: armed perfectly.
-_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+_JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
  errors="0" skipped="1">
   <testcase classname="tests.test_9078_record_written_by_production_path"
             name="test_the_public_capture_path_writes_the_record"/>
@@ -3473,6 +3658,30 @@ _JUNIT_XFAIL = """<testsuites><testsuite name="pytest" tests="3" failures="0" \
   </testcase>
   <testcase classname="tests.test_9555_narrative_carrier"
             name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"/>
+</testsuite></testsuites>"""
+
+#: ⛔ THE `xfail` QUARANTINE (#11429 review cycle 3): D8 is PRESENT by name but
+#: produced no verdict. Every other rule is satisfied — both armed files ran,
+#: nothing counted as a real skip, nothing failed — so a gate that asked only
+#: "does a testcase with this name exist" certified it, exit 0. `xfail` is the
+#: ordinary way a flaky leg is quarantined, and this leg runs a second container
+#: over the network, so it is the most likely thing anyone would quarantine. The
+#: xfail exclusion above is right for the ARMED legs (one carries a measured
+#: xfail); it must not extend to a REQUIRED case.
+_JUNIT_D8_XFAILED = """<testsuites><testsuite name="pytest" tests="4" failures="0" \
+ errors="0" skipped="1">
+  <testcase classname="tests.test_9078_record_written_by_production_path"
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path"
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier"
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+  <testcase classname="tests.test_9567_record_capstone"
+            name="test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires">
+    <skipped type="pytest.xfail" message="flaky: second container"/>
+  </testcase>
 </testsuite></testsuites>"""
 
 #: One leg deselected out of the run — the Postgres proof never happened.
@@ -3505,8 +3714,104 @@ _JUNIT_FAILED = """<testsuites><testsuite name="pytest" tests="3" failures="1" \
 </testsuite></testsuites>"""
 
 #: pytest collected nothing (a bad `-k`, a broken module): nothing certified.
+#: ⛔ DELIBERATELY NOT FILLED with the DoD legs — its whole subject is `tests="0"`,
+#: so filling it would make the fixture non-empty and destroy the falsifier it
+#: exists for (#11429 review cycle 5 suggested filling it; refusing that is why a
+#: finding is verified before it is applied).
 _JUNIT_EMPTY = """<testsuites><testsuite name="pytest" tests="0" failures="0" \
  errors="0" skipped="0"/></testsuites>"""
+
+_D8_NAME = "test_D8_the_artifact_restores_into_a_scratch_record_and_the_falsifier_fires"
+_D10_NAME = "test_D10_a_record_table_without_its_policy_fails_closed"
+
+
+def _capstone_d_leg_names() -> list[str]:
+    """Every DoD leg the capstone FILE defines, read from its source.
+
+    Read rather than restated, for the same reason the gate reads it (#11429
+    review cycle 4): a hand-maintained list is how eleven of twelve legs stayed
+    invisible, and a fixture that drifted from the file would red for a reason
+    that has nothing to do with the rule it is testing.
+    """
+    tree = ast.parse((REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8"))
+    return [node.name for node in ast.walk(tree)
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef))
+            and node.name.startswith("test_D")]
+
+
+def _fill_d_legs(xml: str, *, omit: tuple[str, ...] = ()) -> str:
+    """Add a GREEN `<testcase>` for every DoD leg the fixture does not already name.
+
+    ⛔ THE FIXTURES MUST CARRY THE WHOLE SET. The gate requires every `test_D*`
+    leg by name, so a fixture that names only D8 now reds for the eleven legs it
+    omits — which would make each falsifier below pass for the wrong reason and
+    stop discriminating. `omit` is how a fixture says "this one leg is the
+    subject": the rest stay green so the only possible problem is the rule under
+    test.
+    """
+    extra = [name for name in _capstone_d_leg_names()
+             if name not in omit and f'name="{name}"' not in xml]
+    if not extra:
+        return xml
+    cases = "\n".join(
+        '  <testcase classname="tests.test_9567_record_capstone"\n'
+        f'            name="{name}"/>' for name in extra)
+    filled = xml.replace("</testsuite></testsuites>",
+                         cases + "\n</testsuite></testsuites>")
+    match = re.search(r'tests="(\d+)"', filled)
+    assert match is not None, (
+        "the fixture lost its `tests=` attribute — re-anchor this helper instead "
+        "of deleting it (the gate reads that attribute)")
+    total = int(match.group(1)) + len(extra)
+    return filled[:match.start()] + f'tests="{total}"' + filled[match.end():]
+
+
+#: ⛔ FILL EVERY OTHERWISE-GREEN FIXTURE WITH THE WHOLE DoD SET (#11429 review
+#: cycle 4). Each of these asserts a verdict that must be attributable to ONE
+#: rule; without the other eleven legs present, "exit 1" would also mean "eleven
+#: legs were missing", and the falsifier would no longer prove anything about the
+#: rule it names.
+_JUNIT_GREEN = _fill_d_legs(_JUNIT_GREEN)
+_JUNIT_REAL_SKIP = _fill_d_legs(_JUNIT_REAL_SKIP)
+_JUNIT_ONE_FILE = _fill_d_legs(_JUNIT_ONE_FILE)
+_JUNIT_WRONG_FILES = _fill_d_legs(_JUNIT_WRONG_FILES)
+_JUNIT_XFAIL = _fill_d_legs(_JUNIT_XFAIL)
+_JUNIT_D8_XFAILED = _fill_d_legs(_JUNIT_D8_XFAILED)
+_JUNIT_D8_QUARANTINED = _fill_d_legs(_JUNIT_D8_QUARANTINED, omit=(_D8_NAME,))
+#: Filled LATE (the helper is defined below them) so each keeps ONE cause: measured
+#: unfilled, these carried 13/13 problems instead of 1, and a later `any()` -> `==`
+#: tightening would silently assert about the missing legs (#11429 review cycle 5).
+#: `_JUNIT_EMPTY` is the deliberate exception — see its own note.
+_JUNIT_DESELECTED = _fill_d_legs(_JUNIT_DESELECTED)
+_JUNIT_FAILED = _fill_d_legs(_JUNIT_FAILED)
+
+#: One DoD leg deselected, D8 green — the `-k "not D10"` shape (#11429 review
+#: cycle 4). D10 `DROP POLICY`s on the live record, so it is the leg most likely
+#: to be quarantined; before the derived rule it CERTIFIED (exit 0).
+_JUNIT_D10_DESELECTED = _fill_d_legs(
+    """<testsuites><testsuite name="pytest" tests="3" failures="0" \
+ errors="0" skipped="0">
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_record"/>
+  <testcase classname="tests.test_9078_record_written_by_production_path" \
+            name="test_the_public_capture_path_writes_the_epistemic_layer"/>
+  <testcase classname="tests.test_9555_narrative_carrier" \
+            name="test_the_public_capture_path_lands_the_narrative_in_the_record"/>
+</testsuite></testsuites>""",
+    omit=(_D10_NAME,))
+
+#: ⛔ A REQUIRED LEG'S NAME IN A FOREIGN MODULE (#11429 review cycle 6): every DoD
+#: leg is green EXCEPT that D8's case lives in another module — the shape
+#: `--deselect tests/test_9567_record_capstone.py::test_D8_…` plus a same-named stub
+#: elsewhere produces. pytest allows the name in both modules, so only the module
+#: check can see it.
+_JUNIT_D8_IN_FOREIGN_MODULE = re.sub(
+    r'classname="tests\.test_9567_record_capstone"(\s+)name="'
+    + re.escape(_D8_NAME) + r'"/>',
+    r'classname="tests.test_9999_elsewhere"\1name="' + _D8_NAME + r'"/>',
+    _JUNIT_GREEN, count=1)
+assert _JUNIT_D8_IN_FOREIGN_MODULE != _JUNIT_GREEN, (
+    "the D8 stub was not found in _JUNIT_GREEN — re-anchor this fixture")
 
 
 def _run_leg_gate(tmp_path, xml: str, script: Path | None = None):
@@ -3577,6 +3882,107 @@ def test_the_arm_gate_reds_when_the_WRONG_two_files_contributed(tmp_path):
     assert "from_files=2" in result.stdout, result.stdout
 
 
+def test_the_arm_gate_reds_when_the_D8_drill_is_QUARANTINED(tmp_path):
+    """⛔ The `-k "not D8"` route (#11429 review cycle 2).
+
+    Every other rule is satisfied: both armed files ran, nothing skipped, nothing
+    failed, and the capstone FILE is still named in the job's pytest argument
+    list. That is precisely what quarantining a flaky leg looks like, and it must
+    not certify — D8 is the only restore drill on any CI leg.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_QUARANTINED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which the D8 drill was deselected — a `-k` "
+        f"filter hides it:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("required leg test_D8_" in line for line in errors), errors
+
+
+def test_the_arm_gate_reds_on_any_deselected_dod_leg_not_just_d8(tmp_path):
+    """⛔ One enumerated entry was the SAME defect one `-k` away (#11429 cycle 4).
+
+    `REQUIRED_CASES` held only D8, so `-k "not D10"` — which deselects the drill
+    that `DROP POLICY`s on the live record and re-applies the tenancy migration to
+    repair it, i.e. the leg most likely to be quarantined — recorded no skip and
+    passed every other rule. Measured before the derived rule: exit 0, CERTIFIED.
+    The required set is now read from the capstone's own source, so every DoD leg
+    is protected and a leg added later needs no second edit here.
+
+    Mutation: restrict the derived set back to D8 -> RED on this test, green on the
+    previous one — which is exactly the asymmetry that made this a finding.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D10_DESELECTED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which D10 was deselected — only an "
+        f"enumerated D8 was protected:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("test_D10_" in line for line in errors), errors
+    assert not any("test_D8_" in line for line in errors), (
+        f"D8 was present in this fixture, so it must not be named as missing: {errors}")
+
+
+def test_the_arm_gate_reds_when_a_dod_leg_is_DELETED_from_the_capstone(tmp_path):
+    """⛔ A required set derived ONLY from the artifact is circular (#11429 cycle 5).
+
+    The rule exists to stop a DoD leg vanishing, but it read the leg list from the
+    capstone itself — so deleting the `def test_D10_…` line deleted the
+    REQUIREMENT with it. Measured on a mirror with every remaining leg green, both
+    armed files present and 0 skips: exit 0, no `::error::`. Renaming the leg had
+    the same effect. `EXPECTED_CAPSTONE_LEGS` is the static half that catches it;
+    the derivation still protects a leg ADDED later.
+
+    Mutation: drop the static tuple from `decide()`'s union -> RED here, and the
+    `-k "not D10"` test stays green (it is caught by the derived half).
+    """
+    source = (REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8")
+    mutant = source.replace(f"def {_D10_NAME}(", "def _no_longer_a_dod_leg(")
+    assert mutant != source, (
+        f"could not rename {_D10_NAME} in {CAPSTONE_FILE} — re-anchor this "
+        "falsifier rather than deleting it")
+
+    mirror = tmp_path / "repo"
+    (mirror / ".github" / "scripts").mkdir(parents=True)
+    (mirror / "tests").mkdir()
+    (mirror / "tests" / CAPSTONE_FILE.split("/")[-1]).write_text(
+        mutant, encoding="utf-8")
+    gate = mirror / ".github" / "scripts" / RECORD_LEG_GATE.name
+    gate.write_text(RECORD_LEG_GATE.read_text(encoding="utf-8"), encoding="utf-8")
+
+    result = _run_leg_gate(tmp_path, _JUNIT_D10_DESELECTED, script=gate)
+
+    assert result.returncode == 1, (
+        "the gate certified a run after a DoD leg was DELETED from the capstone — "
+        f"the required set vanished with the leg it protects:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any(_D10_NAME in line for line in errors), (
+        f"expected the deleted leg to be named: {errors}")
+
+
+def test_the_arm_gate_requires_the_leg_from_the_capstone_MODULE(tmp_path):
+    """⛔ A same-named case in another module must not satisfy a required leg.
+
+    The gate was module-aware for ARMED legs but matched a required DoD leg on its
+    NAME alone, so `--deselect tests/test_9567_record_capstone.py::test_D8_…` plus
+    a same-named stub in any other file the job runs CERTIFIED (measured, exit 0).
+    pytest permits the same function name in several modules, so nothing else
+    objects — the gate has to say WHERE the leg must live (#11429 review cycle 6).
+
+    Mutation: revert `present` to name-only -> RED here.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_IN_FOREIGN_MODULE)
+
+    assert result.returncode == 1, (
+        "a required leg was satisfied by a case in the WRONG module:"
+        f"\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any(_D8_NAME in line and "did not run in test_9567_record_capstone" in line
+               for line in errors), errors
+    assert any("another module" in line for line in errors), (
+        f"the message should name the decoy, so the reader is not sent hunting: {errors}")
+
+
 def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
     """The other direction: a certified run must not be red (a gate that cannot
     pass is indistinguishable from a broken job)."""
@@ -3584,6 +3990,25 @@ def test_the_arm_gate_passes_a_green_armed_run(tmp_path):
 
     assert result.returncode == 0, result.stdout
     assert _gate_errors(result) == [], _gate_errors(result)
+
+
+def test_the_arm_gate_reds_on_a_quarantined_required_case(tmp_path):
+    """⛔ An `xfail` on D8 must not certify (#11429 review cycle 3).
+
+    The gate excludes `type="pytest.xfail"` from its skip count so a measured
+    engine xfail on an ARMED leg does not red the job. Composed with a
+    name-presence test for `REQUIRED_CASES`, that certified a run in which the
+    record's only restore drill never produced a verdict — one line away from the
+    hole `REQUIRED_CASES` was added to close. A required case must have RUN, not
+    merely appear.
+    """
+    result = _run_leg_gate(tmp_path, _JUNIT_D8_XFAILED)
+
+    assert result.returncode == 1, (
+        "the gate certified a run in which the D8 drill was xfail-quarantined — "
+        f"it produced no verdict:\n{result.stdout}")
+    errors = _gate_errors(result)
+    assert any("required leg test_D8_" in line for line in errors), errors
 
 
 def test_the_arm_gate_tolerates_a_strict_xfail(tmp_path):
@@ -3665,7 +4090,18 @@ def test_deleting_the_skip_clause_reds_the_arm_gate(tmp_path):
     assert start != -1 and end > start, (
         "the skip clause moved — re-point this mutation test at it instead of "
         "deleting the proof that the pin discriminates")
-    mutated = tmp_path / "record-postgres-leg-gate.py"
+    # ⛔ THE COPY MUST KEEP THE SCRIPT'S OWN LAYOUT. The gate resolves the
+    # capstone by `Path(__file__).resolve().parents[2] / "tests" / …`, and fails
+    # CLOSED when it cannot read it — correct, but it means a bare copy in
+    # /tmp reds for "cannot read the capstone" instead of for the deleted clause,
+    # and this proof would silently stop proving anything. Mirror `repo/` so the
+    # mutation is the ONLY difference between the two runs.
+    mirror = tmp_path / "repo"
+    (mirror / ".github" / "scripts").mkdir(parents=True)
+    (mirror / "tests").mkdir()
+    (mirror / "tests" / CAPSTONE_FILE.split("/")[-1]).write_text(
+        (REPO_ROOT / CAPSTONE_FILE).read_text(encoding="utf-8"), encoding="utf-8")
+    mutated = mirror / ".github" / "scripts" / "record-postgres-leg-gate.py"
     mutated.write_text(source[:start] + source[end:], encoding="utf-8")
 
     result = _run_leg_gate(tmp_path, _JUNIT_REAL_SKIP, script=mutated)

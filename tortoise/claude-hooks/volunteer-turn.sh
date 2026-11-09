@@ -12,7 +12,7 @@
 # this script with a harness arg):
 #   .codex/hooks.json       → "UserPromptSubmit": "…/volunteer-turn.sh codex"
 #   .claude/settings.json   → "UserPromptSubmit": "…/volunteer-turn.sh claude"
-#   .cline/…                → "UserPromptSubmit": "…/volunteer-turn.sh cline"
+#   .clinerules/hooks/      → a UserPromptSubmit FILE: "…/volunteer-turn.sh cline"
 #   .devin/hooks.v1.json    → "UserPromptSubmit": [{"hooks": [{"type":
 #                              "command", "command": "…/volunteer-turn.sh devin"}]}]
 #                             (Devin's file IS the hooks object — no "hooks"
@@ -25,9 +25,15 @@
 # (the harness injects nothing; the turn proceeds untouched). A reflex
 # failure must NEVER break the agent turn.
 #
-# Hook input contract (Claude/Codex UserPromptSubmit): stdin JSON with a
-# top-level "prompt" string; older/other harnesses send a text blob. Both
-# are accepted.
+# Hook input contract: stdin JSON carrying the user's prompt. Two shapes are
+# in the wild and BOTH are accepted:
+#   * Claude/Codex/Devin — a TOP-LEVEL "prompt" string;
+#   * Cline — the prompt is NESTED under "userPromptSubmit"
+#     ({"userPromptSubmit": {"prompt": "…", "attachments": […]}}). Cline's
+#     proto declares `UserPromptSubmitData user_prompt_submit = 12` and
+#     hook-factory.ts serialises exactly that object, so a top-level-only
+#     reader misses it and would hand the reflex the raw JSON envelope.
+# A non-JSON stdin is still accepted as a raw text blob (older harnesses).
 set -euo pipefail
 
 # ── The interpreter guard (#4848) ─────────────────────────────────────────
@@ -347,6 +353,12 @@ if isinstance(d, str):
     print(d)
 elif isinstance(d, dict):
     p = d.get("prompt") or d.get("userPrompt") or ""
+    if not p:
+        # Cline nests it: {"userPromptSubmit": {"prompt": "…"}}
+        # (hooks.proto `UserPromptSubmitData user_prompt_submit = 12`).
+        ups = d.get("userPromptSubmit")
+        if isinstance(ups, dict):
+            p = ups.get("prompt") or ""
     if isinstance(p, str):
         print(p)
 ' 2>/dev/null || true)"
@@ -553,15 +565,20 @@ print(json.dumps({'hookSpecificOutput': {
 " 2>/dev/null || true
     ;;
   cline)
-    # Cline UserPromptSubmit → contextModification.context.
+    # Cline UserPromptSubmit → {cancel, contextModification, errorMessage}, where
+    # `contextModification` is a FLAT STRING. Cline's proto declares
+    # `string context_modification = 1` and hook-factory.ts REJECTS a non-string:
+    # "Invalid hook output: 'contextModification' must be a string" — so the
+    # nested {context: …} shape this arm used to emit reached no model on any
+    # Cline surface. No backticks in the source below (double-quoted shell string).
     "$PY3" -c "
 import sys
 # CWE-427: same double-quoted source and same quote-free predicate as the
 # claude|codex|devin arm above - and likewise NO backticks in this comment.
 sys.path[:] = [p for p in sys.path if p and p != '.']
 import json, os
-print(json.dumps({'contextModification': {
-    'context': os.environ.get('TORTOISE_VOLUNTEER_BLOCK', '')}}))
+print(json.dumps({'cancel': False,
+                  'contextModification': os.environ.get('TORTOISE_VOLUNTEER_BLOCK', '')}))
 " 2>/dev/null || true
     ;;
   *)

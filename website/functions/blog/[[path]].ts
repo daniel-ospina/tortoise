@@ -2,8 +2,9 @@
 //
 // Server-rendered HTML (no client JS required for content — AI-crawler
 // visible). Renders published, non-held posts from Supabase; markdown→HTML
-// sanitized (plan §6). Catch-all: non-post paths (static assets like
-// og-image, favicons) fall through to ASSETS.
+// sanitized (plan §6). Catch-all: a non-post path under /blog/ is offered to
+// ASSETS first — today that is `/blog/blog.js` (emitted on every article page)
+// and `/blog/author-daniel-ospina.jpg` (`_lib.ts` DEFAULT_AUTHOR_IMAGE_URL).
 //
 // NOTE: /blog/sitemap.xml and /blog/feed.xml are routed by more-specific
 // Function files (#1796) — longest-prefix routing wins over this catch-all.
@@ -20,8 +21,17 @@ export const onRequestGet: PagesFunction<Env> = async (context) => {
   const url = new URL(request.url);
   const path = url.pathname; // "/blog" or "/blog/<slug>"
 
-  // ── ASSETS fallback for non-post paths (favicons, og-image, ...) ─────────
-  // E2E-1 asserts /blog/og-image.png returns 200 via this fallback.
+  // ── ASSETS fallback for non-post paths (blog.js, the author avatar) ──────
+  // A path with a dot is not a post slug, so it is offered to ASSETS before the
+  // router. This branch is LIVE, not dead code: every article page emits
+  // `/blog/blog.js` (below), `_lib.ts` ships `/blog/author-daniel-ospina.jpg` as
+  // DEFAULT_AUTHOR_IMAGE_URL, and with no `_routes.json` this Function sees both
+  // before the asset layer — delete the branch and both 404. NO TEST DRIVES IT:
+  // `tests/e2e/test_blog.py` fetches `/blog` and `/blog/<slug>`, neither contains
+  // a dot, and the markdown harness's ASSETS stub answers 404, so serving a static
+  // path under /blog/ needs its own test. (`/blog/feed.xml` and `/blog/sitemap.xml`
+  // never reach here — longest-prefix routing sends them to their own Function
+  // files, #1796.)
   if (path.includes(".")) {
     const res = await env.ASSETS.fetch(request);
     if (res.status !== 404) return res;
@@ -81,6 +91,7 @@ ${tags.map((t) => `<a class="tag ${tag === t ? "on" : ""}" href="/blog?tag=${enc
     description:
       "Memory for agents to remember why, not just what. Notes on the epistemic graph, EP belief propagation, and building agents that reason over what they know.",
     url: indexUrl,
+    imageAlt: "Tortoise blog — memory for agents to remember why, not just what.",
     type: "website",
     jsonLd: [
       {
@@ -128,6 +139,7 @@ async function renderArticle(env: Env, slug: string): Promise<Response> {
     description,
     url,
     image: post.cover_image_url,
+    imageAlt: post.title,
     type: "article",
     // BlogPosting + BreadcrumbList, plus FAQPage when the body has an FAQ
     // section — see articleJsonLd (pure, so the wiring is unit-tested).

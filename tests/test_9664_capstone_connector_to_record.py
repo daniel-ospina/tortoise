@@ -72,7 +72,7 @@ RECORD_DB_ENV = "TEST_RECORD_DB_URI"
 #: absent from `tools/list` and a connector's tool grant cannot contain it. The
 #: served skill already says so (`tortoise/onboarding/SKILL.md`, the
 #: ADVERTISED-form sentence).
-JOURNEY_TOOLS = ("tortoise_overview", "tortoise_create_point",
+JOURNEY_TOOLS = ("tortoise_graph_overview", "tortoise_create_point",
                  "tortoise_query", "tortoise_list_graphs", "tortoise_get_entity")
 
 
@@ -646,7 +646,7 @@ def test_one_onboarding_call_reaches_the_record_and_its_id_reads_back(
         _authenticated(client, api_key)
 
         # The served first job: verify through the ADVERTISED health section.
-        _status, health = _call(client, "tortoise_overview", {"section": "health"})
+        _status, health = _call(client, "tortoise_graph_overview", {"section": "health"})
         _assert_call_succeeded(health, "the journey's verify step")
         _assert_healthy_verify_payload(_tool_payload(health))
 

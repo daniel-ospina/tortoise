@@ -31,7 +31,13 @@ DECIDED (pure, no I/O, no clock, no model, no graph):
   walked twice (``route_sufficiency``);
 * **the write-back plan** — verified findings become derived summary units that
   carry their own span, cannot promote a claim's class, and dedupe by identity
-  so a repeat escalation is not paid for twice (``plan_writeback``).
+  so a repeat escalation is not paid for twice (``plan_writeback``). The dedupe
+  closes ACROSS calls, not only within one: the caller hands the plan the units
+  the cheap tier ALREADY holds (``already_written``), so the second escalation of
+  the same question writes nothing, re-mints nothing, and reports
+  ``already_persisted`` with ``ok``/``settled`` — §12.7's *"no attribution loop"*
+  is the absence of exactly that, and a plan that could not be told what was
+  stored re-minted every unit and called it ok.
 
 NOT DECIDED (deliberately, and each has a named owner):
 
@@ -122,9 +128,12 @@ A summary unit written back to the cheap tier:
   router learning to fetch from the wrong tier"* — a different defect; the
   class sense is §12.4's.)
 * **dedupes by identity** — the key is content-addressed over (span, normalised
-  claim), so the SAME verified finding written back twice is ONE unit. That is
-  what makes the escalation an investment rather than a repeating tax; its
-  absence is the published *"no attribution loop"* failure (§12.7).
+  claim), so the SAME verified finding written back twice WITHIN ONE CALL is ONE
+  unit. That is the half that is not enough: ACROSS calls the caller hands the
+  plan the units the cheap tier ALREADY holds (``already_written``), and the
+  repeat is reported (``already_persisted``) instead of re-minted. *That* is what
+  makes the escalation an investment rather than a repeating tax; its absence is
+  the published *"no attribution loop"* failure (§12.7).
 
 WHAT THIS MODULE DELIBERATELY IS NOT
 ====================================
@@ -1334,6 +1343,23 @@ class SummaryUnit:
         if not isinstance(self.unit_key, str) or not self.unit_key.strip():
             raise ValueError(
                 f"unit_key must be a non-empty string, got {self.unit_key!r}")
+        if not isinstance(self.claim_class, str) or not self.claim_class.strip():
+            # The CLASS is load-bearing since the attribution loop landed: the
+            # plan compares it against what the cheap tier holds (a store row and
+            # a re-verification disagreeing about the class is §12.4's incorrect
+            # promotion as an OVERWRITE). Unvalidated, an unhashable class made
+            # that refusal escape as `TypeError: unhashable type` FROM THE SET
+            # LITERAL — not the `ValueError` §12.5b's contract documents — and a
+            # ``None`` class raised `TypeError: '<' not supported …` from
+            # ``sorted`` before this message sorted by ``repr``. In both escapes
+            # the caller's documented ``except ValueError`` recovery missed it and
+            # the traceback blamed Python instead of the store. The class is also
+            # what ``promote_to`` exists to bolt shut, so a unit without one is
+            # not a summary unit.
+            raise ValueError(
+                f"a summary unit needs the finding's claim class, got "
+                f"{self.claim_class!r}"
+            )
         expected = unit_key(self.span, self.claim)
         if self.unit_key != expected:
             raise ValueError(
@@ -1357,20 +1383,46 @@ class WritebackRefusal:
 
 @dataclass(frozen=True)
 class WritebackPlan:
-    """The write-back's OUTPUT: units to persist, and refusals to report.
+    """The write-back's OUTPUT: THREE collections — ``units`` (write these now),
+    ``already_persisted`` (the cheap tier holds these; nothing to write), and
+    ``refusals`` (could not be written back honestly).
 
     A plan performs no I/O. Persistence is the caller's seam — no Tier-1 store
     exists yet, and §12.3's tier count is OPEN, so this module must not become
     the second place that decides where a summary unit lands.
+
+    THREE collections, because "already written back" is neither a unit to write
+    nor a refusal. ``units`` is what the caller persists NOW; ``already_persisted``
+    is what the cheap tier ALREADY holds for this evidence (nothing to write, and
+    that is a SUCCESS — §12.5's investment — not a failed plan); ``refusals`` is
+    what could not be written back honestly. Collapsing the middle case into
+    ``refusals`` would make the second escalation's honest outcome read as an
+    error, and collapsing it into ``units`` would re-mint — and re-WRITE — the
+    duplicate whose absence is the whole attribution loop (§12.7).
     """
 
     units: tuple[SummaryUnit, ...] = ()
     refusals: tuple[WritebackRefusal, ...] = ()
+    #: Units the cheap tier already holds for evidence in this batch. Reported so
+    #: the caller can LOG that the escalation was free, and so a plan that did
+    #: nothing is distinguishable from a plan that was never handed anything.
+    already_persisted: tuple[SummaryUnit, ...] = ()
 
     @property
     def ok(self) -> bool:
-        """True when nothing was refused (an empty plan is not `ok` by itself)."""
-        return bool(self.units) and not self.refusals
+        """True when nothing was refused and the evidence was ACCOUNTED for.
+
+        An empty plan is not `ok` by itself — nothing was established. But a plan
+        whose every unit is already persisted IS ok: the loop closed, and
+        re-paying for it is exactly what §12.5 exists to prevent.
+        """
+        return bool(self.units or self.already_persisted) and not self.refusals
+
+    @property
+    def settled(self) -> bool:
+        """True when the loop CLOSED: something was accounted for, and nothing
+        is left to write. This is the second escalation of the same question."""
+        return self.ok and not self.units
 
 
 def _normalise_claim(claim: str) -> str:
@@ -1382,9 +1434,13 @@ def unit_key(span: SourceSpan, claim: str) -> str:
     """Content-addressed identity for a summary unit.
 
     Over ``(span, normalised claim)`` so that the SAME verified finding written
-    back twice is ONE unit. This is the attribution loop's whole mechanism: the
-    second escalation of the same question must not pay for a duplicate, or
-    §12.5's "escalation is a permanent tax" is exactly what we ship.
+    back twice is ONE unit. This is the IDENTITY half of the attribution loop,
+    and only the identity half: the key is what a repeat is recognised BY, and
+    nothing is recognised across calls until the caller hands the stored units
+    in (``already_written``, the other half — see ``plan_writeback``). Without
+    that, the second escalation of the same question pays again for the
+    duplicate, and §12.8 item 4's "escalation is a permanent tax rather than an
+    investment" is exactly what we ship.
     """
     if not isinstance(span, SourceSpan):
         raise TypeError("unit_key needs a SourceSpan — a unit without an address is unattributable")
@@ -1396,6 +1452,7 @@ def plan_writeback(
     findings: Iterable[VerifiedFinding],
     *,
     promote_to: str | None = None,
+    already_written: Iterable[SummaryUnit] = (),
 ) -> WritebackPlan:
     """Plan §12.5's write-back: verified findings → derived summary units.
 
@@ -1406,6 +1463,36 @@ def plan_writeback(
     ``promote_to`` is the §12.4 *"incorrect promotion"* door, and it is bolted
     shut: it may be ``None`` or the finding's own class, never a different one
     (an episodic fact must not become a semantic rule by being written back).
+
+    ``already_written`` is the OTHER half of the attribution loop (§12.5, §12.7's
+    *"no attribution loop"*): the summary units the cheap tier ALREADY holds. The
+    planner is pure and owns no store, so it cannot know what was written back
+    last time unless the caller says so — and without that, every escalation of
+    the same question re-minted every unit and reported ``ok``, so a caller that
+    persisted honestly wrote a DUPLICATE of a finding it had already paid for.
+    With it, a repeat finding is REPORTED (``already_persisted``) instead of
+    re-minted, and a repeat finding that disagrees about the CLASS is REFUSED
+    (``class-conflict``) rather than overwriting the stored class or writing a
+    second one for the same identity.
+
+    ⚠️ **These MUST be loaded from the store.** A prior plan's ``units`` are NOT
+    evidence of persistence: passing them asserts "the cheap tier holds this", so
+    a caller that planned and never wrote would get ``already_persisted`` — and
+    ``ok``/``settled`` — for a unit that was never written, which is the whole
+    loop failing silently in the opposite direction. This planner cannot check
+    the claim; it is the one thing about this argument the caller owns.
+
+    ⚠️ The parameter is ``SummaryUnit``s, not bare ``unit_key`` strings, on
+    purpose: a key is an identity, not a summary — the cheap tier cannot SERVE a
+    key, and a key carries no class, so accepting one would silently disable the
+    class-conflict guard above (the fail-open direction).
+
+    ⚠️ **EVERY unit handed in is graded**, not only the keys this batch happens to
+    touch: a store that holds one identity under two classes raises, wherever in
+    the passed sequence the contradiction sits. So pass the store you actually
+    have — a subset narrows what the guard can see, and a subset that hides a
+    contradiction while the docstring promised a repair would be a silent
+    downgrade of the only check the store gets.
     """
     units: list[SummaryUnit] = []
     refusals: list[WritebackRefusal] = []
@@ -1414,6 +1501,36 @@ def plan_writeback(
     #: written back: the dedupe cannot pick one, and picking by input order would
     #: be §12.4's incorrect promotion decided by iteration order.
     conflicted: set[str] = set()
+
+    persisted: dict[str, SummaryUnit] = {}
+    for unit in already_written:
+        if not isinstance(unit, SummaryUnit):
+            # Fail LOUD. A caller that passes keys, dicts, or the store's own row
+            # type would otherwise get a dedupe that silently matches nothing —
+            # a guard disabled by its own input, which is worse than no guard.
+            raise TypeError(
+                "already_written takes the SummaryUnit instances the cheap tier "
+                f"holds, not {type(unit).__name__} — a bare unit_key cannot carry "
+                "the claim's CLASS, so it would silently disable the "
+                "class-conflict refusal"
+            )
+        prior = persisted.setdefault(unit.unit_key, unit)
+        if prior.claim_class != unit.claim_class:
+            # The STORE contradicts ITSELF: one identity, two classes. There is no
+            # honest way to plan over it — ``setdefault`` would keep whichever
+            # arrived first, so the verdict would depend on the caller's row ORDER
+            # and one order would report ``ok``/``settled`` for a key the store
+            # contradicts. The store is the record; the caller repairs it and
+            # re-plans. (Reported, not resolved: this planner does not write.)
+            raise ValueError(
+                f"already_written holds one identity under two classes: "
+                f"unit_key {unit.unit_key!r} is "
+                f"{sorted({prior.claim_class, unit.claim_class}, key=repr)} — the store "
+                f"contradicts itself, and which class a plan would settle on "
+                f"would then depend on row order"
+            )
+    already: list[SummaryUnit] = []
+    reported: set[str] = set()
 
     for finding in findings:
         claim = finding.claim if isinstance(finding.claim, str) else ""
@@ -1433,15 +1550,33 @@ def plan_writeback(
             refusals.append(WritebackRefusal(claim=claim, reason=REFUSAL_PROMOTION))
             continue
         key = unit_key(finding.span, claim)
-        if key in seen:
-            if seen[key].claim_class != finding.claim_class:
+        known = persisted.get(key) or seen.get(key)
+        if known is not None:
+            if known.claim_class != finding.claim_class:
                 # Same identity, different CLASS: refuse the KEY outright rather
-                # than keep whichever arrived first. Order-independent by
-                # construction, and REPORTED — a silent drop here would be the
-                # promotion door closing quietly instead of bolted.
+                # than keep whichever arrived first. WHICH KEYS are refused is
+                # order-independent by construction (``conflicted`` is a set), and
+                # the refusal is REPORTED — a silent drop here would be the
+                # promotion door closing quietly instead of bolted. ⚠️ The NUMBER
+                # of rows is not order-invariant, by design: one `class-conflict`
+                # row per disagreeing finding (measured — the same three findings
+                # permuted leave ``units``/``already_persisted``/``ok``/``settled``
+                # identical and carry 1 or 2 rows), so deduping them would be a
+                # caller-visible behaviour change that needs its own test.
+                # ⚠️ The comparison is against the STORE's class too, which is the
+                # stronger side of it: the stored class is the record, so a
+                # re-escalation that re-verified the same span+claim under a
+                # different class is §12.4's incorrect promotion arriving as an
+                # overwrite — it may neither replace the stored unit nor mint a
+                # second class for one identity.
                 conflicted.add(key)
                 refusals.append(
                     WritebackRefusal(claim=claim, reason=REFUSAL_CLASS_CONFLICT))
+            elif key in persisted and key not in reported:
+                # Already in the cheap tier: NOTHING to write, and paying again
+                # is the tax §12.5 exists to remove. Reported, never re-minted.
+                already.append(known)
+                reported.add(key)
             # Otherwise idempotent: the same verified finding is ONE unit.
             continue
         unit = SummaryUnit(
@@ -1455,4 +1590,12 @@ def plan_writeback(
 
     if conflicted:
         units = [unit for unit in units if unit.unit_key not in conflicted]
-    return WritebackPlan(units=tuple(units), refusals=tuple(refusals))
+        # A key that CONFLICTED while already stored must not be reported as
+        # settled either: the store holds a class this batch contradicts, and
+        # calling that "nothing to write" would hide the disagreement.
+        already = [unit for unit in already if unit.unit_key not in conflicted]
+    return WritebackPlan(
+        units=tuple(units),
+        refusals=tuple(refusals),
+        already_persisted=tuple(already),
+    )

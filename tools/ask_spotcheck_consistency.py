@@ -2,16 +2,29 @@
 """Issue #2071 step 5/6 (I2): consistency harness — spot-check semantic
 verdicts vs the graded eval's semantic verdicts on the shared population.
 
-Both lanes call the SAME judge (``build_judge()`` → ``LLMJudge``, official
-gpt-4o anscheck templates, temperature 0) with the SAME
+Both lanes call the SAME judge (``build_judge(_judge_spec())`` →
+``LLMJudge``, anscheck templates, temperature 0) with the SAME
 (question_type, question, answer, hypothesis, abstention) inputs, so
 agreement is expected BY CONSTRUCTION — this harness MEASURES it per
 question on the 21-question spot-check composition (the shared
-population). The graded-eval leg is the exact judge call the eval harness
+population).
+
+The judge is pinned to the **OFFICIAL** one (``OFFICIAL_JUDGE_MODEL``)
+for BOTH legs, deliberately and explicitly: the graded-eval RUN's default
+judge was re-pinned to our own model by the #8486 owner ruling (2026-10-27),
+while this harness exists to compare the two lanes' judge *calls*, which is
+only meaningful inside ONE judge. Naming it explicitly also keeps the
+comparison from silently following that default — a bare
+``build_judge()`` would have graded both legs with DeepSeek while the
+pre-flight checked the official key (#8486).
+The graded-eval leg is the exact judge call the eval harness
 makes (``tools/longmem_eval/run.py`` judge call site, ``run_evaluation``)
-— the two lanes' judge calls are byte-identical; only the ``_abs`` marker
+— the two lanes' judge calls are byte-identical **when the eval leg names
+this same spec**; under the shipped default they diverge by design (the
+eval RUN grades with ``DEFAULT_JUDGE_MODEL``, see above), which is why this
+harness names the spec instead of inheriting it. Only the ``_abs`` marker
 short-circuit in ``ask_spotcheck._grade`` (deterministic, precedes the
-judge call) can differ. A second leg measures CI parity: the key-free
+judge call) can differ otherwise. A second leg measures CI parity: the key-free
 MockJudge (containment) verdict vs the semantic verdict on the same
 answers — the expected-class flips are the point of the #2071 owner
 decision.
@@ -61,6 +74,7 @@ if _REPO_ROOT not in sys.path:
 
 from tools.ask_spotcheck import (  # noqa: E402
     _grade,
+    _judge_spec,
     _load_composition,
     _require_judge_key,
 )
@@ -284,7 +298,8 @@ def main(argv: list[str] | None = None) -> int:
                          "default: curated answers (long-gold paraphrases + "
                          "verbatim short golds + _abs abstentions)")
     ap.add_argument("--live", action="store_true",
-                    help="use the real build_judge() (official gpt-4o) — "
+                    help="use the real build_judge() (the OFFICIAL judge — "
+                         "the same one both lanes are compared under) — "
                          "requires a judge provider key (fail-fast "
                          "contract); default: scripted fake judge (offline)")
     args = ap.parse_args(argv)
@@ -298,7 +313,14 @@ def main(argv: list[str] | None = None) -> int:
         except (RuntimeError, ValueError) as exc:
             print(f"ask_spotcheck_consistency: {exc}", file=sys.stderr)
             return 2
-        judge = build_judge()
+        # ⛔ ONE SPEC FOR BOTH LEGS (#8486). The pre-flight resolves
+        # `_judge_spec()`; a bare `build_judge()` resolves
+        # `DEFAULT_JUDGE_MODEL`, which the #8486 owner ruling re-pinned to
+        # DeepSeek. Left split, this harness would check the official judge's
+        # key and then grade BOTH lanes with a different model while printing
+        # the official key env — and the harness's whole premise is that the
+        # two lanes are compared INSIDE one judge.
+        judge = build_judge(_judge_spec())
         judge_label = f"live {judge.model_id} ({key_env})"
     else:
         judge = _offline_judge(questions)

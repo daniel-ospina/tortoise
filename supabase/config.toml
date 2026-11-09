@@ -96,7 +96,15 @@ openai_api_key = "env(OPENAI_API_KEY)"
 
 # Email testing server. Emails sent with the local dev setup are not actually sent - rather, they
 # are monitored, and you can view the emails that would have been sent from the web interface.
-[inbucket]
+#
+# ⛔ `[inbucket]` → `[local_smtp]` (#10896): the Supabase CLI **v3.0.0** removed the `[inbucket]`
+# section and REJECTS a config that carries it — not a warning, an `exit 1` with
+# `[inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.` Because
+# `supabase db push` parses the config BEFORE it looks at any migration, that exit 1 happened ~1 s
+# into `Apply migrations` and **no migration was ever applied** — the config section name is the
+# whole reason the only automated DDL path was dead while `deploy-hosted` refused on drift. The
+# section is LOCAL-DEV only (the local mail catcher); it has no production effect.
+[local_smtp]
 enabled = true
 # Port to use for the email testing server web interface.
 port = 54324
@@ -187,7 +195,7 @@ password_requirements = ""
 
 [auth.rate_limit]
 # Number of emails that can be sent per hour. Requires auth.email.smtp to be enabled.
-# 2/hr is DEV-ONLY and intentional (local inbucket testing; keeps the bucket
+# 2/hr is DEV-ONLY and intentional (local Mailpit/inbucket testing; keeps the bucket
 # branch exercisable — see #801/#863). Hosted project runs the shared 30/hr
 # project-wide bucket (custom SMTP) — headroom + 429 alerting there is a
 # dashboard/ops item (#885), NOT this file.
@@ -245,7 +253,7 @@ enable_signup = true
 double_confirm_changes = true
 # If enabled, users need to confirm their email address before signing in.
 # Local prod parity (#801): prod has confirmations ON (SMTP-era, #832); local
-# email goes to inbucket, so the confirmation branch + 429 UX are exercisable
+# email goes to Mailpit/inbucket, so the confirmation branch + 429 UX are exercisable
 # locally. NOTE: [auth.sms].enable_confirmations stays false — different setting.
 enable_confirmations = true
 # If enabled, users will need to reauthenticate or have logged in recently to change their password.
@@ -304,13 +312,15 @@ max_frequency = "5s"
 # enabled = true
 # uri = "pg-functions://postgres/auth/before-user-created-hook"
 
-# Auth hook after_user_created is configured on the REMOTE project (Management API)
-# — CLI v2.90 cannot parse [auth.hook.after_user_created] in config.toml.
-# Remote state (2026-08-10, #832): hook_after_user_created is DISABLED on this
-# plan (its Standard-Webhooks signature could never be verified) and
-# AUTH_HOOK_SECRET was removed from tenant-provision — the function's hook
-# path fails CLOSED (401). Client-side provisioning (welcome page JWT path)
-# is the production path (#802/#839).
+# Auth hook `after_user_created` does NOT exist on this platform: the supported
+# hooks are before_user_created, custom_access_token, send_sms, send_email,
+# MFA verification and password verification (Supabase docs, Auth Hooks). #839's
+# "Error invoking hook" 500 was a platform-capability gap, not a config gap, and
+# #1120 deleted the function's dead hook path rather than leaving it inert.
+# Provisioning is triggered server-side by the dashboard's same-origin BFF route
+# (`website/apps/dashboard/functions/api/provision.ts`, #3501/#4054), which mints
+# the caller's access token from the `__Host-session` cookie and calls
+# tenant-provision with it (#802).
 
 # This hook runs before a token is issued and allows you to add additional claims based on the authentication method used.
 # [auth.hook.custom_access_token]
@@ -461,13 +471,14 @@ s3_secret_key = "env(S3_SECRET_KEY)"
 # format_options = "{\"keywordCase\":\"upper\",\"indent\":2,\"maxWidth\":80,\"commaStyle\":\"trailing\"}"
 
 # ── Edge Functions ────────────────────────────────────────────────
-# tenant-provision is invoked by the after_user_created auth hook.
-# Auth hooks call WITHOUT a user JWT → verify_jwt must be false
-# (Supabase Auth signs the hook request itself with the hook secret).
-# Caller auth is enforced INSIDE the function (#802): it verifies the
-# Standard-Webhooks signature against AUTH_HOOK_SECRET (hook calls) or a
-# user JWT whose identity matches the provisioning target (direct calls).
-# The public anon key alone returns 401.
+# tenant-provision is called SERVER-SIDE ONLY, by the dashboard's same-origin
+# BFF route (website/apps/dashboard/functions/api/provision.ts, #3501/#4054).
+# That BFF mints the user's access token and sends no Origin header, so the
+# function keeps verify_jwt=false (the caller is verified inside it, #802) while
+# carrying NO CORS surface at all: no origin allowlist, no preflight answer, no
+# Access-Control-* header, and an origin-bearing request is refused 403 (#1120).
+# The public anon key alone returns 401, and a caller may only provision for
+# THEMSELVES (JWT identity must match the provisioning target).
 [functions.tenant-provision]
 verify_jwt = false
 

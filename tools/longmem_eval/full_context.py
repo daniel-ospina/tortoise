@@ -12,7 +12,13 @@ session, every turn, dated) instead of the retrieved top-k — "option 5"
 Mechanically it is a READER-ONLY run: no graph, no retrieval. The full
 haystack is rendered in the official gen.py shape (Current Date header +
 per-session date annotations — the same shape the retrieval leg produces) and
-handed to the reader; the official judge scores the answer. Recall is
+handed to the reader; the judge scores the answer — the run's judge, which is
+`deepseek-v4-flash` by default since the #8486 ruling of 2026-10-27 (see
+`docs/benchmarks/longmemeval-500q/run-report.md` §1.1); pass
+`--judge-model openai:gpt-4o-2024-08-06` for the OFFICIAL one — that spec
+needs `OPENAI_API_KEY` on the box (or the routed
+`openrouter:openai/gpt-4o-2024-08-06` form with `OPENROUTER_API_KEY`), and it
+fails closed naming the key rather than grading with another model. Recall is
 trivially 1.0 (every session is in context), so the cell isolates
 reader+judge capability — the ceiling any retrieval leg must approach.
 
@@ -20,7 +26,7 @@ Run via the run-protocol orchestrator (``run_protocol full-context``) or
 directly::
 
     python -m tools.longmem_eval.full_context --data tests/fixtures/longmemeval_mini.json --limit 5 --mock
-    python -m tools.longmem_eval.full_context --split s --limit 50   # real reader+judge
+    python -m tools.longmem_eval.full_context --split s --limit 50   # real reader+judge (judge = the #8486 default; --judge-model for the official one)
 
 The report is saved with a methodology block that marks the cell as the
 option-5 full-context comparison (never misread as a retrieval-backed run).

@@ -148,9 +148,12 @@ _SOCKET_FLAG = "unixsocket"
 # At the time of writing the widest is `test` at 90 (`python-ci.yml`);
 # `evals-on-demand.yml::evals` 90, `test-slow` 60,
 # `post-merge-validation.yml::validate` 60, `perf-lane` 45, `test-d14-hosted-api`
-# 40, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
+# 50, `test-carve-out` 30, `ci.yml::flip-gate` 30 (capped by #10327's review —
 # it was UNCAPPED at 360 and invisible to an earlier, narrower population),
-# `test-record-postgres`/`legal-e2e`/`blog-write-e2e` 20, and the rest 15.
+# `test-record-postgres` 20 (raised to 50 on 2026-11-05 for a post-step cache
+# save, then put BACK to 20 when #11063 made that job restore-only and removed
+# the save the raise was derived from), `legal-e2e`/`blog-write-e2e` 20,
+# and the rest 15.
 #
 # A server YOUNGER than the widest outer cancel bound can still belong to a live
 # leg, so reaping on age is only a proof ABOVE it. The invariant is

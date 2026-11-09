@@ -1,6 +1,6 @@
 """Extraction-quality measurement core (epic #909 slice 8a, #960).
 
-Implements plan §6.3's `compute_metrics` + `kappa` over tests/eval/types.py.
+Implements plan §6.3's `compute_metrics` + `kappa` over tests/eval/eval_types.py.
 Skeleton lineage: tests/aries_extraction.py (load_sample / evaluate /
 run_variant — the fuzzy-matching + per-run aggregation patterns), as
 specified in plan §8.3 slice 8.
@@ -80,7 +80,7 @@ _REPO_ROOT = str(Path(__file__).resolve().parents[2])
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tests.eval.types import (  # noqa: E402
+from tests.eval.eval_types import (  # noqa: E402
     CLASS_VOCAB,
     RELATION_VOCAB,
     WINDOW_TYPES,

@@ -16,13 +16,24 @@ What this file pins, and why each test exists:
 * the enrichment SEAM: identity without a rewrite function, a per-turn rewrite
   with one (threading the neighbour window), and fail-soft to raw on any
   failure — a capture must never store a half-enriched batch;
-* the ON→OFF re-capture: a stale enriched text must not survive a re-capture
-  whose flag is off (the #4194 lie a vector no longer describes);
 * the same rule on EVERY door that replaces or clears the vector —
   `update_point(content=…)`, `update_point(embedding=…)` / `embedding=None`,
   and the sibling `:Point` update door `update_entity` (#10523 review, P1);
 * raw retrieval unchanged: ``content`` stays in the fulltext field set, so a
   query that matched before still matches with enrichment on.
+
+⛔ **`#4282` DELETED THIS FILE'S CAPTURE-DOOR HALF** (2026-10-27).
+`TortoiseSDK.capture_session` was one of the 26 dead public methods that PR
+removed, so the legs that drove it — the flag-OFF/ON write, the journal
+attestation, the dense leg's on/off ranking, the ON→OFF re-capture, the rebuild
+preserve, the keyword-searchable leg and the mismatched-pair replay — went with
+the door. That is a REAL coverage loss for the ON→OFF storage/vector semantics
+(the `#4194` lie a stale `embeddingText` behind a new vector would be), and it
+is recorded on `#10227` and in the PR's "Coverage removed" section, not
+absorbed here. What SURVIVES below is every door that was merely SEEDED by a
+capture — their rows are seeded directly (`_seed_enriched_turn`) with the exact
+triple the writer mints, because the invariant they police is the UPDATE door's,
+not the capture's.
 
 Fixture note (honest scope, same as tests/test_bm25_lexical_8488.py): the
 dense leg is driven by a small lexicon stand-in embedder installed at the
@@ -36,8 +47,6 @@ network call.
 """
 from __future__ import annotations
 
-import json
-import logging
 import re
 from pathlib import Path
 from typing import ClassVar
@@ -60,7 +69,6 @@ from tortoise.embeddings import (
 from tortoise.ids import content_hash
 from tortoise.projection.entities import _writable_journalled_vector
 from tortoise.sdk import TortoiseSDK
-from tortoise.search_engine import run_vector_query
 
 pytestmark = pytest.mark.embedded_only
 
@@ -383,159 +391,13 @@ def test_a_raising_rewrite_is_LOGGED_not_swallowed(caplog, monkeypatch):
 
 # ── 3. OFF is byte-identical to pre-#8488 ──────────────────────────────────
 
-def test_flag_off_writes_no_embedding_text_and_embeds_the_raw_content(
-        sdk, embedder, monkeypatch):
-    """OFF: no ``embeddingText`` node prop, vector == the raw stored text's."""
-    monkeypatch.delenv(ENRICH_ENV, raising=False)
-    _keyless(monkeypatch)
-    sdk.capture_session(CONV, session_id="sess-off")
-    rows = _turn_rows(sdk, "sess-off")
-    assert len(rows) == len(CONV)
-    for tid, content, enriched, stored in rows:
-        assert enriched is None, (tid, "OFF must not write embeddingText")
-        assert stored is not None
-        assert np.allclose(stored, compute_embedding(content), atol=1e-6), tid
-
-
 # ── 4. ON stores the enriched text and embeds IT (schema A′) ───────────────
-
-def test_flag_on_stores_and_embeds_the_enriched_text(sdk, embedder, enrichment_on):
-    """ON: ``embeddingText`` is stored and the ONE vector is computed from it."""
-    sdk.capture_session(CONV, session_id="sess-on")
-    rows = _turn_rows(sdk, "sess-on")
-    assert len(rows) == len(CONV)
-    t0, t1 = rows
-    # turn 0's rewrite changed the text → its vector changed too (the #4194
-    # point: the vector describes the ENRICHED text, never the raw content).
-    assert t0[2] == "[user] the auth flow is blocked"
-    assert t0[2] != t0[1]
-    assert not np.allclose(t0[3], compute_embedding(t0[1]), atol=1e-6)
-    assert np.allclose(t0[3], compute_embedding(t0[2]), atol=1e-6)
-    # turn 1 is unchanged by this rewriter → embeddingText == content and the
-    # vector is still that text's (both spellings agree).
-    assert t1[2] == t1[1]
-    assert np.allclose(t1[3], compute_embedding(t1[1]), atol=1e-6)
-
-
-def test_journal_attests_the_enriched_text(sdk, embedder, enrichment_on, tmp_path):
-    """``embedding_text_hash`` attests ``embeddingText``, not the raw content."""
-    from tortoise.log import EventLog
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
-    try:
-        s.capture_session(CONV, session_id="sess-attest")
-    finally:
-        s.close()
-    events = EventLog(log_path).read_all()
-    adds = [e for e in events if e.get("type") == "PointAdded"]
-    assert adds, "no PointAdded journaled"
-    enriched0 = adds[0]["point"]["embeddingText"]
-    assert enriched0 == "[user] the auth flow is blocked"
-    assert adds[0]["point"]["embedding_text_hash"] == content_hash(enriched0)
-
 
 # ── 5. The on/off retrieval-equivalence property ───────────────────────────
 
-def test_dense_leg_returns_the_enriched_turn_only_when_on(
-        sdk, embedder, monkeypatch):
-    """A test that cannot tell on from off is not a test: the SAME query
-    surfaces a DIFFERENT top hit depending on the gate.
-
-    The first turn's raw text says "the release is blocked"; enrichment
-    resolves it to "the auth flow is blocked". Querying the ENRICHED meaning
-    ("auth") must surface that turn only when the gate is ON — when OFF the
-    turn's vector carries "release" and the auth query cannot find it.
-    """
-    _keyless(monkeypatch)
-    monkeypatch.delenv(ENRICH_ENV, raising=False)
-    sdk.capture_session(CONV, session_id="sess-rank-off")
-
-    from tortoise import model_adapters
-    monkeypatch.setenv(ENRICH_ENV, "1")
-    monkeypatch.setattr(model_adapters, "build_extractor_model",
-                        lambda *a, **kw: _Rewriter())
-    sdk.capture_session(CONV, session_id="sess-rank-on")
-
-    proj = sdk._get_proj()
-    qvec = _query_vec(embedder, "auth")
-
-    def scores(prefix):
-        hits = run_vector_query(proj.g, qvec, limit=10,
-                                is_embedded=getattr(proj, "_is_embedded", True),
-                                entity_type="point")
-        return {h[0]: h[1] for h in hits if h[0].startswith(prefix)}
-
-    off = scores("sess-rank-off_")
-    on = scores("sess-rank-on_")
-    # The SAME first turn, raw ("release") vs enriched ("auth flow"): the
-    # enriched twin must score strictly higher for the enriched query — and it
-    # must reach its session's top. When OFF the raw turn's vector carries
-    # "release", so the auth query barely scores it.
-    assert on["sess-rank-on_t0"] > off["sess-rank-off_t0"], (off, on)
-    assert on["sess-rank-on_t0"] == max(on.values()), on
-
-
 # ── 6. The ON→OFF re-capture clears the stale enriched text ───────────────
 
-def test_recapture_off_after_on_clears_the_stale_enriched_text(
-        sdk, embedder, enrichment_on, monkeypatch):
-    """A stale ``embeddingText`` must not survive a re-capture with the flag
-    off — the node reverts to the raw-only shape, so no enriched text outlives
-    the vector that described it."""
-    sdk.capture_session(CONV, session_id="sess-recap")
-    on_rows = _turn_rows(sdk, "sess-recap")
-    assert all(r[2] is not None for r in on_rows), on_rows
-
-    # The gate goes off; the SAME session is re-captured. The real
-    # `_capture_enriched_texts` now returns None (the env is unset), so the
-    # writer must REMOVE the stale enriched text, not preserve it.
-    monkeypatch.delenv(ENRICH_ENV, raising=False)
-    sdk.capture_session(CONV, session_id="sess-recap")
-    off_rows = _turn_rows(sdk, "sess-recap")
-    for tid, content, enriched, stored in off_rows:
-        assert enriched is None, (tid, "a stale enriched text survived the OFF re-capture")
-        assert stored is not None
-        assert np.allclose(stored, compute_embedding(content), atol=1e-6), tid
-
-
 # ── 7. Raw retrieval is unchanged ─────────────────────────────────────────
-
-def test_content_stays_keyword_searchable_when_enriched(sdk, embedder, enrichment_on):
-    """``content`` stays in the fulltext field set: a query that matched the
-    raw text before still matches with enrichment on (the enriched text is a
-    NEW field, never a replacement for ``content``)."""
-    sdk.capture_session(CONV, session_id="sess-raw")
-    hits = sdk.tortoise_fts_query("release", limit=5)
-    assert any(h["id"].startswith("sess-raw_t") for h in hits), (
-        f"raw retrieval lost the keyword the enriched text replaced: "
-        f"{[h['id'] for h in hits]}")
-
-
-def test_rebuild_preserves_the_enriched_text(sdk, embedder, enrichment_on, tmp_path):
-    """live == replay for the new field: a rebuilt turn keeps its ``embeddingText``
-    and the vector computed from it (the #4194 identity survives a rebuild)."""
-    from tortoise.log import EventLog
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
-    try:
-        s.capture_session(CONV, session_id="sess-rebuild")
-        before = _turn_rows(s, "sess-rebuild")
-        assert before and all(r[2] is not None for r in before), before
-
-        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
-
-        after = _turn_rows(s, "sess-rebuild")
-        assert [r[0] for r in after] == [r[0] for r in before]
-        for (bid, _bc, be, bv), (aid, _ac, ae, av) in zip(before, after, strict=True):
-            assert aid == bid
-            assert ae == be, (aid, "the rebuilt turn lost its embeddingText")
-            assert np.allclose(bv, av, atol=1e-6), aid
-            assert np.allclose(av, compute_embedding(ae), atol=1e-6), aid
-    finally:
-        s.close()
-
 
 def test_attestation_prefers_embedding_text_when_present():
     """``stamp_journal_embedding`` attests ``embeddingText`` over ``content``."""
@@ -697,195 +559,6 @@ def test_the_attestable_predicate_pins_each_replay_gate_boundary():
     assert not _attestable(dict(base, embeddingText=None, content="\ud800"))
 
 
-def test_a_mismatched_enriched_pair_is_DETECTED_on_replay(
-        embedder, enrichment_on, tmp_path, caplog):
-    """#8932 §2 / #4194 — the attestation is CHECKABLE, and a mismatched pair
-    is not accepted silently.
-
-    The ruling obliges the link between the vector and the text it was computed
-    from to be PERSISTED so a reader can verify what the vector describes.
-    `stamp_journal_embedding` mints `embedding_text_hash` over `embeddingText`
-    (asserted above), and `_record_embedding_identity` RE-DERIVES that hash at
-    replay and compares. No test exercised the MISMATCH leg, so both halves of
-    that check could be broken with the suite fully green:
-
-      * **deleted** — a hand-edited record whose vector describes text the node
-        no longer holds would restore silently, which is the quiet #4194 lie
-        the attestation exists to catch. The journal IS a FILE (hand-editable,
-        truncatable, writable by an older build), `stamp_journal_embedding`'s
-        own docstring states that threat model, and this test feeds it exactly
-        that record (`preventable` rather than a hypothetical);
-      * **re-pointed at `content`** — the PRE-#8488 spelling. On an enriched
-        turn `content` ("the release is blocked") is not the text the vector
-        was computed from ("the auth flow is blocked"), so a faithful rebuild
-        would emit a false divergence on every enriched Point.
-
-    Non-vacuity, both halves — the test reds on EITHER mutation:
-      * the FAITHFUL leg asserts NO text-hash warning (re-pointing the check at
-        `content` fires one here);
-      * the TAMPERED leg asserts the warning DOES fire and names the Point
-        (deleting the comparison emits nothing here).
-    """
-    from tortoise.log import EventLog
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
-    try:
-        s.capture_session(CONV, session_id="sess-mismatch")
-    finally:
-        s.close()
-
-    def _text_hash_warnings(records):
-        return [r.getMessage() for r in records
-                if r.levelname == "WARNING"
-                and "text-hash does not match" in r.getMessage()]
-
-    # ── leg 1: a FAITHFUL enriched journal must not look like a divergence ──
-    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
-    try:
-        # The store's vector width — the call-site gate the premise below needs.
-        store_dim = s._get_proj().required_embedding_dim
-        with caplog.at_level(logging.WARNING,
-                             logger="tortoise.projection.entities"):
-            caplog.clear()
-            s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
-        assert _text_hash_warnings(caplog.records) == [], (
-            "a FAITHFUL enriched rebuild reported a text-hash divergence: the "
-            "record's embeddingText still matches its attested hash, so this "
-            "is a FALSE divergence. The likely cause is the check comparing "
-            "against `content` rather than `embeddingText` (the pre-#8488 "
-            "spelling), which no longer describes the vector on an enriched "
-            f"turn: {_text_hash_warnings(caplog.records)}")
-    finally:
-        s.close()
-
-    # ── tamper the record: the enriched text no longer matches its hash ─────
-    events = [json.loads(line) for line in
-              Path(log_path).read_text().splitlines() if line.strip()]
-    points = [ev.get("point") or {} for ev in events]
-
-    # ⛔ ONE predicate (`_attestable`, module level) used by EVERY derivation
-    # below so they cannot SKEW (review cycle 3, P3). It mirrors the replay's
-    # gates in order — not an operator (`projection/entities.py:2484`), a
-    # restorable vector (`:2483`), no identity (`:943-952`), no string hash or
-    # text (`:963-971`), unhashable text (`:979-982`). A re-emitted snapshot —
-    # `stamp_journal_embedding(creating=False)` — deliberately carries NEITHER a
-    # hash nor an identity (its own docstring says so), so counting it here
-    # would demand a contract production never makes and would false-red on a
-    # legitimate record.
-
-    # PREMISE: the ONE gate left out of the predicate is the call-site WIDTH
-    # refusal (`projection/entities.py:2488-2508`), because it reads
-    # `required_embedding_dim` — store STATE — and the predicate is pure. It
-    # cannot narrow the population in THIS lane: the module is
-    # `embedded_only`, and an embedded store skips vector-index creation by
-    # design so `required_embedding_dim` is None
-    # (`projection/__init__.py:19814`) and `:2489` never refuses. Asserted
-    # conditionally rather than assumed, and NOT re-asserted in the None arm:
-    # restorability is now clause 2 of the predicate, so there is nothing left
-    # for that arm to check (a premise that cannot fail is not a premise).
-    if store_dim is not None:
-        wrong_width = [
-            p.get("id") for p in points
-            if _attestable(p)
-            and len(_writable_journalled_vector(p.get("embedding"))) != store_dim]
-        assert not wrong_width, (
-            "premise: these attestable records carry a vector of the WRONG "
-            f"WIDTH for this store ({store_dim}), so the call site refuses it "
-            f"before `_record_embedding_identity` runs: {wrong_width}")
-    # PREMISE for leg 1 (review cycle 1, P2): the ABSENCE of a divergence is
-    # only discriminating if some attestable record's vector describes text that
-    # DIFFERS from `content` — otherwise a check re-pointed at `content` agrees
-    # by accident and leg 1 cannot tell the two spellings apart. Derived, never
-    # assumed: a later edit to CONV/the rewriter that left every turn an
-    # identity rewrite would silently remove one of the two mutation kills and
-    # keep the suite green — the exact false confidence this test prevents.
-    differing_from_content = [
-        p.get("id") for p in points
-        if _attestable(p) and _attested_text(p) != p.get("content")]
-    assert differing_from_content, (
-        "premise: no journalled record has embeddingText != content, so leg 1 "
-        "cannot distinguish an embeddingText check from a `content` check — "
-        "the faithful leg would pass against the pre-#8488 spelling")
-    tampered_ids = []
-    for p in points:
-        if _attestable(p):
-            p["embeddingText"] = _attested_text(p) + " (tampered)"
-            tampered_ids.append(p.get("id"))
-    assert tampered_ids, (
-        "premise: the journal carried no attestable enriched record, so this "
-        "test would be vacuous")
-    # DERIVED, not assumed (review cycle 1, P3): the (journalled hash, current
-    # hash) PAIRS whose stored hash no longer matches the (now tampered) text,
-    # each mapped to the ids that carry it — computed ONCE, because leg 2's
-    # two premises and its attribution all read the same derivation.
-    mismatched = {}
-    for p in points:
-        if not _attestable(p):
-            continue
-        pair = (p.get("embedding_text_hash"), content_hash(_attested_text(p)))
-        if pair[0] != pair[1]:
-            mismatched.setdefault(pair, set()).add(str(p.get("id")))
-    assert mismatched, (
-        "premise: tampering did not produce a hash mismatch, so leg 2 has "
-        "nothing to detect")
-    # PREMISE (review cycle 3, P3): `len(messages) == len(mismatched)` can only
-    # catch "report only the FIRST" when there are at least TWO distinct pairs.
-    # A later edit to CONV/the rewriter that left both turns with the same
-    # enriched text collapses this to 1 and the mutation kill vanishes silently,
-    # with the suite still green — the same reasoning leg 1's premise assertion
-    # carries above.
-    assert len(mismatched) >= 2, (
-        "premise: the fixture produces fewer than 2 distinct (journal hash, "
-        "text hash) pairs, so this assertion cannot catch 'report only the "
-        "first' — it would pass vacuously")
-    Path(log_path).write_text(
-        "\n".join(json.dumps(e) for e in events) + "\n", encoding="utf-8")
-
-    # ── leg 2: the tampered pair MUST be detected and named ────────────────
-    s = TortoiseSDK(str(tmp_path / "m.db"), event_log_path=log_path)
-    try:
-        with caplog.at_level(logging.WARNING,
-                             logger="tortoise.projection.entities"):
-            caplog.clear()
-            s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
-        messages = _text_hash_warnings(caplog.records)
-        assert messages, (
-            "a journalled vector whose embeddingText no longer matches its "
-            "attested hash was restored SILENTLY — the #4194 identity is not "
-            "checkable, which is the one property schema A′ exists to keep")
-        # ⛔ The de-dup key is the (journalled hash, current hash) PAIR, NOT the
-        # Point id — `_record_embedding_identity` de-dups per pair and says so
-        # ("keyed by the identity pair, so every DISTINCT divergence still
-        # reports"; review cycle 2, P3). Asserting one warning per POINT would
-        # demand a stronger contract than the code makes and would red on a
-        # fixture whose turns share a text — a legitimate, intended de-dup.
-        assert len(messages) == len(mismatched), (
-            "one warning per DISTINCT (journal hash, text hash) pair is the "
-            f"contract — got {len(messages)} warning(s) for {len(mismatched)} "
-            f"distinct pair(s): {messages}")
-        # ⛔ ATTRIBUTION, not mere presence (last-review note 3): requiring only
-        # *some* mismatched id per message let a warning that named the WRONG
-        # mismatched Point pass (ids where one is a prefix of another are
-        # ambiguous under a substring test). Each warning names the pair's two
-        # hashes, so bind it to THAT pair and require the Point it names to be
-        # one of that pair's own records.
-        for msg in messages:
-            bound = [pair for pair in mismatched
-                     if pair[0] in msg and pair[1] in msg]
-            assert len(bound) == 1, (
-                "a text-hash warning did not identify exactly ONE mismatched "
-                f"(journal hash, text hash) pair: {msg}")
-            pair = bound[0]
-            named = [pid for pid in mismatched[pair]
-                     if f"(Point {pid}: " in msg]
-            assert named, (
-                "a text-hash warning named no Point belonging to the pair it "
-                f"reports {pair} ({sorted(mismatched[pair])}): {msg}")
-    finally:
-        s.close()
-
-
 # ── 8. The ruling's acceptance test #1: turn discrimination survives ───────
 
 def _real_embedding_model_or_skip():
@@ -918,10 +591,13 @@ def test_turn_discrimination_survives_enrichment():
     lexicon stand-in used elsewhere in this file cannot measure a 0.89 band.
 
     Residual (honest scope): #8932 §3.2 (a retired claim's enriched text must
-    not keep describing the pre-retirement state) is covered for the field's
-    LIFETIME by ``test_recapture_off_after_on_clears_the_stale_enriched_text``
-    — an ON→OFF re-capture removes the value — but the claim-terminal path
-    (#2490) is not exercised here; turns are episodic and are not superseded.
+    not keep describing the pre-retirement state) was covered for the field's
+    LIFETIME by `test_recapture_off_after_on_clears_the_stale_enriched_text` —
+    an ON→OFF re-capture removes the value — but that arm went with the SDK
+    `capture_session` door (`#4282`, loss recorded on `#10227`), so the LIFETIME
+    half is now UNPINNED here; the UPDATE-door half below still holds. The
+    claim-terminal path (#2490) is not exercised either: turns are episodic and
+    are not superseded.
     """
     model = _real_embedding_model_or_skip()
     turns = [
@@ -962,57 +638,54 @@ def test_turn_discrimination_survives_enrichment():
         "similarity above the approved rewrite on this fixture")
 
 
-# ── 9. The preserve arm is LOAD-BEARING (review round 2, P2) ───────────────
+# ── Section 9's surviving-door arm ────────────────────────────────────────
+#
+# ⛔ Every test in the CAPTURE-door half of this file (the flag-OFF/ON write, the
+# journal attestation, the dense leg, the ON→OFF re-capture, the rebuild
+# preserve, the keyword-searchable leg and the mismatched-pair replay) drove
+# `TortoiseSDK.capture_session`, one of the 26 dead public methods `#4282`
+# deleted; they went with the door they tested. That loss — including this
+# file's only ON→OFF storage/vector pins — is recorded on `#10227` and in the
+# PR's "Coverage removed" section, NOT absorbed here.
+#
+# The UPDATE doors they seeded (``update_point(content=…)``,
+# ``update_point(embedding=…)`` / ``embedding=None``, and the sibling
+# ``update_entity``) all SURVIVE, so their tests are restored below with the row
+# SEEDED rather than captured — the same idiom `test_the_guard_reports_a_
+# lower_casing_writer` already uses. The seed mints exactly the triple the
+# writer mints (raw ``content``, the enriched ``embeddingText``, and a vector
+# computed FROM that text), which is what the doors' clear arm is keyed on.
 
-def _no_embedder(monkeypatch):
-    """The documented `_capture_turn_embeddings` no-vector path: the embedder is
-    unavailable for the whole capture, so `turn.emb` is NULL and the write's
-    ``CASE`` reaches its preserve/clear arm instead of the new-vector branch."""
-    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
-        lambda cls, load_timeout=None: None))
-    EmbeddingModel._reset()
+def _seed_enriched_turn(sdk, session_id: str, *, raw: str, enriched: str,
+                        turn: int = 0) -> list:
+    """Write the ``(content, embeddingText, embedding)`` triple the capture mints.
 
-
-def test_recapture_on_with_a_different_rewrite_clears_the_stale_vector(
-        sdk, embedder, enrichment_on, monkeypatch):
-    """#4194 on the preserve arm: with no new vector, the stored one may be kept
-    ONLY while the text it describes is unchanged. The first test in this file
-    that would red if the `prior_et` half of that guard were removed."""
-    sdk.capture_session(CONV, session_id="sess-on2")
-    on_rows = _turn_rows(sdk, "sess-on2")
-    assert all(r[2] is not None for r in on_rows), on_rows
-    assert all(r[3] is not None for r in on_rows), on_rows
-
-    # The embedder disappears (the keyword-only install), and the rewrite
-    # changes: turn 0 becomes "the billing flow is blocked". The stored vector
-    # describes the OLD embeddingText, so it must be CLEARED, not preserved.
-    from tortoise import model_adapters
-
-    class _BillingRewriter:
-        def complete(self, *, system, user):
-            return _target_of(user).replace("the release is blocked",
-                                            "the billing flow is blocked")
-
-    _no_embedder(monkeypatch)
-    monkeypatch.setattr(model_adapters, "build_extractor_model",
-                        lambda *a, **kw: _BillingRewriter())
-    sdk.capture_session(CONV, session_id="sess-on2")
-
-    rows = _turn_rows(sdk, "sess-on2")
-    t0 = rows[0]
-    assert t0[2] == "[user] the billing flow is blocked", t0
-    assert t0[3] is None, (
-        "the stored vector describes the PREVIOUS embeddingText and was "
-        "preserved beside a new one — the #4194 lie (prior_et guard missing)")
+    Seeded, not captured: the capture door is gone (`#4282`), and the door under
+    test is the UPDATE one. The vector is derived from ``enriched`` for the same
+    reason the writer derives it there — the invariant these tests police is
+    that the text and the vector describe the SAME thing.
+    """
+    tid = f"{session_id}_t{turn}"
+    sdk._get_proj().g.query(
+        "MERGE (t:Point {id:$id}) SET t.content=$c, t.embeddingText=$e, "
+        "t.embedding=$v, t.is_episodic=true",
+        params={"id": tid, "c": raw, "e": enriched,
+                "v": compute_embedding(enriched)})
+    return _turn_rows(sdk, session_id)
 
 
-def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
+def test_content_edit_clears_the_enriched_text(sdk, embedder):
     """`update_point(content=…)` re-derives the vector from `content`, so the
     node must not keep an `embeddingText` no vector was computed from
-    (review round 2, P1 — the other write door into the same #4194 rule)."""
-    sdk.capture_session(CONV, session_id="sess-edit")
-    t0 = _turn_rows(sdk, "sess-edit")[0]
-    assert t0[2] == "[user] the auth flow is blocked", t0
+    (review round 2, P1 — the other write door into the same #4194 rule).
+
+    Row SEEDED, not captured: the SDK capture door is deleted (`#4282`); the
+    door under test survives.
+    """
+    t0 = _seed_enriched_turn(
+        sdk, "sess-edit", raw="[user] the auth flow is blocked",
+        enriched="[conv] the auth flow is blocked")[0]
+    assert t0[2] == "[conv] the auth flow is blocked", t0
 
     sdk.update_point(t0[0], content="the billing migration is blocked")
     after = _turn_rows(sdk, "sess-edit")[0]
@@ -1023,8 +696,7 @@ def test_content_edit_clears_the_enriched_text(sdk, embedder, enrichment_on):
                        atol=1e-6), after
 
 
-def test_a_caller_supplied_vector_clears_the_enriched_text(
-        sdk, embedder, enrichment_on):
+def test_a_caller_supplied_vector_clears_the_enriched_text(sdk, embedder):
     """#10523 review round 3 (P3): the OTHER vector door into the same invariant.
 
     Round 2 closed `update_point(content=…)`, which RE-ENCODES. A caller vector
@@ -1034,10 +706,13 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
     text beside a caller's vector computed from nothing of the kind. The
     identity hash cannot catch it (payload-only, and withheld when the vector is
     preserved), so this leg is the only thing that does.
+
+    Row SEEDED, not captured (`#4282`); the door under test survives.
     """
-    sdk.capture_session(CONV, session_id="sess-vec")
-    t0 = _turn_rows(sdk, "sess-vec")[0]
-    assert t0[2] == "[user] the auth flow is blocked", t0
+    t0 = _seed_enriched_turn(
+        sdk, "sess-vec", raw="[user] the auth flow is blocked",
+        enriched="[conv] the auth flow is blocked")[0]
+    assert t0[2] == "[conv] the auth flow is blocked", t0
     assert t0[3] is not None, t0
 
     # A caller vector: the node must not keep the text the OLD vector described.
@@ -1050,33 +725,36 @@ def test_a_caller_supplied_vector_clears_the_enriched_text(
 
     # …and an unrelated update must NOT disturb a writer-minted value (the gate
     # is the KEY, so this cannot be satisfied by clearing unconditionally).
-    sdk.capture_session(CONV, session_id="sess-vec2")
-    t0b = _turn_rows(sdk, "sess-vec2")[0]
-    assert t0b[2] == "[user] the auth flow is blocked", t0b
+    t0b = _seed_enriched_turn(
+        sdk, "sess-vec2", raw="[user] the auth flow is blocked",
+        enriched="[conv] the auth flow is blocked")[0]
+    assert t0b[2] == "[conv] the auth flow is blocked", t0b
     sdk.update_point(t0b[0], status="live")
     assert _turn_rows(sdk, "sess-vec2")[0][2] == t0b[2], (
         "an update with no vector changed the writer-minted embeddingText")
 
 
 def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text(
-        sdk, embedder, enrichment_on):
+        sdk, embedder):
     """#10523 review (P1): the SIBLING `:Point` update door into the same rule.
 
     `update_point` clears `embeddingText` when the vector is replaced or cleared
     (`update_point`'s caller-vector door); `_update_entity` — the door's own
-    docstring calls it *"the SECOND
-    documented UPDATE door onto a `:Point`"* — applies caller props with a bare
-    `SET n += $p`, and its `if "embedding" in props:` block touched only
-    `embedding_verbatim`. So a caller vector landed BESIDE the enriched text it
-    was never computed from: the #4194 lie through the door the round-3 fix did
-    not reach. Tenant-reachable via
+    docstring calls it *"the SECOND documented UPDATE door onto a `:Point`"* —
+    applies caller props with a bare `SET n += $p`, and its `if "embedding" in
+    props:` block touched only `embedding_verbatim`. So a caller vector landed
+    BESIDE the enriched text it was never computed from: the #4194 lie through
+    the door the round-3 fix did not reach. Tenant-reachable via
     `tortoise_update_entity(id, props={"embedding": […]})`, and silent
     afterwards (the identity hash is payload-only; `_record_embedding_identity`
     returns early when the journal carries none).
+
+    Row SEEDED, not captured (`#4282`); the door under test survives.
     """
-    sdk.capture_session(CONV, session_id="sess-ue")
-    t0 = _turn_rows(sdk, "sess-ue")[0]
-    assert t0[2] == "[user] the auth flow is blocked", t0
+    t0 = _seed_enriched_turn(
+        sdk, "sess-ue", raw="[user] the auth flow is blocked",
+        enriched="[conv] the auth flow is blocked")[0]
+    assert t0[2] == "[conv] the auth flow is blocked", t0
     assert t0[3] is not None, t0
 
     # A caller vector: the node must not keep the text the OLD vector described.
@@ -1090,9 +768,10 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
 
     # …and an unrelated `update_entity` must NOT disturb a writer-minted value:
     # the gate is the KEY, so this cannot be satisfied by clearing always.
-    sdk.capture_session(CONV, session_id="sess-ue2")
-    t0b = _turn_rows(sdk, "sess-ue2")[0]
-    assert t0b[2] == "[user] the auth flow is blocked", t0b
+    t0b = _seed_enriched_turn(
+        sdk, "sess-ue2", raw="[user] the auth flow is blocked",
+        enriched="[conv] the auth flow is blocked")[0]
+    assert t0b[2] == "[conv] the auth flow is blocked", t0b
     sdk.update_entity(t0b[0], status="live")
     assert _turn_rows(sdk, "sess-ue2")[0][2] == t0b[2], (
         "an update_entity with no vector changed the writer-minted "
@@ -1108,202 +787,15 @@ def test_a_caller_supplied_vector_through_update_entity_clears_the_enriched_text
     assert cleared[3] is None, cleared
 
 
-def test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild(
-        embedder, enrichment_on, tmp_path):
-    """#10523 review (P2): the caller-vector CLEAR must replay, not just happen.
+# ── 9. The preserve arm is LOAD-BEARING (review round 2, P2) ───────────────
 
-    `update_point(embedding=[…])` / `update_point(embedding=None)` journals a
-    `PointRevised` carrying `embeddingText: None` (the writer sets it beside
-    `embedding_verbatim`, and `emit_props` carries it). `_revise_point` folded
-    that field ONLY inside its `new_content is not None` re-encode branch, so
-    this door's clear was journalled and never replayed — `rebuild()` restored a
-    text the live graph no longer holds, contradicting that branch's own comment
-    ("so a rebuild and the live write agree"). Live is the truth here: the
-    vector was replaced, so no text describes it.
-
-    Non-vacuity: on the pre-fix fold the REBUILT row keeps
-    `'[user] the auth flow is blocked'` while LIVE holds `None`, so the
-    live-vs-rebuilt assertion reds.
-    """
-    from tortoise.log import EventLog
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
-    try:
-        s.capture_session(CONV, session_id="sess-vec-rebuild")
-        before = _turn_rows(s, "sess-vec-rebuild")
-        assert before[0][2] == "[user] the auth flow is blocked", before
-
-        s.update_point(before[0][0], embedding=[1.0, 0.0, 0.0, 0.0])
-        live = _turn_rows(s, "sess-vec-rebuild")
-        assert live[0][2] is None, live
-
-        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
-
-        rebuilt = _turn_rows(s, "sess-vec-rebuild")
-        assert rebuilt[0][2] is None, (
-            "a rebuild restored an embeddingText the LIVE graph does not hold: "
-            "the caller-vector clear was journalled but never replayed "
-            "(#10523 review P2)")
-        # The sibling turn is untouched — the clear is keyed to this record, so a
-        # blanket wipe cannot satisfy this test.
-        assert rebuilt[1][2] == before[1][2], (
-            "the caller-vector clear wiped a SIBLING turn's embeddingText",
-            live, rebuilt)
-    finally:
-        s.close()
-
-
-def test_check_consistency_does_not_red_a_faithful_enriched_graph(
-        embedder, enrichment_on, tmp_path):
-    """#10523 review (P2): the PURE fold must clear `embeddingText` too.
-
-    `check_consistency`'s reference view is `projection._apply_one`
-    (`consistency._fold_journal`: *"Ground truth is `_apply_one`"*), and
-    `embeddingText` is a declared node property that is NOT in any exclusion
-    list — so both sides are supposed to carry it. Both journaled CLEAR paths
-    (`update_point(embedding=…)` / `embedding=None`, and the content-edit
-    re-encode branch) write the key into the record and the GRAPH fold
-    (`_revise_point`) honours both, but `_apply_one`'s `PointRevised` arm folded
-    neither: it kept the creation's enriched text while the live node cleared
-    it, and the checker reported a FALSE `divergence="content"` naming
-    `embeddingText` on a graph the live path itself wrote — with an `action`
-    ("reconcile by replaying the journal") that reproduces exactly that graph,
-    so it could never clear (#8317/#5048 class, one field over).
-
-    Non-vacuity, both halves:
-      * the CONTENT-EDIT leg asserts `ok` outright and reds with
-        `fields=["embeddingText"]` on the pre-fix fold (nothing else diverges
-        there — the re-encode branch also replays the vector);
-      * the CALLER-VECTOR leg asserts `embeddingText` is absent while asserting
-        the point IS still reported for the `embedding` key the PR already
-        documents as a residual (#5046: a caller vector is live-only), so a leg
-        that simply returned `ok` everywhere could not satisfy it.
-    """
-    from tortoise.consistency import check_consistency
-
-    def _diverged_fields(result, pid):
-        for row in result.get("divergent_points") or []:
-            if row.get("id") == pid:
-                return list(row.get("fields") or [])
-        return []
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
-    try:
-        # ── the CONTENT-EDIT door: the graph fold clears ABSOLUTELY ────────
-        s.capture_session(CONV, session_id="sess-cc-edit")
-        t0 = _turn_rows(s, "sess-cc-edit")[0]
-        assert t0[2] is not None, t0
-        s.update_point(t0[0], content="the billing migration is blocked")
-        assert _turn_rows(s, "sess-cc-edit")[0][2] is None
-
-        result = check_consistency(log_path, s._get_proj())
-        assert result["ok"], (
-            "the reference fold disagrees with a FAITHFUL graph after a content "
-            "edit that cleared the enriched text: "
-            f"{result.get('divergent_points')}")
-
-        # ── the CALLER-VECTOR door: live clears PRESENCE-conditionally ─────
-        s.capture_session(CONV, session_id="sess-cc-vec")
-        t1 = _turn_rows(s, "sess-cc-vec")[0]
-        assert t1[2] is not None, t1
-        s.update_point(t1[0], embedding=[1.0, 0.0, 0.0, 0.0])
-        assert _turn_rows(s, "sess-cc-vec")[0][2] is None
-
-        result = check_consistency(log_path, s._get_proj())
-        fields = _diverged_fields(result, t1[0])
-        assert "embeddingText" not in fields, (
-            "the reference fold kept an embeddingText the LIVE graph cleared "
-            f"through the caller-vector door: {result.get('divergent_points')}")
-        # The declared #5046 residual, asserted so this leg cannot pass by the
-        # checker simply saying nothing about the point at all.
-        assert "embedding" in fields, (
-            "this leg no longer exercises the caller-vector door — the #5046 "
-            f"residual it leans on is gone: {result.get('divergent_points')}")
-
-        # ── an unrelated revision must NOT clear it (presence-conditional) ──
-        s.capture_session(CONV, session_id="sess-cc-ok")
-        t2 = _turn_rows(s, "sess-cc-ok")[0]
-        s.update_point(t2[0], status="live")
-        assert _turn_rows(s, "sess-cc-ok")[0][2] == t2[2], (
-            "a revision that never spoke about embeddingText cleared it in the "
-            "pure fold")
-        assert "embeddingText" not in _diverged_fields(
-            check_consistency(log_path, s._get_proj()), t2[0])
-    finally:
-        s.close()
-
-
-def test_an_unwritable_content_edit_keeps_the_text_in_BOTH_folds(
-        embedder, enrichment_on, tmp_path):
-    """#10523 review (P2): the CONTENT-EDIT gate must be the GRAPH fold's gate.
-
-    ``_revise_point`` NULLS its own ``new_content`` local when the value is one
-    the store cannot take (#3689), so its ABSOLUTE ``n.embeddingText = NULL`` is
-    never emitted for such a record — the text is KEPT. ``_apply_one`` leaves
-    its local alone (its guard is an inline conjunction, it does not reassign),
-    so a bare ``new_content is not None`` made the SAME record count as a
-    content edit here and POPPED ``embeddingText``. The two folds then disagreed
-    on one journal: ``check_consistency`` — whose reference view IS
-    ``_apply_one`` — named a divergence on a graph the GRAPH fold itself had
-    just produced, with an `action` ("replay the journal") that reproduces
-    exactly that graph and so can never clear it (the #8317/#5048/#3817 class,
-    and a breach of the module's own #330 parity contract).
-
-    Record shape: a ``PointRevised`` whose ``new_content`` is unwritable and
-    which does NOT state ``embeddingText`` at all — the corrupt/hand-edited
-    JSONL shape the #3689 guards exist to survive. ⚠️ The
-    ``embeddingText: None`` variant does NOT discriminate: there the
-    presence-conditional arm clears it in BOTH folds, so both already agree and
-    a leg built on it would pass either way. The absent key is what separates
-    the two gates.
-
-    Non-vacuity: on the pre-fix fold this reds with ``fields=["embeddingText"]``
-    (the graph kept the creation's enriched text; the pure fold dropped it). The
-    two prior assertions pin the premise — that the graph fold KEEPS the text —
-    so the leg cannot pass by both folds clearing.
-    """
-    import json
-
-    from tortoise.consistency import check_consistency
-    from tortoise.log import EventLog
-
-    log_path = str(tmp_path / "events" / "sdk.jsonl")
-    s = TortoiseSDK(str(tmp_path / "t.db"), event_log_path=log_path)
-    try:
-        s.capture_session(CONV, session_id="sess-unwritable")
-        rows = _turn_rows(s, "sess-unwritable")
-        pid = rows[0][0]
-        enriched = rows[0][2]
-        assert enriched == "[user] the auth flow is blocked", rows
-
-        # Append the record the #3689 gate is written for: content the store
-        # cannot take (a NUL string), and NO `embeddingText` key.
-        with open(log_path, "a", encoding="utf-8") as fh:
-            fh.write(json.dumps({
-                "type": "PointRevised",
-                "id": pid,
-                "new_content": "a\x00b",
-                "initiated_by": "hand-edited",
-            }) + "\n")
-
-        # The GRAPH fold is the reference for what this record means.
-        s._get_proj().rebuild(EventLog(log_path), confirm_destructive=True)
-        rebuilt = _turn_rows(s, "sess-unwritable")
-        assert rebuilt[0][2] == enriched, (
-            "the graph fold dropped the text for an UNWRITABLE content edit — "
-            "the premise of this leg is gone, so it no longer tests the gate",
-            rebuilt)
-
-        # ... and the PURE fold must agree with it, which is what reds pre-fix.
-        result = check_consistency(log_path, s._get_proj())
-        assert result["ok"], (
-            "the reference fold disagrees with the graph the GRAPH fold built, "
-            "for an unwritable content edit: "
-            f"{result.get('divergent_points')}")
-    finally:
-        s.close()
+def _no_embedder(monkeypatch):
+    """The documented `_capture_turn_embeddings` no-vector path: the embedder is
+    unavailable for the whole capture, so `turn.emb` is NULL and the write's
+    ``CASE`` reaches its preserve/clear arm instead of the new-vector branch."""
+    monkeypatch.setattr(EmbeddingModel, "get", classmethod(
+        lambda cls, load_timeout=None: None))
+    EmbeddingModel._reset()
 
 
 # ── 10. `embeddingText` is WRITER-minted at every intake door ──────────────

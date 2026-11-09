@@ -82,7 +82,7 @@ __all__ = [  # noqa: RUF022
     "Vocab", "CORE_POINT_KINDS",
     "compile_vocab", "get_vocab", "refresh_vocab",
     # models
-    "ProvenanceRef", "Source", "Entity", "Point", "OperatorTarget",
+    "ProvenanceRef", "Source", "Entity", "Point", "Mention", "OperatorTarget",
     "Operator", "ExtractorInfo", "TelemetryExtractor", "TelemetryModel",
     "TelemetryCounts", "Telemetry", "CommitPayload",
     # Layer-1
@@ -94,7 +94,7 @@ __all__ = [  # noqa: RUF022
     "canonical_payload", "compute_client_commit_id", "point_content_id",
     # ingest budget (#4051 §3.1)
     "declared_commit_write_count", "commit_ingest_charge_bytes",
-    "COMMIT_INGEST_BYTES_PER_NODE",
+    "payload_envelope_bytes", "COMMIT_INGEST_BYTES_PER_NODE",
     # reconciliation
     "GraphState", "PointReconcile", "EntityReconcile", "OperatorReconcile",
     "ReconcileResult", "reconcile_payload",
@@ -563,6 +563,95 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
         )
 
 
+class Mention(BaseModel):
+    """A phrase that POINTS at something instead of naming it (**#11021**).
+
+    A mention is **not** an entity and never becomes one: it is recorded on the
+    claim that used it, with the surface the claim used and the span it
+    addressed, so a reader can see what the sentence meant without a node being
+    minted for a pronoun. It is the DM1 property shape
+    (``docs/epics/2026-11-05-5087-extractor-v4/05-plan.md``): ``surface``,
+    ``span_start``, ``span_end``, ``kind_guess`` — and deliberately **no
+    ``claim_id``**, because the point carrying the property IS the claim.
+
+    ⛔ **PAYLOAD-ONLY TODAY — this is not graph state, and must not be read as it.**
+    The record reaches **four** in-memory surfaces and then STOPS, and they are not
+    interchangeable (review at `5da3575b7a`, P2):
+
+    - the extraction payload — ``points[].mentions``, built by
+      ``extractor_v2._mentions_for_claim``;
+    - the run's evidence block — ``result["mentions"]["records"]``, assembled in
+      ``extract_session_v2``;
+    - **the producer channel** — ``result["embed_list"]["mentions"]`` and
+      ``result["s2_embed"]["mentions"]``. ⚠️ These two are NOT one kind (review at
+      ``b791a3eb2``, P3 — the earlier text ranked both as raw on every path, which
+      is false for the armed one):
+      ``embed_list`` is ``route_mentions``' own output, and ``s2_embed`` is
+      REBOUND to it once the cue is armed (``extract_session_v2`` assigns
+      ``result["s2_embed"] = embed_list`` after the route), so armed they carry
+      ``_mention_record``'s VERIFIED records — a re-derived ``rule_id``, a
+      cue-derived span and a deduped list. On the **fail-open** path
+      (``route_mentions`` raised) they carry the model's entry verbatim, an
+      unverified ``rule_id`` and span included. Read them as "what S2 chose", never
+      as the clamped committed shape the first two surfaces publish.
+
+    Only the first two go through ``extractor_v2._clamped_mention``, which
+    re-derives ``rule_id`` against ``referentiality.judge``, cuts ``claim_ref``
+    through the write's own window, and ships a declared ``quote``/``narrative``
+    address only where that text still puts the surface at those offsets — with
+    ONE stated exception, applied by BOTH builders: an ABSENT ``narrative`` is an
+    unknowable haystack, so that declaration ships UNCHECKED rather than demoted
+    (an absent ``quote`` is a definite mismatch). ``span_source`` ``model`` is not
+    a verification: it is the honest label for "the model asserted these bytes"
+    (an unverified offset pair survives under it — it is demoted, never dropped).
+
+    No declared write door carries it, and there are **four** of them: the REST
+    ``CreatePointRequest`` (no ``mentions`` field at all), the SDK capture
+    whitelist (``sdk._CAPTURE_PASSTHROUGH_ORDER``, ``#2949``'s response-parity
+    surface: ``quote/when/search_keys/source_turn_id/span_start/span_end`` only),
+    ``hosted_api._execute_commit_writes`` — the door the v2 payload actually
+    uses, which enumerates its ``sdk.create_point`` kwargs (``#11239``) — and the
+    SELF-HOST mirror ``selfhost_api.CreatePointRequest`` /
+    ``selfhost_api.create_point``, which is a separate model and route that
+    enumerates its ``sdk.create_point`` kwargs the same way (``#4032`` frames the
+    two as parity mirrors, so a hosted-only addition re-opens the divergence).
+    So a capture's ``stats["mentions_recorded"]`` counts records the write
+    DISCARDS — on either deployment.
+    DM1's home on the Point is declared but unfulfilled; persisting it (a
+    flat/scalar projection, or an explicit session-evidence-only ruling) is
+    **#11239**, deliberately not this slice. ``tests/test_referentiality_11021.py
+    ::test_the_mention_record_is_payload_only_and_says_so`` pins the boundary so
+    this docstring cannot quietly become a lie.
+
+    ``span_start``/``span_end`` are the same "pointer, not payload" pair the
+    Point carries (E4 / ``#5007``): all-or-nothing and ``end > start``, or both
+    absent. Absent means "the surface was not uniquely locatable in the text the
+    extraction saw" — never a fabricated offset, because an address that names
+    the wrong bytes is worse than no address.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    surface: str = Field(min_length=1, max_length=200)
+    claim_ref: str = ""              # the claim's own content (no `claim_id` — DM1)
+    quote: str = Field(default="", max_length=200)
+    span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
+    span_end: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)
+    #: Which text the offsets address: ``"quote"`` (the claim's own verbatim
+    #: quote), ``"narrative"`` (the compiled story the extraction saw), or
+    #: ``"model"`` (the extraction model supplied them). A bare offset that does
+    #: not say which space it is in is not an address — the Point's own span is
+    #: quote-inside-turn, so the two are not interchangeable.
+    span_source: Literal["", "quote", "narrative", "model"] = ""
+    kind_guess: str | None = Field(default=None, max_length=60)
+    rule_id: str = ""                # which rule held it — no silent hold
+
+    @model_validator(mode="after")
+    def _span_is_an_address(self) -> Mention:
+        validate_span(self.span_start, self.span_end)
+        return self
+
+
 class Point(BaseModel):
     """A single extracted point — content-addressed id, closed kind vocab."""
 
@@ -595,6 +684,13 @@ class Point(BaseModel):
                     "hint; absence = Tier-B default",
     )
     slots: ParticipantSlots | None = None  # #1418: typed participant slots
+    # #11021: the phrases this claim POINTED with but did not NAME. Additive-
+    # optional, so a pre-#11021 payload validates unchanged, and the write path
+    # never promotes a member to an :Object — a mention is a record, not a node.
+    # ⛔ PAYLOAD-ONLY: no writer persists this list (see `Mention`'s docstring),
+    # so a graph read after a capture holds the claim and no mention on it.
+    # Persistence is #11239, not this slice.
+    mentions: list[Mention] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def _span_is_an_address(self) -> Point:
@@ -1024,22 +1120,57 @@ def commit_ingest_charge_bytes(payload) -> int:
       ``confidence``/``c_cal``/``status``/``reason``, so charging it would
       understate the bytes a client actually sends (``docs/INGEST_CONTRACT.md``
       §9 states the unit in these terms);
-    * the **node floor** stops the reverse — a ``points: []`` commit's ~1 KB
-      body mints ~3 KB of nodes, which is the cheapest iteration of the very
-      loop #4051 is about (measured pre-fix: unbounded).
+    * the **node floor** stops the reverse — a ``points: []`` commit's ~840 B
+      body mints ~4 KB of nodes (``_COMMIT_FIXED_NODES`` = 4), which is the
+      cheapest iteration of the very loop #4051 is about (measured pre-fix:
+      unbounded).
 
     Serializing the payload costs one pass; the commit path ALSO canonicalizes
     a JSON subset per request, but only to hash ``client_commit_id`` — this
     charge deliberately measures the full body instead. It runs on the
     endpoint's worker thread (``asyncio.to_thread(_commit_sync)``), never on
     the event loop.
+
+    ⛔ THE PAYLOAD TERM CAN NEVER BE ``0``. ``model_dump_json`` RAISES on a value
+    it cannot render as UTF-8 — a lone surrogate (``"\ud800"``, carried as a
+    JSON escape by any body and accepted by the schema) does it, and the field
+    carrying it need not be one the request is charged for: ``telemetry``'s
+    free-form strings are excluded from ``canonical_payload`` and are never
+    METERED, so a 500 KB ``summary`` used to write while the charge collapsed to
+    the node floor — the fail-OPEN direction for a throttle, one endpoint away
+    from the capture lane's identical hole (#4051 §3.1, found by review of
+    PR #11214). ``payload_envelope_bytes`` renders the same model through
+    ``json.dumps`` with ``ensure_ascii``, which ESCAPES a lone surrogate instead
+    of raising, and encodes with ``surrogatepass``, which cannot fail on any
+    ``str`` a JSON body can produce.
+    """
+    return max(payload_envelope_bytes(payload),
+               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
+
+
+def payload_envelope_bytes(model) -> int:
+    """Bytes of a validated request model — and it can never come out ``0``.
+
+    Shared by BOTH session write lanes' charges (commit: this module; capture:
+    ``hosted_api.capture_ingest_charge_bytes``), because they spend ONE per-org
+    window: an under-count on either is a free write on both.
+
+    The fast path is ``model_dump_json`` (the canonical re-serialization). Its
+    fallback must never be ``0``: a body the fast path cannot render is still a
+    body that gets stored, so returning ``0`` charges the node floor only and
+    removes the bound. ``json.dumps`` with ``ensure_ascii`` ESCAPES a lone
+    surrogate instead of raising, and ``surrogatepass`` cannot fail on any
+    ``str`` a JSON body can carry — so the fallback OVER-counts the escape
+    rather than under-counting the write.
     """
     try:
-        payload_bytes = len(payload.model_dump_json().encode("utf-8"))
-    except Exception:  # a charge must never fail a commit
-        payload_bytes = 0
-    return max(payload_bytes,
-               declared_commit_write_count(payload) * COMMIT_INGEST_BYTES_PER_NODE)
+        return len(model.model_dump_json().encode("utf-8"))
+    except Exception:  # never shrink to 0; model_dump() is the only branch
+        # that can still raise (the docstring scopes the guarantee to any ``str``
+        # a JSON body can carry, not to the model itself)
+        return len(json.dumps(model.model_dump(), default=str,
+                              ensure_ascii=True)
+                   .encode("utf-8", "surrogatepass"))
 
 
 # ── Layer-1 validation (deterministic) ────────────────────────────────────
@@ -1182,9 +1313,12 @@ def _bare_kind(k: Any) -> str:
 def _slot_role_refs(slots: Any) -> list[tuple[str, Any]]:
     """(role, ref) pairs for the entity-role slots (subject/object).
 
-    The ``event`` slot is event-as-content (#1417 B2) — its resolution is
-    owned by the #1370 write path, never Layer-1 (a slot name like "the
-    Aug 3 meeting" is not an entity name and must not 422 on that basis).
+    The ``event`` slot is event-as-content (#1417 B2) — its binding belongs
+    to the #1417 ``aboutEvent`` work, which ``subject_binding._ROLE_TARGET``
+    deliberately excludes, and NOTHING resolves it against entities: not
+    Layer-1 and not the #1370 write path (a slot name like "the Aug 3
+    meeting" is not an entity name and must not 422 on that basis).
+    #11021 P3-a.
     Accepts ParticipantSlots models or plain dicts (the local extractor
     mirrors payloads as dicts); non-dict refs are skipped defensively.
     """

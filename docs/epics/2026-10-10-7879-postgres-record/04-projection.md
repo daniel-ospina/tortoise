@@ -65,6 +65,15 @@ Interface A states four properties, and the failure each one prevents:
 2. **A declared refusal is not a skip — but a refusal is only correct when the
    record genuinely cannot represent the operation.** `EntityMutated op=rename`
    is *known* and *refused* with a written reason (`RefusedJournalOperation`).
+   ⚠️ **STALE SINCE #9948 — do not re-derive the refusal from this bullet.** The
+   key moved to the stable `id`, which makes a rename an ordinary column patch,
+   so `Dispatch.refused_ops` is now EMPTY. What remains, from #9881's follow-up,
+   is a PAYLOAD refusal rather than an op refusal: a rename record whose applied
+   map carries no `name` (a record carrying only the reserved envelope `name`, or
+   an empty/name-less `state`) raises `RecordProjectionError` naming the op,
+   instead of emitting the 0-effect `SET node_key = node_key` that silently kept
+   the OLD name. The producer's own record always carries `state['name']`, so no
+   real write is refused.
    `PointsMerged` used to sit beside it and was **wrong to**: the graph fold's
    whole mutation for a merge is one `DETACH DELETE` per `merge_ids` entry
    (`projection/entities.py::_EntityHandlers._delete`; `keep_id` is read nowhere

@@ -639,21 +639,27 @@ def test_an_argument_that_LOOKS_read_only_is_not_taken_at_face_value():
     `tortoise_onboarding_seed`'s no-name call was ruled out PRE-EMPTIVELY for the
     same reason (a COMPACT org has no person gap, so the same no-name call falls
     through to `seed_onboarding_anchors`) — that exclusion is the only thing ever
-    written about it: no arm for it was added and then removed. Both are
-    STATE-conditional, which no argument predicate can see, so both stay UNSAFE
-    and the rule count stays four.
+    written about it: no arm for it was added and then removed.
+
+    ⛔ `tortoise_onboarding_seed` has NO ARM HERE ANY MORE, and its absence is
+    deliberate rather than an omission: #4282 Phase 3.2 REMOVED the tool from
+    the registry, so it is in neither `TOOL_REGISTRY` nor
+    `RETIRED_TOOL_REGISTRY` — and `_wait_bound_refusal_result` emits
+    `committed`/`retry_safe`/`retry_rule` only for a name in the SERVED write
+    set, so an arm naming it would assert a payload the seam no longer builds
+    for it (measured: `KeyError: 'committed'`). The property it existed for is
+    still carried, by the `tortoise_manage_sources` arm above — the surviving
+    ``looks-like-a-read`` case, and the one whose state-conditional write the
+    reviewer actually falsified. It stays UNSAFE, so the rule count stays four.
+
+    The rule itself is unchanged: both exclusions are STATE-conditional, which
+    no argument predicate can see.
     """
     listing = _error(ms._wait_bound_refusal_result(
         "tortoise_manage_sources", {"action": "list"}))["data"]
     assert listing["committed"] == "unknown"
     assert listing["retry_safe"] is False
     assert listing["retry_rule"] == ms._WAIT_BOUND_RETRY_RULE_UNSAFE
-
-    for args in ({}, {"org_name": "Acme"}):
-        seed = _error(ms._wait_bound_refusal_result("tortoise_onboarding_seed", args))["data"]
-        assert seed["committed"] == "unknown", (
-            "a no-name seed still seeds a compact org — it is never a known-no-write")
-        assert seed["retry_safe"] is False
 
 
 def test_a_tool_whose_DECLARED_default_is_the_preview_is_recognised():

@@ -10,11 +10,14 @@ The live end-to-end demonstration (real capture → real journal replay into a
 throwaway record → census exit 0 → one row removed → exit 2) is a lane-run
 artifact on throwaway stores, not a CI test; what CI can and must hold is the
 comparison core and the CLI contract, which is everything the verdict is made
-of. The STORE LEGS are pinned separately, without stores: `read_record_turns`
-is driven through a STUBBED connection (its scoped door, its SQL column
-contract and the refusal each failure raises) and `read_graph_turns` through a
-fake `g` (paging, the aggregate cross-check, and the classification of every
-row the store returns). An unpinned door is exactly how an unscoped read
+of. The STORE LEGS are pinned separately — `read_record_turns` through a
+STUBBED connection (its scoped door, its SQL column contract and the refusal
+each failure raises), `read_graph_turns` through a fake `g` (paging, the
+aggregate cross-check, and the classification of every row the store returns),
+AND through four real throwaway EMBEDDED redislite stores (#11112/#11113: the
+presence check, the write-freedom pins and the LOST-store arm can only be
+measured against a real `GRAPH.LIST` — a fake cannot show that a typo'd
+`--graph-name` mints a graph). An unpinned door is exactly how an unscoped read
 (#10024) would certify vacuously while every core case stayed green.
 """
 
@@ -22,6 +25,7 @@ from __future__ import annotations
 
 import ast
 import json
+import os
 import sys
 import types
 from pathlib import Path
@@ -106,6 +110,13 @@ def _census(nodes, rows):
     return tpc.census(graph, record, sample=5)
 
 
+def _census_titled(graph_name):
+    """The same census, with the graph identity the report must now carry."""
+    graph, record = _stores({"s1_t0": _graph_node("s1_t0", "s1")},
+                            {"s1_t0": _record_row("s1_t0")})
+    return tpc.census(graph, record, sample=5, graph_name=graph_name)
+
+
 def _problems(report: dict, session: str) -> list[dict]:
     for v in report["parity"]["failed_sessions"]:
         if v["session"] == session:
@@ -178,6 +189,12 @@ def test_exact_parity_passes_and_the_dry_run_counts():
     rows = {f"s1_t{i}": _record_row(f"s1_t{i}") for i in range(3)}
     report = _census(nodes, rows)
     assert report["verdict"] == "CLEAN"
+    # ⛔ THE ARTIFACT NAMES ITSELF (#11004 review, gate-fail-open). The consumer
+    # (`tortoise/cache_eviction.py::load_parity_report`) REFUSES a report that names no
+    # instrument, because a nameless one is attributable to any population by whoever
+    # hands it over — so the honest report must carry this field or requiring it would
+    # be a gate that can never open.
+    assert report["instrument"] == tpc.INSTRUMENT == "tools/turn_parity_census.py"
     assert report["dry_run"]["would_delete_turn_nodes"] == 3
     assert report["parity"]["failed_sessions"] == []
     session = report["dry_run"]["per_session_sample"][0]
@@ -417,6 +434,116 @@ def test_graph_name_help_names_the_graph_leg_only(capsys):
     assert "--org-id/--graph-id" in block
 
 
+def test_the_report_carries_the_graph_it_measured():
+    """⛔ THE ARTIFACT MUST NAME ITS TARGET, OR THE CONSUMER'S CHECK CANNOT FAIL.
+
+    Review P1 on PR #11004: `census()` emitted no graph identity, so
+    `cache_eviction.load_parity_report` filled the caller's own name in — and the
+    binding that exists to stop a CLEAN census of graph A licensing a sweep of graph B
+    proved only that the operator typed one string. The identity is authored HERE, by
+    the leg that read the graph, so the consumer has something to compare.
+    """
+    report = _census_titled("live-v4")
+
+    assert report["graph"] == "live-v4"
+
+
+def test_an_unattributed_census_says_SO_instead_of_omitting_the_field():
+    """`None` is emitted, never dropped: a shape from before the field existed must not
+    be indistinguishable from an artifact that knows it has no target."""
+    nodes = {"s1_t0": _graph_node("s1_t0", "s1")}
+    report = _census(nodes, {"s1_t0": _record_row("s1_t0")})
+
+    assert "graph" in report
+    assert report["graph"] is None
+
+
+def test_the_cli_writes_the_measured_graph_into_the_json_artifact(
+        monkeypatch, tmp_path, capsys):
+    """End-to-end: `--uri` → the JSON an operator hands to `--parity-report` names the
+    graph the run actually addressed (derived by the canonical resolver, not the argv)."""
+    out = tmp_path / "r.json"
+    monkeypatch.setattr(tpc, "read_graph_turns", lambda *a, **k: {
+        "nodes": {"s1_t0": _graph_node("s1_t0", "s1")}})
+    monkeypatch.setattr(tpc, "read_record_turns", lambda *a, **k: {
+        "rows_by_key": {"s1_t0": _record_row("s1_t0")},
+        "non_turn_shaped": 0})
+
+    assert tpc.main(_argv("--json", str(out))) == 0
+    assert json.loads(out.read_text())["graph"] == "g"
+    assert "graph      : g" in capsys.readouterr().out
+
+
+def test_resolve_graph_name_uses_the_canonical_uri_derivation():
+    """Not a second URI parser: the URI arm is `resolve_db_endpoint`, the derivation
+    `FalkorProjection.from_uri` itself calls — so the emitted name is the one the
+    connection addressed. A hand-rolled parse here would be the same defect one layer
+    down (the `--graph-name` override and the embedded default must both still work)."""
+    assert tpc.resolve_graph_name("docker://h:1/live-v4", None, None) == "live-v4"
+    assert tpc.resolve_graph_name("docker://h:1/live-v4", None, "team_acme") \
+        == "team_acme"
+    assert tpc.resolve_graph_name(None, "/tmp/x.db", None) == "tortoise"
+    assert tpc.resolve_graph_name("docker://h:1/", None, None) == "tortoise"
+
+
+def test_resolve_graph_name_never_treats_an_EMPTY_uri_as_no_uri():
+    """`--uri "$UNSET_VAR"` must not resolve to the embedded store's graph name.
+
+    Measured before the fix (review P2 on PR #11097): the empty value fell through the
+    truthiness test to the embedded default, so a run that read NOTHING but the local
+    embedded graph emitted `graph: "tortoise"` — a name the cache census accepts for a
+    hosted graph of the same name. A shell accident licensed a sweep of an instance the
+    census never touched, which is the `different instance` shape the binding exists to
+    refuse.
+    """
+    with pytest.raises(ValueError):
+        tpc.resolve_graph_name("", None, None)
+
+
+@pytest.mark.parametrize("flag,extra", [
+    ("--uri", []),
+    ("--db-path", []),
+    # ⛔ `--graph-name ""` won the `graph_name is not None` branch and was written
+    # into the artifact as `graph: ""` while the EMBEDDED read fell back to
+    # `tortoise` — an artifact that misstates its own target AND can never be
+    # loaded, because the consumer refuses a blank name (review P2, cycle 2).
+    ("--graph-name", ["--uri", "docker://:@127.0.0.1:1/g"]),
+])
+def test_an_EMPTY_graph_target_flag_refuses_by_name(flag, extra, capsys):
+    """An empty flag value is NOT "no flag" — the rule the record flags already state.
+
+    Wrong outcome before the fix: `--uri ""` fell through to the EMBEDDED store, exited
+    0 CLEAN, and (once this tool authors the identity) wrote a report naming a graph on
+    an instance the run never opened (review P2 on #11097).
+    """
+    code = tpc.main([flag, "", *extra, "--record-dsn", "postgresql://x/y",
+                     "--org-id", "o", "--graph-id", "g"])
+
+    assert code == 1
+    err = capsys.readouterr().err
+    assert "EMPTY" in err and flag in err
+    assert "EMBEDDED" in err
+
+
+def test_a_broken_tortoise_import_is_a_CensusError_not_a_traceback(monkeypatch):
+    """The URI arm's import is guarded, like `read_graph_turns`' own.
+
+    Measured before the fix (review P2, cycle 2): the new unguarded
+    `from tortoise.projection import resolve_db_endpoint` raised ImportError straight
+    out of `main()`, which exits the interpreter with **1** — the documented USAGE
+    code — so a broken install read as a mistyped flag and the operator retried flags
+    instead of repairing the environment.
+    """
+    import sys as _sys
+
+    monkeypatch.setitem(_sys.modules, "tortoise.projection", None)
+
+    with pytest.raises(tpc.CensusError) as excinfo:
+        tpc.resolve_graph_name("docker://h:1/g", None, None)
+
+    assert "tortoise import failed" in str(excinfo.value)
+
+
 def test_main_maps_clean_to_zero_and_refused_to_two(monkeypatch, tmp_path):
     nodes = {"s1_t0": _graph_node("s1_t0", "s1")}
     graph = {"nodes": nodes}
@@ -532,6 +659,18 @@ def test_a_graph_read_row_of_the_wrong_shape_is_an_unreadable_side(
     class _Proj:
         g = _G()
 
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
+        # `from_uri('docker://…/g')` resolves the graph name from the URI path;
+        # the fake carries it so the presence pre-check asks about the graph the
+        # real projection would have addressed, not the default.
+        graph_name = _graph_name = "g"
+
         @classmethod
         def from_uri(cls, *a, **k):
             return cls()
@@ -561,6 +700,14 @@ def test_a_non_sequence_graph_vector_refuses_rather_than_reading_as_absent(
 
     class _Proj:
         g = _G()
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+        graph_name = _graph_name = "g"
 
     from tortoise.projection import FalkorProjection
     monkeypatch.setattr(FalkorProjection, "from_uri",
@@ -691,12 +838,28 @@ def _turn_row(inner_id: int, tid: str, sid: str, et=None) -> list:
             "2026-10-25T00:00:00+00:00", "event", None, False, [sid], et]
 
 
-def _patch_proj(monkeypatch, g):
+def _patch_proj(monkeypatch, g, graphs=("g", "tortoise")):
     from tortoise.projection import FalkorProjection
 
+    class _DB:
+        # The presence pre-check asks the STORE (`GRAPH.LIST`) before the leg
+        # addresses the graph it was handed — a projection without a store
+        # handle is not a projection, and a fake that omits it would silently
+        # exercise the "store unreadable" refusal instead of the read.
+        @staticmethod
+        def list_graphs():
+            return list(graphs)
+
     class _Proj:
+        # The pre-check asks about the projection's OWN resolved name (a redirect
+        # or a URI path can change which graph is addressed), so the fake has to
+        # carry one like the real projection does — without it the leg refuses a
+        # graph it cannot name (fail-closed) instead of exercising the read.
+        graph_name = _graph_name = "g"
+
         def __init__(self, inner):
             self.g = inner
+            self.db = _DB()
 
         @classmethod
         def from_uri(cls, *a, **k):
@@ -921,18 +1084,1251 @@ def test_the_embedded_leg_honours_graph_name(monkeypatch):
             seen["path"] = path
             seen.update(kwargs)
             self.g = _G()
+            # the presence pre-check asks about the projection's OWN resolved
+            # name, so the fake must carry one like the real projection does
+            self.graph_name = self._graph_name = kwargs.get("graph_name")
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["team_acme", "tortoise"]
+
+        db = _DB()
 
     import tortoise.projection as projection
     monkeypatch.setattr(projection, "FalkorProjection", _Proj)
 
     graph = tpc.read_graph_turns(None, "/tmp/x.db", "team_acme")
     assert graph["nodes"] == {}
-    assert seen == {"path": "/tmp/x.db", "graph_name": "team_acme"}
+    # the bind is asked to WRITE NOTHING (#11112): the health probe and the
+    # schema DDL are both `GRAPH.QUERY` statements, and on a graph that does not
+    # exist yet the first one creates it.
+    assert seen == {"path": "/tmp/x.db", "graph_name": "team_acme",
+                    "skip_health_check": True, "ensure_indexes": False}
 
     seen.clear()
     tpc.read_graph_turns(None, "/tmp/x.db", None)
-    assert seen == {"path": "/tmp/x.db", "graph_name": "tortoise"}
+    assert seen == {"path": "/tmp/x.db", "graph_name": "tortoise",
+                    "skip_health_check": True, "ensure_indexes": False}
 
+
+# ── the graph must ALREADY EXIST: the gate never creates its own target ──────
+#
+# #11112. Measured on `origin/main` before this pin: `--graph-name tortise`
+# (typo) on a store holding only `tortoise` exited 3 with the correct verdict,
+# and `GRAPH.LIST` afterwards held `['tortise', 'tortoise']` — the first
+# `GRAPH.QUERY` on a selected graph is the creating operation on BOTH legs, so
+# a wrong name wrote a stub graph into the store the run was certifying. The
+# verdict was safe; the store was not, and the exit-3 message then described a
+# graph the previous typo had created (wrong name vs drained graph stopped
+# being distinguishable in practice, not just in the message).
+
+def _embedded_store_with_tortoise(tmp_path, monkeypatch):
+    """A real embedded store: graph `tortoise`, with one Point and one Meta node.
+
+    Measured on the result: `MATCH (n) RETURN count(n)` → 2 — the `(:Point)` this
+    helper creates, plus the `(:Meta)` the bind's schema DDL writes. So the store
+    holds exactly ONE TURN node, which is the population the census reads; a
+    "ONE node" shorthand would be wrong in the same way the EMPTY twin's
+    docstring was (see its note below).
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_presence.db")
+    proj = FalkorProjection(db_path, graph_name="tortoise",
+                            skip_health_check=True)
+    try:
+        proj.g.query("CREATE (:Point {id:'s1_t1', is_episodic:true, "
+                     "pointKind:'event'})")
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+    return db_path
+
+
+def _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch):
+    """A real embedded store holding exactly one graph, `tortoise`, and zero POINTS.
+
+    #11113 review cycle 3, finding 2: the earlier wording said "ZERO nodes" and
+    "no node is ever written", and both are false — the default bind issues the
+    schema DDL, which on a fresh graph writes one `(:Meta)` node (measured:
+    `MATCH (n) RETURN count(n)` → 1, `Point` → 0). The property this fixture is
+    for is the CENSUS predicate, `is_episodic`, which really is 0 here.
+
+    This is #10017's own post-purge state: the drain has happened, the graph
+    still EXISTS. It is the state the presence check must NOT refuse.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_empty.db")
+    # default bind kwargs: the graph is created and its DDL writes one (:Meta),
+    # but no Point — which is the population the census counts.
+    proj = FalkorProjection(db_path, graph_name="tortoise")
+    try:
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+        n = proj.g.query("MATCH (p:Point) RETURN count(p)").result_set[0][0]
+        assert n == 0, f"fixture is not empty: {n} node(s)"
+    finally:
+        proj.close()
+    return db_path
+
+
+def test_a_wrong_graph_name_is_REFUSED_before_it_creates_the_graph(
+        tmp_path, monkeypatch):
+    """The gate must not mint the target it certifies (#11112)."""
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortise")
+    assert "does not exist" in str(exc.value)
+    assert "tortoise" in str(exc.value)      # names what IS there
+
+    from tortoise.projection import FalkorProjection
+    proj = FalkorProjection(db_path, graph_name="tortoise",
+                            skip_health_check=True)
+    try:
+        # the ROW is the measurement: the typo did not become a graph.
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+
+
+def test_a_NAMELESS_target_is_REFUSED_not_verified_as_some_other_graph(
+        tmp_path, monkeypatch):
+    """⛔ The guard must ask about the name the run will OPEN (#11113 review P2).
+
+    Before the fix `wanted` was an `or`-chain, so a FALSY resolved name fell
+    through to `requested` / `"tortoise"`: the guard verified a graph this run
+    would not open, PASSED, and the read then created the nameless one. Measured
+    on this exact fixture: `FalkorProjection(path, graph_name="")` keeps
+    `_graph_name == ""` (and `resolve_db_endpoint(uri, "")` returns `""`), the
+    guard passed for `"tortoise"`, and `GRAPH.LIST` went `['tortoise']` →
+    `['tortoise', '']` — the #11112 defect one layer down.
+
+    Unreachable from either CLI (both pre-refuse an empty `--graph-name`), so
+    this pins the LIBRARY arm, where an environment lookup like
+    `os.environ.get("TORTOISE_GRAPH", "")` produces exactly this name.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import FalkorProjection
+
+    proj = FalkorProjection(db_path, graph_name="", skip_health_check=True,
+                            ensure_indexes=False)
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc._refuse_unless_graph_present(proj, "")
+        assert "no NAME" in str(exc.value)
+
+        # And it is the HANDLE, not the argument, that decides: a caller that
+        # passes a perfectly good name must still be refused, because the
+        # projection addresses `""` regardless of what the caller believes.
+        with pytest.raises(tpc.CensusError):
+            tpc._refuse_unless_graph_present(proj, "tortoise")
+
+        # The ROW is the measurement: the nameless graph was never created.
+        assert sorted(proj.db.list_graphs()) == ["tortoise"]
+    finally:
+        proj.close()
+
+
+def test_an_ABSENT_name_refuses_rather_than_assuming_the_default(
+        monkeypatch):
+    """No name anywhere is not `tortoise` — the same rule, one spelling over.
+
+    A fake without a name and a caller without an argument used to fall through
+    to `"tortoise"` and verify THAT, which is a presence claim about a graph the
+    object never proved it addresses.
+    """
+
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            return ["tortoise"]
+
+    class _Proj:
+        db = _DB()
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc._refuse_unless_graph_present(_Proj(), None)
+    assert "no NAME" in str(exc.value)
+
+
+def test_a_present_graph_is_never_refused_by_the_presence_check(
+        tmp_path, monkeypatch):
+    """A present graph holding a turn node reads — the check does not gate on content.
+
+    Scope, stated so this pin is not read as more than it is: THIS test proves
+    presence does not refuse a graph that has something in it. The
+    presence-vs-emptiness case (#11112/#11113 review cycle 1, finding 1) is
+    pinned separately, on a DRAINED graph, by
+    `test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_verdict`
+    — this file's other half of the same property.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "s1_t1" in graph["nodes"]
+
+
+def test_a_present_but_EMPTY_graph_passes_presence_and_reaches_the_emptiness_verdict(
+        tmp_path, monkeypatch, capsys):
+    """⛔ PRESENCE IS NOT EMPTINESS, and #10017's post-purge re-run depends on it.
+
+    #11113 review cycle 1, finding 1: the pin that NAMED this property seeded a
+    node, so it never exercised the drained graph — a future guard that refused
+    an existing-but-empty graph passed it green, and the run #10017 ends on
+    (delete happened, graph now empty, `--expect-empty`) would start exiting 3.
+    This test is that graph: it exists, it holds zero POINTS (the bind's DDL
+    writes one `(:Meta)`, not a Point — measured, #11113 review cycle 3).
+
+    Two assertions, because the failure has two halves:
+      (a) the READ must not raise — presence, not content, is the question;
+      (b) the CLI with `--expect-empty` must reach the EMPTINESS verdict and must
+          NOT print the presence refusal ("does not exist").
+    """
+    db_path = _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch)
+
+    # (a) read side: no CensusError, and it really is empty.
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}
+    assert graph.get("unidentifiable") == []
+
+    # (b) CLI side: with --expect-empty the drained graph certifies (exit 0),
+    # and the message it would print if presence had refused is absent.
+    rc = tpc.main([
+        "--db-path", db_path, "--graph-name", "tortoise",
+        "--local-record-dir", str(tmp_path / "no-record"),
+        "--expect-empty",
+    ])
+    err = capsys.readouterr().err
+    assert "does not exist in this store" not in err, (
+        "the presence check refused a graph that EXISTS and is drained — this "
+        "is exactly #10017's post-purge re-run: " + err)
+    assert rc == 0, err
+
+
+def test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone(
+        tmp_path, monkeypatch):
+    """⛔ `ensure_indexes=False` ALONE still WRITES — the pair is the guarantee.
+
+    #11113 review cycle 2, finding 1: the comment on the new keyword said
+    `ensure_indexes=False` is "for a caller that must address the store WITHOUT
+    writing to it". It is not — it skips only the schema DDL, while the
+    open-time health probe (`_auto_health_recover`) is a `GRAPH.QUERY` too, and
+    on a graph the store does not hold the FIRST ONE CREATES IT. Measured
+    before this pin existed: `ensure_indexes=False` with `skip_health_check` at
+    its default ADDED the missing graph to `GRAPH.LIST`.
+
+    This is the trap the comment now names, so it is pinned rather than
+    described: half the rule looks like it works (it does skip the DDL) and the
+    caller who needs it most — a gate that certifies a store it must not
+    mutate — would still mint its target.
+
+    RED under the mutation this defends: make `_auto_health_recover` a no-op
+    (the pin's first half then observes NO new graph, so its assertion fails —
+    that half exists precisely because the health probe, not the DDL, is what
+    still writes here).
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import FalkorProjection
+
+    # (a) the HALF rule still writes: `ensure_indexes=False` ALONE, health probe
+    # at its default. The DDL is skipped and the graph is created anyway — by
+    # `_auto_health_recover`'s `_probe_ok()` (`MATCH (n) RETURN count(n) LIMIT 1`),
+    # the first `GRAPH.QUERY` on the new graph. Measured on a spy: exactly ONE
+    # graph-level query, and `GRAPH.LIST` gains the name.
+    half = FalkorProjection(db_path, graph_name="half_rule",
+                            ensure_indexes=False)
+    try:
+        assert sorted(half.db.list_graphs()) == ["half_rule", "tortoise"], (
+            "`ensure_indexes=False` alone did NOT create the graph — if that is "
+            "true by design, the comment on the flag must be re-derived, "
+            "because the census's write-freedom would then come from one flag "
+            "and not the pair")
+    finally:
+        half.close()
+
+    # (b) the PAIR does not: same store, a name it does not hold, nothing minted.
+    pair = FalkorProjection(db_path, graph_name="pair_rule",
+                            skip_health_check=True, ensure_indexes=False)
+    try:
+        assert sorted(pair.db.list_graphs()) == ["half_rule", "tortoise"]
+    finally:
+        pair.close()
+
+
+def _embedded_store_with_TWO_graphs(tmp_path, monkeypatch):
+    """A store holding `live` (one turn node) AND `tortoise` (present, empty).
+
+    The residual case: a wrong `--graph-name` whose value the store HAPPENS to
+    hold. Presence cannot tell it from the graph the operator meant, because
+    both exist.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_two.db")
+    live = FalkorProjection(db_path, graph_name="live", skip_health_check=True)
+    try:
+        live.g.query("CREATE (:Point {id:'live_t1', is_episodic:true, "
+                     "pointKind:'event'})")
+    finally:
+        live.close()
+    drained = FalkorProjection(db_path, graph_name="tortoise",
+                               skip_health_check=True)
+    try:
+        assert sorted(drained.db.list_graphs()) == ["live", "tortoise"]
+    finally:
+        drained.close()
+    return db_path
+
+
+def test_expect_empty_STILL_certifies_a_wrong_but_EXISTING_graph_name(
+        tmp_path, monkeypatch, capsys):
+    """⛔ PIN ON A LIMIT, not on a guarantee (#11113 review cycle 2, P1).
+
+    The presence check proves a NAME EXISTS. It does not prove it is the graph
+    the operator meant: another tenant's graph of the same name, a typo an
+    earlier run created, or a wrong --db-path pointing at another store all
+    pass it. Measured here: `--graph-name tortoise` on a store whose real
+    target is `live` certifies CLEAN under `--expect-empty`.
+
+    This test exists so the help text can never again claim that `--expect-empty`
+    "can never be used to pass a target that does not exist" — an assurance that
+    is FALSE for a target that exists under the wrong name, which is the class
+    this gate is most likely to be pointed at by accident. If the gate ever
+    grows the intent check that would close this, this pin must be updated
+    deliberately rather than deleted quietly.
+    """
+    db_path = _embedded_store_with_TWO_graphs(tmp_path, monkeypatch)
+
+    rc = tpc.main([
+        "--db-path", db_path, "--graph-name", "tortoise",
+        "--local-record-dir", str(tmp_path / "no-record"),
+        "--expect-empty",
+    ])
+    out = capsys.readouterr()
+    assert rc == 0, out.err
+    assert "graph      : tortoise" in out.out, out.out
+    assert "verdict    : CLEAN" in out.out, out.out
+
+
+def test_the_expect_empty_help_NAMES_the_intent_residual():
+    """The false assurance that this pin replaces, asserted absent.
+
+    Truthiness is one thing; a docstring that promises safety the code does not
+    provide is how an operator arms `--expect-empty` on a suspicious run
+    (#11113 review cycle 2, P1 — it was green because nothing pinned the text).
+    """
+    import ast
+    import inspect
+
+    src = inspect.getsource(tpc)
+    tree = ast.parse(src)
+    helps = {}
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Call) and getattr(node.func, "attr", "") == \
+                "add_argument":
+            flags = [a.value for a in node.args
+                     if isinstance(a, ast.Constant)
+                     and isinstance(a.value, str)]
+            for kw in node.keywords:
+                if kw.arg == "help" and isinstance(kw.value, ast.Constant):
+                    for f in flags:
+                        helps[f] = kw.value.value
+
+    expect_help = helps["--expect-empty"]
+    graph_help = helps["--graph-name"]
+    # the false assurance: names the absent case only, and calls it safety.
+    assert "cannot be blessed" not in expect_help
+    assert "refuses those regardless" not in expect_help
+    assert "cannot be blessed" not in graph_help
+    # the true statement, in both operator-visible sites.
+    assert "not the intended" in expect_help.replace("\n", " "), expect_help
+    # the USAGE block is the other operator-visible site (the argparse help for
+    # --graph-name is one line; the full text there is the usage preamble).
+    usage = src.split('"""', 2)[1]
+    flat_usage = " ".join(usage.split())
+    assert "not prove it is the graph you meant" in flat_usage, flat_usage
+    # and the USAGE block must not repeat the old claim either.
+    assert "cannot be blessed" not in usage
+    assert "NOT the same answer as a drained graph" not in usage
+
+
+def test_an_EMPTY_graph_name_is_refused_by_the_LIBRARY_not_substituted(
+        tmp_path, monkeypatch):
+    """#11113 review cycle 3, P2: `graph_name or "tortoise"` pre-empted the guard.
+
+    The CLI refuses `--graph-name ""` before this point (`empty_graph_target_flag`),
+    so the defect was reachable only from the library — the arm `read_graph_turns`
+    is. Measured on the pre-fix code: `read_graph_turns(None, db, "")` on a store
+    holding `['live','tortoise']` returned `tortoise`'s turns, i.e. it CERTIFIED a
+    graph the caller never asked about, and `_refuse_unless_graph_present` (which
+    refuses a nameless handle outright) never saw the name. `None` still means
+    "the default"; `""` is a name that cannot be verified.
+    """
+    db_path = _embedded_store_with_TWO_graphs(tmp_path, monkeypatch)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "")
+    assert "no NAME" in str(exc.value), str(exc.value)
+    # ... and the default is still the default, so the refusal is about "" and
+    # not about an absent argument: `None` resolves to `tortoise`, which in this
+    # fixture is the drained graph, so it reads (nothing) instead of raising.
+    assert tpc.read_graph_turns(None, db_path, None).get("nodes") == {}
+    # the non-default line is reachable, so the fixture really holds `live_t1`.
+    graph = tpc.read_graph_turns(None, db_path, "live")
+    assert sorted(graph["nodes"]) == ["live_t1"], graph["nodes"]
+
+
+def _write_replayable_log(tmp_path):
+    """A non-empty adjacent event log beside the store (the LOST-store signal)."""
+    path = tmp_path / "session-events.jsonl"
+    path.write_text('{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    return str(tmp_path)
+
+
+def _embedded_store_with_NO_nodes(tmp_path, monkeypatch):
+    """A store whose graph EXISTS but holds zero nodes of ANY label.
+
+    This is what a LOST graph looks like (redislite starts fresh on a corrupt
+    RDB, an interrupted restore, a manual `MATCH (n) DETACH DELETE n`) — NOT
+    what a purged graph looks like, because a purge leaves the non-turn nodes
+    the bind wrote.
+    """
+    monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+    from tortoise.projection import FalkorProjection
+
+    db_path = str(tmp_path / "census_lost.db")
+    proj = FalkorProjection(db_path, graph_name="tortoise")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        assert _tpc_total_nodes(proj.g) == 0, _tpc_total_nodes(proj.g)
+    finally:
+        proj.close()
+    return db_path
+
+
+def _tpc_total_nodes(g):
+    return int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+
+def test_a_LOST_graph_with_a_replayable_log_is_REFUSED_not_certified(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 4, P1: `--expect-empty` must not bless a lost store.
+
+    The write-free bind skips the health probe, and the probe was also a
+    DETECTOR: `recover_from_log` rebuilds only when the graph has 0 TOTAL nodes
+    and the adjacent log has events, so pre-PR this state was replayed and the
+    census refused. With the probe skipped it read as "drained" and certified
+    CLEAN — a false PASS about a store that lost its graph.
+
+    Measured red-first: on the pre-fix module this call RETURNS (nodes {}).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "LOST-STORE shape" in message, message
+    assert "ACTS on that log" in message, message
+
+
+def test_an_UNANSWERABLE_total_node_count_REFUSES_not_certifies(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 11, P1: "I could not ask" is not "not lost".
+
+    This arm's first condition is the graph's TOTAL node count, and
+    `recover_from_log` REFUSES when that count cannot be answered
+    ("graph unresponsive — recovery requires a live DB"). Returning instead
+    delegated the diagnosis to the read arm — but that arm runs a DIFFERENT
+    query over a DIFFERENT population (`MATCH (t:Point) WHERE t.is_episodic =
+    true`), so it can succeed while the all-label aggregate fails, and the
+    store then certified CLEAN under `--expect-empty`.
+
+    The patch targets the ONE call site in the LOST arm; the aggregate that a
+    healthy store is read through (`_GRAPH_EPISODIC_COUNT_CYPHER`) is a
+    different query, so this cannot mask the population the census reads.
+
+    Measured red-first: on the pre-fix module this call RETURNS `nodes={}`
+    (and the CLI exits 0 with `verdict: CLEAN`).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    def _unanswerable(_g):
+        raise RuntimeError("count query failed mid-flight")
+
+    monkeypatch.setattr(tpc, "_graph_total_node_count", _unanswerable)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "total-node count could not be read" in message, message
+    assert "RuntimeError" in message, message      # the cause is named
+    assert "UNKNOWN, not answered" in message, message
+    # the state that must never be blessed: this is NOT a "nothing there" pass
+    assert "LOST-STORE shape" not in message, message
+
+
+def test_a_DRAINED_graph_is_never_mistaken_for_a_LOST_one(
+        tmp_path, monkeypatch):
+    """The other half, and the one #10017's terminal run depends on.
+
+    A PURGED graph keeps its non-turn nodes (the bind's `(:Meta)`), so its TOTAL
+    count is non-zero even with zero episodic nodes — exactly the line
+    `recover_from_log` draws. The lost-store refusal must therefore NOT fire
+    here, or the post-purge re-run the issue ends on would be blocked by the
+    gate that is supposed to bless it.
+    """
+    db_path = _embedded_store_with_EMPTY_tortoise(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)          # same log, same directory
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_FIFO_named_like_a_log_does_NOT_hang_the_refusal_arm(
+        tmp_path, monkeypatch):
+    """⛔ A planted FIFO must not wedge the census with no verdict (#11113 c5, P2).
+
+    `_one_replayable_log` reads a file beside the store, which the operator may
+    share; a plain `O_RDONLY` open on a FIFO blocks FOREVER, and this runs on
+    exactly the empty-graph state #10017 ends on — so the gate would hang
+    silently instead of refusing. What protects it is `O_NONBLOCK` + `S_ISREG`
+    on the fd; `O_NOFOLLOW` is deliberately NOT used (recovery FOLLOWS a
+    symlinked log, so refusing to look through it failed open — see the sibling
+    `test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it`).
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    fifo = tmp_path / "session-events.jsonl"
+    os.mkfifo(fifo)
+
+    # A FIFO is not a replayable log: the arm must read PAST it (no refusal, no
+    # hang). The pin is that this call RETURNS at all — on the pre-fix code the
+    # plain open() blocked here and the test would time out, not fail.
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_GARBAGE_log_is_not_called_replayable(tmp_path, monkeypatch):
+    """The arm must match `recover_from_log`'s boundary, not approximate it.
+
+    #11113 review cycle 5, P2: recovery replays only from a log with at least
+    one PARSABLE event, so a garbage-only log is `nothing to recover`. Claiming
+    "recovery would REPLAY this" there tells the operator a false cause — the
+    same class of misdiagnosis this PR fixes elsewhere. Measured on the sibling:
+    `recover_from_log` → `{'recovered': False, 'reason': 'event log empty or
+    unreadable — nothing to recover'}`.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_text("not json at all\n{\n")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_TWO_adjacent_logs_are_ambiguous_so_the_arm_does_not_claim_a_replay(
+        tmp_path, monkeypatch):
+    """Recovery refuses an ambiguous pair; the arm must not assert otherwise."""
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "a.jsonl").write_text('{"event_type": "SessionStarted"}\n')
+    (tmp_path / "b.jsonl").write_text('{"event_type": "SessionStarted"}\n')
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_an_UNREADABLE_log_REFUSES_rather_than_certifying_the_store(
+        tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 9, P2: the loader's THIRD answer, one record over.
+
+    The sidecar branch was fixed to distinguish "nothing here" (`None`) from
+    "here but untrustworthy" (a refusal); the log branch collapsed the same two
+    answers. `os.listdir` has just proved there IS exactly one `.jsonl`, so a
+    log this process cannot READ is not an ABSENT one — reporting it as `None`
+    let a ZERO-node store certify `CLEAN` under `--expect-empty`, the exact
+    false PASS the arm exists to prevent, while the identical store with the
+    same bytes at a readable mode REFUSED.
+
+    Measured red-first: on the parent of the fixing commit this call RETURNS
+    (`nodes={}`) instead of raising.
+    """
+    if os.geteuid() == 0:                       # root reads through the mode
+        pytest.skip("chmod 000 does not deny a root reader")
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    log = tmp_path / "session-events.jsonl"
+    log.write_text('{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    os.chmod(log, 0o000)
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc.read_graph_turns(None, db_path, "tortoise")
+    finally:
+        os.chmod(log, 0o600)                    # let tmp_path teardown clean up
+    message = str(exc.value)
+    assert "could not be OPENED" in message, message
+    assert "UNKNOWN, not answered" in message, message
+    # It must NOT claim the LOST-STORE shape: that verdict needs a record the
+    # arm could actually read, and this one was never established.
+    assert "LOST-STORE shape" not in message, message
+
+
+def test_a_log_read_that_DIES_mid_file_REFUSES_too(tmp_path, monkeypatch):
+    """The same third answer one frame down: the read, not just the open.
+
+    A short read (`EIO`, a truncated FUSE mount) is "could not ask" exactly as
+    an `EACCES` open is; swallowing it into `None` certifies a 0-node store on
+    evidence the arm never obtained. Pinned at the seam the code actually
+    crosses (`os.fdopen`), because the failure is not reproducible from user
+    space on a healthy filesystem.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    _write_replayable_log(tmp_path)
+
+    real_fdopen = os.fdopen
+
+    def _failing_fdopen(fd, *a, **kw):
+        handle = real_fdopen(fd, *a, **kw)
+
+        def _boom(*_a, **_kw):
+            raise OSError(5, "Input/output error")
+
+        handle.read = _boom                # type: ignore[method-assign]
+        return handle
+
+    monkeypatch.setattr(os, "fdopen", _failing_fdopen)
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "could not be READ to completion" in message, message
+    assert "UNKNOWN, not answered" in message, message
+    assert "LOST-STORE shape" not in message, message
+
+
+def test_an_UNLISTABLE_log_directory_REFUSES_rather_than_reading_as_empty(
+        tmp_path):
+    """⛔ #11113 review cycle 9, P2: `[]` means "no logs", so it must not be
+    reachable from a directory the gate could not LIST.
+
+    `_jsonl_names` answers `[]` on any error, which is the right answer for the
+    DIAGNOSIS callers. But `_one_replayable_log` refuses on `len(names) != 1`,
+    so an unlistable directory collapsing to `[]` made "I could not ask"
+    indistinguishable from "nothing is adjacent". The strict mode is the pin:
+    drop it and this test reds.
+
+    Pinned at the helper, not through `read_graph_turns`: the store's own
+    redislite sidecars live in this directory, so denying the listing by mode
+    also denies the BIND and the arm is never reached (measured — a `0o111`
+    directory fails at `census_lost.db.settings` first).
+    """
+    if os.geteuid() == 0:                       # root lists through the mode
+        pytest.skip("chmod 0111 does not deny a root lister")
+    shared = tmp_path / "shared"
+    shared.mkdir()
+    (shared / "session-events.jsonl").write_text(
+        '{"event_type": "SessionStarted", "session_id": "s1"}\n')
+    os.chmod(shared, 0o111)                     # traverse, cannot list
+    try:
+        with pytest.raises(tpc.CensusError) as exc:
+            tpc._jsonl_names(str(shared), strict=True)
+        assert "could not be LISTED" in str(exc.value), str(exc.value)
+        # The lenient default is UNCHANGED: the diagnosis callers still word a
+        # message rather than raising out of an unrelated code path.
+        assert tpc._jsonl_names(str(shared)) == []
+        # A directory that is GONE is still a genuine negative in BOTH modes.
+        assert tpc._jsonl_names(str(tmp_path / "gone"), strict=True) == []
+    finally:
+        os.chmod(shared, 0o700)                 # let teardown clean up
+    # ...and the ARM must actually ask strictly, or the mode above is dead code.
+    src = (Path(__file__).resolve().parent.parent
+           / "tools" / "turn_parity_census.py").read_text(encoding="utf-8")
+    assert "_jsonl_names(events_dir, strict=True)" in src
+
+
+def test_a_DANGLING_symlink_log_is_an_ABSENCE_not_a_refusal(tmp_path, monkeypatch):
+    """⛔ #11113 review cycle 9: "unreadable" and "gone" are different answers.
+
+    Cycle 9 made every `OSError` from the open refuse, to stop an `EACCES` log
+    certifying a 0-node store CLEAN. But `ENOENT` is the opposite case: the name
+    `listdir` reported has nothing behind it (a dangling symlink, or a log the
+    writer rotated or deleted in the window between the listing and the open) —
+    so there IS no record, and the correct answer is the arm's NEGATIVE. The
+    sibling `_jsonl_names` already answers `[]` for that same errno one frame
+    up; refusing here was an over-block whose message pointed the operator at a
+    file that does not exist.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    link = tmp_path / "session-events.jsonl"
+    try:
+        link.symlink_to(tmp_path / "gone-away.jsonl")     # target never exists
+    except (OSError, NotImplementedError) as exc:          # pragma: no cover
+        pytest.skip(f"symlinks unavailable here: {exc}")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_SYMLINKED_log_is_still_replayable_because_recovery_follows_it(
+        tmp_path, monkeypatch):
+    """⛔ `O_NOFOLLOW` made this arm FAIL OPEN — measured, #11113 review cycle 6.
+
+    Recovery follows a symlinked `.jsonl` and replays it, so an arm that refused
+    to look through the link certified `CLEAN` (rc 0) on a 0-node store whose
+    log was a symlink, while the IDENTICAL file under a regular name refused
+    (rc 3). The FIFO protection is `O_NONBLOCK` + `S_ISREG`, not `O_NOFOLLOW`,
+    so the link is followed and the fd is still checked.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    # the real log lives OUTSIDE the store's directory, so the directory holds
+    # exactly ONE `.jsonl` — the symlink. (Two adjacent logs are "ambiguous" and
+    # recovery refuses, which is a different case with its own pin.)
+    elsewhere = tmp_path / "elsewhere"
+    elsewhere.mkdir()
+    real = elsewhere / "real.jsonl"
+    real.write_text('{"event_type": "PointAdded", "id": "p1"}\n')
+    os.symlink(os.path.join("elsewhere", real.name),
+               tmp_path / "session-events.jsonl")
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_an_OVERSIZED_log_is_treated_as_replayable_without_reading_it(
+        tmp_path, monkeypatch):
+    """A huge log must REFUSE — and must do it WITHOUT reading the file.
+
+    #11113 review cycle 7, P2: the first version of this pin wrote a PARSABLE
+    40-byte file, so the non-capped path also returned `path` — the pin passed
+    on a mutant with the cap branch deleted, i.e. it did not measure its own
+    name. The file here is UNPARSABLE, so only the cap can produce a refusal;
+    and `os.fdopen` is spied to prove nothing was read.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_bytes(b"x" * 4096)  # unparsable
+    monkeypatch.setattr(tpc, "_LOST_LOG_MAX_BYTES", 4)   # smaller than the file
+
+    opened = []
+    real_fdopen = __import__("os").fdopen
+
+    def spy(*a, **k):
+        opened.append(a)
+        return real_fdopen(*a, **k)
+
+    monkeypatch.setattr(os, "fdopen", spy)
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+    assert opened == [], f"the cap did not prevent a read: {opened}"
+
+
+def test_a_CR_separated_log_is_replayable_like_the_reader_treats_it(
+        tmp_path, monkeypatch):
+    """⛔ CR-only records: recovery replays them, so the arm must refuse.
+
+    #11113 review cycle 7, P2, measured: the arm split on `\n` only while
+    `EventLog.read_all` normalises a bare `\r`, so a 0-node store whose record
+    used CR separators certified `CLEAN` (rc 0) while `recover_from_log`
+    refilled it (`log_points: 2`). Same fail-open class as the symlink fix.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_bytes(
+        b'{"event_type": "PointAdded", "id": "p1"}\r'
+        b'{"event_type": "PointAdded", "id": "p2"}\r')
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_a_BOM_log_does_not_refuse_where_the_reader_finds_nothing(
+        tmp_path, monkeypatch):
+    """The reader parses TEXT; `json.loads(bytes)` strips a BOM and it does not.
+
+    #11113 review cycle 7, P3: refusing there named a replay recovery would not
+    perform. Measured: `read_all` → 0 events → 'nothing to recover'.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    (tmp_path / "session-events.jsonl").write_bytes(
+        b'\xef\xbb\xbf{"event_type": "PointAdded", "id": "p1"}\n')
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert graph["nodes"] == {}, graph["nodes"]
+
+
+def test_a_pending_prewipe_SNAPSHOT_alone_is_the_LOST_shape_too(
+        tmp_path, monkeypatch):
+    """`recover_from_log` checks the sidecar before its 'no logs' return (#2943).
+
+    #11113 review cycle 7, P3, measured: with zero `.jsonl` files, a pending
+    snapshot is replayed by recovery (`recovered: True`), so a 0-node store whose
+    only record is that sidecar must not be certified `CLEAN` either.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    import json as _json
+
+    from tortoise.projection import prewipe_snapshot_path
+
+    # the loader's own section vocabulary (`_SNAPSHOT_SECTIONS`): an unknown
+    # key would make this an INVALID sidecar, i.e. a different refusal path.
+    # the loader validates shape AND value types, and the `type` must be one the
+    # replay dispatches on (`PointAdded`/`OperatorAdded`) — an unknown shape is a
+    # DIFFERENT refusal path, not the pending-sidecar this pin is about.
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        _json.dump(
+            {"synthetic_events": [{
+                "type": "PointAdded",
+                "point": {"id": "p-synthetic", "content": "x",
+                          "pointKind": "point", "is_episodic": False},
+            }]},
+            fh)
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "LOST-STORE shape" in str(exc.value), str(exc.value)
+
+
+def test_an_UNTRUSTWORTHY_prewipe_snapshot_REFUSES_instead_of_reading_as_absent(
+        tmp_path, monkeypatch):
+    """⛔ The loader's third answer is a REFUSAL, not an absence (#11113 cycle 8).
+
+    `_load_prewipe_snapshot` raises for a sidecar that exists but cannot be
+    trusted — unparsable, a symlink, a FIFO, absurdly large — because it may be
+    the only surviving record of a rebuild's graph-only Points, and
+    `recover_from_log` turns that into its own refusal. Swallowing it into None
+    made `--expect-empty` certify `CLEAN` against a state recovery refuses on.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+
+    path = prewipe_snapshot_path(str(tmp_path))
+    with open(path, "w") as fh:
+        fh.write("this is not the snapshot you are looking for\n")
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    assert "cannot be trusted" in message, message
+    assert "LOST-STORE" not in message, message   # a different refusal, on purpose
+
+
+def test_a_pending_sidecar_with_TWO_logs_says_RECOVERY_REFUSES_not_replays(
+        tmp_path, monkeypatch):
+    """The diagnosis must match what recovery does on THIS state (#11113 c8).
+
+    Measured on the sibling: with a pending sidecar AND two adjacent logs,
+    `recover_from_log` returns `recovered: False` — "ambiguous log set".
+    Refusing to certify is right; claiming "recovery would REPLAY" is not.
+    """
+    db_path = _embedded_store_with_NO_nodes(tmp_path, monkeypatch)
+    import json as _json
+
+    from tortoise.projection import prewipe_snapshot_path
+
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        _json.dump({"synthetic_events": [{
+            "type": "PointAdded",
+            "point": {"id": "p-synthetic", "content": "x",
+                      "pointKind": "point", "is_episodic": False},
+        }]}, fh)
+    for name in ("a.jsonl", "b.jsonl"):
+        (tmp_path / name).write_text('{"event_type": "SessionStarted"}\n')
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, db_path, "tortoise")
+    message = str(exc.value)
+    # 2 logs + pending snapshot: recovery declines ("ambiguous log set"). The
+    # assertion is the PHRASE, not the bare word — "unambiguous" appears in the
+    # trailing remedy sentence and silently satisfied a bare `in` check
+    # (#11113 review cycle 10, P3).
+    assert "ambiguous log set" in message, message
+    assert "REBUILDS" not in message, message
+    assert "would REPLAY" not in message, message
+
+
+def test_a_HEALTHY_store_is_never_refused_over_a_sidecar_recovery_ignores(
+        tmp_path, monkeypatch):
+    """⛔ Order is part of the mirror: count FIRST (#11113 review cycle 9, P2).
+
+    `recover_from_log` returns early on `db_count > 0` — "graph already has
+    nodes, no rebuild" — so on a healthy store it never reads the records at
+    all. Probing (and raising about) an untrustworthy sidecar before the count
+    refused the #10017 PRE-purge census on a perfectly good store, and the
+    message invited the operator to delete a rescue file. Measured
+    `recover_from_log` on this exact state: `{'recovered': False, 'db_points':
+    2, 'reason': 'graph already has nodes — no rebuild'}`.
+    """
+    db_path = _embedded_store_with_tortoise(tmp_path, monkeypatch)
+    from tortoise.projection import prewipe_snapshot_path
+
+    with open(prewipe_snapshot_path(str(tmp_path)), "w") as fh:
+        fh.write("garbage, not a snapshot\n")
+
+    graph = tpc.read_graph_turns(None, db_path, "tortoise")
+    assert "s1_t1" in graph["nodes"], graph["nodes"]
+
+
+def test_an_unlistable_store_REFUSES_rather_than_reading_through(
+        monkeypatch):
+    """Fail closed: "I could not ask" is not "the graph is there"."""
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            raise RuntimeError("store went away")
+
+    class _Proj:
+        db = _DB()
+        g = object()
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, "/tmp/x.db", "tortoise")
+    assert "could not be listed" in str(exc.value)
+    # NON-VACUITY for the credential diagnosis below: an ordinary store failure
+    # is NOT reported as a credential problem. Without this, "the refusal names
+    # the credential" would hold for every unlistable store and would say
+    # nothing about the NOPERM arm.
+    assert "credential" not in str(exc.value)
+    assert "GRAPH.LIST" not in str(exc.value)
+
+
+def _refusal_from_listing(monkeypatch, error):
+    """The CensusError `_refuse_unless_graph_present` raises for *error*."""
+    class _DB:
+        @staticmethod
+        def list_graphs():
+            raise error
+
+    class _Proj:
+        db = _DB()
+        g = object()   # ⛔ never touched: a refusal must not open the graph
+        _graph_name = "tortoise"
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns(None, "/tmp/x.db", "tortoise")
+    return str(exc.value)
+
+
+def test_a_permission_refusal_is_diagnosed_as_the_CREDENTIAL(monkeypatch):
+    """#11113 review P2: "the store could not be listed" blamed the wrong side.
+
+    `GRAPH.LIST` is individually granted, and the repo's per-graph tenant user is
+    deliberately forbidden it (`tortoise/acl_graph_users.py`, #2113/#8617) — so a
+    census on the `--uri` leg with a tenant credential is a REFUSAL the operator
+    can only act on if the message says whose problem it is. Measured on the
+    pinned client (redis 7.4.1): the vendor parser maps `NOPERM` to
+    `NoPermissionError`, whose MESSAGE the ACL predicate matches — the
+    classification is a text test (`tortoise/acl_graph_users.py`
+    `_is_permission_refusal`: `"noperm" in msg or "no permissions" in msg`),
+    NOT a type test, and there is no type arm anywhere in this pair. This case
+    therefore pins the wording an operator actually sees, not a behaviour the
+    class alone would buy (#11113 review cycle 11, P2).
+    """
+    from redis.exceptions import NoPermissionError
+
+    err = _refusal_from_listing(
+        monkeypatch,
+        NoPermissionError("NOPERM this user has no permissions to run the "
+                          "'graph.list' command"))
+
+    assert "credential" in err, err
+    assert "GRAPH.LIST" in err, err
+    assert "does not exist" not in err, err      # the store is NOT at fault
+    assert "nothing was created" in err, err
+    # the remedy an operator will otherwise reach for is the forbidden one
+    assert "Do NOT grant" in err, err
+    assert "per-graph tenant user" in err, err
+    assert "#2113/#8617" in err, err
+
+
+def test_the_permission_arm_also_reads_the_vendor_TEXT(monkeypatch):
+    """The text arm, for a client/version or double that hands back a bare
+    `ResponseError` — the code is the contract, not the class."""
+    from redis.exceptions import ResponseError
+
+    err = _refusal_from_listing(
+        monkeypatch,
+        ResponseError("NOPERM User tenant_acme has no permissions to run the "
+                      "'graph.list' command"))
+    assert "credential" in err, err
+    assert "GRAPH.LIST" in err, err
+
+
+def test_a_transport_failure_is_NOT_reported_as_a_permission_refusal(
+        monkeypatch):
+    """⛔ The answered-refusal / outage split, both directions.
+
+    On the pinned client `AuthenticationError` and `AuthorizationError` SUBCLASS
+    `ConnectionError`, so a type-or-message test that admitted the transport
+    family would send an operator after their credentials when the box was
+    down (`tortoise/retry.py` records the same trap, #8827).
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    err = _refusal_from_listing(
+        monkeypatch, RedisConnectionError("Error connecting to localhost:6379"))
+    assert "could not be listed" in err, err
+    assert "credential" not in err, err
+
+
+def test_a_REFUSED_BIND_is_diagnosed_as_the_credential_too(monkeypatch):
+    """#11113 review P3: the tenant user is refused EARLIER than the listing.
+
+    Measured against a real server with the ACL layer's own grant recipe
+    (`-@all +GRAPH.QUERY +GRAPH.RO_QUERY +PING`): the pinned client's constructor
+    issues `INFO`, the grant denies it, and the run dies in the BIND — so it
+    never reached `_refuse_unless_graph_present` and reported "the graph could
+    not be read", the same blame-the-wrong-side shape the listing arm repaired.
+    """
+    from redis.exceptions import NoPermissionError
+
+    import tortoise.projection as projection
+
+    def _refuse(*a, **k):
+        raise NoPermissionError("User tenant_x has no permissions to run the "
+                                "'info' command")
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        types.SimpleNamespace(from_uri=staticmethod(_refuse)))
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://tenant_x:pw@127.0.0.1:1/g", None, "g")
+    err = str(exc.value)
+    assert "credential" in err, err
+    assert "INFO" in err, err
+    assert "GRAPH.LIST" in err, err
+    assert "could not be read" not in err, err   # the STORE is not at fault
+    assert "#2113/#8617" in err, err
+
+
+def test_a_transport_failure_IN_THE_BIND_keeps_the_generic_wording(monkeypatch):
+    """NON-VACUITY for the arm above: an outage must stay an outage.
+
+    Without this, "a refused bind names the credential" would hold for every
+    bind failure and would say nothing about the NOPERM arm — the same false PASS
+    the listing arm's twin test closes.
+    """
+    from redis.exceptions import ConnectionError as RedisConnectionError
+
+    import tortoise.projection as projection
+
+    def _down(*a, **k):
+        raise RedisConnectionError("Error connecting to 127.0.0.1:1")
+
+    monkeypatch.setattr(projection, "FalkorProjection",
+                        types.SimpleNamespace(from_uri=staticmethod(_down)))
+
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://:@127.0.0.1:1/g", None, "g")
+    err = str(exc.value)
+    assert "could not be read" in err, err
+    assert "credential" not in err, err
+
+
+def test_the_permission_predicate_is_the_ACL_layer_s_own():
+    """⛔ ONE rule, not a second spelling — pinned STRUCTURALLY.
+
+    `tortoise/acl_graph_users.py` mints the per-graph user AND owns the predicate
+    that recognises its refusal; a copy here would drift from the module that
+    defines the grant (`_quote_identifier`, `_bounded_server_socket_kwargs` are
+    the repo's same move in the sibling censuses).
+
+    ⛔ `not hasattr(tpc, "_is_permission_refusal")` ALONE IS VACUOUS — MEASURED
+    (#11113 review P2): replacing the import with an INLINE respelling inside
+    `_refuse_unless_graph_present`
+
+        refused_by_credential = (isinstance(exc, NoPermissionError)
+                                 or "noperm" in str(exc).lower()
+                                 or "no permissions" in str(exc).lower())
+
+    left this suite fully green, i.e. the property the test names could be
+    violated while every pin still passed — the same false-PASS class the
+    `_RECORD_TURNS_SQL` pin above was written with `ast` to close. So the
+    structural half is the pin: the handler that CLASSIFIES the listing failure
+    must import the ACL layer's predicate by name.
+
+    (No pass count is quoted: the file's collection size drifts with every pin
+    added, and a stale figure reads as a measurement of THIS head — see the
+    currency rule the `ci-surfaces.yml` duration rows state.)
+    """
+    assert not hasattr(tpc, "_is_permission_refusal"), (
+        "import tortoise.acl_graph_users._is_permission_refusal instead of "
+        "respelling it — a second spelling drifts from the rule that defines "
+        "the grant")
+
+    source = (Path(__file__).resolve().parent.parent
+              / "tools" / "turn_parity_census.py").read_text(encoding="utf-8")
+    handlers = [
+        node
+        for fn in ast.walk(ast.parse(source))
+        if isinstance(fn, ast.FunctionDef)
+        and fn.name == "_refuse_unless_graph_present"
+        for node in ast.walk(fn)
+        if isinstance(node, ast.ExceptHandler)
+    ]
+    imports = [
+        alias.name
+        for handler in handlers
+        for node in ast.walk(handler)
+        if isinstance(node, ast.ImportFrom)
+        and node.module == "tortoise.acl_graph_users"
+        for alias in node.names
+    ]
+    assert "_is_permission_refusal" in imports, (
+        "`_refuse_unless_graph_present` must IMPORT "
+        "tortoise.acl_graph_users._is_permission_refusal to classify a refused "
+        "listing; no such import was found in its exception handlers, so the "
+        "rule is being respelled here (found imports: "
+        f"{imports or 'none'})")
+
+
+def test_the_uri_leg_binds_without_WRITING_either(monkeypatch):
+    """The URI leg is the one that can mint a graph on a LIVE server.
+
+    #11113 review, non-blocking observation (i): the flags were pinned only on
+    the embedded branch, because every `from_uri` fake swallowed `**k` — so a
+    future edit dropping `ensure_indexes=False` there would have been silent on
+    the leg that writes to a customer instance.
+    """
+    seen = {}
+
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    from tortoise.projection import FalkorProjection
+
+    class _Proj:
+        g = _G()
+        _graph_name = "g"
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
+        @classmethod
+        def from_uri(cls, *a, **k):
+            seen.update(k)
+            seen["positional"] = a
+            return cls()
+
+    monkeypatch.setattr(FalkorProjection, "from_uri", _Proj.from_uri)
+    assert tpc.read_graph_turns("docker://h:1/g", None, "g")["nodes"] == {}
+    assert seen["positional"] == ("docker://h:1/g",)
+    assert seen["skip_health_check"] is True
+    assert seen["ensure_indexes"] is False
+
+
+def test_presence_is_asked_about_the_RESOLVED_name_not_the_argument(
+        monkeypatch):
+    """#11113 review, non-blocking observation (ii): nothing covered this.
+
+    A redirect or a test-name derivation can change which graph is addressed,
+    so the question is asked about the projection's OWN name (`_graph_name`) —
+    refusing on the raw argument would reject a graph the store really holds,
+    and accepting on it would open a graph the store does not.
+    """
+    seen = {}
+
+    class _G:
+        def query(self, cypher, params=None):
+            seen["queries"] = seen.get("queries", 0) + 1
+
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    from tortoise.projection import FalkorProjection
+
+    def _proj_for(graphs):
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return list(graphs)
+
+        class _Proj:
+            g = _G()
+            db = _DB()
+            _graph_name = "resolved_acme"     # the redirect's name, not the arg
+
+        return _Proj
+
+    # the STORE holds the RESOLVED name while the ARGUMENT names something else:
+    # that is not a refusal — the argument is a selector, not an address.
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _proj_for(
+                            ["resolved_acme"])()))
+    assert tpc.read_graph_turns("docker://h:1/team_acme", None,
+                                "team_acme")["nodes"] == {}
+    assert seen.get("queries")                      # it really read
+
+    # …and when only the ARGUMENT's name is present, refusing is correct:
+    # opening `resolved_acme` is what would create it.
+    monkeypatch.setattr(FalkorProjection, "from_uri",
+                        classmethod(lambda cls, *a, **k: _proj_for(
+                            ["team_acme"])()))
+    with pytest.raises(tpc.CensusError) as exc:
+        tpc.read_graph_turns("docker://h:1/team_acme", None, "team_acme")
+    assert "'resolved_acme'" in str(exc.value), str(exc.value)
+
+
+def test_the_graph_list_requirement_is_documented_at_the_flag(capsys):
+    """#11113 review P2(b): the requirement is stated where the operator reads it.
+
+    The module documented no permission requirement at all, so the natural
+    remedy an operator reached for was the one the ACL layer forbids. A help
+    string and a docstring are the only places an operator reads BEFORE the
+    flag is chosen, so both name it.
+    """
+    with pytest.raises(SystemExit) as exit_:
+        tpc.main(["--help"])
+    assert exit_.value.code == 0
+    help_text = capsys.readouterr().out
+    assert "GRAPH.LIST" in help_text, help_text
+    assert "credential" in help_text, help_text
+
+    doc = " ".join((tpc.__doc__ or "").split())
+    assert "GRAPH.LIST" in doc
+    assert "per-graph tenant user" in doc
+
+
+def test_a_caller_holding_the_handle_does_not_re_ask_the_store(monkeypatch):
+    """The delete-time re-check addresses a handle it ALREADY holds.
+
+    `purge_legacy_turns` re-reads a session through the projection it is about
+    to delete from (`g=proj.g`, #10483 review P2-1). Listing the store there
+    would ask a second connection about the graph the caller is already
+    addressing — and refuse work that is provably addressable.
+    """
+    class _G:
+        def query(self, cypher, params=None):
+            class _R:
+                result_set = [[0]] if "count" in cypher else []
+            return _R()
+
+    class _Proj:
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                raise AssertionError("the store was listed for a bound handle")
+
+        db = _DB()
+        g = _G()
+
+    import tortoise.projection as projection
+    monkeypatch.setattr(projection, "FalkorProjection", lambda *a, **k: _Proj())
+    assert tpc.read_graph_turns(None, None, None, node_ids=["s1_t1"],
+                                g=_Proj.g)["nodes"] == {}
 
 # ── the record leg: its door, its SQL contract, and its refusals ───────────
 #
@@ -2238,6 +3634,13 @@ def test_expect_empty_reaches_a_verdict_when_the_local_record_is_absent(
         def __init__(self, inner=None):
             self.g = _G()
 
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
+
     class _G:
         def query(self, cypher, params=None):
             class R:
@@ -2276,6 +3679,13 @@ def test_expect_empty_does_NOT_skip_the_hosted_leg(tmp_path, monkeypatch):
     class _Empty:
         def __init__(self, *a, **k):
             self.g = _G()
+
+        class _DB:
+            @staticmethod
+            def list_graphs():
+                return ["g"]
+
+        db = _DB()
 
     monkeypatch.setattr(FalkorProjection, "from_uri",
                         classmethod(lambda cls, *a, **k: _Empty()))

@@ -122,10 +122,61 @@ def _seed(sdk: TortoiseSDK, seeds: list[dict], *,
             "MERGE (e:Event {eventId: $eid}) SET e.startedAt = $st",
             params={"eid": event_id, "st": f"{sdate}T10:00:00Z"},
         )
+    session_dates = {seed.get("label", f"s{i}"): seed.get("session_date") or ""
+                     for i, seed in enumerate(seeds)}
     for seed in seeds:
         succ = seed.get("supersedes_into")
         if succ and succ in ids and seed.get("label") in ids:
             sdk.supersede_point(ids[seed["label"]], ids[succ])
+            # #8067: ``supersede_point`` stamps BOTH end columns from the run
+            # clock — ``expiredAt`` is always ``now``, and ``validTo`` falls back
+            # to ``now`` whenever the successor's own start is unusable — and
+            # #8067 made those instants reach the reader marker
+            # (``[valid → <to>; expired <at>]``) — so a committed golden would
+            # bake the day it was regenerated and the fidelity pin would go red
+            # at the next UTC midnight. That is the exact failure #4106 already
+            # fixed for ``session_date`` ("leaving the session on the run's wall
+            # clock ... would have made the committed goldens change every
+            # day"), so it takes the same answer: the fixture's own dates,
+            # never the run's.
+            #
+            # The instant is the SUPERSEDING turn's recorded time — the graph
+            # learnt of the end when the successor was recorded, which is TRUE
+            # of this fixture and keeps the predecessor stale as of every
+            # fixture's ``question_date`` instead of "not yet ended" by
+            # accident of when the golden was cut.
+            #
+            # ⛔ Both columns are pinned in ONE statement on purpose. Pinning
+            # only ``expiredAt`` would leave ``validTo`` on the same run-clock
+            # channel: ``_supersede_window_end`` resolves it successor
+            # ``validFrom`` → successor ``createdAt`` → ``_WRITER_CLOCK``, and
+            # ``seed_capture_turn_store(now=None)`` REMOVES ``createdAt`` for a
+            # dateless session (#4156). For a DATED target the resolution is
+            # already the session date, so the pin is a no-op there and an
+            # explicit statement of it here; for an undated one it is the
+            # difference between a golden and a re-cut.
+            #
+            # Which is why an undated target is a REFUSAL and not a silent
+            # skip: it has no fixture date to pin to, so the golden it would
+            # produce is clock-derived by construction and the next lane would
+            # meet the same midnight red with no clue where it came from.
+            learnt_at = session_dates.get(succ) or ""
+            if not learnt_at:
+                raise ValueError(
+                    f"#8067: seed {seed.get('label')!r} supersedes into "
+                    f"{succ!r}, which carries no session_date — the supersession "
+                    "clock would come from the RUN (supersede_point stamps "
+                    "validTo/expiredAt from `now`), and #8067 renders those "
+                    "instants into the reader marker, so the committed golden "
+                    "would change every day. Give the target seed a "
+                    "session_date."
+                )
+            proj.g.query(
+                "MATCH (n:Point {id:$id}) SET n.validTo = $at, "
+                "n.expiredAt = $at",
+                params={"id": ids[seed["label"]],
+                        "at": f"{learnt_at}T10:00:00Z"},
+            )
 
 
 def _render_user_message(sdk: TortoiseSDK, question: str,

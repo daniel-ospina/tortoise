@@ -62,6 +62,13 @@ routes:
   - method: POST
     path: /internal/starter-seed
     class: control-plane
+  # #10892: the served-request liveness surface, probed with a 5 s bound by the
+  # availability watchdog. Control-plane for exactly the reason `/health` is:
+  # it is an OPERATIONAL read for the probe, not a tenant API — it takes no key,
+  # touches no graph and answers nothing about a tenant's data.
+  - method: GET
+    path: /liveness
+    class: control-plane
   - method: GET
     path: /oauth/authorize
     class: protocol

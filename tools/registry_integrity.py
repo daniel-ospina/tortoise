@@ -16,11 +16,16 @@ a duplicate list entry, or a structurally broken document — and
 `yaml.safe_load` then **silently keeps the LAST duplicate key**. Nothing
 downstream can tell that happened.
 
-It is a line-SET union, so byte-identical additions dedupe: two lanes registering
-the same test do NOT duplicate it. A duplicate appears when the same semantic
-entry is written on DIFFERING lines (the same file plus a different trailing
-comment), or when the same key gets DIFFERING values. Both were reproduced
-against a real `merge=union` merge (see #5373).
+It is a line-level union MERGE (not a set union — identical lines are NOT
+collapsed: two copies inside one conflicting hunk survive as two), and that is ALL
+it is: it never dedupes, it only replaces conflict markers with both sides' lines
+(#11336: `git merge-file --union`, base `alpha/X/gamma` vs `OURS1/X/OURS2` and
+`THEIRS1/X/THEIRS2`, emits `X` twice). MEASURED on real merges: the same row
+appended at two DIFFERENT anchors survives as TWO rows, with `merge=union` and
+without it alike, because nothing reconciles independent appends; only the SAME
+change in the SAME place collapses, and that is git's ordinary identical-change
+resolution, not a property of the attribute. A duplicate mapping key is the worse
+case — `yaml.safe_load` keeps the LAST one and nothing downstream can tell.
 
 This is not a belt-and-braces addition to an existing guard. The frozen
 baseline's own duplicate-name refusal (`surface_manifest._read_manifest`) is keyed
@@ -140,6 +145,36 @@ def _walk(fname: str, node: yaml.Node, path: str, problems: list[str]) -> None:
             _walk(fname, item, f"{path}[]", problems)
 
 
+def check_registry_text(text: str, shown: str) -> list[str]:
+    """Every integrity problem in one registry TEXT. Empty list means clean.
+
+    The TEXT entry point exists because one caller holds the document in hand
+    rather than on disk: `tools/ci_timing.py::integrity_problems` validates the
+    REFRESHED manifest BEFORE `refresh_durations` writes it, so grading the text
+    keeps that gate's question ("is the document I am about to write valid?")
+    the one it answers. Measured (#10726 review): with a duplicated TOP-LEVEL
+    `durations:` key — the shape that actually reaches that writer, which the
+    renderer emits twice and `validate_refreshed_manifest` does not report — the
+    duplicate-key walk catches it and no other composed validator does. (A
+    duplicated `.durations:` ROW is already refused earlier, by
+    `_locate_durations_block`, so it cannot reach the write at all.)
+
+    Same fail-closed rule as the path form: text that cannot be parsed returns
+    a problem, never an empty list.
+    """
+    try:
+        node = yaml.compose(text)
+    except yaml.YAMLError as exc:
+        return [f"{shown}: MALFORMED YAML ({exc})"]
+    if node is None:
+        return [f"{shown}: empty document"]
+    if not isinstance(node, yaml.MappingNode):
+        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
+    problems: list[str] = []
+    _walk(shown, node, "", problems)
+    return problems
+
+
 def check_registry(path: Path | str) -> list[str]:
     """Every integrity problem in one registry file. Empty list means clean.
 
@@ -152,17 +187,7 @@ def check_registry(path: Path | str) -> list[str]:
         text = p.read_text(encoding="utf-8")
     except OSError as exc:
         return [f"{shown}: unreadable ({exc}) — a registry that cannot be read is not clean"]
-    try:
-        node = yaml.compose(text)
-    except yaml.YAMLError as exc:
-        return [f"{shown}: MALFORMED YAML ({exc})"]
-    if node is None:
-        return [f"{shown}: empty document"]
-    if not isinstance(node, yaml.MappingNode):
-        return [f"{shown}: top level is {type(node).__name__}, expected a mapping"]
-    problems: list[str] = []
-    _walk(shown, node, "", problems)
-    return problems
+    return check_registry_text(text, shown)
 
 
 def check(paths: list[Path] | None = None) -> list[str]:

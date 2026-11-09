@@ -4406,15 +4406,20 @@ def test_session_capture_tool_honours_capture_extract_off_4288(tmp_path, monkeyp
 
 
 def test_onboarding_state_tool_reads_capture_extract_4288(tmp_path, monkeypatch):
-    """#4288, READ half: the setting is ALREADY readable on the agent-facing
-    surface — ``tortoise_onboarding_state`` (the ``onboarding`` family, bound to
-    GET /v1/onboarding/state) returns ``capture_extract`` for the org.
+    """#4288, READ half: the setting is readable on an AGENT surface, but not
+    through a dedicated read tool any more.
 
-    This pins the half of #4288's outcome that needs NO frozen-baseline re-cut:
-    an agent can already discover whether this org's captures will be extracted,
-    before it decides how to report a capture's outcome. The WRITE half (a
-    parameter on the capture tool, or a state-PATCH tool) is the owner-gated
-    remainder tracked on #4288.
+    ``tortoise_onboarding_state`` was the reader this test was written against;
+    it left the MCP surface in #4282 Phase 3.2. The SURVIVING reader is
+    ``tortoise_manage_sources(action="list")``, whose ``onboarding`` key returns
+    this projection verbatim — and note it is admin-tier, so a ``graphs:read``
+    key is refused and must use ``GET /v1/onboarding/state`` instead. The test
+    below still drives the HANDLER directly (its body is unchanged and still
+    shipped), which is what makes the polarity claim measurable; it no longer
+    proves the MCP surface advertises a dedicated read.
+
+    The WRITE half (a parameter on the capture tool, or a state-PATCH tool) is
+    the owner-gated remainder tracked on #4288.
 
     Polarity (#4258): an older stored state with the key ABSENT must read ON,
     never OFF — so the first read happens on a team whose stored state is ``{}``.

@@ -214,6 +214,40 @@ STATE_FRESH_S = 900.0
 #: UNKNOWN rather than zero (#7957 H1: "an unknown age is never current").
 STATE_CLOCK_SKEW_S = 60.0
 
+# --- the read taxonomy (#11202) --------------------------------------------
+
+#: The conventional "timed out" exit status. ``subprocess.TimeoutExpired`` has no exit
+#: status of its own, and ``_capture`` used to fold it into its "could not be run"
+#: arm — so a reader that CLASSIFIES a failure could not tell "the read was killed for
+#: being slow" from "the binary is missing", and ``gh_json`` reported BOTH as the
+#: payload being malformed. That collapse is #11202: the pre-flight's refusal said
+#: "gh issue list returned no parsable JSON" and its remedy said to check auth, about a
+#: read that was merely slow — so the operator chased the wrong cause, and no caller
+#: could decide to retry, because it could not see that a retry was the right response.
+GH_READ_TIMEOUT_RC = 124
+
+#: Per-row wall-clock budget for a paginated ``gh … list`` read, and the floor (#11202).
+#:
+#: ⛔ A LIST READ'S COST IS LINEAR IN WHAT IT ASKS FOR, AND A FIXED BOUND IS NOT.
+#: Measured 2026-11-07 on the ``cmux`` cell, unloaded (``gh`` pages 100 rows per
+#: request, sequentially): limit=100 → 1.0 s, 500 → 4.0 s, 1000 → 6.9 s, 2000
+#: (1854 open issues) → 13.0-13.7 s, i.e. ~7 ms per row. The same read measured
+#: **37.4 s** on the owner's Mac, and **4 concurrent copies of it** (what four lanes
+#: pre-flighting at once do) took 14.0-29.8 s each — 2.2x the single-copy time. So the
+#: call can legitimately need several times the 60 s the reader used to allow, while
+#: ``_run`` turns the kill into a string indistinguishable from a corrupt payload.
+#: The bound therefore scales with the DECLARED page count and keeps a floor for the
+#: small reads (PRs, a single issue) where 60 s is already generous.
+GH_LIST_S_PER_ROW = 0.05
+GH_LIST_MIN_S = 60
+
+#: The off-switch for the scaled bound + single timeout retry (#11202).
+#: ``fixed`` restores the pre-#11202 path exactly: one attempt, 60 s regardless of
+#: ``--limit``, no retry — so a read that contention slowed past 60 s is killed again
+#: and the board answers INCOMPLETE (fail-closed, as it did before). It selects no
+#: path and no target: the bound is arithmetic, and the read is the same read.
+GH_READ_BOUND_ENV = "FLEET_STATE_GH_READ_BOUND"
+
 # --- paths ------------------------------------------------------------------
 
 HOME = Path.home()
@@ -1277,8 +1311,11 @@ def cmux_session_records() -> tuple[list[dict[str, Any]], str, str]:
         #     sat in a payload the reader had already discarded. On a FAILURE stderr
         #     wins, because stdout may carry the command's chatter (a progress line,
         #     a warning) and naming that would point an operator at the wrong thing.
-        # `_run` is deliberately left as it is (`gh_json` depends on its
-        # succeed-or-empty polarity); this store needs the failure's OWN words.
+        # `_run` is deliberately left as it is (its succeed-or-empty polarity is what
+        # every other store read in this module wants); this store needs the failure's
+        # OWN words, so it goes through `_capture` instead. (Before #11202 the reason
+        # given here was "`gh_json` depends on it" — `gh_json` no longer uses `_run`, so
+        # that half of the sentence is deleted rather than left as a false inventory.)
         # ⛔ THE CAUSE COMES FROM THE FIRST STREAM THAT ACTUALLY SAID SOMETHING (review of
         # #2401, final round). `raw`-truthiness is not enough: a WHITESPACE-only stdout (`"\n"`)
         # won over a non-empty stderr, so the message rendered `(stderr: no output)` about a stream
@@ -1598,9 +1635,9 @@ def process_cwds(pids: Sequence[int]) -> tuple[dict[int, str], str]:
 def _capture(cmd: Sequence[str], timeout: int = 60) -> tuple[str, int, str]:
     """``(stdout, returncode, stderr)`` — NOTHING is discarded on a failure.
 
-    ⛔ ``_run`` DEGRADES A NON-ZERO EXIT TO THE EMPTY STRING (correct for
-    ``gh_json`` and for the cmux workspace list, which must not read a chatty
-    failure as an answer). A caller that has to CLASSIFY the failure cannot use
+    ⛔ ``_run`` DEGRADES A NON-ZERO EXIT TO THE EMPTY STRING (correct for the
+    cmux workspace list, which must not read a chatty failure as an answer). A
+    caller that has to CLASSIFY the failure cannot use
     it: the payload it classifies is exactly the one a failing command prints.
     ``cmux_session_records`` is such a caller — it shape-checks the payload to tell
     a session store from a refusal — and routing it through ``_run`` made that arm
@@ -1613,6 +1650,13 @@ def _capture(cmd: Sequence[str], timeout: int = 60) -> tuple[str, int, str]:
         p = subprocess.run(
             cmd, capture_output=True, text=True, timeout=timeout, check=False
         )
+    except subprocess.TimeoutExpired:
+        # ⛔ A KILL IS ITS OWN CLASS (#11202). Folded into the generic arm below, a
+        # timeout reached ``gh_json`` as "returned no parsable JSON" — the same string
+        # a malformed payload produces — so the one failure whose right response is
+        # "retry, or widen the bound" was unactionable for both the operator and the
+        # caller. ``GH_READ_TIMEOUT_RC`` is the conventional status for it.
+        return "", GH_READ_TIMEOUT_RC, f"timed out after {timeout:g}s"
     except Exception as exc:
         return "", 127, f"`{cmd[0]}` could not be run: {type(exc).__name__}: {exc}"
     return p.stdout or "", p.returncode, p.stderr or ""
@@ -1999,33 +2043,232 @@ class GitHubRows(list):
         self.error = error
 
 
-def gh_json(args: Sequence[str], timeout: int = 60, *, what: str = "gh") -> GitHubRows:
+#: Rendered bound on the stderr tail ``gh_json`` reports for a failed read. The
+#: refusal that carries it is read through a 320-character window by the harness, and
+#: the gate composes ~180 characters of its OWN prose in front of the cause — so the
+#: whole cause gets roughly 140. 99 leaves room for the arm's own prefix ("gh issue
+#: list FAILED (1 exit): ", "gh issue list returned no parsable JSON: ") and is
+#: measured for every arm — AT EACH ARM'S OWN MAXIMUM CAUSE LENGTH, not only at short
+#: fixtures — by `test_every_board_read_failure_fits_the_window_its_readers_apply`
+#: (#11202 review round 4: 200 overran the window on the refusal arm, where the cause
+#: and not only the tail is what carries the words; round 14: 100 composed the
+#: UNPARSABLE arm to 321 against a 320 window once the fixture carried a body at
+#: `_bounded_repr`'s own maximum instead of the short `<html>nope</html>` body — the
+#: cut removed only the final `)` of `#8175`, so the defect was the CLAIM, not the
+#: rendering).
+_GH_SAID_BOUND = 99
+
+
+def _gh_said(stderr: str, stdout: str = "") -> str:
+    """The command's OWN words for a failure, bounded — stderr first, stdout LAST.
+
+    ``gh`` says *why* it failed on stderr (``API rate limit exceeded``, ``HTTP 401``,
+    ``could not resolve host``). Discarding that and reporting only "no parsable
+    JSON" is what made three different failures — auth, network, rate limit — look
+    like one malformed payload (#11202). The first non-empty line is the cause; the
+    rest is usually a stack of hints.
+
+    ⛔ THE ORDER IS THE CONTRACT, AND SO IS WHEN ``stdout`` MAY BE PASSED. It is the
+    LAST resort, and the only arm that passes it is the one where the BODY IS THE
+    THING BEING REPORTED (an exit-0 read whose stdout did not parse): there the
+    fragment on stdout is the evidence, not a cause. Never pass it to explain a
+    NON-ZERO exit — that arm has stderr, and a progress line on stdout would point the
+    operator at the wrong thing.
+    """
+    for stream in (stderr, stdout):
+        for line in (stream or "").splitlines():
+            said = line.strip()
+            if said:
+                said = _bounded_repr(said, _GH_SAID_BOUND)
+                return said
+    # ⛔ STREAM-AWARE EMPTINESS (#11202 review round 3): the refusal arm never passes
+    # `stdout`, so "either stream" there asserted a fact about a stream no one read —
+    # in the one field the operator is told to trust as the cause.
+    return "it printed nothing on stderr" if not stdout else "it printed nothing on either stream"
+
+
+def gh_read_bound_enabled() -> bool:
+    """Is the scaled list-read bound (and its single retry) ARMED? (#11202)
+
+    Default ON. ``FLEET_STATE_GH_READ_BOUND=fixed`` restores the pre-#11202 BOUND and
+    ATTEMPT COUNT — one attempt, flat 60 s regardless of ``--limit``, no retry — see that
+    seam's own comment. It does NOT restore the pre-#11202 *cause text*: the failure
+    classification is not gated by this seam, so a refusal still names the timeout / the
+    exit status instead of the old `returned no parsable JSON`. Saying "byte-for-byte"
+    here disagreed with the seam's own comment in the same file, and the docstring is what
+    a lane reasons from (#11202 review round 2).
+    """
+    return (os.environ.get(GH_READ_BOUND_ENV) or "").strip().lower() != "fixed"
+
+
+def gh_list_timeout(limit: int, *, fixed: int = GH_LIST_MIN_S) -> int:
+    """The wall-clock bound for a paginated ``gh … list --limit N`` read (#11202).
+
+    ⛔ THE BOUND IS DERIVED FROM THE READ'S OWN DECLARED SIZE, because the read's cost
+    is: ~7 ms per row measured on this cell, 13.7 s for 1854 open issues, 37.4 s on
+    the owner's Mac, and 2.2x that again under four concurrent pre-flights. A single
+    60 s bound is generous for a 100-row read and insufficient for a 2000-row one, so
+    the same constant was simultaneously too loose and too tight — and it failed in
+    the direction that blocks every dispatch. ``GH_LIST_S_PER_ROW`` is ~7x the
+    measured per-row cost, which keeps the bound above the Mac-under-contention
+    figure (37.4 s x 2.2 ≈ 82 s) without letting a wedged read hang indefinitely.
+
+    The value is a BOUND, not an expectation: nothing pays it on the happy path.
+    """
+    if not gh_read_bound_enabled():
+        return fixed
+    try:
+        rows = int(limit)
+    except (TypeError, ValueError):
+        return fixed
+    if rows <= 0:
+        return fixed
+    return max(fixed, int(rows * GH_LIST_S_PER_ROW))
+
+
+def _declared_rows(args: Sequence[str]) -> int | None:
+    """The page count a ``gh … list`` read DECLARED (``--limit N``), else ``None``.
+
+    Read back out of the argv the caller built, never re-derived from the default: the
+    timeout cause quotes it ("bound=100s for 2000 rows"), and a quoted number that came
+    from a constant the caller did not pass would be a claim about someone else's read.
+    """
+    for i, token in enumerate(args):
+        value = None
+        if token == "--limit" and i + 1 < len(args):
+            value = args[i + 1]
+        elif token.startswith("--limit="):
+            value = token.split("=", 1)[1]
+        if value is None:
+            continue
+        try:
+            return int(value)
+        except (TypeError, ValueError):
+            return None
+    return None
+
+
+def gh_json(
+    args: Sequence[str], timeout: float = 60, *, what: str = "gh",
+    retries: int = 0,
+) -> GitHubRows:
     """Run ``gh … --json`` and say whether the READ was MEASURED (#7957).
 
     "Could not read it" and "the answer is empty" are different facts, and only the
     first is a reason to refuse to answer. ``measured`` is True only when the command
-    SUCCEEDED (``_run`` degrades a non-zero exit to "") and the payload parsed as a
-    JSON list — a chatty failure, a rate-limit notice, a ``null`` and a truncated
-    body all come back UNMEASURED with the cause attached.
+    SUCCEEDED and the payload parsed as a JSON list — a chatty failure, a rate-limit
+    notice, a ``null`` and a truncated body all come back UNMEASURED.
+
+    ⛔ AND THE CAUSE IS CLASSIFIED, NOT COLLAPSED (#11202). The read may fail in four
+    distinct ways, and before this they all reached the caller — and the operator — as
+    ``returned no parsable JSON``:
+
+    * **timed out** — killed at the bound. The read was SLOW, not broken, and a retry
+      or a wider bound is the right response. ``retries`` (timeouts only) covers the
+      transient case: a lane's contention passes, so the second attempt succeeds.
+    * **exited non-zero** — a definitive answer (403 rate limit, 401 auth, DNS). Retrying
+      it would only repeat the answer, so it is never retried; the command's own
+      stderr is carried, bounded.
+    * **exited 0 with an unparsable body** — the only case that is genuinely
+      "no parsable JSON".
+    * **exited 0 with a non-list** — reported with the type it did return.
+
+    ⛔ FAIL-CLOSED IS UNCHANGED, and that is the line this change must not cross: every
+    one of those classes still returns ``measured=False``, so the claim gate refuses
+    instead of reading "nobody holds it" out of a read that did not happen. A retry
+    cannot manufacture an answer either — a success still requires a parsable list.
+
+    ⛔ AND THE OFF-SWITCH GOVERNS THE RETRY, NOT ONLY THE BOUND (#11202 review, HIGH).
+    ``FLEET_STATE_GH_READ_BOUND=fixed`` promises the pre-#11202 path — one attempt — so
+    the retry is clamped HERE, at the one place every caller passes through. Reading the
+    seam only inside `gh_list_timeout` left the two callers' ``retries=1`` in force, so
+    an operator who armed the switch to cap the wall clock got two attempts anyway: the
+    promise and the code disagreed, and nothing said so.
     """
-    out = _run(["gh", *args], timeout=timeout)
-    try:
-        data = json.loads(out)
-    except Exception:
-        return GitHubRows(measured=False, error=f"{what} returned no parsable JSON")
-    if not isinstance(data, list):
-        return GitHubRows(
-            measured=False,
-            error=f"{what} returned {type(data).__name__}, not a list",
+    if not gh_read_bound_enabled():
+        retries = 0
+    rows = _declared_rows(args)
+    attempt = 0
+    last = ""
+    while True:
+        attempt += 1
+        started = time.monotonic()
+        out, rc, err = _capture(["gh", *args], timeout=timeout)
+        elapsed = time.monotonic() - started
+        if rc == GH_READ_TIMEOUT_RC:
+            # ⛔ THE ONE RETRYABLE CLASS, AND THE RETRY IS STATED IN THE CAUSE. A
+            # single retry answers the MEASURED intermittency (contention multiplies
+            # this read 2.2x and then passes); it is bounded — `retries` defaults to
+            # 0 and the two callers below ask for exactly one — so the worst case is
+            # 2x the bound, never an unbounded wait.
+            last = (
+                f"{what} TIMED OUT after {timeout:g}s ({attempt} attempt(s), "
+                f"{elapsed:.1f}s) — killed for being slow, not malformed"
+                # ⛔ THE TAIL MUST BE TRUE IN BOTH SEAM STATES, AND IT MUST NOT HAND THE
+            # OPERATOR A KNOB THAT DOES NOT EXIST (#11202 review rounds 2-4). Unconditional
+            # it claimed a scaling rule the `fixed` seam had disabled; phrased as "raise
+            # --limit" it named a flag NO reader has — `build_state` calls both readers with
+            # no limit argument (`open_prs(repo)` / `open_issues(repo)`), `fleet_state`'s CLI
+            # declares no `--limit`, and the pre-flight's only limit flags
+            # (`--pr-limit`/`--closed-pr-limit`) never reach `gh_list_timeout`. It therefore
+            # states the ARITHMETIC and NAMES THE SEAM STATE, so the operator who armed
+            # `fixed` can confirm from the refusal itself that it took effect (60 s beside
+            # 2000 rows is otherwise indistinguishable from a broken scaling rule).
+            # ⛔ AND IT IS BUDGETED, NOT JUST SHORT: the gate composes ~180 characters of its
+            # own prose in front of this cause and its readers cut the result at 320, so the
+            # whole cause has ~140 characters. Every arm below is measured against that by
+            # `test_every_board_read_failure_fits_the_window_its_readers_apply`.
+            + (
+                f"; bound={timeout:g}s"
+                # The declared row count WHEN THERE IS ONE — a caller may pass a bound
+                # with no `--limit` at all (the tests do), and quoting rows it never
+                # asked for would be a claim about someone else's read.
+                + (f"/{rows} rows" if rows is not None else "")
+                # …and the SEAM STATE, which is what tells an operator that a 60 s
+                # bound beside 2000 rows is his own switch and not a broken rule.
+                + ("" if gh_read_bound_enabled() else " FIXED seam")
+            )
+            + (" (retried)" if attempt > 1 else "")
         )
-    return GitHubRows(data, measured=True)
+            if attempt <= retries:
+                continue
+            return GitHubRows(measured=False, error=last)
+        if rc != 0:
+            # A NAMED failure is the command's answer, not a read we may retry.
+            # ⛔ STDERR ONLY HERE (`_gh_said`'s contract): a refusal has stderr, and
+            # stdout may carry a progress line (`Fetching page 2 of 19...`) which would
+            # then be rendered as the CAUSE — the same mis-classification this change
+            # exists to remove. An empty stderr is reported truthfully as such.
+            return GitHubRows(
+                measured=False,
+                error=(
+                    f"{what} FAILED ({rc} exit): "
+                    f"{_gh_said(err)}"
+                ),
+            )
+        try:
+            data = json.loads(out)
+        except Exception:
+            return GitHubRows(
+                measured=False,
+                error=(
+                    f"{what} returned no parsable JSON: "
+                    f"{_gh_said(err, out)}"
+                ),
+            )
+        if not isinstance(data, list):
+            return GitHubRows(
+                measured=False,
+                error=f"{what} returned {type(data).__name__}, not a list",
+            )
+        return GitHubRows(data, measured=True)
 
 
 def open_prs(repo: str, limit: int = 400) -> GitHubRows:
     return gh_json([
         "pr", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
         "--json", "number,title,headRefName,headRefOid,mergeable,mergeStateStatus,url,isDraft,updatedAt",
-    ], what="gh pr list")
+    ], timeout=gh_list_timeout(limit), what="gh pr list", retries=1)
 
 
 #: The open-issue window ``build_state`` reads. ``attribute_claims`` gates EVERY
@@ -2039,10 +2282,16 @@ OPEN_ISSUES_LIMIT = 2000
 
 
 def open_issues(repo: str, limit: int = OPEN_ISSUES_LIMIT) -> GitHubRows:
+    """The open-issue universe, read at a bound derived from its own size (#11202).
+
+    This is the surface whose cost this board pays for everything: it was 13.7 s of a
+    22.9 s rebuild on this cell (1854 open issues, 19 sequential pages) and 37.4 s on
+    the owner's Mac, against a flat 60 s bound. See `gh_list_timeout`.
+    """
     return gh_json([
         "issue", "list", "--repo", repo, "--state", "open", "--limit", str(limit),
         "--json", "number,title,assignees,labels,updatedAt,url",
-    ], what="gh issue list")
+    ], timeout=gh_list_timeout(limit), what="gh issue list", retries=1)
 
 
 def process_table() -> tuple[dict[int, float], dict[int, int]]:

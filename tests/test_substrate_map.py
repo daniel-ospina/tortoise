@@ -1546,14 +1546,28 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     Reachable — and it WAS the shipped state: §5 read *":Document occurs on **17**
     lines under `tortoise/` at `4f68a2aa7`"*, but 17 is `git grep -l`'s FILE count;
     `git grep -n` (`git grep -c` too — "the number of matching lines", per the
-    git-grep manual) counts **55** LINES at exactly that commit, which is also 55
-    at this head. The number is load-bearing: it is the evidence §5 records for
-    the decision NOT to regex-check the label, so it is the number a reader
-    re-examining that decision quotes — and it was wrong by 3x.
+    git-grep manual) counts **55** LINES at exactly that commit. The number is
+    load-bearing: it is the evidence §5 records for the decision NOT to
+    regex-check the label, so it is the number a reader re-examining that
+    decision quotes — and it was wrong by 3x.
+
+    The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
+    claims it is: population = every tracked file under `tortoise/`. It has since
+    moved to **57** lines across **18** files, in two moves, one per workstream:
+    `cache_eviction.py:635` (the #10976 census's note on why labels do not partition
+    the node set) is one, and #8447's ingest door (`tortoise/ingest.py`, the
+    `REFUSED_NOT_FOUND` enum docstring) is the other. That move is the mechanism
+    working: the census landed, this check reddened, and §5 was re-measured instead
+    of the number being quietly widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
-    still matching exactly **two** RST literals is what makes *"a guard would have
-    needed a hand-maintained allowlist"* a measurement rather than an assertion.
+    matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
+    plus that same `cache_eviction.py:635` comment — is what makes *"a guard would
+    have needed a hand-maintained allowlist"* a measurement rather than an assertion,
+    and it moved 2 → 3 with the line count. The pin is exact for the same reason the
+    first one is: a narrow pattern that starts matching most of the prose is the day
+    §5's exclusion argument stops being true, and the honest response is to re-measure
+    it, never to widen the assertion.
     """
     doc = _doc()
     match = _LABEL_CLAIM.search(doc)
@@ -1573,10 +1587,111 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
     )
-    assert narrow == 2, (
-        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 2 "
-        "RST literals §5 records — the exclusion argument needs re-measuring"
+    assert narrow == 3, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 3 "
+        "§5 records (2 RST literals in `migrate_kinds.py` + the `cache_eviction.py` "
+        "comment) — the exclusion argument needs re-measuring"
     )
+
+
+def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes() -> None:
+    """Fails if a `cache_eviction.py:<n>` pointer drifts off the line it names.
+
+    Reachable — and it WAS the shipped state: §5 (and this file's docstring) cited
+    `cache_eviction.py:611`, which was correct at `52c15ebca` and then became a bare
+    `)` when `6e96734e3` ("`__all__` names every public symbol…") added five entries
+    to `__all__` ABOVE the comment. The line COUNT was re-measured in that paragraph;
+    the pointer was not. A reader re-examining the no-regex-check decision follows
+    that pointer as the evidence — and lands on `)`.
+
+    The count pin above cannot catch this: it pins the NUMBER (57/18), not where the
+    number came from. This is the same silent-staleness class the PR closed for
+    `Pinned by tests/…` citations with
+    `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation
+    that names something is checked against the thing it names, or it is decoration.
+
+    A line pointer is a moving target by design, and that is the point — when the
+    prose moves, this reds and §5 is re-measured rather than read past.
+    """
+    doc = _doc()
+    cited = sorted({int(n) for n in re.findall(r"cache_eviction\.py:(\d+)", doc)})
+    assert cited, (
+        "§5's `cache_eviction.py:<line>` citation is gone — re-state the evidence "
+        "pointer rather than dropping it silently"
+    )
+    source_lines = (REPO / "tortoise" / "cache_eviction.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    for line_no in cited:
+        assert 1 <= line_no <= len(source_lines), (
+            f"§5 cites `cache_eviction.py:{line_no}`, but the file has only "
+            f"{len(source_lines)} lines"
+        )
+        assert ":Document" in source_lines[line_no - 1], (
+            f"§5 cites `cache_eviction.py:{line_no}` as the `:Document` prose line, "
+            f"but that line is {source_lines[line_no - 1]!r} — the pointer drifted "
+            f"when lines moved above it; re-measure the pointer (§5), never widen "
+            f"this assertion"
+        )
+
+
+#: §5 introduces some of its evidence with the SYMBOL the line declares:
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) ``. Those pointers rot the
+#: same way the `:Document` ones did — and one already had: §5 cited
+#: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
+#: map was cut at `438a8924d1` and is at **1974** at this head, so the citation
+#: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
+#: the guard above reads only `cache_eviction.py` citations.
+_SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
+
+
+def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> None:
+    """Fails if a `` `SYMBOL` (`file:line`) `` citation in §5 points elsewhere.
+
+    Reachable — and it WAS the shipped state: §5's D10 evidence cited
+    `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration is at
+    1974 (it was 1584 when the map was cut; that module has grown since). The
+    citation therefore sent a reader re-examining the retirement mechanism to a
+    comment about `_ingestedAtStored` — the exact class of stale evidence pointer
+    the `:Document` pin next door closes for one file, still open for the rest.
+
+    The rule is the one the document states: a pointer introduced by a symbol must
+    land on a line that carries that symbol. Symbols rather than line numbers are
+    what the map's own `ENTRY RULE` tells a reader to re-derive, so this asserts the
+    locatable claim and leaves the line free to move — as long as the pointer moves
+    with it.
+    """
+    doc = _doc()
+    section = smc._section(doc, "### The one interface that must not be broken")
+    assert section, "§5's `one interface` subsection is gone — re-state the evidence"
+    citations = _SYMBOL_POINTER.findall(section)
+    assert len(citations) >= 2, (
+        f"§5's evidence now carries {len(citations)} `SYMBOL` (`file:line`) "
+        "citation(s); this pin was written against 2 (`_DOC_RETIRED_KEYS` and "
+        "`relabel_legacy_documents`) — dropping one is a decision to state, not a "
+        "silently narrower check"
+    )
+    for symbol, relpath, numbers in citations:
+        path = REPO / relpath
+        if not path.exists():
+            path = REPO / "tortoise" / relpath
+        assert path.exists(), (
+            f"§5 cites `{symbol}` at `{relpath}:{numbers}`, but no such file is in "
+            "this checkout"
+        )
+        source_lines = path.read_text(encoding="utf-8").splitlines()
+        for number in numbers.split(","):
+            line_no = int(number)
+            assert 1 <= line_no <= len(source_lines), (
+                f"§5 cites `{symbol}` at `{relpath}:{line_no}`, but {relpath} is "
+                f"{len(source_lines)} lines long"
+            )
+            cited = source_lines[line_no - 1]
+            assert symbol in cited, (
+                f"§5 cites `{symbol}` at `{relpath}:{line_no}`, but that line is "
+                f"{cited.strip()!r} — the pointer drifted when the file grew; "
+                "re-measure it (§5), never widen this assertion"
+            )
 
 
 def test_the_summary_line_agrees_with_the_named_holes_section() -> None:

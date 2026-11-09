@@ -56,10 +56,19 @@ The only questions that can be asked of it are therefore window-level:
   ``two_slot_tail_session`` pool below), and a sole representative can be
   displaced while its session stays visible through a DIFFERENT bucket (two hits
   of one session carrying different raw date strings are two buckets). Read
-  ``deleted_sessions`` / ``additive`` for the verdict. The predicate is reported
-  here, never enforced: whether an arm MAY pay for a slot by evicting base
-  evidence is the open owner ruling (``window-exit`` vs ``ab-head-ab``), and this
-  file does not decide it.
+  ``deleted_sessions`` / ``additive`` for the verdict.
+
+  ⛔ WHAT IS AND IS NOT DECIDED HERE. The owner RULED ``window-exit`` on
+  2026-11-07 (#10538, comment ``6711158625``) and the guard that enforces it —
+  ``_non_eviction_filter`` in ``tortoise/temporal_leg.py``, on by default — has
+  shipped. So "may an arm pay for a slot by evicting base evidence?" is NOT an
+  open question and this file does not report a report-only predicate: it asks
+  for the PRE-RULING splice EXPLICITLY (``NON_EVICTION = False``) because its
+  receipt's subject is the baseline the guard is measured AGAINST, and every row
+  stamps which arm produced it (see ``_row``'s note). What remains open, and
+  what this instrument deliberately does not decide, is the PLACEMENT verdict —
+  ``tail`` vs ``head``. A stale "the ruling is undecided" line is how a bypass
+  gets argued later.
 * can the graded metric see the picks at all (``pick_ranks`` vs
   ``graded_by_recall_all_at_5``)?
 
@@ -360,6 +369,11 @@ def _shallow_pool(depth: int) -> list[dict]:
     return _pool(spec)[:depth]
 
 
+#: #10538: the guard state every row of this receipt is measured under. It is
+#: a module constant so the row AND the geometry block read one value.
+NON_EVICTION = False
+
+
 def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
     """One measured row — the SHIPPED wiring, never a re-implementation."""
     from tortoise.retrieval import is_raw_chunk
@@ -371,7 +385,23 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
 
     order, picks = temporal_leg_fusion_order(
         pool, anchors=(), window=window, limit=limit,
-        date_window=DATE_WINDOW, placement=placement)
+        date_window=DATE_WINDOW, placement=placement,
+        # ⛔ #10538 (owner ruling 2026-11-07): the non-eviction guard is now the
+        # SHIPPED default, so this receipt — whose SUBJECT is the PRE-RULING
+        # splice — must ask for the unguarded arm explicitly. ⚠️ Do NOT read
+        # this as "the guard is inert on this instrument": it is not, and
+        # flipping :data:`NON_EVICTION` to ``True`` does NOT reproduce these
+        # rows. Measured on THIS instrument (review cycle 4, both arms run with
+        # everything else unchanged): the guarded TAIL arm still fires on 25 of
+        # the 85 rows, and ``picks``/``net``/``pick_ranks`` differ on 33 of
+        # them — e.g. a ``w=13`` row goes from ``['se13','sf14'] net 1`` to
+        # ``[] net 0``. The switch is passed EXPLICITLY (never inherited
+        # from the environment) so the committed receipt stays a build
+        # artifact that reproduces byte-for-byte on any box; the GUARDED arm's
+        # behaviour is pinned mechanism-level in
+        # `tests/test_temporal_leg_non_eviction_10538.py`, where each of the
+        # three conditions has its own discriminating case.
+        non_eviction=NON_EVICTION)
     # ``window_arm_retention``'s DEFAULT models the reader (the post-``dedup_pool``
     # pool the metric grades), so nothing here applies a chunk cap by hand: a row
     # measures whatever shape ``pool`` carries, and the shape is reported beside
@@ -387,6 +417,14 @@ def _row(pool: list[dict], *, window: int, limit: int, placement: str) -> dict:
         "limit_requested": limit,
         "budget_effective": effective_promotion_budget(window, limit),
         "placement": placement,
+        # ⛔ #10538 (fresh-context review, finding 6): the row must name the
+        # GUARD state too, not only the placement. The instrument runs the
+        # PRE-RULING splice (``non_eviction=False``, see the call above), and
+        # without this field an operator comparing a fresh `temporal_leg_stats`
+        # row (guard ON by default) against this receipt would find two
+        # artifacts disagreeing on picks/net with nothing in either naming the
+        # difference.
+        "non_eviction": NON_EVICTION,
         "picks": picks,
         "fired": bool(picks),
         "pick_ranks": retention["pick_ranks"],
@@ -491,6 +529,10 @@ def measure() -> dict[str, Any]:
             "window": SHIPPED_WINDOW,
             "limit": DEFAULT_TEMPORAL_LEG_LIMIT,
             "bucket_cap": DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
+            # the PRE-RULING splice: this receipt is the baseline the #10538
+            # non-eviction guard is measured AGAINST, so the guard is off here
+            # by construction and every row says so.
+            "non_eviction": NON_EVICTION,
             # The reader's per-session raw-chunk cap `window_arm_retention`
             # models by default (`retrieve.py` applies it AFTER fusion).
             "max_chunks_per_session": DEFAULT_MAX_CHUNKS_PER_SESSION,

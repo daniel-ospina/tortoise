@@ -507,6 +507,37 @@ def _emit_mcp_wait_bound_breach_off_loop(org_id: str, latency_ms: int,
     # import. Sanitized on the loop (pure and cheap), so the off-loop closure
     # carries only the safe value.
     safe_name = _mcp_auth._sanitize_for_log(name)
+    # #10602: count the breach on THIS thread, before the emit is submitted.
+    # ``submit`` returns a PRE-FAILED future when the telemetry pool's bounded
+    # backlog is full — the saturation that also causes breaches — so a counter
+    # incremented inside ``_emit`` would under-count precisely when it matters.
+    #
+    # EXACTLY-ONCE across the whole `/mcp` surface: this helper is the seam's
+    # only counting site, and the seam reaches it from exactly one place — the
+    # ``else`` of ``if _wait_bound_refused():``. The two ``dispatched=False``
+    # returns deliberately emit nothing (the transport already answered and
+    # already counted, as ``mcp``), so one refused MCP request is one count no
+    # matter which detector saw it. `test_the_mcp_module_has_exactly_one
+    # _breach_counting_site` pins that a second site is not added.
+    #
+    # ⛔ THE COUNT IS CLAIMED, not merely performed. `_wait_bound_refused()` is
+    # one-directional (it suppresses THIS seam when the middleware went first),
+    # so in the reverse order — the seam refusing first, the middleware's own
+    # bound expiring later in the same request — the middleware would count a
+    # second time for one refusal. `_claim_wait_bound_count()` makes whichever
+    # detector fires FIRST the only counter, in both orders.
+    #
+    # ⛔ WRAPPED, the same rule the emit below carries: telemetry must never
+    # turn a refusal into a generic error. This call sits on the refusal path
+    # BEFORE `_wait_bound_refusal_result` builds its `-32009` body, so a raise
+    # here would replace that legible refusal with a bare tool error — the
+    # observation destroying the thing it observes (#3834/#10602).
+    if _claim_wait_bound_count():
+        try:
+            monitoring.record_wait_bound_breach(
+                monitoring.WAIT_BOUND_SURFACE_MCP)
+        except Exception:  # measurement must never break a refusal
+            _log.debug("mcp wait-bound count failed", exc_info=True)
 
     def _emit() -> None:
         try:
@@ -550,6 +581,15 @@ _WAIT_BOUND_ARRIVAL_KEY = "_wait_bound_t0"
 #: answered the caller (#3834 F-2). The seam reads it so one request records
 #: exactly one ``transport_wait_bound_exceeded``.
 _WAIT_BOUND_REFUSED_KEY = "_wait_bound_refused"
+
+#: The key claiming the #10602 breach COUNT for this request. ``_WAIT_BOUND_REFUSED_KEY``
+#: is one-directional — it suppresses this seam when the middleware went first,
+#: never the other way — so a request whose seam refused first would be counted a
+#: second time when the middleware's own bound expires later in the same request
+#: (fastmcp's ``json_response`` mode: no response starts before dispatch, so the
+#: seam's deadline has not collapsed and it can win the race).
+#: Same literal as ``hosted_api._WAIT_BOUND_COUNTED_STATE``.
+_WAIT_BOUND_COUNTED_KEY = "_wait_bound_counted"
 
 
 def _wait_bound_state() -> dict | None:
@@ -624,6 +664,29 @@ def _wait_bound_refused() -> bool:
     """
     state = _wait_bound_state()
     return bool(state.get(_WAIT_BOUND_REFUSED_KEY)) if state is not None else False
+
+
+def _claim_wait_bound_count() -> bool:
+    """Claim the breach count for this request; True when THIS detector owns it.
+
+    #10602: the counter drives a capacity decision, so one refused request must
+    move it by exactly one across the WHOLE ``/mcp`` surface — not once per
+    detector that noticed. ``hosted_api.WaitBoundMiddleware`` and this seam can
+    both observe the same refusal, and their order is not fixed (see
+    ``_WAIT_BOUND_COUNTED_KEY``), so the claim is a checked write on the shared
+    ``scope["state"]``: the first detector to reach it counts, every later one
+    is a no-op.
+
+    Off-HTTP there is no shared dict, so every call owns its own count — that is
+    not a double count, it is two unrelated callers.
+    """
+    state = _wait_bound_state()
+    if state is None:
+        return True
+    if state.get(_WAIT_BOUND_COUNTED_KEY):
+        return False
+    state[_WAIT_BOUND_COUNTED_KEY] = True
+    return True
 
 
 #: The four retry rules shipped WITH a breached write's refusal. Exactly ONE is
@@ -909,6 +972,16 @@ def _declared_dry_run_default(name: str):
 #: ONLY the TRUE half is used below — see ``_coerces_to_true`` for why.
 _COERCES_TO_TRUE = frozenset({"true", "1", "yes", "on", "t", "y"})
 
+#: #10602: the `limit` the RETIRED `tortoise_query_points_by_tag` alias passes, so the new
+#: bound in `tortoise_query` cannot silently truncate it to the un-paginated default (100).
+#: A population-sized cap, NOT a validated ceiling: no SDK limit guard runs on this path at
+#: all (`paginated_query` checks only `limit >= 1`, tortoise/sdk.py, and the `tag=` arm
+#: slices a list — `rows[:eff_limit]` — consulting no validator), so "within the SDK's max"
+#: would be false. 10_000 is chosen to exceed any realistic tag population: the alias's
+#: contract is the RAW tag result set and its signature offers no `offset`/`page` with
+#: which to walk a truncation. The alias is removed next release; so is this constant.
+_TAG_ALIAS_LIMIT = 10_000
+
 
 def _coerces_to_true(value) -> bool:
     """Whether FastMCP will coerce this raw argument to ``True`` — and only that.
@@ -1040,10 +1113,13 @@ def _wait_bound_refusal_result(name: str | None = None,
     non-write-set tools DO mutate: ``tortoise_compute_confidence`` /
     ``tortoise_get_confidence`` are ``maintenance``-tier and re-store a
     re-derived score on a repeat (why the tier refuses ``writes=True`` for them),
-    and ``tortoise_onboarding_state`` is ``read``-tier but its registry leg
-    ``_get_onboarding_state`` runs ``_cas_write_onboarding_state(org_id, state,
-    0)`` when the state is missing — the same CAS that got the
-    ``tortoise_manage_sources(action="list")`` read-only arm removed below. So the
+    and ``tortoise_onboarding_state`` was ``read``-tier but its registry leg
+    ``_get_onboarding_state`` ran ``_cas_write_onboarding_state(org_id, state,
+    0)`` when the state was missing — the same CAS that got the
+    ``tortoise_manage_sources(action="list")`` read-only arm removed below. (That
+    name left the surface in #4282 Phase 3.2 and is in neither registry, so it is
+    history here, not a live example — the two ``maintenance``-tier names above
+    carry the point.) So the
     non-write-set arm makes NO mutation claim either way; it only declines to add
     the write-ambiguity payload. For a
     WRITE it may not — the seam ABANDONS the dispatch rather than cancelling it
@@ -2269,12 +2345,15 @@ def _excluded_writer_writes_the_default_graph(
     argument?" — NOT "does it touch a graph". The seam used to read the second
     answer out of the first, and that is false for
     `GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET`: `tortoise_pack_install`,
-    `tortoise_onboarding_demo_create`, `tortoise_onboarding_seed`,
     `tortoise_onboarding_github_index` and `tortoise_manage_sources` each write
     graph data into the org's DEFAULT graph, and each REJECTS a graph-bound key
     (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
     arm they can be on. Leaving them undisclosed left the #10084 defect in place
     on every tool except the one the issue measured (review P2).
+
+    (#4282 Phase 3.2 removed `tortoise_onboarding_demo_create` and
+    `tortoise_onboarding_seed` from that frozenset along with the tools
+    themselves, so they are no longer members here.)
 
     `tortoise_manage_sources` is CONDITIONAL on its own ARGUMENTS, because only
     one branch writes graph data; see
@@ -2349,8 +2428,8 @@ def _disclose_graph_resolution(result: Any, name: str,
     graph":
 
     * **writes NO graph** (`tortoise_org_create` provisions the workspace,
-      `tortoise_onboarding_session_recording` flips a control-plane flag,
-      `tortoise_onboarding_github_connect` stores OAuth CSRF state): SKIPPED.
+      `tortoise_onboarding_session_recording` flips a control-plane flag):
+      SKIPPED.
       Naming the credential's graph on them would assert a target the call never
       had — the wrong-graph claim this issue exists to remove, emitted by us.
     * **writes the workspace DEFAULT graph**
@@ -2878,8 +2957,6 @@ _QUOTA_GATED: frozenset[str] = frozenset({
     "tortoise_retract_point",
     # epic #888 W2 consolidated write surface
     "tortoise_create_entity", "tortoise_update", "tortoise_operator_action",
-    # delegates to hosted_api._seed_demo_graph (creates the 4-layer demo graph)
-    "tortoise_onboarding_demo_create",
     # #684: node-creating tools that were missed in the original #329 audit
     "tortoise_file_human_approval",  # creates Event + decision Point + IMPL edges
     "tortoise_assess_source",        # creates assessment Point
@@ -3539,7 +3616,7 @@ def _http_excluded_error() -> dict:
     """#236: JSON-RPC error for tools excluded from the tenant HTTP surface (D4).
 
     #9084: an `_SafeError`, not a plain dict — this is ONE funnel feeding eight
-    tool bodies (six live, two retired-but-served), each of which returns it
+    tool bodies (five live, three retired-but-served), each of which returns it
     verbatim, so the dispatch used to be recorded ``status="ok"``. The wire
     payload is unchanged (`_SafeError` is a ``dict`` subclass); the seam matches
     it by value. Its ``error`` is a MAPPING, so the seam's text arm cannot see
@@ -3677,6 +3754,19 @@ def _public_filters(filters: Any) -> dict:
     return {k: v for k, v in filters.items() if k not in PRIVATE_FILTER_KEYS}
 
 
+# ⚠️ DOC NOTE (#10063) — the docstring below opens with "structural exact-match
+# retrieval", and since #10063's fix that phrase is very slightly NARROW for
+# exactly two keys: `extractedFrom` / `extractedFromAll` answer through a UNION
+# (property equality OR `(n)-[:extractedFrom]->(:Source {url: $k})`), so a ref
+# carried only by a fold's `:Source` edge matches too. Every match is still an
+# EXACT one (no normalization, no prefix/fuzzy), which is why the served text is
+# left standing rather than reworded: its opening is mirrored as the catalog
+# `description` in `tortoise/tool_registry.py`, as the `job:` row in
+# `config/surface-manifest.yml` and in the rendered `docs/product/mcp-sdk-surface.md`,
+# so a reword is a surface-manifest re-cut — the surface gate's own artifact,
+# which a documentation note must not move. Recorded here, in-tree, instead of
+# only in a PR comment nobody greps (the
+# `tests/test_orient_direct_consolidation.py:186-189` precedent).
 def tortoise_query(kind: str | None = None,
                    filters: Any = None,
                    text: str | None = None,
@@ -3692,13 +3782,15 @@ def tortoise_query(kind: str | None = None,
     retrieval for known shapes (Epic #888 consolidation of paginated_query +
     query_points_by_tag into this one tool).
 
-    - Structural path (text=None): property-filter query via sdk.query().
+    - Structural path (text=None): property-filter query, **bounded to `limit`**
+      (default 100 — see the #10602 note below).
     - tag=<name>: filter Points by TAGGED edge (previously
       tortoise_query_points_by_tag). Tag mode takes precedence over text and
       ignores kind/filters/min_confidence/entity_type/order_by.
-    - Pagination: pass offset=/limit= (or 1-based page=). When any pagination
-      param is set, returns {results, total, hasMore} (previously
-      tortoise_paginated_query); a plain list is returned otherwise. Not
+    - Pagination: pass offset=/limit= (or 1-based page=). When offset=/page= is
+      set, returns {results, total, hasMore} (previously
+      tortoise_paginated_query); a plain list is returned otherwise. `limit`
+      alone does NOT switch the return shape — it BOUNDS the plain list. Not
       combinable with text= (fts has no offset/skip) — error dict returned.
     - text=<query>: routes through tortoise_fts_query() for hybrid search
       (unchanged behavior; limit defaults to 100).
@@ -3730,11 +3822,12 @@ def tortoise_query(kind: str | None = None,
     paginated = offset is not None or page is not None
     eff_limit = limit if limit is not None else (20 if paginated else 100)
     if tag is not None:
-        # #7983: record what this call SERVES — the post-filter population for an
-        # unpaginated caller, the one page for a paginated one. Never inside the
-        # accessor: it runs BEFORE the retracted filter below, so it would count
-        # Points the caller never receives (f HIGH, the direction that must not
-        # happen), and the two tag modes would measure different things.
+        # #7983: record what this call SERVES — the page delivered from the
+        # post-filter list (at most `limit`), for a paginated or un-paginated
+        # caller alike. Never inside the accessor: it runs BEFORE the retracted
+        # filter below, so it would count Points the caller never receives
+        # (f HIGH, the direction that must not happen), and the two tag modes
+        # would measure different things.
         rows = _safe(_get_org_sdk().query_points_by_tag, tag, _record_reads=False)
         if not isinstance(rows, list):
             return rows
@@ -3743,8 +3836,14 @@ def tortoise_query(kind: str | None = None,
         if not include_retracted:
             rows = [r for r in rows if r.get("status") != "retracted"]
         if not paginated:
-            _ledger_record_page("Point", rows)  # #7983: the served population
-            return rows
+            # #10602 review 3: a lone `limit=` used to be ignored HERE too, so a caller
+            # asking for 2 rows of a large tag got the whole tagged population back —
+            # the served description then told them that was capped. Bound the RESPONSE
+            # to `eff_limit` (the same number the structural arm uses); `offset=`/`page=`
+            # remain what switches on `{results,total,hasMore}`.
+            page_rows = rows[:eff_limit]
+            _ledger_record_page("Point", page_rows)  # #7983: the served page
+            return page_rows
         eff_offset = offset if offset is not None else 0
         if page is not None:
             eff_offset = (page - 1) * eff_limit
@@ -3762,6 +3861,43 @@ def tortoise_query(kind: str | None = None,
                      entity_type=entity_type, limit=eff_limit,
                      min_confidence=min_confidence or 0.0,
                      order_by=order_by or "relevance")
+    # #10602 review (F3, then round-6 finding 2): `kind`, `skip` and `limit` are
+    # reserved filter keys (`security.validate_filter_key`) AND names the binding
+    # below already binds, so a caller's `filters={"limit": 5}` collides. The two
+    # collisions FAIL DIFFERENTLY, and covering both is the point (both measured on
+    # this tree by neutralising this guard):
+    #   * `skip`/`limit` are passed to `_safe(...)` itself, so the duplicate is
+    #     raised while BINDING THAT CALL — outside `_safe`'s try, which therefore
+    #     never sees it — and escapes the tool body as a bare TypeError.
+    #   * `kind` is the accessor's first POSITIONAL argument, so the duplicate forms
+    #     INSIDE `_safe` (`paginated_query(kind, **{"kind": …})`) and is caught
+    #     there — a structured error, but one carrying the internal signature
+    #     `paginated_query() got multiple values for argument 'kind'` instead of the
+    #     documented "Reserved filter key" refusal. Guarding only {skip, limit}
+    #     left that message wrong, which is why the round-6 review reds it.
+    # Refused ONCE here, above BOTH arms: the F3 finding was that the plain arm was
+    # closed while the `offset=`/`page=` arm still raised (a pre-existing hole eight
+    # lines away), and one guard above the branch closes the class rather than the
+    # one instance of it.
+    # The set is READ from its owner (`tortoise/security.py`), not re-typed here: a
+    # second copy is what drifts. (A `frozenset` literal here ALSO used to make this
+    # handler's fingerprint non-deterministic — `_code_digest` repr'd `co_consts`, and
+    # a multi-element frozenset's repr order follows string hashes, so `served_from`
+    # differed between processes over one unchanged tree. That hazard is FIXED at its
+    # source: both digests now encode a set order-independently, #10602. The
+    # single-owner reason above stands on its own.)
+    # `tag`/`text` forward no caller filters at all, so a refusal on those arms is
+    # redundant-but-harmless rather than a check on a real collision.
+    from tortoise.security import _RESERVED_FILTER_KEYS
+
+    _filters = _public_filters(filters)
+    _collide = sorted(set(_filters) & _RESERVED_FILTER_KEYS)
+    if _collide:
+        return _SafeError({
+            "error": f"Reserved filter key: {_collide[0]!r}. This name collides "
+                     f"with internal query parameters (kind, skip, limit, "
+                     f"kind_<n>). Rename the property.",
+        })
     if paginated:
         eff_offset = offset if offset is not None else 0
         if page is not None:
@@ -3771,15 +3907,40 @@ def tortoise_query(kind: str | None = None,
                      # #7983: the SAME underscore drop as the plain path below,
                      # so one filter dict cannot be a private switch here and a
                      # property filter there.
-                     **_public_filters(filters))
+                     **_filters)
     # #7983: a caller-supplied filter may not set the SDK's PRIVATE switches
     # (PRIVATE_FILTER_KEYS), or a remote agent could turn the read ledger off
     # with a query parameter — a caller-controlled switch on a measurement that
     # is presented as authoritative. A tenant property named `_foo` is still a
     # filter (validate_filter_key accepts it), so ONLY the known switches go.
-    result = _safe(_get_org_sdk().query, kind,
-                   include_retracted=include_retracted,
-                   **_public_filters(filters))
+    # #10602 — the plain structural path is BOUNDED. `eff_limit` has always been
+    # computed above (100 when the caller passes none) and was applied only on
+    # the tag/text/paginated branches, so a `limit` passed WITHOUT offset=/page=
+    # was silently dropped here and `sdk.query` was asked for the whole label.
+    # `sdk.query` has no limit of its own (`MATCH (n:Point) WHERE … RETURN
+    # properties(n)`, no LIMIT and no ORDER BY), so on the hosted graph
+    # `tortoise_query(kind="statement", limit=3)` returned all 15,708 statements:
+    # 15,417 ms with no data, and a deterministic `-32009`
+    # "wait budget exceeded / retry_after 10" once the read + serialisation
+    # outlived `mcp_auth._TRANSPORT_WAIT_BOUND_S` (10 s). Measured 2026-11-05;
+    # the same logical read bounded at the source (`offset=0, limit=3`) answers
+    # in 1,362 ms with `total=15708`. So the bound is pushed to the ACCESSOR —
+    # `paginated_query` is the SDK method that applies LIMIT — rather than
+    # slicing the full list here, which would still pay the unbounded read.
+    # (`_filters` was computed once, above the paginated branch — this path does
+    # not recompute it; one dict, one meaning.)
+    bounded = _safe(_get_org_sdk().paginated_query, kind, skip=0, limit=eff_limit,
+                    include_retracted=include_retracted,
+                    **_filters)
+    # `_safe` returns an `_SafeError` (a dict SUBCLASS) instead of raising, so
+    # reading `.get("results")` off it without this gate would turn every
+    # database failure into a successful empty read — the false PASS #10602's
+    # sibling defect exists to remove.
+    if isinstance(bounded, _SafeError):
+        return bounded
+    # The un-paginated path's contract is a plain list; `paginated_query`
+    # answers {results, total, hasMore}, so take only the page.
+    result = bounded.get("results", []) if isinstance(bounded, dict) else bounded
     # If empty results and a kind filter was provided, attach suggestion
     if isinstance(result, list) and len(result) == 0 and kind is not None:
         from tortoise.query_suggestions import compute_suggestion
@@ -3805,7 +3966,7 @@ def tortoise_paginated_query(kind: str | None = None,
 
 def tortoise_check_structure() -> list[dict]:
     """Check Gate 0→4 chain integrity (orphans, dangling refs).
-    Alias → overview(section='structure_check') (epic #888 W3)."""
+    Alias → graph_overview(section='structure_check') (epic #888 W3)."""
     return _safe(_get_org_sdk().check_structure)
 
 
@@ -3835,25 +3996,25 @@ def tortoise_summarize_structure() -> dict:
     Returns {total, operators, gate0_jtbds..gate4_requirements, gate_total}.
     total counts every non-operator kind (statements, observations, decisions,
     ...), not just the product-strategy gates; operators is reported
-    separately. Alias → overview(section='structure') (epic #888 W3)."""
+    separately. Alias → graph_overview(section='structure') (epic #888 W3)."""
     return _safe(_get_org_sdk().summarize_structure)
 
 
 def tortoise_list_pointkinds() -> list[dict]:
     """List all pointKinds present in the graph with counts. What EXISTS.
-    Alias → overview(section='pointkinds') (epic #888 W3)."""
+    Alias → graph_overview(section='pointkinds') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_pointkinds)
 
 
 def tortoise_list_sources() -> list[dict]:
     """List all Sources with point counts. Where data came FROM.
-    Alias → overview(section='sources') (epic #888 W3)."""
+    Alias → graph_overview(section='sources') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_sources)
 
 
 def tortoise_list_namespaces() -> list[dict]:
     """List installed pack namespaces.
-    Alias → overview(section='namespaces') (epic #888 W3)."""
+    Alias → graph_overview(section='namespaces') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_namespaces)
 
 
@@ -3934,7 +4095,7 @@ def tortoise_pack_install(manifest_yaml: str) -> dict:
 
 def tortoise_list_tags() -> list[dict]:
     """List all Tag names with count of tagged Points. Where tags are USED.
-    Alias → overview(section='tags') (epic #888 W3)."""
+    Alias → graph_overview(section='tags') (epic #888 W3)."""
     return _safe(_get_org_sdk().list_tags)
 
 
@@ -3942,13 +4103,29 @@ def tortoise_query_points_by_tag(tag: str) -> list[dict]:
     """DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=...).
 
     Kept for one release with grace; will be removed in the next release.
-    Migrate to: tortoise_query(tag=tag)
+    Migrate to: tortoise_query(tag=tag, offset=0, limit=N), walking it while
+    `hasMore` is true. The PAGED form returns {results, total, hasMore}; the bare
+    `tortoise_query(tag=tag)` caps the RESPONSE at the un-paginated default (100)
+    and answers a plain list with no `hasMore`/`total`, so a large read through it
+    cannot be told from a complete one — the loss this alias exists to avoid, and
+    the #8447 §1 shape this tool's users would otherwise walk into.
 
     Note: passes include_retracted=True to preserve this tool's pre-#888 behavior
     (raw tag results incl. tombstones); the new tortoise_query(tag=...) default
     excludes retracted points.
+
+    #10602: `limit` is passed explicitly because this alias's whole purpose is the
+    RAW, complete tag result set. Without it the new bound in `tortoise_query`
+    would silently truncate this tool to the un-paginated default (100), turning
+    an answer this signature cannot page into an incomplete one that looks
+    complete. The value is `_TAG_ALIAS_LIMIT` — a POPULATION-SIZED CAP, not a
+    validated ceiling: no SDK limit guard runs on this path (see that constant's
+    own comment, which this text must keep agreeing with), so it restores the
+    pre-bound behaviour for any realistic tag and TRUNCATES above 10,000 tagged
+    rows. The SERVED description of this tool says so out loud, because this
+    signature offers no `offset`/`page` with which to walk the truncation.
     """
-    return tortoise_query(tag=tag, include_retracted=True)
+    return tortoise_query(tag=tag, include_retracted=True, limit=_TAG_ALIAS_LIMIT)
 
 
 def tortoise_get_point(id: str) -> dict:
@@ -4718,7 +4895,7 @@ def tortoise_list_graphs() -> list[str]:
     `org_{org_id}` / legacy `team_{org_id}` equality, plus each of the org's
     OTHER graphs' namespaces — no cross-tenant enumeration). Stdio: full list
     (operator context).
-    Alias → overview(section='graphs') (epic #888 W3).
+    Alias → graph_overview(section='graphs') (epic #888 W3).
 
     #9340: this is the DISCOVERY surface for the `graph` tool argument, so a
     workspace that holds more than one graph must be able to see them here. It
@@ -4754,14 +4931,14 @@ def tortoise_list_graphs() -> list[str]:
 def tortoise_status() -> dict:
     """Graph health + entity counts + FalkorDB connectivity.
     Returns {connected, counts: {Point, Event, ...}, total_entities}.
-    Alias → overview(section='status') (epic #888 W3).
+    Alias → graph_overview(section='status') (epic #888 W3).
     """
     return _safe(_get_org_sdk().status)
 
 
 def tortoise_health() -> dict:
     """Health check + basic metrics: graph_size, last_ingest, error_count, uptime.
-    Alias → overview(section='health') (epic #888 W3).
+    Alias → graph_overview(section='health') (epic #888 W3).
 
     #2202 (health-truthful): probes the SDK THIS server actually serves —
     the request-scoped org SDK over HTTP and the base SDK over stdio — so the
@@ -4856,13 +5033,13 @@ def tortoise_ingest_corpus(directory: str) -> dict:
 def tortoise_taxonomy() -> dict[str, int]:
     """Count entities by node label. Returns {Point: N, Event: N, Subject: N,
     Object: N, Source: N} (D10: a document is a Source, not a :Document node).
-    Alias → overview(section='taxonomy') (epic #888 W3)."""
+    Alias → graph_overview(section='taxonomy') (epic #888 W3)."""
     return _safe(_get_org_sdk().taxonomy)
 
 
 def tortoise_list_topics(entity_id: str) -> dict:
     """entityProfile lite for an entity. Returns {id, pointKind, neighbors, neighborCounts}.
-    Alias → overview(section='topics', entity_id=...) (epic #888 W3)."""
+    Alias → graph_overview(section='topics', entity_id=...) (epic #888 W3)."""
     return _safe(_get_org_sdk().list_topics, entity_id)
 
 
@@ -4988,7 +5165,7 @@ def tortoise_analyze(question: str,
 
 def tortoise_stale(days: int = 30, limit: int = 50) -> dict:
     """Find Points not updated in N days. Returns {stale, count, cutoff, limit}.
-    Alias → overview(section='stale', days=, limit=) (epic #888 W3)."""
+    Alias → graph_overview(section='stale', days=, limit=) (epic #888 W3)."""
     return _safe(_get_org_sdk().stale_points, days=days, limit=limit)
 
 
@@ -5481,6 +5658,37 @@ _OVERVIEW_SECTIONS = (
     "taxonomy", "structure", "structure_check", "pointkinds", "tags",
     "sources", "namespaces", "graphs", "topics", "health", "status",
     "stale",
+    # #4282 — the three sections the approved container `graph_overview` absorbs
+    # (`docs/product/canonical-mcp-tools.md`, row 6). Each dispatches to the tool
+    # body it replaces; none is re-implemented here.
+    #
+    # `issue_insight` is deliberately NOT here: its Phase-0.1 destination
+    # (`tools/bridge_table.py` DESTINATION) is `search_knowledge`, so it travels with
+    # that container rather than this one, and the door is still live. Adding a second
+    # advertised door onto that read would also give one SDK method two different
+    # defaults — the container's shared `limit=50` against the door's `limit=2`.
+    "validate_domain", "audit", "dream_health",
+)
+
+#: Sections that REQUIRE an argument, so the no-`section` combined summary cannot
+#: call them. `topics` was the only one; #4282 added `validate_domain` (needs
+#: `domain`). `audit` and `dream_health` take no argument but are ALSO kept out of
+#: the default summary on purpose: the summary a caller gets with no `section` must
+#: stay byte-identical to what `tortoise_overview` returned before this
+#: consolidation, and adding keys to it is a behaviour change nobody asked for.
+#: Pass the section explicitly for any of them.
+#:
+#: PINNED LITERALLY, not derived: `_OVERVIEW_DEFAULT_SUMMARY_KEYS` below is the
+#: assertable form of "the default envelope did not move", and a test compares it to
+#: the pinned tuple — a derivation from these two constants would agree with any
+#: edit to them and could never fail.
+_OVERVIEW_SUMMARY_SKIP = frozenset({"topics", "validate_domain", "audit", "dream_health"})
+
+#: The exact keys (in dispatch order) the no-`section` summary returns. 11 before
+#: #4282 and 11 after it — that equality is the claim this constant makes testable.
+_OVERVIEW_DEFAULT_SUMMARY_KEYS = (
+    "taxonomy", "structure", "structure_check", "pointkinds", "tags", "sources",
+    "namespaces", "graphs", "health", "status", "stale",
 )
 
 
@@ -5607,7 +5815,9 @@ def _overview_summary(rows: Any, group_field: str, out_field: str,
 
 
 def _overview_section(section: str, entity_id: str | None,
-                      days: int, limit: int) -> Any:
+                      days: int, limit: int,
+                      domain: str | None = None,
+                      point_kinds: list[str] | None = None) -> Any:
     """Dispatch one overview section to its original tool body."""
     if section == "taxonomy":
         return tortoise_taxonomy()
@@ -5636,25 +5846,85 @@ def _overview_section(section: str, entity_id: str | None,
         return tortoise_status()
     if section == "stale":
         return tortoise_stale(days=days, limit=limit)
+    # ── #4282: the three sections this batch adds (a fourth, `issue_insight`, is NOT
+    # in this batch — its destination is `search_knowledge`) ──────────────────
+    if section == "validate_domain":
+        if not domain:
+            return _SafeError(
+                {"error": "graph_overview(section='validate_domain') requires "
+                          "domain"})
+        return tortoise_validate_domain(domain)
+    if section == "audit":
+        return tortoise_audit(point_kinds=point_kinds)
+    if section == "dream_health":
+        # Keeps the sibling door's own transport guard: `dream_health` is the one
+        # member excluded from tenant HTTP (`http_policy=False`), and the guard
+        # that refuses it there lives in the handler, not in the registry.
+        return tortoise_dream_health()
     return _SafeError(
         {"error": f"overview: unknown section {section!r}. "
                   f"Valid sections: {', '.join(_OVERVIEW_SECTIONS)}"})
 
 
+def _row_section_envelope(result: Any) -> Any:
+    """Give a ROW-returning ``overview`` section the wire shape its alias ships.
+
+    #10085: ``tortoise_overview`` is annotated ``-> Any``, so FastMCP derives NO
+    output schema for it, and its ``Tool.convert_result``
+    (``fastmcp/tools/base.py``) carries ``structured_content`` ONLY for a dict
+    return when no schema is declared. A section that returns ROWS therefore
+    reached a client as a bare text block — measured through the ChatGPT
+    connector as ``{"text": "[\\"org_…\\"]"}``, a JSON string the model had to
+    parse twice — while its own alias ``tortoise_list_graphs`` (annotated
+    ``-> list[str]``, i.e. FastMCP's ``x-fastmcp-wrap-result`` envelope) shipped
+    ``{"result": [...]}``. Same payload, two wire shapes — and the tool the
+    SERVED DOCS tell users to call was the broken one, so "which graph did my
+    write land in" came back as an opaque blob.
+
+    The envelope is built here the way FastMCP builds it for a
+    wrap-annotated tool: the rows' compact JSON in ``content``
+    (``ensure_ascii=False`` and ``,``/``:`` separators, matching
+    ``pydantic_core.to_json``) and ``structured_content = {"result": rows}``
+    plus the same ``wrap_result`` meta claim, which is what a client that
+    unwraps keys off.
+
+    A MAPPING section is returned UNTOUCHED: with no output schema a dict
+    return already ships structured content, so wrapping it would change a
+    shape that works — and would nest a caller's payload one level deeper.
+    """
+    if not isinstance(result, (list, tuple)):
+        return result
+    rows = list(result)
+    from mcp.types import TextContent
+    return ToolResult(
+        content=[TextContent(type="text",
+                             text=json.dumps(rows, default=str,
+                                             ensure_ascii=False,
+                                             separators=(",", ":")))],
+        structured_content={"result": rows},
+        meta={"fastmcp": {"wrap_result": True}},
+    )
+
+
 def tortoise_overview(section: str | None = None,
                       entity_id: str | None = None,
                       days: int = 30,
-                      limit: int = 50) -> Any:
+                      limit: int = 50,
+                      domain: str | None = None,
+                      point_kinds: list[str] | None = None) -> Any:
     """Graph orientation in one call — consolidates the list_*/status/health/
     taxonomy/structure zoo (epic #888 W3, PR #912).
 
-    section selects one orient surface:
+    section selects one orient surface. The full set is `_OVERVIEW_SECTIONS`:
       taxonomy | structure | structure_check | pointkinds | tags | sources |
-      namespaces | graphs | topics | health | status | stale
+      namespaces | graphs | topics | health | status | stale | validate_domain |
+      audit | dream_health
     Each section returns exactly what the legacy tool returned.
 
-    Omit section → compact combined summary: {section: result} for every
-    section except topics (which requires entity_id). The UNCAPPED sections
+    Omit section → compact combined summary: {section: result} for every section NOT in
+    `_OVERVIEW_SUMMARY_SKIP` — `topics` (requires entity_id) and the three #4282 additions
+    are excluded, so the default envelope stays the eleven keys it has always had
+    (`_OVERVIEW_DEFAULT_SUMMARY_KEYS`). The UNCAPPED sections
     whose size grows with the graph's ROWS rather than its shape (a fixed
     vocabulary) are reported as bounded counts, never as rows, so the summary
     stays compact as the graph grows (#3510). Each number in a section's
@@ -5674,8 +5944,10 @@ def tortoise_overview(section: str | None = None,
     if section is None:
         combined: dict[str, Any] = {}
         for sec in _OVERVIEW_SECTIONS:
-            if sec == "topics":
-                continue  # requires entity_id — not part of the default summary
+            if sec in _OVERVIEW_SUMMARY_SKIP:
+                # requires an argument, or is deliberately not part of the
+                # default summary — see `_OVERVIEW_SUMMARY_SKIP`.
+                continue
             result = _overview_section(sec, entity_id, days, limit)
             # #3510: every data-proportional section is folded to bounded
             # counts here — the rows themselves stay behind the explicit
@@ -5698,7 +5970,53 @@ def tortoise_overview(section: str | None = None,
     if not isinstance(section, str):
         return _SafeError({"error": f"overview: section must be a string, got "
                                     f"{type(section).__name__}"})
-    return _overview_section(section.strip().lower(), entity_id, days, limit)
+    result = _overview_section(section.strip().lower(), entity_id, days, limit,
+                               domain=domain, point_kinds=point_kinds)
+    # #10085: a ROW section (a list) needs the structured payload its own alias
+    # ships; see `_row_section_envelope`. Deliberately written as `return
+    # result` for the non-row case rather than wrapping both arms: this return
+    # is a NAME assigned from `_overview_section`, which is the shape
+    # `tests/test_mcp_refusal_telemetry_9084.py`'s served-tool walk follows to
+    # prove a refusal cannot escape as a plain dict.
+    if not isinstance(result, (list, tuple)):
+        return result
+    return _row_section_envelope(result)
+
+
+def tortoise_graph_overview(section: str | None = None,
+                            entity_id: str | None = None,
+                            days: int = 30,
+                            limit: int = 50,
+                            domain: str | None = None,
+                            point_kinds: list[str] | None = None) -> Any:
+    """What is in this memory graph and how it is shaped (#4282 row 6).
+
+    The approved container name for the orientation family. `section` selects the
+    view; every value dispatches to the tool body it replaces, so the absorbed
+    doors and this one cannot disagree:
+
+      taxonomy | structure | structure_check | pointkinds | tags | sources |
+      namespaces | graphs | topics | health | status | stale        (`overview`)
+      validate_domain   requires `domain`   — was `tortoise_validate_domain`
+      audit             takes  `point_kinds` — was `tortoise_audit`
+      dream_health                           — was `tortoise_dream_health`
+
+    `structure_check` KEEPS its own door live on purpose: that read is the one
+    member with a WRAP envelope (`-> list[dict]`), and this container returns
+    `Any`, so retiring the door would move the #8482 failure repair off the
+    advertised path — a `_safe` failure payload the array schema cannot carry.
+    The section and the door return the same rows; the door is what carries the
+    repair, and it retires once the container has a declared envelope.
+
+    Omit `section` → the compact combined summary `tortoise_overview` returned.
+    That default is deliberately UNCHANGED by this consolidation: the four
+    argument-taking or newly-absorbed sections stay out of it
+    (`_OVERVIEW_SUMMARY_SKIP`), so a caller who passes no section sees exactly the
+    envelope it saw before.
+    """
+    return tortoise_overview(section=section, entity_id=entity_id, days=days,
+                             limit=limit, domain=domain,
+                             point_kinds=point_kinds)
 
 
 _GET_TYPES = ("point", "operator", "entity", "event", "session",
@@ -5905,13 +6223,18 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # directly (same pattern as all tools) — the REST endpoints in hosted_api.py
 # expose the same operations to the welcome page.
 
-# Epic #888 no-regret: once an org's onboarding completes, the seven
-# tortoise_onboarding_* tools retire from that org's steady-state MCP
-# surface (tools/list) — the REST /v1/onboarding/* endpoints remain for the
-# web onboarding flow. Function bodies are untouched; only the listing hides
-# them. #2210: no @mcp.tool decorators here — the module-bottom register_all
-# registers each from its registry entry (annotations are registry-canonical).
+# Epic #888 no-regret (HISTORICAL — read the frozenset below before trusting
+# this paragraph): once an org's onboarding completed, the onboarding tools
+# retired from that org's steady-state MCP surface (tools/list) while the REST
+# /v1/onboarding/* endpoints stayed for the web onboarding flow. Function bodies
+# were untouched; only the listing hid them. #2210: no @mcp.tool decorators
+# here — the module-bottom register_all registers each from its registry entry
+# (annotations are registry-canonical).
 # See _HTTPToolFilter.list_tools.
+# ⛔ SINCE #4282 Phase 3.2 THIS GATE HAS NO POPULATION: the set below is EMPTY,
+# and five of the seven tools are UNREGISTERED, so they can never be listed in
+# ANY team state — the hiding is not what keeps them off the surface. Do not read
+# a served-name regression as "already covered by hiding".
 # #3540: `tortoise_onboarding_session_recording` and
 # `tortoise_onboarding_github_index` were RETIRED into
 # `tortoise_manage_sources` (#3883), so they are no longer advertised and must
@@ -5920,10 +6243,18 @@ def tortoise_belief_timeline(topic: str, limit: int = 50) -> dict:
 # it is the STEADY-STATE management surface, and the whole point of the set is
 # that its members disappear once onboarding completes.
 _ONBOARDING_TOOL_NAMES: frozenset[str] = frozenset({
-    "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
-    "tortoise_onboarding_github_connect",
-    "tortoise_onboarding_github_status",
-    "tortoise_onboarding_seed",  # #1999 (W3)
+    # EMPTY after #4282 Phase 3.2 — all five members were the `run_onboarding`
+    # set and every one of them left the served surface: `demo_create`, `state`,
+    # `seed` (moved off the MCP, owner ruling 2026-09-22) and `github_connect` /
+    # `github_status`. See `tortoise/tool_registry.py` for the recorded reasons
+    # and the REST routes that preserve each capability.
+    #
+    # ⚠️ CONSERVED, NOT REMOVED: the set is now INERT — `_HTTPToolFilter` hides
+    # these names once onboarding completes, and with no members it hides
+    # nothing. That is cosmetic (this gate fails OPEN by design and no permission
+    # depends on it), so dismantling the filter + its 60s state cache is a
+    # follow-up, not part of a surface-removal batch. Remove the seam, not just
+    # this set, if a later lane picks it up.
 })
 
 # 60s per-org TTL cache for the tools/list gate — the onboarding-state read
@@ -6049,9 +6380,11 @@ def _onboarding_state() -> dict:
     from tortoise.mcp_auth import SELFHOST_ORG_ID
     org_id = _current_org_id.get()
     if org_id is None:
-        # #9084: `_SafeError`, so `tortoise_onboarding_state`,
-        # `tortoise_manage_sources` and `_sources_view` — which all return this
-        # payload verbatim — record the dispatch as a refusal instead of `ok`.
+        # #9084: `_SafeError`, so a caller that returns this payload verbatim
+        # records the dispatch as a refusal instead of `ok`. `_sources_view`
+        # does exactly that; `tortoise_manage_sources` does NOT reach this
+        # branch — it answers its own `_SafeError` when `org_id` is None
+        # (its first guard) and never calls in here.
         return _SafeError({"error": "No team context (HTTP mode required)"})
     if org_id == SELFHOST_ORG_ID:
         from tortoise.mcp_auth import _get_org_sdk
@@ -6280,11 +6613,12 @@ def _sources_view() -> dict:
 
         The two GitHub sources share a key set on purpose: a caller iterating
         `sources` must not need to know which of them happens to carry the
-        index state. Both onboarding tools are off the TARGET list yet STILL
-        SERVED today: `tortoise_onboarding_state` returns the raw projection and
-        is therefore a second reader of this state, while
-        `tortoise_onboarding_github_status` is served but reads no index state.
-        "Removed" here is a target-list status, never the served surface. The
+        index state. Both onboarding tools that used to read this state are gone
+        from the surface (#4282 Phase 3.2: `tortoise_onboarding_state`,
+        `tortoise_onboarding_github_status`), so `tortoise_manage_sources` is the
+        only SERVED reader of the projection — `onboarding` below carries the raw
+        state `tortoise_onboarding_state` used to return. (That handler's BODY is
+        retained and still reads it; nothing dispatches to it any more.) The
         issues walk stamps `github_indexed`, the docs walk `github_docs_indexed`.
         """
         raw = _state_get(state, f"{prefix}_at")
@@ -6531,7 +6865,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 "error": (
                     "Could not read the stored GitHub credential (control "
                     "plane unavailable). NOTHING was changed — retry, or "
-                    "re-authorise with tortoise_onboarding_github_connect."
+                    "re-authorise GitHub from the dashboard "
+                    "(`POST /v1/onboarding/github/connect`)."
                 )
             })
         if not encrypted:
@@ -6539,9 +6874,9 @@ def _set_source_state(source: str, enable: bool) -> dict:
                                "refused_not_connected")
             return _SafeError({
                 "error": (
-                    "GitHub not connected. Authorise it first with "
-                    "tortoise_onboarding_github_connect — this tool never "
-                    "accepts credentials."
+                    "GitHub not connected. Authorise it first from the "
+                    "dashboard (`POST /v1/onboarding/github/connect`) — this "
+                    "tool never accepts credentials."
                 )
             })
         # #1845: HEAL before walking, exactly as both REST twins do. The two
@@ -6573,8 +6908,8 @@ def _set_source_state(source: str, enable: bool) -> dict:
                 "error": (
                     "GitHub org unknown for this team's stored credential and "
                     "it could not be derived from the stored token. Nothing "
-                    "was started. Re-connect with "
-                    "tortoise_onboarding_github_connect."
+                    "was started. Re-connect GitHub from the dashboard "
+                    "(`POST /v1/onboarding/github/connect`)."
                 )
             })
         kind = "docs" if source == "github_documents" else "github"
@@ -6699,8 +7034,10 @@ def tortoise_manage_sources(action: str,
     server-side reads it yet) that residual cannot be closed from here; the
     honest statement is that a `disable` records intent and does not cancel an
     index run, whether it arrives through this tool or an old name.
-    `tortoise_onboarding_github_connect` is deliberately NOT folded in — it is
-    the OAuth handshake, and credentials must never pass through the model.
+    `tortoise_onboarding_github_connect` was deliberately never folded in — it was
+    the OAuth handshake, and credentials must never pass through the model. That
+    tool has since left the MCP surface (#4282 Phase 3.2), so the handshake's only
+    door is `POST /v1/onboarding/github/connect`.
     """
     # C5 #2114 parity: this writes ORG-level state, so a graph-bound key is
     # rejected rather than allowed to reconfigure the org from inside a graph.
@@ -6928,15 +7265,34 @@ def _maybe_onboarding_auto_complete(*,
 # this tool. It calls the SAME capture pipeline as POST /v1/sessions
 # (hosted_api._capture_session_impl) so the two surfaces can never drift on
 # gate order: boundary 422 → admission 429 (#3060) / in-flight 409 (#3129)
-# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402;
-# the tool docstring below carries the full list, including the inner
-# extractor-provider 503 that can follow them.
+# → session_recording opt-out 409 → turn cap 400 → empty 422 → quota 402
+# → ingest_rate_limited 429 (#4051 §3.1 — the per-org window, NOT the
+# admission 429 above); the tool docstring below carries the list through the
+# 402 and NOT the 429 (see below), including the inner extractor-provider 503
+# that can follow them.
+# ⛔ The 429 note lives HERE and NOT in the tool docstring: the docstring is a
+# `co_consts` member, so prose there moves `_code_digest` and reds the required
+# `surface-guard` job (measured at head c0cb695152 — served_from
+# `bd6dbf27d57b404c` → `d93e6d0ba135d51f`, rc=1, reversed to rc=0 by keeping
+# this note here). A description change is a FROZEN-SURFACE change and needs
+# Daniel's approval (#4282); a comment carries the same information to the same
+# reader at no surface cost.
 # A missing provider key is NOT a gate (#3892): the capture
 # is STORED and only the LLM extraction is skipped, reported as
 # `extraction_mode: "no-provider"`. Stdio/self-host returns an honest "requires
 # hosted mode" error —
 # there is deliberately NO local fallback that bypasses the capture pipeline
 # (a prompt-injection exfiltration surface must not exist).
+#
+# ⛔ THE LAST-ERROR EXEMPTION IS EVERY 429, and the tool docstring below still
+# names only the #3060 capacity one — kept that way on purpose, because a
+# docstring edit is a FROZEN-SURFACE change (see the note above). The predicate
+# it describes reads `if (status >= 400 and status != 429 and detail !=
+# _CAPTURE_SESSION_IN_FLIGHT_DETAIL)` — modelled on `hosted_api.py`'s REST
+# wrapper, which carries the same `!= 429` — so since #4051 §3.1 the per-org
+# ingest throttle (#11214) is a THIRD exempt class: a transient server
+# condition that must not paint a harness failure on the dashboard. Recorded
+# here as a comment rather than in the docstring, for the reason above.
 
 
 def tortoise_session_capture(conversation: list[dict],
@@ -7258,7 +7614,7 @@ def tortoise_onboarding_github_index(org: str, repo: str | None = None) -> dict:
         plane = "Supabase control plane" if is_supabase_enabled() else "registry"
         return _SafeError({"error": f"{plane} unavailable"})
     if not encrypted:
-        return _SafeError({"error": "GitHub not connected. Run tortoise_onboarding_github_connect first."})
+        return _SafeError({"error": "GitHub not connected. Authorise it from the dashboard (`POST /v1/onboarding/github/connect`) first."})
     # #1725 + P1-1 (PR #1792): single-flight — an in-flight started job for
     # the org is reused AND the run is spawned ONLY when the job was
     # freshly minted (never two concurrent walks on one job).
@@ -7648,9 +8004,11 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
             _by_name = get_tool_by_name()
             # Skip the control-plane read when it can't change the outcome: in
             # a curation-group-scoped app (other than "onboarding") the group
-            # filter below already excludes the onboarding tools.
+            # filter below already excludes the onboarding tools — and since
+            # #4282 Phase 3.2 the hide-list is EMPTY, so there is no population
+            # left for this read to gate.
             onboarding_done = False
-            if not (group and group != "onboarding"):
+            if _ONBOARDING_TOOL_NAMES and not (group and group != "onboarding"):
                 # #2924: awaited — the gate read is off the event loop (the
                 # read is synchronous end to end; see _org_onboarding_complete).
                 onboarding_done = await _org_onboarding_complete()
@@ -7666,9 +8024,13 @@ def create_http_app(*, allowed_origins: list[str] | None = None,
                 # Epic #888: onboarding tools retire from the steady-state
                 # surface once this org's onboarding is complete (fail-open
                 # — state read errors keep them visible).
-                if onboarding_done and t.name in _ONBOARDING_TOOL_NAMES:  # noqa: SIM103
-                    return False
-                return True
+                #
+                # #4282 Phase 3.2: the set is EMPTY (all five members left the
+                # surface), so it is tested FIRST — without the short-circuit
+                # every `tools/list` would still pay an `_org_onboarding_complete()`
+                # control-plane read to gate a population that cannot exist.
+                return not (_ONBOARDING_TOOL_NAMES and onboarding_done
+                            and t.name in _ONBOARDING_TOOL_NAMES)
 
             return [t for t in tools if _visible(t)]
 

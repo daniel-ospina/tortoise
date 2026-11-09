@@ -207,6 +207,108 @@ def test_search_wire_session_id_carries_the_captured_session():
         assert h["sessionId"] == SID_A, h
 
 
+def test_captured_turn_hits_seed_their_own_session_10540():
+    """#10540 — the C4 SEED must see the identity the read surface ALREADY
+    carries, on the real fetch, not on a modelled hit.
+
+    The chain this pins end to end: ``capture_session``'s turn Points carry
+    NO ``sessionId``/``session_id`` prop, the point fetch derives the
+    identity from the ``(:Session)-[:CONTAINS]->(:Point)`` edge and hands it
+    back as the camel key ONLY (``h["sessionId"] == SID_A`` pinned by the
+    sibling above; the snake key's ABSENCE pinned below, in this test), and
+    the pool authority (``retrieval.session_key_of``) must resolve that same
+    spelling.
+
+    MEASURED on this tree BEFORE the fix, with exactly these two turns:
+    ``retrieval.hit_session_id`` → ``SID_A`` for both hits, while
+    ``session_key_of`` → ``idx:point:{sid}_t0`` / ``idx:point:{sid}_t1`` and
+    ``seeded_sessions`` → ``[]``. ``_is_real_session_id`` refuses an
+    ``idx:`` bucket, and the fetch pops the snake ``session_id`` from every
+    point hit, so on the raw search pool NO hit could seed a session — see
+    ``session_reinjection``'s module docstring for the exact scope (an
+    ASK-lane hit can carry a snake id re-attached by ``annotate_ask_hits``,
+    but that lane keys with its own ``ask_session_key`` and the arm is off
+    in the product).
+    """
+    from tortoise.session_reinjection import seeded_sessions
+
+    sdk = _new_sdk()
+    _seed_captured_session(sdk, SID_A, TURNS_A)
+    hits = sdk.tortoise_fts_query("gym schedule", limit=40,
+                                  include_terminal=True)
+
+    # non-vacuity precondition: the captured turns must actually retrieve
+    assert len(hits) == 2, hits
+    # ... and the fetch names the session in the CAMEL key alone (the shape
+    # the pool authority used to ignore)
+    assert all(h["sessionId"] == SID_A for h in hits), hits
+    assert all("session_id" not in h for h in hits), hits
+
+    # the READER's authority and the POOL's authority agree
+    assert all(retrieval.hit_session_id(h) == SID_A for h in hits), hits
+    assert all(retrieval.session_key_of(h) == SID_A for h in hits), hits
+
+    # ... so the seed fires, and it fires on the captured session
+    seeds = seeded_sessions(hits, window=40, limit=5)
+    assert [s.session_id for s in seeds] == [SID_A], seeds
+    assert seeds[0].point_id in {h["id"] for h in hits}, seeds
+
+
+def test_the_seed_key_equals_the_group_key_the_fetch_returns():
+    """#10540 — the invariant the whole arm rests on, pinned on the GRAPH.
+
+    The seed key comes from ``retrieval.session_key_of`` over the HIT; the
+    fetch's group key comes from ``coalesce(p.session_id, s.id)`` over the
+    GRAPH row. The arm delivers only when those two strings are EQUAL —
+    when they are not, the rows are fetched, charged to the per-session and
+    total budgets, and then DROPPED by
+    ``reinjection_merge_order`` (groups are built over ``seed_order`` alone),
+    i.e. the receipt reads ``seeded: N`` with ``injected: 0``. Every other
+    test in this file stops at ``seeded_sessions``, and the splice test in
+    ``test_2976_session_admission.py`` monkeypatches the fetch, so the two
+    halves were only ever connected by prose.
+
+    Red on a snake-only graph key (the pre-#10540 shape) and on any future
+    change to either side. The second half records the measured BOUND the
+    module docstring names: a session id outside the render allowlist is
+    emitted by the fetch as ``""``, so the reader and the pool both call it
+    unknown and it still cannot seed.
+    """
+    from tortoise.retrieval import TURN_POINT_KIND
+    from tortoise.session_reinjection import (
+        seeded_sessions,
+        source_session_chunk_pass,
+    )
+
+    sdk = _new_sdk()
+    _seed_captured_session(sdk, SID_A, TURNS_A)
+    hits = sdk.tortoise_fts_query("gym schedule", limit=40,
+                                  include_terminal=True)
+    seeds = seeded_sessions(hits, window=40, limit=5)
+    assert [s.session_id for s in seeds] == [SID_A], seeds
+
+    fetch = source_session_chunk_pass(
+        sdk._get_proj(), [s.point_id for s in seeds], pool_ids=set(),
+        chunk_kind=TURN_POINT_KIND)
+    assert fetch["ok"] is True, fetch
+    # the ONE assertion that makes the two halves one contract
+    assert {s.session_id for s in seeds} == set(fetch["by_session"]), (
+        seeds, fetch["by_session"])
+    assert fetch["total"] > 0, fetch
+
+    # BOUND (measured, recorded rather than assumed): a session id outside
+    # the render allowlist is emitted as "", so it is unseedable — the
+    # reader and the pool agree it is unknown, and nothing is fetched.
+    sdk_b = _new_sdk()
+    _seed_captured_session(sdk_b, "session/2026-11-05 10:00", TURNS_A)
+    hits_b = sdk_b.tortoise_fts_query("gym schedule", limit=40,
+                                      include_terminal=True)
+    assert hits_b, "the capture must still retrieve — only the IDENTITY is blank"
+    assert all(h["sessionId"] == "" for h in hits_b), hits_b
+    assert all(retrieval.hit_session_id(h) == "" for h in hits_b), hits_b
+    assert seeded_sessions(hits_b, window=40, limit=5) == []
+
+
 def test_hosted_search_route_returns_the_session_id(hosted_client):
     """The read surface end to end: GET /v1/search on a captured session
     returns the session id on the wire.

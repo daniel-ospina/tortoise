@@ -939,6 +939,15 @@ class TestOthersBranchFailClosedRecheck1879:
     seam (a real two-thread race here would be timing-dependent, and a
     sequential double-call would prove nothing). Mutation: delete the
     re-check → the mint returns 200 and the org ends at cap+1.
+
+    ⛔ The PROBE cache is warmed explicitly before `_make_sdk` is patched, and
+    `_StubSDK` is TOTAL (an unmodelled attribute delegates to a real registry
+    SDK). The two are layered, not redundant: totality means a COLD cache cannot
+    surface as an `AttributeError` that reads like a product bug, while the warm
+    call means the request is served by a REAL anchor (the production shape)
+    instead of a stub installed into a process-global cache. Cache warmth on
+    entry is a startup-thread race — 31/31 pass on an idle box, this test red in
+    CI `test (e)` run 42474716785 — so it must not decide what is measured.
     """
 
     def test_revoke_that_frees_no_slot_refuses_instead_of_overshooting(
@@ -979,15 +988,48 @@ class TestOthersBranchFailClosedRecheck1879:
 
         spy = _Spy(reg)
 
+        orig_make_sdk = ha._make_sdk
+
         class _StubSDK:
+            """The REGISTRY SDK surrogate: the spy for the registry, a real SDK for anything else.
+
+            ⛔ A one-method stub is a trap: `_make_sdk(namespace="registry")` returns this
+            object, and ANY other attribute the endpoint reaches on it (`_get_proj`, on a
+            code path that only some ambient states take) becomes an `AttributeError` that
+            reads like a product bug. That is exactly how this test went red in a CI shard
+            while passing in isolation (#11510 `test (e)`), so every unmodelled attribute
+            delegates to a REAL registry SDK instead of missing.
+            """
+
             def _get_registry(self):
                 return spy
 
-        orig_make_sdk = ha._make_sdk
+            def __getattr__(self, name):
+                return getattr(orig_make_sdk(namespace="registry"), name)
 
         def _make_sdk_spy(*a, **kw):
             ns = kw.get("namespace") or (a[0] if a else None)
             return _StubSDK() if ns == "registry" else orig_make_sdk(*a, **kw)
+
+        # ⛔ WARM THE PROBE CACHE **BEFORE** THE STUB IS INSTALLED.
+        # The request's first registry read is `_membership_role` ->
+        # `_registry_anchor()`, which in URI mode IS the cached registry probe
+        # (#8098). Its cache identity is (`TORTOISE_DB_URI`, the per-test
+        # `TORTOISE_DB_PATH` pin), so the entry warmed here is unreachable from
+        # any other test. Two reasons, in that order:
+        #   1. DETERMINISM OF WHAT IS MEASURED. Whether the cache is warm when
+        #      the body starts is a STARTUP-THREAD race: a background thread
+        #      binds the anchor during the `client` fixture on an idle box and
+        #      loses that race on a loaded runner (measured 2026-11-08 — the
+        #      whole file 31/31 locally, this test red in CI `test (e)`
+        #      42474716785). Warming it here makes the request use the REAL
+        #      handle on both boxes.
+        #   2. THE STUB STAYS OUT OF A PROCESS GLOBAL. `_StubSDK` is total
+        #      below, so a COLD cache no longer 500s — it INSTALLS the stub as
+        #      the probe handle, and every later registry probe read in this
+        #      test would then route through the spy. Warming first keeps the
+        #      stub doing its ONE job: the mint path's registry reads.
+        ha._registry_anchor()
 
         monkeypatch.setattr(ha, "_make_sdk", _make_sdk_spy)
 

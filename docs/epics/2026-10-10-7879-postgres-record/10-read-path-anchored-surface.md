@@ -96,8 +96,10 @@ is called.
 ## 2. Parity, measured on real stores
 
 `record_serve.parity_difference(cache_props, record_props, label=…)` is the rule: a field the cache
-answers and the record does not is **explained** only by the schema's refused set or by a declared
-fold `ON CREATE` default; anything else reddens, and so does a field the record answers that the
+answers and the record does not is **explained** only by one of the FOUR declared asymmetries — the
+schema's refused set, a fold `ON CREATE` default, the `#10853` decline (an EPISODIC Source's
+`summary`/`_searchText`) or the `#10394` NOT-PROJECTABLE class (`cache_projection.CACHE_FORBIDDEN_COLUMNS`);
+anything else reddens, and so does a field the record answers that the
 cache does not. A field both sides carry is **always** compared, refused name or not — that is what
 keeps the endpoint's own `content_hash` re-derivation honest.
 

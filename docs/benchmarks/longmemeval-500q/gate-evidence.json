@@ -21,5 +21,15 @@
     }
   },
   "corpus_hash": "sha256:d6f21ea9d60a0d56f34a05b609c79c88a451d2ae03597821ea3d5a9678c3a442",
-  "judge_pin": "longmemeval-official-anscheck-gpt4o-2024-08-06-v1"
+  "judge_pin": "longmemeval-official-anscheck-gpt4o-2024-08-06-v1",
+  "errata": [
+    {
+      "recorded": "2026-11-07",
+      "issue": "#8486",
+      "field": "judge_pin",
+      "superseded_by": "judge-model = deepseek:deepseek-v4-flash (internal baseline series)",
+      "why": "Owner ruling on #8486 (2026-10-27) replaced the official judge as the run's judge with our own pinned model, and re-stated it 2026-11-03 (owner verbatim: 'i have already mentioned multiple times that we use deepseek and that i want to complete the p0 and p1 issues before doing an eval'; the same comment's own point 2 records 'The model is DeepSeek. Not OpenAI, not OpenRouter' — that sentence is the recording comment's wording, not a quotation of the owner). The pin recorded above is HISTORICAL: it is what gate 4 verified on 2026-09-04, and it is NOT what a step-5 run records. A run under the ruling records judge_pin 'unpinned:deepseek-v4-flash' and verdict 'inconclusive' BY DESIGN (derived from the judge that graded), and must be reported as an internal baseline series - never as the LongMemEval number, and never beside a vendor figure. The official pin is still mintable: only a run the OFFICIAL judge (openai:gpt-4o-2024-08-06) graded carries it.",
+      "evidence": "docs/benchmarks/longmemeval-500q/run-report.md sec 1.1; tools/longmem_eval/judge.py OFFICIAL_JUDGE_MODEL / DEFAULT_JUDGE_MODEL"
+    }
+  ]
 }

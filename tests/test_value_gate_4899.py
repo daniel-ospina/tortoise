@@ -11,9 +11,13 @@ What this file pins, and why each is load-bearing:
   CI vocabulary, test counts and inline hex colours are NOT discards. The
   ``the owner`` case is the proof that a definite-article rule cannot be
   mechanical, and is left to the arbiter.
-- **Off by default.** ``TORTOISE_VALUE_GATE`` unset ⇒ the predicate never runs
-  and the only delta is a zeroed ``mechanical`` stats key, so the rate effect is
-  measurable before it is trusted (``#4899`` safeguard 1).
+- **On by default, and explicitly killable** (#10996). ``TORTOISE_VALUE_GATE``
+  unset ⇒ the predicate RUNS: ``EXTRACTOR-V4-ARCHITECTURE.md`` §S2.2 requires the
+  mechanical half on (*"unset must not mean 'the predicate never runs'"*), and
+  `#4899`'s measured 0-of-61-Objects rate is what made the default safe to flip.
+  ``=0`` (or blank/garbage) is the operator kill-switch, and the only delta then
+  is a zeroed ``mechanical`` stats key — the rate-effect safeguard survives, its
+  trigger moved.
 - **No silent discard** (safeguard 2) and a **recoverable counterfactual**
   (safeguard 3) — asserted on the record, not on the send.
 - **Fail-open is structural** — a predicate that raises keeps everything.
@@ -317,12 +321,79 @@ def test_version_and_abbreviation_are_not_paths() -> None:
     assert vgm.identifier_only("e.g.") is None
 
 
-# ── the flag: off by default, inert ────────────────────────────────────────
+# ── the flag: ON by default (#10996), and explicitly off on demand ────────
+
+
+def test_unset_arms_the_predicate(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#10996 — **unset must not mean "the predicate never runs".**
+
+    ``EXTRACTOR-V4-ARCHITECTURE.md`` §S2.2 requires the *mechanical* half to
+    default ON (*"`TORTOISE_VALUE_GATE` unset must not mean 'the predicate never
+    runs'"*); `#4899` shipped it off only so its rate effect could be measured
+    first, and that rate is now committed (`docs/evidence/9889/e1-gate-drops.json`:
+    0 drops of 61 Objects, 0 of 13 bare-definite, positive controls firing).
+
+    Three readers must agree, and they read ONE resolver
+    (``value_gate.value_gate_enabled``), so this asserts the effect at the
+    effecting site rather than at the wrapper:
+
+    * ``extractor_v2._value_gate_enabled()`` — the PASS (arms ``vet_enabled``);
+    * ``vet_gate.py``'s predicate guard — where the DISCARD is actually taken;
+    * ``vet_gate.py``'s ``stats["mechanical"]["enabled"]`` — the witness.
+
+    A flip that lands in the wrapper only leaves the predicate reading ``False``
+    ⇒ ``enabled: False, fired: 0`` and THIS test reds (`#10996` Claim 4: that is
+    the inert-enforcer shape the wrapper's own docstring was written about).
+    """
+    from tortoise import extractor_v2 as v2
+
+    monkeypatch.delenv(vgm.ENV_FLAG, raising=False)
+    assert vgm.value_gate_enabled() is True, (
+        "the leaf reader is the effecting read — a wrapper-only flip is inert")
+    assert v2._value_gate_enabled() is True, "the pass would not be armed"
+
+    out = vg.vet_candidates(_entity_list("#4118", "the owner"))
+    mechanical = out["stats"]["mechanical"]
+    assert mechanical["enabled"] is True, (
+        "the predicate never ran: the flip did not reach vet_gate's guard")
+    assert mechanical["fired"] == 1
+    assert mechanical["by_rule"][vgm.RULE_REFERENCE] == 1, mechanical
+
+    (discarded,) = _decisions_for(out, "#4118")
+    assert discarded["outcome"] == vg.DISCARD
+    assert discarded["rule_id"] == vgm.RULE_REFERENCE
+    assert discarded["counterfactual"], "#4899 safeguard 3: no silent discard"
+    (kept,) = _decisions_for(out, "the owner")
+    assert kept["outcome"] == vg.KEEP, (
+        "a definite description is not an identifier — `the <X>` is the "
+        "arbiter's question, never this predicate's")
+
+
+def test_blank_and_garbage_read_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A default-ON **discard** predicate must read a typo as OFF.
+
+    ``env_truthy``'s own docstring prescribes this shape for a default-ON knob
+    whose typo must read OFF (``is_truthy(os.environ.get("X", "1"))``) rather
+    than the tristate resolver, whose unset/blank/garbage → ``default`` would
+    arm the predicate on a blank compose value. For a predicate whose wrong
+    answer is memory loss, OFF is the safe residual — and it keeps
+    ``test_flag_falsey_values_are_off`` (the kill-switch contract) unchanged.
+    """
+    for raw in ("", "  ", "ture", "0", "false", "no", "off"):
+        monkeypatch.setenv(vgm.ENV_FLAG, raw)
+        assert vgm.value_gate_enabled() is False, raw
+    for raw in ("1", "true", "yes", "on", " TRUE "):
+        monkeypatch.setenv(vgm.ENV_FLAG, raw)
+        assert vgm.value_gate_enabled() is True, raw
 
 
 def test_flag_off_is_inert(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Unset ⇒ no candidate is judged and nothing is discarded."""
-    monkeypatch.delenv(vgm.ENV_FLAG, raising=False)
+    """Explicit ``=0`` ⇒ no candidate is judged and nothing is discarded.
+
+    The *inertness* half of `#4899` safeguard 1 survives the default flip; only
+    its trigger moved from "unset" to the operator kill-switch `=0` (#10996).
+    """
+    monkeypatch.setenv(vgm.ENV_FLAG, "0")
     out = vg.vet_candidates(_entity_list("#4118", "9bce8d31f"))
     assert out["stats"]["mechanical"]["enabled"] is False
     assert out["stats"]["mechanical"]["fired"] == 0
@@ -341,8 +412,23 @@ def test_flag_falsey_values_are_off(monkeypatch: pytest.MonkeyPatch, raw: str) -
 
 def test_flag_on_discards_and_records_provenance(monkeypatch: pytest.MonkeyPatch) -> None:
     """Safeguards 2 and 3 — the rule id is recorded and the counterfactual is
-    recoverable, so a discard is never silent."""
-    monkeypatch.setenv(vgm.ENV_FLAG, "1")
+    recoverable, so a discard is never silent.
+
+    Run on BOTH arms (#10996): the explicit ``=1`` arm and the default (unset)
+    arm, because the default now reaches this same code. ⚠️ This is a CONTROL,
+    not a proof of the flip: it passed before the default moved. The proof is
+    ``test_unset_arms_the_predicate``.
+    """
+    for raw in ("1", None):
+        _assert_provenance_discard(monkeypatch, raw)
+
+
+def _assert_provenance_discard(monkeypatch: pytest.MonkeyPatch,
+                               raw: str | None) -> None:
+    if raw is None:
+        monkeypatch.delenv(vgm.ENV_FLAG, raising=False)
+    else:
+        monkeypatch.setenv(vgm.ENV_FLAG, raw)
     out = vg.vet_candidates(_entity_list("#4118", "the owner"))
 
     (discarded,) = _decisions_for(out, "#4118")
@@ -561,13 +647,62 @@ def test_value_gate_flag_switches_the_vet_pass_on(
     )
 
     # The text pin above catches a DELETED term; these catch a NEUTERED helper,
-    # which is the actual inert-flag bug this test exists to prevent.
+    # which is the actual inert-flag bug this test exists to prevent. The OFF
+    # arm is the explicit kill-switch (`=0`) since #10996 — "unset" no longer
+    # means off — and the LEAF reader is asserted beside the wrapper, because
+    # the wrapper delegates and only the leaf's value reaches vet_gate's guard
+    # (a flip at the wrapper alone is the inert-enforcer shape, #10996 Claim 4).
     from tortoise import extractor_v2 as v2
 
-    monkeypatch.delenv(vgm.ENV_FLAG, raising=False)
+    monkeypatch.setenv(vgm.ENV_FLAG, "0")
     assert v2._value_gate_enabled() is False
+    assert vgm.value_gate_enabled() is False, (
+        "the leaf reader and the wrapper disagree — the predicate would read "
+        "a different flag than the pass that contains it")
     monkeypatch.setenv(vgm.ENV_FLAG, "1")
     assert v2._value_gate_enabled() is True
+    assert vgm.value_gate_enabled() is True
+    monkeypatch.delenv(vgm.ENV_FLAG, raising=False)
+    assert v2._value_gate_enabled() is True, (
+        "unset must arm the predicate (EXTRACTOR-V4-ARCHITECTURE.md §S2.2); "
+        "the pass runs by default and so must the predicate inside it")
+    assert vgm.value_gate_enabled() is True
+
+
+def test_no_gate_docstring_still_cites_the_value_gate_as_a_default_off_precedent() -> None:
+    """The precedent list is shipped prose, and `#10996` removed its third member.
+
+    ``TORTOISE_EMBED_GATE`` and ``TORTOISE_DD_BACKFILL`` both justify their
+    own off-by-default flag by naming ``TORTOISE_VALUE_GATE`` / ``TORTOISE_VET``
+    / ``TORTOISE_CLASSIFY_LATER`` as *"the rate effect is measurable before it is
+    trusted"* precedent. The value gate is no longer that: since `#10996` it is
+    ON when unset, and unset is the state every deploy is in.
+
+    Red-first by construction — both sentences were present when this pin was
+    written — and this is the failure it exists to catch: the rationale is what
+    the NEXT gate author copies, so leaving it makes a superseded rule read as
+    the house pattern. Each file must now say why the third member is missing,
+    which is the difference between a corrected precedent and a quietly short
+    one.
+    """
+    embed = (ROOT / "tortoise" / "embed_gate.py").read_text()
+    backfill = (ROOT / "tortoise" / "definite_description_backfill.py").read_text()
+    for name, text in (("embed_gate.py", embed),
+                       ("definite_description_backfill.py", backfill)):
+        assert "was the third member" in text, (
+            f"{name} no longer records that TORTOISE_VALUE_GATE left the "
+            "off-by-default precedent — a short list reads as if it never had "
+            "three members, and the next reader re-adds it")
+    # The two OLD sentences, verbatim. Restoring either re-falsifies the claim
+    # while every behavioural test above stays green — which is why the pin is
+    # on the prose and not on the flag.
+    assert "matching the `TORTOISE_VALUE_GATE` /" not in embed, (
+        "embed_gate.py still cites TORTOISE_VALUE_GATE as an off-by-default "
+        "precedent; #10996 flipped it ON, so that sentence now argues for a "
+        "default this repo does not use")
+    assert "the ``TORTOISE_VALUE_GATE`` (#4899)," not in backfill, (
+        "definite_description_backfill.py still cites TORTOISE_VALUE_GATE as "
+        "an off-by-default precedent (#10996)")
 
 
 #: Documented **fail-open** misses — recorded here so they are a decision rather

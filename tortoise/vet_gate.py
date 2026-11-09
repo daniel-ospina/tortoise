@@ -84,7 +84,7 @@ Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 - ``DISCARD`` — do not ship; the candidate is removed and its counterfactual
   recorded.
 - ``MERGE`` — fold into another candidate.
-- ``RENARRATE`` — **batch-level only**: re-extract the batch.
+- ``RENARRATE`` — **batch-level only**: re-extract the batch. ⛔ **This token HAS a consumer (#11002)**: ``extractor_v2`` reads a batch verdict's ``outcome`` after the S2.2 pass and, exactly once per run, re-narrates and re-extracts (``_renarrate_trigger`` → ``_arm_extract`` with the emphasis seam). The gate still performs no re-extraction itself — it says the batch is poor, the pipeline decides what to do about it, which is the same verdict/action split ``MERGE`` has above.
 
 This is VET's **selection** axis and is deliberately distinct from
 ``extractor_v2.DecisionRecord``'s consolidation axis (``ADD``/``UPDATE``/
@@ -345,10 +345,13 @@ def _iter_items(embed_list: object
 def _narrative_statements(narrative: str) -> int:
     """A deterministic proxy for "how many things did the narrative state?".
 
-    Deliberately crude and **unmeasured** — it exists to be *reported*, not to
-    trigger an action. The design's `RENARRATE` trigger threshold is explicitly
-    something the draft-and-run loop must set on real sessions (§4.2), so this
-    function never decides anything by itself.
+    Deliberately crude and **unmeasured** — it is a *count*, never a threshold,
+    so it cannot decide anything by itself. It reaches an action only through
+    ``check_batch``'s ``coverage_suspect``, the ONE unambiguous coverage failure
+    (prose in, zero candidates out — no ratio, no number to choose); #11002 is
+    what consumes that flag. The design's `RENARRATE` trigger threshold remains
+    something the draft-and-run loop must set on real sessions (§4.2), and a
+    keep-rate threshold is therefore NOT chosen in advance here.
     """
     return sum(1 for part in _SENTENCE_SPLIT.split(str(narrative or ""))
                if part and part.strip())
@@ -359,7 +362,16 @@ def _narrative_statements(narrative: str) -> int:
 def check_batch(embed_list: object, narrative: str) -> dict:
     """Level 2 — *did this batch come out right?*
 
-    Two signals, both **reported, never acted on** in v1:
+    Two signals. They are **inert HERE** — this gate never retries, re-narrates
+    or extracts anything (its role is to *select*), and no key below gates a
+    decision inside this module. The consumer is the PIPELINE: #11002 reads
+    ``coverage_suspect`` (and an arbiter's ``RENARRATE``, above) via
+    ``extractor_v2._renarrate_trigger`` and runs at most one re-narrate. An
+    earlier revision of this docstring said *"reported, never acted on in v1"*;
+    scoping #11002 measured that the ``in v1`` qualifier was the only thing
+    between that sentence and a false claim once the pipeline consumes it — so
+    the sentence now names the boundary that is actually true (inert at the
+    gate, consumed by the pipeline) instead of a qualifier a reader can miss.
 
     - **coverage** — candidates emitted vs. statements the narrative carried.
       ``coverage_suspect`` fires only on the unambiguous case (a non-empty
@@ -489,6 +501,13 @@ def vet_candidates(embed_list: object, *,
 
     # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
     #
+    # ⛔ This guard is WHY the default lives in ``value_gate.value_gate_enabled``
+    # and not in the pipeline wrapper (`#10996` Claim 4): a default flipped one
+    # file over would arm ``extractor_v2``'s pass while this line still read
+    # ``False``, giving ``enabled: False, fired: 0`` — the pass running with the
+    # predicate inert. The leaf reader is the effecting read, so the default sits
+    # there. ``TORTOISE_VALUE_GATE=0`` (or blank/garbage) is the kill-switch.
+    #
     # It runs BEFORE the arbiter, deliberately: with ``TORTOISE_VET`` alone no
     # arbiter is supplied (``extractor_v2._s2_seam_arbiter`` supplies one only
     # when ``TORTOISE_S2_DECISION_SEAM`` is armed, #5087), so an arbiter-only
@@ -614,8 +633,10 @@ def vet_candidates(embed_list: object, *,
         "by_outcome": by_outcome,
         "discarded": by_outcome.get(DISCARD, 0),
         "arbiter": "present" if arbiter is not None else "none",
-        # #4899: additive. ``enabled=False`` on every default run, so the flag
-        # is observable in the evidence surface without changing the rate.
+        # #4899: additive. ``enabled`` reports the RESOLVED value, so the
+        # evidence surface says whether the predicate ran — it is ``True`` on a
+        # default run since #10996 (the mechanical half defaults ON) and ``False``
+        # only under the explicit ``TORTOISE_VALUE_GATE=0`` kill-switch.
         "mechanical": {
             "enabled": value_gate.value_gate_enabled(),
             "fired": len(mechanical),
@@ -638,7 +659,8 @@ def vet_candidates(embed_list: object, *,
 # ── Applying the verdicts — the removal, and the Layer-1 guard ─────────────
 
 def _referenced_entity_names(embed_list: object,
-                             discarded_ids: set[str]) -> set[str]:
+                             discarded_ids: set[str], *,
+                             relation_endpoints: bool = True) -> set[str]:
     """Entity names referenced by any candidate that is NOT being discarded.
 
     This is the P0 guard's input. Only *surviving* items are scanned: an
@@ -649,6 +671,19 @@ def _referenced_entity_names(embed_list: object,
     :func:`apply_vet` handles the removed-entity-endpoint case separately. A
     shape we do not recognise contributes nothing, which is safe because the
     guard's only failure mode is keeping too much.
+
+    ``relation_endpoints`` (#10999) decides WHICH WARNING is truthful about the
+    entity↔entity channel's endpoints — never whether an endpoint protects its
+    entity. Both the DISCARD guard and the Rule-4 RESTORE leg count relation
+    endpoints as references (the default ``True``); the channel is **result-level**
+    — an endpoint naming an entity no pass emitted leaves ``execute_embed``'s
+    ``relations`` unresolved, dropped and named (the declared fail-open), and the
+    Layer-1 payload never carries it, so it cannot 422. ``False`` therefore asks
+    the narrower question "is this entity referenced by something Layer-1 CAN
+    reject?", which only the DOWNGRADE message may answer with "Layer-1
+    referential integrity"; passing it into the restore computation is the
+    defect #10999 fixed — the entity stayed gone and S5 then dropped the edge
+    as unresolvable, with nothing in the record saying why.
     """
     names: set[str] = set()
     for section, index, item in _iter_items(embed_list):
@@ -667,6 +702,53 @@ def _referenced_entity_names(embed_list: object,
                 for r in refs:
                     if isinstance(r, Mapping) and r.get("name"):
                         names.add(_norm(r["name"]))
+    # #10999: an entity an entity↔entity relation NAMES is referenced. The
+    # per-item scan above reads `about_entities`/`slots` only, so an entity
+    # whose sole tie to the emission is a relation's endpoint looked
+    # unreferenced and could be DISCARDed — and S5 would then drop the
+    # relation as unresolvable, one stage after this guard authorised it.
+    #
+    # ⚠️ `_norm(ref)` ALONE leaves this arm half-closed. S5 resolves the
+    # endpoint on EITHER fold (``extractor_v2._endpoint_fold_keys`` — `_norm`,
+    # which collapses a whitespace RUN, and `.casefold()`, which folds ß/İ;
+    # neither is a superset of the other), while this module's key is in
+    # ``_norm`` space and its probe adds ``.casefold()`` — the very pair the
+    # ``_norm`` docstring above names as DIVERGENT on ('Straße', 'İ'). For a
+    # spelling variant the two folds disagree on, S5 resolves "STRASSE" →
+    # "Straße" and ``_norm("STRASSE")`` is "strasse" ≠ "straße", so the
+    # entity whose ONLY tie is that relation is still DISCARDed — the gap this
+    # arm exists to close, one spelling variant in. Carry every emitted entity
+    # the endpoint could resolve to instead; keeping too much is this guard's
+    # only safe failure mode.
+    #
+    # ⛔ THIS IS A THIRD SHAPE OF THE FOLD, and a COPY by construction: this
+    # module is stdlib-only and may not import `extractor_v2`, so
+    # `_endpoint_fold_keys`' pair cannot be called here. The index below is
+    # `_norm(name).casefold()` with two probes — NOT the emitter's two-key pair —
+    # so "the identity rule has one home" holds for the two RESOLVER stages and
+    # NOT for this guard. Measured over a 14x20 spelling matrix: 0 S5-resolvable
+    # pairs are left unprotected, 2 are over-protected ('Straße  X' /
+    # 'STRASSE X'), and over-protecting is this guard's declared safe direction —
+    # it can keep an entity whose relation S5 then drops, never mint a wrong edge.
+    if not relation_endpoints:
+        return names
+    emitted: dict[str, set[str]] = {}
+    for entity in _section_items(embed_list, "entities"):
+        if isinstance(entity, Mapping):
+            key = _norm(entity.get("name"))
+            if key:
+                emitted.setdefault(key.casefold(), set()).add(key)
+    for rel in _section_items(embed_list, "relations"):
+        if not isinstance(rel, Mapping):
+            continue
+        for side in ("src", "dst"):
+            ref = rel.get(side)
+            if not (isinstance(ref, str) and ref.strip()):
+                continue
+            names.add(_norm(ref))
+            # both folds, because the emitter's own key may carry either
+            for probe in (ref.strip().casefold(), _norm(ref).casefold()):
+                names |= emitted.get(probe, set())
     return names
 
 
@@ -870,6 +952,48 @@ def removal_pool(before: object, after: object) -> dict:
     }
 
 
+def applied_discards(before: object, after: object,
+                     decisions: Mapping[str, Mapping[str, Any]]) -> int:
+    """How many candidates a ``DISCARD`` verdict ACTUALLY removed.
+
+    ``stats["discarded"]`` counts **verdicts**, and that is the right number for
+    *"what did the gate say?"*. It is the wrong number for a **keep-rate**:
+    :func:`apply_vet`'s Rule 2 downgrades a discard to ``KEEP`` whenever the
+    entity is still referenced by a surviving candidate (dropping it would fail
+    ``validate_layer1`` and 422 the session), and Rule 4 RESTORES one an earlier
+    pass removed. On those runs the verdict count reports a loss that did not
+    happen — so a rate built on it under-states the yield, can select the wrong
+    narrative in a tie-break, and can fire a hand-armed threshold on a removal
+    that never occurred.
+
+    Counts by the SAME two questions the applied pass answers, so it cannot
+    disagree with the output it describes: the item carried a ``DISCARD``
+    verdict (``_item_id`` on ``before``, the list those ids came from) **and** it
+    is absent from ``after`` (:func:`_survives`, the value equality
+    :func:`removal_pool` rests on — which is also what makes a downgraded
+    discard correctly count as ZERO here).
+
+    Collateral prunes are deliberately NOT counted: an operator pruned because
+    it referenced a removed item carries no verdict of its own, and counting it
+    would report a loss of a candidate the narrative never produced.
+
+    Fail-open in the reporting direction: anything unreadable contributes 0, so
+    an unparseable decision or list under-reports removals rather than inventing
+    them — the same direction as :func:`apply_vet`'s own guards.
+    """
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    removed = 0
+    for section, index, item in _iter_items(before):
+        decision = decisions.get(_item_id(section, index, item))
+        if not isinstance(decision, Mapping):
+            continue
+        if str(decision.get("outcome") or "").strip().upper() != DISCARD:
+            continue
+        if not _survives(section, item, after):
+            removed += 1
+    return removed
+
+
 def _rewrite_entity_references(embed_list: Mapping[str, Any],
                                restored: Mapping[str, str]) -> None:
     """Re-spell a reference to the emitted entity's exact name.
@@ -979,6 +1103,17 @@ def apply_vet(embed_list: Mapping[str, Any],
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
+    # The Layer-1 half of the same set, and the ONLY half a downgrade may
+    # truthfully cite as "Layer-1 referential integrity". A relation endpoint
+    # protects its entity (the edge is the story's assertion and would vanish
+    # with it) but the channel is RESULT-level: no Layer-1 reference names the
+    # entity, so it cannot produce a 422 (#10999). ⛔ This narrower set is for
+    # the WORDING only — the Rule-4 restore below still counts relation
+    # endpoints, because that leg is the only one that can bring back an entity
+    # an earlier pass removed, and S4 supplies the narrative's conclusion
+    # between the two passes.
+    layer1_referenced = _referenced_entity_names(
+        base, discarded_ids, relation_endpoints=False)
     removed_entity_names: set[str] = set()
     removed_context: set[str] = set()      # norm CONTENT of removed points/events
     # norm entity name -> the spelling that must win in a reference. Populated
@@ -1019,10 +1154,21 @@ def apply_vet(embed_list: Mapping[str, Any],
                     # entity name rewritten verbatim would CREATE the 422 the
                     # reconciliation exists to prevent.
                     canonical[name] = str(item.get("name") or "").strip()
-                    warnings.append(
-                        f"vet: entity {str(item.get('name'))!r} was DISCARDed "
-                        "but is referenced by a surviving candidate — kept "
-                        "(Layer-1 referential integrity)")
+                    if name in layer1_referenced:
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is referenced by a surviving "
+                            "candidate — kept (Layer-1 referential integrity)")
+                    else:
+                        # A relation endpoint is the entity's only tie to the
+                        # emission. The edge is kept, the 422 claim is not:
+                        # `relations` never enters the Layer-1 payload.
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is named by a surviving "
+                            "entity↔entity relation — kept (the relation is "
+                            "the story's own assertion; this is NOT a "
+                            "Layer-1 reference)")
                     kept.append(item)
                     continue
                 if name:
@@ -1046,27 +1192,125 @@ def apply_vet(embed_list: Mapping[str, Any],
     # now needs, and reconcile the reference's SPELLING. Computed BEFORE the
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
-    present = set(_entity_map(out))
+    present_map = _entity_map(out)
+    present = set(present_map)
+    # #10999: relation endpoints DO count for the restore — a relation naming an
+    # entity an earlier pass removed is exactly the cross-pass case Rule 4
+    # exists for (S4 supplies the conclusion between the two passes). The
+    # `relation_endpoints` flag splits the WARNING, not the restore: it was
+    # applied to this whole computation once, so the entity stayed gone and S5
+    # then dropped the edge as unresolvable — with nothing in the record saying
+    # why. `layer1_referenced` is what may truthfully be called a Layer-1
+    # reference; a relation endpoint is result-level and cannot 422.
+    layer1_referenced = _referenced_entity_names(
+        out, set(), relation_endpoints=False)
     to_restore = _referenced_entity_names(out, set()) - present
-    for name in sorted(to_restore):
+    # The DISCARD arm above matches an endpoint on EITHER fold; the RESTORE
+    # lookup must be fold-complete too, or the cross-pass case this arm exists
+    # for fails one spelling variant in: `prior_entities` is keyed by `_norm`
+    # (see `_entity_map`), so a casefold-only endpoint spelling ('STRASSE' vs
+    # 'Straße', 'İ' vs 'i') restored nothing and S5 then dropped the edge as
+    # unresolvable. Unique-or-nothing, and never a SECOND copy of an entity
+    # this pass already holds under a different casefold.
+    # Held spellings, by casefold, kept CURRENT as restores land (a restore
+    # appends to `out["entities"]`, and a stale snapshot is how a later
+    # reference in the same loop is left unreconciled).
+    held_folded: dict[str, str] = {}
+    for _key, _item in present_map.items():
+        _spelling = str(_item.get("name") or "").strip()
+        if _spelling:
+            held_folded.setdefault(_key.casefold(), _spelling)
+    restored_keys: set[str] = set()
+    for ref_name in sorted(to_restore):
+        name = ref_name
+        # A RELATION endpoint whose entity this pass already holds under another
+        # casefold is the same entity: restoring the prior copy would put two
+        # Objects in the emission, make S5's fold index ambiguous, and drop the
+        # very edge the arm exists to save. Layer-1 references are NOT skipped
+        # — payload identity is EXACT (`(str(name).strip(), kind)`), so when
+        # `prior` can supply the spelling a point/`slots` reference actually
+        # names, restoring it is correct and re-pointing the reference at a
+        # casefold sibling would silently attribute the statement to a
+        # DIFFERENT entity (this module's own doctrine: guessing is worse than
+        # a miss).
+        if ref_name not in layer1_referenced \
+                and name.casefold() in held_folded:
+            # The append is skipped, and the reference is recorded so the Layer-1
+            # surfaces `_rewrite_entity_references` actually rewrites
+            # (`about_entities`, `slots`) name the held spelling. ⛔ It does NOT
+            # rewrite a RELATION endpoint: `_iter_items` walks
+            # `entities`/`events`/`points` only, so `relations[].src/dst` keep
+            # the spelling as written and rely on S5's own endpoint fold — a
+            # future consumer of `embed_list["relations"]` that matches EXACTLY
+            # would see the unreconciled name.
+            canonical[ref_name] = held_folded[name.casefold()]
+            continue
         original = prior_entities.get(name)
+        if original is None:
+            folded = [key for key in prior_entities
+                      if key.casefold() == name.casefold()]
+            if len(folded) == 1 and folded[0].casefold() not in held_folded:
+                name = folded[0]
+                original = prior_entities[name]
         if original is not None and str(original.get("name") or ""):
             # STRIP, as above: the emitted name is stripped (see the downgrade
-            # branch for why).
-            canonical[name] = str(original["name"]).strip()
+            # branch for why). Stamped on the REFERENCE's key: the folded prior
+            # key is not what a reference's `_norm` form looks up.
+            canonical[ref_name] = str(original["name"]).strip()
+            if name in restored_keys:
+                # Two divergent references can both resolve to ONE prior entry
+                # (the direct hit and a folded sibling): reconcile, never append
+                # a second copy or repeat the warning.
+                continue
+            restored_keys.add(name)
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
-            warnings.append(
-                f"vet: entity {name!r} was discarded by an earlier pass but "
-                "is referenced after S4 — restored (Layer-1 referential "
-                "integrity)")
-        else:
-            warnings.append(
-                "vet: ⚠️ a surviving candidate references entity "
-                f"{name!r}, which no pass emitted — it cannot be restored "
-                "here; the payload will fail Layer-1 unless the extractor "
-                "emits it")
+            # Re-stamp: two divergent spellings can both be in `to_restore`, and
+            # the second must not restore the same entity again.
+            held_folded.setdefault(name.casefold(), canonical[ref_name])
+            if ref_name in layer1_referenced or name in layer1_referenced:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but is referenced after S4 — restored (Layer-1 "
+                    "referential integrity)")
+            else:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but an entity↔entity relation now names it — restored "
+                    "(the relation is the story's own assertion; this is NOT "
+                    "a Layer-1 reference)")
+        elif ref_name in layer1_referenced:
+            # `prior` cannot supply this spelling, but the emission may already
+            # HOLD the entity under a casefold sibling — and payload identity
+            # is EXACT, so leaving the reference as written makes
+            # `validate_layer1` reject the whole session ("about_entities
+            # reference unknown entities"), where re-spelling it onto the held
+            # entity is both valid and what the reference names to every other
+            # stage. Reconcile when a held spelling exists; warn only when
+            # nothing can be reconciled (then the 422 is real and named).
+            held = held_folded.get(name.casefold())
+            if held:
+                canonical[ref_name] = held
+                # ⚠️ RESIDUAL (review round 10, P3, NOT fixed here): this
+                # re-spelling emits no warning. It is deliberate — payload
+                # identity is EXACT, so the reference as written would fail
+                # Layer-1 — but the held spelling may be a DIFFERENT entity
+                # (Layer-1 identity is `(name, kind)`), and the doctrine 50
+                # lines above says "guessing is worse than a miss". The arm was
+                # not reproduced by probe at 4ff6f2310 (to_restore carried the
+                # reference and `held_folded` held the sibling, yet this branch
+                # produced neither a rewrite nor a warning), so the disclosure
+                # is left as a follow-up rather than claimed as fixed.
+            else:
+                warnings.append(
+                    "vet: ⚠️ a surviving candidate references entity "
+                    f"{name!r}, which no pass emitted — it cannot be restored "
+                    "here; the payload will fail Layer-1 unless the extractor "
+                    "emits it")
+        # else: a relation endpoint naming an entity no pass emitted restores
+        # nothing and warns nothing — it cannot 422 (result-level channel), and
+        # S5 names the dropped relation itself.
     if canonical:
         _rewrite_entity_references(out, canonical)
 

@@ -54,10 +54,14 @@ stronger than they are:
   by this module.** The ordering claim ("the protocol commit is an ancestor of
   the run commit") lives in git, and the run report's Reproduction section
   points at ``git log -- tests/eval/ask/preregistration.json``. What the bar
-  DOES enforce is the content: corpus hash, case and class coverage, reader and
-  judge spec, judge pin and rubric hash, seed flags, arms, and the gate arm —
-  every field the protocol fixes is a field the bar refuses to run without, so
-  the protocol cannot be quietly re-worded after the fact and still pass.
+  DOES enforce is the content it READS: corpus hash, case and class coverage,
+  reader and judge spec, judge pin and rubric hash, seed flags, arms, and the
+  gate arm. The ``measurement``, ``per_category`` and ``two_number_split``
+  blocks are **not** read by the bar — they state what those enforced clauses
+  ARE (and what the bar deliberately does not threshold), so they must not be
+  cited as gates. What keeps them honest is the record's byte identity: the
+  committed file is compared to a fresh render, so none of it can be re-worded
+  after the fact without a commit that says so.
 
 5. **A verified commit binding** (:func:`verify_commit_binding`) — the run's
    ``--commit`` is not free text. At publish time the repository itself is
@@ -181,9 +185,18 @@ from tools.longmem_eval.guard_measured_revision import (  # noqa: E402
     _is_noise,
 )
 from tools.longmem_eval.judge import (  # noqa: E402
-    DEFAULT_JUDGE_MODEL,
+    OFFICIAL_JUDGE_MODEL,
+    VARIANT_CONTAINMENT_SPEC,
     MockJudge,
     build_judge,
+)
+
+# The judge's provider resolution, read from the SAME module the judge transport
+# reads it from, so the key NAME this record states cannot drift from the key
+# the judge actually sends.
+from tools.longmem_eval.reader import (  # noqa: E402
+    _parse_model_spec,
+    _resolve_provider,
 )
 from tools.longmem_eval.w7_publish import (  # noqa: E402
     FAILURE_ORIGIN_VALUES,
@@ -251,12 +264,21 @@ READER_PINNED = True
 #: clause must be able to say so.
 INJECTED_READER_SPEC = "injected"
 
-#: The judge pin for this benchmark: the OFFICIAL LongMemEval anscheck judge
-#: (``tools/longmem_eval/judge.py`` → ``build_judge()``), the same grading
-#: discipline the published LongMemEval numbers use. The rubric id is the same
+#: The pin a run whose spec names the OFFICIAL LongMemEval model records
+#: (``judge.OFFICIAL_JUDGE_MODEL``, which :func:`judge_pin_for` names
+#: explicitly), the same grading discipline the published LongMemEval numbers
+#: use. The rubric id is the same
 #: one the graded eval carries (``JUDGE_RUBRIC_ID`` in
 #: ``tools/longmem_eval/run.py``); the hash is computed with the same 16-hex
 #: convention so the two records are comparable.
+#:
+#: ⛔ **This is NOT this benchmark's pin.** The ask record's judge is
+#: :data:`PREREGISTERED_JUDGE_SPEC` (the owner-ruled DeepSeek judge), and its
+#: pin is ``unpinned:<spec>`` (:func:`judge_pin_for`). No ask run produces this
+#: value short of a ``--judge openai:gpt-4o-2024-08-06`` override that the bar
+#: then rejects as ``config_mismatch``. A re-registration that reads the old
+#: wording as "the ask judge" would restore the exact
+#: ``inconclusive``-by-construction defect #11460 removes.
 JUDGE_PIN = "ask-exit-anscheck-official-v1"
 #: The pin a MOCK-graded run carries. The pin is derived from the judge spec
 #: (never passed in independently), so a receipt cannot claim the official pin
@@ -264,6 +286,54 @@ JUDGE_PIN = "ask-exit-anscheck-official-v1"
 MOCK_JUDGE_PIN = "ask-exit-anscheck-mock"
 JUDGE_RUBRIC_ID = "longmemeval-official"
 MOCK_JUDGE_SPEC = "mock"
+#: Prefix of the synthetic identity ``score`` records for an injected judge
+#: object whose model id does not match the resolved spec. It is NOT a provider
+#: name: nothing may try to resolve a credential for it.
+INJECTED_SPEC_PREFIX = "injected:"
+
+#: The judge this BENCHMARK pre-registers (#11460). It is DeepSeek because the
+#: OWNER RULED it (#2281 comment 6590088403, 2026-11-02: *"D1-JUDGE is SETTLED:
+#: use DeepSeek as the eval judge"*), and the ruling explicitly authorises moving
+#: this line: *"the pre-registered pin stays, as the protocol requires … the
+#: ruling therefore keeps the pin and changes which judge it names;
+#: re-registering that line is now authorised"*.
+#:
+#: ⛔ **The PROVIDER is part of the spec, not a routing detail here.**
+#: ``deepseek/deepseek-v4-pro`` (the OpenRouter namespace id) parses to
+#: ``provider=None`` (``_parse_model_spec`` splits on ``:``), so the endpoint,
+#: the model id AND the credential would all be decided by whichever key sits in
+#: the box's environment (``_PROVIDER_PRIORITY`` tries ``openrouter`` first) —
+#: the exact "the recorded provider disagrees with the endpoint that produced the
+#: labels" class #8486 exists to close. Naming ``deepseek:`` fixes both halves:
+#: the direct route's model id is ``deepseek-v4-pro`` (not the namespaced one)
+#: and the credential is ``DEEPSEEK_API_KEY``, so the record — not the shell —
+#: decides who graded the run and which key it used. The LongMemEval-500Q /
+#: official-anscheck judge is now its OWN named constant
+#: (``judge.OFFICIAL_JUDGE_MODEL``, ``openai:gpt-4o-2024-08-06``) and stays
+#: exactly as it is — the other benchmark's published comparability rests
+#: on it — while the graded-eval RUN's default was re-pinned to DeepSeek by the
+#: #8486 owner ruling, which is why nothing here may read "official" off
+#: ``judge.DEFAULT_JUDGE_MODEL`` any more. The ask benchmark has its own judge
+#: now, and before #11460 the two
+#: were conflated: this module inherited the official default, so a
+#: DeepSeek-graded run against the committed record returned
+#: ``inconclusive: config_mismatch`` no matter how green it was. That is the
+#: defect this constant removes — the protocol and the run now name the SAME
+#: judge by construction, and the record says which one out loud.
+#:
+#: Why ``deepseek-v4-pro`` rather than the reader's ``deepseek-v4-flash``: a
+#: judge that is the same model as the reader grades its own output, and the
+#: one DeepSeek judge this repo has measured in an eval role is
+#: ``deepseek-v4-pro`` (``docs/evidence/2026-10-25-longmemeval-pilot-s/``,
+#: ``tools/pair_label_runner.py``). The pin travels as
+#: ``unpinned:<spec>`` (:func:`judge_pin_for`), so the receipt can never claim
+#: official-judge comparability it does not have.
+#:
+#: **OVERRIDES:** the LongMemEval official judge (``gpt-4o-2024-08-06``, the
+#: paper's judge) — the owner ruled DeepSeek as our eval judge, so this
+#: benchmark records ``unpinned:deepseek:deepseek-v4-pro`` instead of claiming
+#: an official-judge pin it did not run under.
+PREREGISTERED_JUDGE_SPEC = "deepseek:deepseek-v4-pro"
 
 
 def _sha16(text: str) -> str:
@@ -291,10 +361,57 @@ def judge_pin_for(spec: str) -> str:
     # The official judge is the MODEL, not the transport: a routed provider that
     # serves the same model id (openrouter:openai/gpt-4o-2024-08-06) grades with
     # the same judge, so it keeps the official pin.
-    official = judge_model_id(DEFAULT_JUDGE_MODEL)
+    #
+    # It is named EXPLICITLY (#8486, 2026-11-07) and must never be derived from
+    # ``judge.DEFAULT_JUDGE_MODEL`` again: that default was re-pinned to DeepSeek
+    # by the #8486 owner ruling (2026-10-27), and deriving "official" from it
+    # would have minted ``JUDGE_PIN`` for a DeepSeek-graded run — the exact R12
+    # fail-open ``#9992`` closed, re-opened by a one-line default change. This is
+    # NOT a claim about what this benchmark pre-registers: #11460 re-registered
+    # the ask lane onto ``PREREGISTERED_JUDGE_SPEC``, whose pin is
+    # ``unpinned:<spec>``; this constant only keeps the OFFICIAL identity
+    # nameable (and unmixable with a DeepSeek run) for the LongMemEval receipts.
+    official = judge_model_id(OFFICIAL_JUDGE_MODEL)
     if model == official or model.endswith("/" + official):
         return JUDGE_PIN
     return f"unpinned:{spec}"
+
+
+def judge_key_env_name(spec: str) -> str | None:
+    """The NAME of the credential env var a judge spec resolves to — and only
+    the name.
+
+    The owner's ruling carries two clauses that meet here (#2281 comment
+    6590088403): evals run on a **dedicated key per eval**, and the report
+    *"must state which key was used, by name — ⛔ never its value, and never a
+    fragment long enough to identify it"*. So the record carries the env var
+    NAME (``DEEPSEEK_API_KEY``), resolved through the SAME path the judge
+    transport uses (``reader._resolve_provider``), never the secret itself and
+    never a prefix of it.
+
+    ``None`` whenever there is no credential to name, and naming one anyway
+    would be a FALSE provenance statement:
+
+    * the offline mock (``mock``) and the keyless deterministic judge
+      (``variant-containment``) send no request and hold no key;
+    * a SYNTHETIC identity — ``score`` records an injected judge object as
+      ``injected:<model-id>``, and feeding ``injected`` to the provider table
+      raised ``KeyError``, turning the honest-identity guard into a crash in
+      the scorer; an unknown provider name is the same shape;
+    * no configured provider at all.
+    """
+    spec = (spec or "").strip()
+    if (not spec or spec in (MOCK_JUDGE_SPEC, VARIANT_CONTAINMENT_SPEC)
+            or spec.startswith(INJECTED_SPEC_PREFIX)):
+        return None
+    provider, _ = _parse_model_spec(spec)
+    try:
+        resolved = _resolve_provider(named=provider)
+    except KeyError:
+        # An unknown provider name is a synthetic/forward spec, not a
+        # credential: there is no key to name, so the record says nothing.
+        return None
+    return resolved[2] if resolved else None
 
 
 def judge_rubric_id_hash(rubric_id: str | None = None) -> str:
@@ -317,11 +434,32 @@ def resolve_reader_spec(override: str | None = None) -> str:
 
 def resolve_judge_spec(override: str | None = None,
                        *, mock: bool = False) -> str:
-    """The judge spec the SCORE step will use (mock → env → official default)."""
+    """The judge spec the SCORE step will use (mock → env → this benchmark's
+    pre-registered judge).
+
+    ⚠️ The final fallback is :data:`PREREGISTERED_JUDGE_SPEC` (the owner-ruled
+    DeepSeek judge), NOT ``judge.DEFAULT_JUDGE_MODEL``. Both sides of the
+    config check read this function — the protocol writer (:func:`protocol`)
+    and the scorer (:func:`score`) — so a run that is graded with no explicit
+    ``--judge`` is graded by the judge the protocol names. Inheriting the
+    official LongMemEval default here is what made every DeepSeek run
+    ``inconclusive: config_mismatch`` (#11460); the two records could not agree
+    because nothing made them name the same judge.
+
+    ⛔ **The #8486 re-pin of ``judge.DEFAULT_JUDGE_MODEL`` does not reach this
+    line.** ``#8486`` moved that default to DeepSeek for the graded-eval RUN;
+    this benchmark was re-registered onto its OWN judge by #11460, so its
+    fallback is the pre-registered one and stays there. What the re-pin DOES
+    change here is the other derivation: :func:`judge_pin_for` names the
+    official judge id through ``OFFICIAL_JUDGE_MODEL`` instead of reading it off
+    ``DEFAULT_JUDGE_MODEL``, because deriving it from a default that moved would
+    have handed ``JUDGE_PIN`` to a DeepSeek-graded ask run — the R12 fail-open
+    ``#9992``.
+    """
     if mock:
         return MOCK_JUDGE_SPEC
     return (override or os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip()
-            or DEFAULT_JUDGE_MODEL)
+            or PREREGISTERED_JUDGE_SPEC)
 
 
 def protocol(*, reader_spec: str | None = None,
@@ -349,6 +487,112 @@ def protocol(*, reader_spec: str | None = None,
                      "of the ask lane over a distilled + planted-supersession "
                      "corpus",
         "written_before_any_arm_run": True,
+        # ── the measurement this record fixes (#11460) ──────────────────────
+        # A pre-registration is citable LATER as "this was decided before the
+        # number existed", so the target, the metric, the population (with its
+        # denominator and its exclusion rule), the pass/fail line and the
+        # falsifier are all IN the record — not only in prose beside it.
+        # ⛔ What this block does NOT claim: that the bar READS it. The bar
+        # enforces `corpus`, `reader`, `judge`, `seed`, `arms` and `gate_arm`;
+        # the fields below state the measurement those enforced clauses ARE, so
+        # a reader can see the whole bar in one place and see what it does not
+        # threshold. Treating an unread field as enforced would be the
+        # "documentation, not a pre-registration" failure this module warns
+        # about elsewhere — which is why the per-class reading is rendered from
+        # the rows the bar reads, not from a number invented here.
+        "measurement": {
+            "target": "the ask lane commits the CURRENT state on the "
+                      "knowledge-update class, and does not regress on the "
+                      "verbatim class, when the product's own reader answers "
+                      "over a distilled + planted-supersession corpus",
+            "metric": {
+                "gate": "superseded_live@<gate_arm> — per planted "
+                        "superseded claim: seen / rendered_live / flagged, "
+                        "attributed by the validity window",
+                "no_regression": "verbatim_no_regression — per verbatim "
+                                 "case: raw.committed vs "
+                                 "distilled.committed, and the list of cases "
+                                 "the gate arm lost",
+                "reported_not_thresholded": "current_state@<arm> — the "
+                                            "knowledge-update current-state "
+                                            "rate; reported, never gated "
+                                            "(D8)",
+                "not_a_metric": "the judge's semantic grade is never "
+                                "THRESHOLDED and never enters an "
+                                "absolute/comparability claim. It enters "
+                                "`metrics` as the per-arm `committed` "
+                                "count, which the report PRINTS as the "
+                                "knowledge-update rate (reported, no pass "
+                                "threshold) and reads as the paired "
+                                "within-run comparison — see "
+                                "`scoring.two_number_split`",
+            },
+            "population": {
+                "cases": "every case this record's `corpus.cases` names, "
+                         "in BOTH arms inside ONE invocation",
+                "classes": "every class `corpus.classes` names — the "
+                           "knowledge-update class IS the D8 gate and the "
+                           "verbatim class IS the no-regression half, so a "
+                           "run that covers one of them measured half a bar",
+                "denominator": "cases per class per arm, and planted "
+                               "superseded claims for the D8 gate. The "
+                               "denominators are read from the corpus "
+                               "(`n_cases`, `seen`/`n`, `verbatim.n`), never "
+                               "assumed: a zero denominator is "
+                               "`inconclusive`, not a pass",
+            },
+            "exclusion_rule": "there is none. A case is never dropped to "
+                               "make the bar clean: a run that misses a "
+                               "pre-registered case, class, or arm is "
+                               "`inconclusive` (a subset run is not this "
+                               "measurement), and a case that failed to run "
+                               "in either arm is `inconclusive` too — an "
+                               "unmeasured case is never a pass and is never "
+                               "excluded. The only legitimate way to change "
+                               "the population is to re-register (a new "
+                               "commit of this file), BEFORE a run exists",
+            "pass_line": "PASS iff the corpus verifies, the config matches "
+                         "this record, every pre-registered case ran in both "
+                         "arms, the VACUITY FLOORS did not fire (the scored "
+                         "corpus plants at least one superseded claim, "
+                         "carries at least one verbatim case, and the raw "
+                         "arm committed at least one — with none of them the "
+                         "clauses above would hold over a measurement that "
+                         "was never made, which is `inconclusive`, never a "
+                         "pass), `superseded_live@<gate_arm>.rendered_live "
+                         "== 0`, `superseded_live@<gate_arm>.seen == "
+                         "superseded_live@<gate_arm>.n`, and "
+                         "`verbatim_no_regression.regressions == []`. No "
+                         "other number is compared against any threshold",
+            "falsifier": [
+                "any superseded claim RENDERED LIVE to the reader on the "
+                "gate arm falsifies the target",
+                "any planted superseded claim NOT OBSERVED on the gate arm "
+                "falsifies the target (an unobserved claim is never a pass)",
+                "any verbatim-class case committed on the raw arm and LOST "
+                "by the distilled arm falsifies the target — a KU win with a "
+                "verbatim loss is a FAIL, not a trade",
+                "a corpus that plants no superseded claim, carries no "
+                "verbatim case, or a raw arm that committed no verbatim "
+                "case: the clauses would be satisfied vacuously, so such a "
+                "run is `inconclusive` — a bar that cannot fail is not "
+                "evidence",
+                "a corpus whose manifest does not verify, or whose hash is "
+                "not this record's hash, makes every reading INCONCLUSIVE "
+                "rather than green",
+                "a run graded by a judge / reader / pin / rubric / seed / "
+                "arm set other than this record's is INCONCLUSIVE "
+                "(`config_mismatch`), never a pass",
+            ],
+            "not_claimed": "no rate is claimed as a THRESHOLDED benchmark "
+                           "result and no absolute or cross-benchmark "
+                           "accuracy is claimed. The published claim is the "
+                           "two mechanical clauses above; the D8 rate is "
+                           "PRINTED as a reported number (§3 of the report) "
+                           "with no pass threshold attached to it, and the "
+                           "judge's reading is never presented as an "
+                           "absolute",
+        },
         "corpus": {
             "path": "tests/eval/ask",
             "fixture_glob": corpus.FIXTURE_GLOB,
@@ -369,11 +613,16 @@ def protocol(*, reader_spec: str | None = None,
                  "train/test split — the corpus is hand-authored and every case "
                  "is scored, so there is nothing to fit.",
         "scoring": {
-            "committed": "the official anscheck semantic judge "
-                         "(build_judge) grades the reader's answer against the "
-                         "SEALED gold answer, per case per arm, using the "
-                         "official template the sealed gold names "
-                         "(knowledge-update | single-session-user)",
+            "committed": "the anscheck semantic judge built from THIS "
+                         "record's `judge.model_spec` (build_judge) grades "
+                         "the reader's answer against the SEALED gold "
+                         "answer, per case per arm, using the official "
+                         "TEMPLATE the sealed gold names (knowledge-update "
+                         "| single-session-user). ⛔ The TEMPLATE stays "
+                         "official; the JUDGE is this record's "
+                         "(`deepseek:deepseek-v4-pro`, pin "
+                         "`unpinned:`), never the official model — the "
+                         "pin is what says so",
             "superseded_live": "the assembled READER EVIDENCE is searched for "
                                "the superseded claim's own text "
                                "(ask_spotcheck._superseded_live_state): "
@@ -383,6 +632,54 @@ def protocol(*, reader_spec: str | None = None,
             "verbatim_regression": "for a verbatim-class case: "
                                    "raw.committed AND NOT "
                                    "distilled.committed",
+            # The TWO-NUMBER SPLIT as this benchmark can actually honour it
+            # (owner relay, #9097 comment 6710959889 §4). It is stated
+            # TERMS-OF-FACT, not as the write-path harness's stronger form,
+            # because here `committed` IS the judge's grade: claiming the judge
+            # "never enters metrics" would be false for this module and would
+            # let a later lane treat a judge-derived clause as mechanical
+            # (#11460 review P1).
+            "two_number_split": {
+                "mechanical_and_authoritative": "corpus verification "
+                                               "(manifest + hashes) and "
+                                               "the D8 supersession gate "
+                                               "(seen / rendered_live / "
+                                               "flagged, from the validity "
+                                               "window) need NO judge and "
+                                               "are AUTHORITATIVE",
+                "judge_labelled": "`committed` — whether the reader's "
+                                  "answer matched the sealed gold — is "
+                                  "the anscheck judge's grade. It feeds "
+                                  "the knowledge-update rate (REPORTED, "
+                                  "never thresholded) and the paired "
+                                  "verbatim/raw comparison. Both arms are "
+                                  "graded by the SAME judge inside ONE "
+                                  "run, so a SYSTEMATIC judge bias "
+                                  "cancels across the arms; a PERMISSIVE "
+                                  "judge does not, which is why no "
+                                  "THRESHOLD and no comparability claim "
+                                  "are published for that rate (it is "
+                                  "printed as a REPORTED number, §3) and "
+                                  "why the judge is pinned",
+                "d14_5085_shape": "the write-path harness keeps the judged "
+                                  "arm entirely out of `metrics` "
+                                  "(`tests/eval/write_path/runner.py`); "
+                                  "this benchmark cannot — its `committed` "
+                                  "IS the judge's grade — so the "
+                                  "equivalent guarantee is pre-registered "
+                                  "explicitly instead: no THRESHOLD and "
+                                  "no comparability claim for the "
+                                  "judge-labelled rate (it IS printed as a "
+                                  "REPORTED number, §3), and that half "
+                                  "is only ever a paired comparison "
+                                  "between the two arms of one run",
+                "what_it_does_not_mean": "the judge-free D8 half is NOT a "
+                                         "makeshift substitute for a "
+                                         "judge that was skipped — it is "
+                                         "the bar's authoritative half, "
+                                         "and the judge-labelled half is "
+                                         "declared as such",
+            },
         },
         "decision_rule": {
             "kind": "paired within-run comparison + product gate; NO pre-set "
@@ -431,6 +728,45 @@ def protocol(*, reader_spec: str | None = None,
                                         "competing threshold is invented: the "
                                         "product gate lives at "
                                         "docs/product-success-eval.md)",
+            # #11460 indicator 5 — the PER-CATEGORY row surface, pre-registered
+            # BEFORE the run so a later reader cannot be handed a headline with
+            # the classes silently merged. The row SURFACE is this issue's; the
+            # type-stratified GATE MECHANISM is #2516's and is NOT re-implemented
+            # here (declared dependency, not absorbed work).
+            "per_category": {
+                "rows": [
+                    "knowledge-update — the D8 gate: rendered_live / seen / "
+                    "n over the planted superseded claims, plus the "
+                    "current-state rate REPORTED (never thresholded)",
+                    "verbatim — the no-regression half: raw.committed vs "
+                    "distilled.committed per case, with the regressed case "
+                    "ids listed",
+                ],
+                "verdict_per_class": "each class is read against the "
+                                     "clauses that APPLY to it (the D8 "
+                                     "gate for knowledge-update, the "
+                                     "paired comparison for verbatim). A "
+                                     "class with no clause in this bar is "
+                                     "reported as not graded, never as a "
+                                     "pass, and on a run whose bar is "
+                                     "`inconclusive` EVERY class reports "
+                                     "`inconclusive` rather than a class "
+                                     "green under an inconclusive "
+                                     "headline; the per-class GATE "
+                                     "MECHANISM (a verdict sealed per "
+                                     "class) is #2516's and is not "
+                                     "claimed to be implemented here",
+                "threshold": "NONE is pre-set per class either. The "
+                             "knowledge-update rate is reported, the "
+                             "verbatim comparison is a regression, and "
+                             "neither needs an absolute to be read",
+                "mechanism_dependency": "#2516 (seal per-category, "
+                                        "type-stratified gates). Declared, "
+                                        "not absorbed: this record fixes the "
+                                        "row surface and the requirement "
+                                        "that each class is legible; the "
+                                        "enforcement mechanism is #2516's",
+            },
         },
         "reader": {
             "model_spec": resolve_reader_spec(reader_spec),
@@ -1412,8 +1748,15 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
     fixtures = {f["case_id"]: f for f in corpus.load_fixtures(corpus_root)}
     golds = corpus.load_golds(corpus_root)
     if judge is None:
-        judge = MockJudge() if mock else build_judge(judge_spec)
+        # ⛔ Resolve the spec FIRST and BUILD from it. `build_judge()` has its own
+        # fallback (``judge.DEFAULT_JUDGE_MODEL`` — the #8486-pinned DeepSeek
+        # model, and before that the official LongMemEval judge), so resolving
+        # only the RECORDED spec let a run with no ``--judge`` be graded by one
+        # model while the record — and therefore the bar's config check — named
+        # another: a false PASS on the one clause that exists to prove who
+        # graded the numbers (#11460 review).
         spec = resolve_judge_spec(judge_spec, mock=mock)
+        judge = MockJudge() if mock else build_judge(spec)
     elif isinstance(judge, MockJudge):
         # UNCONDITIONAL: a mock is a mock. Checking a caller-declared spec first
         # let `score(judge=MockJudge(), judge_spec="mock-judge")` record the
@@ -1431,7 +1774,7 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
         if object_id and object_id == judge_model_id(declared):
             spec = declared
         else:
-            spec = f"injected:{object_id}"
+            spec = f"{INJECTED_SPEC_PREFIX}{object_id}"
 
     # Refuse a report the bar has a clause for, LOUDLY, instead of dying with a
     # bare KeyError a caller has to decode: the clause cannot fire if the scorer
@@ -1508,6 +1851,12 @@ def score(*, run_report: dict, corpus_root: Path = corpus.ASK_DIR,
         "judge_model_spec": spec,
         "judge_pin": judge_pin_for(spec),
         "judge_model_id": getattr(judge, "model_id", ""),
+        # The credential this eval ran on, BY NAME ONLY (#2281 ruling: "the
+        # report must state which key was used, by name — never its value, and
+        # never a fragment long enough to identify it"). A NAME cannot leak the
+        # secret, and the test that pins this greps the emitted artifacts for
+        # the configured VALUE to prove nothing else travels.
+        "judge_key_env": judge_key_env_name(spec),
         "judge_rubric_id_hash": judge_rubric_id_hash(
             getattr(judge, "rubric_id", None)),
         "arms": run_report["arms"],
@@ -1835,7 +2184,27 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
         "run sets the benchmark-side X set (the KU rate is reported, not gated)",
         "the pre-registered bars that need no number: the D8 superseded-live "
         "gate and the paired verbatim/raw comparison",
+        "two-number split (D14/#5085 shape): the D8 supersession gate and "
+        "the corpus verification are judge-free and AUTHORITATIVE; the "
+        "judge-labelled half is only ever the paired within-run "
+        "comparison (the KU rate is printed as REPORTED, never "
+        "thresholded), so no threshold and no comparability claim are "
+        "published for it",
     ]
+    key_env = scored.get("judge_key_env")
+    if key_env:
+        # NAME only. Never the value, never a fragment of it (#2281 ruling).
+        # ⚠️ "the credential the run resolved" — NOT "the eval's dedicated
+        # credential": what is recorded is the provider's env var NAME, and
+        # nothing here can tell a dedicated per-eval VALUE from the product's
+        # shared one behind the same name. The dedicated-key clause is an
+        # operational requirement on the box (#2281), not a checked property of
+        # this receipt, and saying otherwise would be prose evidence.
+        note_list.append(
+            f"the judge credential the run resolved, by env var NAME only: "
+            f"{key_env} (the value is deliberately not recorded; whether that "
+            f"name holds the eval-dedicated key or the shared one is an "
+            f"operational fact this receipt cannot establish)")
     if prereg_sha256:
         note_list.append(f"pre-registration sha256: {prereg_sha256}")
     note_list.extend(notes or [])
@@ -1868,6 +2237,7 @@ def build_receipt(*, scored: dict, commit: str, cost_usd: float,
             "arms": copy.deepcopy(scored["arms"]),
             "gate_arm": GATE_ARM,
             "judge_model_spec": scored["judge_model_spec"],
+            "judge_key_env": scored.get("judge_key_env"),
             "reader_model_spec": scored.get("reader_model_spec"),
             "reader_temperature": READER_TEMPERATURE,
             "reader_max_tokens": READER_MAX_TOKENS,
@@ -2224,6 +2594,54 @@ def render_report(*, receipt: dict, scored: dict, prereg: dict,
         f"{'✅' if row['arms'][GATE_ARM]['committed'] else '❌'} | "
         f"{_claim_cell(row['superseded'])} |"
         for row in scored["cases"])
+    # #11460 indicator 5 — the PER-CATEGORY rows. Derived from the SAME per-case
+    # rows the bar reads (never a second aggregation), and rendered for every
+    # class the run covered, so a reader gets a reading per class instead of a
+    # headline the classes were merged into. No threshold is introduced: the
+    # class reading is the pre-registered clauses restricted to that class, and
+    # the KU rate stays reported-not-thresholded.
+    #
+    # ⛔ A class may NOT read PASS on a run whose bar is inconclusive: the
+    # bar's own denominator floors exist to reject vacuous greens ("the raw arm
+    # committed NO verbatim case" ⇒ `regressions == []` trivially), and printing
+    # PASS per class under an INCONCLUSIVE headline would re-introduce exactly
+    # that vacuity in the audit surface (#11460 review P2).
+    bar_inconclusive = (receipt.get("run_status") != "completed"
+                        or receipt.get("verdict") == "inconclusive")
+    class_rows: list[str] = []
+    for klass in sorted({row["class"] for row in scored["cases"]}):
+        in_class = [row for row in scored["cases"] if row["class"] == klass]
+        claims = [claim for row in in_class for claim in row["superseded"]]
+        regressed = [row["case_id"] for row in in_class
+                     if row["verbatim_regression"]]
+        committed = sum(1 for row in in_class
+                        if row["arms"][GATE_ARM]["committed"])
+        if klass == corpus.CLASS_KNOWLEDGE_UPDATE:
+            # the D8 clauses are the KU class's own bar
+            gate_seen = sum(1 for claim in claims if claim["seen"])
+            gate_live = sum(1 for claim in claims if claim["rendered_live"])
+            reading = (f"{gate_live}/{len(claims)} rendered live · "
+                       f"{gate_seen}/{len(claims)} seen · rate "
+                       f"{committed}/{len(in_class)} (reported)")
+            outcome = "PASS" if (claims and gate_live == 0
+                                 and gate_seen == len(claims)) else "FAIL"
+        elif klass == corpus.CLASS_VERBATIM:
+            # the verbatim class's own bar is the paired comparison
+            reading = (f"{committed}/{len(in_class)} committed on "
+                       f"`{GATE_ARM}` · regressions "
+                       f"{regressed or 'none'}")
+            outcome = "PASS" if not regressed else "FAIL"
+        else:
+            # A class this bar has no clause for is NOT graded — rendering it
+            # as PASS would assert a reading nothing measured.
+            reading = f"{len(in_class)} case(s) — no clause in this bar"
+            outcome = "not graded"
+        if bar_inconclusive:
+            origin = receipt.get("failure_origin") or "bar not evaluated"
+            outcome = f"inconclusive ({origin})"
+        class_rows.append(f"| `{klass}` | {len(in_class)} | {reading} | "
+                          f"{outcome} |")
+    per_class = "\n".join(class_rows)
     notes = "\n".join(f"- {note}" for note in receipt["notes"])
     # The binding is rendered from the receipt, never re-derived here: what a
     # reader audits is what the publisher verified.
@@ -2299,6 +2717,7 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 | Gate arm | `{prereg["gate_arm"]}` |
 | Reader | `{receipt["reader_model_spec"]}` (temperature {prereg["reader"]["temperature"]}, max_tokens {prereg["reader"]["max_tokens"]}, pinned: {receipt["reader_pinned"]}) |
 | Judge | `{receipt["judge_model"]}` — pin `{receipt["judge_pin"]}`, rubric id `{prereg["judge"]["rubric_id"]}` (hash `{receipt["judge_rubric_id_hash"]}`) |
+| Judge credential (name only) | `{(receipt.get("resolved_config") or {}).get("judge_key_env") or "—"}` — the key's VALUE is never recorded (owner ruling, #2281) |
 | Commit (exact) | `{run_commit}` — **commit binding verified at publish time** (§6) |
 | Tree the run executed from | `{run_tree}` — {tree_state} |
 | Corpus hash | `{receipt["corpus_hash"]}` (re-hashed from the tree AT that commit: `{committed_corpus_hash}`) |
@@ -2317,6 +2736,18 @@ extends: tools/longmem_eval/measure_ask_distilled.py, tests/eval/ask/README.md
 **Verdict: {receipt["verdict"].upper()}**
 
 {chr(10).join("- " + reason for reason in scored["bar"]["reasons"])}
+
+### 2b. Per-category readings (#11460 row surface; mechanism #2516)
+
+| Class | Cases | Reading | Outcome |
+|---|---|---|---|
+{per_class}
+
+The row SURFACE is this pre-registration's; the type-stratified GATE MECHANISM
+is #2516's and is declared, not re-implemented. Each class is read against the
+same pre-registered clauses, so a class cannot be merged away by the headline.
+No per-class threshold is introduced — the knowledge-update rate stays
+**reported, not thresholded** (D8).
 
 ## 3. Reported, NOT thresholded — the knowledge-update rate
 
@@ -2433,7 +2864,10 @@ def _main(argv: list[str] | None = None) -> int:
                           "the product default)")
     pre.add_argument("--judge", default=None,
                      help="judge model spec (default: TORTOISE_LME_JUDGE_MODEL "
-                          "or the official judge)")
+                          "or THIS benchmark's pre-registered judge, "
+                          f"{PREREGISTERED_JUDGE_SPEC} — NOT the LongMemEval "
+                          "official judge, which is another benchmark's "
+                          "default)")
 
     run = sub.add_parser("run", help="run the sealed corpus (fixtures only)")
     run.add_argument("--out", required=True)
@@ -2448,7 +2882,11 @@ def _main(argv: list[str] | None = None) -> int:
     sc.add_argument("--out", required=True)
     sc.add_argument("--corpus-root", default=str(corpus.ASK_DIR),
                     help="corpus tree (default: the committed one)")
-    sc.add_argument("--judge", default=None)
+    sc.add_argument("--judge", default=None,
+                    help="judge model spec (default: TORTOISE_LME_JUDGE_MODEL "
+                         "or THIS benchmark's pre-registered judge, "
+                         f"{PREREGISTERED_JUDGE_SPEC}; the LongMemEval official "
+                         "judge is a different benchmark's default)")
     sc.add_argument("--mock", action="store_true",
                     help="offline MockJudge (wiring checks only, never a "
                          "published number)")

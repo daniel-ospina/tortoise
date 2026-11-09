@@ -67,7 +67,7 @@ WHAT THIS PINS
    override names an unknown pack, a green section when it names a subset
    (round 4, P3).
 12. The documented recipe (``README.md`` → "Re-running the measurable half")
-   reproduces ``MEASURED: 25 premises, 0 unmeasured sections.`` on a box that
+   reproduces ``MEASURED: 26 premises, 0 unmeasured sections.`` on a box that
    exports ``TORTOISE_API_KEY`` without a pepper, its stdout is byte-identical
    when the key is absent, and the documented command's fail-closed tail exits 3
    on a deliberate refusal.
@@ -163,9 +163,20 @@ def test_the_tool_names_the_correction_introduces_are_measured(probe) -> None:
         "a retired tool's row must name its advertised replacement, or a runner "
         f"reads a bare absence as 'the product is broken': {health!r}"
     )
+    # #4282: `tortoise_overview` retired into the `graph_overview` container, so the
+    # ADVERTISED name is the container and the old name is the retired row — the same
+    # two-row shape `tortoise_health` has above.
+    container = _measured(probe, "tool `tortoise_graph_overview` is on the MCP surface")
+    assert container.startswith("PRESENT"), (
+        f"`tortoise_graph_overview` is the advertised name and must measure PRESENT, "
+        f"got {container!r}"
+    )
     overview = _measured(probe, "tool `tortoise_overview` is on the MCP surface")
-    assert overview.startswith("PRESENT"), (
-        f"`tortoise_overview` is the advertised name and must measure PRESENT, got {overview!r}"
+    assert overview.startswith("ABSENT"), (
+        f"`tortoise_overview` is retired and must measure ABSENT, got {overview!r}"
+    )
+    assert RETIRED_USE_INSTEAD["tortoise_overview"] in overview, (
+        "a retired tool's row must name its advertised replacement"
     )
 
 
@@ -598,7 +609,7 @@ def test_the_union_arm_clause_about_the_catalog_union_is_measured(probe, monkeyp
     (`pack_state.unapproved_kind_pack`'s `if approved is None: return None`, whose
     docstring IS the #2714 indicator-3 statement). Measured in review: replacing that
     `return None` with a narrowed fallback (`approved = frozenset({'dev'})`) left all
-    five packs rows CONFIRMED, `25 premises, 0 unmeasured sections`, exit 0 — the
+    five packs rows CONFIRMED, `26 premises, 0 unmeasured sections`, exit 0 — the
     instrument green-lit the fallback being dead.
 
     The wrapper mutates exactly that branch and leaves the rest of the function real,
@@ -636,7 +647,7 @@ def test_the_union_arm_absence_clause_is_measured_not_asserted(
     (hoisting `graph_kind_namespaces(g)` above the early return,
     `pack_state.py:974-975`) keeps every expectation satisfied while the row
     prints the opposite of what happened. Measured at `9d8350652`: the whole
-    census reported `25 premises, 0 unmeasured sections`, exit 0, and this
+    census reported `26 premises, 0 unmeasured sections`, exit 0, and this
     file was 18/18 green.
 
     The wrapper keeps the REAL resolution's reads (so the arms stay
@@ -725,7 +736,7 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
     `census_onboarding`'s `from tortoise.hosted_api import _CHECKPOINT_STEPS`
     raised, the `onboarding` section was UNMEASURED (rows 1 and 5a-5e never
     printed) and the probe exited 3: the documented recipe (`README.md` →
-    "Re-running the measurable half") could not reproduce `25 premises, 0
+    "Re-running the measurable half") could not reproduce `26 premises, 0
     unmeasured sections` anywhere but a box without the key or with a pepper set.
     These pins are green over it because `tests/conftest.py:18` supplies the pepper
     the recipe does not — so this one reproduces the recipe, in a fresh process.
@@ -752,7 +763,7 @@ def test_the_onboarding_section_measures_on_a_box_that_exports_the_hosted_key() 
         "the census verdict (fail-closed 3 = a section unmeasured): "
         f"{exported.stdout[-1600:]} / {exported.stderr[-800:]}"
     )
-    assert "MEASURED: 25 premises, 0 unmeasured sections." in exported.stdout, (
+    assert "MEASURED: 26 premises, 0 unmeasured sections." in exported.stdout, (
         f"the recipe's own verdict must be the published one: {exported.stdout[-1600:]}")
     assert "UNMEASURED SECTIONS" not in exported.stdout, (
         f"a section went unmeasured on a box with only the hosted key set: "

@@ -212,3 +212,4 @@ def test_the_bundle_retracts_the_claim_that_a_graph_census_adds_nothing():
     assert "0/113" in text, "the retraction must carry the measured counterexample"
     assert "graph_census" in text, (
         "the bundle must name the instrument that closes the gap (#8444)")
+

@@ -1200,6 +1200,71 @@ def test_a_model_version_bump_with_no_changelog_block_fails() -> None:
     _assert_declared_version_is_recorded(bumped, recorded)
 
 
+def _assert_no_block_records_a_version_above_the_declared_one(
+        ontology: str, changelog: str) -> None:
+    """No block may record a release NEWER than the model document declares.
+
+    The changelog's own rule is *"one entry per model change"*, and a version
+    number in a block header asserts *"this release of the model document has
+    been published"*. So a block above the declared version is either a second
+    record of a change that was already recorded (the duplicate-release class) or
+    a bump that never landed on the document — in both cases one model change
+    carrying two version numbers, one of which the document does not declare.
+    """
+    declared = re.search(r'^title: "Tortoise — Canonical Ontology v(\d+\.\d+)"',
+                         ontology, re.M)
+    assert declared, "docs/ONTOLOGY.md must declare its model version in frontmatter"
+    ceiling = _model_version(declared.group(1))
+    offenders = sorted(
+        {(version, tail)
+         for version, tail in re.findall(r"^> \*\*Changelog v(\d+\.\d+)([^\n]*)",
+                                        changelog, re.M)
+         if _model_version(version) > ceiling})
+    assert offenders == [], (
+        f"ONTOLOGY-CHANGELOG.md records {len(offenders)} block(s) above the "
+        f"v{declared.group(1)} this model document declares: "
+        + "; ".join(f"v{version}{tail}" for version, tail in offenders))
+
+
+def test_no_changelog_block_records_a_version_above_the_declared_one() -> None:
+    """A release record NEWER than the model document is a double-recorded bump.
+
+    #11083's PR added two blocks for ONE model change — `v3.32` at the top (the
+    entry whose bump the owner approved, the version `ONTOLOGY.md`'s title and
+    `docs/evidence/11083/README.md` name) and a second `v3.33` block further
+    down that claimed a version the document does not declare, unblockquoted and
+    below the v3.31 entry, so it also broke newest-first.
+
+    ⛔ Nothing in the tree redded, and that is why the class survived a green
+    run: `_assert_declared_version_is_recorded` reads only the FIRST
+    `> **Changelog v3.` occurrence, so a later block at a HIGHER version is
+    invisible to it — the same shape as round 5's stale-count pin only reading
+    a row's tail. This arm reads EVERY block, so the duplicate cannot be
+    re-added below the top one.
+    """
+    ontology = ONTOLOGY.read_text(encoding="utf-8")
+    changelog = ONTOLOGY_CHANGELOG.read_text(encoding="utf-8")
+    _assert_no_block_records_a_version_above_the_declared_one(ontology, changelog)
+
+    # Non-vacuity, in the shape the real defect took: re-insert a block one
+    # minor version above the declared one, BELOW the newest block (where the
+    # v3.33 duplicate sat) — invisible to the newest-block arm — and show this
+    # arm rejects it while that one stays green.
+    declared = re.search(r'^title: "Tortoise — Canonical Ontology v(\d+\.\d+)"',
+                         ontology, re.M)
+    assert declared, "docs/ONTOLOGY.md must declare its model version in frontmatter"
+    major, minor = declared.group(1).split(".")
+    above = f"{major}.{int(minor) + 1}"
+    dup = f"> **Changelog v{above} (2199-01-01 — issue #0 — synthetic):**\n>\n"
+    anchor = changelog.index("§4.8 (added by #3554")
+    header = changelog.rindex("> **Changelog v3.", 0, anchor)
+    duplicated = changelog[:header] + dup + changelog[header:]
+    _assert_declared_version_is_recorded(ontology, duplicated)
+    with pytest.raises(AssertionError, match="above the"):
+        _assert_no_block_records_a_version_above_the_declared_one(
+            ontology, duplicated)
+
+
 def test_ontology_section_4_8_owner_lists_match_the_declaration() -> None:
     """The doc mirror must name every property AND its exact owner set.
 

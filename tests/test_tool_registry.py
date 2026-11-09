@@ -75,50 +75,87 @@ class TestRegistryEquivalence:
         )
 
     def test_registry_count(self):
-        """81 live tools = 98 − the 16 owner-approved retirements (#3863) − 1.
+        """72 live tools = 98 − the 16 owner-approved retirements (#3863) − 1 − 5 + 1 − 5.
 
-        The extra −1 is #3540 ruling B: the two per-source switches were
-        consolidated into `tortoise_manage_sources`, which is the ruling's own
-        requirement ("the surface ends up one tool fewer, not more"). The
-        census is bumped per add — and, here, per approved CONSOLIDATION.
+        The −1 is #3540 ruling B: the two per-source switches were consolidated into
+        `tortoise_manage_sources`, which is the ruling's own requirement ("the surface
+        ends up one tool fewer, not more"). The census is bumped per add — and, here,
+        per approved CONSOLIDATION.
+
+        #4282 (this change): the `graph_overview` container absorbs FIVE advertised
+        names (`overview`, `summarize_structure`, `validate_domain`, `audit`,
+        `dream_health`) and adds itself — 81 − 5 + 1 = 77. `check_structure` is absorbed
+        as a SECTION while its door stays live, because it is the one member carrying the
+        #8482 wrap-envelope repair that a `-> Any` container cannot. The approved target
+        is 27 advertised tools; `tools/surface-target-check.py` is what measures the
+        distance to it, and this pin moves with every landed container batch.
+
+        #4282 Phase 3.2 (main): the five `run_onboarding` tools
+        (`tortoise_onboarding_state`, `_seed`, `_demo_create`,
+        `_github_connect`, `_github_status`) were DELETED from the registry on the
+        2026-09-22 owner ruling (`run_onboarding` dropped for `check_connection`),
+        so they are neither live nor retired — they have no replacement NAME to
+        redirect to. 77 − 5 = 72. The two moves are independent (disjoint name
+        sets) and compose: neither side's own figure survives the merge.
         """
         from tortoise.tool_registry import RETIRED_TOOL_REGISTRY, TOOL_REGISTRY
-        assert len(TOOL_REGISTRY) == 81, f"Expected 81, got {len(TOOL_REGISTRY)}"
+        assert len(TOOL_REGISTRY) == 72, f"Expected 72, got {len(TOOL_REGISTRY)}"
         names = {t.name for t in TOOL_REGISTRY}
-        # The 16 #3863 retirements plus the 2 per-source switches #3540 ruling B
-        # consolidated are NOT live, and each one is declared retired (#3883).
+        # The 16 #3863 retirements, the 2 per-source switches #3540 ruling B
+        # consolidated and the 5 #4282 container members are NOT live, and each one is
+        # declared retired (#3883).
         retired = {t.name for t in RETIRED_TOOL_REGISTRY}
-        assert len(retired) == 18, f"Expected 18 retired, got {len(retired)}"
+        assert len(retired) == 23, f"Expected 23 retired, got {len(retired)}"
         assert not (retired & names), f"Retired names still live: {retired & names}"
-        assert "tortoise_validate_domain" in names, "Missing #405 validate_domain tool"
+        # #405's `validate_domain` capability is not lost: #4282 retired the door into the
+        # `graph_overview` container, which dispatches `section="validate_domain"`. Asserting
+        # the NAME would re-assert the surface shape the approved target removes, so the
+        # assertion follows the capability.
+        assert "tortoise_graph_overview" in names, "Missing the graph_overview container"
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD
+        assert "validate_domain" in RETIRED_USE_INSTEAD["tortoise_validate_domain"]
         assert "tortoise_packs_list" in names, "Missing #318 packs_list tool"
         assert "tortoise_graph_set_recording" in names, "Missing #2302 graph_set_recording tool"
-        onboarding = {"tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+        onboarding = {
                       # #3540 ruling B: ONE consolidated operation carries the
                       # sources; the two per-source switches retired into it.
+                      # #4282 Phase 3.2: it is now the ONLY live onboarding-group
+                      # tool — the five dropped `run_onboarding` members moved off
+                      # the MCP (owner ruling 2026-09-22) and their REST routes
+                      # survive in `tortoise/hosted_api.py`.
                       "tortoise_manage_sources",
-                      "tortoise_onboarding_github_connect",
-                      "tortoise_onboarding_github_status",
-                      "tortoise_onboarding_seed"}
+                      }
         assert onboarding <= names, f"Missing onboarding tools: {onboarding - names}"
+        for gone in ("tortoise_onboarding_demo_create", "tortoise_onboarding_state",
+                     "tortoise_onboarding_seed", "tortoise_onboarding_github_connect",
+                     "tortoise_onboarding_github_status"):
+            assert gone not in names, (
+                f"{gone} is back on the served surface — #4282 Phase 3.2 removed it and "
+                "the owner's 2026-09-22 ruling keeps `run_onboarding` off the MCP")
         assert "tortoise_file_human_approval" in names, "Missing #531 human-approval tool"
         assert "tortoise_review_connections" in names, "Missing #913 review_connections tool"
         assert "tortoise_events_poll" in names, "Missing #432 poll_events tool"
         assert "tortoise_retract_point" in names, "Missing #432 retract_point tool"
         assert "tortoise_find_cross_lens_candidates" in names, "Missing #438 cross-lens tool"
-        assert "tortoise_audit" in names, "Missing #348 tortoise_audit tool"
+        # #348's audit capability, reached through the #4282 container: the door retired and
+        # `graph_overview(section="audit")` is the name that resolves now.
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD as _RUI
+        assert 'section="audit"' in _RUI["tortoise_audit"], "Missing #348 audit capability"
         # W1–W4 consolidated tools (#888): recall (W1), update/delete/
         # operator_action/create_edge (W2), overview/get_entity (W3), ingest (W4).
         # W3's fetch tool is `tortoise_get_entity` — `tortoise_get` retires into it
         # (owner decision, docs/product/canonical-mcp-tools.md @ approval_pr 4120).
+        # `tortoise_overview` left this set when #4282 retired it into
+        # `tortoise_graph_overview` — the container is the W3 consolidation now.
         w_consolidations = {"tortoise_recall", "tortoise_update", "tortoise_delete",
                             "tortoise_operator_action", "tortoise_create_edge",
-                            "tortoise_overview", "tortoise_get_entity", "tortoise_ingest"}
+                            "tortoise_graph_overview", "tortoise_get_entity",
+                            "tortoise_ingest"}
         assert w_consolidations <= names, (
             f"Missing W1–W4 tools: {w_consolidations - names}")
         # #454-era surface tools covered by this PR's tests
         for name in ("tortoise_query", "tortoise_suggest_entry_points",
-                     "tortoise_overview"):
+                     "tortoise_graph_overview"):
             assert name in names, f"Missing tool: {name}"
         # Phase-4 mining/promotion/dedup/timeline surface (#787)
         phase4 = {"tortoise_mine_conversations", "tortoise_list_dedup_candidates",
@@ -217,6 +254,16 @@ class TestCurationGroups:
 # so the dashboard only PRESENTS what exists and the wiring never grows a
 # bespoke per-integration UI flow.
 #
+# ⛔ ONE RECORDED EXCEPTION, and it is deliberate (owner ruling 2026-09-22,
+# #4282 Phase 3.2): the GitHub CONNECT leg is human/dashboard-side
+# (`POST /v1/onboarding/github/connect`) and is NOT agent-callable — credentials
+# never pass through the model. For `github-issues` the invariant therefore
+# holds on the ENABLE and STATE-READ legs only, and only AFTER a human has
+# connected: `tortoise_manage_sources(action="enable")` refuses with a pointer
+# to that route while the team has no connection (see
+# `tests/test_manage_sources_3540.py::test_enabling_a_github_source_without_a_connection_is_refused`).
+# Never describe GitHub as connectable from an agent.
+#
 # This table is the HAND-MAINTAINED registry of the integrations this file
 # tracks. It is parametrized, so a row IN it cannot go stale silently: a row
 # whose tool path is missing fails `test_existing_integrations_agent_settable`,
@@ -240,22 +287,24 @@ class TestCurationGroups:
 # per-source tool reappearing here is a regression, not an improvement.
 _INTEGRATIONS: dict[str, dict] = {
     "github-issues": {
-        # `github_connect` is the OAuth handshake, deliberately NOT folded into
-        # the consolidated operation (credentials never pass through the model).
-        "enable": ("tortoise_manage_sources",
-                   "tortoise_onboarding_github_connect"),
-        "state_read": ("tortoise_onboarding_github_status",
-                       "tortoise_onboarding_state"),
+        # `github_connect` (the OAuth handshake) was NEVER folded into the
+        # consolidated operation — credentials never pass through the model — and
+        # #4282 Phase 3.2 removed it from the MCP surface entirely. Its only door
+        # is now `POST /v1/onboarding/github/connect`, so the integration is
+        # enabled and read through `tortoise_manage_sources` alone on the agent
+        # surface.
+        "enable": ("tortoise_manage_sources",),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
     "agent-session-recording": {
         "enable": ("tortoise_manage_sources",),
-        "state_read": ("tortoise_onboarding_state",),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
     "github-documents": {
         "enable": ("tortoise_manage_sources",),
-        "state_read": ("tortoise_manage_sources", "tortoise_onboarding_state"),
+        "state_read": ("tortoise_manage_sources",),
         "blocked": None,
     },
 }
@@ -278,7 +327,12 @@ class TestAgentAddressableIntegrations:
     Parametrized over the three integrations the epic ships. A live row
     asserts registry presence, onboarding-group membership (an ungrouped tool
     falls to the 'memory' default and is filtered off group-scoped surfaces)
-    and HTTP exposure."""
+    and HTTP exposure.
+
+    Scope of the claim, stated so it is not read wider than it holds: the
+    CONNECT leg of `github-issues` is dashboard-side by ruling (see the table's
+    recorded exception above), so what these rows prove is that the ENABLE and
+    STATE-READ legs are agent-settable."""
 
     @staticmethod
     def _registry():
@@ -380,9 +434,10 @@ class TestAgentAddressableIntegrations:
         for retired_switch in ("tortoise_onboarding_github_index",
                               "tortoise_onboarding_session_recording"):
             assert retired_switch not in advertised
-        # The OAuth handshake stays: it is not a switch, and folding it in would
-        # push credentials toward the model.
-        assert "tortoise_onboarding_github_connect" in advertised
+        # The OAuth handshake is NOT on the MCP: credentials never pass through
+        # the model, and #4282 Phase 3.2 removed the tool. Its only door is
+        # `POST /v1/onboarding/github/connect`.
+        assert "tortoise_onboarding_github_connect" not in advertised
 
     def test_the_new_tool_is_write_gated(self):
         """Ruling B's permission condition rests on the registry flag.
@@ -849,6 +904,38 @@ class TestCapabilityModel:
         assert writers >= NON_SDK_WRITER_TOOLS, (
             "a NON_SDK_WRITER_TOOLS member is not writer-annotated: "
             f"{sorted(NON_SDK_WRITER_TOOLS - writers)}")
+
+    def test_every_non_sdk_reader_is_still_served(self):
+        """`NON_SDK_READ_TOOLS` is "Kept exact" too, so its liveness needs the same arm.
+
+        #10914 review P3: the writer set got
+        `test_every_non_sdk_writer_is_still_served` for exactly this reason and the read
+        set got nothing, so a rename on the read side would leave the declaration
+        pointing at a name that resolves nowhere while every other check stayed silent —
+        `declared_set_violations` iterates live ENTRIES, never the declared names.
+
+        The two extra arms pin what makes the set *mean* "handler-served read": an
+        empty `sdk_method` (the binding is in hosted_api, outside the sdk.py
+        derivation) and no `writes` flag. A member that gains either belongs in
+        `NON_SDK_WRITER_TOOLS` — inheriting the reader exemption would let an
+        empty-binding WRITE escape the writer guards by being declared read.
+        """
+        from tool_surface_capabilities import NON_SDK_READ_TOOLS, served_registry
+
+        served = served_registry()
+        names = {e.name for e in served}
+        stale = sorted(NON_SDK_READ_TOOLS - names)
+        assert stale == [], (
+            f"NON_SDK_READ_TOOLS names no served tool: {stale} — delete or rename "
+            f"the entry")
+        rows = {e.name: e for e in served if e.name in NON_SDK_READ_TOOLS}
+        bound = sorted(n for n, e in rows.items() if e.sdk_method)
+        assert bound == [], (
+            f"a NON_SDK_READ_TOOLS member declares an sdk_method: {bound}")
+        writers = sorted(n for n, e in rows.items() if e.writes)
+        assert writers == [], (
+            f"a NON_SDK_READ_TOOLS member is writer-annotated: {writers} — it "
+            f"belongs in NON_SDK_WRITER_TOOLS")
 
     def test_guards_cover_the_served_set_not_only_the_live_one(self):
         """#3883: a retired name is still resolvable and callable by name, so the
@@ -1663,10 +1750,13 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
         one real carve-out is declared."""
         import tool_surface_capabilities as tsc
 
-        # Pretend `query` were an out-of-boundary mutator: the read tools that
-        # reach it (tortoise_query and friends) are NOT declared, so it must fire.
+        # Pretend the accessor `tortoise_query` reaches were an out-of-boundary
+        # mutator: it is NOT declared, so it must fire. #10602 moved that tool off
+        # `sdk.query` (no LIMIT in its Cypher) onto `paginated_query`, which is the
+        # accessor its handler actually reaches now — probing `query` would test a
+        # binding that no longer exists and pass vacuously.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v
@@ -1705,7 +1795,10 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
 
         import tool_surface_capabilities as tsc
 
-        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+        # #10602: tortoise_query now reaches `paginated_query`, not `query` — the
+        # probe must name the accessor the handler ACTUALLY reaches, or the arm
+        # looks vacuous while the binding it was written for is gone.
+        monkeypatch.setitem(tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
                             "probe: pretend a mutation lives outside sdk.py")
         # A REAL entry (so the handler resolution is real) moved to the
         # `maintenance` tier — exactly the re-tiering a lane might attempt.
@@ -1979,9 +2072,13 @@ class TestToolIdentity:
         # LIVE writers move 45 → 44 and retired writer shims move 2 → 4; the
         # SERVED number (get_write_tool_names covers both, #3883) therefore
         # moves 47 → 48 while the ADVERTISED surface falls by one.
-        assert len(WRITE_TOOL_NAMES) == 48, f"write census moved: {len(WRITE_TOOL_NAMES)}"
+        # #4282 Phase 3.2 then removed THREE served writers (81 -> 76 live):
+        # `tortoise_onboarding_github_connect` (admin) plus
+        # `tortoise_onboarding_seed` / `tortoise_onboarding_demo_create` (write),
+        # so SERVED 48 -> 45 and LIVE 44 -> 41.
+        assert len(WRITE_TOOL_NAMES) == 45, f"write census moved: {len(WRITE_TOOL_NAMES)}"
         live = frozenset(t.name for t in TOOL_REGISTRY if t.writes)
-        assert len(live) == 44, f"live write census moved: {len(live)}"
+        assert len(live) == 41, f"live write census moved: {len(live)}"
 
     def test_gate_refuses_read_scope_for_every_writer_annotated_entry(self):
         """#4474: a `graphs:read`-only key is REFUSED for EVERY entry that writes.
@@ -2009,9 +2106,9 @@ class TestToolIdentity:
 
         served = [*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY]
         writers = sorted(e.name for e in served if e.writes)
-        # 48 = the served writer census (44 live + 4 retired shims). Pinned
+        # 45 = the served writer census (41 live + 4 retired shims). Pinned
         # here so the derived loop below can never pass by covering nothing.
-        assert len(writers) == 48, writers
+        assert len(writers) == 45, writers
         for name in ("tortoise_backfill_v25", "tortoise_dream",
                      "tortoise_index_sessions", "tortoise_ingest_corpus",
                      "tortoise_org_create"):

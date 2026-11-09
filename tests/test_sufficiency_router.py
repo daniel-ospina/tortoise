@@ -18,8 +18,9 @@ These tests pin the decision at the point where it is made:
 * the router takes **no query class** — pinned structurally, so the classifier
   §12.4 rejects cannot be reintroduced without reddening a test;
 * the write-back carries its **span**, never promotes a class, never carries the
-  raw payload, and **dedupes by identity** (the attribution loop, without which
-  the escalation is a permanent tax).
+  raw payload, and **dedupes by identity** — within one call only, which is why
+  the caller hands the plan what the cheap tier already holds (the attribution
+  loop; without the across-call half the escalation is a permanent tax).
 
 MUTATION PROOF — the guard each test exists to hold, and the edit that turns it
 RED:
@@ -47,8 +48,47 @@ RED:
   ``test_a_finding_without_a_span_is_refused_not_downgraded`` RED.
 * **Promote an episodic fact** — drop the ``promote_to`` refusal →
   ``test_the_write_back_refuses_to_promote_a_claim_class`` RED.
-* **Drop the attribution loop** — remove the ``seen`` dedupe →
-  ``test_the_same_verified_finding_writes_back_once`` RED.
+* **Drop the within-call dedupe** — remove the ``seen`` dedupe →
+  ``test_the_same_verified_finding_writes_back_once_within_ONE_CALL`` RED.
+  (That test pins ONLY the within-call half: a second CALL re-mints unless the
+  caller passes the store's units, which is what the ACROSS-CALL bullets below
+  are for.)
+* **Drop the ACROSS-CALL attribution loop** — ignore ``already_written`` (re-mint
+  what the cheap tier holds) → ``test_a_second_escalation_of_the_same_question_writes_nothing``,
+  ``test_a_repeat_escalation_writes_nothing_and_the_loop_closed``,
+  ``test_one_stored_unit_does_not_suppress_a_DIFFERENT_finding``,
+  ``test_a_repeat_occurrence_is_reported_once`` and four more RED (eight in total).
+* **Let the module's own prose credit the within-call half** — restore the
+  pre-#11428 docstring bullet (*"written back twice is ONE unit. That is what
+  makes the escalation an investment … its absence is … 'no attribution loop'"*)
+  → ``test_no_loop_claim_in_the_module_docstring_credits_the_within_call_half``
+  RED, and green everywhere else in this file (it asserts prose only).
+* **Report a MINTED unit as already stored** — drop the ``key in persisted`` half
+  of the branch → ``test_a_minted_unit_is_never_also_reported_as_persisted`` RED.
+* **Leave the stored class out of the class guard** — compare only against
+  ``seen`` → ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation``
+  RED, together with the seven other tests that bullet's eight comprises
+  (measured: eight in total — that edit IS the loop being ignored; this test is
+  the one that names the STORE's class specifically).
+* **Drop the ``already`` strip on conflicted keys** — report a stored unit the
+  batch contradicts as "nothing to write" →
+  ``test_a_stored_class_conflict_beats_the_within_batch_dedupe`` RED, and it is
+  the ONLY test that reds (measured 1 failed, 227 passed).
+* **Grade the store lazily** — record a store contradiction and raise only when
+  the batch hits that key → ``test_a_contradictory_store_is_refused_even_when_the_batch_never_touches_it``
+  RED and the sibling contradiction test stays GREEN (this is the one edit that
+  distinguishes the two).
+* **Drop the store-contradiction refusal** — plain ``setdefault`` → both
+  store-contradiction tests RED.
+* **Claim a closed loop when nothing was accounted for** — ``settled = not units``
+  → ``test_an_empty_plan_is_neither_ok_nor_settled``,
+  ``test_a_refused_plan_is_never_settled_even_when_the_tier_holds_a_unit`` and
+  ``test_a_stored_class_cannot_be_overwritten_by_a_re_escalation`` RED.
+* **Accept a bare ``unit_key`` in ``already_written``** — drop the ``SummaryUnit``
+  type check → ``test_a_bare_key_cannot_silently_disable_the_dedupe`` RED (and
+  the stored-class guard is silently disabled).
+* **Mutate the caller's store list** — ``already_written.sort(…)`` in place →
+  ``test_planning_a_write_back_mutates_nothing_it_was_given`` RED.
 * **Let a unit carry the raw payload** — add a ``raw``/``supersedes`` field to
   ``SummaryUnit`` → ``test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it``
   RED.
@@ -1037,15 +1077,63 @@ def test_the_write_back_refuses_to_promote_a_claim_class() -> None:
     assert same.units[0].claim_class == "episodic"
 
 
-def test_the_same_verified_finding_writes_back_once() -> None:
-    """The attribution loop: a repeated escalation must not pay for a duplicate."""
+def test_the_same_verified_finding_writes_back_once_within_ONE_CALL() -> None:
+    """WITHIN one call the dedupe holds — and that is all this pins.
+
+    ⚠️ A repeat ESCALATION is a SEPARATE call, and it re-mints one unit per call
+    unless the caller hands over the store's units (`already_written`): the
+    ``again`` assertion below IS that re-mint, deliberately, because the planner
+    owns no store and cannot know what was written back. This test used to be
+    named for "the attribution loop" while proving only the within-call half,
+    which read as if the across-call loop were pinned here. It is not —
+    `test_a_repeat_escalation_writes_nothing_and_the_loop_closed` and its
+    siblings are.
+    """
     first = plan_writeback([_finding()])
     again = plan_writeback([_finding()])
     both = plan_writeback([_finding(), _finding()])
     assert len(first.units) == 1
+    # NOT the across-call loop: a second call with no store re-mints by design.
     assert len(again.units) == 1
     assert len(both.units) == 1
     assert both.units[0].unit_key == first.units[0].unit_key
+
+
+def test_no_loop_claim_in_the_module_docstring_credits_the_within_call_half() -> None:
+    """The loop's credit belongs to the STORE, and the module's prose kept not saying so.
+
+    This claim re-staled three times (cycle 6 on `WritebackPlan`'s summary line,
+    cycle 7 in this file, cycle 11 in the module's DECIDED section): the fix
+    landed in the code while an older sentence went on crediting ``dedupes by
+    identity`` for making the escalation an investment — and that within-call
+    dedupe is precisely the half §12.5b says *"is not enough"*, so the reader
+    got the belief that produced the duplicate this PR exists to stop.
+
+    The pin is SEMANTIC, not a sentence: every paragraph of the module docstring
+    that mentions the attribution loop must either scope the dedupe to one call
+    or name ``already_written``. Mutant: restore the pre-#11428 bullet ("written
+    back twice is ONE unit. That is what makes the escalation an investment …
+    its absence is … 'no attribution loop'") → RED here, and green everywhere
+    else in this file, because it asserts prose and nothing else.
+    """
+    import re
+
+    from tortoise import sufficiency_router
+
+    paragraphs = [
+        " ".join(block.split())
+        for block in re.split(r"\n\s*\n", sufficiency_router.__doc__ or "")
+        if "attribution loop" in block.casefold()
+    ]
+    assert paragraphs, "the module docstring no longer mentions the loop at all"
+    unscoped = [
+        p for p in paragraphs
+        if "already_written" not in p and "within one call" not in p.casefold()
+    ]
+    assert not unscoped, (
+        "the module docstring credits the loop without naming the across-call "
+        "half (the store the caller hands in):\n" + "\n".join(unscoped)
+    )
 
 
 def test_two_classes_for_one_identity_are_refused_not_settled_by_order() -> None:
@@ -1103,12 +1191,263 @@ def test_a_summary_unit_can_neither_carry_the_raw_payload_nor_supersede_it() -> 
     assert names.isdisjoint(forbidden), names & forbidden
 
 
+# ── §12.5's ATTRIBUTION LOOP, closed ACROSS calls (#5009) ────────────────
+#
+# `plan_writeback` deduped only WITHIN one call. The planner is pure and owns no
+# store, so it could not know what the cheap tier already holds — and it could
+# not be TOLD, because it took no such argument. So every escalation of the same
+# question re-minted every unit and reported `ok`, and a caller that persisted
+# honestly wrote a duplicate of a finding it had already paid for. That is
+# §12.7's published "no attribution loop" one level below the module, and it is
+# what makes §12.8 item 4's "escalation is a permanent tax rather than an
+# investment" true.
+#
+# RED-first. The 17 tests this change adds (15 of its 16) or extends (2) for the
+# across-call loop are RED on the pre-fix module; the 16th added test — the
+# within-call rename — is green on both BY DESIGN (`main` already deduped within
+# one call). Not every test in the §12.5 section it sits in is in that 17: that
+# section's four pre-existing tests are green on both (measured: 8 collected
+# items) — the `unit_key`/refusal-plan pair, the refusal-reason allow-list, and
+# the parametrised span case (5 items).
+# Measured by loading `origin/main`'s module in place of this one — 17 failed, 211
+# passed (228 total) — and the 17 break down EXACTLY as: 12 x `TypeError: unexpected keyword argument 'already_written'`,
+# 1 x `AssertionError: Regex pattern did not match` (the bare-key test asserts the
+# refusal MESSAGE, so the interpreter's own TypeError lands inside its
+# `pytest.raises`), 1 x `AttributeError: no attribute 'already_persisted'`, 2 x
+# `Failed: DID NOT RAISE ValueError` (the `SummaryUnit` class-invariant tests —
+# `main` has no class check to drop), and 1 x `AssertionError: the module docstring
+# credits the loop without naming the across-call half` (the prose guard: `main`'s
+# docstring bullet credits the within-call dedupe for making the escalation an
+# investment). So the red-first evidence is the whole set, not a sample.
+# (`settled`'s own SEMANTICS are not proved by that run — none of these tests
+# reaches it pre-fix; they are held by the `settled = not units` revert, which
+# reddens three of them.)
+#
+# ⚠️ `already_written=first.units` below STANDS IN for a store load, which the
+# tests cannot perform (the planner is pure and owns no store). It is not a
+# pattern to copy: passing a prior plan's `units` asserts "the cheap tier holds
+# these", so a caller that planned and never WROTE would report the loop closed
+# over a unit that does not exist. The real input is the store's own rows.
+
+
+def test_a_second_escalation_of_the_same_question_writes_nothing() -> None:
+    """The defect, at the seam: the same question, escalated twice.
+
+    The caller persists `first.units`. Next time it asks the same question the
+    escalation verifies the same finding again — and the pre-fix planner had no
+    way to be told what the cheap tier holds, so it minted the unit a SECOND time
+    and called that ok, handing the caller a duplicate it had already paid for.
+    """
+    first = plan_writeback([_finding()])
+    assert len(first.units) == 1
+    # (The store load, stood in for — see the block note above.)
+    again = plan_writeback([_finding()], already_written=first.units)
+    assert again.units == (), "the second escalation re-minted a stored unit"
+
+
+def test_a_repeat_escalation_writes_nothing_and_the_loop_closed() -> None:
+    """With the store's units supplied, the repeat is FREE — and `ok`."""
+    first = plan_writeback([_finding()])
+    (stored,) = first.units
+    again = plan_writeback([_finding()], already_written=[stored])
+    assert again.units == ()                       # nothing to write
+    assert again.already_persisted == (stored,)    # reported, not silently eaten
+    assert again.refusals == ()
+    assert again.ok is True
+    assert again.settled is True
+
+
+def test_a_stored_class_cannot_be_overwritten_by_a_re_escalation() -> None:
+    """The stored class is the RECORD: a disagreeing re-finding is refused.
+
+    Same span + same claim, a different class — that is §12.4's incorrect
+    promotion arriving through the loop as an overwrite. Neither the stored unit
+    may be replaced nor a second class minted for one identity.
+    """
+    stored = plan_writeback([_finding(claim_class="episodic")]).units[0]
+    plan = plan_writeback(
+        [_finding(claim_class="semantic")], already_written=[stored])
+    assert plan.units == ()
+    assert plan.already_persisted == ()
+    assert [r.reason for r in plan.refusals] == [REFUSAL_CLASS_CONFLICT]
+    assert plan.ok is False
+    assert plan.settled is False
+
+
+def test_one_stored_unit_does_not_suppress_a_DIFFERENT_finding() -> None:
+    """The dedupe is per IDENTITY, not per batch."""
+    stored = plan_writeback([_finding()]).units[0]
+    plan = plan_writeback(
+        [_finding(), _finding(claim="acme corp renewed in April")],
+        already_written=[stored],
+    )
+    assert plan.already_persisted == (stored,)
+    assert [u.claim for u in plan.units] == ["acme corp renewed in April"]
+    assert plan.ok is True
+    # Something is still LEFT to write, so the loop has not settled.
+    assert plan.settled is False
+
+
+def test_a_repeat_occurrence_is_reported_once() -> None:
+    """Two copies of a finding the tier holds is ONE line of accounting."""
+    stored = plan_writeback([_finding()]).units[0]
+    plan = plan_writeback([_finding(), _finding()], already_written=[stored])
+    assert plan.units == ()
+    assert plan.already_persisted == (stored,)
+
+
+def test_a_stored_class_conflict_beats_the_within_batch_dedupe() -> None:
+    """Persisted `episodic` + a batch asserting BOTH classes: refuse the key.
+
+    Order-independent, and the stored unit must NOT be reported as settled —
+    calling a contradicted key "nothing to write" would hide the disagreement.
+    """
+    stored = plan_writeback([_finding(claim_class="episodic")]).units[0]
+    episodic = _finding(claim_class="episodic")
+    semantic = _finding(claim_class="semantic")
+    for batch in ([episodic, semantic], [semantic, episodic]):
+        plan = plan_writeback(batch, already_written=[stored])
+        assert plan.units == ()
+        assert plan.already_persisted == ()
+        assert [r.reason for r in plan.refusals] == [REFUSAL_CLASS_CONFLICT]
+        assert plan.ok is False
+
+
+def test_a_bare_key_cannot_silently_disable_the_dedupe() -> None:
+    """`already_written` takes UNITS, and refuses anything else LOUDLY.
+
+    A store that holds only keys was the tempting input, and accepting one would
+    have disabled the class-conflict guard without saying so — a guard defeated
+    by its own input, which is the fail-open direction.
+    """
+    stored = plan_writeback([_finding()]).units[0]
+    for bogus in (stored.unit_key, {"unit_key": stored.unit_key}, None):
+        # The MESSAGE is asserted, not just the type: on the pre-fix module this
+        # raised `unexpected keyword argument`, so a bare `pytest.raises(TypeError)`
+        # was green there for the wrong reason — a test that cannot tell the
+        # guard from the guard's absence.
+        with pytest.raises(TypeError, match="cannot carry"):
+            plan_writeback([_finding()], already_written=[bogus])  # type: ignore[list-item]
+
+
+def test_a_minted_unit_is_never_also_reported_as_persisted() -> None:
+    """The two collections answer OPPOSITE questions about one unit.
+
+    ``units`` means "write this now"; ``already_persisted`` means "the cheap tier
+    holds this, write nothing". A unit in both tells the caller to write and not
+    to write — and dropping the ``key in persisted`` half of the branch made an
+    in-batch duplicate report both, with every test still green. This is the
+    falsifier for that: the collections are key-disjoint, always.
+    """
+    stored = plan_writeback([_finding()]).units[0]
+    plans = (
+        plan_writeback([_finding(), _finding()]),                       # in-batch only
+        plan_writeback([_finding(), _finding()], already_written=[stored]),
+        plan_writeback([_finding(), _finding(claim="acme corp renewed in April")],
+                       already_written=[stored]),
+    )
+    for plan in plans:
+        written = {u.unit_key for u in plan.units}
+        held = {u.unit_key for u in plan.already_persisted}
+        assert written.isdisjoint(held), (written, held)
+
+
+def test_a_store_that_contradicts_itself_is_refused_not_decided_by_row_order() -> None:
+    """One identity under two classes in the STORE: there is no honest plan.
+
+    ``setdefault`` would keep whichever row arrived first, so the verdict would
+    depend on the caller's row ORDER — and one order reported ``ok``/``settled``
+    for a key the store contradicts (measured with the guard REMOVED — plain
+    ``setdefault``, this ``ValueError`` disabled — on THIS test's ``semantic``
+    batch: ``[semantic, episodic]`` settled, ``[episodic, semantic]`` refused; the
+    winner is whichever row arrives FIRST, so an ``episodic`` batch reverses
+    that). The store is the record; the caller repairs it and re-plans. Both
+    orders must fail, identically.
+    """
+    episodic = plan_writeback([_finding(claim="acme corp signed",
+                                       claim_class="episodic")]).units[0]
+    semantic = plan_writeback([_finding(claim="acme corp signed",
+                                       claim_class="semantic")]).units[0]
+    assert episodic.unit_key == semantic.unit_key
+    for store in ([episodic, semantic], [semantic, episodic]):
+        with pytest.raises(ValueError, match="contradicts itself"):
+            plan_writeback([_finding(claim="acme corp signed")],
+                           already_written=store)
+
+
+def test_a_contradictory_store_is_refused_even_when_the_batch_never_touches_it() -> None:
+    """EVERY unit handed in is graded — not only the keys this batch happens to hit.
+
+    The sibling test above passes a batch containing the contradicted identity, so
+    it is satisfied by BOTH an eager pre-pass and a lazy grade-at-lookup. Only this
+    one distinguishes them: a store that contradicts itself on an identity the
+    batch never references must still abort. Without it the natural optimisation
+    (grade at lookup) stays green while silently narrowing the guard back to the
+    batch — the documented-but-unpinned class this file keeps having to close.
+    """
+    elsewhere = SourceSpan(source_id="source:raw-9", turn=9, start=0, end=10)
+    episodic = plan_writeback([_finding(claim="a finding the batch never asks about",
+                                       span=elsewhere,
+                                       claim_class="episodic")]).units[0]
+    semantic = plan_writeback([_finding(claim="a finding the batch never asks about",
+                                       span=elsewhere,
+                                       claim_class="semantic")]).units[0]
+    assert episodic.unit_key == semantic.unit_key
+    with pytest.raises(ValueError, match="contradicts itself"):
+        # The batch's own finding is untouched by the contradiction.
+        plan_writeback([_finding()], already_written=[episodic, semantic])
+
+
+def test_an_empty_plan_is_neither_ok_nor_settled() -> None:
+    """Nothing accounted for is not a closed loop."""
+    plan = plan_writeback([])
+    assert plan.units == () and plan.already_persisted == ()
+    assert plan.ok is False
+    assert plan.settled is False
+
+
+def test_a_refused_plan_is_never_settled_even_when_the_tier_holds_a_unit() -> None:
+    """`settled` is not "no units": a refusal must keep the plan open."""
+    stored = plan_writeback([_finding()]).units[0]
+    plan = plan_writeback(
+        [_finding(), _finding(claim="a belief with no proof", verified=False)],
+        already_written=[stored],
+    )
+    assert plan.already_persisted == (stored,)
+    assert [r.reason for r in plan.refusals] == [REFUSAL_UNVERIFIED]
+    assert plan.ok is False
+    assert plan.settled is False
+
+
+def test_the_reported_unit_is_the_STORED_one_verbatim() -> None:
+    """Nothing is re-derived: a caller logging what it did not re-write gets the
+    store's own unit, not a re-mint that happens to share an identity."""
+    stored = plan_writeback([_finding()]).units[0]
+    plan = plan_writeback([_finding(claim="ACME Corp   signed the contract in March")],
+                          already_written=[stored])
+    assert plan.already_persisted == (stored,)
+    assert plan.already_persisted[0].claim == "acme corp signed the contract in March"
+
+
 def test_planning_a_write_back_mutates_nothing_it_was_given() -> None:
     """The write-back is a PLAN over verified findings; the findings are untouched."""
     findings = (_finding(), _finding(claim="", verified=True), _finding(verified=False))
     before = tuple(dataclasses.astuple(f) for f in findings)
     plan_writeback(list(findings), promote_to=None)
     assert tuple(dataclasses.astuple(f) for f in findings) == before
+    # ... and the store's units are equally a READ-ONLY input. The list is the
+    # MUTABLE object a caller actually passes (`SummaryUnit` is frozen, so
+    # asserting on its contents alone could never fail — a vacuous guard), and it
+    # is handed over in a deliberate, non-sorted ORDER so an in-place sort (the
+    # realistic mutation) reddens it.
+    stored = plan_writeback(
+        [_finding(), _finding(claim="acme corp renewed in April")]).units
+    # Descending by identity, so ANY in-place sort is a change.
+    store = sorted(stored, key=lambda u: u.unit_key, reverse=True)
+    assert store != sorted(store, key=lambda u: u.unit_key)
+    handed_over = list(store)
+    plan_writeback(list(findings), promote_to=None, already_written=store)
+    assert store == handed_over
 
 
 @pytest.mark.parametrize("kwargs", [
@@ -1121,6 +1460,35 @@ def test_planning_a_write_back_mutates_nothing_it_was_given() -> None:
 def test_an_unaddressable_span_is_refused(kwargs: dict) -> None:
     with pytest.raises(ValueError):
         SourceSpan(**kwargs)
+
+
+def test_a_summary_unit_without_a_claim_class_is_refused_not_built() -> None:
+    """The CLASS is load-bearing since the loop landed, and it was unvalidated.
+
+    ``SummaryUnit.__post_init__`` checked the span, the claim, ``derived`` and the
+    ``unit_key`` — not the class. Two consequences, with their provenance kept
+    APART because they are not the same mutant. Dropping ONLY this check: an
+    unhashable class (a JSON row's ``list``) makes the store-contradiction refusal
+    escape as ``TypeError: unhashable type`` raised while building the message's
+    SET LITERAL — not ``sorted``, which sorts by ``repr`` precisely so a class
+    that is merely unorderable cannot do this — while a ``None`` class still
+    reaches the intended ``ValueError``. ALSO stripping that ``key=repr``: the
+    ``None`` class then raises ``TypeError: '<' not supported …`` from ``sorted``.
+    In both escapes the traceback blamed Python instead of the store, the
+    caller's documented ``except ValueError`` recovery could miss it, and
+    ``plan_writeback`` would happily MINT a unit whose class is ``None``. Fail
+    closed at the type, next to the other invariants.
+    """
+    span = _span()
+    with pytest.raises(ValueError, match="claim class"):
+        SummaryUnit(unit_key=unit_key(span, "a claim"), claim="a claim",
+                    claim_class=None, span=span)  # type: ignore[arg-type]
+    with pytest.raises(ValueError, match="claim class"):
+        SummaryUnit(unit_key=unit_key(span, "a claim"), claim="a claim",
+                    claim_class="  ", span=span)
+    # ... and the planner cannot mint one either.
+    with pytest.raises(ValueError, match="claim class"):
+        plan_writeback([_finding(claim_class=None)])
 
 
 def test_a_summary_unit_cannot_be_constructed_without_its_invariants() -> None:
@@ -1153,6 +1521,13 @@ def test_a_summary_unit_cannot_be_constructed_without_its_invariants() -> None:
         SummaryUnit(**{**good, "claim": "   "})
     with pytest.raises(ValueError):
         SummaryUnit(**{**good, "claim": 7})  # type: ignore[arg-type]
+    # The CLASS (added with the across-call attribution loop): without these two
+    # cases this test's own MUTATION PROOF bullet was false — dropping the class
+    # check left it green, so the guard was pinned only by its dedicated test.
+    with pytest.raises(ValueError):
+        SummaryUnit(**{**good, "claim_class": None})  # type: ignore[arg-type]
+    with pytest.raises(ValueError):
+        SummaryUnit(**{**good, "claim_class": "  "})
 
 
 def test_a_unit_key_requires_an_address() -> None:

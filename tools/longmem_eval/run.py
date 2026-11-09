@@ -5,7 +5,10 @@
 Pipeline per question (fresh isolated graph per question — the benchmark's
 independent-memory protocol, no cross-question contamination):
     ingest haystack sessions → hybrid retrieval (graph + raw sessions) →
-    reader LLM answers from context → official answer-check judge scores.
+    reader LLM answers from context → the run's pinned judge scores it. The
+    RUBRIC is the official `evaluate_qa.py` anscheck one; the GRADER is
+    `judge.DEFAULT_JUDGE_MODEL` (#8486 owner ruling, 2026-10-27), and the
+    official GPT-4o grader only when `judge.OFFICIAL_JUDGE_MODEL` is named.
 
 Resilience (per-question error isolation): each question is wrapped in its
 own try/except — a transient LLM error is retried with exponential backoff
@@ -92,7 +95,11 @@ from tortoise.projection import (
 # measurement gate's raw reader_refusal marker uses EXACTLY the vocabulary
 # the tortoise reader abstains with (never the _abs question-id marker).
 from tortoise.reader import _looks_abstained as _reader_abstained
-from tortoise.sdk import TortoiseSDK
+
+# C2 (#2518 indicator 2): the ONE resolver for the dense half's switch — the
+# read path calls the same function, so the fingerprint cannot record an arm
+# different from the one the retrieval ran.
+from tortoise.sdk import TortoiseSDK, _entity_key_dense_enabled
 
 # #8488: the lexical-arm DECLINE key. Imported from its ONE home (the module
 # that writes it) rather than re-spelled here — the whole point of the key is
@@ -1575,6 +1582,20 @@ def _model_id(model: Any) -> str | None:
     return _adapter_fingerprint(model)
 
 
+def _resolved_dense_arm(entity_key_expansion: bool | None) -> bool | None:
+    """The C2 dense half's fingerprint value (#2518 indicator 2).
+
+    ``True`` only when the arm could actually have FIRED — i.e. the dense
+    switch is armed AND the sparse lever it is a parity of is on. Stamping an
+    armed-but-inert env var recorded an arm the retrieval did not run and
+    refused an equivalent resume over it (``CheckpointStaleError``; review
+    finding, PR #11459). ``None`` otherwise, so a disarmed run's fingerprint
+    stays byte-identical to a pre-feature checkpoint's.
+    """
+    return (True if (entity_key_expansion and _entity_key_dense_enabled())
+            else None)
+
+
 def _build_fingerprint(*, reader_model: str, judge_model: str,
                        ks: tuple[int, ...], top_k: int, split: str,
                        ingest_mode: str, extractor_model: Any,
@@ -1594,6 +1615,16 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
                        # C2 knob (a boosted/expanded checkpoint resumed
                        # without the arm is refused by the fingerprint gate).
                        entity_key_expansion: bool | None = None,
+                       # C2 (#2518 indicator 2): the DENSE half's arm, resolved
+                       # from ``TORTOISE_ENTITY_KEY_DENSE``. CONDITIONAL presence
+                       # like the sibling C2 knobs: absent (``None``) while the
+                       # half is disarmed, so an existing checkpoint's
+                       # fingerprint stays byte-identical; an ARMED run stamps
+                       # ``True``, so a dense-armed checkpoint can never be
+                       # resumed by a dense-disarmed run (whose per-question
+                       # retrieval would silently be the sparse-only arm — the
+                       # A/B arm-blending class the fingerprint gate exists for).
+                       entity_key_dense: bool | None = None,
                        # C6 (#2520, #2513): the time-aware query expansion
                        # arm — conditional presence like the sibling C-arm
                        # knobs (an armed checkpoint resumed without the arm
@@ -1764,6 +1795,22 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
     from .retrieve import resolve_temporal_leg_placement as _resolve_tl_place
     _tl_placement_env = _resolve_tl_place(
         None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
+    #: #10538 non-eviction guard — resolved from the SAME resolver/env the
+    #: shipped call resolves, so the fingerprint certifies the rule that ran.
+    #: CONDITIONAL presence: only stamped when it resolves OFF, because ON is
+    #: the default and every existing arm-ON checkpoint must still resume
+    #: byte-identically (the ``temporal_leg_placement`` precedent below, which
+    #: uses the same "absent at the default" shape). A guard-OFF checkpoint
+    #: must never resume under the guard ON: the promotion sets differ, so the
+    #: fused orders differ.
+    from .retrieve import (
+        DEFAULT_TEMPORAL_LEG_NON_EVICTION as _TL_NON_EVICTION_DEFAULT,
+    )
+    from .retrieve import (
+        resolve_temporal_leg_non_eviction as _resolve_tl_non_eviction,
+    )
+    _tl_non_eviction_env = _resolve_tl_non_eviction(
+        None, os.environ.get("TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION"))
     # #2976: the TR session-admission / completion arms are env-only from the
     # harness (the sibling #2976 temporal-leg precedent), so the fingerprint
     # reads the env. CONDITIONAL presence: OFF leaves both keys ABSENT, so the
@@ -1840,6 +1887,12 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
             ("evidence_boost_verbatim", evidence_boost_verbatim),
             ("evidence_boost_source", evidence_boost_source),
             ("entity_key_expansion", entity_key_expansion),
+            # C2 (#2518 indicator 2): the DENSE half's arm. Conditional presence
+            # (``None`` unless it is actually armed) so a dense-off run keeps
+            # the byte-identical fingerprint its checkpoints already carry, and
+            # a dense-armed run cannot be resumed as (or blended into) the
+            # measured sparse-only arm.
+            ("entity_key_dense", entity_key_dense),
             ("time_aware_qe", time_aware_qe),
             ("coverage_loop", coverage_loop),
             # #2513 (#10629 review): the guard's cap — conditional presence
@@ -1913,6 +1966,18 @@ def _build_fingerprint(*, reader_model: str, judge_model: str,
              _tl_placement_env
              if (_temporal_leg_on
                  and _tl_placement_env != _TL_PLACEMENT_DEFAULT) else None),
+            # #10538: the NON-EVICTION guard — stamped for the same reason as
+            # the placement above: it changes WHICH picks are promoted (the
+            # guard drops the ones that would evict a session), so a
+            # guard-OFF checkpoint and a guard-ON checkpoint are different
+            # arms and must not be resumed into one another. CONDITIONAL
+            # presence: absent at the default (ON), so every existing arm-ON
+            # checkpoint keeps resuming byte-identically.
+            ("temporal_leg_non_eviction",
+             _tl_non_eviction_env
+             if (_temporal_leg_on
+                 and _tl_non_eviction_env != _TL_NON_EVICTION_DEFAULT)
+             else None),
             # #2976: the TR session-admission arm — conditional presence ONLY
             # when it resolves ON (the default fingerprint stays
             # byte-identical), and the FOUR completion budgets are stamped with
@@ -4056,6 +4121,39 @@ def _hard_gate_red(outcome: dict) -> list[str]:
     return [r for r in _gate_red(outcome) if r in HARD_GATE_REASONS]
 
 
+def _breaker_dropped_outcome(
+    question: dict, qid: str, ks: tuple[int, ...],
+) -> dict[str, Any]:
+    """#1349: the outcome recorded when the vector-arm breaker DROPS a
+    question — a drop, never a failure, and never recall 0 in the means.
+
+    #2516 (C1): the two recall rows do NOT share a drop convention, because
+    they do not share an empty-gold-set convention in band. The official
+    ``session_recall@k`` dict is 0.0 for a gold-less question
+    (``retrieve.py::_recall_metrics``), so a drop mirrors that with 0.0. The
+    gold-cutoff VARIANT is ``None`` there — in band and in
+    ``w7_publish`` — because an empty denominator is NOT ELIGIBLE rather than
+    a fabricated perfect score, and absence becomes ``n_excluded``. Mirroring
+    the VARIANT's in-band ``None`` here is what keeps ``n_gold`` a property of
+    the DATA: hard-coding 0.0 counted a gold-less question as a 0.0 miss on a
+    dropped question and as unmeasured on a graded one, so the variant's
+    denominator moved with whether a breaker happened to open.
+    """
+    return {
+        "question_id": qid,
+        "question_type": question.get("question_type", ""),
+        "breaker_open": True,
+        "dropped_reason": "breaker_open",
+        "label": None,
+        "hypothesis": None,
+        "session_recall@k": {str(k): 0.0 for k in ks},
+        "session_recall@n_gold": (
+            0.0 if (question.get("answer_session_ids") or []) else None),
+        "turn_recall@k": {str(k): 0.0 for k in ks},
+        "ndcg@10": None, "p@10": None, "p@5": None,
+    }
+
+
 def _activate_beliefs_for_question(
     sdk, *, namespace: str | None, qid: str,
 ) -> dict[str, Any]:
@@ -4560,6 +4658,20 @@ def run_evaluation(
         # fingerprint — an expanded checkpoint resumed without the arm is
         # refused by the fingerprint gate (A/B arm isolation).
         entity_key_expansion=bool(entity_key_expansion),
+        # C2 (#2518 indicator 2): the RESOLVED dense-half arm. Conditional by
+        # construction — ``_resolved_dense_arm`` is the ONE resolver, and it asks
+        # the same ``_entity_key_dense_enabled()`` the read path asks, so the
+        # checkpoint fingerprint cannot record an arm the gate could not have
+        # run. Reported as ``None`` while disarmed so a pre-feature checkpoint's
+        # fingerprint is unchanged. The REPORT's methodology block carries the
+        # same value under its own key (``entity_key_dense`` in ``r1_knobs``).
+        # BOTH levers must be on: the dense half is a PARITY of the sparse one,
+        # so with ``entity_key_expansion`` off the read path provably cannot run
+        # it (the gate short-circuits) and stamping it would record an arm the
+        # retrieval did not run — and refuse an equivalent resume
+        # (``CheckpointStaleError``) over an inert env var (review finding,
+        # PR #11459). Only an arm that could have fired is fingerprinted.
+        entity_key_dense=_resolved_dense_arm(entity_key_expansion),
         # #8486: the resolved belief-layer arm — an armed checkpoint can never
         # be resumed without it (the resumed outcomes would carry no activation
         # manifest and the run would be EP-inert for exactly those questions).
@@ -5295,6 +5407,13 @@ def run_evaluation(
                         "s4_out_tokens": (ingest_stats.get("recovery") or {}).get("s4_out_tokens", 0),
                         "s4_merge": ingest_stats.get("s4_merge", {}),
                         "session_recall@k": ret["session_recall@k"],
+                        # #2516 (C1): the labelled `recall_all@N_gold` cutoff
+                        # variant's per-question fraction (retrieve.py computes
+                        # it on the SAME ranking `session_recall@k` is measured
+                        # on). Absent on a retriever arm that does not emit it →
+                        # the publication layer counts it n_missing, never 0.0.
+                        "session_recall@n_gold": ret.get(
+                            "session_recall@n_gold"),
                         "turn_recall@k": ret["turn_recall@k"],
                         "evidence_recall@k": ret.get("evidence_recall@k"),
                         # R1 (#1540): the M6 raw-chunk containment view, wired
@@ -5544,17 +5663,8 @@ def run_evaluation(
                     # means (count surfaced in report["dropped"]). Never
                     # recall 0.
                     with _lock:
-                        dropped_outcome = {
-                            "question_id": qid,
-                            "question_type": question.get("question_type", ""),
-                            "breaker_open": True,
-                            "dropped_reason": "breaker_open",
-                            "label": None,
-                            "hypothesis": None,
-                            "session_recall@k": {str(k): 0.0 for k in ks},
-                            "turn_recall@k": {str(k): 0.0 for k in ks},
-                            "ndcg@10": None, "p@10": None, "p@5": None,
-                        }
+                        dropped_outcome = _breaker_dropped_outcome(
+                            question, qid, ks)
                         outcomes.append(dropped_outcome)
                         done[qid] = dropped_outcome
                         # #2185: breaker-open spend is OVERHEAD (Am 20/24) —
@@ -5905,6 +6015,20 @@ def run_evaluation(
             # arm — recorded verbatim in the methodology (published numbers
             # carry which A/B arm produced them).
             "entity_key_expansion": bool(entity_key_expansion),
+            # C2 (#2518 indicator 2): the DENSE half's arm. Its own key, and
+            # not folded into the line above, because the two halves are
+            # separable in an A/B: without this the published methodology block
+            # of a dense-armed run is BYTE-IDENTICAL to the measured
+            # sparse-only arm's, and an adoption decision reads the delta as
+            # belonging to an arm whose dense lever was off (review round 2,
+            # PR #11459). ``None`` when it could not have fired — stated
+            # explicitly rather than omitted, so the methodology always answers
+            # "which dense arm" while the FINGERPRINT omits the key entirely
+            # (its conditional-presence convention keeps a disarmed
+            # checkpoint's fingerprint byte-identical). The two are not
+            # symmetric on purpose: a report must be unambiguous, a fingerprint
+            # must not drift.
+            "entity_key_dense": _resolved_dense_arm(entity_key_expansion),
             # C6 (#2520, #2513): the time-aware query expansion arm —
             # recorded verbatim in the methodology (published numbers carry
             # which A/B arm produced them).
@@ -6145,7 +6269,26 @@ def outcomes_to_report(
         "outcomes": [
             {k: o.get(k) for k in (
                 "question_id", "question_type", "question_date", "label",
-                "hypothesis", "session_recall@k", "turn_recall@k",
+                "hypothesis", "session_recall@k",
+                # #2516 (C1) — the labelled ``recall_all@N_gold`` variant's
+                # per-question fraction MUST ride this projection: it is the
+                # ONLY path a real run's outcome takes into the published
+                # report (``build_report`` spreads this projected list over
+                # its raw one under ``extra["outcomes"]``, and
+                # ``w7_publish --report`` reads THAT list), so a variant key
+                # missing here is stripped from every receipt forever while
+                # the aggregate still looks right — ``GOLD_CUTOFF_ROW`` reads
+                # ``value: None, n: 0, n_excluded: <all non-_abs>`` on a real
+                # run and nothing goes red (the #10137 failure mode the
+                # ``belief_activation`` entry below already records: a
+                # published aggregate DROPPED the per-question cells it was
+                # counted from).
+                # Unconditional, like ``evidence_recall@k``/``breaker_open``
+                # beside it: the value is legitimately ``None`` for a question
+                # with no gold session, and ``w7_publish`` counts a null as
+                # ``n_excluded`` — never a fabricated 0.0.
+                "session_recall@n_gold",
+                "turn_recall@k",
                 "evidence_recall@k",
                 "chunk_evidence_recall@k",  # R1 #1540 D5: containment view
                 "n_ingest_errors", "ingest_error_text",
@@ -6617,7 +6760,9 @@ def _build_parser() -> argparse.ArgumentParser:
         prog="python -m tools.longmem_eval.run",
         description="LongMemEval-S external comparability runner (issue #1144, "
                     "axis 2): ingest haystacks → hybrid retrieval → reader LLM "
-                    "→ official GPT-4o judge, with full methodology provenance.")
+                    "→ judge, with full methodology provenance. The judge "
+                    "defaults to our own pinned model (#8486 ruling); name "
+                    "the OFFICIAL GPT-4o judge for a comparable number.")
     p.add_argument("--split", default=ds.DEFAULT_SPLIT,
                    choices=sorted(ds.SPLIT_FILES), help="dataset split (default s)")
     p.add_argument("--limit", type=int, default=None,
@@ -7094,12 +7239,18 @@ def _build_parser() -> argparse.ArgumentParser:
     p.add_argument("--reader-model", default=None,
                    help="reader model spec <provider>:<model> "
                         "(env TORTOISE_LME_READER_MODEL; default "
-                        "openrouter:deepseek/deepseek-v4-flash — the M5 "
-                        "pinned reader, #1525; an override records "
-                        "reader_pinned=false + warns on stderr)")
+                        "deepseek:deepseek-v4-flash — the M5 pinned "
+                        "reader, #1525, on the transport the #8486 "
+                        "ruling names; an override records reader_pinned=false + "
+                        "warns on stderr)")
     p.add_argument("--judge-model", default=None,
                    help="judge model spec (env TORTOISE_LME_JUDGE_MODEL; "
-                        "default openai:gpt-4o-2024-08-06 — the official judge)")
+                        "default deepseek:deepseek-v4-flash — the #8486 "
+                        "owner ruling of 2026-10-27 (internal baseline "
+                        "series; the receipt records unpinned:<model> + "
+                        "verdict inconclusive). The OFFICIAL judge "
+                        "openai:gpt-4o-2024-08-06 is still servable by "
+                        "naming it)")
     p.add_argument("--output", default=None,
                    help="report JSON path (default "
                         "longmemeval_<split>_<ts>.report.json in CWD)")
@@ -7278,8 +7429,9 @@ def _run_spot_check(args, instances: list[dict], *, ks, top_k, db_uri) -> dict:
         # compute_embedding (ingest-time interception) AND sets the
         # _ACTIVE_CACHE global that encode_query reads (query-encode
         # persistence across questions/processes). Without .active() the
-        # cache is dead code — every question re-encodes the overlapping
-        # haystack (the 5-10x redundancy the cache exists to eliminate).
+        # cache is dead code — every question re-encodes the haystack text
+        # whose vectors a previous question already produced (measured 1.299x
+        # / 23.0% of encode units in one pass — #1779 haystack_overlap).
         with cache.active():
             outcomes, _report = run_evaluation(
                 instances, reader=None, judge=None, ks=ks, top_k=top_k,

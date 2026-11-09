@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import os
 import re
+import sys
 import tempfile
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
@@ -767,9 +768,9 @@ def test_a_legacy_team_namespace_graph_is_promotable_and_followed(monkeypatch):
 
     # …and the lanes actually built from it open THAT graph, not graph 0.
     _fake_org_row(monkeypatch, legacy_ns)
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
-    assert opened == [{"graph_name": legacy_ns}], (
+    assert _gate_builds(calls) == [{"graph_name": legacy_ns}], (
         "an org-wide lane must open the promoted legacy graph")
 
 
@@ -891,8 +892,49 @@ def test_the_sql_guard_accepts_exactly_what_the_gate_follows():
 # runners would keep reading and writing the DEMOTED graph while filing record
 # rows under the promoted one.
 
+# ⛔ `ha._make_sdk` IS A PROCESS GLOBAL, SO `opened` IS NOT SCOPED TO THE CODE
+# UNDER TEST. Anything in this process that opens an SDK lands in it, including
+# the health probe: `_probe_sdk()` opens `_make_sdk(namespace=None)` (and
+# `_data_plane_db()`, the DR sweep's handle, opens the same shape). On shard (h)
+# 2026-11-06 a probe landed inside a quota-gate window and
+# `test_the_quota_gate_counts_the_promoted_graph` reported
+# `[{'namespace': None}]` — BYTE-IDENTICAL to the value an eagerly-built gate
+# would produce — so the test accused the gate of a build that never came from
+# it (#11029). `namespace=None` has exactly two producers in `hosted_api.py`
+# and neither is the quota gate (the gate's own builds are
+# `_make_sdk(graph_name=…)` / `_make_sdk(namespace=org_id)`), which is why
+# attribution can be exact rather than a heuristic.
+#
+# So the capture RECORDS ITS CALLER alongside each build, and the assertions
+# that care about the gate filter the non-gate callers out. A negative list on
+# purpose: a NEW non-gate builder reds the test (a false red someone fixes)
+# rather than being silently ignored (a false PASS, which is the failure mode a
+# money gate must never have).
+#
+# ⛔ AND THE RECORD IS ONE OPERATION — `(caller, kwargs)` in a SINGLE append.
+# Two parallel lists (`callers` + `opened`) is the same defect one level down:
+# `_make_sdk` is a process global called from ANOTHER THREAD, so a probe's build
+# landing between the two appends desynchronises the pair for the rest of the
+# window, and `zip(strict=True)` then pairs the gate's kwargs with `_probe_sdk`
+# — filtering the gate's REAL build out and redding a gate that behaved
+# correctly. A tuple cannot be split, whatever the scheduler does.
+_GATE_WINDOW_NON_GATE_BUILDERS = frozenset({"_probe_sdk", "_data_plane_db"})
+
+
 def _capture_make_sdk(monkeypatch):
-    opened: list[dict] = []
+    """Record every `_make_sdk` build as ONE list of `(caller_name, kwargs)`.
+
+    ⛔ There is deliberately NO unattributed mode. An earlier revision kept a
+    `with_callers=False` default "so the other call sites are untouched", but
+    every call site wants attribution and a default is exactly how the next test
+    gets the old single-list-of-kwargs return back — the unattributed shape that
+    produced the shard-(h) false red this file exists to prevent. One return
+    shape, one record per build.
+
+    The pair is appended in a SINGLE operation, not as two parallel lists: the
+    caller and its payload must be recorded together (see the note above).
+    """
+    calls: list[tuple[str, dict]] = []
 
     class _Sdk:
         def _get_proj(self):  # pragma: no cover - shape only
@@ -901,9 +943,25 @@ def _capture_make_sdk(monkeypatch):
         def _bind_record_tenant(self, *a, **k):
             return None
 
-    monkeypatch.setattr(
-        ha, "_make_sdk", lambda **kw: (opened.append(kw), _Sdk())[1])
-    return opened
+    def _capture(**kw):
+        # ONE record, one append: this pair cannot be interleaved.
+        calls.append((sys._getframe(1).f_code.co_name, kw))
+        return _Sdk()
+
+    monkeypatch.setattr(ha, "_make_sdk", _capture)
+    return calls
+
+
+def _gate_builds(calls: list[tuple[str, dict]]) -> list[dict]:
+    """The `_make_sdk` builds attributable to the QUOTA GATE.
+
+    Everything the gate can build goes through `_gate_sdk_for` /
+    `_org_sdk_for_credential` / `_check_org_limit`; the excluded callers are
+    the process's own unrelated builders, named above. Each record carries its
+    own caller, so there is no positional invariant to break.
+    """
+    return [kw for caller, kw in calls
+            if caller not in _GATE_WINDOW_NON_GATE_BUILDERS]
 
 
 def _fake_org_row(monkeypatch, graph_name: str):
@@ -924,9 +982,9 @@ def test_org_sdk_is_byte_identical_for_an_unpromoted_org(monkeypatch):
     `sdk._namespace` None and change the fallback-snapshot identity key."""
     _hosted(monkeypatch)
     _fake_org_row(monkeypatch, f"org_{TEAM}")
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
-    assert opened == [{"namespace": TEAM}]
+    assert _gate_builds(calls) == [{"namespace": TEAM}]
 
 
 def test_org_sdk_follows_a_promoted_default(monkeypatch):
@@ -936,9 +994,9 @@ def test_org_sdk_follows_a_promoted_default(monkeypatch):
     new one, and the points cap counts the wrong graph (money gate)."""
     _hosted(monkeypatch)
     _fake_org_row(monkeypatch, f"org_{TEAM}_{NEW_ID}")
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
-    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+    assert _gate_builds(calls) == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
 
 
 def test_org_sdk_takes_the_namespace_it_is_given_without_a_read(monkeypatch):
@@ -946,14 +1004,14 @@ def test_org_sdk_takes_the_namespace_it_is_given_without_a_read(monkeypatch):
     (the authenticated org dict carries `graph_name`) — and it goes through the
     SAME gate, so it cannot bypass it."""
     _hosted(monkeypatch)
-    opened = _capture_make_sdk(monkeypatch)
+    records = _capture_make_sdk(monkeypatch)
     calls: list[str] = []
     monkeypatch.setattr(ha, "_org_default_namespace",
                         lambda oid: calls.append(oid) or "SHOULD-NOT-BE-USED")
     ha._org_sdk(TEAM, namespace=f"org_{TEAM}")
     ha._org_sdk(TEAM, namespace=f"org_{TEAM}_{NEW_ID}")
-    assert opened == [{"namespace": TEAM},
-                      {"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+    assert _gate_builds(records) == [{"namespace": TEAM},
+                                     {"graph_name": f"org_{TEAM}_{NEW_ID}"}]
     assert calls == [], "the given namespace must not cost a control-plane read"
 
 
@@ -970,9 +1028,9 @@ def test_org_sdk_falls_back_to_the_historical_open_when_the_read_fails(monkeypat
     monkeypatch.setattr(ha, "get_control_plane", lambda: _Broken(), raising=False)
     monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                         lambda: _Broken())
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     ha._org_sdk(TEAM)
-    assert opened == [{"namespace": TEAM}]
+    assert _gate_builds(calls) == [{"namespace": TEAM}]
 
 
 def _credential(**over) -> dict:
@@ -1050,14 +1108,15 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
         ha, "_org_default_namespace",
         lambda oid: pytest.fail("the quota gate must not read the control plane"))
 
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     ha._check_org_limit(_credential(), "points")
-    assert opened == [], (
+    assert _gate_builds(calls) == [], (
         "the gate must not BUILD the SDK eagerly — #4051 hands the counter a "
         "factory, so a gate that never counts never constructs one")
     assert seen["sdk_factory"] is not None
     seen["sdk_factory"]()
-    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
+    assert _gate_builds(calls) == [
+        {"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
         "the points cap must count the graph the writes land in")
 
     # A control-plane-counted resource must not pay for an SDK it never touches.
@@ -1065,11 +1124,161 @@ def test_the_quota_gate_counts_the_promoted_graph(monkeypatch):
     # resolve lazy); what must not happen is a BUILD. `_gate_sdk_for` answers
     # None for a registry-scoped count, so the counter falls back to its own
     # control-plane read and no graph handle is ever constructed.
-    opened.clear()
+    calls.clear()
     ha._check_org_limit(_credential(), "api_keys")
-    assert opened == []
+    assert _gate_builds(calls) == []
     assert seen["sdk_factory"]() is None
-    assert opened == []
+    assert _gate_builds(calls) == []
+
+
+def test_the_gate_assertion_measures_the_gate_and_not_the_process(monkeypatch):
+    """The quota-gate assertion above is scoped to the GATE — prove both halves.
+
+    `ha._make_sdk` is a process global, so a build by anything else lands in the
+    same list. FAIL-ON 1: drop the caller filter and a health probe firing
+    inside the window reds `test_the_quota_gate_counts_the_promoted_graph` with
+    `[{'namespace': None}]` while the gate did nothing — measured on shard (h)
+    2026-11-06, and the reason this pin exists (#11029).
+
+    FAIL-ON 2 (the direction that matters for a money gate): widen the filter
+    so it also swallows the gate's own builds and the eager-build assertion
+    above becomes vacuous. An eager `_gate_sdk_for` must still be attributed to
+    the gate.
+    """
+    calls = _capture_make_sdk(monkeypatch)
+
+    # Half 1 — the probe's build. Same kwargs AND the same caller frame name as
+    # the real `hosted_api._probe_sdk()`, so this stands in for the production
+    # builder rather than approximating it.
+    def _probe_sdk():
+        return ha._make_sdk(namespace=None)
+
+    _probe_sdk()
+    assert calls == [("_probe_sdk", {"namespace": None})], (
+        "the stand-in must reproduce the exact build the real probe makes")
+    assert _gate_builds(calls) == [], (
+        "a probe build is NOT a gate build — the gate assertion must ignore it")
+
+    # Half 2 — the gate's own build, through the frame the gate really builds
+    # in. The filter must not hide it.
+    def _gate_sdk_for(org, resource):
+        return ha._make_sdk(graph_name=f"org_{TEAM}_{NEW_ID}")
+
+    _gate_sdk_for({}, "points")
+    assert _gate_builds(calls) == [
+        {"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
+        "an eager gate build must STILL be attributed to the gate")
+
+
+def test_the_non_gate_filter_cannot_drift_from_the_functions_it_names(monkeypatch):
+    """P2 (review, #11029): `_GATE_WINDOW_NON_GATE_BUILDERS` is a hand-maintained
+    list of FRAME NAMES, so a rename on the production side would leave the
+    filter green and bring the shard-(h) false red straight back.
+
+    ⛔ The stand-in in the two tests above defines its OWN `_probe_sdk`, which is
+    the whole hazard: it proves the FILTER works and proves nothing about
+    whether `hosted_api` still has a frame by that name. If `_probe_sdk` were
+    renamed (or folded into another builder), the capture would record the NEW
+    caller name, the filter would no longer match it, and
+    `test_the_quota_gate_counts_the_promoted_graph` would again red on a probe
+    build — accusing a money gate that built nothing. A list that names code
+    must be pinned against that code.
+
+    So this drives the REAL `hosted_api._probe_sdk()` and
+    `hosted_api._data_plane_db()` and asserts the caller names the capture
+    records ARE the names in the set (and that both are filtered out).
+    """
+    # 1. The functions the list names still exist, under those names.
+    assert ha._probe_sdk.__name__ in _GATE_WINDOW_NON_GATE_BUILDERS, (
+        "`hosted_api._probe_sdk` is no longer named `_probe_sdk`, so the filter "
+        "cannot attribute its builds — update the set AND the capture")
+    assert ha._data_plane_db.__name__ in _GATE_WINDOW_NON_GATE_BUILDERS, (
+        "`hosted_api._data_plane_db` is no longer named `_data_plane_db` — the "
+        "DR sweep's handle opens `_make_sdk(namespace=None)` too, so dropping "
+        "it from the set re-arms the probe false red")
+
+    # 2. The names the capture RECORDS are the same ones — driven for real.
+    recorded: list[tuple[str, dict]] = []
+
+    class _Handle:
+        """Just enough for `_data_plane_db` to reach `._get_proj().db`."""
+
+        db = "db"
+
+        def _get_proj(self):
+            return self
+
+        def close(self):  # pragma: no cover - shape only
+            return None
+
+    def _make(**kw):
+        recorded.append((sys._getframe(1).f_code.co_name, kw))
+        return _Handle()
+
+    monkeypatch.setattr(ha, "_make_sdk", _make)
+    ha._probe_sdk_reset()          # a cached handle would suppress the build
+    try:
+        ha._probe_sdk()
+        ha._data_plane_db()
+    finally:
+        ha._probe_sdk_reset()      # drop (and close) the stub we cached
+
+    assert {caller for caller, _ in recorded} == _GATE_WINDOW_NON_GATE_BUILDERS, (
+        "the builders the quota gate must IGNORE are named "
+        f"{sorted(_GATE_WINDOW_NON_GATE_BUILDERS)} but production builds from "
+        f"{sorted({caller for caller, _ in recorded})} — the filter and the code "
+        "it names have drifted apart, which is the `[{'namespace': None}]` false "
+        "red on the money gate (#11029)")
+    assert all(kw == {"namespace": None} for _, kw in recorded), (
+        "both non-gate builders are supposed to be `namespace=None` producers — "
+        f"if one changed shape the filter no longer removes it: {recorded!r}")
+    assert _gate_builds(recorded) == [], (
+        "neither the health probe nor the DR sweep's handle is a QUOTA GATE "
+        "build, so neither may survive the filter")
+
+
+def test_a_record_interleaved_by_a_concurrent_builder_cannot_mis_pair(
+        monkeypatch):
+    """The caller attribution must be ORDER-INDEPENDENT — #11029, one level down.
+
+    `ha._make_sdk` is a process global and the health probe runs on its own
+    thread. FAIL-ON (pre-fix): the capture appended the caller name and the
+    kwargs in TWO operations, so a probe's build could land BETWEEN them
+    (`callers += [probe]; opened += [gate_kw]` → `_probe_sdk` paired with the
+    GATE's payload) and the gate's real build would be filtered out — the exact
+    `[{'namespace': None}]` false red measured on shard (h) 2026-11-06, one
+    level down. Post-fix a record is ONE `(caller, kwargs)` tuple, so no
+    ordering can pair a payload with someone else's caller.
+
+    ⚠️ The split itself is scheduler-dependent and did NOT reproduce when this
+    pin was written (20 000 gate builds against a probe thread spinning at a
+    1 µs switch interval: 0 splits on this CPython), so pinning the race would
+    be a flaky test rather than a gate. What IS deterministic is the invariant
+    the fix establishes: attribution reads each record's OWN caller, so it is
+    independent of record order. That is asserted here, and the pre-fix shape
+    cannot satisfy it — it has no per-record caller to read at all.
+    """
+    calls = _capture_make_sdk(monkeypatch)
+
+    def _probe_sdk():
+        return ha._make_sdk(namespace=None)
+
+    def _gate_sdk_for(org, resource):
+        return ha._make_sdk(graph_name=f"org_{TEAM}_{NEW_ID}")
+
+    _gate_sdk_for({}, "points")
+    _probe_sdk()
+    assert calls == [("_gate_sdk_for", {"graph_name": f"org_{TEAM}_{NEW_ID}"}),
+                     ("_probe_sdk", {"namespace": None})], (
+        "each build must carry its OWN caller with its own payload — the "
+        "pairing is what a second append could split")
+
+    # The order an interleave would produce is IRRELEVANT to attribution.
+    calls.reverse()
+    assert _gate_builds(calls) == [
+        {"graph_name": f"org_{TEAM}_{NEW_ID}"}], (
+            "the gate's build must be attributed to the gate whatever order "
+            "the process's other builds arrived in")
 
 
 def test_a_graph_bound_credential_counts_the_graph_it_writes_to(monkeypatch):
@@ -1097,14 +1306,14 @@ def test_a_graph_bound_credential_counts_the_graph_it_writes_to(monkeypatch):
         quota, "enforce_org_limit",
         lambda limits, resource, sdk_factory=None, **kw: seen.update(
             {"sdk_factory": sdk_factory}))
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     credential = _credential(graph_id=NEW_ID,
                              graph_namespace=f"org_{TEAM}_{NEW_ID}")
     ha._check_org_limit(credential, "points")
-    assert opened == []
+    assert _gate_builds(calls) == []
     assert seen["sdk_factory"] is not None
     seen["sdk_factory"]()
-    assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+    assert _gate_builds(calls) == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
     assert ha._default_graph_name(credential) is None
 
 
@@ -1225,7 +1434,15 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   CONSTRUCTION the closure still performs there — the org-being-created
     #   mint already recorded above (tortoise#7500).
     "provision_tenant": 1,
-    "register_user": 3,
+    # ⛔ 3 → 2 (#1981). The THIRD site was `register_user`'s reclaim, which built
+    # an inline `_make_sdk(namespace=org_id)` purely to `.delete()` a namespace —
+    # a second copy of `_drop_org_graph_impl` WITHOUT its absent-graph tolerance,
+    # and it ran the blocking `GRAPH.DELETE` ON the event loop. It now calls the
+    # shared `_drop_org_graph` off-loop (`await asyncio.to_thread(_drop_org_graph,
+    # org_id, graph_name)`), so the opener is GONE rather than moved. This
+    # allowlist is the fail-on pin for exactly this class and it caught the
+    # change: the count records that the site was converted, not deleted.
+    "register_user": 2,
     "_eager_provision_org_graph": 1,
 }
 
@@ -2072,21 +2289,21 @@ def test_the_org_id_only_lanes_reuse_the_requests_own_answer(monkeypatch):
 
     monkeypatch.setattr("tortoise.supabase_control.get_control_plane",
                         lambda: _Unreadable())
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
 
     # The auth seam publishes; the lane consumes — no read, promoted graph.
     token = ha._resolved_default_namespace.set(None)
     try:
         ha._publish_default_namespace(_credential())
         ha._org_sdk(TEAM)                   # e.g. _org_proj / _graph_available
-        assert opened == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
+        assert _gate_builds(calls) == [{"graph_name": f"org_{TEAM}_{NEW_ID}"}]
 
         # The hint is ORG-scoped: a different org in the same context falls back
         # to the read (here unreadable → the historical open), never to this
         # org's graph.
-        opened.clear()
+        calls.clear()
         ha._org_sdk(OTHER_TEAM)
-        assert opened == [{"namespace": OTHER_TEAM}]
+        assert _gate_builds(calls) == [{"namespace": OTHER_TEAM}]
     finally:
         ha._resolved_default_namespace.reset(token)
 
@@ -2103,7 +2320,7 @@ def test_a_graph_bound_credential_publishes_no_default_namespace(monkeypatch):
     the graph-bound capture path (`POST /v1/sessions` admits those keys, and
     `_maybe_apply_completion` runs on every capture)."""
     _hosted(monkeypatch)
-    opened = _capture_make_sdk(monkeypatch)
+    calls = _capture_make_sdk(monkeypatch)
     fake = _fake_org_row(monkeypatch, f"org_{TEAM}")   # NEVER promoted
 
     token = ha._resolved_default_namespace.set(None)
@@ -2115,7 +2332,7 @@ def test_a_graph_bound_credential_publishes_no_default_namespace(monkeypatch):
         # not the caller's binding.
         assert ha._resolved_default_namespace.get() is None
         ha._org_sdk(TEAM)
-        assert opened == [{"namespace": TEAM}], (
+        assert _gate_builds(calls) == [{"namespace": TEAM}], (
             "an org-level lane must open the org's DEFAULT graph, never the "
             "graph-bound credential's own graph")
     finally:
@@ -3296,8 +3513,16 @@ def _registry_with_bound_and_wide_keys(tmp_path, monkeypatch):
     try:
         org = reg.org_create("org-10180-bound")
         org_id = org["id"]
-        reg.org_update(org_id, max_points=10_000, max_graphs=10,
-                       max_sessions=10_000)
+        # #4282 deleted `TortoiseSDK.org_update`; this fixture only needs the
+        # quota fields ON the Team row, so it writes the registry node the
+        # method wrote (`MATCH (t:Team {id:$id}) SET t += $fields`), the same
+        # direct-node shape the sibling control-plane fixtures use.
+        reg._get_registry().query(
+            "MATCH (t:Team {id:$id}) SET t += $fields",
+            params={"id": org_id,
+                    "fields": {"max_points": 10_000, "max_graphs": 10,
+                               "max_sessions": 10_000}},
+        )
         graph = reg._graph_create(org_id, "graph-10180-bound", kind="custom")
         bound = reg.apikey_create(org_id, "bound-10180",
                                   graph_id=graph["graph_id"],

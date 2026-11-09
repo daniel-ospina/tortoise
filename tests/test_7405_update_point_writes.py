@@ -60,6 +60,9 @@ import contextlib
 import json
 import os
 import re
+import subprocess
+import sys
+import textwrap
 import types
 import uuid
 from pathlib import Path
@@ -1855,6 +1858,10 @@ def test_a_journal_replaced_during_a_fold_is_not_memoised(tmp_path, monkeypatch,
         assert any("the journal still holds the id" in r.getMessage()
                    for r in caplog.records), (
             "the crossing call's report must be journal_known and LOUD")
+        assert scans[:] == [(None, 0), (b"new-0100", 0)], (
+            "the discarded map must be re-derived from the file that is "
+            "there NOW, needle-filtered (bounded memory) rather than a full "
+            f"re-fold: {scans}")
         new_stat = os.stat(journal)
         assert (new_stat.st_dev, new_stat.st_ino) != (
             old_stat.st_dev, old_stat.st_ino), (
@@ -1909,11 +1916,9 @@ def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
     sdk, journal = _sdk_journaled(tmp_path, "midfoldGone")
     try:
         # ⛔ INITIALISE THE PROJECTION FIRST. The embedded lane AUTO-REPLAYS a
-        # journal into an EMPTY db on first use, so records appended BEFORE that
-        # point end up in the live graph and the ABSENT arm never runs — the
-        # failure mode that makes this test vacuous rather than wrong. One
-        # `_get_proj()` replays what the journal holds NOW (nothing yet), and
-        # everything appended afterwards stays journal-only.
+        # journal into an EMPTY db on first use, so records appended BEFORE
+        # that point end up in the live graph and the ABSENT arm never runs —
+        # the failure mode that makes this test vacuous rather than wrong.
         sdk._get_proj()
         log = sdk._get_event_log()
         pid = "held-0007"
@@ -1969,43 +1974,36 @@ def test_a_map_present_id_is_unjudged_when_the_fold_loses_the_file(
             sdk.close()
 
 
-
-def test_a_journal_unlinked_at_the_END_of_a_fold_is_unjudged_not_a_typo(
+def test_a_map_present_id_outlives_an_unlink_after_the_fold(
         tmp_path, monkeypatch, caplog):
-    """#10543 review round 17, finding 1: the SAME world state, a microsecond later.
+    """#10515 review round 17, finding 1: ``stat_after is None`` has its OWN evidence.
 
-    ``unlink(2)`` keeps an open file's inode alive — "if the name was the last
-    link to a file but any processes still have the file open, the file will
-    remain in existence until the last file descriptor referring to it is
-    closed" (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so a
-    deletion that lands AFTER the fold's ``open()`` raises NOTHING inside the
-    fold: the scan reads the (now nameless) inode to EOF through the live fd and
-    the loss surfaces only at the post-fold ``os.stat``. That arm used to treat
-    ``stat_after is None`` exactly like a REPLACEMENT and hand the question to
-    ``_journal_presence_needle``, whose ``FileNotFoundError`` branch consults the
-    ``.position`` sidecar ONLY — and the same deletion takes the sidecar with it,
-    so an id the retained map held as PRESENT answered "a typo" (silent). It is
-    the #10515 indicator-1 loss surviving at the sibling site of the rule round
-    16 added: a deletion one microsecond EARLIER (before the fold's open) is
-    already reported as ``journal_unreadable``.
+    ``unlink(2)`` keeps a file readable through an already-open descriptor —
+    "the file will remain in existence until the last file descriptor referring
+    to it is closed" — so a deletion that lands AFTER the fold's ``open()`` and
+    BEFORE its post-fold ``os.stat`` raises nothing inside the fold: the fold
+    really did read this journal's bytes, and the only trace is ``stat_after is
+    None``. That makes ``known`` EVIDENCE for this call, not a stale map.
 
-    Non-vacuity: on the pre-fix tree the crossing call increments nothing — the
-    helper never sees the map, and ``_journal_carried_records`` answers ``False``
-    because the sidecar is gone with the journal, so the MAP arm is the only one
-    that can save it.
+    Pre-fix the two facts shared one arm, the needle was called MAP-FREE, and
+    the answer for a map-PRESENT id was ``False`` — "a typo": no WARNING and no
+    counter, i.e. the silent loss #10515 indicator 1 forbids, and a regression
+    against ``main``'s loud ``known.get(point_id, False)``.
+
+    Non-vacuity: the position sidecar is deleted WITH the journal, so
+    ``carried_records()`` answers ``False`` and only the retained map can
+    produce ``journal_unreadable``; the pre-fix arm increments nothing.
     """
     from tortoise import monitoring
-    from tortoise.log import EventLog
 
-    sdk, journal = _sdk_journaled(tmp_path, "midfoldEndGone")
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldUnlink")
     try:
-        # ⛔ INITIALISE THE PROJECTION FIRST (same reason as the test above): the
-        # embedded lane AUTO-REPLAYS a journal into an EMPTY db on first use, so a
-        # record appended before that point would land in the live graph and the
-        # ABSENT arm would never run — making the test vacuous.
+        # ⛔ INITIALISE THE PROJECTION FIRST: the embedded lane auto-replays a
+        # journal into an EMPTY db on first use, which would put the id in the
+        # live graph and retire the ABSENT arm entirely.
         sdk._get_proj()
         log = sdk._get_event_log()
-        pid = "held-0007"
+        pid = "kept-0011"
         log.append({"type": "PointAdded", "point": {"id": pid}})
         assert not sdk.get_point(pid), (
             "the live graph must NOT hold the point — the journal alone does")
@@ -2018,44 +2016,444 @@ def test_a_journal_unlinked_at_the_END_of_a_fold_is_unjudged_not_a_typo(
             f"the map must hold the id as PRESENT: {memo['known'].get(pid)}")
 
         # an append makes the next call RESUME (a fold that starts above byte 0)
-        log.append({"type": "PointAdded", "point": {"id": "grow-9999"}})
+        log.append({"type": "PointAdded", "point": {"id": "grow-1111"}})
+
+        # The unlink lands between the fold and the POST-FOLD stat. unlink(2)
+        # leaves the descriptor the fold already holds readable, so the fold
+        # completes normally and only `_journal_stat_key` sees the path gone —
+        # the `stat_after is None` arm, not the fold's FileNotFoundError arm.
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_unlink(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                return None
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_unlink))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat (the resume path), not "
+            f"the fold's own FileNotFoundError arm: {calls['n']} stat calls")
+        assert not os.path.exists(journal), (
+            "the fixture must actually remove the journal before the re-fold")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "the fold read a file this call watched disappear, and the "
+            "retained map said it HELD this id — answering \"a typo\" is the "
+            "silence #10515 indicator 1 forbids")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the map proves the journal CARRIED the id but cannot prove it "
+            "still does, so this is UNREADABLE, not known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert not any("the journal still holds the id" in r.getMessage()
+                       for r in caplog.records), (
+            "the map proves the journal CARRIED the id, not that it still "
+            "does — the reason must be unreadable, never known")
+        assert sdk._journal_presence_memo is None, (
+            "a map folded from a file whose path is gone must not be kept")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_truncation_under_the_fold_keeps_the_map_as_witness(
+        tmp_path, monkeypatch, caplog):
+    """#10515 review round 18, finding 1: a SHRINK is not a REPLACEMENT.
+
+    Round 17 split ``stat_after is None`` out of the shared post-fold arm and
+    handed the retained map to the needle as a WITNESS. The OTHER half of that
+    predicate — ``stat_after[2] < resume`` — stayed on the MAP-FREE arm, and it
+    is not the same evidence: no new file exists there, the bytes the fold read
+    were merely truncated away, and ``known`` was folded over exactly those
+    bytes. So a truncation landing between the fold and the post-fold ``stat``
+    answered "a typo" — no counter, no WARNING. ⚠️ That silence is this
+    branch's own, not `main`'s parity: `origin/main` folds truncation together
+    with replacement into ONE map-free arm
+    (``stat_after[2] < resume or stat_after[:2] != stat_key[:2]`` →
+    ``_journal_presence_needle(log, point_id)``), so the base answers ``False``
+    for this interleaving too. The witness is a deliberate TIGHTENING over it;
+    the ``known.get(point_id, False)`` this docstring used to cite as "`main`
+    LOUD" is the older `fcc742b8a` single-arm shape, not the base. The mirror
+    image of the round-16 silence, in the direction #10515 indicator 1 forbids.
+    The comparison the field makes is the same one: identity (inode) decides
+    REPLACEMENT, offset vs size decides TRUNCATION.
+
+    The position sidecar goes away WITH the bytes on purpose, so
+    ``_journal_carried_records`` cannot answer and only the retained map can
+    report the loss.
+
+    Non-vacuity: on the pre-fix tree the crossing call increments nothing — the
+    re-read of the shorter file simply misses the id.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldTruncate")
+    try:
+        # ⛔ INITIALISE THE PROJECTION FIRST (the embedded lane auto-replays a
+        # journal into an EMPTY db on first use, which would put the id in the
+        # live graph and retire the ABSENT arm).
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "trunc-0021"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        # a first absent write folds the journal and RETAINS the map from it
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None, "the fixture needs a RETAINED map to test"
+        assert memo['known'].get(pid) is True, (
+            f"the map must hold the id as PRESENT: {memo['known'].get(pid)}")
+
+        # an append makes the next call RESUME (a fold that starts above byte 0)
+        log.append({"type": "PointAdded", "point": {"id": "grow-2222"}})
+        resume = os.path.getsize(journal)
+        assert resume > 0, "the fixture needs a non-empty journal to truncate"
+
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_truncate(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                # truncate IN PLACE — same inode, and the bytes the fold just
+                # read are the ones cut away — and take the sidecar with them
+                with open(journal, "w", encoding="utf-8"):
+                    pass
+                with contextlib.suppress(FileNotFoundError):
+                    os.unlink(journal + ".position")
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_truncate))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat (the resume path), not "
+            f"the fold's own FileNotFoundError arm: {calls['n']} stat calls")
+        truncated = os.stat(journal)
+        assert (truncated.st_dev, truncated.st_ino) == memo['ident'], (
+            "the fixture must truncate the SAME inode — a new inode is the "
+            "REPLACEMENT arm, which re-folds the NEW file and hands the map on "
+            "as a witness too, so it would exercise different evidence")
+        assert truncated.st_size < resume, (
+            "the fixture must shrink the journal BELOW the folded offset")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "the fold read bytes this same inode no longer holds, and the "
+            "retained map said it HELD this id — answering \"a typo\" is the "
+            "silence #10515 indicator 1 forbids")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "the map proves the journal CARRIED the id but cannot prove the "
+            "truncated file still does, so this is UNREADABLE, not known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert sdk._journal_presence_memo is None, (
+            "a map folded from bytes that are gone must not be kept")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_map_present_id_is_unjudged_when_the_path_is_recreated(
+        tmp_path, monkeypatch, caplog):
+    """#10515 review round 18, finding 1 (second sub-case): the witness must
+    also cover a re-read that SUCCEEDS.
+
+    Round 17 applied the witness only in the needle's ``except
+    FileNotFoundError`` branch. The ``stat_after is None`` arm can still reach a
+    SUCCESSFUL re-read — the path is recreated between the post-fold ``stat``
+    and the needle's own read (a writer, a rotated-in file, a restore) — and
+    then the exception never fires: the re-read simply finds no record for the
+    id and the call answered ``False``, "a typo", while ``known`` proved the
+    journal it folded NAMED that id. A destroyed record must be UNJUDGED.
+
+    Non-vacuity: on the pre-fix tree the crossing call increments nothing — the
+    recreated file exists and answers, so no exception path is taken.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldRecreate")
+    try:
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "kept-0022"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo['known'].get(pid) is True, (
+            f"the fixture needs the id PRESENT in a retained map: {memo}")
+
+        log.append({"type": "PointAdded", "point": {"id": "grow-3333"}})
+
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_recreate(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                # the post-fold stat observes NO file at the path …
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                # … and a writer puts a NEW journal there before the needle
+                # re-reads, so that read SUCCEEDS and carries no such record
+                with open(journal, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"type": "PointAdded",
+                                         "point": {"id": "fresh-4444"}})
+                             + "\n")
+                return None
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_recreate))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0)
+        known_before = monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0)
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat: "
+            f"{calls['n']} stat calls")
+        assert os.path.exists(journal) and os.path.getsize(journal) > 0, (
+            "the recreated journal must ANSWER the needle's read — that is what "
+            "makes the pre-fix answer a silent False instead of an exception")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_unreadable", 0) == before + 1, (
+            "the fold read a file this call watched disappear, and its retained "
+            "map said that file HELD this id — a recreated path cannot confirm "
+            "it, so the absence is UNJUDGED, never \"a typo\"")
+        assert monitoring.silent_revision_loss_counts().get(
+            "journal_known", 0) == known_before, (
+            "nothing proves the id still carries a record, so this is "
+            "UNREADABLE, not known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
+                   for r in caplog.records), (
+            "the loss must be LOUD in the log, not only in a counter")
+        assert sdk._journal_presence_memo is None
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_delete_in_the_recreated_path_is_answered_not_escalated(
+        tmp_path, monkeypatch, caplog):
+    """#10515 review round 19, finding 1: only a VACUOUS ``False`` is unjudged.
+
+    The companion of `test_a_map_present_id_is_unjudged_when_the_path_is_recreated`,
+    and the case that keeps round 18's witness override from overshooting. Both
+    tests put a witnessed id through a recreated path, and the re-read SUCCEEDS
+    in both; what differs is what the re-read FINDS:
+
+    * there, no line names the id, so the read has no evidence and the witness'
+      ``True`` is unconfirmed ⇒ ``None`` (``journal_unreadable``);
+    * here, an ``EntityMutated {op: delete}`` for that id is folded — the needle
+      MATCHED the line, parsed it, and folded it to ``False``. The journal now
+      says the point is GONE, which is an ANSWER, not an absence of one.
+
+    Round 18's condition tested the dumped value (``answer is False``) rather
+    than that fact, so this path answered ``None`` and filed `journal_unreadable`
+    for an ordinary write-after-delete — #10515 indicator 2, "a counter that
+    fires on every write-after-delete can never be alerted on", and the reading
+    ``_journal_knows_point`` already applies to its retained map
+    (``"The INVERSE map value (False) is NOT the same case"``).
+
+    Non-vacuity: on the pre-fix tree this call increments `journal_unreadable`
+    by one and warns "could not be READ to rule a typo out" — both asserted
+    AGAINST below, so reverting only the ``point_id not in state`` term reddens
+    this test.
+    """
+    from tortoise import monitoring
+
+    sdk, journal = _sdk_journaled(tmp_path, "midfoldRecreateDelete")
+    try:
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "deleted-0023"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid), (
+            "the live graph must NOT hold the point — the journal alone does")
+
+        # a first absent write folds the journal and RETAINS the map from it
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo['known'].get(pid) is True, (
+            f"the fixture needs the id PRESENT in a retained map: {memo}")
+
+        # an append makes the next call RESUME (a fold that starts above byte 0)
+        log.append({"type": "PointAdded", "point": {"id": "grow-5555"}})
+
+        real_stat_key = TortoiseSDK._journal_stat_key
+        calls = {'n': 0}
+
+        def stat_key_then_recreate_with_delete(log):
+            calls['n'] += 1
+            if calls['n'] == 2:
+                # the post-fold stat observes NO file at the path …
+                for path in (journal, journal + ".position"):
+                    with contextlib.suppress(FileNotFoundError):
+                        os.unlink(path)
+                # … and a writer puts a NEW journal there before the needle
+                # re-reads, so that read SUCCEEDS and folds a DELETE for the id
+                with open(journal, "w", encoding="utf-8") as fh:
+                    fh.write(json.dumps({"type": "EntityMutated",
+                                         "id": pid, "label": "Point",
+                                         "op": "delete"}) + "\n")
+                return None
+            return real_stat_key(log)
+
+        monkeypatch.setattr(TortoiseSDK, '_journal_stat_key',
+                            staticmethod(stat_key_then_recreate_with_delete))
+        calls['n'] = 0
+
+        before = monitoring.silent_revision_loss_counts()
+        caplog.clear()
+        with caplog.at_level("WARNING"):
+            assert sdk.update_point(pid, confidence=0.9) == {}
+        assert calls['n'] == 2, (
+            "the fixture must reach the POST-FOLD stat: "
+            f"{calls['n']} stat calls")
+        assert monitoring.silent_revision_loss_counts() == before, (
+            "the recreated journal carries a DELETE for this id, so the re-read "
+            "has positive evidence that the point is gone — an ordinary "
+            "write-after-delete must never move the counter (#10515 "
+            "indicator 2: a counter that fires on every write-after-delete can "
+            "never be alerted on)")
+        assert not any("could not be READ to rule a typo out" in r.getMessage()
+                       for r in caplog.records), (
+            "a folded delete is a READ answer, not an UNREADABLE journal — the "
+            "round-18 witness override must not escalate it")
+        assert not any("will not be replayed" in r.getMessage()
+                       for r in caplog.records), (
+            "a deleted point is deliberately gone; it is not a lost revision")
+        assert sdk._journal_presence_memo is None, (
+            "the map still came from a file the path no longer names, so it "
+            "must not be kept, whatever this call answered")
+    finally:
+        with contextlib.suppress(Exception):
+            sdk.close()
+
+
+def test_a_replacement_reports_a_map_present_id_as_unjudged_not_a_typo(
+        tmp_path, monkeypatch, caplog):
+    """A REPLACEMENT is evidence about the OLD file, not an erasure of it.
+
+    Review round 20, finding 1. `rename(2)`: *"Open file descriptors for oldpath
+    are also unaffected"* — so the fd the fold read is still the OLD journal even
+    after the path resolves to a new inode. The retained map was folded from
+    that fd, so an entry saying ``True`` is a RECORD of a revision that existed
+    at this path and that the live graph does not hold.
+
+    The tree used to answer this arm MAP-FREE, which made it the only post-fold
+    arm that stayed QUIET: the re-read of the NEW file finds no line for the id
+    and returns ``False``, `_journal_knows_point` reads ``False`` as "a typo"
+    and `_report_absent_revision` returns without a line or a counter. That is
+    #10515 indicator 1 — a silent legitimate-revision loss. ⚠️ It is a
+    TIGHTENING over this PR's base, not a restoration of parity: `origin/main`
+    folds truncation together with replacement into ONE map-free arm, so the
+    base answers ``False`` (silent) here as well. The "`main` reported it as
+    ``journal_known``" reading this docstring used to give is the older
+    `fcc742b8a` single-arm shape, which the base no longer carries.
+
+    The witness is applied in the round-19 shape, so it can only make the answer
+    LOUDER: the re-read carries no line for the id, so its ``False`` is VACUOUS
+    and the answer is UNJUDGED (``None`` ⇒ ``journal_unreadable`` + WARNING). A
+    folded delete or merge loser (``point_id in state``) still answers ``False``
+    and stays silent — see
+    `test_a_delete_in_the_recreated_path_is_answered_not_escalated`.
+
+    ⛔ NON-VACUITY, and the reason the docstring that used to sit here was
+    deleted: it claimed "it passes on both trees", which is measurably false.
+    On `main` this interleaving returns ``False`` — the shared truncation-or-
+    replacement arm is MAP-FREE there, so it increments nothing — and on this
+    branch's own pre-round-20 tree it also returns ``False`` (silent), so the
+    assertion below on ``journal_unreadable`` fails on BOTH and only the fixed
+    tree satisfies it. (The earlier "``main`` returns ``True`` (``journal_known``
+    +1)" reading described `fcc742b8a`'s single arm, not this base.)
+    The ``old-0055`` id is in the journal that was replaced away, which is why
+    it is a LOSS and not the "absent from BOTH graph and journal" typo shape
+    that #10515 indicator 2 reserves silence for.
+    """
+    from tortoise import monitoring
+    from tortoise.log import EventLog
+
+    sdk, journal = _sdk_journaled(tmp_path, "replaceWitness")
+    try:
+        sdk._get_proj()
+        log = sdk._get_event_log()
+        pid = "old-0055"
+        log.append({"type": "PointAdded", "point": {"id": pid}})
+        assert not sdk.get_point(pid)
+
+        assert sdk.update_point(str(uuid.uuid4()), confidence=0.9) == {}
+        memo = sdk._journal_presence_memo
+        assert memo is not None and memo['known'].get(pid) is True
+        old_stat = os.stat(journal)
+
+        # an append makes the crossing call RESUME, so it takes the map path and
+        # can observe the replacement instead of answering from the memo
+        log.append({"type": "PointAdded", "point": {"id": "grow-5555"}})
+
+        # a DIFFERENT journal (new inode, no record for `pid`) replaces the path
+        # when the resuming fold ends — the replacement arm, not truncation
+        replacement = journal + ".replacement"
+        other = EventLog(replacement)
+        other.append({"type": "PointAdded", "point": {"id": "brand-new-9"}})
 
         real = EventLog.mention_lines
         armed = {'on': True}
 
-        class _UnlinkingScan:
-            """The real ``MentionScan``, with the UNLINK landing when it ENDS.
-
-            A plain generator wrapper would lose ``resume_offset`` (the fold reads
-            it off the scan object), so this delegates it — the fold must reach
-            the end of the bytes through its OWN open fd before the path goes away,
-            which is the interleaving ``stat_after is None`` is about.
-            """
-
-            def __init__(self, inner, on_end):
+        class _ReplacingScan:
+            def __init__(self, inner, start, needle):
                 self._inner = inner
-                self._on_end = on_end
-                self.resume_offset = getattr(inner, 'resume_offset', 0)
+                self.resume_offset = getattr(inner, 'resume_offset', start)
+                self._key = (needle, start)
 
             def __iter__(self):
                 yield from self._inner
                 self.resume_offset = self._inner.resume_offset
-                self._on_end()
-
-        def on_end():
-            if armed['on']:
-                armed['on'] = False
-                # the journal AND its position sidecar go away AFTER the read
-                for path in (journal, journal + ".position"):
-                    with contextlib.suppress(FileNotFoundError):
-                        os.unlink(path)
+                # the map-path fold (needle None) has finished, whatever offset
+                # it RESUMED from, and the path has not been observed since
+                if armed['on'] and self._key[0] is None:
+                    armed['on'] = False
+                    os.replace(replacement, journal)
 
         def spy(self, needle=None, start=0):
-            inner = real(self, needle, start)
-            if start and needle is None:
-                # the RESUME fold — the one whose post-fold stat sees the loss
-                return _UnlinkingScan(inner, on_end)
-            return inner
+            return _ReplacingScan(real(self, needle, start), start, needle)
 
         monkeypatch.setattr(EventLog, "mention_lines", spy)
 
@@ -2066,24 +2464,32 @@ def test_a_journal_unlinked_at_the_END_of_a_fold_is_unjudged_not_a_typo(
         caplog.clear()
         with caplog.at_level("WARNING"):
             assert sdk.update_point(pid, confidence=0.9) == {}
-        assert not os.path.exists(journal), (
-            "the fixture must actually unlink the journal — if it survived, the "
-            "post-fold stat answered and this test never reached its arm")
+        new_stat = os.stat(journal)
+        assert (new_stat.st_dev, new_stat.st_ino) != (
+            old_stat.st_dev, old_stat.st_ino), (
+            "the fixture must actually REPLACE the journal (a new inode), or "
+            "this is the truncation arm and asserts nothing about this one")
         assert monitoring.silent_revision_loss_counts().get(
             "journal_unreadable", 0) == before + 1, (
-            "a journal whose file went away WHILE the fold read it cannot be "
-            "judged, and the map this very fold produced says it HELD this id — "
-            "answering \"a typo\" is the silence #10515 indicator 1 forbids")
+            "the retained map — folded, through a live fd, from the file this "
+            "path no longer names — says the journal CARRIED this id, and the "
+            "re-read of the new file cannot rule the loss out. Answering "
+            "\"a typo\" is the silence #10515 indicator 1 forbids — a "
+            "tightening over `main`, whose shared truncation-or-replacement arm "
+            "is map-free and stays silent here")
         assert monitoring.silent_revision_loss_counts().get(
             "journal_known", 0) == known_before, (
-            "the map proves the journal CARRIED the id but cannot prove it still "
-            "does, so this is UNREADABLE, not known")
-        assert any("could not be READ" in r.getMessage()
+            "the map proves the journal CARRIED the id, not that the file at "
+            "this path still does — so this is UNREADABLE, never known")
+        assert any("could not be READ to rule a typo out" in r.getMessage()
                    for r in caplog.records), (
             "the loss must be LOUD in the log, not only in a counter")
+        assert not any("the journal still holds the id" in r.getMessage()
+                       for r in caplog.records), (
+            "nothing re-read here names the id, so the reason is unreadable, "
+            "never known")
         assert sdk._journal_presence_memo is None, (
-            "a map describing a file that is GONE must not be retained — a "
-            "re-created path can get the same (st_dev, st_ino) back")
+            "the memo still came from a file the path no longer names")
     finally:
         with contextlib.suppress(Exception):
             sdk.close()
@@ -4808,8 +5214,10 @@ def test_a_LANDED_update_still_runs_the_ep_side_effects(tmp_path):
 # says so in comments; so do the promote notes beside it and the `sourceVersion`
 # anchor in `_write_relation`. Every one of those references used to be a
 # `file:line` cite — and NOTHING resolves a `projection/` or `record_projection.py`
-# line cite: the bundle's `_BUNDLE_CITE` sweep matches `sdk|edges|extractor_v2`
-# only and reads DOCUMENTS (not `sdk.py`), and `_PREREG_STEP_CITE_DOCS` reads the
+# line cite written in CODE: the bundle's `_BUNDLE_CITE` sweep matches
+# `sdk|edges|extractor_v2` only and reads DOCUMENTS (not `sdk.py`); its sibling
+# pattern resolves `projection/__init__.py`/`entities.py` cites in those same
+# DOCUMENTS, not a cite in this file; and `_PREREG_STEP_CITE_DOCS` reads the
 # extractor's own cites. So those numbers re-staled in silence, and all five had
 # drifted by PR #10543's head (measured, each target read back):
 #
@@ -4906,3 +5314,147 @@ def test_the_presence_fold_cites_the_projection_by_symbol_not_by_line():
         "`plan_point_restamp_folds` folds every merged id to NOT-present; the "
         "projection's pending-delete fold is gone — re-derive the claim, do not "
         "delete the assertion")
+
+
+def test_a_fifo_at_the_journal_path_cannot_park_the_presence_scan(tmp_path):
+    """#10702 review (non-blocking 1): the ABSENT-write scan must never WAIT.
+
+    ``MentionScan.__iter__`` opened the journal with a plain ``open``, while its
+    sibling :func:`tortoise.log._read_regular_range` is hardened with
+    ``O_NONBLOCK | S_ISREG`` because it too runs on ``update_point``'s
+    ABSENT-write path. A FIFO left at the configured journal path therefore
+    PARKED ``open`` until a writer appeared — synchronously, inside an
+    HTTP-exposed call — where the seam read makes the same file a MISS.
+
+    ⛔ RUN IN A SUBPROCESS, deliberately. Pre-fix the failure mode is a permanent
+    WAIT, so an in-process assertion would HANG the suite rather than fail it; a
+    subprocess with a timeout turns "parked" into the failure this case reports.
+    """
+    fifo = tmp_path / "journal.fifo"
+    os.mkfifo(fifo)
+    code = textwrap.dedent(
+        """
+        import sys
+        from pathlib import Path
+        from tortoise.log import MentionScan
+        try:
+            lines = list(MentionScan(Path(sys.argv[1])))
+        except OSError as exc:
+            print(f"refused: {type(exc).__name__}")
+            raise SystemExit(0)
+        print(f"scanned: {len(lines)}")
+        raise SystemExit(3)
+        """)
+    try:
+        done = subprocess.run([sys.executable, "-c", code, str(fifo)],
+                             capture_output=True, text=True, timeout=120,
+                             cwd=str(_REPO))
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "the presence scan PARKED on a FIFO at the journal path: the scan's "
+            "open waited for a writer, so an absent write on this lane never "
+            "returns — the failure `_read_regular_range`'s O_NONBLOCK exists to "
+            "prevent")
+    assert done.returncode == 0, (
+        "a non-regular journal must be REFUSED promptly, never scanned as "
+        f"garbage and never waited on: rc={done.returncode} "
+        f"out={done.stdout!r} err={done.stderr[-800:]!r}")
+    assert "refused" in done.stdout, done.stdout
+
+
+def test_the_presence_scan_still_follows_a_symlinked_journal(tmp_path):
+    """Why the hardening above must NOT reach for ``O_NOFOLLOW``.
+
+    ``test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it``
+    depends on this asymmetry: the SEAM read refuses a symlinked journal
+    (``O_NOFOLLOW`` ⇒ ``ELOOP`` ⇒ unreadable ⇒ re-fold) while this scan FOLLOWS
+    it, so the memo stays live and only the guard dies — the combination that
+    makes the unreadable-seam branch reachable. A scan that refused symlinks
+    would make that state impossible and silently retire the guard.
+    """
+    from tortoise.log import MentionScan
+
+    real = tmp_path / "real-journal.jsonl"
+    real.write_bytes(b'{"id": "a"}\n{"id": "b"}\n')
+    link = tmp_path / "journal.jsonl"
+    os.symlink(real, link)
+    assert list(MentionScan(link)) == [b'{"id": "a"}', b'{"id": "b"}']
+
+
+def test_a_fifo_at_the_journal_path_cannot_park_the_absent_write(tmp_path):
+    """#10702 review (P2-1): the SCAN refusing is only half the claim.
+
+    ``MentionScan._open``'s reason for existing is that this scan runs on
+    ``update_point``'s ABSENT-write path, synchronously inside an HTTP-exposed
+    call — and the scan-level test above never exercises that half. What a
+    caller needs is that the whole door still answers: ``{}`` and no raise, the
+    loss reported as UNJUDGED (``journal_unreadable`` — the tri-state's THIRD
+    value, never ``False``/"a typo"), and ``journal_known`` untouched.
+
+    ⛔ RUN IN A SUBPROCESS for the same reason as the scan-level case: pre-fix
+    the failure mode is a permanent WAIT inside the open, which would hang the
+    suite rather than fail it. ``cwd`` is the repo root so the child resolves
+    ``import tortoise`` from the checkout rather than inheriting whatever
+    directory pytest was launched from.
+
+    Non-vacuity: with ``_open`` back to a plain ``open`` the child never prints
+    and ``subprocess.run`` times out — and a fix that dropped the ``S_ISREG``
+    refusal (or let the ``OSError`` escape ``update_point``) reddens the reply
+    or the counter assertions instead.
+    """
+    code = textwrap.dedent(
+        """
+        import json, os, sys, uuid
+        from tortoise import monitoring
+        from tortoise.sdk import TortoiseSDK
+
+        db_path, journal = sys.argv[1], sys.argv[2]
+        sdk = TortoiseSDK(
+            None if os.environ.get("TORTOISE_DB_URI") else db_path,
+            namespace=f"test_7405_fifo_{uuid.uuid4().hex[:8]}",
+            event_log_path=journal)
+        try:
+            # materialise the lane BEFORE the FIFO exists: an embedded lane
+            # AUTO-REPLAYS a journal into an empty db, and a replay would park
+            # on the FIFO in the fixture rather than in the code under test
+            sdk._get_proj()
+            os.mkfifo(journal)
+            pid = str(uuid.uuid4())
+            before = monitoring.silent_revision_loss_counts()
+            reply = sdk.update_point(pid, confidence=0.9)
+            after = monitoring.silent_revision_loss_counts()
+            print(json.dumps({
+                "reply": reply,
+                "tri": sdk._journal_knows_point(pid),
+                "unreadable": (after.get("journal_unreadable", 0)
+                               - before.get("journal_unreadable", 0)),
+                "known": (after.get("journal_known", 0)
+                          - before.get("journal_known", 0)),
+            }))
+        finally:
+            sdk.close()
+        """)
+    try:
+        done = subprocess.run(
+            [sys.executable, "-c", code,
+             str(tmp_path / "fifo.db"), str(tmp_path / "journal.fifo")],
+            capture_output=True, text=True, timeout=180, cwd=str(_REPO))
+    except subprocess.TimeoutExpired:
+        pytest.fail(
+            "`update_point` PARKED on a FIFO at the journal path: the "
+            "ABSENT-write scan's open waited for a writer, so every absent "
+            "write on this lane never returns — the failure "
+            "`_read_regular_range`'s O_NONBLOCK exists to prevent")
+    assert done.returncode == 0, (
+        "a FIFO at the journal path must be REPORTED, never waited on and "
+        f"never raised: rc={done.returncode} out={done.stdout!r} "
+        f"err={done.stderr[-1200:]!r}")
+    seen = json.loads(done.stdout.strip().splitlines()[-1])
+    assert seen["reply"] == {}, (
+        "the documented ABSENT-arm reply is `{}`: an unreadable journal is a "
+        f"REPORT, not a 500: {seen}")
+    assert seen["tri"] is None, (
+        "an unreadable journal is UNJUDGED — the tri-state's third value. "
+        f"`False` is \"a typo\" and silences the loss: {seen}")
+    assert seen["unreadable"] == 1 and seen["known"] == 0, (
+        f"the loss must be counted as journal_unreadable alone: {seen}")

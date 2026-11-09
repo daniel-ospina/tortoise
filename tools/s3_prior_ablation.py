@@ -612,6 +612,20 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     import tortoise.extractor_v2 as ev
     from tortoise.sdk import TortoiseSDK
 
+    # ⛔ #4282 (owner ruling 2026-10-27) DELETED `TortoiseSDK.capture_session`,
+    # and this arm drove the extraction pipeline through it — the only
+    # in-process door that ran `_extract_session_v2` end to end. Refuse by name
+    # instead of dying with an `AttributeError` mid-corpus, the same posture the
+    # #7949 capstone probes take (`docs/evidence/7949-capstone/probes/`). The
+    # ablation needs a surviving door before it can run again; the reachability
+    # gap and the guards it took are recorded on #10227.
+    if not hasattr(TortoiseSDK, "capture_session"):
+        raise SystemExit(
+            "s3-prior-ablation: REFUSED — #4282 deleted "
+            "TortoiseSDK.capture_session, the door this arm drove. No surviving "
+            "in-process entry point runs the extraction pipeline end to end "
+            "(#10227 tracks the restoration).")
+
     real_search = ev.search_graph
     # ``real`` is the arm total; ``real_session`` is THIS session's calls to the REAL function, and
     # it is the only one arm integrity may read. ``intercepted`` counts calls that reached either

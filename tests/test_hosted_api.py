@@ -6076,6 +6076,122 @@ class TestSessionFloodGate:
         assert f"{detail['used']} in use + {detail['estimate']} estimated" in msg, msg
         assert f"exceeds {detail['limit']}." in msg, msg
 
+    def test_the_ingest_window_does_not_run_ahead_of_the_points_cap(
+            self, client, monkeypatch):
+        """#10175: the PERMANENT 402 outranks the retryable 429 on THIS lane too.
+
+        An org at ``max_points`` must be answered its quota refusal, never
+        "retry shortly": a 429 promises a wait after which the request fits, and
+        a request that can never fit is the unbreakable-loop class
+        ``quota.commit_ingest_admit`` warns about.
+
+        ⛔ TWO legs pin the ordering on this lane, and the charge whose
+        placement they guard is the one #4051 §3.1 ADDED here: THIS one for the
+        POINTS 402 (`max_points`), and
+        `test_the_ingest_window_does_not_run_ahead_of_the_cohort_cap` for the
+        COHORT 402 (`cohort_cost_cap`). The charge must sit after BOTH — a charge
+        in the gap between them turns one permanent refusal into a retryable 429.
+        `TestCommitPointsGate::test_the_points_cap_refuses_before_the_ingest_window`
+        pins the COMMIT lane; `TestCaptureOrgIngestBound`'s four endpoint legs
+        cannot pin this ordering — they run with `no_provider_keys`, i.e. the
+        #3892 store-only path where the 402 is skipped by design (measured: a
+        store-only capture at `max_points=1` returns 200), so they reach the 429
+        without ever being 402'd.
+
+        THE DISCRIMINATOR is the second POST: the window is armed at exactly one
+        capture's charge, so a charge taken BEFORE the 402 would spend the whole
+        window and the retry would answer 429 — "retry shortly" for a request
+        that can never fit — while a charge taken after the gate leaves the
+        window empty and the retry answers the SAME 402.
+        """
+        import tortoise.quota as quota_mod
+        from tortoise.hosted_api import SessionRequest, capture_ingest_charge_bytes
+
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conv = [{"role": "user", "content": dense}] * 51
+        bodies = [
+            {"session_id": "quota-order-session", "conversation": conv},
+            {"session_id": "quota-order-session-2", "conversation": conv},
+        ]
+        unit = max(capture_ingest_charge_bytes(SessionRequest(**b))
+                   for b in bodies)
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", unit)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+        first = client.post("/v1/sessions", json=bodies[0])
+        assert first.status_code == 402, (
+            f"the first capture was answered {first.status_code} — the points "
+            "refusal must precede the ingest charge")
+        assert first.json()["detail"]["resource"] == "points"
+
+        retry = client.post("/v1/sessions", json=bodies[1])
+        assert retry.status_code == 402, (
+            f"the retry after a points refusal answered {retry.status_code} — "
+            "the 402 CHARGED the ingest window, so an org at its cap is told "
+            "\"retry shortly\" for a request that can never fit (#10175)")
+
+    def test_the_ingest_window_does_not_run_ahead_of_the_cohort_cap(
+            self, client, monkeypatch):
+        """The COHORT 402 is a permanent refusal too, and is also upstream.
+
+        The charge's own comment claims it sits "after every refusal that mints
+        nothing (the 409/400/422 boundary gates and the 402 points/cohort gates
+        above)". `test_the_ingest_window_does_not_run_ahead_of_the_points_cap`
+        pins the POINTS one; a charge moved into the gap BETWEEN the two 402s
+        would pass every other leg in this file while turning a permanent
+        `cohort_cost_cap` refusal into a retryable 429 — the same #10175 class.
+
+        The cohort gate is stubbed (it would otherwise need a real spend/period
+        row) and raises the SAME 402 shape the real
+        `CohortCostCapExceeded` maps to. Same discriminator as its sibling: the
+        window is armed at exactly one capture's charge, so an early charge
+        spends it and the SECOND POST answers 429 instead of the same 402.
+        """
+        from fastapi import HTTPException
+
+        import tortoise.cohort_cost as cohort_mod
+        import tortoise.quota as quota_mod
+        from tortoise.hosted_api import (
+            SessionRequest,
+            capture_ingest_charge_bytes,
+            get_current_org,
+        )
+
+        def _refuse_cohort(_org):
+            raise HTTPException(
+                status_code=402,
+                detail={"code": "quota_exceeded", "resource": "cohort_cost_cap"})
+
+        monkeypatch.setattr(cohort_mod, "enforce_cohort_cost_cap", _refuse_cohort)
+        # The POINTS gate must PASS here, or the 402 under test is its own: the
+        # dense 51-turn window would otherwise 402 on `est` before the cohort
+        # gate is ever reached (that is what the sibling leg exercises).
+        app.dependency_overrides[get_current_org] = lambda: dict(
+            TEST_TEAM, max_points=10 ** 9)
+
+        dense = ("we should go. " * 300)  # 4500 chars < 5000 turn limit
+        conv = [{"role": "user", "content": dense}] * 51
+        bodies = [
+            {"session_id": "cohort-order-1", "conversation": conv},
+            {"session_id": "cohort-order-2", "conversation": conv},
+        ]
+        unit = max(capture_ingest_charge_bytes(SessionRequest(**b))
+                   for b in bodies)
+        monkeypatch.setattr(
+            quota_mod, "MAX_COMMIT_INGEST_BYTES_PER_MIN_PER_ORG", unit)
+        quota_mod._reset_commit_ingest_budget_for_tests()
+
+        first = client.post("/v1/sessions", json=bodies[0])
+        assert first.status_code == 402, (
+            f"the cohort refusal answered {first.status_code} — the permanent "
+            "402 must precede the ingest charge")
+        retry = client.post("/v1/sessions", json=bodies[1])
+        assert retry.status_code == 402, (
+            f"the retry after a cohort refusal answered {retry.status_code} — "
+            "the charge sits BETWEEN the two 402s, so a permanent refusal is "
+            "reported as a retryable throttle (#10175)")
+
     def test_extraction_amplifier_402_zero_growth(self, client):
         """Dense sentence content → extraction-aware estimate exceeds the
         points quota → 402 BEFORE any write (zero node growth)."""
@@ -7300,6 +7416,643 @@ def test_registry_anchor_caches_the_uri_mode_handle(monkeypatch):
     assert len(constructed) == 2, constructed
 
     ha._reset_registry_probe_sdk()  # the suite's isolation hook owns the close
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_the_registry_probe_never_CONSTRUCTS_under_the_keepalive_lock(monkeypatch):
+    """#8867 finding 2 — the registry probe must not hold `_KEEPALIVE_LOCK`
+    across its construction.
+
+    `_make_sdk`'s EMBEDDED branch takes that SAME lock and `threading.Lock` is
+    not reentrant, so a construction that runs while this caller holds it is a
+    self-deadlock the moment `TORTOISE_DB_URI` reads as set to the caller and
+    unset to `_make_sdk`'s own re-read — which the suite does continuously via
+    `monkeypatch.delenv`. The probe then never releases the lock, and the hang
+    cascades: `_probe_sdk` holds `_PROBE_SDK_LOCK` across its own `_make_sdk`,
+    so `_probe_sdk_reset()` blocks forever and `_lifespan` never returns.
+
+    MEASURED 2026-11-05, CI run 42025169439, required check `test (d)`: the leg
+    stopped at `1253 passed` for 16 minutes and died at its 26m watchdog with
+    "failure set unobservable" — pytest-timeout fired at 4m40s inside
+    `tests/test_body_cap_sweep.py`'s `embedded_client` fixture, and the stack
+    dump was exactly `_registry_anchor` -> `_registry_probe_sdk` -> `_make_sdk`
+    blocked entering `_KEEPALIVE_LOCK`.
+
+    The leg asks for the lock NON-BLOCKINGLY, so it reports the pre-fix
+    deadlock condition as `False` instead of wedging the whole session.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/probe-lock")
+    ha._reset_registry_probe_sdk()
+    acquired: list[bool] = []
+
+    class _Recording:
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            pass
+
+    def _spy_make_sdk(*, namespace=None, graph_name=None):
+        got = ha._KEEPALIVE_LOCK.acquire(blocking=False)
+        acquired.append(got)
+        if got:
+            ha._KEEPALIVE_LOCK.release()
+        return _Recording()
+
+    monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+    try:
+        ha._registry_probe_sdk()
+    finally:
+        ha._reset_registry_probe_sdk()
+
+    assert acquired == [True], (
+        "the registry probe built its handle while HOLDING `_KEEPALIVE_LOCK`; "
+        "`_make_sdk`'s embedded branch takes that same non-reentrant lock as "
+        "soon as TORTOISE_DB_URI vanishes between the two reads, so the probe "
+        "self-deadlocks holding it and app startup hangs forever (#8867 f2)")
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_losing_builder_neither_installs_nor_LEAKS_its_handle(monkeypatch):
+    """Concurrency: the pre-fix arm's stated guarantee ("two worker threads
+    cannot both build one and leak the loser") must SURVIVE the lock being
+    released for the construction — otherwise the fix trades a deadlock for a
+    connection leak or for two live cached handles.
+
+    Both builders are parked inside `_make_sdk` on a barrier, so both have a
+    handle before either can install. The winner installs; the loser must
+    return the WINNER's handle (one cached handle per identity) and close its
+    own.
+    """
+    import threading
+
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/probe-race")
+    ha._reset_registry_probe_sdk()
+    built: list = []
+    barrier = threading.Barrier(2, timeout=30)
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _spy_make_sdk(*, namespace=None, graph_name=None):
+        handle = _Handle()
+        barrier.wait()  # both builders hold a handle before either installs
+        return handle
+
+    monkeypatch.setattr(ha, "_make_sdk", _spy_make_sdk)
+    handed: dict[str, object] = {}
+
+    def _run(tag):
+        handed[tag] = ha._registry_probe_sdk()
+
+    threads = [threading.Thread(target=_run, args=(tag,), daemon=True)
+               for tag in ("a", "b")]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(30)
+        assert not any(thread.is_alive() for thread in threads), (
+            "a concurrent registry probe deadlocked")
+        assert handed["a"] is handed["b"], (
+            "two handles were handed out for ONE cache identity — the losing "
+            "builder installed its own instead of yielding to the winner")
+        assert len(built) == 2, built
+        losers = [handle for handle in built if handle is not handed["a"]]
+        assert len(losers) == 1, (built, handed)
+        assert losers[0].closed == 1, (
+            "the losing builder's handle was closed neither by the install "
+            "path nor by itself — an unreachable connection leak")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_URI_drift_DURING_the_build_is_REBUILT_not_cached_under_either_identity(
+        monkeypatch):
+    """A drift that lands between the identity read and the build costs one
+    REBUILD, and no handle is ever cached against an identity it may not have
+    been built for.
+
+    `_make_sdk` re-reads `TORTOISE_DB_URI` immediately before it constructs, so
+    a reconfiguration in that gap can bind the handle to a server this caller
+    never named, while leaving it filed under the identity this caller read.
+    The stability rule (pre-read == post-read) cannot tell such a handle from a
+    correct one, so it REFUSES it: the first handle is closed un-installed and
+    the second — built entirely under the drifted identity — is what gets
+    cached. Pre-fix the first handle was cached under the POST-build identity,
+    which is only right when the build itself did not drift.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/drift-old")
+    ha._reset_registry_probe_sdk()
+    built = []
+
+    class _Recording:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _drifting_make_sdk(*, namespace=None, graph_name=None):
+        # The reconfiguration lands AFTER the caller read the identity and
+        # BEFORE the handle exists — `_make_sdk` would build for the NEW URI.
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/drift-new")
+        return _Recording()
+
+    monkeypatch.setattr(ha, "_make_sdk", _drifting_make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()
+        assert ha._REGISTRY_PROBE_URI.endswith("/drift-new"), (
+            "the cached identity kept the pre-build URI, so the handle built "
+            "against the NEW server is filed under the OLD one")
+        assert len(built) == 2, (
+            f"the ambiguous build was CACHED instead of rebuilt: {built}")
+        assert hand is built[1], (
+            "the handle built across the drift was installed; only the handle "
+            "built entirely under the identity we cached may be")
+        assert built[0].closed == 1, (
+            "the discarded (ambiguous) handle was neither installed nor "
+            "closed — a connection leak")
+        assert ha._registry_probe_sdk() is hand, (
+            "a repeat call at the identity we just recorded rebuilt the handle")
+        assert len(built) == 2, built
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_a_drift_during_the_BIND_never_files_the_old_graph_under_the_new_identity(
+        monkeypatch):
+    """REGRESSION PIN (measured, CI run 42069864951).
+
+    The window a post-build identity read has to cover is not the microseconds
+    between two reads — it is the WHOLE eager bind (`_get_proj()`: connect plus
+    nine `CREATE INDEX`). A pin re-bound inside it produced a handle bound to
+    the PREVIOUS test's path-derived graph and filed it under the NEW pin: the
+    auth path trusts this cache, so it read a graph the test never seeded. That
+    is the fail-open behind the two reds of that run —
+    `tests/test_invites_http.py::TestInviteCreate::test_unknown_team_404`
+    (`assert 403 == 404`, shard (g)) and the empty `GET /v1/organizations` in
+    `tests/test_onboarding_endpoints.py::TestOnboardingTeam::\
+    test_create_team_then_session_key_mint_registry` (shard (f)).
+
+    The pre-fix code installed the pre-drift handle under the post-drift
+    identity and left the ambiguity unclosed, so this leg reds on it: the
+    pre-drift handle must be closed un-installed, and the handle handed out must
+    be the one built entirely after the drift.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/bind-prev-test")
+    ha._reset_registry_probe_sdk()
+    built = []
+    drifted: list[bool] = []
+
+    class _Handle:
+        def __init__(self, index):
+            self.index = index
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            # The reconfiguration lands DURING the eager bind, i.e. AFTER
+            # `_make_sdk`'s own env read — so THIS handle addresses the graph
+            # that was configured when it was constructed (the previous test's),
+            # never the one the new pin names.
+            if not drifted:
+                drifted.append(True)
+                monkeypatch.setenv("TORTOISE_DB_URI",
+                                   "docker://:pw@localhost:6379/bind-this-test")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        return _Handle(len(built))
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()
+        assert hand is built[-1] and hand.index == 1, (
+            "the probe handed out (or cached) the handle built BEFORE the "
+            "drift — it addresses the previous test's graph, and the auth path "
+            "reads through this cache (#9334 :35278 class)")
+        assert built[0].closed == 1, (
+            "the ambiguous pre-drift handle was neither installed nor closed — "
+            "the pre-fix code left it installed under the NEW identity")
+        assert hand.closed == 0, "the installed handle was closed"
+        assert ha._REGISTRY_PROBE_URI.endswith("/bind-this-test")
+        assert ha._registry_probe_sdk() is hand, (
+            "a repeat call at the recorded identity rebuilt a correctly-paired "
+            "handle — the cache the probe exists for was defeated")
+        assert len(built) == 2, built
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #8867 embedded keepalive lock protocol (URI-less lane, D14)
+def test_an_identity_that_never_settles_is_served_UNCACHED_never_installed(
+        monkeypatch):
+    """The bound on the rebuild: an identity that churns through every attempt
+    must leave the cache EMPTY rather than install a pairing it cannot vouch
+    for, and it must not leak the handles it refused.
+
+    An un-cached handle can mislead only the call that built it; an installed
+    one misleads every later caller on that identity, for the life of the
+    process. So the retry is bounded (`_REGISTRY_PROBE_BUILD_ATTEMPTS`) and the
+    last resort is "serve, do not cache" — plus a warning, because a process
+    whose identity never settles is a configuration fault, not a routine miss.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/churn-0")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            # EVERY build drifts, so no attempt can ever see a stable identity.
+            churn["n"] += 1
+            monkeypatch.setenv("TORTOISE_DB_URI",
+                               f"docker://:pw@localhost:6379/churn-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle())
+    try:
+        hand = ha._registry_probe_sdk()
+        assert hand is built[-1], "the probe did not hand back the last build"
+        assert ha._REGISTRY_PROBE_SDK is None and ha._REGISTRY_PROBE_URI is None, (
+            "an unvouchable pairing was INSTALLED — every later caller on that "
+            "identity now reads the graph of a handle nobody could identify")
+        assert len(built) == ha._REGISTRY_PROBE_BUILD_ATTEMPTS + 1, (
+            f"the retry was not bounded at {ha._REGISTRY_PROBE_BUILD_ATTEMPTS} "
+            f"attempts plus the un-cached fallback: {len(built)} builds")
+        assert ha._REGISTRY_PROBE_SDK is None and ha._REGISTRY_PROBE_URI is None, (
+            "an unvouchable pairing was INSTALLED — every later caller on that "
+            "identity now reads the graph of a handle nobody could identify")
+        assert [handle.closed for handle in built[:-1]] == [1] * len(built[:-1]), (
+            "a discarded handle was not closed — a connection leak per churn")
+        assert hand.closed == 0, "the served handle was closed before use"
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+def test_a_TORN_cache_publication_cannot_pair_a_new_handle_with_the_OUTGOING_identity(
+        monkeypatch):
+    """The cache must switch identity ATOMICALLY, or the auth path gets a
+    wrong-graph handle (#11001 review, P2).
+
+    The install path used to store the handle and its identity as SEPARATE
+    globals (`_REGISTRY_PROBE_SDK = sdk`, then the `(_URI, _PATH)` pair), and
+    the fast path read them with no lock held. A reader landing between the two
+    stores read its own identity (still the outgoing one), then the freshly
+    installed handle, then the not-yet-updated identity — all three agreed, and
+    it was handed a handle built for a DIFFERENT graph. This reproduces exactly
+    that interleaving by seeding the state a mid-install reader would observe:
+    the OLD identity on the scalars, the NEW handle already published, and the
+    atomic tuple naming the pairing that handle was really built for.
+
+    The pre-fix arm returns the poisoned handle (RED); the fix reads ONE global
+    and therefore misses, builds, and serves a handle for the identity the
+    process actually resolves to.
+    """
+    import tortoise.hosted_api as ha
+
+    uri_a = "docker://:pw@localhost:6379/torn-a"
+    uri_b = "docker://:pw@localhost:6379/torn-b"
+    monkeypatch.setenv("TORTOISE_DB_URI", uri_a)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()
+    built = []
+
+    class _Handle:
+        def __init__(self, tag):
+            self.tag = tag
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    poisoned = _Handle("built-for-B")
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle("built-for-A"))
+    try:
+        # The torn state, exactly as the two-store window left it: NEW handle
+        # already visible, identity scalars still naming the OUTGOING pin.
+        ha._REGISTRY_PROBE_SDK = poisoned
+        ha._REGISTRY_PROBE_URI = uri_a
+        ha._REGISTRY_PROBE_PATH = ""
+        ha._REGISTRY_PROBE_CACHE = ((uri_b, ""), poisoned)
+
+        hand = ha._registry_probe_sdk()
+        assert hand is not poisoned, (
+            "the probe served a handle built for the OTHER identity — the "
+            "#9334 wrong-graph class on the auth path, from a torn "
+            "handle/identity publication")
+        assert hand.tag == "built-for-A", hand.tag
+        assert poisoned.closed == 1, (
+            "the superseded handle was neither replaced-and-closed nor "
+            "retired — it was simply left in the mirror")
+        # After the call the cache names the identity the process resolves to.
+        assert ha._REGISTRY_PROBE_CACHE is not None
+        assert ha._REGISTRY_PROBE_CACHE[0] == ha._registry_probe_identity()
+        assert ha._REGISTRY_PROBE_CACHE[1] is hand
+        assert ha._registry_probe_sdk() is hand, (
+            "a repeat call at the recorded identity rebuilt a correctly-paired "
+            "handle — the cache the probe exists for was defeated")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+def test_the_un_cached_fallback_INSTALLS_nothing_and_LEAVES_a_pre_existing_entry_alone(
+        monkeypatch):
+    """The last resort declines to INSTALL — it does not empty the cache
+    (#10962 round-6 obs 2).
+
+    The two are different behaviours, and the churn leg cannot tell them apart:
+    it calls `_reset_registry_probe_sdk()` first, so the cache is already `None`
+    before the call, and "installed nothing" is indistinguishable from "cleared
+    it". Here an entry is CACHED FIRST, at a stable identity, and only then does
+    the identity churn through every attempt.
+
+    The correct outcome is that the earlier entry SURVIVES untouched. A churning
+    identity can never equal the identity that entry is filed under, so it can
+    never be matched to it; evicting it would only close a handle a concurrent
+    caller may still be using (#8867 finding 1's close-under-use hazard), and
+    would defeat the cache for the stable identity a later request arrives on.
+    The comment claimed "Cache NOTHING", which reads as an eviction; it now says
+    what the code does.
+
+    Discrimination: this reds on the plausible "fix" — clearing
+    `_REGISTRY_PROBE_CACHE` in the fallthrough — measured, not assumed.
+    """
+    import tortoise.hosted_api as ha
+
+    stable = "docker://:pw@localhost:6379/stable-a"
+    monkeypatch.setenv("TORTOISE_DB_URI", stable)
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"on": False, "n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            if churn["on"]:
+                churn["n"] += 1
+                monkeypatch.setenv(
+                    "TORTOISE_DB_URI",
+                    f"docker://:pw@localhost:6379/churn-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    monkeypatch.setattr(ha, "_make_sdk",
+                        lambda *, namespace=None, graph_name=None: _Handle())
+    try:
+        first = ha._registry_probe_sdk()  # cached, at the STABLE identity
+        assert ((stable, ""), first) == ha._REGISTRY_PROBE_CACHE
+
+        # Identity churns under EVERY build, starting from an identity that
+        # differs from the cached one so the fast path misses.
+        churn["on"] = True
+        monkeypatch.setenv("TORTOISE_DB_URI",
+                           "docker://:pw@localhost:6379/stable-b")
+        served = ha._registry_probe_sdk()
+
+        assert served is built[-1], "the fallback did not serve its last build"
+        assert ((stable, ""), first) == ha._REGISTRY_PROBE_CACHE, (
+            "the un-cached fallback TOUCHED the cache — it must install nothing "
+            "and evict nothing. The pre-existing entry's identity cannot match "
+            "a churning one, so destroying it only removes a handle a "
+            f"concurrent caller may be using. cache={ha._REGISTRY_PROBE_CACHE}")
+        assert first.closed == 0, (
+            "the pre-existing cached handle was CLOSED by a churn on a "
+            "DIFFERENT identity — close-under-use (#8867 finding 1)")
+        assert [h.closed for h in built[1:-1]] == [1] * len(built[1:-1]), (
+            "a discarded (never-installed) handle was not closed")
+        assert served.closed == 0, "the served handle was closed before use"
+
+        # The surviving entry is still SERVED at its own identity, so the churn
+        # did not cost the stable caller its handle.
+        monkeypatch.setenv("TORTOISE_DB_URI", stable)
+        assert ha._registry_probe_sdk() is first, (
+            "the stable identity's cached handle was lost to a churn on another "
+            "identity — the cache the probe exists for was defeated")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+@pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
+def test_a_reset_DURING_the_build_is_not_undone_by_the_builder(monkeypatch):
+    """#10962 review finding 1 — the reset is an INVALIDATION BARRIER for a build
+    already in flight, not only a clear of what is cached.
+
+    Construction runs OUTSIDE `_KEEPALIVE_LOCK` (#8867 finding 2) and lasts the
+    whole `_get_proj()` (a connect plus nine `CREATE INDEX` statements), so a
+    reset can COMPLETE while a builder is inside `_make_sdk`. The identity then
+    still holds still (nothing rebound the env), so the stability rule passes and
+    the builder's only remaining question was "does an entry match my identity?"
+    — never "was the cache invalidated since I started?". On the pre-fix arm it
+    therefore INSTALLS the handle it began before the reset and the cache is
+    repopulated behind a teardown hook that already returned: the #5049 rule-4
+    order-dependence the reset exists to prevent, on the BUILDER side.
+
+    The reset here finds an EMPTY cache on purpose — that is the shape the old
+    lock-free "nothing to close" fast path returned from, and it is exactly the
+    case where a builder has installed nothing yet, so a reset that skipped the
+    invalidation would leave the contract open. Discrimination: this reds on
+    pre-fix `hosted_api.py` at BOTH the rebuild count and the close count.
+    """
+    import tortoise.hosted_api as ha
+
+    monkeypatch.setenv("TORTOISE_DB_URI",
+                       "docker://:pw@localhost:6379/reset-mid-build")
+    monkeypatch.setenv("TORTOISE_DB_PATH", "")
+    ha._reset_registry_probe_sdk()  # empty cache: nothing for the reset to clear
+    built = []
+    armed = {"on": True}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        handle = _Handle()
+        if armed["on"]:
+            armed["on"] = False
+            # The autouse per-test teardown (`tests/conftest.py`
+            # `_process_global_isolation` -> `_reset_registry_probe_sdk`) lands
+            # while we are INSIDE the build. It does not wait for us: the build
+            # holds no lock, which is the whole reason the in-lock mutual
+            # exclusion that used to guarantee #5049 rule 4 is gone.
+            ha._reset_registry_probe_sdk()
+        return handle
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()
+        assert len(built) == 2, (
+            "the builder INSTALLED the handle it began before the reset instead "
+            f"of discarding it and rebuilding: built={built}, "
+            f"cache={ha._REGISTRY_PROBE_CACHE}")
+        assert built[0].closed == 1, (
+            "the pre-reset handle was not closed un-installed — the reset "
+            "returned and its effect was undone behind it (#5049 rule 4)")
+        assert hand is built[1], (
+            "the caller was handed a handle built BEFORE the reset returned")
+        assert hand.closed == 0, "the served handle was closed before use"
+        assert (
+            ha._registry_probe_identity(),
+            built[1],
+        ) == ha._REGISTRY_PROBE_CACHE, (
+            "the cache holds a handle built before the reset returned: "
+            f"cache={ha._REGISTRY_PROBE_CACHE}, built={built}")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
+def test_the_reset_clears_the_atomic_tuple_BEFORE_the_scalars():
+    """The ORDER of the reset's stores is the fix, and it is not observable at
+    close time — every ordering clears before `sdk.close()` — so a post-
+    condition assertion cannot discriminate it (round 8, P3: the earlier one was
+    green against the buggy ordering).
+
+    Pin it where it lives. Clearing the tuple LAST (round 7's defect) leaves a
+    lock-free reader being served the handle the reset is about to close: the
+    fast path reads only the tuple, so the tuple's store must come FIRST.
+    """
+    import dis
+
+    import tortoise.hosted_api as ha_mod
+
+    def first_store(name):
+        for ins in dis.get_instructions(ha_mod._reset_registry_probe_sdk):
+            if ins.opname == "STORE_GLOBAL" and ins.argval == name:
+                return ins.offset
+        raise AssertionError(
+            f"_reset_registry_probe_sdk never stores {name} — the teardown no "
+            "longer clears it")
+
+    tuple_at = first_store("_REGISTRY_PROBE_CACHE")
+    sdk_at = first_store("_REGISTRY_PROBE_SDK")
+    assert tuple_at < sdk_at, (
+        "the reset stores the sdk mirror BEFORE clearing the atomic tuple "
+        f"(tuple@{tuple_at} must precede sdk@{sdk_at}) — a lock-free reader "
+        "keeps being served the handle this call is about to CLOSE")
+
+
+def test_the_registry_probe_retry_is_BOUNDED_and_it_is_not_a_spin(
+        monkeypatch):
+    """A never-settling identity must make the call RETURN, not spin.
+
+    ⛔ THIS PINS THE OUTCOME, NOT THE CONSTANT (#10962 round-6 obs 3). Its
+    previous body was a single `assert 2 <= _REGISTRY_PROBE_BUILD_ATTEMPTS <= 5`
+    — a restatement of a production constant, which cannot fail for any change
+    to the loop and only reds on an edit to a number (a design pin, not a test).
+    The property a request path actually needs is that the loop ENDS with a
+    handful of builds whatever the budget happens to be; the churn leg already
+    pins the exact `attempts + 1` count against the constant, which is what
+    frees the constant to move here.
+
+    `_SPIN_CEILING` is chosen independently of the constant on purpose: it is
+    the behavioural ceiling this test will accept, so raising the budget by a
+    little stays green while turning the retry into a spin goes red. A spin
+    FAILS FAST instead of hanging — the build past the ceiling raises.
+    """
+    import tortoise.hosted_api as ha
+
+    _SPIN_CEILING = 8  # deliberately NOT `_REGISTRY_PROBE_BUILD_ATTEMPTS`
+
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:pw@localhost:6379/spin-0")
+    ha._reset_registry_probe_sdk()
+    built = []
+    churn = {"n": 0}
+
+    class _Handle:
+        def __init__(self):
+            self.closed = 0
+            built.append(self)
+
+        def _get_proj(self):
+            churn["n"] += 1
+            monkeypatch.setenv(
+                "TORTOISE_DB_URI",
+                f"docker://:pw@localhost:6379/spin-{churn['n']}")
+            return object()
+
+        def close(self):
+            self.closed += 1
+
+    def _make_sdk(*, namespace=None, graph_name=None):
+        if len(built) >= _SPIN_CEILING:
+            raise AssertionError(
+                f"the probe is building handle #{len(built) + 1} for a "
+                f"never-settling identity — the retry SPINS on the request "
+                f"path instead of reaching the un-cached fallback")
+        return _Handle()
+
+    monkeypatch.setattr(ha, "_make_sdk", _make_sdk)
+    try:
+        hand = ha._registry_probe_sdk()  # must RETURN, not spin and not raise
+        assert hand is built[-1], "the probe did not hand back its last build"
+        assert len(built) <= _SPIN_CEILING, (
+            f"the retry built {len(built)} handles for a never-settling "
+            f"identity — that is a spin, not a bound")
+    finally:
+        ha._reset_registry_probe_sdk()
+
+
 
 
 @pytest.mark.embedded_only  # #2172 embedded keepalive anchor race (URI-less lane, D14)
@@ -10680,6 +11433,15 @@ class TestUriRegistryProbeConnectionReuse:
             "the reset dropped the cached handle WITHOUT closing it — a "
             "connection leak per test in the URI lane")
         assert ha_mod._REGISTRY_PROBE_SDK is None
+        # The post-condition below guards "the tuple is never cleared" only —
+        # every ordering clears it before the close, so the ORDER itself is
+        # pinned by its own leg (`test_the_reset_clears_the_atomic_tuple_BEFORE_
+        # the_scalars`). Stated here so a green assertion is not mistaken for an
+        # order guard (round 8, P3).
+        assert ha_mod._REGISTRY_PROBE_CACHE is None, (
+            "the reset left the ATOMIC publication in place — the fast path reads "
+            "that tuple (not the mirror) and would keep serving the handle this "
+            "call just closed")
         assert ha_mod._registry_existing_graphs() == {"org_a"}
         assert len(constructed) == 2, "the reset did not clear the cache"
 

@@ -108,6 +108,85 @@ def test_status_forwards_driver_not_configured(monkeypatch, capsys):
     assert json.loads(capsys.readouterr().out)["status"] == "unconfigured"
 
 
+def test_the_rewrite_rule_is_the_TERM_set_not_the_narrower_legacy_pair(monkeypatch, capsys):
+    """The rewrite's rule is `raw not in CLIENT_STATUS_TERMS` — stated as code.
+
+    This probe's docstring claimed the rewrite applies to a word in
+    `LEGACY_WORDS_NEEDING_CONFIGURATION` (in practice `tortoise_unavailable`),
+    which is a NARROWER rule than the code applies and differs on a reachable
+    input: `not_configured` is a flat legacy word that resolves to
+    `unconfigured` and is NOT in the recorded term set, so the code rewrites it
+    (`url: None`, `configured: false`) where the narrower rule passes it
+    through verbatim (#10790 review, P3).
+
+    No behavioural defect was in the code — the payload is defensible for
+    `not_configured` too — so this pins BOTH halves: the payload the code
+    produces for that word, and the rule the docstring names. Without the
+    second arm a maintainer "correcting" the code toward the narrower sentence
+    would silently change a legacy-word payload and no test would red.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
+    monkeypatch.setattr(cli, "status", _fake_status("not_configured"))
+
+    assert cli.main(["status"]) == 4  # a SET-UP gap, not an outage
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unconfigured"
+    assert out["url"] is None, (
+        f"a legacy word with no declared endpoint must drop the driver's "
+        f"default url, as `tortoise_unavailable` does: {out}")
+    assert out["configured"] is False, out
+
+    doc = " ".join((cli._probe_payload.__doc__ or "").split())
+    assert "CLIENT_STATUS_TERMS" in doc, (
+        "the docstring must state the rule the code applies — a word OUTSIDE "
+        "`CLIENT_STATUS_TERMS`. Naming only "
+        "`LEGACY_WORDS_NEEDING_CONFIGURATION` describes a narrower rule that "
+        "does not rewrite `not_configured`, which is the word this test just "
+        "rewrote")
+
+
+def test_a_missing_key_refusal_keeps_the_endpoint_it_probed(monkeypatch, capsys):
+    """The driver's `unconfigured` is passed through VERBATIM (#10605 review, P1).
+
+    MEASURED BEFORE THIS PIN: the driver refusing for a MISSING KEY reports its
+    refusal under the recorded `unconfigured` term — `{"status": "unconfigured",
+    "url": "http://localhost:8000/mcp/", "error": "MCP-KEY-EMPTY: …"}` — and with
+    `TORTOISE_MCP_URL` unset this probe rewrote it to `{"status":
+    "unconfigured", "url": null, "configured": false, …}`. An endpoint WAS
+    resolved and CONTACTED and the gap was the credential, so a caller branching
+    on `configured` was told to declare an endpoint it already had: exactly the
+    misattribution #10605 exists to remove, and the opposite of what this
+    module's own docstring promised.
+
+    The rewrite is therefore keyed on the driver's word being OUTSIDE the
+    recorded term set — only the two-outcome outage word needs `configured`.
+    """
+    monkeypatch.delenv("TORTOISE_MCP_URL", raising=False)
+    # ⛔ NON-VACUITY, stated rather than assumed (#10790 review, P3): with an endpoint still
+    # DECLARED by some other input, `configured` is True and the rewrite this test forbids never
+    # has a chance to fire — the assertions below would pass against the pre-fix code. Clearing
+    # the env var is the setup; this is the precondition.
+    monkeypatch.setattr(cli, "endpoint_declared", lambda: False)
+    assert cli.endpoint_declared() is False
+    refusal = {
+        "status": "unconfigured",
+        "url": "http://localhost:8000/mcp/",
+        "error": ("MCP-KEY-EMPTY: the MCP endpoint rejected this request as "
+                  "unauthenticated and NO credential resolved on the client"),
+    }
+    monkeypatch.setattr(cli, "status", lambda: dict(refusal))
+
+    assert cli.main(["status"]) == 4  # still a SET-UP gap, not an outage
+    out = json.loads(capsys.readouterr().out)
+    assert out["status"] == "unconfigured"
+    assert out["url"] == "http://localhost:8000/mcp/", (
+        f"the endpoint the driver actually probed was discarded: {out}")
+    assert "configured" not in out, (
+        "a missing credential was re-reported as a missing endpoint: "f"{out}")
+    assert "MCP-KEY-EMPTY" in out["error"]
+
+
 def test_call_failure_keeps_exit_one(monkeypatch, capsys):
     """1 is KEPT for a query that genuinely fails — the supersede is narrow."""
 

@@ -1285,12 +1285,50 @@ class MentionScan:
         self._chunk = chunk
         self.resume_offset = self._start
 
+    def _open(self):
+        """The scan's handle, opened so a SPECIAL file cannot PARK the call.
+
+        ⛔ This scan runs on ``update_point``'s ABSENT-write path, synchronously
+        inside an HTTP-exposed call, so the open must not be able to WAIT. A
+        plain ``open`` on a FIFO left at the journal path blocks until a writer
+        appears — the same parking failure :func:`_read_regular_range` exists to
+        prevent, guarded the same way (``O_NONBLOCK`` so the open cannot wait,
+        ``S_ISREG`` so a device or directory is refused instead of read as
+        garbage).
+
+        ⚠️ ``O_NOFOLLOW`` is DELIBERATELY NOT added, unlike on the seam read: a
+        SYMLINKED journal is a supported shape HERE. Everything else on this
+        path follows the link — ``os.stat`` and this scan — while ``tail_bytes``
+        (``O_NOFOLLOW``) cannot open it at all, and it is exactly that asymmetry
+        that makes ``_journal_seam``'s unreadable branch reachable and keeps
+        ``test_a_seam_that_cannot_be_read_drops_the_map_instead_of_trusting_it``
+        meaningful. Adding ``O_NOFOLLOW`` here would silently retire that guard.
+
+        A non-regular file RAISES, which is what ``open`` already did for a
+        directory. ⛔ The CALLER's reading of that raise is NOT "drop the memo and
+        re-fold" — that is ``tail_bytes``'s reading on the seam path. A raising
+        scan reaches :func:`_journal_knows_point`'s ``except Exception`` arm,
+        which answers UNJUDGED (``None`` ⇒ ``journal_unreadable``) and leaves the
+        retained memo alone: it is still a valid prefix of the journal, and this
+        failure says nothing about those bytes. Unjudged is the conservative
+        direction — the loss is REPORTED, never asserted to be a typo.
+        """
+        fd = os.open(self._path, os.O_RDONLY | os.O_NONBLOCK)
+        try:
+            if not stat.S_ISREG(os.fstat(fd).st_mode):
+                raise OSError(errno.EINVAL,
+                              'journal is not a regular file', str(self._path))
+        except BaseException:
+            os.close(fd)
+            raise
+        return os.fdopen(fd, 'rb')
+
     def __iter__(self) -> Iterator[bytes]:
         chunk_size = self._chunk or EventLog.MENTION_SCAN_CHUNK
         consumed = self._start
         tail = b''
         self.resume_offset = self._start
-        with open(self._path, 'rb') as fh:
+        with self._open() as fh:
             if self._start:
                 fh.seek(self._start)
             while True:

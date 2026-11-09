@@ -49,6 +49,20 @@ class MockModel:
         return resp
 
 
+#: #10997 — the search result a MINT is licensed by. `#2552`'s mint-before-wire
+#: fabricates a `statement` Point out of a model ref, which is an identity
+#: ASSERTION; §4.4's I1 licenses it only on a lookup that RESOLVED. A test that
+#: exercises the mint must therefore pass a COMPLETE lookup — `{}` means "the
+#: lookup did not run", and the pre-pass now HOLDS the edge instead (pinned in
+#: `tests/test_10997_identity_hold.py`).
+RESOLVED_SEARCH = {
+    "mode": "real", "degraded": False, "reason": None,
+    "entities": [], "points": [], "events": [], "queries_run": 5,
+    "query_coverage": {"derived": {"object": 2, "event": 1, "point": 2},
+                       "ran": {"object": 2, "event": 1, "point": 2},
+                       "failed": {"object": 0, "event": 0, "point": 0}},
+}
+
 S2_FIXTURE = {
     "entities": [
         {"name": "single-flash pipeline", "kind": "core:plan", "lifecycle": "created",
@@ -2040,7 +2054,7 @@ class TestS5:
         embed = json.loads(json.dumps(S2_FIXTURE))
         embed["operators"].append({"src": "not a real content",
                                    "dst": "also not", "op_type": "IMPL"})
-        result = v2.execute_embed(embed, {}, session_id="s1")
+        result = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         # Pass 1 emits IMPL/NAND in input order; pass 2 appends MITIGATES —
         # so the appended IMPL is index 1 and the fixture's MITIGATES is last.
         assert [o["op_type"] for o in result["payload"]["operators"]] == \
@@ -2072,7 +2086,7 @@ class TestS5:
              "dst": "The owner paused the solar cleaning tier", "op_type": "MITIGATES",
              "target_edge": {"src": "ghost", "dst": "ghost2", "op_type": "IMPL"},
              "strength": 0.3}]
-        result = v2.execute_embed(embed, {}, session_id="s1")
+        result = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         types = [o["op_type"] for o in result["payload"]["operators"]]
         assert types == ["IMPL", "MITIGATES"]
         ids = {p["content"]: p["id"] for p in result["payload"]["points"]}
@@ -2098,7 +2112,7 @@ class TestS5:
             {"src": "the missing claim", "dst": "a third missing claim",
              "op_type": "NAND"},
         ]
-        r = v2.execute_embed(embed, {}, session_id="s1")
+        r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         pts = r["payload"]["points"]
         contents = [p["content"] for p in pts]
         assert contents.count("the missing claim") == 1
@@ -2128,7 +2142,7 @@ class TestS5:
             {"src": "cleaning-pass tier",          # an EMITTED entity name
              "dst": "The owner paused the solar cleaning tier",
              "op_type": "IMPL"}]
-        r = v2.execute_embed(embed, {}, session_id="s1")
+        r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         assert r["payload"]["operators"] == []
         assert r["stats"]["operator_endpoints_minted"] == 0
         assert not any(p["content"] == "cleaning-pass tier"
@@ -2164,7 +2178,7 @@ class TestS5:
             {"src": long_ref,
              "dst": "The owner paused the solar cleaning tier",
              "op_type": "IMPL"}]
-        r = v2.execute_embed(embed, {}, session_id="s1")
+        r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         ops = [o for o in r["payload"]["operators"] if o["op_type"] == "IMPL"]
         assert len(ops) == 1
         assert not any("did not resolve" in w for w in r["warnings"])
@@ -2432,7 +2446,7 @@ class TestS5:
         embed["operators"] = [
             {"src": "orphan claim alpha", "dst": "orphan claim beta",
              "op_type": "MITIGATES", "strength": 0.3}]
-        r = v2.execute_embed(embed, {}, session_id="s1")
+        r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         assert r["payload"]["operators"] == []
         assert r["payload"]["points"] == []
         assert r["stats"]["operator_endpoints_minted"] == 0
@@ -2456,7 +2470,7 @@ class TestS5:
             "points": [{"content": obs, "pointKind": "statement"}],
             "operators": [{"src": obs, "dst": claim, "op_type": "IMPL"}],
         }
-        r = v2.execute_embed(embed, {}, session_id="s1")
+        r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1")
         ids = {p["content"]: p["id"] for p in r["payload"]["points"]}
         assert claim in ids  # the endpoint the grader anchors on now exists
         assert [o["op_type"] for o in r["payload"]["operators"]] == ["IMPL"]
@@ -3300,7 +3314,7 @@ class TestValueVerbSpan2684:
             embed = {"entities": [], "points": [], "events": [],
                      "operators": [{"src": src, "dst": "the retro doc",
                                     "op_type": "IMPL"}]}
-            r = v2.execute_embed(embed, {}, session_id="s1", edus=edus)
+            r = v2.execute_embed(embed, RESOLVED_SEARCH, session_id="s1", edus=edus)
             return r, {p["content"]: p for p in r["payload"]["points"]}[src]
 
         # (a) verbatim-anchored and value-bearing -> a real address, re-readable
@@ -3346,7 +3360,7 @@ class TestValueVerbSpan2684:
             {"entities": [], "points": [], "events": [],
              "operators": [{"src": free, "dst": "the retro doc",
                             "op_type": "IMPL"}]},
-            {}, session_id="s1", edus=band_turn)
+            RESOLVED_SEARCH, session_id="s1", edus=band_turn)
         pt = {p["content"]: p for p in r["payload"]["points"]}[free]
         assert not v2._carries_value(free)
         assert pt["source_turn_id"] == 0 and pt["quote"] == ""   # the band route
@@ -3380,7 +3394,7 @@ class TestValueVerbSpan2684:
             {"entities": [], "points": [], "events": [],
              "operators": [{"src": content, "dst": "the retro doc",
                             "op_type": "IMPL"}]},
-            {}, session_id="s1", edus=edus)
+            RESOLVED_SEARCH, session_id="s1", edus=edus)
         pt = {p["content"]: p for p in r["payload"]["points"]}[content]
         assert "span_start" not in pt and "span_end" not in pt
         absences = [w for w in r["warnings"]

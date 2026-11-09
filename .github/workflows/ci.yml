@@ -277,7 +277,7 @@ jobs:
                   and not f.startswith("website/apps/"),
                   isfile("tests/e2e/test_welcome_page.py", "tests/e2e/conftest.py",
                          "tests/test_waitlist_subscribe.mjs",
-                         "tests/test_tenant_provision_cors.mjs",
+                         "tests/test_tenant_provision_server_only.mjs",
                          # #4481: the blog SSR markdown renderer's harness. Its
                          # subject (website/functions/blog/_lib.ts) already
                          # matches the website/ prefix, but the harness itself
@@ -518,6 +518,20 @@ jobs:
                   # skips the job (skipped, not failed). Same #3501 rationale as
                   # the auth-suite entries under `website` above.
                   isfile("tests/e2e/test_dashboard_onboarding.py"),
+                  # #11057: the browser-free half of the coming-soon dialog's
+                  # "which tile did that actually open" observation is its own
+                  # importable module (`tile_key_for_dialog_name`), for the same
+                  # reason as `preview_preflight.py` above and the same #4221
+                  # inversion if it is omitted: a PR touching ONLY this module
+                  # would leave the job `skipped` (reported as Success) while
+                  # never running the spec that consumes it (`_dialog_tile_key`
+                  # → `_tile_key_for_dialog_name` in
+                  # `test_every_coming_soon_tile_captures_its_click`).
+                  # ⛔ NOT because a test of the mapping runs here: those cases
+                  # live in `tests/test_dialog_tile_key.py` (registered on `core`)
+                  # precisely so they run WITHOUT this job's `RUN_DASHBOARD_E2E`
+                  # opt-in — see #11057 review ISSUE-1.
+                  isfile("tests/e2e/dialog_tile_key.py"),
                   # #2809: the identity spec is wired into the job now, and it
                   # spawns its own Supabase-bound preview — so a PR touching
                   # ONLY the spec, or only the mock it depends on, must run the
@@ -824,12 +838,46 @@ jobs:
         # `fetch-depth: 0` (see the checkout above), so this is where the ancestry
         # claim is actually proved. `--check` is verify-only; stdlib only, so it
         # needs nothing from the `pip install` above (kept for its siblings).
+        # #11084: the surface map's own guard (`tools/test_design_map_check.py`,
+        # pinning `docs/epics/2026-11-04-5090-vector-layer/TEST-DESIGN-surface-map.md`)
+        # joins for the same reason again — a docs-only edit of the map selects no
+        # surface — and for one that is specific to it: the map EXISTS to be a
+        # checklist for the #5090 capstone (#11089), and a checklist that silently
+        # loses a row is the failure the artifact was written to prevent. The tool
+        # is stdlib only, reads one file, touches no DB and no network.
+        # #2820: the memory-substrate problem map's drift guard
+        # (`tools/problem_map_check.py`, pinning
+        # `docs/architecture/MEMORY-SUBSTRATE-PROBLEM-MAP.md`) joins for the SAME
+        # reason as its #5086 sibling above — a docs-only edit of the map selects
+        # NO surface, so its own test reaches it only through the curated `tier1`
+        # list, and `docs` is the required, path-filter-free context that cannot
+        # inherit that skip — plus the ancestry reason stated there: its third
+        # claim is that every row's anchor commit is reachable from `HEAD`, which
+        # the depth-1 `test` job cannot answer at all (it reports exit 2
+        # UNVERIFIED rather than blaming the document). This job checks out at
+        # `fetch-depth: 0`, so this is where that claim is actually proved.
+        # Stdlib only, so it needs nothing from the `pip install` above.
+        #
+        # BOTH arms of the surface map guard run. `--self-test` is the arm that proves the checker still
+        # catches the mutations the map's "not trusted" claim rests on: a rule
+        # quietly weakened in a way a document mutation can reach (a reverted width
+        # or parity rule) reds it instead of passing silently, and an arm nothing
+        # runs is not a guard. ⚠️ The word floor is NOT in that class: `MIN_FAILURE_WORDS`
+        # 8 -> 7 (or 4) stays green on both arms, because the only floor case sits at
+        # 3 words (measured sweep, 21/21 through 8..4, exit 1 at 3). That lowering is
+        # review-visible only — do not read a green arm as covering it.
+        # A shrunk mutation POPULATION is caught by the tool's own floor, not by this arm.
+        # Both lines sit INSIDE the exact list the two `docs`-job pins assert, so
+        # neither can be appended around them.
         run: |
           pip install -e . --quiet
           python3 tools/bridge_table.py --check
           python3 tools/mcp_rename_table.py --check
           python3 tools/sdk_surface.py --check
           python3 tools/substrate_map_check.py --check
+          python3 tools/problem_map_check.py --check
+          python3 tools/test_design_map_check.py
+          python3 tools/test_design_map_check.py --self-test
       - uses: actions/setup-node@v4
         with:
           node-version: '22'
@@ -1503,7 +1551,7 @@ jobs:
     # `ubuntu-latest`), so every `runs-on: ubuntu-latest` job is served ONLY by
     # GitHub-hosted — measured job queue wait in run 41320964047: 15.3, 17.8,
     # 19.0, 25.5, 33.7, 34.5, 37.6 and 39.0 MINUTES — while 10 of 12 pool runners
-    # sat idle. The required legs CANNOT be routed here: `python-ci.yml:1891`
+    # sat idle. The required legs CANNOT be routed here: `python-ci.yml:2151`
     # and `docs/ops/ci-runner-x64.md:65` REFUSE a `self-hosted` pin for them,
     # because such a pin removes the GitHub-hosted half of the race and a
     # hosted outage then leaves the required aggregate pending forever.
@@ -2161,8 +2209,14 @@ jobs:
         # The only enforcement of "a view never touches the mailing list": the
         # gate writes deck_views, and joining the list stays a separate act.
         run: node --experimental-strip-types tests/test_deck_view.mjs
-      - name: Run tenant-provision CORS runtime harness (#1110)
-        run: node --experimental-strip-types tests/test_tenant_provision_cors.mjs
+      - name: Run tenant-provision server-only runtime harness (#1120)
+        # Replaced the #1111 CORS harness: the browser caller it existed for is
+        # gone, and the function is now reached only by the dashboard BFF. This
+        # executes the real handler and proves the endpoint has no CORS surface
+        # (no allowlist, no preflight answer, no Access-Control-* header), that
+        # an origin-bearing call is refused 403, and that the JWT path still
+        # mints one deterministic org per user.
+        run: node --experimental-strip-types tests/test_tenant_provision_server_only.mjs
       - name: Run blog SSR markdown renderer harness (#4481)
         # Also executes every documented example in docs/blog-authoring.md
         # (#8379 finding 2) — a docs-only edit must reach this step.

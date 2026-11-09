@@ -739,6 +739,19 @@ def canonical_direction(value: str | None) -> str | None:
     """
     if value is None:
         return None
+    if not isinstance(value, str):
+        # #10520 — a RAW-WRITTEN non-scalar `direction` (a list or map, reachable
+        # by hand edit, a foreign/legacy writer or a bulk import) is UNHASHABLE,
+        # so BOTH the frozenset membership test below and the alias dict lookup
+        # raise `TypeError: unhashable type: 'list'` on it. That aborted every
+        # reader that shares this one normalizer — including the EP LOAD path
+        # (`TortoiseEP._affected_factors` -> `factor_direction` -> here), i.e. a
+        # single junk property aborted a belief run it is not about. Junk is
+        # ABSENT, which is the same reading `claim_class.normalize` gives a junk
+        # claim-class token: `None` means absent to every consumer
+        # (`direction_flows(None) == (True, True)` — the runtime's historical
+        # mutual default), never a third state and never a crash.
+        return None
     if value in DIRECTION_VALUES:
         return value
     return DIRECTION_ALIASES.get(value)

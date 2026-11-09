@@ -34,6 +34,8 @@ import inspect
 import json
 import pathlib
 import re
+import sys
+import traceback
 
 import pytest
 
@@ -54,7 +56,21 @@ def _embed(content: str, quote: str) -> dict:
 
 
 def _write(content: str, quote: str) -> dict:
-    return v2.execute_embed(_embed(content, quote), {}, session_id="s_10360")
+    # #10997: a COMPLETE lookup. `#2552`'s mint is an identity assertion and is
+    # licensed only by a lookup that resolved (`{}` = "the lookup did not run"
+    # now HOLDS the edge), and the mint cases in this file must reach the code
+    # they pin.
+    return v2.execute_embed(_embed(content, quote), _RESOLVED_SEARCH,
+                            session_id="s_10360")
+
+
+_RESOLVED_SEARCH = {
+    "mode": "real", "degraded": False, "reason": None,
+    "entities": [], "points": [], "events": [], "queries_run": 5,
+    "query_coverage": {"derived": {"object": 1, "event": 1, "point": 1},
+                       "ran": {"object": 1, "event": 1, "point": 1},
+                       "failed": {"object": 0, "event": 0, "point": 0}},
+}
 
 
 # ── 1. the rule + its tolerance bound ───────────────────────────────────────
@@ -474,6 +490,266 @@ def test_the_refusal_judges_the_SAME_text_the_write_uses_on_a_falsy_content():
                for w in result["warnings"]), result["warnings"]
 
 
+# ── 2b. the enforcement's OWN off-switch (#10360, 2026-11-07) ────────────────
+
+def test_the_off_switch_defaults_ON_and_restores_the_pre_10513_write(monkeypatch):
+    """The rule WITHHOLDS a durable memory, so it needs a reversible door.
+
+    MUTATION CHECK TARGETS, both arms: drop the switch from the emit site and
+    the OFF block below reds; flip its default to ``False`` and the ON block
+    reds. Neither arm is machinery — the ON arm asserts the guarantee is armed
+    when nothing is set, and the OFF arm asserts the write path is the
+    PRE-#10513 one, byte for byte (the point is written, carrying the rewritten
+    value, with no refusal and no disclosure).
+    """
+    monkeypatch.delenv(v2.STATE_VALUE_VERBATIM_SWITCH, raising=False)
+    assert v2._state_value_verbatim_enforced() is True
+    assert _write("the p95 hit 4.0 seconds",
+                  "the p95 hit 4.2 seconds")["payload"]["points"] == []
+    # a TYPO is not a statement: an unparseable value resolves to the DEFAULT (ON),
+    # which is the only safe direction for a gate that can withhold a memory.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "ture")
+    assert v2._state_value_verbatim_enforced() is True
+    assert _write("the p95 hit 4.0 seconds",
+                  "the p95 hit 4.2 seconds")["payload"]["points"] == []
+    # …and each explicit falsy spelling opens the door.
+    for spelling in ("0", "off", "false", "no"):
+        monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, spelling)
+        off = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+        assert [p["content"] for p in off["payload"]["points"]] == [
+            "the p95 hit 4.0 seconds"], spelling
+        assert not any("REWRITES its own verbatim quote" in w
+                       for w in off["warnings"]), (spelling, off["warnings"])
+        # …and the WHOLE rule is off, not just its refusal: the hard-cut
+        # disclosure is part of the judgment and must not leak into the OFF arm
+        # (a half-disarmed switch reads as "judged and failed open"). ⚠️ The
+        # plain pair above cannot discriminate this — both predicates are False
+        # for it — so the shape that WOULD disclose is used too (review round 2,
+        # P3: the assertion was unfalsifiable for `the p95 hit 4.0 seconds`).
+        assert not any("NOT judged" in w for w in off["warnings"]), (
+            spelling, off["warnings"])
+        hard_cut_shape = "z" * 998 + "4.2 seconds"
+        off_cut = _write(hard_cut_shape, "4.2 seconds")
+        assert not any("NOT judged" in w for w in off_cut["warnings"]), (
+            "the hard-cut disclosure leaked into the OFF arm — the switch "
+            "disarmed the refusal but left the judgment's other output on",
+            spelling, off_cut["warnings"])
+
+
+def test_the_off_switch_leaves_the_MINT_guard_off_too(monkeypatch):
+    """“Off” has to mean BOTH doors, or it is a half-armed guard.
+
+    `refused_value_contents` / `refused_value_slots` are populated only on a
+    refusal, so a switch that disarmed the refusal while leaving
+    `_mint_endpoint`'s guard armed would suppress an operator edge for a point
+    the run never refused. With the switch off the rewritten value is written
+    AND an operator naming a variant of it is not suppressed — the pre-#10513
+    behaviour on both doors.
+    """
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    embed = _embed("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    embed["operators"] = [{
+        "src": "the p95 hit 4.0 seconds.",
+        "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
+    contents = [p["content"] for p in result["payload"]["points"]]
+    assert "the p95 hit 4.0 seconds" in contents, contents
+    assert not any("refused for rewriting its own verbatim quote" in w
+                   for w in result["warnings"]), result["warnings"]
+
+
+def test_the_off_switch_does_not_move_the_JUDGMENT(monkeypatch):
+    """The switch moves the DOOR, never the classifier.
+
+    `_value_slot_divergence` / `_value_slots` are the production value engine
+    (shared with `value_gate`/#4899), so an operator can flip the switch,
+    re-measure and flip it back without re-deriving a tolerance battery. Pinned
+    because a switch that also silenced the classifier would make the OFF arm
+    unable to report what it let through.
+    """
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    assert v2._state_value_verbatim_enforced() is False
+    assert v2._value_slot_divergence("the p95 hit 4.0 seconds",
+                                     "the p95 hit 4.2 seconds")
+    assert v2._value_slots("the p95 hit 4.0 seconds")
+
+
+def test_the_off_switch_is_read_at_ONE_site():
+    """One switch, one read (#4097's lesson, applied to a guarantee).
+
+    Two things a rename or a second spelling would break silently, both pinned
+    literally rather than against the constant itself (review round 2, P3: the
+    first version compared the assignment to `v2.STATE_VALUE_VERBATIM_SWITCH`,
+    i.e. the value against itself, so renaming the variable kept every test
+    green while the documented rollback stopped working):
+
+    * the module's string literal is **exactly** `TORTOISE_STATE_VALUE_VERBATIM`,
+      and it appears as a literal **once** — a second spelling is a second read
+      waiting to disagree;
+    * the constant is referenced by NAME **only inside
+      `_state_value_verbatim_enforced`**. That is what catches a second read in
+      ANY spelling — `env_flag`, `is_truthy(os.environ.get(…))`,
+      `os.environ.get(…)` — which a call-count pin alone cannot (review round 2,
+      P3: `is_truthy(os.environ.get(STATE_VALUE_VERBATIM_SWITCH, "1"))` left the
+      count at one and stayed green);
+    * the single `env_flag` read of it defaults to ``True``:
+      a default-OFF read would silently disarm the guarantee for every
+      deployment that never sets the variable.
+    """
+    import ast
+    source = pathlib.Path(v2.__file__).read_text(encoding="utf-8")
+    assert v2.STATE_VALUE_VERBATIM_SWITCH == "TORTOISE_STATE_VALUE_VERBATIM", (
+        "the switch's NAME is the operator's interface: it is quoted in the "
+        "registry row and in `.env.example`, so a rename is a breaking change "
+        "and must not ride on a test that compares the constant to itself")
+    tree = ast.parse(source)
+    # ONE definition of the name…
+    assigns = [n for n in ast.walk(tree)
+               if isinstance(n, ast.Assign)
+               and any(isinstance(t, ast.Name)
+                       and t.id == "STATE_VALUE_VERBATIM_SWITCH"
+                       for t in n.targets)]
+    assert len(assigns) == 1, (
+        f"expected ONE module-level definition, found {len(assigns)}")
+    # …whose string literal is the operator-visible name, spelled ONCE. Docstrings
+    # are excluded (they NAME the variable for readers; they are not reads).
+    docstrings = {id(n.body[0].value) for n in ast.walk(tree)
+                  if isinstance(n, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                                    ast.AsyncFunctionDef))
+                  and n.body and isinstance(n.body[0], ast.Expr)
+                  and isinstance(n.body[0].value, ast.Constant)
+                  and isinstance(n.body[0].value.value, str)}
+    literals = [n for n in ast.walk(tree)
+                if isinstance(n, ast.Constant)
+                and isinstance(n.value, str)
+                and "TORTOISE_STATE_VALUE_VERBATIM" in n.value
+                and id(n) not in docstrings]
+    assert len(literals) == 1, (
+        f"the switch's name is spelled in {len(literals)} string literals — any "
+        "literal besides the constant's definition is a second, divergent read "
+        "that this pin would otherwise not see")
+    assert literals[0].value == "TORTOISE_STATE_VALUE_VERBATIM"
+    # …and ONE read, through `env_flag`, defaulting True.
+    calls = [n for n in ast.walk(tree)
+             if isinstance(n, ast.Call) and isinstance(n.func, ast.Name)
+             and n.func.id == "env_flag"
+             and n.args and isinstance(n.args[0], ast.Name)
+             and n.args[0].id == "STATE_VALUE_VERBATIM_SWITCH"]
+    assert len(calls) == 1, f"expected ONE env_flag read, found {len(calls)}"
+    assert isinstance(calls[0].args[1], ast.Constant) \
+        and calls[0].args[1].value is True, (
+            "the switch must default ON: a default-OFF read silently disarms "
+            "the guarantee for every deployment that never sets the variable")
+    # …and the name is referenced NOWHERE ELSE, in any spelling of a read.
+    helper = next((n for n in ast.walk(tree)
+                   if isinstance(n, ast.FunctionDef)
+                   and n.name == "_state_value_verbatim_enforced"), None)
+    assert helper is not None, "the helper is gone — the switch has no ONE read"
+    inside = {id(n) for n in ast.walk(helper)
+              if isinstance(n, ast.Name)
+              and n.id == "STATE_VALUE_VERBATIM_SWITCH"}
+    assert len(inside) == 1, (
+        f"`_state_value_verbatim_enforced` references the switch {len(inside)} "
+        "time(s) — the helper must resolve it ONCE, or two spellings inside it "
+        "can disagree about what 'unset' means (measured: appending "
+        "`return is_truthy(os.environ.get(STATE_VALUE_VERBATIM_SWITCH, \"1\"))` "
+        "left this pin green until the count was added)")
+    outside = [n.lineno for n in ast.walk(tree)
+               if isinstance(n, ast.Name)
+               and n.id == "STATE_VALUE_VERBATIM_SWITCH"
+               and isinstance(n.ctx, ast.Load)
+               and id(n) not in inside]
+    assert not outside, (
+        f"the switch is referenced at line(s) {outside} outside "
+        "`_state_value_verbatim_enforced` — a read in any spelling there can "
+        "disagree with the helper's (env_flag, is_truthy(os.environ.get(...)), "
+        "os.environ.get(...)); route it through the helper")
+
+
+def test_the_rule_HONOURS_the_switch_the_caller_handed_it(monkeypatch):
+    """The `armed=` handoff is a guarantee, so it is pinned (review round 3, P3).
+
+    Round 2's defect was exactly the shape this catches: the emit site resolved the
+    switch for a point and the rule resolved it AGAIN, so a mid-batch flip judged
+    one point under two answers and wrote a divergent value with no warning. With
+    the handoff honoured, the caller's answer wins both ways.
+
+    MUTATION CHECK TARGET: replace ``if armed is None: armed = …`` with an
+    unconditional read and this reds (measured: the whole file stayed green under
+    that mutant until this test existed).
+    """
+    content, quote = "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds"
+    # env ON, caller says OFF → the CALLER's answer wins: no refusal, no report.
+    monkeypatch.delenv(v2.STATE_VALUE_VERBATIM_SWITCH, raising=False)
+    warnings: list[str] = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=False) is False
+    assert warnings == [], warnings
+    # env OFF, caller says ON → the CALLER's answer wins: refusal + report.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    warnings = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings,
+                                     armed=True) is True
+    assert any("REWRITES its own verbatim quote" in w for w in warnings), warnings
+
+
+def test_the_emit_site_SUPPLIES_the_reading_the_rule_honours(monkeypatch):
+    """The handoff's SUPPLY end, which `armed=`-honouring alone does not pin.
+
+    Review round 5's mutation attribution measured an un-killed mutant (M9): dropping
+    `armed=_value_fidelity_judged` at the emit site left the whole file green,
+    because in a static environment the caller's read and the rule's own re-read
+    cannot disagree — which is exactly the round-2 defect shape (one point judged
+    under two answers) that the handoff exists to prevent.
+
+    This pins the supply by making the two reads DISAGREE: the helper answers from a
+    call counter, so the emit site's read says ON and any later re-read says OFF.
+    With the handoff supplied the rule refuses (the point's own reading wins); with
+    the handoff dropped the rule re-reads, gets OFF, and writes the divergent point.
+
+    MUTATION CHECK TARGET: remove `armed=_value_fidelity_judged` from the call site
+    and this reds on the call count (2 reads) and on the written point.
+    """
+    calls: list[int] = []
+
+    def _one_reading_then_off() -> bool:
+        calls.append(1)
+        return len(calls) == 1
+
+    monkeypatch.setattr(v2, "_state_value_verbatim_enforced",
+                        _one_reading_then_off)
+    result = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    assert calls == [1], (
+        "the emit site did not hand its own reading to the rule — the rule read "
+        f"the switch again ({len(calls)} reads for one point), so a mid-batch "
+        "flip can judge one point under two answers and write the divergent "
+        "value with no warning")
+    assert result["payload"]["points"] == [], (
+        "the emit site's ON reading was not honoured by the rule: the divergent "
+        f"point was written {result['payload']['points']!r}")
+
+
+def test_the_off_switch_is_INTRINSIC_so_a_second_call_site_cannot_bypass_it(
+        monkeypatch):
+    """The switch is checked INSIDE the rule, not only at the emit site.
+
+    Review round 2, P3: with the gate only at the caller, the next lane to wire
+    `_refuse_rewritten_value` into a SECOND emit path restores a refusal nobody
+    can turn off, and no test notices. Called directly with the switch OFF the
+    rule must answer ``False`` and say nothing.
+    """
+    content, quote = "the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds"
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    warnings: list[str] = []
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings) is False
+    assert warnings == [], warnings
+    # positive control: the switch is what answered — with it ON the SAME direct
+    # call refuses and reports, so this cannot pass by the rule being dead.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "1")
+    assert v2._refuse_rewritten_value(content, quote, warnings=warnings) is True
+    assert any("REWRITES its own verbatim quote" in w for w in warnings)
+
+
 # ── 3. the invariant: a verbatim value is never dropped ─────────────────────
 
 def test_a_point_that_carries_its_value_verbatim_is_written_untouched():
@@ -488,6 +764,132 @@ def test_a_point_that_carries_its_value_verbatim_is_written_untouched():
     points = result["payload"]["points"]
     assert len(points) == 1, result["warnings"]
     assert points[0]["content"] == "the p95 hit 4.2 seconds"
+
+
+def test_every_STORED_value_bearing_point_satisfies_the_verbatim_identity(
+        monkeypatch):
+    """MECHANISM-LEVEL SURVIVAL — the value a stored point carries IS the value
+    its own verbatim quote states.
+
+    This is the provable form of “the value survives verbatim”, and it needs no
+    LLM arm: whatever the model wrote, the write path's guarantee is that a
+    stored point's value identity and its own verbatim quote's value identity
+    AGREE. A reader can re-derive it over any payload — it is
+    `_value_slot_divergence(stored.content, stored.quote) == ()` — over the FORM
+    tolerances the rule applies on purpose (unit spelling, a leading dot, a
+    magnitude prefix), none of which may be mistaken for a rewrite.
+
+    ⛔ The ON arm contains a DIVERGENT pair as well, asserted ABSENT from the
+    stored set (review round 2, P2: the first version's four cases were
+    non-divergent BY CONSTRUCTION, so every assertion held whether or not the
+    emit-site rule existed — deleting the rule left it green). MUTATION CHECK
+    TARGETS: delete the emit-site rule → the divergent case reaches the payload
+    and this reds; set the switch off → the falsifier's divergent pair is stored
+    and the identity check flags it.
+    """
+    cases = (
+        ("the p95 hit 4.2 seconds", "the p95 hit 4.2 seconds"),     # identical
+        ("the TTL is 20 minutes", "the TTL is 20 mins"),           # unit spelling
+        ("the p95 is 0.5 seconds", "the p95 is .5 seconds"),       # leading dot
+        ("we saw 5k QPS", "we saw 5000 QPS"),                      # magnitude form
+    )
+    stored_values = []
+    for content, quote in cases:
+        points = _write(content, quote)["payload"]["points"]
+        assert len(points) == 1, (content, quote)
+        stored = points[0]
+        # the value SURVIVED into what is written…
+        assert content in stored["content"], (content, stored["content"])
+        # …and the stored text still satisfies the identity against its own
+        # verbatim quote — the two readings a consumer holds agree.
+        assert v2._value_slot_divergence(
+            stored["content"], stored["quote"]) == (), (content, quote, stored)
+        stored_values.append(stored["content"])
+    # THE DISCRIMINATING CASE: a DIVERGENT pair must not be stored at all, so the
+    # identity above is a guarantee about the graph rather than a property of the
+    # four pairs picked for it.
+    divergent = _write("the p95 hit 4.0 seconds", "the p95 hit 4.2 seconds")
+    assert divergent["payload"]["points"] == [], (
+        "a divergent pair was STORED, so the identity below is not enforced by "
+        f"the write path: {divergent['payload']['points']!r}")
+    assert "the p95 hit 4.0 seconds" not in stored_values
+    # FALSIFIER — the identity check is not vacuous. With the door OPEN the same
+    # check FLAGS the pair the invariant forbids, so a future lane cannot green
+    # this test by neutering both sides.
+    monkeypatch.setenv(v2.STATE_VALUE_VERBATIM_SWITCH, "0")
+    leaked = _write("the p95 hit 4.0 seconds",
+                    "the p95 hit 4.2 seconds")["payload"]["points"]
+    assert len(leaked) == 1, leaked
+    assert v2._value_slot_divergence(leaked[0]["content"],
+                                     leaked[0]["quote"]), (
+        "the identity check must FLAG a stored divergent pair, or the block "
+        "above passes by vacancy")
+
+
+def test_the_registry_row_declares_the_off_switch():
+    """The row a lane reads must name the switch, its default and what OFF restores.
+
+    A rollback nobody can find is not a rollback: the row is what an operator
+    reads before flipping a guarantee off in production. The name is asserted
+    against `v2.STATE_VALUE_VERBATIM_SWITCH` (review round 2, P3) so the row and
+    the code cannot drift — renaming the variable without the row reds here.
+    """
+    row = (pathlib.Path(__file__).resolve().parent.parent
+           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    flattened = " ".join(row.split())
+    assert v2.STATE_VALUE_VERBATIM_SWITCH in flattened, (
+        f"the registry row does not name the enforcement's off-switch "
+        f"({v2.STATE_VALUE_VERBATIM_SWITCH})")
+    assert "_state_value_verbatim_enforced" in flattened, (
+        "the row must name the ONE read the switch goes through")
+    assert "STATE_VALUE_VERBATIM_SWITCH" in flattened, (
+        "the row must name the constant as a `symbols:` anchor, or a rename "
+        "leaves it pointing at a symbol that does not exist with every gate green")
+    assert "defaults to **ON**" in flattened, (
+        "the row must state the default, so a reader knows what unset means")
+    assert "pre-#10513 REFUSAL semantics" in flattened, (
+        "the row must state WHAT OFF restores — the rollback target is the "
+        "whole point of the switch — and must not overclaim byte-identical "
+        "pre-#10513 output (the #10513 mint-site cuts are not behind it)")
+
+
+def test_the_off_switch_is_declared_in_the_env_contract():
+    """`.env.example` IS this repo's env contract, and an operator rolling back an
+    over-blocking refusal in production reads it — not the registry row.
+
+    Review round 2, P2: the switch was named only in the module, the row and this
+    test file, while the test's own message claimed it was in "deployment docs".
+    Mirrors `tests/test_time_aware_2520.py::test_env_example_declares_the_valid_time_kill_switch`
+    and `tests/test_bm25_lexical_8488.py::test_env_example_declares_the_bm25_arm_switch`:
+    the name must be present AND shown as a commented assignment (the form an
+    operator copies), not merely named in prose.
+    """
+    env = (pathlib.Path(__file__).resolve().parent.parent
+           / ".env.example").read_text(encoding="utf-8")
+    name = v2.STATE_VALUE_VERBATIM_SWITCH
+    assert name in env, (
+        f"{name} is the only way to turn the verbatim-value refusal off, and "
+        ".env.example does not declare it")
+    declared = [line for line in env.splitlines()
+                if line.strip().startswith(f"# {name}=")
+                or line.strip().startswith(f"{name}=")]
+    assert declared, (
+        f"{name} must be shown as a commented assignment (the example form an "
+        "operator copies), not just named in prose")
+    # ⚠️ Scoped to THIS block, not the whole file (review round 3, P3): a
+    # file-wide substring search is green for a neighbouring knob's "default-on"
+    # (the S4 delta block has one), so it could not fail for the declaration it
+    # describes.
+    lines = env.splitlines()
+    start = next(i for i, line in enumerate(lines)
+                 if line.strip().startswith(f"# {name}=")
+                 or line.strip().startswith(f"{name}="))
+    block = " ".join("\n".join(lines[max(0, start - 14):start + 4]).split())
+    assert "default-on" in block, (
+        f"the {name} declaration must state the default, so 'unset' is "
+        f"unambiguous — found in the block: {block[-200:]!r}")
+    assert "ENFORCED" in block, (
+        f"the {name} declaration must name what unset MEANS (enforced)")
 
 
 def test_a_quote_that_only_fragments_the_point_is_not_a_contradiction():
@@ -808,7 +1210,7 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     embed["operators"] = [{
         "src": variant,
         "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert variant not in contents, contents
     # positive control: an endpoint with no value in it is still minted, so the
@@ -817,7 +1219,7 @@ def test_a_refused_value_cannot_re_enter_the_graph_under_a_VARIANT_name(variant)
     embed["operators"] = [{
         "src": "the nightly rebuild window",
         "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert "the nightly rebuild window" in contents, contents
 
@@ -854,7 +1256,7 @@ def test_the_mint_guard_matches_the_SLOT_TUPLE_exactly_so_a_WIDER_variant_mints(
         embed["operators"] = [{
             "src": variant,
             "dst": "the cache TTL is 20 minutes", "op_type": "IMPL"}]
-        result = v2.execute_embed(embed, {}, session_id="s_10360")
+        result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
         contents = [p["content"] for p in result["payload"]["points"]]
         assert variant in contents, (name, contents)
 
@@ -900,7 +1302,7 @@ def test_a_DIFFERENT_claim_sharing_an_anchor_and_value_is_suppressed_too():
     control["operators"] = [{
         "src": "the cache TTL is 20 minutes",
         "dst": "the nightly rebuild window", "op_type": "IMPL"}]
-    result = v2.execute_embed(control, {}, session_id="s_10360")
+    result = v2.execute_embed(control, _RESOLVED_SEARCH, session_id="s_10360")
     contents = [p["content"] for p in result["payload"]["points"]]
     assert "the cache TTL is 20 minutes" in contents, contents
 
@@ -1238,33 +1640,14 @@ def test_a_composed_prefix_against_a_UNITLESS_side_keeps_the_omitted_unit_tolera
                                      "the batch took 5000 ms")
 
 
-#: The patterns that assert the ADJACENCY gap is OPEN again — the thing
-#: `test_the_registry_row_names_the_residual_that_still_stands` must red on.
-#: Deliberately narrow: each one names a REOPENING, so a truthful rewording of
-#: "this gap is closed" passes, and `fails open` (true of the SPELLING case) is
-#: not matched (review cycles 5 and 6, measured).
-#: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
-#: a reopening phrased with none of these words ("`minute` is back in the open
-#: set") passes. The pin's job is to catch the shapes a lane actually writes —
-#: the seven below covered every one produced by four review cycles — not to be a
-#: semantic reader of English. Closing that gap needs a human or a different
-#: instrument, not a longer regex.
-_ADJACENCY_REOPENING = (
-    # `not closed`, allowing an adverb inside the negation (`is not yet / not
-    # fully / not really closed`) — the adverb-free form was the whole class
-    # one word away (review cycle 6, MEASURED: all three PASSED before this).
-    r"\bnot\b[^.;]{0,30}\bclosed\b",
-    r"\bisn'?t\b[^.;]{0,30}\bclosed\b",
-    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
-    r"\bunclosed\b",
-    r"\bre-?open",
-    # The verb arm covers the INFLECTIONS, not just the present tense (review
-    # cycle 7, MEASURED: `stayed open`, `remained open`, `has stayed open`,
-    # `keeps open` and `is left open` all PASSED against the previous
-    # `stays?|remains?` arm — one inflection defeated it).
-    r"\b(is|are|was|were|remain(s|ed)?|stay(s|ed)?|keep(s)?)\b[^.;]{0,25}\bopen\b",
-    r"\bopen\s+again\b",
-)
+#: ⛔ THE REOPENING SCAN IS NO LONGER A BLOCK-SCOPED LIST (#11223). It lived here
+#: as `_ADJACENCY_REOPENING` and was applied to the `(d)` block's sentences and
+#: then to a narrow tail; BOTH bounds are gone, because a reopening appended
+#: where a lane APPENDS it — after the last residual — was outside every one of
+#: them (`"(d2)" in block` → False on a 10,019-char block). The list now lives
+#: beside its two partners, `_RESIDUAL_OPENNESS` (what it became) and
+#: `_RESIDUAL_CLASS_ANCHOR` (what the claim must be ABOUT), and the scan covers
+#: the whole residual region. See `_residual_reopening_claims`.
 
 #: The closure ASSERTION the adjacency sentence must carry. Not the bare word
 #: `closed`: a sentence reading "the ADJACENCY half is now UNJUDGED, unlike the
@@ -1273,51 +1656,1061 @@ _ADJACENCY_REOPENING = (
 #: previous revision and this one).
 _ADJACENCY_CLOSED_CLAIM = (
     r"\b(is|are|was|were)\b[^.;]{0,20}\bclosed\b",
+    # ⛔ ONLY THE FIRST ALTERNATIVE HAS A FALSIFIER (#11258 review round 23 `P2`,
+    # MEASURED): delete any of the three below and the whole file stays GREEN —
+    # they are exercised by no proof, because the row's own sentence happens to use
+    # the `is … closed` form. They are carried as DECLARED SPECULATION, not as
+    # measured coverage: the failure direction here is OVER-BLOCK (a narrowed list
+    # refuses an honest row), which is a false block rather than a gate that passes
+    # something wrong, so the cost of leaving them unpinned is bounded. Recorded
+    # rather than repaired on purpose — a synthetic block per form would be
+    # machinery to prove a list nobody has needed to widen.
     r"\b(has|have|had)\s+been\s+closed\b",
     r"\bwe\s+have\s+closed\b",
     r"\bclosed\s+by\s+this\s+table\b",
 )
 
 
-#: The ONE exemption for the full adjacency scan in the trailing region: a
-#: sentence that discloses the still-open SPELLING class AND names no unit at all.
-#: The unit-token arm is what keeps an appended reopening from hiding behind the
-#: word `spelling` (review cycle 8, MEASURED: scanning the tail with the NARROW
-#: subset instead let 7 end-appended reopenings PASS, e.g. "except `minute`, which
-#: is open again" — the shape the block's own comment calls the likeliest edit).
+#: The exemption `_is_honest_spelling` grants: a sentence that discloses the
+#: still-open SPELLING class AND names no class anchor at all. The anchor arm is
+#: what keeps an appended reopening from hiding behind the word `spelling`
+#: (review cycle 8, MEASURED: scanning the tail with the NARROW subset instead let
+#: 7 end-appended reopenings PASS, e.g. "except `minute`, which is open again" —
+#: the shape the block's own comment calls the likeliest edit).
+#: ⛔ It is NOT scoped to a trailing region any more: since #11223 the scan covers
+#: the whole residual region, so the waiver applies wherever the sentence sits.
 _UNIT_TOKEN = re.compile(
     r"\b(minute|minutes|second|seconds|hour|hours|day|days|week|weeks|month|"
     r"months|year|years|mile|miles|percent|pct|millisecond|milliseconds|"
     r"time-unit)\b")
 
 
-#: The floor for an EXEMPT tail sentence — one that discloses the still-open
-#: SPELLING class and names no unit. It is not skipped: these reopenings say a
-#: unit stopped being fused/judged, which reopens the adjacency gap whatever else
-#: the sentence is about (review cycle 7, MEASURED: exempting that sentence
-#: wholesale let "the SPELLING gap is not closed and `minute` no longer fuses"
-#: PASS; cycle 9: skipping it entirely let "… the value class is no longer
-#: judged" PASS). `not closed` / `is open` are deliberately absent — the SPELLING
-#: gap IS open and saying so is the row's own honest disclosure.
-_SPELLING_SENTENCE_REOPENING = (
-    r"\bno\s+longer\s+(closed|fuses|judged|caught|compared|enforced|retained)\b",
-    r"\bunclosed\b",
-    r"\bre-?open",
+#: The marker that opens the residual list inside the `state_value_carve_out`
+#: row — the artifact a lane reads ("read this before improving a number").
+#: ⛔ IT IS A LOCATOR, NOT THE SCAN'S BOUND (#11258 review, round 3): the marker
+#: sits 12,908 chars into a 50,850-char row, so a scan that STARTED here read
+#: 37,942 chars (50,850 − 12,908; MEASURED) — 74.6% of the row — and reported
+#: PASS over a reopening written
+#: into the row's own narrative above it (MEASURED at `(2b) the ADJACENCY half is
+#: open again.` inserted just above the marker: marker bound `[]` → GREEN, row
+#: bound 1 claim → RED). That is #11223's own defect one bound further in
+#: (`[:1200]` → the `(d)` block → the marker → the row), so `_residual_region`
+#: starts at `_RESIDUAL_ROW_START`; the marker keeps two jobs — it names the
+#: residual list, and it is one of the two anchors the region must still carry.
+_RESIDUAL_MARKER = "⛔ WHAT IS STILL NOT ENFORCED"
+
+#: The row's own entry start — where the scanned region BEGINS. Deliberately a
+#: LITERAL, like `_RESIDUAL_ROW_END` below, so the region cannot move with the
+#: function the proof test checks.
+_RESIDUAL_ROW_START = "\n  - id: state_value_carve_out\n"
+
+#: What marks a claim as being about THIS row's closed gap: the adjacency class
+#: (the word itself, a time/length UNIT token or its abbreviation, `time-unit`),
+#: the carve-out, or the retention guarantee.
+#: ⛔ THE ANCHOR IS NOT REQUIRED OF EVERY PHRASE — that is the difference between
+#: this revision and the one the #11258 review refused (`P1`, measured): requiring
+#: it of ALL of them let `the gap those tables closed is open again` through,
+#: which the PRE-change guard caught. It is required only of the OPENING VERB
+#: (`re-?open` / `reopened`), because that verb is the one the row itself uses
+#: honestly about OTHER subjects — a false refusal, an owner's decision, a
+#: ruling. Every other phrase below can only describe a gap being reopened, so it
+#: is matched wherever it appears.
+#: ⛔ AND THE ANCHOR IS NOT THE WORD `adjacency` ALONE: review cycle 6 MEASURED
+#: that gating the whole scan on it let five reopenings through ("`minute` no
+#: longer fuses", "the time-unit half is no longer closed", "except `minute`,
+#: which is open again"). The abbreviations are here because the row's own
+#: vocabulary uses them (`min`, `ms`, `km`); `\b` keeps `800ms` (one token) from
+#: matching.
+_RESIDUAL_CLASS_ANCHOR = re.compile(
+    r"adjacency|\btime[- ]unit\b|carve[- ]out|\bthe guarantee\b|\bretention\b|"
+    r"\bvalue class\b|\bnumeric side\b|"
+    r"\b(ms|min|mins|sec|secs|hr|hrs|km)\b|"
+    # ⛔ ONE subject phrase, and only one: `the gap that/those … closed` names the
+    # gap BY ITS CLOSURE, so it can only be about this one. `the remaining gap` and
+    # `the exception it carved` were here for a revision and had to go — anchoring
+    # `the remaining gap` reds the honest proof `the remaining gap is the SPELLING
+    # case, which is open by design` (MEASURED: GREEN at this head, RED once the
+    # phrase is added to this anchor), because it is an ordinary noun phrase a
+    # truthful sentence about the SURVIVING residual can use. ⛔ NOT because the
+    # row says that phrase: `rg -c 'the remaining gap' config/v4-mechanisms.yml`
+    # is 0 (MEASURED), and the row's own wording is "What SURVIVES of the old (d)
+    # is the SPELLING case". `the remaining gap is open` is therefore an
+    # undisclosed-arm shape and is named in `WHAT THIS CANNOT CATCH` instead of
+    # being claimed covered.
+    r"\bthe gap (?:that|those)\b[^.;]{0,40}\bclosed\b|"
+    + _UNIT_TOKEN.pattern,
+    re.I)
+
+#: ⛔ THE WAIVER withholds on ITS OWN SET, which is `_RESIDUAL_CLASS_ANCHOR` PLUS
+#: every spelling the unit arm reads and the anchor does not name (#11258 review
+#: round 5 `P1`, MEASURED). The unit arm was widened to the row's whole family;
+#: the anchor it is withheld by was not, so 9 of the arm's spellings (`units?`,
+#: `unit word`, `mos`, `mi`, `millisec(s)`, `kg`, `m`, `s`) never reached it when
+#: the sentence also said `spelling`: `` the SPELLING gap is open because `kg` is
+#: no longer fused `` was WAIVED (GREEN) while the same shape with `minute` RED —
+#: the waiver is applied per sentence, so one word defeated the gate, the same
+#: class as round 3's finding one layer in.
+#: ⛔ WIDEN THIS SET, NOT `_RESIDUAL_CLASS_ANCHOR`: the anchor also arms
+#: `_RESIDUAL_ANCHORED_OPENNESS`, and adding these spellings to it reds EVERY
+#: truthful statement — no exception survives (MEASURED at the 33-statement
+#: revision; the earlier "29 of 32" was stale on both operands, #11258 review
+#: round 11 `P2`) — so the withholding set is the narrow surface. ⛔ THE COUNT IS
+#: DELIBERATELY NOT RESTATED: it drifted once already, and the measurement is the
+#: claim.
+#: ⛔ THE UNIT SPELLINGS ARE ONE DECLARED TUPLE, and the pin DERIVES its sample
+#: spellings from it, so an arm added or removed here is measured the moment it
+#: is declared. Two of the alternatives an earlier revision carried were DEAD and
+#: are gone: `unit\s+word` (`units?` already matches `unit`) and `millisec`
+#: (`millisecs?` covers both forms) — each could be deleted at the previous head
+#: with the whole file still `102 passed` (#11258 review round 9 `P2`, measured).
+_RESIDUAL_UNIT_WAIVER_ARMS = (r"units?", r"kg", r"mi", r"mos", r"millisecs?")
+
+#: ⛔ THE VOCABULARY THE WAIVER MUST WITHHOLD ON, named independently of the arms
+#: so that DELETING an arm cannot delete the spelling that would have caught it
+#: (#11258 review round 9 `P2`, MEASURED: with the samples derived from
+#: `_RESIDUAL_UNIT_WAIVER_ARMS` alone, dropping `kg` also dropped `kg` from the
+#: sample list and all `103 passed`). The test asserts BOTH directions: every
+#: spelling here is withheld, and every arm declares a spelling that is exercised.
+_RESIDUAL_WAIVER_REQUIRED_SPELLINGS = (
+    "units", "unit", "kg", "mi", "mos", "millisec", "millisecs")
+
+#: ⛔ THE `(?<!['’])` GUARDS ARE PINNED BY THEIR OWN FALSIFIERS (#11258 review
+#: round 9 `P2`, MEASURED): `\b` treats `'` as a boundary, so without them the
+#: bare `m`/`s` arms arm on a contraction. Each guard owns a sentence that flips:
+#: `I'm confident the pair is no longer fused` is GREEN with the `m` guard and RED
+#: without it; `the pair's refusal is no longer fused` is GREEN with the `s` guard
+#: and RED without it (in `_RESIDUAL_OPENNESS`); and in the WITHHOLD set,
+#: `the spelling list is unchanged; I'm confident it stays so` is WAIVED with the
+#: guard and WITHHELD without. All three are asserted in
+#: `test_every_waiver_withhold_arm_earns_its_place`.
+#: ⚠️ A round-9 finding quoted `I'm confident the ADJACENCY half is no longer
+#: fused` as proof the guards were unnecessary: that sentence carries a class
+#: ANCHOR, so it reds in BOTH configurations and demonstrated nothing. The two
+#: sentences above are the ones that flip, and they are the same two this guard
+#: was originally justified with — the guard was right, its stated proof was
+#: imprecise.
+_RESIDUAL_WAIVER_WITHHOLD = re.compile(
+    _RESIDUAL_CLASS_ANCHOR.pattern
+    + r"|\b(?:" + "|".join(_RESIDUAL_UNIT_WAIVER_ARMS) + r")\b"
+    + r"|(?<!['\u2019])\b[ms]\b",
+    re.I)
+
+#: The anchors that mark a claim about the CLOSED gap, and — because the
+#: honest-SPELLING waiver reads THIS set — the words that withhold that waiver.
+#: ⛔ `carve-out` IS IN IT, and that is a deliberate OVER-BLOCK: prefixing a
+#: reopening with `the SPELLING ` used to waive it whole, so
+#: `the SPELLING carve-out is open again` / `… stays open` / `… is not closed` all
+#: went GREEN while the same sentences without the word `spelling` red — one word
+#: defeated the gate (#11258 review round 3 `P1`, measured, and the pre-#11258
+#: revision on `main` has the same hole). The cost of closing it is that an honest
+#: clause naming BOTH `spelling` and the carve-out is refused; over-block is the
+#: safe direction here, and it is stated rather than left to be discovered.
+#: ⛔ ONE DEFINITION, ABOVE — this note deliberately does NOT re-declare the regex.
+#: It did for one revision, without `carve-out`, and the second binding silently
+#: shadowed the first: four mutations (`the carve-out is still open`, `… reopens`,
+#: `… fails open`, and the two-clause spelling form) went GREEN because the
+#: anchored arm stopped applying to any carve-out clause at all (#11258 review
+#: round 3, measured). A note binds nothing; only the literal above does.
+
+#: The other negated CLOSED verdicts: `never … closed`, `<aux> yet to be closed`,
+#: `far from closed`, `anything but closed`. ⛔ ANCHORED, deliberately: `not …
+#: closed` can only be about this gap, but these read naturally about ANY residual —
+#: the row is a list of what is still not enforced, so `(b2) is far from closed` and
+#: `residual (a) is never closed by any rule` are HONEST, and putting them in the
+#: unanchored arm red eight such sentences (#11258 review round 5 `P1`, measured).
+#: The round-4 defect they close is real: `the ADJACENCY gap was never closed` was
+#: GREEN while `the ADJACENCY gap is not closed` RED.
+_RESIDUAL_CLOSED_VERDICT = (
+    r"\bnever\b[^.;]{0,30}\bclosed\b",
+    # ⛔ `<aux> yet to be closed` AND ITS SYNONYMS (#11258 review round 9 `P2`,
+    # MEASURED): the arm read only `yet`, so `the ADJACENCY half remains to be
+    # closed` and `… is still to be closed` — the natural residual-list phrasing,
+    # asserting the gap is still open — were GREEN. `remains?` is its own form
+    # because it takes no auxiliary.
+    # ⛔ AND THE FILLER WINDOW, on EVERY plain form in this tuple (#11258 review
+    # round 13 `P1`, MEASURED). Round 12 unified the `no longer` arms and left
+    # these requiring strict `\s+` adjacency, so one interpolated word or comma
+    # turned a membership-pinned mutation GREEN:
+    #   RED    the time-unit half has yet to be closed
+    #   GREEN  the time-unit half has yet, in practice, to be closed.  / … fully …
+    #   RED    the ADJACENCY half remains to be closed
+    #   GREEN  the ADJACENCY half remains, for now, to be closed.
+    # ⛔ AND AN EARLIER REVISION OF THIS NOTE WAS FALSE (#11258 round 21,
+    # MEASURED): it said "the row's own register is exactly `, in practice, ` /
+    # `, after the widen, ` / `, for now, `". The registry writes NONE of them —
+    # `in practice`, `after the widen` and `for now` occur 0 times in
+    # `config/v4-mechanisms.yml`, exact AND whitespace-flattened. The claim was
+    # stated where a lane reasons from, which is the class this file polices
+    # (rounds 16-17 corrected two of its members); a lane that looked for the
+    # form in the row found nothing.
+    # What IS measured: the row does interpolate parenthetically (`measured at
+    # this head`, `, paraphrase, `), English supplies these adverbials freely,
+    # and each form above is pinned RED in `_RESIDUAL_REOPENING_MUTATIONS`.
+    # Filling the slot is the EASY edit because the LANGUAGE offers it — not
+    # because the row contains it today. `never … closed` above already carried a
+    # 30-char window; that asymmetry was unintended and is what hid these.
+    r"\b(?:has|have|had|is|are|was|were)\b[^.;]{0,20}?\b(?:yet|still)\b[^.;]{0,20}?"
+    r"to\s+be\s+(?:\w+\s+)?closed\b",
+    r"\bremains?\b[^.;]{0,20}?\bto\s+be\s+(?:\w+\s+)?closed\b",
+    # ⛔ THE PRESENT-TENSE VERB, not only the participle (#11258 review round 10,
+    # MEASURED): `the ADJACENCY half doesn't close the gap` asserts the gap is
+    # still open and was GREEN at every head before this one, because the whole
+    # `closed` family reads only the PARTICIPLE. It sits in the ANCHORED arm and
+    # NOT in `_RESIDUAL_OPENNESS` on purpose: `the tables do not close the
+    # SPELLING gap` is HYPOTHETICAL honest prose — the row does NOT contain it
+    # (`grep -ciF "tables do not close"` over the registry is 0; its real SPELLING
+    # disclosure is "a unit outside `_UNIT_EQUIV` (`800millis`) still fails open on
+    # purpose"), so an earlier version of this comment calling it "the row's own
+    # honest disclosure" was WRONG (#11258 review round 16 `P2`, MEASURED). It is in
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` now, so the anchoring has a REAL falsifier.
+    # ⛔ THREE ALTERNATIVES, because English writes the negation three ways and
+    # each round found one of them missing: the contraction on the auxiliary
+    # (`doesn't`, `didnt`, `can't`), the spaced `not` (with a window, so
+    # `does, in practice, not close` is read), and `cannot`.
+    r"(?:\b(?:does|do|did|would|will|can|could|must|should|need|ai)"
+    r"(?:n['\u2019]?t|['\u2019]t)"
+    r"|\b(?:does|do|did|would|will|can|could|must|should|need)[^.;]{0,20}?\bnot\b"
+    r"|\bcannot\b)[^.;]{0,20}?\bclose[sd]?\b",
+    r"\b(?:far\s+from|anything\s+but)\b[^.;]{0,20}?\bclosed\b",
 )
 
+#: The affirmations that something IS open / STOPPED being closed. TWO ARMS,
+#: and the split is the whole design — each arm was measured into place.
+#:
+#: 1. `_RESIDUAL_OPENNESS` — phrases that can only describe a gap being reopened.
+#:    Applied to EVERY sentence in the region, with NO class anchor, because a
+#:    reopening that names the gap in words outside the anchor vocabulary is still
+#:    a reopening: requiring the anchor here let `the gap those tables closed is
+#:    open again` through, which the PRE-change guard caught (#11258 review `P1`).
+#: 2. `_RESIDUAL_ANCHORED_OPENNESS` — the polysemous arm (`<verb> … open`, and the
+#:    opening verb `re-?open`). "is open" can be said of anything, and the row
+#:    says it about a false refusal and about an owner's decision, so this arm
+#:    requires `_RESIDUAL_CLASS_ANCHOR` somewhere in the sentence. Without that
+#:    requirement the arm's filler window read the row's own honest
+#:    "the pair is unjudgeable and fails open" as an openness claim (MEASURED).
+#: ⛔ AND THE PLAIN `not … judged` / `not … fused` SHAPE IS NOT READ (#11258
+#: review round 13 `P2`, MEASURED): only the `no longer …` form is —
+#: `the ADJACENCY half is no longer judged.` REDS, but `the ADJACENCY half is not
+#: judged.`, `… is not fused.` and `the units are still not fused.` are GREEN. That
+#: is a DISCLOSURE, not a missing arm, and the reason is measured: an anchored
+#: `not … (fused|judged)` arm false-blocks the row's OWN honest prose —
+#: `(d) … is not judged: no unit is ADJACENT`, `(h) … is not judged by the PURE
+#: function`, `(i) A k SUFFIX IS NOT JUDGED` and `miles was not fused there` all
+#: sit in a clause segment that carries a class anchor. So the arm cannot separate
+#: the honest denial from the reopening, and naming the shape here is the honest
+#: alternative to claiming coverage.
+#: ⛔ AND EVERY FILLER WINDOW IS BOUNDED, so a filler LONGER than the bound defeats
+#: that arm (#11258 review round 15 `P1`, MEASURED): multi-token interpolations
+#: are ordinary English (`, in practice, ` / `, at this head, ` — ⛔ NOT "the
+#: row's own register": the row writes NEITHER comma form, 0 occurrences each, and
+#: its one `at this head` is bare, inside `measured at this head`; #11258 round 21,
+#: MEASURED), and two of them stacked exceed `[^.;]{0,25}?` / `{0,30}` /
+#: `{0,20}`. GREEN at this revision:
+#: `the ADJACENCY half is no longer, in practice and at this head, judged.`,
+#: `the units are no longer, in practice and at this head, fused.`,
+#: `the ADJACENCY half is not, in practice and at this head, closed.`,
+#: `the ADJACENCY half has, in practice and at this head, yet to be closed.`,
+#: `the ADJACENCY half remains, in practice and at this head, to be closed.`,
+#: `the ADJACENCY half is never, in practice and at this head, closed.`
+#: ⛔ THE BOUND IS NOT RAISED TO CHASE THESE, deliberately: the windows are bounded
+#: BECAUSE an unbounded filler false-blocks honest prose (a `not … closed` reaching
+#: across a clause, `is unjudged and never closed`), and each widening measured in
+#: this file traded one leak for a false block. A scan with a length limit is the
+#: artifact; the limit is stated here so a lane knows what it is buying when it
+#: writes a long interpolation. The multi-token forms would need a parser, not a
+#: regex — which is the honest boundary of this pin.
+#: ⛔ WHAT THIS CANNOT CATCH, stated rather than implied: it is a pattern list, so
+#: a reopening phrased with none of these words passes — MEASURED, still GREEN at
+#: this revision: "the ADJACENCY half went back to being unjudged", "`minute` is
+#: once more outside the closed set", "adjacency is unjudged again", and the
+#: coordinator form of the row's own vocabulary, "the ADJACENCY half is unjudged
+#: and fails open" (the clause split leaves the anchor in one clause and the
+#: phrase in the next — see `_RESIDUAL_FAIL_OPEN`). ⛔ AND A JOINER THE SPLITTER
+#: DOES NOT KNOW (`_RESIDUAL_CLAUSE_SPLIT` is a CLOSED list: `and`/`but`/`while`/
+#: `whereas`/`although`/`though`/`yet`) puts two claims in one segment, and the
+#: honest `spelling` waiver then covers both — the measured fix for `while` and
+#: `although` is in that list, but a joiner it does not name still does this. ⛔ AND
+#: THE GAP NAMED WITHOUT AN ANCHOR: `the remaining gap is open` is GREEN, because
+#: `the remaining gap` names the SURVIVING OPEN residual and therefore cannot be a
+#: class anchor — anchoring it would refuse `the remaining gap is the SPELLING
+#: case, which is open by design`, which is true (#11258 review round 5 `P2`,
+#: measured). The closed subject IS read when it names its own closure
+#: (`the gap those tables closed is open`). ⛔ EVERY
+#: ENTRY HERE IS A CLAIM LIKE ANY OTHER and must be re-measured when the arms
+#: change: "`minute` is back in the open set" sat on this list for one revision
+#: and is RED again (it is mutation #28), because the anchored arm reads an object
+#: complement. A stale entry here is worse than no entry — a lane reads it as
+#: uncovered and deletes the mutation as unfalsifiable, shrinking coverage
+#: silently. The pin's job is
+#: to catch the shapes a lane actually writes, not to be a semantic reader of
+#: English; closing that needs a human or a different instrument, not a longer
+#: regex.
+#: ⛔ ONE WINDOW for every `no longer …` arm (#11258 review round 12, MEASURED):
+#: three separate arms each required the verb to follow `no longer` IMMEDIATELY, so
+#: `no longer BEING fused`, `no longer EVEN judged`, `no longer ACTIVELY fused` were
+#: GREEN in whichever arm was supposed to read them, and the floor — the ONLY tuple
+#: the honest-SPELLING path runs — had the same hole. `\bno\s+longer\b` (word
+#: boundaries, not `\s+`) also stops a PUNCTUATED insertion from defeating all
+#: three: `no longer, strictly speaking, closed` was GREEN.
+#: ⛔ `fused`/`fusing` are NOT in the unanchored arm below; they stay in the
+#: subject-gated ones. The falsifier is `` `percent`/`pct` is no longer fused ``
+#: (a must-stay-GREEN proof), and `percent`/`pct` are absent from those gates'
+#: vocabularies, which is what makes a window there free.
+_NO_LONGER_WINDOW = r"\bno\s+longer\b[^.;]{0,25}?"
 
-def test_the_registry_row_names_the_residual_that_still_stands():
-    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+_RESIDUAL_OPENNESS = (
+    # `not closed`, allowing an adverb inside the negation (`is not yet / not
+    # fully / not really closed`) — the adverb-free form was the whole class
+    # one word away (review cycle 6, MEASURED: all three PASSED before this).
+    # Scanned PER SENTENCE rather than per clause: `the ADJACENCY half is not, and
+    # never was, closed` splits into clauses that each carry only half of it
+    # (#11258 review `P2`, measured).
+    r"\bnot\b[^.;]{0,30}\bclosed\b",
+    # ⛔ THE CONTRACTION ARM IS A PATTERN, NOT AN AUXILIARY LIST (#11258 review
+    # rounds 8 and 9, each MEASURED). Round 8 replaced `isn'?t closed` with an
+    # enumeration (`is|are|was|were|has|have|had|does|do|did|would|should|could|
+    # must|need|ca|wo`) and round 9 found three holes in the enumeration itself:
+    # `cannot` has NO word boundary after `can`, and `shan't` was never listed, so
+    # `cannot be closed` / `shan't be closed` stayed GREEN while `can not be
+    # closed` / `can't be closed` RED. An enumeration will keep acquiring holes
+    # because the language has one, so the arm is now the SHAPE: any word whose
+    # contraction ends the negation, plus `cannot`.
+    # ⛔ THE APOSTROPHE IS OPTIONAL ONLY ON A KNOWN STEM (#11258 review round 10
+    # `P1`, MEASURED). Round 9 made it MANDATORY to avoid `point`/`count`/
+    # `account`, and that NARROWED the arm: `isnt closed`, `wasnt closed`,
+    # `hasnt been closed`, `hadnt been closed` were RED at the previous head and
+    # GREEN at round 9's — an undisclosed fail-open REGRESSION introduced by the
+    # fix, in the same direction the last two rounds were closing. The collision
+    # only exists on the UNBOUNDED stem (`\w+n['’]?t` matches `point`), so the
+    # arm has two contraction branches:
+    #   (a) apostrophe MANDATORY, any stem — every contraction spelling;
+    #   (b) apostrophe OPTIONAL, KNOWN auxiliary stems only — the sloppy
+    #       apostrophe-less spellings a lane actually types;
+    #   (c) `cannot`, the one contraction written without either.
+    r"\b(?:\w+n['\u2019]t|"
+    r"(?:isn|aren|wasn|weren|hasn|haven|hadn|doesn|don|didn|wouldn|shouldn|"
+    r"couldn|mustn|needn|can|shan|won|ain)['\u2019]?t|cannot)\b[^.;]{0,30}\bclosed\b",
+    # ⛔ `never … closed`, `<aux> yet to be closed`, `far from closed` and
+    # `anything but closed` assert the gap is open for the same reason `not …
+    # closed` does — but they are in the ANCHORED arm and NOT here, because unlike
+    # `not closed` they are ordinary prose about ANY residual: this row's list is
+    # literally "WHAT IS STILL NOT ENFORCED", so `(b2) is far from closed` and
+    # `residual (a) is never closed by any rule` are honest and both RED when these
+    # forms are unanchored (#11258 review round 5 `P1`, measured). See
+    # `_RESIDUAL_CLOSED_VERDICT`.
+    # ⛔ AND THE FILLER WINDOW, which the verb list alone did not have (#11258
+    # review round 11 `P1`, MEASURED): `no longer judged` RED but `no longer BEING
+    # judged`, `no longer EVEN judged`, `no longer ACTIVELY judged` and `no longer
+    # BEING closed` were all GREEN — the arm required the verb to follow `no
+    # longer` immediately, while its sibling `not` arm deliberately carries a
+    # window for exactly this reason. It is phrased with `no longer` + `closed`/
+    # `judged`, i.e. the vocabulary this arm CLAIMS to read, so it is not the
+    # disclosed residual.
+    _NO_LONGER_WINDOW
+    + r"(closed|fuses|judged|caught|compared|enforced|retained)\b",
+    # ⛔ THE PARTICIPLE, SUBJECT-GATED. The `no longer` arm above carries only the
+    # 3sg `fuses`, so "the ADJACENCY half is no longer fused" — the row's OWN
+    # register (`the unit word IS fused`, `THE FUSION ITSELF MULTIPLIES`) — stayed
+    # GREEN while "… is no longer judged" RED: the arm was reached and only the
+    # inflection was missing (#11258 review round 3, MEASURED). It cannot simply
+    # join the arm: this arm is UNANCHORED, so an ungated participle reds an honest
+    # `no longer fused` about ANY subject — `percent`/`pct` is no longer fused: …`
+    # RED (measured, and it is a must-stay-GREEN proof statement below, so the gate
+    # has a falsifier).
+    # ⛔ WHAT IS TRUE ABOUT THE ROW, stated because an earlier revision of this
+    # comment claimed otherwise (#11258 review round 4 `P2`, MEASURED): the row's
+    # real prose is "`miles` was not fused there" and "fusing `percent` REFUSED
+    # the truthful pair" — `grep -c "no longer fus"` over the whole registry is
+    # **0**, and `git log -S"no longer fused" -- config/v4-mechanisms.yml` is
+    # empty. So the honest shapes below are HYPOTHETICAL (what a future lane might
+    # write about the same graph), not the row's own sentences, and an ungated
+    # participle leaves the real row GREEN. That is why the gate may be — and is —
+    # widened to the past tense: it costs no real disclosure.
+    # ⛔ TWO GATES because one cannot be both wide enough for the row's own
+    # closed-class vocabulary and narrow enough for a generic subject:
+    #   (a) the non-unit class words of the CLOSED gap — no subject gate can be
+    #       narrower than the vocabulary the row itself names;
+    #   (b) the unit vocabulary the row enumerates plus its conventional siblings,
+    #       with an explicit copula so a bare unit token elsewhere cannot arm it.
+    # ⛔ TENSE IS NOT A DISCRIMINATOR (#11258 review round 4 `P2`, MEASURED): the
+    # first revision of (b) admitted only a PRESENT copula, which left the
+    # dangerous direction open — `the units were no longer fused in this revision`
+    # and `\`minute\` was no longer fused after the widen` were GREEN (a reopening
+    # in the past tense) — while (a) refused honest past-tense prose one vocabulary
+    # class over. Since the row writes no `no longer fused` at all, the honest
+    # past-tense shapes are hypothetical, so BOTH arms admit `was|were` and the
+    # leak closes on both sides.
+    # ⛔ ONE WINDOW FOR BOTH ARMS: a 20-char bound on (b) made the same sentence
+    # RED on the class-word side and GREEN on the unit side once it carried an
+    # interpolated `after the widen landed` (MEASURED: `\`minute\` is, after the
+    # widen landed, no longer fused` → GREEN at 20, RED at 80). ⛔ NOT "the row's
+    # own register": `after the widen` occurs 0 times in the registry, and no
+    # commit ever added it (`git log -S` is empty; #11258 round 21, MEASURED).
+    # ⛔ IT READS THE WHOLE ANCHOR VOCABULARY, not a hand-copied six (#11258 review
+    # round 16 `P1`, MEASURED): the literal here was narrower than
+    # `_RESIDUAL_CLASS_ANCHOR` by exactly `the guarantee`, `retention` and
+    # `the gap that/those … closed`, so the SAME predicate was RED for six of the
+    # nine members and GREEN for the other three:
+    #   GREEN  the gap those tables closed is no longer fused.
+    #   GREEN  the retention guarantee is no longer fused.
+    #   RED    the ADJACENCY half is no longer fused.
+    # The asymmetry was specific to `fused|fusing` — those three subjects RED under
+    # every other arm — and the row uses `retention` / `the guarantee` ABOUT THIS
+    # CARVE-OUT, while `_RESIDUAL_CLASS_ANCHOR`'s own note says `the gap that/those …
+    # closed` "can only be about this one". Widening false-blocks 0 of the truthful
+    # statements and does not red the real row (measured) — the same argument this
+    # comment already uses for admitting the past tense.
+    # ⛔ AND `the gap that/those … closed`, the anchor member that names the gap BY
+    # ITS CLOSURE — listed inside the group, not delegated to
+    # `_RESIDUAL_CLASS_ANCHOR.pattern`, because that pattern also carries the UNIT
+    # TOKENS and would false-block the must-stay-GREEN
+    # `` `percent`/`pct` is no longer fused `` proof (measured). ⚠️ It must sit
+    # INSIDE `(?:…)`: a top-level `|` here makes the anchor word alone a complete
+    # match and reds every truthful statement (measured, twice).
+    r"\b(?:adjacency|the\s+half|carve-?out|value\s+class|numeric\s+side|"
+    r"time[- ]unit|retention|the\s+guarantee"
+    r"|the\s+gap\s+(?:that|those)\b[^.;]{0,40}\bclosed\b)"
+    r"[^.;]{0,80}?"
+    + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
 
-    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
-    read this before improving a number"). It named the ADJACENCY gap
-    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
-    by the tables above, so the row was left FALSE and nothing red on it. This
-    pins both halves: the closed class must not come back into the row, and the
-    still-open RATE class must stay named there.
+    r"\b(?:units?|unit\s+word|second|seconds|minute|minutes|hour|hours|day|days|"
+    r"week|weeks|month|months|mos|year|years|mile|miles|mi|millisecond|"
+    r"milliseconds|millisec|millisecs|min|mins|ms|sec|secs|hr|hrs|km|kg|"
+    r"(?<![\'\u2019])\bm\b|(?<![\'\u2019])\bs\b)"
+    r"\b[^.;]{0,80}?\b(?:is|are|remains?|stays?|was|were)\b[^.;]{0,80}?"
+    + _NO_LONGER_WINDOW + r"(?:fused|fusing)\b",
+    r"\bunclosed\b",
+    # ⛔ NEGATION IS NOT A REOPENING, and this arm is the UNANCHORED one — so it is
+    # where a plain `not` would otherwise reach an `open` phrase: `the ADJACENCY
+    # gap is not open again` DENIES the gap and it red before this pair was added
+    # (#11258 review `P2`, measured). `not closed` is deliberately NOT guarded —
+    # there the negation ASSERTS the gap is open, which is the whole arm.
+    # ⛔ THE NEGATION WINDOW IS THE RUN OF FIXED-WIDTH LOOKBEHINDS BELOW, and the
+    # RUN is the count — say `ten forms` and it is stale the next time one is added
+    # (this comment said `SIX FORMS` while carrying ten, in the same commit whose
+    # finding was "stale count comments", #11258 review round 4 `P2`, measured).
+    # They match the opening verb's window, and for the same
+    # measured reason: two forms read only `not open again` / `never open again`
+    # and left `has not been open again`, `has never been open again` and
+    # `hasn't been open again` as FALSE BLOCKS (#11258 review round 2 `P2`).
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
+    # ⛔ THE APOSTROPHE CLASS CARRIES U+2019 (#11258 review round 22 `P2`,
+    # MEASURED): the contraction ARM already accepts the typographic apostrophe
+    # (`n['\u2019]?t`), and so does every other spelling arm — but the negation
+    # RUNS spelled only `'`, so `the ADJACENCY gap hasn’t been open again.` (the
+    # smart-quote form macOS supplies for free) was REFUSED while its ASCII twin
+    # stayed GREEN, and NO ledger entry re-measured the difference. That
+    # breaks this artifact's own rule — an over-block is acceptable only if
+    # RECORDED — and it is the false block that ends with the pin being deleted.
+    # ⛔ MEASURED at `6c3c18b8280f`: SEVEN truthful denials were GREEN/ASCII and
+    # RED/curly. Both characters therefore belong in the class at EVERY run site,
+    # and the invariant that keeps them there is
+    # `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`,
+    # which re-measures every proof-list shape in both spellings — so a site that
+    # loses `’` reds for the shape that exercises it. Fixed width is unchanged:
+    # `[n'’]t` is still three chars, so every lookbehind stays legal.
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)"
+    # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
+    # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
+    # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
+    # opened again`, `is no longer opening again`, `hasn't yet opened again`,
+    # `hasn't ever opened again` were GREEN while the arm read only `open again`
+    # (no match at all) and RED the moment it read the inflection. An inflection
+    # added to the arm needs its own negation form HERE, and every form in this run
+    # has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`.
+    # ⛔ AND EACH SITE HAS ITS OWN PARTNERS, not a shared assumption (#11258 review
+    # round 18 `P0`, MEASURED): the run is carried in BOTH sites because the two
+    # drift independently, and only the `_RESIDUAL_OPENNESS` copy was falsifiable —
+    # deleting this site's copy left the whole file GREEN while five honest waived
+    # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
+    # `the SPELLING gap …` partners pin THIS one.
+    r"(?<!no longer\s)(?<![n'\u2019]t\syet\s)(?<![n'\u2019]t\sever\s)"
+    r"\bopen(?:s|ed|ing)?\s+again\b",
+)
+
+#: The ANCHORED arm: `<verb> … open` and the opening verb. ⛔ NO HYPHEN EXCEPTION —
+#: `fail-open` IS read, because failing open on the adjacency class is exactly the
+#: reopening this scan refuses (`the ADJACENCY half is fail-open.` stays GREEN with
+#: one, #11258 review `P2`).
+_RESIDUAL_OPEN_VERBS = (
+    r"is|are|was|were|remain|remains|remained|stay|stays|stayed|"
+    r"keep|keeps|kept|hold|holds|held")
+
+#: `<verb> open` with the verb NEGATED is a DENIAL of the gap, not a reopening:
+#: `the ADJACENCY half is not open` closes it. The veto sits directly after the
+#: verb so it can only ever speak about THIS predicate — `is unjudged and never
+#: closed` is still read by the `not … closed` arm, where the negation asserts the
+#: gap is open (#11258 review `P2`, measured: seven honest denials red before it).
+#: ⛔ IT VETOES ONLY THE PREDICATE'S OWN NEGATOR, and it admits an adverb on BOTH
+#: sides of it. Too tight, and honest denials are refused — `is not entirely open`,
+#: `is clearly not open` were FALSE BLOCKS (#11258 review round 3 `P2`, measured).
+#: Too wide (a bare `(?!…not…)`), and the EMPHATIC negations, which ASSERT the gap
+#: is open, go green — `is not only open`, `is not merely open`, `is not just open,
+#: it is unjudged`, `is never far from open` were a coverage REGRESSION against the
+#: head the previous review approved (#11258 review round 2 `P1`, measured). The
+#: adverb that makes the difference is the one AFTER `not`, so that slot is an
+#: explicit allowlist — `only`/`merely`/`just`/`simply`/`far` flip the polarity and
+#: are deliberately absent, while the ones here do not.
+_RESIDUAL_NEGATED_OPEN = (
+    r"(?!\s*(?:\w+\s+)?(?:not|never)\s+"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)"
+    # ⛔ `no longer` IS ITS OWN LOOKAHEAD, not a member of the `not|never` group
+    # (#11258 review round 13 `P2`, MEASURED): it hard-coded `no\s+longer\s+`, so
+    # `the ADJACENCY half is no longer open.` was GREEN (truthful, pinned) while
+    # `… is no longer, in practice, open.` and `… is no longer being open.` RED —
+    # an UNRECORDED over-block, and the fourth `no longer` site not using the
+    # shared primitive (three did). It takes a window and the SAME after-negator
+    # adverb allowlist, so `no longer merely open` (which ASSERTS openness) stays
+    # RED.
+    r"(?!\s*(?:\w+\s+)?\bno\s+longer\b"
+    # ⛔ THE WINDOW MUST NOT SWALLOW A POLARITY FLIPPER (#11258 review round 13,
+    # MEASURED — my own first attempt did): `no longer merely open` / `no longer
+    # only open` / `no longer far from open` ASSERT the gap is wide open, and with
+    # a bare `[^.;]{0,25}?` the filler consumed `merely ` and the veto fired,
+    # turning all three GREEN — round 2's coverage regression, re-created by the
+    # fix for the over-block. So the filler is barred from containing one.
+    r"(?![^.;]{0,25}?\b(?:merely|only|just|simply|far\s+from)\b)"
+    r"[^.;]{0,25}?"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)"
+    # ⛔ `’` IS IN THE CLASS HERE FOR PARITY, and this site is NOT a falsifier
+    # (#11258 review round 22, MEASURED): a contraction attaches to its own
+    # auxiliary (`isn’t` = `isn` + `’t`), and `\b(is|are|…)\b` cannot match the
+    # `is` of `isn’t` for EITHER apostrophe — so this lookahead's `n't` branch
+    # cannot fire on well-formed English. The guard that actually keeps a
+    # contracted denial out of this arm is the `(?<![n'’]t )` LOOKBEHIND (it vetoes
+    # the participle verbs `kept`/`held` when the contraction precedes them), which
+    # is why `the ADJACENCY gap isn’t kept open.` is GREEN. The class is widened
+    # anyway so that a lane reading any one run site cannot conclude the
+    # typographic apostrophe is handled "somewhere else".
+    r"(?!\s*(?:\w+\s+)?n['\u2019]t\s+"
+    r"(?:(?:yet|fully|really|still|entirely|always|genuinely|currently|quite|"
+    r"completely|actually|wholly|truly|strictly)\s+)?"
+    # ⛔ AND THE PARTICIPLE, the OTHER half of the round-17 `P2` fix — in ALL THREE
+    # post-negator slots (`not`/`never`, `no longer`, `n't`), because a class fixed
+    # in one of three places is the defect rounds 11-12 were spent on. It sits
+    # AFTER the adverb slot, so every polarity flipper round 2's regression let
+    # through (`not only kept open`, `not merely held open`) still cannot reach
+    # `open` and stays RED — pinned as mutations, not asserted.
+    r"(?:(?:kept|held)\s+)?(?:fail-)?open\b)")
+
+#: `fails open` (no hyphen) is the row's OWN vocabulary for the same thing, and it
+#: is read CLAUSE-anchored rather than by adding `fails?` to the verb list above:
+#: MEASURED, that addition reds the real row on its own honest `(d)` — *“`_value_
+#: bindings` fuses nothing and the pair fails open”* — whose clause *“the pair
+#: fails open”* names no class, while *“the ADJACENCY half fails open”* does. So
+#: the anchor requirement is what separates the lane's reopening from the row's
+#: disclosure. ⚠️ THAT SENTENCE IS ONLY HALF TRUE, MEASURED: when the anchor IS the
+#: subject of an honest disclosure — `the numeric side fails open on an unknown
+#: unit`, `the numeric side still fails open on purpose` — the arm REFUSES it, and
+#: the row's own sentence escapes only because its subject (`a unit outside
+#: _UNIT_EQUIV`) carries no anchor (#11258 review round 6 `P2`). That is an
+#: OVER-BLOCK, kept because the alternative is the leak it closes, and
+#: RECORDED IN THE LEDGER rather than left to be discovered — its two sentences
+#: are entries in `_RESIDUAL_REFUSED_TRUTHFUL`, so the suite re-measures them;
+#: until #11258 review round 19 `P3` they were recorded only in THIS comment,
+#: which is a record that cannot red. ⛔ STILL LEAKING, stated rather than implied: the coordinator form
+#: *“the ADJACENCY half is unjudged and fails open”* stays GREEN, because the
+#: clause split leaves the anchor in the first clause and the phrase in the
+#: second — the same shape as the row's honest sentence, so no clause-scoped rule
+#: can separate them (#11258 review `P2`).
+#: ⛔ THE DENIAL OF THIS PREDICATE IS NOT A REOPENING, and until #11258 review
+#: round 25 `P2` this arm had NO negation veto at all while every other
+#: `open`-predicate arm in this file carried one — so the plain, honest negation of
+#: the very phrase it reads was REFUSED: `the ADJACENCY half no longer fails open.`,
+#: `… never fails open.`, `… does not fail open.` and `the numeric side no longer
+#: fails open.` each returned a claim, appeared in NO ledger entry, and got the
+#: message that says the region "REOPENS a gap this row says is CLOSED" plus a
+#: pointer at a ledger with no matching entry — the same double defect rounds
+#: 19/20 were spent removing. MEASURED both directions with this module's own
+#: functions at `9e6839bc4636` (waived=False, one claim each).
+#:
+#: ⛔ THE VETO IS A FIXED-WIDTH RUN, one form per must-stay-GREEN partner in
+#: `_RESIDUAL_TRUTHFUL_STATEMENTS` (this file's own rule, round 17 `P1`: a form in
+#: the run with no partner is a form nothing re-measures). `’` is in the apostrophe
+#: class for parity with every other run site, and its falsifier is the ASCII-valued
+#: `… doesn't fail open.` partner, which
+#: `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`
+#: re-measures in both spellings.
+#:
+#: ⛔ AND EACH FORM IS A FIXED-WIDTH LOOKBEHIND SITTING IMMEDIATELY IN FRONT OF THE
+#: VERB, which is what keeps the EMPHATIC negations RED: `not only fails open`
+#: ASSERTS the predicate, and the four chars in front of the verb there are `nly `,
+#: not `not `, so it is still read. That
+#: narrowness is pinned rather than asserted — `the ADJACENCY half not only fails
+#: open, it leaks.` is in `_RESIDUAL_REOPENING_MUTATIONS` and goes GREEN the moment
+#: the veto is widened into a WINDOW scan (the trade round 2 `P1` and round 13 had
+#: to correct one arm over). ⛔ DO NOT ADD AN EMPHATIC BRANCH: one was written in
+#: this round's first cut, was measured INERT (dropping it left `108 passed`,
+#: because no grammatical emphatic form puts `not` immediately before the verb),
+#: and dead arms are the class rounds 18/23 `P0` filed.
+#:
+#: ⚠️ THE BOUNDED-LOOKBEHIND COST IS PAID OPENLY: an adverb between the negator and
+#: the verb (`does not actually fail open`) sits outside every form the run can
+#: carry, so it is refused. That shape is in `_RESIDUAL_REFUSED_TRUTHFUL`, which is
+#: the route this artifact's own refusal message names.
+_RESIDUAL_FAIL_OPEN = re.compile(
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<![n'\u2019]t\s)(?<!no longer\s)"
+    r"\bfails?\s+open\b",
+    re.I,
+)
+
+#: The gap between the verb and `open` may hold an OBJECT ("keeps the gap open"),
+#: a participle ("is held open"), adverbs or a parenthetical ("remains, in
+#: practice, open"), and it may cross a coordinator that JOINS ADJECTIVES inside
+#: one predicate ("is unjudged and open") — but NOT one that introduces a NEW
+#: PREDICATE, which is how the row's own honest "the pair is unjudgeable and fails
+#: open" was read as an openness claim. Three attempts are recorded here because
+#: each one traded a leak for a different leak, measured: a CLOSED ADVERB LIST
+#: dropped every object (`keeps the gap open`, `is held open` GREEN — round 2
+#: `P1`); a BLANKET coordinator bound dropped coordinator-joined adjectives
+#: (`is unjudged and open` GREEN — round 3, measured); this bound blocks the
+#: coordinator only when a subject and a verb follow it.
+_RESIDUAL_ANCHORED_OPENNESS = (
+    # ⛔ THE VERB MAY ITSELF BE NEGATED FROM THE LEFT (#11258 review round 14 `P2`,
+    # MEASURED): `the ADJACENCY half is no longer kept open.` / `… no longer held
+    # open.` are the negated twins of the pinned reopenings `… is kept open.` /
+    # `… is held open.`, and the veto below sits AFTER the verb, so it could not
+    # see a negator in front of it. Both were RED — an honest closure refused.
+    # The lookbehind is a FIXED-WIDTH literal (`no longer ` is exactly 10 chars),
+    # which a Python lookbehind requires — `\s+`/`\b` make the pattern
+    # variable-width and `re` refuses it outright (measured).
+    # ⛔ ROUND 17 `P2`: that lookbehind covered `no longer` ONLY, and the pair of
+    # costs the ledger used to carry (`is not kept open.` / `is not held open.`)
+    # was RECORDED as unfixable — which was WRONG and is corrected here by
+    # measurement. The two halves are each INERT ALONE and ADDITIVE TOGETHER: the
+    # participle in the veto slot alone changes nothing (the match arrives through
+    # the PARTICIPLE as the verb, so the negator is on the wrong side of that
+    # slot), and `not`/`never` in front of the verb alone is not enough either —
+    # but the two together make both denials GREEN while `not only kept open` /
+    # `not merely held open` (which ASSERT openness) stay RED. Measured: 0
+    # mutations lose RED, 0 truthful statements go RED.
+    r"(?<!no longer )"
+    # ⛔ `’` IS IN THE CLASS HERE TOO — see the apostrophe note on the
+    # `_RESIDUAL_OPENNESS` negation run.
+    r"(?<!\bnot )(?<!\bnever )(?<![n'\u2019]t )\b(" + _RESIDUAL_OPEN_VERBS + r")\b"
+    + _RESIDUAL_NEGATED_OPEN
+    + r"(?:(?!\b(?:and|but)\s+(?:\w+\s+){0,4}?"
+    r"(?:is|are|was|were|fails?|stays?|remains?|keeps?|holds?)\b)[^.;]){0,40}?"
+    r"(?:fail-)?open(?!\w)",
+    # ⛔ A NEGATED reopening is a DENIAL of one: `(d2) does not reopen (d)'s
+    # ADJACENCY result` is the row's own truthful scope boundary (#11223 fix
+    # direction 2), so the lookbehinds are what keep it out of the scan. They are
+    # A FAMILY of fixed-width forms rather than the original pair, because a
+    # one-token window read only `not reopen` / `never reopen` and refused every
+    # honest denial that puts a word between them (`has not been re-opened`,
+    # `has never been reopened`, `doesn't reopen` all red — #11258 review `P2`,
+    # measured). ⚠️ The enumeration is
+    # BOUNDED, not exact: an ADVERB inside the forms (`has not YET been re-opened`,
+    # `has never BEFORE been reopened`) is still refused, so the `yet` and `before`
+    # variants are carried below. A Python lookbehind must be fixed-width, so a
+    # different adverb means another form — do NOT read the run as exhaustive
+    # (#11258 review round 3 `P2`, measured on the word "exact").
+    # ⛔ AND THE COST OF THAT BOUNDEDNESS IS EXECUTABLE, not a sentence here
+    # (#11258 round-20 `P3`, MEASURED): three honest denials with an interpolated
+    # adverb or comma — `has not to date been reopened.`, `has not, in practice,
+    # been reopened.`, `has not yet, in practice, been re-opened.` — are REFUSED,
+    # because a fixed-width lookbehind cannot cross the interpolation. Widening
+    # the run is not the fix (the trades are rounds 2/9/10), so all three live in
+    # `_RESIDUAL_REFUSED_TRUTHFUL` where the suite re-measures them; this note
+    # pointing at prose was the defect the round-19 `fails open` fix had already
+    # closed one arm over.
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
+    # ⛔ `’` IS IN THE CLASS HERE TOO — see the apostrophe note on the
+    # `_RESIDUAL_OPENNESS` negation run.
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)\bre-?open",
+    *_RESIDUAL_CLOSED_VERDICT,
+)
+
+#: The negation RUN shared by `_SPELLING_FLOOR`'s two verb arms.
+#:
+#: ⛔ ONE PRIMITIVE, NOT TWO COPIES — the drift this file already paid for once, one
+#: tuple over (#11258 review rounds 11-12: the run was written out three times, only
+#: one copy carried a filler window, and every copy used `\s+`, so a punctuated
+#: insertion defeated all of them). Both arms below need the SAME run, so it lives
+#: in one place and an arm that widens cannot leave the run behind.
+_SPELLING_FLOOR_NEGATION_RUN = (
+    r"(?<!\bnot\s)(?<!\bnever\s)(?<!\bnot\sbeen\s)(?<!\bnever\sbeen\s)"
+    r"(?<!\bnot\syet\s)(?<!\bnever\sbefore\s)"
+    r"(?<!\bnot\syet\sbeen\s)(?<!\bnever\sbefore\sbeen\s)"
+    # ⛔ `\u2019` IS IN THE CLASS HERE, and the falsifier for it is the TRUTHFUL
+    # PARTNER `the SPELLING gap hasn’t been open again.` — NOT
+    # `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`.
+    # MEASURED (#11258 review round 24 `P2`): that test iterates a shape only when
+    # it contains an ASCII `'` to convert, so it never reaches this site; an earlier
+    # note here claimed it did. Reverting `’` here reds ONLY the truthful-list test.
+    r"(?<![n'\u2019]t\s)(?<![n'\u2019]t\sbeen\s)"
+    r"(?<!no longer\s)(?<![n'\u2019]t\syet\s)(?<![n'\u2019]t\sever\s)"
+)
+
+#: The floor for an EXEMPT sentence — one that discloses the still-open SPELLING
+#: class and names no class anchor. It is not skipped: these say a unit stopped
+#: being fused/judged, which reopens the adjacency gap whatever else the sentence
+#: is about (review cycle 7, MEASURED: exempting that sentence wholesale let "the
+#: SPELLING gap is not closed and `minute` no longer fuses" PASS; cycle 9:
+#: skipping it entirely let "… the value class is no longer judged" PASS).
+#: `not closed` / `is open` are deliberately absent — the SPELLING gap IS open and
+#: saying so is the row's own honest disclosure.
+_SPELLING_FLOOR = (
+    _NO_LONGER_WINDOW
+    + r"(closed|fuses|fused|fusing|judged|caught|compared|enforced|retained)\b",
+    r"\bunclosed\b",
+    # ⛔ THE WAIVED SENTENCE IS STILL READ FOR `open again`, which is why it is here
+    # and not only in `_RESIDUAL_OPENNESS`: the honest path runs ONLY this tuple, so
+    # `the SPELLING gap is open again` was GREEN while the same phrase without the
+    # word `spelling` red — the waiver was skipping the whole openness arm
+    # (#11258 review round 3 `P1`, measured). Its negation window matches the
+    # opening verb's lookbehind run, so an honest denial still passes.
+    # ⛔ THE ARM AND THIS RUN ARE ONE UNIT (#11258 review round 17 `P1`, MEASURED):
+    # widening the ARM to `open(?:s|ed|ing)?` without widening the RUN turned five
+    # honest closures into FALSE BLOCKS — `no longer opens again`, `is no longer
+    # opened again`, `is no longer opening again`, `hasn't yet opened again`,
+    # `hasn't ever opened again` were GREEN while the arm read only `open again`
+    # (no match at all) and RED the moment it read the inflection. An inflection
+    # added to the arm needs its own negation form in the run, and every form in the
+    # run has a must-stay-GREEN partner in `_RESIDUAL_TRUTHFUL_STATEMENTS`.
+    # ⛔ AND EACH SITE HAS ITS OWN PARTNERS, not a shared assumption (#11258 review
+    # round 18 `P0`, MEASURED): the run is carried in BOTH sites because the two
+    # drift independently, and only the `_RESIDUAL_OPENNESS` copy was falsifiable —
+    # deleting this site's copy left the whole file GREEN while five honest waived
+    # denials went RED. The `the ADJACENCY half …` partners pin occurrence #1; the
+    # `the SPELLING gap …` partners pin THIS one.
+    _SPELLING_FLOOR_NEGATION_RUN
+    + r"\bopen(?:s|ed|ing)?\s+again\b",
+    # ⛔ AND FOR THE `reopen` FAMILY (#11258 review round 24 `P1`, MEASURED): this
+    # arm existed on `origin/main` as the third member of
+    # `_SPELLING_SENTENCE_REOPENING` (`\bre-?open`) and the rewrite dropped it. A
+    # WAIVED sentence runs ONLY this tuple, so `the SPELLING gap is reopened.` was
+    # GREEN here while `origin/main`'s own pin REFUSED it — a coverage regression in
+    # the shape this artifact exists to refuse, and NOTHING recorded it: the shape
+    # appeared in no proof list and in neither ledger. Restored with the SAME run as
+    # the arm above (one primitive, not a second copy), with five reopenings pinned
+    # in `_RESIDUAL_REOPENING_MUTATIONS` and three honest denials in
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` so the run reaches this arm too.
+    _SPELLING_FLOOR_NEGATION_RUN
+    + r"\bre-?open(?:s|ed|ing)?\b",
+)
+
+#: The row that FOLLOWS the residual list. The proof test anchors its append point
+#: on this literal, deliberately NOT on `_residual_region` — anchoring it there is
+#: what made the first version of that test self-referential: it inserted each
+#: mutation inside whatever region the function returned, so narrowing the bound
+#: moved the fixture with it and every mutation stayed GREEN (#11258 review `P1`,
+#: measured).
+_RESIDUAL_ROW_END = "\n  - id: atomic_point_write"
+
+
+def _residual_region(text: str) -> str:
+    """The `state_value_carve_out` row's own text: its `  - id: ` entry → the next.
+
+    ⛔ THE BOUND IS THE ROW, NOT THE MARKER, and every earlier bound was defeated
+    by writing OUTSIDE it (#11223): `[:1200]` → the `(d)` block (10,019 chars) →
+    the residual marker (37,942 of 50,850 chars = 74.6% of the row). A reopening
+    is a reopening wherever in the row it is written, so the region is the whole
+    row and the marker is only a locator. MEASURED that covering the marker's
+    12,908-char prefix costs nothing at this revision: the real row carries 0
+    claims on the whole row and every entry of both proof lists below is
+    unchanged, and a reopening inserted into the prefix
+    (`(2b) the ADJACENCY half is open again.`) is GREEN under the marker bound
+    and RED under this one.
     """
-    row = (pathlib.Path(__file__).resolve().parent.parent
-           / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    assert text.count(_RESIDUAL_MARKER) == 1, (
+        f"the registry must carry exactly ONE {_RESIDUAL_MARKER!r} residual list "
+        f"(found {text.count(_RESIDUAL_MARKER)}) — this pin is the guard for "
+        "that one, so a second copy is a second, UNGUARDED residual list")
+    # ⛔ AND THE ROW ITSELF MUST BE UNIQUE: a second `  - id:
+    # state_value_carve_out` entry leaves the scan reading whichever copy comes
+    # first while the other publishes its own, unguarded residual list — measured
+    # on a duplicate appended at the end of the file: both residual tests stayed
+    # GREEN. This file family has exactly that history (`b1751f9d80` deduped a
+    # three-row duplicate of another entry).
+    # ⛔ The count is BRANCHED (#11258 review round 3, `P2`): `0` is not a
+    # duplicate, and it is the case a lane most needs diagnosed — the row was
+    # renamed, re-indented or wrapped, so the pin must be moved, not narrowed.
+    row_copies = text.count(_RESIDUAL_ROW_START)
+    assert row_copies == 1, (
+        ("the `state_value_carve_out` row is GONE (0 matches for "
+         f"{_RESIDUAL_ROW_START!r}) — it was renamed, re-indented or wrapped; move "
+         "this pin with it rather than narrowing the scan to something it can "
+         "still reach")
+        if row_copies == 0 else
+        (f"the registry must carry exactly ONE `state_value_carve_out` row "
+         f"(found {row_copies}) — this pin scans that row, so a second copy is a "
+         "second, UNGUARDED residual list"))
+    start = text.find(_RESIDUAL_ROW_START)
+    # ⛔ the terminator is searched AFTER the row's own entry start, or the start
+    # line itself matches `\n  - id: ` and truncates the region to nothing.
+    tail = text[start + len(_RESIDUAL_ROW_START):]
+    nxt = re.search(r"\n  - id: ", tail)
+    assert nxt is not None, (
+        "could not find the END of the `state_value_carve_out` row (the next "
+        "`  - id: ` entry) — without it this scan would read the REST OF THE "
+        "FILE and red on other rows' prose, which is how a pin gets deleted "
+        "rather than fixed")
+    region = _RESIDUAL_ROW_START + tail[:nxt.start()]
+    # ⛔ ANTI-SILENT-NARROWING: the region must still carry the row's load-bearing
+    # literals, or a `  - id: ` written into the row's PROSE truncates this region
+    # early while every assertion above still passed. MEASURED reach: a decoy at
+    # row+200 / +8,000 / +12,900 / +20,000 / +24,000 / +24,300 REDs here, so this
+    # assert covers truncation UP TO `(e) the` (row+24,386); a decoy AFTER it
+    # (+30,000 / +40,000 / +50,000) passes this assert and is caught by the append
+    # fixture in
+    # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` instead, which
+    # inserts at the row's `_RESIDUAL_ROW_END` literal and asserts the sentence is
+    # inside the region. Two anchors rather than one because the row is 50,850
+    # chars and a single early literal leaves the tail unguarded here.
+    assert (_RESIDUAL_MARKER in region and "(d) a RATE unit" in region
+            and "(e) the" in region), (
+        "the scanned region does not run from the row's start through residual "
+        f"(e) — it truncated early at {len(region)} chars (prose inside "
+        "the row containing `  - id: `?), so the scan would silently cover less "
+        "than the row it claims to guard")
+    return region
+
+
+#: The clause boundary the scan splits on before matching. ⛔ `while`/`whereas`/
+#: `although`/`though` belong here for the same measured reason `and`/`but`
+#: do: they join two claims too, and a joiner the splitter does not know leaves an
+#: honest `spelling` disclosure and a reopening in ONE segment — so the honest
+#: waiver swallowed the second claim (`the SPELLING gap is open while the
+#: remaining gap is not closed` GREEN; the same claim unwrapped RED — #11258 review
+#: round 4 `P2`, measured).
+#: ⛔ `yet` IS A JOINER TOO, GUARDED — and an earlier cut of this note said the
+#: opposite (#11258 review round 23 re-review, MEASURED): `yet\s+` IS a branch of
+#: the alternation, behind `(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)` so that
+#: `hasn't yet opened again` is not severed. Those lookbehinds narrow WHEN it may
+#: split; they do not remove it from the group. Deleting the branch greens
+#: `the SPELLING gap is open yet the remaining gap is not closed.`, which is pinned
+#: in `_RESIDUAL_REOPENING_MUTATIONS`.
+#: ⚠️ This is a CLOSED list standing in for a clause
+#: boundary; a joiner not named here still joins. That residual is disclosed in
+#: `WHAT THIS CANNOT CATCH` rather than implied to be covered.
+_RESIDUAL_CLAUSE_SPLIT = (
+    # ⛔ `yet` IS BARRED BEHIND A NEGATOR (#11258 review round 18 `P1`, MEASURED).
+    # The splitter bit at `yet` in `hasn't yet opened again`, dropped the honest
+    # `spelling` clause and rejoined the survivors with ` , ` — so the negator and
+    # the participle landed in different segments and `the SPELLING gap hasn't yet
+    # opened again.` went RED while the same denial WITHOUT an honest clause was
+    # GREEN (pinned). A verdict must not depend on unrelated content in the
+    # sentence. The bar is fixed-width and applies to `yet` ONLY. ⛔ IT DOES NOT
+    # REOPEN THE ROUND-7 HOLE: the closed-verdict lookahead below still refuses to
+    # split `has yet to be closed` (measured at this head: the sentence stays ONE
+    # segment, so `_RESIDUAL_CLOSED_VERDICT` reads it whole). The bar narrows WHO
+    # may split at `yet`; the lookahead still decides WHERE it may not.
+    r";|,?\s+(?:(?:and|but|while|whereas|although|though)\s+"
+    # ⛔ `’` IS IN THE CLASS HERE TOO: the bar exists to keep a negator attached to
+    # its `yet`, and it was the round-18 `P1` fix — with the ASCII-only class the
+    # curly spelling severed it again, so the verdict depended on unrelated
+    # content in the sentence, which is exactly what that round removed.
+    r"|(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)yet\s+)"
+    # ⛔ THE COORDINATOR MUST NOT BITE INSIDE A VERDICT'S OWN TEXT. `has yet to be
+    # closed` splits at `yet` and `anything but closed` at `but`; severing them put
+    # the two halves of `_RESIDUAL_CLOSED_VERDICT` in different segments, so after an
+    # honest `spelling` clause was removed and the survivors rejoined they never
+    # matched — a fail-open reachable by clause ORDER: `the SPELLING gap is open, and
+    # the half has yet to be closed, per the ADJACENCY row` was GREEN while the same
+    # claim with the anchor first was RED (#11258 review round 7 `P1`, measured).
+    r"(?!(?:to\s+be\s+closed|closed)\b)")
+
+def _residual_reopening_claims(text: str) -> list[str]:
+    """Every claim in the residual region that REOPENS a gap the row closed.
+
+    REGION-WIDE, SENTENCE-scoped, and anchored only where it has to be. Each of
+    those three is a correction, measured — not a preference:
+
+    * region-wide: the region used to stop at `(e) the`, so a reopening appended
+      where a lane appends one was never read (#11223);
+    * SENTENCE-scoped, not clause-scoped: splitting a sentence on `;`/`, and` puts
+      the class anchor in one half and the openness phrase in the other, so
+      `the ADJACENCY half is now CLOSED, but the exception it carved is open
+      again.` and `the ADJACENCY half is not, and never was, closed.` both PASSED
+      a clause-scoped scan (#11258 review `P2`, measured);
+    * anchored ONLY for the opening verb, and for the SPELLING waiver: requiring
+      the class anchor of EVERY phrase let `the gap those tables closed is open
+      again` through — a shape the PRE-change guard caught (#11258 review `P1`).
+
+    A sentence that discloses the still-open SPELLING class and names no class
+    anchor is honest (that gap IS open) and gets only `_SPELLING_FLOOR`.
+    Returns the offending phrase with its sentence, so a red names both.
+    """
+    claims: list[str] = []
+    flat = " ".join(_residual_region(text).split()).lower()
+    for sentence in re.split(r"(?<=[.!?;])\s+", flat):
+        # ⛔ THE WAIVER IS CLAUSE-SCOPED EVEN THOUGH MATCHING IS PER SENTENCE. The
+        # two scopes answer two different failures, measured in opposite
+        # directions: matching must be per SENTENCE, or a `;`/`, and` split
+        # separates a class anchor from its openness phrase (round 1 `P2`); the
+        # WAIVER must be per CLAUSE, or one honest `spelling` clause waives a
+        # reopening in the NEXT one — "The SPELLING gap is open on purpose, but
+        # the remaining gap is not closed." stayed GREEN with a sentence-scoped
+        # waiver (round 2 `P2`). So the honest clauses are REMOVED and what is
+        # left is scanned.
+        clauses = re.split(_RESIDUAL_CLAUSE_SPLIT, sentence)
+        honest = [c for c in clauses if _is_honest_spelling(c)]
+        # ⛔ THE NEGATED CLOSED VERDICTS DO NOT NEED A SENTENCE-SCOPED PASS, and the
+        # one that sat HERE has been DELETED (#11258 review round 22 `P2`, MEASURED).
+        # Its job was round 5's `P2` (`has yet to be closed` splits at `yet`,
+        # `anything but closed` at `but`, and rejoining the pieces put the pattern's
+        # two halves in different segments). That job is now done by the SPLITTER's
+        # own lookahead, `(?!(?:to\s+be\s+closed|closed)\b)` in
+        # `_RESIDUAL_CLAUSE_SPLIT` (round 7), so this pass supplied nothing — and a
+        # review measured it DELETEABLE WHILE GREEN: removing the loop and its helper
+        # left 135/135 mutations RED, every truthful statement GREEN, 15/15 ledger
+        # entries refused and the row green. It is the class rounds 17/18 filed as
+        # `P0` (an arm deletable while green), so it is gone rather than left looking
+        # like coverage; its helper `_match_is_honest_spelling_disclosure` had no
+        # other caller and went with it.
+        # ⛔ WHY IT COULD NOT BE RESCUED WITH A FALSIFIER: `_RESIDUAL_CLOSED_VERDICT`
+        # also travels in `_RESIDUAL_ANCHORED_OPENNESS`, which runs on `scan`, and
+        # `_RESIDUAL_WAIVER_WITHHOLD` is a literal SUPERSET of
+        # `_RESIDUAL_CLASS_ANCHOR` — so a clause carrying an anchor can never be an
+        # honest one, therefore can never be the clause REMOVED, therefore the text
+        # a sentence-scoped pass would judge always reaches `scan` too. That is an
+        # argument, so it is also measured, both directions, at the head this note
+        # was written at: round 5's
+        # `the SPELLING gap is open, and the time-unit half has yet to be closed`
+        # still REDS, and round 6's over-block statement
+        # `the SPELLING gap has never been closed, and the ADJACENCY half is closed
+        # by the tables` is still GREEN (it is in `_RESIDUAL_TRUTHFUL_STATEMENTS`,
+        # which re-measures it on every run).
+        if honest:
+            if len(honest) == len(clauses):
+                for pattern in _SPELLING_FLOOR:
+                    m = re.search(pattern, sentence)
+                    if m is not None:
+                        claims.append(
+                            f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                        break
+                continue
+            # ⛔ THE FLOOR JUDGES EACH HONEST CLAUSE — it is what the waived clause
+            # is judged BY, so it must not be reachable only when EVERY clause is
+            # honest (#11258 review `P1`, MEASURED at `0f48bcd05db`). Removing the
+            # honest clauses from `scan` and then never running the floor on them
+            # left `the SPELLING gap is reopened, and the pair is fused.` GREEN: the
+            # second clause is TRUE and carries no anchor, and it decided the
+            # verdict for a reopening in the first — the class round 18's `P1` was
+            # filed for. THIRTEEN of the 157 pinned mutations went GREEN once one
+            # truthful clause was appended, so the list is non-vacuous alone and
+            # vacuous under composition. `origin/main` ran this floor PER CLAUSE
+            # (`_SPELLING_SENTENCE_REOPENING`), so the all-honest-only path was a
+            # COVERAGE REGRESSION, not a widening — measure it against the same
+            # site inside residual `(d)` and main REDS the three mixed shapes this
+            # head passed.
+            # ⚠️ The all-honest branch above searches the WHOLE SENTENCE and is
+            # left alone: a per-clause search is a subset of it, so changing it
+            # could only narrow the floor's reach there. The floor still omits
+            # `not closed` / `is open` deliberately, so the honest disclosures it
+            # exists to allow cannot be blocked by this pass.
+            floor_hit = None
+            for clause in honest:
+                for pattern in _SPELLING_FLOOR:
+                    m = re.search(pattern, clause)
+                    if m is not None:
+                        floor_hit = m.group(0)
+                        break
+                if floor_hit is not None:
+                    break
+            if floor_hit is not None:
+                claims.append(f"{floor_hit!r} in sentence {sentence.strip()!r}")
+                continue
+            # ⛔ REJOINED WITH `, `, NOT `. ` — see the round-5 note below.
+            scan = " , ".join(c for c in clauses if not _is_honest_spelling(c))
+        else:
+            scan = sentence
+        patterns = list(_RESIDUAL_OPENNESS)
+        if _RESIDUAL_CLASS_ANCHOR.search(scan):
+            patterns += _RESIDUAL_ANCHORED_OPENNESS
+        for pattern in patterns:
+            m = re.search(pattern, scan)
+            if m is not None:
+                claims.append(f"{m.group(0)!r} in sentence {sentence.strip()!r}")
+                break
+        # ⛔ THE UNHYPHENATED `fails open` IS CLAUSE-ANCHORED (`_RESIDUAL_FAIL_OPEN`):
+        # it can only be read when THIS clause names the class, which is what keeps
+        # the row's own `the pair fails open` disclosure green while a lane's
+        # `the ADJACENCY half fails open` reds (#11258 review `P2`).
+        for clause in re.split(_RESIDUAL_CLAUSE_SPLIT, scan):
+            m = _RESIDUAL_FAIL_OPEN.search(clause)
+            if m is not None and _RESIDUAL_CLASS_ANCHOR.search(clause):
+                claims.append(f"{m.group(0)!r} in clause {clause.strip()!r}")
+                break
+    return claims
+
+
+def _is_honest_spelling(text: str) -> bool:
+    """Does this TEXT disclose the still-open SPELLING class and nothing else?
+
+    That gap IS open, so saying so is the row's own honest disclosure — but the
+    waiver is only ever granted to a span that names NO class anchor, so it can
+    never travel to a claim about the gap this row closed.
+
+    ⛔ The withholding set is `_RESIDUAL_WAIVER_WITHHOLD` — NOT
+    `_RESIDUAL_CLASS_ANCHOR` "in full", which is what this docstring said until
+    #11258 review round 17 `P2` measured that false at the head. It is the anchor
+    PLUS two arms the anchor does not carry: the unit-spelling family declared as
+    `_RESIDUAL_UNIT_WAIVER_ARMS`, and the bare `(?<!['’])\b[ms]\b` abbreviation.
+    ⛔ THE MEMBERS ARE DELIBERATELY NOT RE-ENUMERATED HERE, because two cuts of
+    this paragraph drifted from the code precisely by re-listing them: it named
+    `unit word`, which no declaration carries (`units?` already matches `unit` —
+    DEAD, removed in round 9), and it dropped "a unit token or its abbreviation",
+    which is where `hrs`/`minute` live, while claiming a shape (`… because `kg`
+    is no longer fused`) that `_SPELLING_FLOOR` reds even under the narrower
+    anchor-only withholding — the shape that actually flips is `… because `kg` is
+    not closed` (#11258 review rounds 18-19 `P2`, MEASURED). The declarations
+    above are the statement: `test_every_waiver_withhold_arm_earns_its_place`
+    derives its sample spellings from them, so an arm added or removed there is
+    measured the moment it is declared. WIDEN THAT SET, NOT
+    `_RESIDUAL_CLASS_ANCHOR`: the anchor also arms `_RESIDUAL_ANCHORED_OPENNESS`,
+    and widening it reds every truthful statement (MEASURED). What the anchor
+    alone must keep out is unchanged: with `carve-out` dropped from it, `the
+    SPELLING carve-out is open again` was waived and the same sentence without
+    `spelling` red (round 3 `P1`, measured).
+
+    ⛔ The cost, named rather than implied: a clause naming BOTH `spelling` and the
+    carve-out gets no waiver, so honest prose of that shape is refused. That is an
+    over-block, which this artifact prefers to the fail-open it replaces.
+    """
+    return ("spelling" in text
+            and not _RESIDUAL_WAIVER_WITHHOLD.search(text))
+
+
+def _assert_the_row_names_its_closure(row: str) -> None:
+    """The pin's WHOLE assertion body, callable by its own proof (#11258).
+
+    ⛔ A FUNCTION AND NOT INLINE, for a measured reason: with the body inline,
+    deleting its two wiring lines (`claims = _residual_reopening_claims(row)`
+    and `assert claims == []`) left BOTH the pin and its proof test GREEN, and
+    the pin then passed over `⛔ (d3) the ADJACENCY half is open again.`
+    appended at the residual list's end — the exact state #11223 exists to
+    refuse (#11258 review round 7 `P2`, reproduced by the reviewer). The proof
+    list called the helper directly, so it proved the HELPER and never that
+    the pin used it; `test_the_residual_region_is_scanned_WHERE_a_lane_
+    appends` now calls THIS function on the mutated row, so detaching the scan
+    from the assertion it feeds reds the proof.
+
+    Takes the row's TEXT rather than reading the file, so the proof can feed
+    it a mutated copy. `test_the_registry_row_names_the_residual_that_still_
+    stands` is the only caller that reads the artifact.
+    """
     residual = row.split("(d) a RATE unit", 1)
     assert len(residual) == 2, (
         "the registry row no longer states residual (d) as the RATE-unit gap — "
@@ -1343,36 +2736,53 @@ def test_the_registry_row_names_the_residual_that_still_stands():
     #   (b) the guard read `[:1200]` while residual (d) runs 1339 chars, so a
     #       reopening note appended where a lane APPENDS it was invisible EVEN
     #       with a phrase from the list ("no longer closed").
-    # So: scope to the WHOLE (d) block (up to `(e) the`), scan EVERY sentence for
-    # a reopening, and separately require the block to still NAME the adjacency
-    # claim as closed — the scan is not limited to sentences that say
-    # `adjacency`, because a reopening that names the gap another way
-    # ("`minute` no longer fuses", "the time-unit half is no longer closed",
-    # "except `minute`, which is open again") is the likeliest edit of all
-    # (review cycle 6, MEASURED: with the scan gated on `adjacency`, all five of
-    # those PASSED). Verified against 15 reopening mutations (all FAIL) and 8
-    # truthful statements (all PASS: "is now CLOSED", "has been CLOSED", "We have
-    # closed the ADJACENCY half", "the ADJACENCY gap is closed", "closed by this
-    # table", and the two TRUE spelling disclosures and "no longer fails open")
+    # So: scan EVERY sentence for a reopening, and separately require the block
+    # to still NAME the adjacency claim as closed — the scan is not limited to
+    # sentences that say `adjacency`, because a reopening that names the gap
+    # another way ("`minute` no longer fuses", "the time-unit half is no longer
+    # closed", "except `minute`, which is open again") is the likeliest edit of
+    # all (review cycle 6, MEASURED: with the scan gated on `adjacency`, all five
+    # of those PASSED).
+    # ⛔ AND `(d) THE` IS NOT THE BOUND EITHER (#11223, MEASURED: that block is
+    # 10,019 chars and does not contain the row's own `(d2)` clause, so a
+    # reopening appended after it was never read at all — the position a lane
+    # actually appends in). The scan is now REGION-WIDE, from the row's own
+    # `  - id: ` entry → the next entry; the class anchor is what keeps a truthful
+    # statement about some OTHER subject from tripping it, and the closed-claim
+    # rule stays scoped to `(d)` where that claim lives.
+    # The block's own structural half is asserted here; the reopening half lives
+    # in `_residual_reopening_claims`, whose proof list is `len()` of the two
+    # tuples below (`_RESIDUAL_REOPENING_MUTATIONS` must all RED,
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` must all stay GREEN) and is PINNED by shape
+    # and floor in that test, and is
+    # `test_the_residual_region_is_scanned_WHERE_a_lane_appends` below — that test
+    # is what makes the list above a checked claim rather than a docstring.
     # — plus the structural rule that the still-open SPELLING disclosure must be
     # its OWN sentence, because one sentence carrying both claims must satisfy
     # both and cannot.
     block = row.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
     flat = " ".join(block.split()).lower()
     sentences = re.split(r"(?<=[.!?;])\s+", flat)
-    # ⛔ REGION A = every sentence up to AND INCLUDING the LAST one that names
-    # the adjacency claim. The strict scan lives here. Region B is the trailing
-    # DISCLOSURE that the SPELLING class is still open — it is TRUE that it is
-    # open, so applying the adjacency rules to it refused a true statement
-    # (review cycle 7, MEASURED: "the SPELLING case is still open on purpose",
-    # "the SPELLING gap, which is not closed" and "remains open by design" all
-    # FAILED), and exempting it wholesale re-opened "the SPELLING gap is not
-    # closed and `minute` no longer fuses" — so region B keeps a narrower ban.
     adjacency_at = [i for i, s in enumerate(sentences) if "adjacency" in s]
-    assert adjacency_at, (
-        "the row no longer makes any ADJACENCY claim in residual (d) — this "
-        "table closed that gap; if it was reopened, say so AND delete this pin")
-    last = adjacency_at[-1]
+    # ⛔ `assert adjacency_at` WAS DELETED HERE AND IT IS NOT TIDINESS (#11258
+    # round 27 `P2`, MEASURED): it was DEAD, and it was the one structural rule
+    # with no killing mutant — the exact class the record in `test_every_structural
+    # _rule_in_the_pin_has_a_falsifier` claims is empty. `after` is
+    # `residual[1][:1200]` and `block` is `residual[1]` up to `(e) the` (10,019
+    # chars), so `after ⊆ block`; the assert 3 lines above
+    # (`"ADJACENCY" in after.upper()`) therefore implies "adjacency" ∈ `flat`,
+    # which implies this list is non-empty. MEASURED by deletion: patching this
+    # assert to `pass` changed NO verdict — control PASS, all 10 falsifiers red at
+    # the same rules — so it could never fire.
+    # The loop below is therefore GUARDED BY AN IMPLICATION, not by an assert, and
+    # that is sound only while `after ⊆ block` holds: if a future edit reads `block`
+    # from a NARROWER window than `after`, the implication breaks and the loop
+    # silently goes vacuous. `test_every_structural_rule_in_the_pin_has_a_falsifier`
+    # re-measures the premise (`after in block` on the real row) and reds if it
+    # stops holding, so the vacuity route is recorded rather than left to be
+    # discovered — and the `adjacency-claim-exists` entry that used to stand in
+    # here is gone with the assert, because its mutant reddened the WINDOW rule
+    # above instead of this one (a label that no longer named its rule).
     # ⛔ THE CLAIM ITSELF must still say CLOSED, per SENTENCE (review cycle 7 P1,
     # MEASURED: collapsing this to a block-wide `"closed" in flat` let a row that
     # says "the ADJACENCY half is not currently judged; the closed set grows"
@@ -1382,53 +2792,2021 @@ def test_the_registry_row_names_the_residual_that_still_stands():
                    for p in _ADJACENCY_CLOSED_CLAIM), (
             "the row does not ASSERT the ADJACENCY gap as CLOSED (a `closed` "
             f"elsewhere in the sentence is not enough): {sentences[i]!r}")
-    for sentence in sentences[:last + 1]:
-        for pattern in _ADJACENCY_REOPENING:
-            m = re.search(pattern, sentence)
-            assert m is None, (
-                f"the row says {m.group(0)!r}, which reopens the adjacency gap "
-                f"this table closed: {sentence!r}")
-    # ⛔ AND THE TAIL IS SCANNED WITH THE FULL LIST, exempting only a sentence that
-    # discloses the SPELLING class and names NO unit (review cycle 8, MEASURED:
-    # the narrow subset let `except \`minute\`, which is open again.` — appended at
-    # the very end — PASS, a regression against the parent commit).
-    # ⛔ AND AN EXEMPT SENTENCE STILL GETS A FLOOR — it is not skipped (review
-    # cycle 9, MEASURED: `continue` applied NO list at all, so "The SPELLING gap
-    # is open, and the value class is no longer judged.", "… the numeric side is
-    # no longer compared." and "… the carve-out reopens." went FAIL→PASS against
-    # the parent commit — phrases `_ADJACENCY_REOPENING` itself advertises). The
-    # exempt arm therefore applies `_SPELLING_SENTENCE_REOPENING`, whose whole
-    # job is to say a unit stopped being fused/judged whatever else the sentence
-    # is about; the non-exempt arm applies the full list.
-    tail = sentences[last + 1:]
-    for sentence in tail:
-        # ⛔ THE WAIVER IS CLAUSE-SCOPED, NOT SENTENCE-SCOPED (review cycle 10,
-        # MEASURED: with the waiver on the whole sentence,
-        # "The SPELLING gap is open, and the carve-out is still open." and
-        # "…, and the carve-out is not closed." both PASSED — they match the
-        # full list's own `is … open` arm, waived only because the FIRST clause
-        # is honestly about spelling). A waiver for an honest clause must not
-        # travel to the next one.
-        for clause in re.split(r";|,?\s+(?:and|but)\s+", sentence):
-            exempt = ("spelling" in clause
-                      and not _UNIT_TOKEN.search(clause))
-            for pattern in (_SPELLING_SENTENCE_REOPENING if exempt
-                            else _ADJACENCY_REOPENING):
-                m = re.search(pattern, clause)
-                assert m is None, (
-                    f"the row says {m.group(0)!r}, which reopens the adjacency "
-                    f"gap this table closed: {clause!r}")
-    assert not tail or any("spelling" in s for s in tail), (
-        "a sentence after the adjacency claim says something other than the "
-        f"disclosed SPELLING residual — inspect it: {tail!r}")
-    if tail:
-        assert any("spelling" in s and "open" in s for s in tail), (
-            "the row no longer discloses that the SPELLING class is open: "
-            f"{tail!r}")
+    # ⛔ AND THE REOPENING SCAN IS REGION-WIDE (#11223), which is the ONLY place it
+    # can live: every earlier bound here — `[:1200]`, the `(d)` block, the tail
+    # after the last adjacency sentence — was defeated by appending the reopening
+    # OUTSIDE it, and the block a lane reads is 10,019 chars while the residual
+    # list it appends to runs to the end of the row. `_residual_reopening_claims`
+    # carries the whole rule (sentence-scoped, class-anchored, spelling floor) and
+    # its own proof list is `test_the_residual_region_is_scanned_WHERE_a_lane_
+    # appends` below — this call is the pin, that test is the pin's own proof.
+    claims = _residual_reopening_claims(row)
+    # ⛔ A REFUSAL WHOSE SENTENCE CONTAINS A LEDGER SHAPE SAYS SO, and it POINTS
+    # rather than ruling (#11258 review round 11 `P2`/`P3`, MEASURED): the sentence
+    # can carry BOTH an honest ledger shape and a genuine reopening —
+    # `the ADJACENCY half is not closed, and (b2) is not closed.` matches the
+    # `(b2)` entry inside a real reopening — so a message that calls it "a recorded
+    # over-block, not a reopening" states something false about the artifact it
+    # just refused. The comparison is LOWERCASED on both sides because `claims`
+    # carries the sentence lower-cased while five of the seven ledger entries are
+    # spelled in caps: a case-sensitive compare found 5 of 7 undetectable, the
+    # `minute` cost included (MEASURED).
+    # ⛔ AND THE ROUTE OUT IS NOT CONDITIONAL ON BEING IN THE LEDGER (#11258 review
+    # round 19 `P2`, MEASURED). It used to be: the whole pointer paragraph hung off
+    # `if ledger_hits else ""`, so an honest sentence about a still-open item that
+    # is NOT one of the recorded entries got the bare accusation and nothing else —
+    # `(a) is not closed.`, `(c) is not closed.`, `(e1) is not closed.` are items of
+    # THIS row's own still-open list, so the statement is true, yet the message told
+    # the lane its disclosure "REOPENS a gap this row says is CLOSED" with no
+    # indication that `is still open` / `remains open` are accepted — the
+    # false-block path that ends with the pin being deleted. `ledger_hits` is now
+    # the SPECIFIC-MATCH detail line only; the pointer is emitted on every refusal.
+    ledger_hits = [s for s in _RESIDUAL_REFUSED_TRUTHFUL
+                   if any(s.rstrip(".").lower() in c.lower() for c in claims)]
+    assert claims == [], (
+        "the residual region REOPENS a gap this row says is CLOSED: "
+        + "; ".join(claims)
+        + ("\n⛔ A LEDGER SHAPE IS ALSO IN THIS SENTENCE: "
+           f"{ledger_hits}." if ledger_hits else "")
+        + "\n⛔ THE ROUTE OUT IS THE OVER-BLOCK LEDGER, ALWAYS: "
+        "`_RESIDUAL_REFUSED_TRUTHFUL` records truthful statements this pin "
+        "refuses, and its note gives the arm, why that arm cannot be narrowed, "
+        "and — where one exists — the phrasing accepted in its place. Read it "
+        "before rewriting: if the WHOLE sentence is honest and an entry records "
+        "it, that entry is why this red is not yours (for `not … closed`: `is "
+        "still open` / `remains open` are MEASURED GREEN, and a still-open item "
+        "of this row's own list belongs in the ledger rather than outside it); "
+        "if the sentence also reopens this gap, the rest of the sentence is the "
+        "defect.")
+    # ⛔ TWO TAIL ASSERTS WERE DELETED HERE, and the reason is measured rather than
+    # tidy (#11258 review round 24 `P1`): `assert not tail or any("spelling" in s
+    # for s in tail)` and the `spelling` + `open` variant over the SAME `tail` are
+    # both IMPLIED by the record in `test_every_structural_rule_in_the_pin_has_a
+    # _falsifier` (`sum("spelling" in s for s in tail) > 1` and
+    # `sum("spelling" in s and "open" in s for s in tail) > 1`), so neither could
+    # ever fire: MEASURED, deleting either alone leaves `108 passed`, and deleting
+    # both leaves `108 passed`. An arm that cannot red is the rounds-17/18 `P0`
+    # class — and this file already deleted one dead pass (`_RESIDUAL_CLOSED_VERDICT`'s
+    # sentence-scoped half) on exactly that ground, so leaving these would be the
+    # same defect one screen down. The RECORD is the guard, and it is strictly
+    # stronger: it reds on the vacuity route too (a trailing `the ADJACENCY half is
+    # CLOSED.` empties `tail`, and the record then asserts `0 > 1`).
     # positive control: the RATE class IS still open, and it must stay NAMED, or
     # the assertions above could be satisfied by a row that says nothing at all.
     assert "not judged" in flat, block
-    assert "per day" in flat or "per\n      day" in block, block
+    # ⛔ AND THE BLOCK-WIDE `per day` ASSERT THAT STOOD HERE WAS DELETED (#11258
+    # round 27 `P3`, MEASURED): unreachable, not merely late. `flat` is `block`
+    # whitespace-flattened and `block ⊇ after`, so the opening-window assert above
+    # (`"per\n      day" in after or "per day" in after`) already implies this one;
+    # MEASURED by deletion: patching it to `pass` left the matrix BYTE-IDENTICAL
+    # (control PASS, every falsifier red at the same line). Same class as the two
+    # tail asserts deleted above, and the `rate-per-day` falsifier still reds on the
+    # window assert, so the rule is not left unpinned.
+
+
+def test_the_registry_row_names_the_residual_that_still_stands():
+    """`config/v4-mechanisms.yml` must not describe a CLOSED gap as open.
+
+    The row's (d) is the artifact a lane reads ("⛔ WHAT IS STILL NOT ENFORCED —
+    read this before improving a number"). It named the ADJACENCY gap
+    (`seconds`, `minute`, `hour`, `day`, `mile`) as unjuged; that gap is closed
+    by the tables above, so the row was left FALSE and nothing red on it. This
+    pins both halves: the closed class must not come back into the row, and the
+    still-open RATE class must stay named there.
+    """
+    _assert_the_row_names_its_closure(
+        (pathlib.Path(__file__).resolve().parent.parent
+         / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8"))
+
+
+#: Reopenings a lane actually writes, appended AT THE END OF THE RESIDUAL LIST —
+#: the position all of them must RED from (#11223). Each names the class (a unit
+#: token, `adjacency`, the `time-unit` half, the carve-out, the value class, the
+#: numeric side), because that is what makes it a claim about THIS row's gap
+#: rather than about a decision, a false refusal or a ruling.
+_RESIDUAL_REOPENING_MUTATIONS = (
+    # the issue's own required mutation, appended after the residual list
+    "the ADJACENCY half is open again",
+    "except `minute`, which is open again.",
+    "`minute` no longer fuses",
+    "the time-unit half is no longer closed",
+    "the ADJACENCY half remains open",
+    "the adjacency gap is not closed",
+    "the ADJACENCY half has not yet been closed",
+    # round 8 (#11258 review round 8 `P2`, MEASURED): the CONTRACTED auxiliary. The
+    # uncontracted twins above and below RED; the contractions were GREEN because
+    # the arm carried `isn't` and only `isn't`. Each is a plain reopening a lane
+    # appends — `wasn't closed` says the gap is open in the past tense.
+    "the ADJACENCY half wasn't closed.",
+    "the ADJACENCY half hasn't been closed.",
+    "the ADJACENCY half hadn't been closed.",
+    "the ADJACENCY half weren't closed.",
+    # ⛔ ROUND 9: the two spellings the AUXILIARY ENUMERATION could not reach, and
+    # the `yet to be closed` synonyms. `cannot` has no word boundary after `can`,
+    # `shan't` was simply never listed, and `remains to be closed` is the natural
+    # residual-list phrasing of the same claim. Each was MEASURED GREEN at the head
+    # that enumerated auxiliaries, which is why the arm is now a shape.
+    "the ADJACENCY half cannot be closed.",
+    "the ADJACENCY half shan't be closed.",
+    "the ADJACENCY half remains to be closed.",
+    "the ADJACENCY half is still to be closed.",
+    # ⛔ THE `no longer …` MOVEMENT (#11258 review round 9 `P1`): with the floor's
+    # old slack this pattern and its six exclusive proofs were deletable in one
+    # edit, and this shape then measured GREEN. It is the one the membership loop
+    # pins that pattern by.
+    "the ADJACENCY half is no longer closed.",
+    "the ADJACENCY half is no longer judged.",
+    # ⛔ THE FILLER WINDOW (#11258 review round 11 `P1`, MEASURED): each of these
+    # was GREEN while its window-free twin RED, because the arm required the verb
+    # to follow `no longer` immediately.
+    "the ADJACENCY half is no longer being closed.",
+    "the ADJACENCY half is no longer being judged.",
+    "the ADJACENCY half is no longer even judged.",
+    "the ADJACENCY half is no longer actively judged.",
+    "the ADJACENCY half is no longer being fused.",
+    # round 16: gate (a) mirrored only six of the anchor vocabulary's nine
+    # members, so the SAME predicate was RED for `adjacency` and GREEN for
+    # `retention` / `the guarantee` / `the gap that/those … closed`.
+    "the retention guarantee is no longer fused.",
+    "the gap those tables closed is no longer fused.",
+    # ⛔ ROUND 12 (#11258 review round 12, MEASURED): the window was fixed in ONE
+    # arm and left out of the other three, and `\s+` after `longer` let a
+    # punctuated insertion defeat all of them. One shared `_NO_LONGER_WINDOW`
+    # primitive now serves every arm — these are its probes, one per arm.
+    "`minute` is no longer being fused.",
+    "the units are no longer being fused.",
+    "the SPELLING gap is no longer being fused.",
+    "the ADJACENCY half is no longer, strictly speaking, closed.",
+    "the value class is no longer, once the widen lands, fused.",
+    "the ADJACENCY half is no longer, at this head, judged.",
+    "the ADJACENCY half is far from being closed.",
+    "the ADJACENCY half is anything but being closed.",
+    # ⛔ ROUND 13 (#11258 review round 13 `P1`, MEASURED): the same `\s+`
+    # adjacency survived in `_RESIDUAL_CLOSED_VERDICT`, whose plain forms all
+    # pinned RED while ONE interpolated word or comma — ordinary English, and
+    # pinned RED here in the three forms below (⛔ NOT "the row's own register": the
+    # row writes none of them, #11258 round 21, MEASURED) — turned them GREEN.
+    "the time-unit half has yet, in practice, to be closed.",
+    "the ADJACENCY half remains, for now, to be closed.",
+    "the ADJACENCY half does, in practice, not close the gap.",
+    "the ADJACENCY half cannot close the gap.",
+    "the ADJACENCY half is anything but being fully closed.",
+    # ⛔ THE APOSTROPHE-LESS CONTRACTIONS (#11258 review round 10 `P1`, MEASURED):
+    # these four were RED, then went GREEN when round 9 made the apostrophe
+    # mandatory to avoid `point`/`count` — a REGRESSION introduced by a fix. They
+    # are the reason the arm's second branch is a KNOWN-STEM list rather than an
+    # optional apostrophe on an unbounded stem.
+    "the ADJACENCY half isnt closed.",
+    "the ADJACENCY half wasnt closed.",
+    "the ADJACENCY half hasnt been closed.",
+    "the ADJACENCY half hadnt been closed.",
+    # the present-tense verb: `closed` is not the only form that asserts openness
+    "the ADJACENCY half doesn't close the gap.",
+    "the ADJACENCY half does not close the gap.",
+    "the ADJACENCY result is unclosed",
+    # ⛔ THE EXCLUSIVE PROOF FOR THE FLOOR'S `\bunclosed\b` (#11258 review round 15,
+    # MEASURED at `474435d658`): `the ADJACENCY result is unclosed` above is caught
+    # by `_RESIDUAL_OPENNESS`'s own `\bunclosed\b` — a class-anchored sentence never
+    # reaches `_SPELLING_FLOOR` — so deleting the floor's arm left `103 passed`.
+    # The floor is the ONLY tuple a WAIVED sentence runs, so the shape that pins it
+    # has to be the SPELLING-subject one; with this entry the same deletion is
+    # `1 failed`.
+    "the SPELLING gap is unclosed.",
+    # the SPELLING clause is honest; a `;`/`, and`-joined second clause is not
+    "the SPELLING gap is not closed and `minute` no longer fuses",
+    "The SPELLING gap is open, and the carve-out is still open.",
+    "the carve-out is still open",
+    "the carve-out reopens.",
+    "the value class is no longer judged.",
+    "the numeric side is no longer compared.",
+    "`min` stays open",
+    # the strongest phrase is not weakened by the `fail-open` hyphen boundary
+    "the time-unit half is fail-open again",
+    "the ADJACENCY half is not closed yet",
+    "the ADJACENCY gap is open",
+    "the carve-out is no longer closed",
+    # ⛔ THE #11258 REVIEW'S OWN CASES, each one a shape the pre-review revision
+    # let through and the PRE-PR guard caught — the anchor is required of the
+    # polysemous arm only, so a reopening that names the gap in other words still
+    # reds (#11258 review P1/P2, measured: OLD=True / NEW=False before this).
+    "the gap those tables closed is open again.",
+    "the remaining gap is not closed.",
+    "the ADJACENCY half is now CLOSED, but the exception it carved is open again.",
+    "the ADJACENCY half is not, and never was, closed.",
+    "the ADJACENCY half is fail-open.",
+    # round 2: the object / participle / parenthetical complements the closed
+    # adverb list had dropped, and the filler tokens it left unpinned
+    "the ADJACENCY half keeps the gap open.",
+    "the ADJACENCY gap is kept open.",
+    "the ADJACENCY gap is held open.",
+    "the ADJACENCY half remains, in practice, open.",
+    "the ADJACENCY half is, in practice, open.",
+    "the ADJACENCY gap is left open.",
+    "the ADJACENCY gap is now open.",
+    "`minute` is back in the open set.",
+    # round 2: one honest `spelling` clause must not waive the NEXT clause
+    "The SPELLING gap is open on purpose, but the remaining gap is not closed.",
+    "The SPELLING gap is still open, and the remaining gap is open again.",
+    # round 3: a coordinator that JOINS two adjectives inside ONE predicate — the
+    # blanket coordinator bound missed these
+    "the ADJACENCY gap is unjudged and open.",
+    "the ADJACENCY half is unfused and open.",
+    "the ADJACENCY gap is unjudged, and open.",
+    "the ADJACENCY gap remains unjudged and open.",
+    "the ADJACENCY half is unjudged but open.",
+    # round 4 (#11258 review `P2`): the row's OWN vocabulary for this gap, used by
+    # a lane instead of a disclosure. `is fail-open` was already read; these are the
+    # UNHYPHENATED verb form, which `_RESIDUAL_FAIL_OPEN` reads CLAUSE-anchored so
+    # the row's own `the pair fails open` stays green. ⛔ The coordinator form
+    # (`… is unjudged and fails open`) is NOT here: it stays GREEN and is disclosed
+    # as a residual on `_RESIDUAL_FAIL_OPEN` rather than asserted as covered.
+    "the ADJACENCY half fails open.",
+    "the time-unit half fails open.",
+    "the carve-out fails open.",
+    "the value class fails open.",
+    # ⛔ THE EMPHATIC FORM OF THE SAME PREDICATE (#11258 review round 25 `P2`):
+    # `not only fails open` ASSERTS it, so the `fails open` arm's new negation veto
+    # must not swallow it. This pins the veto's NARROWNESS — it is four fixed-width
+    # lookbehinds immediately in front of the verb, so `not only` never vetoes — and
+    # it goes GREEN the moment the veto is widened into a window scan, the same
+    # coverage regression round 2 `P1` recorded for the `open` arm (`is not only open`).
+    "the ADJACENCY half not only fails open, it leaks.",
+    # round 5 (#11258 review round 2 `P1`): EMPHATIC negations ASSERT the gap is
+    # open — a negation veto wide enough to refuse these is a coverage regression,
+    # and one was shipped for a round before these probes caught it.
+    "the ADJACENCY half is not only open, it is unfused.",
+    "the ADJACENCY half is not merely open.",
+    "the ADJACENCY half is not just open, it is unjudged.",
+    "the ADJACENCY half is never far from open.",
+    # ⛔ THE `no longer` NEGATOR IS THE SAME TRADE, ONE WORD FAMILY OVER (#11258
+    # review round 7 `P2`, MEASURED). `is no longer open` is the PLAINEST English
+    # for `is closed` and it was a false block; the veto now admits `no\s+longer`
+    # as a negator, keeping the same after-negator adverb allowlist. These three
+    # are what keeps that widening honest: each is an EMPHATIC `no longer` that
+    # still ASSERTS the gap is open, and each must stay RED. Without them the
+    # widening could creep (an adverb allowlist that forgot `only`/`merely`/`far`
+    # would turn all three GREEN, which is round 2's measured regression again).
+    "the ADJACENCY half is no longer merely open.",
+    "the ADJACENCY half is no longer only open.",
+    # round 14: an interpolated `, in practice, ` pushes the filler past the arm's
+    # 30-char bound, so the flipper bar never ran. ⛔ NOT "the row's OWN `, in
+    # practice, ` interpolation" — the row writes no `in practice` at all (0
+    # occurrences, exact AND flattened, and `git log -S` is empty; #11258 round
+    # 21, MEASURED). The form is pinned here because the language offers it.
+    "the ADJACENCY half is no longer, in practice, merely open.",
+    "the ADJACENCY half is no longer, in practice, simply open.",
+    "the ADJACENCY half is no longer far from open.",
+    # round 6 (#11258 review round 3 `P1`): THE WAIVER IS NOT A PREFIX. Each of
+    # these was GREEN while its counterpart without the word `spelling` RED — the
+    # waiver skipped `_RESIDUAL_OPENNESS` whole, so one word defeated the gate.
+    "the SPELLING gap is open again.",
+    "the SPELLING carve-out is open again.",
+    "the SPELLING carve-out stays open.",
+    "the SPELLING carve-out is not closed.",
+    "the SPELLING carve-out fails open.",
+    # round 7 (#11258 review round 4): the CLOSED-verdict arm enumerated `not` and
+    # missed `never`/`yet to be`/`far from` — the same claim in other words — and
+    # the anchor vocabulary had no subject phrase for this gap, so
+    # `<subject> is open` was blind unless it said `adjacency`.
+    "the ADJACENCY gap was never closed.",
+    "the ADJACENCY half is far from closed.",
+    "the ADJACENCY half is anything but closed.",
+    "the time-unit half has yet to be closed",
+    "the gap those tables closed is open.",
+    # round 9 (#11258 review round 5): the honest-`spelling` clause is REMOVED and
+    # the survivors rejoined, so a join that used to be `and`/`but` was severing the
+    # new patterns' own halves — `has` / `to be closed`, `anything` / `closed`. They
+    # are rejoined with ` , ` now; these two pin it.
+    "the SPELLING gap is open, and the time-unit half has yet to be closed.",
+    "the SPELLING gap is open, and the ADJACENCY half is anything but closed.",
+    # round 8 (#11258 review round 4): the clause splitter did not know
+    # `while`/`although`, so an honest `spelling` disclosure and a reopening joined
+    # by one of them shared a segment and the waiver swallowed the second claim.
+    "the SPELLING gap is open while the remaining gap is not closed.",
+    "the SPELLING gap is open although the remaining gap is not closed.",
+    # ⛔ THE PARTICIPLE OF THE ROW'S OWN VERB, SUBJECT-GATED (#11258 review round
+    # 3, MEASURED: `no longer fused` was GREEN because the arm carried only the
+    # 3sg `fuses`, while `no longer judged` RED — the arm was reached and only
+    # the inflection was missing). The second shape names the class in open words
+    # rather than the anchor word, so it exercises the subject gate too.
+    "the ADJACENCY half is no longer fused",
+    "the units are no longer fused",
+    # ⛔ ONE PARTICIPLE SHAPE PER GATE ALTERNATIVE (#11258 review round 3 `P2`,
+    # MEASURED: only 2 of the gate's 7 alternatives were exercised by any
+    # mutation, so an alternative could be deleted and its shape SUBSTITUTED for
+    # one of the four membership-pinned ones — `len` and uniqueness both held and
+    # the test stayed GREEN). These close the remaining five class-word
+    # alternatives. ⛔ NOT EVERY alternative is pinned — measured by deleting one at
+    # a time (#11258 review round 5 `P2`, MEASURED): 5 of the 6 class words lose a
+    # RED — `time[- ]unit` does NOT, because its proof shape `the time-unit half is
+    # no longer fused` is caught by the unit arm's `units?` matching inside the
+    # token, so that alternative is pinned by nothing and its mutation pins nothing
+    # exclusively — plus `units?`, `minute`, `km`, `kg`, `mi`, `mos`, `millisec`,
+    # `m` in the unit arm. The remaining 27 spellings (including `second(s)`,
+    # `hour(s)`, `min`, `ms`, `s`) do NOT lose a RED, so a tidying pass that
+    # collapses `second|seconds` still gets no signal. Said here rather than
+    # implied.
+    "the half is no longer fused",
+    "the carve-out is no longer fused",
+    "the value class is no longer fused",
+    "the numeric side is no longer fused",
+    "the time-unit half is no longer fused",
+    # ... and the unit VOCABULARY the row itself enumerates, which the first
+    # revision of the gate missed entirely (`minute` is no longer fused was GREEN
+    # while `` `minute` no longer fuses `` was RED — the same inflection asymmetry
+    # this arm exists to close, still open for the ten spellings the row names).
+    "`minute` is no longer fused",
+    "`km` is no longer fused",
+    # ⛔ THE REST OF THE ROW'S OWN UNIT FAMILY (#11258 review round 4 `P2`,
+    # MEASURED: `km` was caught while its row-sibling `kg` was GREEN — the same
+    # vocabulary asymmetry one spelling list narrower), and the PAST-TENSE
+    # reopenings the present-copula-only revision let through.
+    "`kg` is no longer fused",
+    "`mi` is no longer fused",
+    "`mos` is no longer fused",
+    "`millisec` is no longer fused",
+    "`m` is no longer fused",
+    "the units were no longer fused in this revision",
+    "`minute` was no longer fused after the widen",
+    # ... and an interpolated `after the widen landed` inside the window, which
+    # the 20-char bound read as GREEN on the unit side and RED on the class-word
+    # side. ⛔ NOT "the row's own register" — `after the widen` occurs 0 times in
+    # the registry (#11258 round 21, MEASURED); the shape is pinned here because
+    # the language offers it, and that is the whole basis for the window.
+    "`minute` is, after the widen landed, no longer fused",
+    # ⛔ THE WAIVER'S OWN FALSIFIERS (#11258 review round 5 `P1`, MEASURED): the
+    # unit arm was widened but the waiver's WITHHOLDING set was not, so prefixing
+    # the shape with the row's own disclosure word made it invisible —
+    # `` the SPELLING gap is open because `kg` is no longer fused `` was WAIVED
+    # while the same shape with `minute` RED. These three run the waiver path.
+    "the SPELLING gap is open because `kg` is no longer fused",
+    "the SPELLING gap is open because `mi` is no longer fused",
+    "the SPELLING gap is open because `mos` is no longer fused",
+    # ⛔ AND THE FLOOR'S `no longer <participle>` ARM HAS ITS OWN FALSIFIER
+    # (#11258 review round 9 `P2`, MEASURED): at `7b3bdd231d` replacing that
+    # pattern with `(?!)` left the WHOLE FILE `102 passed`. ⚠️ AT `ff1ff27c74` IT
+    # WAS ALREADY PINNED by the peer's `the SPELLING gap is no longer being
+    # fused.`; these three cover `judged` and `retained` — endings that entry does
+    # NOT reach — plus the filler-free twin of the `fused` it already exercises
+    # (MEASURED: removing the `fused` alternative greens BOTH `… no longer being
+    # fused.` and `… no longer fused.`, so that pair shares one alternative).
+    # Each is FLOOR-EXCLUSIVE
+    # for a different reason than an openness gap: `judged` and `retained` ARE in
+    # the unanchored openness arm — the floor decides them because
+    # `_residual_reopening_claims` runs ONLY `_SPELLING_FLOOR` when every clause
+    # is an honest `spelling` disclosure and then `continue`s. (An earlier version
+    # of this comment claimed "the unanchored openness arm requires a unit "
+    # "SUBJECT"; measured, that arm matches both of these sentences — the
+    # short-circuit, not the openness vocabulary, is what makes them floor-only.)
+    # Verified by disarming the floor at runtime, one arm at a time.
+    "the SPELLING gap is no longer fused.",
+    "the SPELLING gap is no longer judged.",
+    "the SPELLING gap is no longer retained.",
+    # ⛔ THE `open again` ARM READ ONLY THE UNINFLECTED LEMMA (#11258 review round 16
+    # `P0`, MEASURED). `\bopen\s+again\b` matched `is open again` and nothing else,
+    # so every inflected spelling was GREEN — `opens`, `has opened`, `is opening`.
+    # One character class wide, and NOT one of the disclosed residuals: the
+    # disclosure names shapes phrased with NONE of this arm's words, while these
+    # carry the arm's own word `open` (⛔ NOT "the row's own phrase" — round 17
+    # `P2` corrected that claim: `grep -ci 'open[- ]again' config/v4-mechanisms.yml`
+    # is **0**, the row writes `open`/`opens`/`fails open`/`open on purpose` and no
+    # form of `open again`; the argument rests on the WORD, not on the row).
+    # Fixed at both sites (`_RESIDUAL_OPENNESS` and `_SPELLING_FLOOR`, which is the
+    # ONLY tuple the honest-`spelling` path runs), and pinned at BOTH — round 17
+    # `P0` measured that reverting the second site alone left the whole file green.
+    "the ADJACENCY gap opens again.",
+    "the ADJACENCY gap has opened again.",
+    "the ADJACENCY gap is opening again.",
+    # ⛔ AND THE SAME THREE ON THE WAIVED PATH (#11258 review round 17 `P0`, MEASURED).
+    # The three above are class-anchored, so they run `_RESIDUAL_OPENNESS`; a waived
+    # sentence runs `_SPELLING_FLOOR` ONLY. Reverting the second site alone left the
+    # WHOLE FILE green while `the SPELLING gap opens again.` went GREEN — the exact
+    # "an arm is deletable while both tests pass" failure this proof list exists to
+    # refuse, and the claim that the two sites were "pinned, one per inflection" was
+    # false until these three existed.
+    "the SPELLING gap opens again.",
+    "the SPELLING gap has opened again.",
+    "the SPELLING gap is opening again.",
+    # ⛔ ROUND 17 `P2`: the participle in the negation veto must not swallow a
+    # POLARITY FLIPPER. These are the round-2 regression's own shapes, one verb
+    # over — `not only kept open` ASSERTS the gap is wide open, and the veto that
+    # makes `not kept open` an honest closure must not reach it.
+    "the ADJACENCY half is not only kept open.",
+    "the ADJACENCY half is not merely held open.",
+    "the ADJACENCY half isn't only kept open.",
+    # ⛔ ONE FALSIFIER PER `_RESIDUAL_OPEN_VERBS` ALTERNATIVE (#11258 review round 23
+    # `P1`, MEASURED at `6c3c18b828` by SOURCE-level mutation — delete the
+    # alternative, re-import, re-scan): ELEVEN of the sixteen alternatives had NO
+    # falsifier at all, so any one of them could be deleted with the whole file
+    # GREEN. Only `is`/`remains`/`stays`/`keeps`/`kept` were pinned — five of
+    # sixteen, NOT the seven an earlier cut of this comment claimed: `keep` and
+    # `held` were named there as pinned and were not (round-23 re-review, MEASURED:
+    # deleting either flips NO entry in this list). ⛔ EACH SHAPE BELOW IS MEASURED AS
+    # A FALSIFIER, not merely as a RED: it REDs with the alternative present and
+    # goes GREEN when that ONE alternative is removed from the tuple. A plain
+    # `<verb> open` sentence is NOT usable here — `the ADJACENCY halves are open.`
+    # stays RED with `are` deleted, because another arm catches it, so it would pin
+    # nothing. These are the shapes only this arm reaches.
+    "the carve-outs are still open.",
+    "the carve-out was still open.",
+    "the carve-outs were still open.",
+    "the carve-outs remain open.",
+    "the ADJACENCY half remained open.",
+    "the carve-out may stay open.",
+    "the carve-out stayed open.",
+    "the ADJACENCY gap can hold open.",
+    "the ADJACENCY gap holds open.",
+    # ⛔ THE LAST TWO (#11258 round-23 RE-REVIEW `P1`, MEASURED): `keep` and `held`
+    # were the two alternatives this round's first cut left unpinned while claiming
+    # them pinned. `the ADJACENCY gap is held open.` above does NOT pin `held` —
+    # `is` matches it with `held` as filler, so deleting `held` flips nothing.
+    "the ADJACENCY half may keep the gap open.",
+    "the ADJACENCY gap held open.",
+    # ⛔ `whereas`, `though` AND `yet` ARE ALL LOAD-BEARING SPLITTER BRANCHES
+    # (#11258 review round 23 `P1` + re-review, MEASURED by deleting each branch
+    # from `_RESIDUAL_CLAUSE_SPLIT` and re-running): with the branch gone the whole
+    # file stayed GREEN while these sentences flipped RED -> GREEN, i.e. the honest
+    # `spelling` waiver swallowed the second claim again. ⛔ THE FIRST CUT OF THIS
+    # COMMENT CLAIMED `yet` WAS NOT AN ALTERNATIVE — that was FALSE, and false
+    # because the probe that "measured" it replaced the substring `|yet`, which
+    # does not occur in the source (`yet` sits behind
+    # `(?<![n'\u2019]t\s)(?<!\bnot\s)(?<!\bnever\s)`). A no-op edit was read as a
+    # measurement. `yet` IS a branch of the same alternation; those lookbehinds
+    # guard WHEN it may fire, they do not keep it out of the group.
+    "the SPELLING gap is open whereas the remaining gap is not closed.",
+    "the SPELLING gap is open though the remaining gap is not closed.",
+    "the SPELLING gap is open yet the remaining gap is not closed.",
+    # ⛔ `_RESIDUAL_CLASS_ANCHOR`'s `retention` / `the guarantee` / the SPACED
+    # `time unit` had no falsifier either (same round, MEASURED): the fused arm's
+    # own subject list does not reach these, and each sentence below goes GREEN the
+    # moment its anchor member is deleted.
+    "the retention rule has yet to be closed.",
+    "the guarantee has yet to be closed.",
+    "the time unit half has yet to be closed.",
+    # ⛔ THE WAIVED `reopen` FAMILY (#11258 review round 24 `P1`, MEASURED): the
+    # `reopen` arm was restored to `_SPELLING_FLOOR` because a WAIVED sentence runs
+    # only that tuple, so these five were GREEN at the pre-fix head while
+    # `origin/main`'s own `_SPELLING_SENTENCE_REOPENING` refused them.
+    "the SPELLING gap is reopened.",
+    "the SPELLING gap is re-opened.",
+    "the SPELLING gap has been reopened by the widen.",
+    "the SURVIVING SPELLING case is reopened.",
+    # ⛔ NOT `the unit-spelling case reopens.` — MEASURED GREEN at the append point,
+    # and it is a DISCLOSED residual of the restore rather than a fixture mistake:
+    # a clause carrying `unit` is WITHHELD from the `spelling` waiver
+    # (`_RESIDUAL_WAIVER_WITHHOLD`) and is not a class anchor, so neither
+    # `_SPELLING_FLOOR` (the arm above) nor `_RESIDUAL_ANCHORED_OPENNESS` reads it,
+    # and the unanchored arm cannot take `\bre-?open` without refusing the row's own
+    # honest `…the owner's decision reopened there, not a rung bolted on here.`
+    # (`_RESIDUAL_TRUTHFUL_STATEMENTS`). Same trade as every bounded arm in this
+    # file, recorded here rather than left to be discovered.
+    # ⛔ THE MIXED-CLAUSE FORM (#11258 review `P1`, MEASURED at `0f48bcd05db`): a
+    # reopening written inside an honest `spelling` clause was REMOVED from `scan`
+    # and then judged by NOTHING as soon as a second, truthful clause shared the
+    # sentence — `_SPELLING_FLOOR`, the only tuple a waived clause is ever judged
+    # by, ran only when EVERY clause was honest. All five shapes below were GREEN,
+    # and THIRTEEN of the mutations above go GREEN the same way once
+    # `, and the pair is fused.` is appended to them, so the list was non-vacuous
+    # alone and vacuous under composition. `origin/main` ran the floor PER CLAUSE,
+    # so this was a coverage REGRESSION rather than a widening, and each sentence
+    # here is RED at the same insertion site under main's own
+    # `_SPELLING_SENTENCE_REOPENING`. The second clause is the row's own `(d2)`
+    # truth and carries no anchor, i.e. it is the framework of the must-stay-GREEN
+    # `the SPELLING gap has never been closed, and the ADJACENCY half is closed by
+    # the tables` below — an UNRELATED truthful clause decided the verdict, which
+    # is the class round 18's `P1` was filed for.
+    "the SPELLING gap is reopened, and the pair is fused.",
+    "the SPELLING gap is unclosed, and the pair is fused.",
+    "the SPELLING gap no longer fuses, and the pair is fused.",
+    "the SPELLING gap is open again, and the pair is fused.",
+    "the SPELLING gap opens again, and the ADJACENCY half is closed by the tables.",
+)
+
+#: Truthful statements that must stay GREEN. Each is a shape the row itself uses
+#: or could use honestly: a closure in another tense, the SPELLING disclosure
+#: (that class IS open), a negated reopening, and openness about some OTHER
+#: subject — the four `re-open`/`reopened` phrases the real region already
+#: carries, plus the row's own `fail-open` vocabulary.
+_RESIDUAL_TRUTHFUL_STATEMENTS = (
+    "the ADJACENCY half is now CLOSED.",
+    "the ADJACENCY gap has been CLOSED.",
+    "We have closed the ADJACENCY half.",
+    "the ADJACENCY gap is closed by this table.",
+    "the SPELLING case is still open on purpose.",
+    "the SPELLING gap is not closed.",
+    # round 16: the present-tense `not … close` arm's anchoring falsifier — honest
+    # prose about the SPELLING class the anchor must not read (hypothetical: the
+    # row writes no such sentence, measured).
+    "the tables do not close the SPELLING gap.",
+    # ⛔ THE WORKAROUND THE REFUSAL MESSAGE NAMES IS A PROOF, not prose: when a
+    # lane's honest `not closed` sentence is refused, the message tells it to say
+    # `is still open` / `remains open`, so both must stay GREEN or the advice
+    # itself becomes a falsified measurement (#11258 review round 12 `P3`).
+    "(b2) is still open.",
+    "(e) remains open.",
+    "(d2) does not reopen (d)'s ADJACENCY result — the unit word IS fused.",
+    "an unknown unit still fails open on purpose.",
+    # ⛔ THE DENIALS OF `fails open`, one per form in `_RESIDUAL_FAIL_OPEN`'s veto
+    # run (#11258 review round 25 `P2`, MEASURED): every one of these was REFUSED at
+    # `9e6839bc4636` — the arm had no negation veto at all — while `origin/main`
+    # accepted all four (it had no `fails open` arm). A plain denial of this
+    # predicate CLOSES the gap, so each must stay GREEN; `doesn't` (ASCII) is also
+    # the `’` partner for the run's apostrophe class, re-measured in both spellings
+    # by `test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling`.
+    "the ADJACENCY half no longer fails open.",
+    "the ADJACENCY half never fails open.",
+    "the ADJACENCY half does not fail open.",
+    "the ADJACENCY half doesn't fail open.",
+    "the numeric side no longer fails open.",
+    # ⛔ HONEST DENIALS, and they are here because they were FALSE BLOCKS: each one
+    # red the scan before the negation guards above (#11258 review `P2`, measured).
+    # A false block is how a guard gets deleted, so the surface is executable
+    # rather than argued — every entry below must stay GREEN.
+    "the ADJACENCY half is not open.",
+    "the ADJACENCY gap is not open again.",
+    "the carve-out is not open to a second reading.",
+    "the carve-out has never been reopened.",
+    "the ADJACENCY half has not been re-opened.",
+    "it doesn't reopen (d)'s ADJACENCY result.",
+    # ⛔ ... AND THE SAME DENIALS ONE VERB OVER (`open again`). They were FALSE
+    # BLOCKS at the previous head: the `open again` arm had two negation forms
+    # where the opening verb had six (#11258 review round 2 `P2`, measured).
+    "the ADJACENCY gap has not been open again since the tables landed.",
+    "the ADJACENCY gap has never been open again.",
+    "the ADJACENCY gap hasn't been open again.",
+    "the ADJACENCY half is not entirely open.",
+    "the ADJACENCY half is clearly not open.",
+    "the ADJACENCY half has not yet been re-opened.",
+    # ⛔ HONEST PROSE ABOUT THE ROW'S OTHER RESIDUALS. The row is a list of what is
+    # still not enforced, so `(b2) is far from closed` is a disclosure, not a
+    # reopening — these red when the closed-verdict forms are UNANCHORED (#11258
+    # review round 5 `P1`, measured). The last two are the `spelling` waiver's cost
+    # for `the remaining gap` / `the exception it carved`, which name the OPEN
+    # residual and so must not anchor (#11258 review round 5 `P2`).
+    "(b2) is far from closed at 49.4%.",
+    "(e) has yet to be closed.",
+    "residual (a) is never closed by any rule in this module.",
+    "the remaining gap is the SPELLING case, which is open by design.",
+    "the exception it carved is the SPELLING class, still open.",
+    # ⛔ CLOSURE DOCUMENTATION: both halves are TRUE by the row's own text (the
+    # adjacency half is CLOSED, the spelling half is not), and the sentence-level
+    # closed-verdict pass red all four until it learned to recognise a verdict that
+    # sits INSIDE the honest `spelling` disclosure (#11258 review round 6 `P2`).
+    "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",
+    "the SPELLING gap was never closed (it is open by design), and the ADJACENCY half is closed.",
+    "the SPELLING class is far from closed, and the ADJACENCY half is closed by this table.",
+    "the SPELLING gap has yet to be closed, while the carve-out's ADJACENCY half is CLOSED.",
+    # ⛔ ⚠️ AN HONEST CLAUSE THAT NAMES BOTH `spelling` AND THE CARVE-OUT IS NOT
+    # HERE, because it is deliberately REFUSED: waiving it is what let one word
+    # (`the SPELLING `) turn every reopening on the carve-out GREEN, so the two
+    # sentences `the SPELLING carve-out is still open` / `the carve-out is still
+    # open` disagreed with each other about a fact. Over-block is the direction
+    # this artifact chooses — the shape is documented on `_RESIDUAL_CLASS_ANCHOR`
+    # and in `_is_honest_spelling`, NOT asserted as passing here (#11258 review
+    # round 3 `P1`, measured).
+    "splitting it would re-open that false refusal on every two-group decimal.",
+    "that needs the owner's decision reopened there, not a rung bolted on here.",
+    # ⛔ THE GATE'S OWN FALSIFIERS (#11258 review round 3 `P2`, MEASURED): the
+    # subject gate on the participle is justified by the claim "an UNGATED
+    # `fused|fusing` false-blocks the row's own honest prose", and that claim had
+    # no executable proof — the whole gate could be deleted and this test stayed
+    # GREEN. These four are GREEN under the gated arm and RED under an ungated
+    # one (both measured), so the must-stay-GREEN loop is now the gate's own
+    # falsifier. The last two are HISTORICAL (`were` / `was`), which is what the
+    # present-copula half of the gate exists to admit: a first revision gated
+    # `units?` with no tense requirement and FALSE-BLOCKED both (measured).
+    "`percent`/`pct` is no longer fused: fusing it REFUSED the truthful pair",
+    # ⛔ THREE DELIBERATE OVER-BLOCKS, recorded rather than silently satisfied
+    # (#11258 review round 4 `P2`, MEASURED): the past tense is admitted on BOTH
+    # arms because leaving it out let a past-tense REOPENING through
+    # (`the units were no longer fused in this revision` was GREEN — the dangerous
+    # direction), and no tense rule can separate that from the honest historical
+    # phrasing below without also admitting the reopening. Since the row writes
+    # `no longer fused` NOWHERE (measured: `grep -c "no longer fus"` over the whole
+    # registry is 0), these shapes are hypothetical — a lane that writes one in a
+    # HISTORICAL sense will be asked to rephrase — so the over-block costs no real
+    # disclosure and closes the leak:
+    #   "`miles` was no longer fused at that revision"
+    #   "the units were no longer fused at `origin/main` `525fde4a9`, …"
+    #   "the unit word was no longer fused in the revision the widen replaced"
+    # ⛔ AND `is no longer open` — the plainest closure English — is ACCEPTED, not
+    # an over-block, since the veto took `no\s+longer` as a negator (#11258 review
+    # round 7 `P2`). It is pinned here rather than merely claimed, and the three
+    # emphatic `no longer` forms in `_RESIDUAL_REOPENING_MUTATIONS` are its
+    # falsifier: `no longer merely/only/far from open` mean the OPPOSITE of closed.
+    "the ADJACENCY half is no longer open.",
+    # ⛔ ROUND 13 `P2`: the veto hard-coded `no\s+longer\s+`, so these two
+    # HONEST closures were REFUSED while their window-free twin was accepted —
+    # an unrecorded over-block, and the fourth `no longer` site not using the
+    # shared primitive.
+    "the ADJACENCY half is no longer, in practice, open.",
+    "the ADJACENCY half is no longer being open.",
+    "the ADJACENCY half is no longer an open question.",   # round 13: no longer refused
+    # round 14: the negated twins of the pinned `… is kept open.` / `… is held
+    # open.` reopenings — a true closure the arm used to refuse.
+    "the ADJACENCY half is no longer kept open.",
+    "the ADJACENCY half is no longer held open.",
+    # \u26d4 THE TWO CONTRACTION SENTENCES (#11258 review round 14 `P2`, MEASURED):
+    # each is an honest closure about a DIFFERENT subject that the unanchored
+    # openness arm only reads when its lookbehind is dropped, so each is the
+    # END-TO-END falsifier for one of the two `(?<!['\u2019])` guards. They are here
+    # rather than only in `test_every_waiver_withhold_arm_earns_its_place` because
+    # this list is the surface the append-the-row proof runs, and a guard pinned by
+    # a proof shape is pinned against every future narrowing of the arms.
+    "I'm confident the pair is no longer fused",
+    "the pair's refusal is no longer fused",
+    # round 16: the inflected `open again` arm must not swallow its own DENIALS.
+    # These are the negation lookbehind run's falsifiers for the forms the fix
+    # added — `not open again` / `not been opened again` are honest closures, and
+    # the lookbehind family is a fixed-width enumeration, so each new inflection
+    # needs its own measured partner or a later widening reds it silently.
+    "the ADJACENCY half is not open again.",
+    "the ADJACENCY half has not been opened again.",
+    # ⛔ ROUND 17 `P1`: the widened `open(?:s|ed|ing)?` arm needs the negation RUN
+    # widened with it, or these five honest closures are FALSE BLOCKS — they were
+    # GREEN when the arm read only `open again` (no match) and RED the moment it
+    # read the inflection. One partner per new negation form, because the run is a
+    # fixed-width enumeration and a form without a partner drifts silently.
+    "the ADJACENCY half no longer opens again.",
+    "the ADJACENCY half is no longer opened again.",
+    "the ADJACENCY half is no longer opening again.",
+    "the ADJACENCY half hasn't yet opened again.",
+    "the ADJACENCY half hasn't ever opened again.",
+    # round 17 `P2`: the two `not kept open` / `not held open` costs REPAIRED and
+    # moved here from `_RESIDUAL_REFUSED_TRUTHFUL` — the route that ledger's own
+    # instruction prescribes when a cost stops being paid.
+    "the ADJACENCY half is not kept open.",
+    "the ADJACENCY gap is not held open.",
+    "the ADJACENCY gap isn't kept open.",
+    # ⛔ ROUND 18 `P0`: `(?<!\bnever )` was the ONE third of the round-17 verb guard
+    # that no entry pinned — deleting exactly that term left the whole file green
+    # while `the ADJACENCY half is never kept open.` went RED. Each term of a
+    # lookbehind run needs its own partner, or the arm is deletable a term at a time.
+    "the ADJACENCY half is never kept open.",
+    # ⛔ ROUND 18 `P0`: the round-17 negation RUN is carried at TWO sites and only
+    # one was falsifiable. These are the WAIVED-path partners — the only shape that
+    # reaches `_SPELLING_FLOOR` — so deleting occurrence #2 of the run no longer
+    # leaves the suite green.
+    "the SPELLING gap no longer opens again.",
+    "the SPELLING gap is no longer opened again.",
+    "the SPELLING gap is no longer opening again.",
+    "the SPELLING gap hasn't ever opened again.",
+    # ⛔ ROUND 18 `P1`: the splitter no longer severs a negator from its participle,
+    # so these two honest denials are GREEN — pinned because the bar is the only
+    # thing that decides them, and the second is the shape whose verdict used to
+    # depend on an unrelated honest clause elsewhere in the sentence.
+    "the SPELLING gap hasn't yet opened again.",
+    "the SPELLING gap is open by design, and the ADJACENCY half has not yet opened again.",
+    # ⛔ ROUND 22 `P2`: THE SAME DENIALS SPELLED WITH THE TYPOGRAPHIC APOSTROPHE.
+    # The arms accepted `n’t` and the negation RUNS did not, so every sentence here
+    # was REFUSED while its ASCII twin above stayed GREEN and no ledger entry
+    # re-measured the difference — an unrecorded over-block, and the shape macOS
+    # supplies for free. One partner per run site, because the class is written at
+    # six patterns in two independently-drifting copies: dropping `\u2019` from
+    # any ONE of them reds one entry here.
+    "the ADJACENCY gap hasn’t been open again.",
+    "the ADJACENCY half isn’t yet opened again.",
+    "the ADJACENCY half hasn’t ever opened again.",
+    "the SPELLING gap hasn’t yet opened again.",
+    "the ADJACENCY gap isn’t kept open.",
+    "it doesn’t reopen (d)’s ADJACENCY result.",
+    # ⛔ THE `never …` LOOKBEHINDS' MISSING PARTNERS (#11258 review round 23 `P2`,
+    # MEASURED): the comment above the run asserts that "every form in this run has
+    # a must-stay-GREEN partner" here, and that was FALSE for three of them —
+    # `(?<!\bnever\s)`, `(?<!\bnever\sbefore\s)` and
+    # `(?<!\bnever\sbefore\sbeen\s)` had none (deleting all three left the file
+    # GREEN while the sentences below went RED). Adding the partners makes the
+    # claim true; it was not true before them.
+    "the carve-out never reopens.",
+    "the carve-out has never before been reopened.",
+    "the carve-out has never before reopened.",
+    # ⛔ THE COORDINATOR GUARD'S FALSIFIER (#11258 review rounds 23 and 25 `P2`,
+    # MEASURED): the `(?!\b(?:and|but)\s+…(?:is|are|was|were|fails?)\b)` guard
+    # inside `_RESIDUAL_ANCHORED_OPENNESS` was deletable with the whole file
+    # GREEN, so it needs a partner. ⛔ The partner MUST NOT be a reopening:
+    # round 23 first pinned `the ADJACENCY half is unjudged and the pair is
+    # unjudgeable and fails open`, which asserts the CLOSED gap is open — the row
+    # at this head says *"the ADJACENCY half that used to stand here is CLOSED"*
+    # and `_RESIDUAL_REOPENING_MUTATIONS` carries `the ADJACENCY half is no longer
+    # judged.` as must-RED, so that entry required the scan to stay SILENT on a
+    # reopening and told the next lane (in this list's own failure text) to treat
+    # real coverage as a false block. Replaced with a shape that keeps the
+    # falsifier and is actually truthful (round 25, MEASURED both ways).
+    "the ADJACENCY half is closed and the pair fails open",
+    # ⛔ AND THE `_SPELLING_FLOOR` COPY OF THE RUN NEEDS ITS OWN CURLY PARTNER
+    # (#11258 review round 23 `P1`, MEASURED). Round 22 widened `’` at all six
+    # patterns, but the only waived-path partners it added were for the `open again`
+    # run and the `yet` bar — so reverting `’` at `_SPELLING_FLOOR`'s
+    # `[n'’]t\sbeen` site left the file at `108 passed` while
+    # `the SPELLING gap hasn’t been open again.` was REFUSED: an unrecorded
+    # over-block, which this artifact says is never acceptable. This entry is that
+    # site's falsifier — with it present, the revert reds.
+    "the SPELLING gap hasn’t been open again.",
+    # ⛔ AND THE `reopen` ARM'S HONEST DENIALS (#11258 review round 24 `P1`): the arm
+    # restored to `_SPELLING_FLOOR` shares the same negation run, and these three
+    # are what proves the run reaches THAT arm too — without them the arm could be
+    # narrowed to `\bre-?open` with no lookbehind and nothing would red until an
+    # honest waived denial was refused.
+    "the SPELLING gap is not reopened.",
+    "the SPELLING gap hasn't reopened.",
+    "the SPELLING gap has never been reopened.",
+)
+
+#: ⛔ THE OVER-BLOCK LEDGER: truthful statements this pin REFUSES, each MEASURED
+#: RED at the append point (#11258 review round 7 `P2`). This file's own rule is
+#: that an over-block is the direction the artifact chooses — over fail-open — but
+#: only if it is RECORDED rather than left to be discovered. So the cost is a
+#: tuple and `test_the_residual_region_is_scanned_WHERE_a_lane_appends` re-measures
+#: every entry, rather than a sentence in a comment that can drift.
+#:
+#: Each shape is honest, and each is refused for a reason that is NOT an oversight:
+#: * `CLOSED, not open` / `judged, not open` — the `is … open` veto binds a
+#:   negator DIRECTLY after the verb, and the comma puts a word in the slot. A
+#:   veto wide enough to cross the comma is the veto that let the EMPHATIC
+#:   reopenings through (`is not only open`, `is not merely open`, `is never far
+#:   from open` — a measured coverage REGRESSION, #11258 review round 2 `P1`).
+#: * `closed rather than open` — same slot, same trade.
+#: * ⛔ `no longer an open question` WAS here and is now ACCEPTED (#11258 review
+#:   round 13): the veto took a filler window, so a noun phrase between `no longer`
+#:   and `open` no longer refuses an honest closure. It moved to
+#:   `_RESIDUAL_TRUTHFUL_STATEMENTS` — the route this ledger's own comment
+#:   prescribes when a cost stops being paid.
+#: * `the SPELLING case for \`minute\`, which is open by design` — the unit token
+#:   withholds the `spelling` waiver (that withholding is what stops one word
+#:   `the SPELLING ` from excusing every reopening), so the honest sentence and
+#:   its reopening twin are indistinguishable to a clause-scoped rule. This is
+#:   the cost a lane is most likely to meet, because the row's surviving gap IS
+#:   the unit-spelling class.
+#: * `(b2) is not closed` / `(e) is not closed` — the `not … closed` arm is
+#:   UNANCHORED on purpose, so it also refuses the honest statement that a
+#:   DIFFERENT residual of this row is still not closed. The row is a list of what
+#:   is still not enforced, and `(b2)` (`STRICT VERBATIM SURVIVAL stays SHORT of
+#:   target`, 38/77 = 49.4%) and `(e)` (`the S5 minted-endpoint site is not judged
+#:   against its own quote … a follow-up`) are items in it, so a lane writing an
+#:   update about them meets this (#11258 review round 11 `P1`, MEASURED RED at
+#:   the append point at `7b3bdd231d`). ⛔ THE WORKAROUND IS A DIFFERENT WORD, not
+#:   a wider arm: `(b2) is still open.` / `(e) remains open.` are GREEN (measured).
+#:   This is a CLASS, not two shapes — a third label meets it too, so ADD the
+#:   sentence here rather than anchoring the arm. ⛔ WHAT ANCHORING ACTUALLY
+#:   COSTS, because the first revision of this bullet cited the wrong sentence: it
+#:   is NOT `the gap those tables closed is not closed` — that one matches
+#:   `_RESIDUAL_CLASS_ANCHOR` and stays RED under the anchored arm (MEASURED both
+#:   ways). The loss is the ANCHOR-FREE `the remaining gap is not closed` family,
+#:   whose four exclusive proofs (`the remaining gap is not closed.` and its three
+#:   `the SPELLING gap is open <but|while|although> the remaining gap is not
+#:   closed` variants) go GREEN under the anchored arm — `the remaining gap` is
+#:   deliberately NOT an anchor, and the reason is MEASURED rather than inferred:
+#:   adding it reds the honest proof `the remaining gap is the SPELLING case,
+#:   which is open by design` (GREEN at this head, RED with the phrase in the
+#:   anchor). ⛔ AND NOT because the row says that phrase — `rg -c 'the remaining
+#:   gap' config/v4-mechanisms.yml` is 0 (MEASURED); the row's wording is "What
+#:   SURVIVES of the old (d) is the SPELLING case". Re-measure this set before
+#:   quoting it again: a comment that names the wrong reason is how the next lane
+#:   concludes the arm can be anchored.
+#: * `the ADJACENCY half is no longer open, and the pair is fused.` — the
+#:   UNANCHORED `no longer … (closed|fuses|judged|…)` arm's 25-char `[^.;]` window
+#:   crosses a comma+coordinator, so `no longer OPEN, and the pair is FUSED` is
+#:   read as `no longer … fused`. Both clauses are true (the gap is closed; the
+#:   pair IS fused, the row's own `(d2)`). MEASURED, not repaired: the
+#:   coordinator bound that `_RESIDUAL_ANCHORED_OPENNESS` already carries neither
+#:   un-refuses this sentence nor keeps `the pair is no longer fused, and the
+#:   tables are stale.` RED — it loses that catch. Recorded, per the rule below.
+#:
+#: ⛔ WHEN ONE OF THESE STOPS BEING REFUSED, THAT IS AN IMPROVEMENT — move it into
+#: `_RESIDUAL_TRUTHFUL_STATEMENTS` in the same commit. Do NOT delete the test's
+#: assertion to silence it: a ledger that cannot red is a comment.
+_RESIDUAL_REFUSED_TRUTHFUL = (
+    "the ADJACENCY half is CLOSED, not open.",
+    "the ADJACENCY half is judged, not open.",
+    "the ADJACENCY half is closed rather than open.",
+    "the remaining gap is the SPELLING case for `minute`, which is open by design.",
+    # the unanchored `not … closed` arm's over-block, on THIS row's own items
+    "(b2) is not closed.",
+    "(e) is not closed.",
+    # ⛔ AN HONEST ASSERTION OF CLOSURE, refused (#11258 review round 15 `P2`,
+    # MEASURED). The unanchored `not … closed` arm exists because `not closed`
+    # normally ASSERTS the gap is open; `not merely closed` asserts the opposite,
+    # and the arm cannot tell them apart without the parser this artifact does not
+    # have. Recorded rather than left to be discovered — the rule this ledger
+    # exists for — and it is the reason the arm is not widened to `not … fused`.
+    "the ADJACENCY half is not merely closed, it is fused.",
+    "the ADJACENCY half is not just closed but fused.",
+    "the ADJACENCY half is not closed again since the tables landed.",
+    # ⛔ THE PARTICIPLE SLOT SAID "NOT FIXED" AND THAT WAS WRONG (#11258 review
+    # round 17 `P2`, MEASURED — this is the correction). Round 16 recorded
+    # `… is not kept open.` / `… is not held open.` here as an unfixable cost on
+    # the grounds that "the veto sits after the verb and the match arrives through
+    # the participle". The DIAGNOSIS was right and the CONCLUSION was not: each
+    # half alone is inert, and the two together fix both denials — a
+    # `not`/`never` lookbehind in front of the VERB group (so the participle
+    # cannot BE the verb when it is negated) plus the participle in the veto slot.
+    # Both now live in `_RESIDUAL_TRUTHFUL_STATEMENTS`, which is the route this
+    # ledger's own instruction prescribes when a cost stops being paid.
+    # ⛔ `, so ` IS NOT A CLAUSE SPLIT (#11258 review round 16 `P1`, MEASURED). The
+    # sentence names BOTH classes and closes the first, but `_RESIDUAL_CLAUSE_SPLIT`
+    # does not break on `, so `, so the anchored `stays open` arm judges the union
+    # and reds it. Adding `, so ` to the splitter is a widening, and a widening here
+    # is what round 1's `P2` was: an honest closure that only LOOKS honest because
+    # the clause it removes is the one carrying the anchor.
+    "the ADJACENCY half is closed by the tables, so the SPELLING gap is what stays open.",
+    # ⛔ THE `fails open` OVER-BLOCK, which was recorded in a COMMENT ONLY (#11258
+    # review round 19 `P3`, MEASURED): the `_RESIDUAL_FAIL_OPEN` note states the cost
+    # "recorded here rather than left to be discovered", and both sentences red at
+    # the append point while appearing in NO ledger entry — prose the suite never
+    # re-measures is the failure this ledger exists to prevent, one layer in. These
+    # are the two shapes that note names, moved here so a change to the arm shows up
+    # as a ledger failure (`now_accepted` in
+    # `test_the_residual_region_is_scanned_WHERE_a_lane_appends`).
+    "the numeric side fails open on an unknown unit",
+    "the numeric side still fails open on purpose",
+    # ⛔ THE SAME BOUNDED-LOOKBEHIND COST, MET BY THE NEW `fails open` VETO (#11258
+    # review round 25 `P2`, MEASURED RED at the append point): the run admits a
+    # negator only IMMEDIATELY before the verb, so an adverb between them falls
+    # outside every fixed-width form and the sentence is refused although it is an
+    # honest DENIAL. Recorded rather than left to be discovered — the rule this
+    # ledger exists for — because the refusal message names this ledger as the
+    # route out, so an entry must exist for that route to be true. ⛔ DO NOT "FIX" IT
+    # BY WIDENING THE RUN: a variable-width `not … fail` lookbehind is impossible in
+    # `re`, and an adverb allowlist is the closed-list trade rounds 2/9/10 measured
+    # against.
+    "the ADJACENCY half does not actually fail open.",
+    # ⛔ THE BOUNDED-LOOKBEHIND OVER-BLOCK, recorded here rather than in the run's
+    # own note (#11258 review round 20 `P3`, MEASURED RED at the append point):
+    # these are honest DENIALS of a reopening — the direction the run exists to
+    # accept — and each is refused because its adverb (or a parenthetical comma)
+    # sits between `not` and `been`, which a FIXED-WIDTH lookbehind cannot cross.
+    # `, in practice, ` is ORDINARY English, and the row does not write it today
+    # (`in practice` occurs 0 times in `config/v4-mechanisms.yml`, #11258 round 21,
+    # MEASURED) — so this cost is met by a lane EDITING the row, not by its current
+    # text. ⛔ The round-20 finding's lede inherited the false "row's own register"
+    # claim from the note above; the finding itself stands, because the refusal
+    # message names this ledger as the route out, so the entry must exist for that
+    # route to be true.
+    # ⛔ DO NOT "FIX" THESE BY WIDENING THE RUN: a variable-width `not … been`
+    # lookbehind is impossible in `re`, and the adverb-list alternative is the
+    # closed-list trade rounds 2/9/10 measured against (a dropped adverb re-opens
+    # the reopening). The over-block is the direction this artifact chooses; it is
+    # paid openly, per entry, at zero slack.
+    "the ADJACENCY half has not to date been reopened.",
+    "the ADJACENCY half has not, in practice, been reopened.",
+    "the ADJACENCY half has not yet, in practice, been re-opened.",
+    # ⛔ THE `carve-out` + `spelling` OVER-BLOCK, which was recorded in a COMMENT
+    # only (#11258 review `P3`, MEASURED RED at the append point): `_RESIDUAL_
+    # CLASS_ANCHOR`'s note accepts the cost — an honest clause naming BOTH
+    # `spelling` and the carve-out is refused — and the ledger's own rule is that an
+    # over-block is acceptable "only if it is RECORDED rather than left to be
+    # discovered". Nothing re-measured it, while the refusal it triggers says "THE
+    # ROUTE OUT IS THE OVER-BLOCK LEDGER, ALWAYS" and pointed at a ledger with no
+    # matching entry — the defect rounds 19/20/25 removed for other arms on that
+    # same stated ground. The sentence is the row's OWN truthful claim ("What
+    # SURVIVES of the old (d) is the SPELLING case"). ⛔ The fix is NOT to add
+    # `spelling`+`carve-out` to the waiver's withhold set: that set is what keeps an
+    # appended reopening from hiding behind the word `spelling`, so widening the
+    # waiver is the round-1 `P2` direction.
+    "what survives of the carve-out is the SPELLING case, which is open by design.",
+    # ⛔ THE COMPOSED CLOSURE + `(d2)` TRUTH — measured while re-verifying the
+    # round-26 fix at this head, and recorded rather than left to be discovered.
+    # The UNANCHORED `no longer … (closed|fuses|judged|caught|compared|enforced|
+    # retained)` arm takes a 25-char `[^.;]` window, so it crosses a
+    # comma+coordinator and reads `no longer OPEN, and the pair is FUSED` as
+    # `no longer … fused` — a claim the sentence does not make. BOTH clauses are
+    # true: the ADJACENCY gap is no longer open (the row says it is CLOSED) and
+    # the pair IS fused (the row's own `(d2)`), and the second clause alone is a
+    # `_RESIDUAL_TRUTHFUL_STATEMENTS` entry, so an unrelated truthful clause is
+    # deciding the verdict again — the class round 26's `P1` was filed for, in the
+    # over-block direction instead of the fail-open one.
+    # ⛔ NOT REPAIRED, and the reason is MEASURED, not assumed: bounding that
+    # window with the same coordinator bound `_RESIDUAL_ANCHORED_OPENNESS` already
+    # carries does NOT un-refuse this sentence (measured still RED) and DOES lose
+    # a real catch — `the pair is no longer fused, and the tables are stale.` goes
+    # RED → GREEN under it. A window that reaches the target verb only before the
+    # coordinator is the trade this artifact refuses; the over-block is the
+    # direction it chooses, so it is paid openly here, per entry, at zero slack.
+    "the ADJACENCY half is no longer open, and the pair is fused.",
+)
+
+
+def _with_appended(text: str, sentence: str) -> str:
+    """`text` with `sentence` appended at the END OF THE RESIDUAL LIST.
+
+    That is the append point the issue is about: the shape is inserted where the
+    region ends (just before the row's own terminator), NOT inside the `(d)`
+    block, so a guard that stops reading at `(e) the` cannot see it.
+    """
+    assert text.count(_RESIDUAL_ROW_END) == 1, (
+        f"the row that FOLLOWS the residual list ({_RESIDUAL_ROW_END!r}) is not "
+        "in this registry exactly once, so the append point cannot be fixed "
+        "independently of `_residual_region` — update this anchor deliberately, "
+        "do NOT derive it from the function under test")
+    at = text.index(_RESIDUAL_ROW_END)
+    return text[:at] + "\n      " + sentence + text[at:]
+
+
+def _reds(text: str) -> bool:
+    """Does the PIN refuse this row text? — asked of the pin itself.
+
+    ⛔ THIS ASKS `_assert_the_row_names_its_closure`, NOT `_residual_reopening_
+    claims`, and the difference is the whole point (#11258 review round 7 `P2`,
+    reproduced): with the proof list calling the HELPER, deleting the two wiring
+    lines that connect the helper to the pin left this test GREEN **and** the pin
+    GREEN over a real reopening. Driving the pin's own callable means the wiring
+    cannot be removed without reddening the proof — the assertion a lane deletes
+    is the one this test measures.
+    """
+    try:
+        _assert_the_row_names_its_closure(text)
+    except AssertionError:
+        return True
+    return False
+
+
+def test_every_waiver_withhold_arm_earns_its_place():
+    r"""Each guard the WAIVER carries is pinned by an assertion only IT can satisfy.
+
+    ⛔ WHY THIS TEST EXISTS (#11258 review round 9 `P2`, MEASURED): at
+    `7b3bdd231d` SIX guards in this family could be DELETED with the whole file
+    still `102 passed` — the two subsumed unit spellings (`unit\s+word` and
+    `millisec`), the withhold set's contraction lookbehind, `_RESIDUAL_OPENNESS`'s
+    `m` lookbehind, its `s` lookbehind, and `_SPELLING_FLOOR`'s `no longer …` arm.
+    ⚠️ Five of them still held at `ff1ff27c74`, and the FLOOR's no longer did
+    (the peer's `the SPELLING gap is no longer being fused.` mutation already
+    reds it there) — so the floor is listed for the head the finding was measured
+    at, not as a claim about every head since.
+    For the TWO SUBSUMED SPELLINGS and the WITHHOLD lookbehind, an END-TO-END
+    verdict cannot pin them: the verdict is an OR over several arms (and a deleted
+    withhold guard only WIDENS the set), so no proof shape's verdict flips. So those
+    are pinned at the CONTRACT THEY OWN — `_is_honest_spelling` (does it withhold?)
+    — where the disarmed guard is the only thing deciding the assertion.
+    ⛔ THE TWO BARE-TOKEN LOOKBEHINDS ARE DIFFERENT, and an earlier version of
+    this very paragraph got it wrong (#11258 review round 14 `P2`, MEASURED): they
+    CAN be pinned end-to-end, because deleting them only ever ADDS a match, so an
+    honest sentence flips GREEN→RED — no sibling can cover for them. Both are
+    pinned at BOTH levels: by the assertions below, and by their honest sentences
+    in `_RESIDUAL_TRUTHFUL_STATEMENTS`, so either deletion reds one of them.
+    The floor's arm is pinned end-to-end too, by the floor-exclusive entries in
+    `_RESIDUAL_REOPENING_MUTATIONS`.
+    """
+    # 1. THE UNIT SPELLINGS. The waiver must WITHHOLD on every spelling the unit
+    #    arm reads. ⛔ TWO DECLARATIONS, AND BOTH DIRECTIONS ARE MEASURED: the
+    #    REQUIRED spellings are named independently of the arms (so deleting an
+    #    arm cannot delete the spelling that catches it — dropping `kg` from a
+    #    derived-only list left all `103 passed`, MEASURED), and the samples are
+    #    ALSO derived from the supplied code so an arm that is declared but not
+    #    actually armed reds here (#11258 review round 9 `P2`, MEASURED: adding
+    #    `fortnights?` to a hand-written sample list left `103 passed`).
+    assert _RESIDUAL_UNIT_WAIVER_ARMS, "the withhold set carries no unit spelling"
+    # ⛔ AND THE REQUIRED VOCABULARY IS PINNED BY MEMBERSHIP, not just read: it is
+    # the list that makes deleting an arm visible, so deleting its `kg` entry in
+    # the same edit restores the original fail-open. MEASURED (#11258 review round
+    # 13 `P2`): `kg` removed from BOTH the arms and this list leaves `103 passed`,
+    # and the waiver then swallows `the spelling gap is open because `kg` is not
+    # closed` — the round-5 `P1` this list exists to close. Same idiom as the
+    # proof-list membership loop below: a deleted entry fails to match a literal.
+    assert set(_RESIDUAL_WAIVER_REQUIRED_SPELLINGS) >= {
+        "units", "unit", "kg", "mi", "mos", "millisec", "millisecs"}, (
+        "the required unit-spelling vocabulary SHRANK — every entry here is a "
+        "spelling the unit arm reads and the class anchor does not name, so "
+        "dropping one (with its arm) re-opens the fail-open that let a lane "
+        "defeat the gate with a single word")
+    samples = (*_RESIDUAL_WAIVER_REQUIRED_SPELLINGS,
+               *[a.replace("?", "") for a in _RESIDUAL_UNIT_WAIVER_ARMS])
+    waived = [s for s in samples
+              if _is_honest_spelling(
+                  f"the spelling gap is open because {s} is no longer fused")]
+    assert waived == [], (
+        "these unit spellings were WAIVED by the honest-`spelling` waiver, so a "
+        "reopening that names the class by its own unit spelling passes the "
+        f"gate: {waived}")
+    # 2. THE CONTRACTION LOOKBEHINDS, at the contract each one owns. ⛔ TWO
+    #    ASSERTIONS, ONE PER ALTERNATIVE: a single sentence supplying only `m`
+    #    leaves the `s` guard unpinned (#11258 review round 9 `P2`, MEASURED:
+    #    removing only the `s` lookbehind kept all `103 passed`).
+    contraction = "the spelling list is unchanged; I'm confident it stays so"
+    assert _is_honest_spelling(contraction), (
+        "the waiver WITHHELD on a contraction — `\\b` treats `'` as a boundary, so "
+        "the bare `m`/`s` arms need their `(?<!['’])` guards or the artifact's own "
+        f"vocabulary is false-blocked: {contraction!r}")
+    for opened in ("I'm confident the pair is no longer fused",
+                   "the pair's refusal is no longer fused"):
+        matched = [p for p in _RESIDUAL_OPENNESS if re.search(p, opened, re.I)]
+        assert matched == [], (
+            "the unanchored openness arm read a CONTRACTION as a unit token — "
+            "`I'm` supplies the `m` and `pair's` supplies the `s`, so a sentence "
+            f"about a DIFFERENT subject is refused (false block): {opened!r} "
+            f"matched {matched}")
+    # 3. THE BARE `m`/`s` ALTERNATIVE ITSELF, at the contract it owns. ⛔ THE
+    #    CONTRACTION ASSERTIONS ABOVE PIN THE LOOKBEHIND, NOT THE ALTERNATIVE:
+    #    they assert a contraction is WAIVED, which stays true when the whole
+    #    bare-token alternative is disarmed (nothing matches, so the waiver is
+    #    granted either way). MEASURED at `83e5613cf`: replacing
+    #    `(?<!['’])\b[ms]\b` with a never-matching group left `103 passed` — so
+    #    the row's own `s`/`m` unit abbreviations could stop withholding the
+    #    waiver with no test noticing, and `the spelling gap is open and s is not
+    #    closed` was then WAIVED (a reopening through the honest path, the
+    #    round-5 `P1` one spelling over). Each token is asserted on its own: one
+    #    sentence carrying `s` leaves `m` unpinned, the same way a single
+    #    contraction left the second lookbehind unpinned (#11258 review round 9).
+    for bare in ("s", "m"):
+        bare_sentence = f"the spelling gap is open and {bare} is not closed"
+        assert not _is_honest_spelling(bare_sentence), (
+            "the waiver was GRANTED on a sentence carrying the row's own bare "
+            f"`{bare}` unit abbreviation — the `[ms]` alternative no longer "
+            "withholds, so a reopening written next to one letter passes the "
+            f"gate: {bare_sentence!r}")
+
+
+def test_the_residual_region_is_scanned_WHERE_a_lane_appends():
+    """#11223: the pin's own proof list, executable — every mutation must RED.
+
+    ⛔ NO COUNTS IN THIS DOCSTRING ON PURPOSE. Three revisions carried a count here
+    and every one of them drifted the moment the next fix added a case (39/10 →
+    43/16 → "fixed" → 47/22 in the very commit that re-created the drift,
+    #11258 review round 3 `P2`). The two tuples ARE the count — the assertions
+    below iterate them, so a stale number here could only ever mislead a reader.
+
+    The pin above asserted a scan whose bounds were the `(d)` block; measured on
+    the row at `af864a42a` that block is 10,019 chars and does NOT contain the
+    row's own `(d2)` clause, so every mutation below appended after it stayed
+    GREEN. This test is what makes "the scan is region-wide" a checked claim: it
+    appends each shape where a lane appends and requires the scan to find it.
+    """
+    # ⛔ THE PROOF LISTS ARE PINNED, and by SHAPE rather than by size alone
+    # (#11258 review round 3, MEASURED: gutting `_RESIDUAL_REOPENING_MUTATIONS` to
+    # its first two entries left this test GREEN while both docstrings still
+    # claimed the full count — a proof list that can be deleted without reddening
+    # anything is the drift `[pin-defensive-claim]` names).
+    # ⛔ AN EQUALITY-ONLY SIZE PIN IS NOT ENOUGH EITHER (round-2 reviewer, MEASURED:
+    # reverting the participle and duplicating two existing entries keeps
+    # `len == N` and stays GREEN — and this branch's lists are still GROWING, so an
+    # equality pin also drops one side's proofs in a merge conflict). So: pin
+    # UNIQUENESS rejects duplicate padding ONLY; MEMBERSHIP is the only thing
+    # that blocks SUBSTITUTION, and it pins the shape each arm exists for.
+    # shape each arm exists for, and use a `>=` FLOOR for size.
+    assert len(set(_RESIDUAL_REOPENING_MUTATIONS)) == len(
+        _RESIDUAL_REOPENING_MUTATIONS), (
+        "the reopening proof list has duplicate entries — a duplicate pays for a "
+        "deleted shape while the length stays constant, so the list can be "
+        "gutted without reddening anything")
+    assert len(set(_RESIDUAL_TRUTHFUL_STATEMENTS)) == len(
+        _RESIDUAL_TRUTHFUL_STATEMENTS), (
+        "the truthful-statement proof list has duplicate entries — see above")
+    assert len(_RESIDUAL_REOPENING_MUTATIONS) >= 162, (
+        "the reopening proof list SHRANK below its floor — re-derive the count "
+        "in the docstrings/comments rather than deleting shapes. ⚠️ THE FLOOR IS "
+        "THE CURRENT LENGTH (162 — 157 plus FIVE for the mixed `spelling`+truthful "
+        "clause form the floor used to skip (#11258 review `P1`, MEASURED: thirteen "
+        "of these mutations went GREEN under it); before that, "
+        "156 raised by round 24's four falsifiers for the "
+        "restored waived `reopen` arm, plus ONE this round adds for the "
+        "`not only fails open` shape that pins the NARROWNESS of "
+        "`_RESIDUAL_FAIL_OPEN`'s new negation veto (#11258 review round 25 `P2`); "
+        "before that, 149 raised by round 23's fourteen falsifiers: one "
+        "per `_RESIDUAL_OPEN_VERBS` alternative that had none, `whereas`/`though`, "
+        "and the three `_RESIDUAL_CLASS_ANCHOR` members; plus four this round adds "
+        "for the restored waived `reopen` arm. A FIFTH shape,"
+        " `the unit-spelling case reopens.`, was measured GREEN and is recorded at "
+        "that arm as a disclosed residual rather than pinned; plus three from the "
+        "round-23 re-review, which found `keep` and `held` still unpinned and the "
+        "`yet` splitter branch — the first cut of that round had CLAIMED those "
+        "pinned, and its `yet` note was false), i.e. ZERO SLACK: at "
+        "`>= 81` against an 88-entry "
+        "list the slack was SEVEN mutations, which is more than the SIX exclusive "
+        "proofs of the `no longer …` arm — so that pattern and all six of its "
+        "proofs could be deleted with both tests GREEN, and "
+        "`the ADJACENCY half is no longer closed.` then measured GREEN (#11258 "
+        "review round 9 `P1`, measured). Earlier the same slack at 49 permitted "
+        "twenty-one deletions while `_RESIDUAL_CLOSED_VERDICT` is three patterns. "
+        "A `>=` at the current length costs nothing on growth and refuses any "
+        "shrinkage; raise it in the same commit that adds proofs.")
+    assert len(_RESIDUAL_TRUTHFUL_STATEMENTS) >= 79, (
+        "the truthful-statement proof list SHRANK below its floor — a false-block "
+        "list that can be deleted silently is not coverage. ⚠️ THE FLOOR IS THE "
+        "CURRENT LENGTH (79 — 74 raised by round 24's four partners for the "
+        "restored `reopen` arm, plus FIVE this round adds for `_RESIDUAL_FAIL_OPEN`'s "
+        "negation run, one per form + its `’` partner (#11258 review round 25 `P2`); "
+        "before that, 70 raised by round 23's four partners: the three "
+        "`never …` lookbehind forms that had none, and the coordinator guard's "
+        "honest shape, plus FOUR round 24 added: `_SPELLING_FLOOR`'s curly "
+        "partner and the restored `reopen` arm's three honest denials. Before "
+        "round 23 it was 66 — raised in the commit AFTER the two "
+        "contraction "
+        "falsifiers landed, which is the 2-entry slack this closed; then raised "
+        "again with round 22's six typographic-apostrophe partners), i.e. ZERO "
+        "SLACK, the same rule the ledger and the "
+        "mutation list carry: it was `>= 30` against a 33-entry list, so three "
+        "honest closures were deletable with both tests GREEN (the stale "
+        "\"within two of the current length\" note is why it read as tight; "
+        "#11258 review rounds 11-12, MEASURED)")
+    # ⛔ AND THE OVER-BLOCK LEDGER IS PINNED BY SHAPE TOO (#11258 review round 8
+    # `P2`, MEASURED): it had a fail-closed re-measurement (`now_accepted == []`)
+    # and nothing else, so substituting entry 5 with a DUPLICATE of entry 1 left
+    # five entries, all still refused, and the proof GREEN — the `minute` cost, the
+    # one a lane is most likely to meet, silently dropped from the ledger. Same
+    # defect the two lists above already carry a fix for; the ledger needed it too.
+    assert len(set(_RESIDUAL_REFUSED_TRUTHFUL)) == len(
+        _RESIDUAL_REFUSED_TRUTHFUL), (
+        "the over-block ledger has duplicate entries — a duplicate pays for a "
+        "dropped cost while the count stays constant")
+    assert len(_RESIDUAL_REFUSED_TRUTHFUL) >= 18, (
+        "the over-block ledger SHRANK below its floor — each entry is a measured "
+        "cost of a rule that cannot be widened without a coverage regression; "
+        "re-derive the ledger rather than deleting shapes. ⚠️ THE FLOOR IS THE "
+        "CURRENT LENGTH (18 — 17 plus the composed closure + `(d2)` truth the "
+        "unanchored `no longer …` window reads across a comma+coordinator, "
+        "measured while re-verifying round 26, and the ONE repair attempt for it "
+        "was measured to cost a real catch instead — see the entry's own note; "
+        "before that, 16 plus the `carve-out` + `spelling` cost that was "
+        "recorded in a COMMENT only until #11258 review `P3`; before that, 15 plus "
+        "the bounded-lookbehind cost of the "
+        "new `fails open` negation veto, #11258 review round 25 `P2`), i.e. ZERO "
+        "SLACK: the round-11 entries are the "
+        "`not … closed` cost, round 19 added the two `fails open` costs, round 20 "
+        "added the three bounded-lookbehind denials, and slack above them is "
+        "slack to delete one of those with")
+    for required in (
+            # the unit-token waiver cost — the one a lane actually meets, because
+            # the row's surviving gap IS the unit-spelling class
+            "the remaining gap is the SPELLING case for `minute`, which is open by design.",
+            # the comma forms: the veto slot cannot cross a comma
+            "the ADJACENCY half is CLOSED, not open.",
+            "the ADJACENCY half is judged, not open.",
+            # ⛔ AND THE OTHER TWO (#11258 review round 9 `P2`, MEASURED): pinning
+            # three of five left the remaining two SUBSTITUTABLE — replacing either
+            # with a duplicate of a pinned one kept uniqueness, length and all three
+            # membership strings, and the proof stayed GREEN. A ledger where a cost
+            # can be swapped out silently is the same defect one entry over.
+            "the ADJACENCY half is closed rather than open.",
+            # ⛔ AND THE UNANCHORED `not … closed` COST (#11258 review round 11
+            # `P1`): without membership both entries are substitutable by
+            # duplicates of the ones above — uniqueness and length survive and the
+            # measured class is gone from the ledger, the same defect round 9
+            # closed one entry over.
+            "(b2) is not closed.",
+            "(e) is not closed.",
+            # ⛔ AND THE FOUR THAT WERE STILL SUBSTITUTABLE (#11258 review round 22
+            # `P1`, MEASURED). Rounds 8 and 11 pinned the three comma forms and the
+            # two `(x) is not closed` entries; these four were left with no
+            # membership, so substituting
+            # `the ADJACENCY half is not merely closed, it is fused.` with a
+            # DIFFERENT, equally-refused sentence kept uniqueness, the 15-entry
+            # floor, every membership string already present AND the whole file at
+            # `106 passed` — while the round-15 `P2` cost (the honest assertion of
+            # closure the unanchored `not … closed` arm cannot tell from a
+            # reopening) left the ledger unrecorded. Same defect rounds 8 and 11
+            # closed one entry over, and the rule this file already states:
+            # membership is the only thing that blocks SUBSTITUTION.
+            "the ADJACENCY half is not merely closed, it is fused.",
+            "the ADJACENCY half is not just closed but fused.",
+            # ⛔ this one also pins the `not … closed AGAIN` shape, which is the
+            # only membership entry for it.
+            "the ADJACENCY half is not closed again since the tables landed.",
+            # ⛔ AND THIS ONE IS THE ONLY MEMBERSHIP PIN ON THE CLAUSE SPLITTER:
+            # `_RESIDUAL_CLAUSE_SPLIT` does not break on `, so `, so the sentence is
+            # refused as a UNION. Adding `, so ` to the splitter is what turns it
+            # GREEN, and that widening is what round 16's `P1` refused.
+            "the ADJACENCY half is closed by the tables, so the SPELLING gap is what stays open.",
+            # ⛔ AND THE `fails open` PAIR (#11258 review round 19 `P3`): without
+            # membership both are substitutable by duplicates of the entries above
+            # — uniqueness and length survive and the measured class leaves the
+            # ledger, the same defect round 9 closed one entry over. They are also
+            # the ONLY entries that pin `_RESIDUAL_FAIL_OPEN`'s anchor requirement.
+            "the numeric side fails open on an unknown unit",
+            "the numeric side still fails open on purpose",
+            # ⛔ AND THE BOUNDED-LOOKBEHIND TRIO (#11258 review round 20 `P3`):
+            # without membership each is substitutable by a duplicate of an entry
+            # above — uniqueness and length survive and the measured class leaves
+            # the ledger, the same defect round 9 closed one entry over. They are
+            # also the ONLY entries that pin the fixed-width limit of the
+            # negation run, so deleting the note that explains it now reds here.
+            "the ADJACENCY half has not to date been reopened.",
+            "the ADJACENCY half has not, in practice, been reopened.",
+            "the ADJACENCY half has not yet, in practice, been re-opened.",
+            # ⛔ AND THE `fails open` VETO'S OWN BOUNDED-LOOKBEHIND COST (#11258
+            # review round 25 `P2`): without membership it is substitutable by a
+            # duplicate of an entry above — uniqueness and length survive and the
+            # measured cost leaves the ledger, the same defect round 9 closed one
+            # entry over.
+            "the ADJACENCY half does not actually fail open.",
+            # ⛔ AND THE `carve-out` + `spelling` COST (#11258 review `P3`): without
+            # membership it is substitutable by a duplicate of an entry above —
+            # uniqueness and length survive and the measured cost leaves the ledger,
+            # the same defect round 9 closed one entry over.
+            "what survives of the carve-out is the SPELLING case, which is open by design.",
+            # ⛔ AND THE COMPOSED CLOSURE + `(d2)` COST: without membership it is
+            # substitutable by a duplicate of an entry above — uniqueness and
+            # length survive and the measured cost leaves the ledger, the same
+            # defect round 9 closed one entry over. It is also the ONLY entry that
+            # pins the 25-char window's cross-coordinator reach, so narrowing that
+            # window reds here.
+            "the ADJACENCY half is no longer open, and the pair is fused.",):
+        assert required in _RESIDUAL_REFUSED_TRUTHFUL, (
+            f"the over-block ledger no longer carries {required!r} — that shape's "
+            "refusal is the measured price of a specific rule; if it is no longer "
+            "refused, move it into `_RESIDUAL_TRUTHFUL_STATEMENTS` instead of "
+            "dropping it silently")
+    for required in (
+            # the issue's own mutation, and the append-point arm
+            "the ADJACENCY half is open again",
+            # the `no longer` participle, subject-gated (#11258 round 3)
+            "the ADJACENCY half is no longer fused",
+            # the clause-anchored `fails open` arm
+            "the ADJACENCY half fails open.",
+            # ⛔ AND ITS EMPHATIC FORM (#11258 review round 25 `P2`): `not only
+            # fails open` ASSERTS the predicate, so it is the falsifier for the
+            # veto's narrowness — a veto widened into a WINDOW scan would turn this
+            # GREEN and leave the arm reading denials as claims.
+            "the ADJACENCY half not only fails open, it leaks.",
+            # the emphatic negations the veto must NOT swallow
+            "the ADJACENCY half is not only open, it is unfused.",
+            # ⛔ THE CLOSED-VERDICT ARM (round 4/5, #11258 round-6 review `P1`
+            # MEASURED): with the floor's old slack this arm had NO membership
+            # entry — emptying `_RESIDUAL_CLOSED_VERDICT` AND deleting its TWO
+            # exclusively-covered shapes left BOTH tests GREEN, because the floor
+            # permitted 21 deletions and the arm is three patterns (two of them
+            # exclusively covered).
+            "the ADJACENCY gap was never closed.",
+            "the time-unit half has yet to be closed",
+            "the ADJACENCY half is anything but closed.",
+            # ⛔ THE CONTRACTED AUXILIARY (#11258 review round 8 `P2`, MEASURED):
+            # `isn't` was the ONLY contraction the arm read, so every other one was
+            # GREEN while its uncontracted twin RED. This entry keeps the family
+            # shape (not just the `is` member) from being narrowed back.
+            "the ADJACENCY half hasn't been closed.",
+            # ⛔ AND THE SHAPE ITSELF (#11258 review round 9 `P1`, MEASURED):
+            # `cannot` and `shan't` were GREEN under the ENUMERATION that replaced
+            # `isn't`, so the arm is a pattern now. These two keep the pattern's
+            # two branches (apostrophe-contraction, `cannot`) from being re-listed.
+            "the ADJACENCY half cannot be closed.",
+            "the ADJACENCY half shan't be closed.",
+            # ⛔ AND THE APOSTROPHE-LESS FORM (#11258 review round 10 `P1`): the
+            # arm's KNOWN-STEM branch exists for these, so narrowing back to a
+            # mandatory apostrophe has to red here, not just in the mutations.
+            "the ADJACENCY half wasnt closed.",
+            # ⛔ THE `no longer …` ARM (#11258 review round 9 `P1`, MEASURED): this
+            # pattern loses SIX exclusive proofs and the membership loop pinned
+            # none of them, so it could be deleted with its proofs inside the
+            # floor's slack and `the ADJACENCY half is no longer closed.` went
+            # GREEN with both tests GREEN.
+            "the ADJACENCY half is no longer closed.",
+            "the ADJACENCY half is no longer judged.",
+            # ⛔ AND THE SHARED WINDOW (#11258 review round 12 `P1`): three arms
+            # ran the same rule and only one had the window, and the floor — the
+            # ONLY tuple the waived path runs — had none, so one filler word
+            # defeated it. These two are the unit-vocabulary and floor arms.
+            "`minute` is no longer being fused.",
+            "the SPELLING gap is no longer being fused.",
+            # ⛔ THE `yet to be closed` SYNONYM ARM (#11258 review round 9 `P2`).
+            "the ADJACENCY half remains to be closed.",
+            # ⛔ AND ONE SHAPE PER ARM/PATTERN THAT HAS FEW EXCLUSIVE PROOFS. The
+            # round-6 fix covered `_RESIDUAL_CLOSED_VERDICT` and left the rest:
+            # `_SPELLING_FLOOR` had NO membership entry and exactly ONE exclusive
+            # proof, `\bunclosed\b` and the bare opening verb one each, so each
+            # could be deleted WITH its proof inside the floor's slack — and the
+            # first of those silently restores the round-3 `P1` (the honest waiver
+            # skipping the whole openness arm). Measured GREEN/GREEN before these
+            # lines (#11258 review round 7 `P1`).
+            "the SPELLING gap is open again.",
+            # ⛔ `the ADJACENCY result is unclosed` DOES NOT PIN THE FLOOR'S ARM —
+            # measured at `474435d658`: delete the floor's `\bunclosed\b` and the
+            # suite is `103 passed`, because that sentence is caught by
+            # `_RESIDUAL_OPENNESS`'s OWN `\bunclosed\b` (a class-anchored sentence
+            # never reaches the floor). The floor is the ONLY tuple a WAIVED sentence
+            # runs, so its exclusive proof has to carry `spelling`. ⚠️ BUT IT IS NOT
+            # FREE TO DROP: that entry is the only membership pin on `_RESIDUAL_OPENNESS`'s
+            # arm, and `_RESIDUAL_OPENNESS` has NO length floor of its own, so it is
+            # named here AND below — one entry per arm, not one entry per shape.
+            "the SPELLING gap is unclosed.",
+            "the ADJACENCY result is unclosed",
+            "the carve-out reopens.",
+            # ⛔ THE OTHER DIRECTION NEEDS MEMBERSHIP TOO: without it every proof of
+            # this branch's own false-block fixes was deletable with zero red.
+            "the ADJACENCY half is not open.",
+            # ⛔ AND ONE PER FORM OF THE `fails open` VETO RUN (#11258 review round
+            # 25 `P2`): the run's own members need membership, or a proof can be
+            # swapped for a duplicate while uniqueness and the floor both survive.
+            "the ADJACENCY half no longer fails open.",
+            "the ADJACENCY half never fails open.",
+            "the ADJACENCY half does not fail open.",
+            # ⛔ AND THE MIXED-CLAUSE FLOOR'S OWN PROOFS (round 26, MEASURED): the
+            # five mixed `spelling`+truthful shapes were the ONLY proofs that the
+            # per-clause floor pass runs in the MIXED form, and they had no
+            # membership entry — so replacing all five with five OTHER reopenings
+            # (length 162, uniqueness 162, every membership string above intact)
+            # and then DELETING the pass left the whole proof GREEN: the pass was
+            # DELETABLE WHILE GREEN, the rounds-17/18 `P0` class, in the fix for
+            # the round-26 `P1` itself. Membership is the only thing that blocks
+            # SUBSTITUTION (see the round-9/11/19/20/22/25 entries), so each shape
+            # is named here rather than left to the length floor.
+            "the SPELLING gap is reopened, and the pair is fused.",
+            "the SPELLING gap is unclosed, and the pair is fused.",
+            "the SPELLING gap no longer fuses, and the pair is fused.",
+            "the SPELLING gap is open again, and the pair is fused.",
+            "the SPELLING gap opens again, and the ADJACENCY half is closed by the tables.",
+            "the SPELLING gap has never been closed, and the ADJACENCY half is closed by the tables.",):
+        assert (required in _RESIDUAL_REOPENING_MUTATIONS
+                or required in _RESIDUAL_TRUTHFUL_STATEMENTS), (
+            f"the proof lists no longer carry {required!r} — that shape is the "
+            "reason its arm exists; a lane reading this list must be able to run "
+            "the shape, so deleting it is a silent coverage regression")
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    assert not _reds(text), "the row itself reds before any mutation is applied"
+    # ⛔ THE REGION BOUND IS THE POINT, so it is asserted rather than assumed — and
+    # the append point is anchored on the LITERAL row that follows the list, never
+    # on `_residual_region`. Deriving it from the scanner is how the first version
+    # of this test became self-referential: the mutations moved with the bound, so
+    # narrowing the bound kept the suite GREEN (#11258 review P1, measured — with
+    # the literal anchor, narrowing it puts every mutation outside the region and
+    # the fixture assertion below fires).
+    region = _residual_region(text)
+    old_bound = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    # ⛔ AND IT MUST START AT THE ROW'S OWN ENTRY — the marker sits ~12.9k chars
+    # in, and a scan that starts there reads 74.6% of the artifact and reports PASS
+    # over a reopening written into the row's narrative above it (#11258 review
+    # round 3, MEASURED). `region` here is the SCANNER's own output, deliberately:
+    # a bound that moves back to the marker reds this assert (measured); the
+    # assertion on the append point below is the one that stays on a FIXTURE
+    # literal, so a narrowing bound cannot move it.
+    assert region.startswith(_RESIDUAL_ROW_START), region[:60]
+    assert len(region) > len(old_bound), (
+        "the residual region must reach PAST the pre-#11223 bound (the `(d)` "
+        "block): that bound is the defect this pin exists to remove")
+    # ⛔ AND THE APPEND POINT MUST BE OUTSIDE THAT OLD BOUND, or every mutation
+    # below would be inside the region the OLD guard read and would prove
+    # nothing. This is asserted on the FIXTURE, not on the scanner.
+    # The `(d2)` clause is the row's own text that the old bound could not see; its
+    # absence there is what makes "appended after the block" mean "invisible to the
+    # pre-#11223 guard" (a measured fact, not an inference).
+    assert "(d2)" not in old_bound, (
+        "the `(d2)` clause is now INSIDE the pre-#11223 bound, so this fixture no "
+        "longer demonstrates the append point being outside it — re-measure the "
+        "claim in the docstring before changing this assert")
+    missed = []
+    for sentence in _RESIDUAL_REOPENING_MUTATIONS:
+        mutated = _with_appended(text, sentence)
+        assert sentence in _residual_region(mutated), (
+            f"the fixture appended {sentence!r} OUTSIDE the region it tests — "
+            "the mutation would prove nothing")
+        assert mutated.index(sentence) >= mutated.index(old_bound) + len(old_bound), (
+            f"the fixture appended {sentence!r} INSIDE the pre-#11223 `(d)` block "
+            "— a mutation there proves nothing about the append point")
+        if not _reds(mutated):
+            missed.append(sentence)
+    assert missed == [], (
+        "these reopenings appended after the residual list stayed GREEN — the "
+        f"region-wide scan does not cover the append point: {missed}")
+    # ⛔ AND THE PREFIX IS COVERED TOO, or "region-wide" still means "from the "
+    # marker onward": a reopening written into the row's own narrative, ABOVE the
+    # marker, is the shape #11223's bound would still miss one step further in.
+    # Inserted at the row's start — before the marker — so the assertion fails if
+    # the bound ever moves back to `_RESIDUAL_MARKER`.
+    prefix_mutation = "the ADJACENCY half is open again"
+    prefix_at = text.index(_RESIDUAL_ROW_START) + len(_RESIDUAL_ROW_START)
+    assert prefix_at < text.index(_RESIDUAL_MARKER), (
+        "the row's entry start is now AFTER its own residual marker, so this "
+        "fixture no longer inserts above it — re-measure the prefix claim")
+    prefixed = text[:prefix_at] + "      ⛔ (2b) " + prefix_mutation + ".\n" + text[prefix_at:]
+    assert _reds(prefixed), (
+        "a reopening inserted into the row's narrative ABOVE the residual marker "
+        "stayed GREEN — the scanned region still starts at "
+        f"{_RESIDUAL_MARKER!r}, so it reads only "
+        f"{len(region) - region.find(_RESIDUAL_MARKER)} of the row's "
+        f"{len(region)} chars and publishes PASS over the rest (#11223's own "
+        "defect, one bound further in)")
+    false_alarms = [
+        sentence for sentence in _RESIDUAL_TRUTHFUL_STATEMENTS
+        if _reds(_with_appended(text, sentence))]
+    assert false_alarms == [], (
+        "these TRUTHFUL statements red the scan — a false block is how a guard "
+        f"gets deleted: {false_alarms}")
+    # ⛔ AND THE OVER-BLOCK LEDGER IS RE-MEASURED, not asserted in prose (#11258
+    # review round 7 `P2`). These are honest and refused; the pin states the
+    # cost so it is a measured property of this revision rather than a discovery
+    # left to the next lane. A shape that stops being refused is an IMPROVEMENT —
+    # move it to `_RESIDUAL_TRUTHFUL_STATEMENTS` and drop it here.
+    now_accepted = [s for s in _RESIDUAL_REFUSED_TRUTHFUL
+                    if not _reds(_with_appended(text, s))]
+    assert now_accepted == [], (
+        "these over-blocked statements are no longer refused — that is an"
+        " improvement, so move each one into `_RESIDUAL_TRUTHFUL_STATEMENTS`"
+        " (with its measured verdict) rather than leaving two lists: "
+        f"{now_accepted}"
+    )
+
+
+#: The PIN'S STRUCTURAL HALF, one falsifier per rule (#11258 review round 22 `P0`).
+#:
+#: ⛔ MEASURED BEFORE THIS EXISTED — every rule below was deletable with the file at
+#: `106 passed`. The reopening half was never in that state: both proof tuples drive
+#: `_residual_reopening_claims`, so an arm there cannot be removed silently. The
+#: structural half is a straight-line run of `assert`s whose only caller feeds it the
+#: REAL row, and a real row satisfies every one of them by definition.
+#:
+#: ⛔ AND THE LIST ITSELF IS PINNED — BY MEMBERSHIP, NOT BY SIZE (#11258 review
+#: round 23 `P0`, MEASURED). A falsifier list that can be SHORTENED is the round-1
+#: `P0` over again one layer up: deleting the per-sentence entry AND the loop it covers
+#: left the whole file at `108 passed`, with the pin passing a row that says the
+#: ADJACENCY half "was judged" — two edits, each individually green. So every entry
+#: carries a stable `key` and the test body pins the KEY SET: an entry can neither be
+#: deleted (its key is missing) nor substituted (a duplicate key, or a key that no
+#: longer names its rule). That is the shape the three other proof tuples already use
+#: — UNIQUENESS for padding, MEMBERSHIP for substitution, a `>=` floor for shrinkage —
+#: and it is the shape this one did not have.
+#:
+#: Each entry is `(key, label, mutate, attribution, rule)`:
+#:   * `key` — the stable, short name the test body pins membership of;
+#:   * `label` — the rule, named the way its own assertion names it;
+#:   * `mutate` — the registry text → a copy that breaks THAT rule;
+#:   * `rule` — the SOURCE LINE of the assert that must actually, fire, as a
+#:     fragment of its own text. ⛔ ADDED BECAUSE THE KEY WAS NOT THE RULE (#11258
+#:     round 27 `P2`, MEASURED): `attribution` above checks WHICH KIND of failure
+#:     arrived, never WHICH RULE refused it, so an entry whose mutant reddens a
+#:     NEIGHBOURING structural rule passed every arm — the `adjacency-claim-exists`
+#:     entry (`assert adjacency_at`) was reddened by the WINDOW assert two lines
+#:     above it, and its own rule was dead: patching it to `pass` changed no
+#:     verdict. Declaring the line turns "some structural assert refused it" into
+#:     "THIS rule refused it", which is the only thing the label ever claimed.
+#:     Declared for every entry, not just the ambiguous one: the gap was the whole
+#:     registry's, and a field filled in on one row would let the next row in
+#:     unfalsified. A probe for it (a synthetic entry that reddens a neighbour)
+#:     lives in `test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused`.
+#:   * `attribution` — how the red is allowed to arrive. Named arms, not a fallback
+#:     (#11258 review round 23 `P2`): an arm that accepts ANY non-reopening reason
+#:     is the wrong-reason red this test's own docstring forbids.
+#:       `"claims-empty"`    the reopening scan RETURNS `[]` on the mutant, so the
+#:                          structural rule is provably the only thing that refused
+#:                          it;
+#:       `"claims-not-run"`  the scan RAISES — a guard inside `_residual_region`
+#:                          refuses the mutant before the claim rule can run, so it
+#:                          was never judged a reopening either. That is all this
+#:                          arm needs and all it may claim;
+#:       `"region-guard"`    additionally asserts `_residual_region(mutant)` raises,
+#:                          because the rule under test IS that guard, and a mutant
+#:                          can break a structural rule AND a region guard at once.
+#:                          `rule` pins the guard's OWN assert line for these.
+
+
+def _red_line(call, mutant: str, src_lines) -> tuple[str, int, str]:
+    """The SOURCE LINE of the assert that actually refused `mutant` (#11258 round 27).
+
+    Returns `(function_name, lineno, line_text)` for the innermost `AssertionError`
+    frame, so a falsifier can be attributed to the assert it CLAIMS rather than to any
+    structural rule that happens to be nearby. `src_lines` is this file's own source
+    (read once by the caller); the lineno is 1-based, as `traceback` gives it.
+
+    ⛔ WHY THIS EXISTS: `attribution` says which KIND of failure arrived, never which
+    RULE refused it, so one entry could red a neighbour's assert and read as full
+    coverage of its own dead one — MEASURED on `adjacency-claim-exists`, whose
+    mutant reddened the 1,200-char WINDOW assert while its own `assert adjacency_at`
+    could not fire at all.
+    """
+    try:
+        call(mutant)
+    except AssertionError:
+        frame = traceback.extract_tb(sys.exc_info()[2])[-1]
+        return frame.name, frame.lineno, src_lines[frame.lineno - 1].strip()
+    raise AssertionError(
+        "the mutant did not raise at all, so it cannot attribute a rule — the "
+        "entry proves nothing about the assert it is labelled with")
+
+
+def _mutate_row_end_unfindable(text: str) -> str:
+    """The row becomes the LAST entry: the `  - id: ` terminator after it is gone.
+
+    Without the terminator `_residual_region` would read the REST OF THE FILE and
+    red on other rows' prose — the failure its own message names — so removing the
+    declaration that follows it is the honest mutant for "the END is findable".
+    """
+    start = text.index(_RESIDUAL_ROW_START) + len(_RESIDUAL_ROW_START)
+    nxt = re.search(r"\n  - id: ", text[start:])
+    assert nxt is not None, (
+        "the fixture expects a declaration AFTER the `state_value_carve_out` row to "
+        "truncate at — the row is the last entry in the registry now, so this "
+        "falsifier has nothing to remove")
+    return text[:start + nxt.start()]
+
+
+def _mutate_adjacency_past_the_window(text: str) -> str:
+    """Push the ADJACENCY sentence PAST residual (d)'s 1,200-char opening window.
+
+    ⛔ THE `adjacency-claim-exists` ENTRY THIS USED TO BE PAIRED WITH IS GONE, and
+    so is its `assert adjacency_at` (#11258 round 27 `P2`, MEASURED). That entry
+    claimed this rule was un-falsifiable while `adjacency_at` held — "no mutant can
+    break the window assert without also emptying `adjacency_at`" — and that record
+    was FALSE (#11258 review round 24 `P1`): the sentence sits ~700 chars into the
+    window, so filler inserted BEFORE it moves the sentence past 1,200 while leaving
+    it inside residual (d), and `adjacency_at` still finds it. This helper is that
+    mutant; with it, the WINDOW rule is pinned like every other — and the dead
+    `adjacency_at` assert it was wrongly paired with is deleted rather than left
+    carrying a label this mutant does not red.
+    """
+    anchor = "is the carve-out's own fifth example."
+    assert text.count(anchor) == 1, (
+        f"the window fixture anchors on {anchor!r} and the row now carries it "
+        f"{text.count(anchor)} times — re-anchor it rather than deleting the entry")
+    return text.replace(anchor, anchor + " the row says so." * 60, 1)
+
+
+_STRUCTURAL_FALSIFIERS = (
+    (
+        "d-header",
+        "residual (d) is still stated as the RATE-unit gap",
+        lambda t: t.replace("(d) a RATE unit", "(d) the RATE-unit gap", 1),
+        r"assert len(residual) == 2",
+        "claims-not-run",
+    ),
+    (
+        "rate-per-day",
+        # ⛔ ONE RULE, ONE ASSERT (#11258 round 27 `P3`). This entry used to say the
+        # rule was "expressed TWICE" and that no single deletion was caught; the
+        # SECOND assert (block-wide) was UNREACHABLE, not merely redundant — the
+        # window assert implies it (`after ⊆ block`) — and it is deleted, see the
+        # positive control in `_assert_the_row_names_its_closure`. So a single
+        # deletion DOES red here now, and this mutant reds the one assert left.
+        "the RATE class's own `per day` example is still in residual (d)'s opening",
+        lambda t: t.replace("requests per\n      day", "requests per\n      week", 1),
+        r'assert "per\n      day" in after or "per day" in after',
+        "claims-empty",
+    ),
+    (
+        "positive-control",
+        "the positive control: the RATE class is still named as NOT JUDGED",
+        lambda t: t.replace("is not judged: no unit is ADJACENT",
+                            "is judged: no unit is ADJACENT", 1),
+        'assert "not judged" in flat',
+        "claims-empty",
+    ),
+    (
+        # ⛔ THE `adjacency-claim-exists` ENTRY THAT STOOD HERE IS DELETED (#11258
+        # round 27 `P2`, MEASURED), WITH its `assert adjacency_at`. Its label named
+        # the row still making an ADJACENCY claim at all; its mutant walked the
+        # ADJACENCY word out of the first 1,200 chars, so the red landed on the
+        # WINDOW assert below — a rule that already has its own entry — while its
+        # own assert could not fire for ANY mutant (`after ⊆ block`). Restoring the
+        # note without a falsifier for it is the defect; the rule is now covered by
+        # the window assert (a superset) and by the `after in block` premise check.
+        #
+        # ⛔ THE WINDOW ASSERT IS A SEPARATE RULE FROM `adjacency_at`, MEASURED
+        # (#11258 review round 24 `P1`): this entry replaces a record that claimed
+        # the opposite. See `_mutate_adjacency_past_the_window`.
+        "adjacency-claim-in-window",
+        "the ADJACENCY claim is still inside residual (d)'s opening window",
+        _mutate_adjacency_past_the_window,
+        'assert "ADJACENCY" in after.upper()',
+        "claims-empty",
+    ),
+    (
+        "adjacency-closed-per-sentence",
+        "the ADJACENCY gap is asserted CLOSED, per SENTENCE",
+        lambda t: t.replace("stand here is CLOSED:",
+                            "stand here was judged, and the tables now cover it:", 1),
+        "assert any(re.search(p, sentences[i])",
+        "claims-empty",
+    ),
+    (
+        "one-marker",
+        "the registry carries exactly ONE residual-list marker",
+        # ⛔ NOT `t.replace(marker, marker + " (2b)")` — MEASURED: that leaves the
+        # count at ONE (the marker substring survives inside its own replacement),
+        # so it mutates nothing the guard reads and would prove the guard missing
+        # when it is present. A second OCCURRENCE is what the guard counts.
+        lambda t: t + "\n      " + _RESIDUAL_MARKER + " — a second, unguarded list\n",
+        "assert text.count(_RESIDUAL_MARKER) == 1",
+        "region-guard",
+    ),
+    (
+        "one-row",
+        "the registry carries exactly ONE `state_value_carve_out` row",
+        lambda t: t + "  - id: state_value_carve_out\n    name: \"a second, unguarded copy\"\n",
+        "assert row_copies == 1",
+        "region-guard",
+    ),
+    (
+        "row-end-findable",
+        "the row's END (the next `  - id: ` entry) is findable",
+        _mutate_row_end_unfindable,
+        "assert nxt is not None",
+        "region-guard",
+    ),
+    (
+        "region-spans-d-to-e",
+        "the region runs from residual (d) through residual (e)",
+        lambda t: t.replace("(e) the", "(e) that", 1),
+        r'assert (_RESIDUAL_MARKER in region and "(d) a RATE unit" in region',
+        "region-guard",
+    ),
+)
+
+
+def _verify_structural_falsifier(entry, text: str, src_lines) -> None:
+    """One `_STRUCTURAL_FALSIFIERS` entry, measured end to end (#11258 round 27).
+
+    Extracted so the checks are exercised by a PROBE entry as well as by the real
+    list: `test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused` feeds it a
+    deliberately mis-attributed entry, so the attribution check has a falsifier of
+    its own instead of being trusted because it is written down.
+
+    `entry` is `(key, label, mutate, rule, attribution)`; `src_lines` is this file's
+    source, used to name the assert that actually fired.
+    """
+    key, label, mutate, rule, attribution = entry
+    assert attribution in ("claims-empty", "claims-not-run", "region-guard"), (
+        f"{key!r} declares an unknown attribution {attribution!r} — an unnamed "
+        "arm is a fallback, and a fallback accepts any non-reopening reason")
+    mutant = mutate(text)
+    assert mutant != text, (
+        f"the fixture for {key!r} ({label!r}) no longer CHANGES the registry — "
+        "the row wording it targets has moved, so this falsifier proves nothing "
+        "at all. Re-anchor it on the row's new text; do not delete the entry")
+    try:
+        _assert_the_row_names_its_closure(mutant)
+    except AssertionError:
+        pass
+    else:
+        raise AssertionError(
+            f"the structural rule {label!r} has NO falsifier: a registry that "
+            "breaks it still passes the pin, so the rule is prose the suite "
+            "never re-measures — the class this artifact exists to refuse")
+    # ⛔ ATTRIBUTION, asserted per named arm rather than as one permissive
+    # fallback (#11258 review round 23 `P2`). `claims-empty` is the STRONG arm:
+    # the claim rule ran and found nothing, so nothing but the structural rule
+    # can have refused the mutant. `claims-not-run` records the weaker fact —
+    # the mutant never reached the claim rule — instead of pretending to the
+    # stronger one.
+    if attribution == "claims-empty":
+        assert _residual_reopening_claims(mutant) == [], (
+            f"the falsifier for {key!r} reds through the REOPENING scan, so it "
+            "proves nothing about the structural rule it is labelled with — "
+            "re-derive the mutant, or declare `claims-not-run` if the scan "
+            "cannot run on it at all")
+    else:
+        with pytest.raises(AssertionError):
+            _residual_reopening_claims(mutant)
+    if attribution == "region-guard":
+        # asserted on the GUARD ITSELF, not inferred from the pin's failure above: a
+        # mutant can break a structural rule AND the region guard, and then the pin's
+        # red says nothing about which one refused it.
+        frame, lineno, line = _red_line(_residual_region, mutant, src_lines)
+    else:
+        frame, lineno, line = _red_line(
+            _assert_the_row_names_its_closure, mutant, src_lines)
+    # ⛔ THE RED MUST ARRIVE AT THIS ENTRY'S OWN RULE (#11258 round 27 `P2`). The
+    # kind arms above cannot see WHICH assert fired, so an entry whose mutant reddens
+    # a NEIGHBOURING rule read as full coverage of a rule with no killing mutant at
+    # all — measured on the deleted `adjacency-claim-exists`, whose
+    # `assert adjacency_at` could not fire for any mutant. `rule` is a fragment of the
+    # raising line's own text, so a re-anchored entry that drifts onto a neighbour's
+    # assert reds HERE instead of passing quietly.
+    assert rule in line, (
+        f"the falsifier for {key!r} ({label!r}) reds {frame}:{lineno} — "
+        f"`{line}` — which is NOT the rule it declares (`{rule}`). An entry "
+        "that reds a neighbouring rule proves nothing about its own: "
+        "re-derive the mutant, or delete the rule and the entry together")
+
+
+def test_a_falsifier_that_reddens_a_neighbouring_rule_is_refused():
+    """The attribution check has a falsifier of its own (#11258 round 27 `P2`).
+
+    ⛔ MEASURED, and this is the finding: at `06cdf2a692e7` the falsifier table
+    carried `adjacency-claim-exists` labelled "the row still makes an ADJACENCY claim
+    at all", whose mutant walked the ADJACENCY word out of residual (d)'s 1,200-char
+    window. Every arm the table had — the `mutant != text` guard, "the pin reds", the
+    kind attribution — PASSED, because the red landed on the WINDOW assert three lines
+    above, a rule that already had its own entry. The entry's own rule
+    (`assert adjacency_at`) could not fire for ANY mutant (MEASURED by deletion:
+    patching it to `pass` left the control PASS and all 10 falsifiers red at the same
+    rules), so the table asserted coverage of a rule it never touched.
+
+    This probe feeds `_verify_structural_falsifier` exactly that shape — a real
+    mutant, a real red, `claims-empty` genuinely satisfied — with only the `rule`
+    fragment pointing at a DIFFERENT assert. Before the `rule` check existed this
+    entry passed; now it must be refused, and named as mis-attributed. A probe that
+    hardcodes the expected message would pass on a stub, so what is asserted is the
+    refusal AND that it names the declared rule.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    src_lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
+    probe = (
+        "probe-reddens-a-neighbour",
+        "a rule whose mutant reds the NEXT rule's assert instead",
+        lambda t: t.replace("requests per\n      day", "requests per\n      week", 1),
+        'assert "ADJACENCY" in after.upper()',
+        "claims-empty",
+    )
+    with pytest.raises(AssertionError) as refused:
+        _verify_structural_falsifier(probe, text, src_lines)
+    message = str(refused.value)
+    assert "probe-reddens-a-neighbour" in message, (
+        f"the probe was refused for some other reason: {message}")
+    assert "is NOT the rule it declares" in message, (
+        "the probe was refused without naming the mis-attribution — the check that "
+        f"refused it is not the `rule` check this test exists to pin: {message}")
+
+
+def test_every_structural_rule_in_the_pin_has_a_falsifier():
+    """#11258: the pin's STRUCTURAL half, refused rule by rule.
+
+    ⛔ WHY THIS EXISTS — MEASURED at the review head (`6c3c18b8280f`), and it is
+    this artifact's own defect class one layer in. `_assert_the_row_names_its_
+    closure` has two halves: the REOPENING half, whose arms are iterated by both
+    proof tuples (`_RESIDUAL_REOPENING_MUTATIONS` must RED,
+    `_RESIDUAL_TRUTHFUL_STATEMENTS` must stay GREEN), and the STRUCTURAL half — an
+    unbroken run of `assert`s over the real row. A real row satisfies all of them
+    by definition, so nothing re-measured any of them: neutralising the `(d)`
+    header split, the `per day` example, the `not judged` positive control, the
+    per-sentence CLOSED rule, the single-marker guard AND the single-row guard left
+    this file at **106 passed**.
+
+    ⛔ TWO OF THOSE ARE NOT COSMETIC, which is what makes this a `P0` rather than
+    tidiness:
+      * neutralising the per-sentence CLOSED loop restores review cycle 7's `P1` —
+        a row saying the ADJACENCY half "was judged" (a retired claim: no CLOSED
+        verdict in the sentence) passes, because the block-wide `"closed" in flat`
+        control that cycle 7 replaced is satisfied elsewhere in the 10,019-char
+        block;
+      * neutralising the row guard restores the duplicate-row fail-open its own
+        comment measures — a second `  - id: state_value_carve_out` row publishes
+        its own residual list while the scan reads whichever copy comes first.
+
+    ⛔ AND A MUTANT MUST NOT RED FOR THE WRONG REASON. Each entry declares its
+    attribution — `claims-empty` (the scan RETURNS `[]`, so the structural rule is
+    provably the only refuser), `claims-not-run` (the scan RAISES, so the mutant was
+    never judged a reopening), or `region-guard` (that guard IS the rule, asserted
+    directly) — so a mutant that is merely a reopening cannot stand in for a missing
+    structural rule. Same shape as the over-block ledger: what is measured is
+    recorded as measured, and what a rule CANNOT do is stated rather than implied.
+
+    ⛔ AND A MUTANT MUST NOT RED FOR THE WRONG RULE EITHER (#11258 round 27 `P2`,
+    MEASURED). Attribution by KIND was not enough: `adjacency-claim-exists`
+    (`assert adjacency_at`) was reddened by the WINDOW assert three lines above it,
+    so an entry whose own rule was DEAD read as full coverage — the exact shape
+    cargo-mutants refuses when it reports the test that CAUGHT a mutant rather than
+    "some test failed". Each entry now declares the source line of the assert that
+    must fire (`rule`), and this loop re-reads the raised frame's own line.
+
+    ⛔ AND THE LIST OF FALSIFIERS IS ITSELF PINNED — see its own note. A falsifier
+    list that can be SHORTENED is this same `P0` one layer up, and it was measured:
+    deleting the per-sentence entry plus the loop it covers left the file at `108
+    passed` over a row that says the ADJACENCY half "was judged".
+
+    ⛔ NOT FALSIFIED HERE, stated rather than implied: nothing — and the two rules
+    that WERE here under a claimed falsifier are gone rather than excused. The two
+    SPELLING-tail rules were DELETED (#11258 review round 24 `P1`, MEASURED): both
+    are implied by this test's own `sum(…) > 1` records over the same `tail`, so
+    neither could ever fire. `assert adjacency_at` and the block-wide `per day`
+    assert were DELETED with their claims (#11258 round 27 `P2`/`P3`, MEASURED):
+    each was UNREACHABLE given the assert above it, and patching either to `pass`
+    changed no verdict. A DEAD assert is worse than an absent one — the absence is
+    visible here, the dead assert reads as coverage — which is why the eliminations
+    leave their premise re-measured below (`after in block`) instead of a note.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    src_lines = pathlib.Path(__file__).read_text(encoding="utf-8").splitlines()
+    # control: the real row must PASS, or a mutant could red for a reason that has
+    # nothing to do with the rule it is labelled with.
+    _assert_the_row_names_its_closure(text)
+    # ⛔ THE PREMISE under which the two dead asserts above were deleted (#11258
+    # round 27). `assert adjacency_at` was dead and the block-wide `per day` assert
+    # was dead ONLY while `after ⊆ block`; if a later edit reads `block` from a
+    # narrower window than `after`, both deleted rules become reachable again and the
+    # per-sentence CLOSED loop silently goes vacuous (a suppressed red, not a loud
+    # one). So the premise is re-measured rather than assumed.
+    _residual_after_block = text.split("(d) a RATE unit", 1)[1]
+    assert _residual_after_block[:1200] in \
+        _residual_after_block.split("(e) the", 1)[0], (
+            "`after` (the 1,200-char opening window) is no longer a PREFIX of the "
+            "(d) block, so `assert adjacency_at` and the block-wide `per day` assert "
+            "that were deleted as unreachable are reachable again — re-derive a "
+            "falsifier for the rule they covered (and for the now-vacuous "
+            "per-sentence CLOSED loop) instead of reading the deletion as coverage")
+    # ⛔ THE LIST IS PINNED (#11258 review round 23 `P0`): see its own note. Without
+    # this, deleting a rule and the single entry covering it is TWO edits that are
+    # each individually green — measured at `108 passed` over a row that says the
+    # ADJACENCY half "was judged".
+    keys = [entry[0] for entry in _STRUCTURAL_FALSIFIERS]
+    assert len(set(keys)) == len(keys), (
+        "the structural falsifier list has duplicate keys — a duplicate pays for a "
+        "deleted rule while the length stays constant")
+    assert set(keys) >= {
+        "d-header",
+        "rate-per-day",
+        "positive-control",
+        # ⛔ NOT `adjacency-claim-exists`: its assert was dead and its mutant reddened
+        # the window rule, so the entry is DELETED with it (#11258 round 27 `P2`).
+        # Re-adding the key without a rule that its own mutant reds is the defect.
+        "adjacency-claim-in-window",
+        "adjacency-closed-per-sentence",
+        "one-marker",
+        "one-row",
+        "row-end-findable",
+        "region-spans-d-to-e",
+    }, (
+        "the structural falsifier list no longer carries a declared rule — deleting "
+        "a rule AND the falsifier that covers it is the `P0` this key set exists to "
+        f"refuse (have: {sorted(set(keys))})")
+    for entry in _STRUCTURAL_FALSIFIERS:
+        _verify_structural_falsifier(entry, text, src_lines)
+    # ⛔ THE RECORD behind "not falsified here": the tail rules cannot be isolated
+    # while more than one tail sentence carries their evidence. If that ever drops
+    # to ONE, they CAN be falsified a sentence at a time and the entries belong in
+    # `_STRUCTURAL_FALSIFIERS` — so this reds and says so rather than leaving a
+    # stale excuse in a docstring (the [pin-defensive-claim] class this file polices).
+    block = text.split("(d) a RATE unit", 1)[1].split("(e) the", 1)[0]
+    flat = " ".join(block.split()).lower()
+    sentences = re.split(r"(?<=[.!?;])\s+", flat)
+    tail = sentences[
+        [i for i, s in enumerate(sentences) if "adjacency" in s][-1] + 1:]
+    assert sum("spelling" in s for s in tail) > 1, (
+        "the SPELLING disclosure is now expressed by a SINGLE tail sentence, so "
+        "`_assert_the_row_names_its_closure`'s two tail rules CAN be falsified one "
+        "sentence at a time — move them into `_STRUCTURAL_FALSIFIERS` and delete "
+        "this record rather than leaving it stale")
+    assert sum("spelling" in s and "open" in s for s in tail) > 1, (
+        "only one tail sentence now carries `spelling` AND `open`, so the tail "
+        "rules' evidence is isolable — falsify them in `_STRUCTURAL_FALSIFIERS` "
+        "instead of recording them as unfalsifiable")
+
+
+def test_the_filler_windows_are_justified_by_the_language_not_by_the_row():
+    """The interpolation notes cite a MEASUREMENT, not "the row's own register" (#11258 round 21).
+
+    ⛔ MEASURED, and this is the correction: SEVEN notes in this file said
+    `, in practice, ` / `, after the widen, ` / `, for now, ` is "the row's own
+    register" (or "the row's OWN interpolation") — and `config/v4-mechanisms.yml`
+    writes NONE of them (0 occurrences each, exact AND whitespace-flattened; no
+    commit ever added one, `git log -S` is empty for all three). The class is the
+    one this file polices: a lane reading the note looks for the form in the row
+    and does not find it. Round 20's `P3` severity argument inherited the false half
+    verbatim ("the row writes it"), which is why the correction belongs on the
+    artifact rather than in a comment.
+
+    What the notes claim now is TWO-SIDED, and both sides are pinned here:
+      * the row does not contain the comma-delimited forms — so the cost is met by
+        a lane EDITING the row, not by the row's current text, and
+      * each form is still pinned RED in `_RESIDUAL_REOPENING_MUTATIONS` — THAT
+        list, not the row, is what justifies the filler windows. The pin is
+        per-FORM, not per-mutation (`in practice` is carried by six mutations and
+        the others by one each): deleting EVERY mutation carrying a form is what
+        leaves the window justified by nothing a reader can re-measure.
+
+    ⛔ PRE-FIX BEHAVIOUR: with the "row's own register" prose restored, the suite
+    stayed green (105 passed at `7cfb51aa0d4`) — nothing re-measured the claim, so
+    it could stay false indefinitely, and it did (written in round 13, still there
+    at round 20). Both assertions below are measured, not asserted: revert either
+    side and this test reds.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    row = _residual_region(text)
+    flat_row = " ".join(row.split())
+    for interpolation in (", in practice,", ", after the widen", ", for now,"):
+        assert interpolation not in flat_row, (
+            f"the registry now WRITES {interpolation!r} — that is fine, but the "
+            "notes in `_RESIDUAL_CLOSED_VERDICT` / `_RESIDUAL_OPENNESS` / the "
+            "over-block ledger state the cost as met by an EDIT; re-measure those "
+            "notes against the row's new text rather than leaving a claim that is "
+            "true for the wrong reason")
+        assert any(interpolation in mutation
+                   for mutation in _RESIDUAL_REOPENING_MUTATIONS), (
+            f"no mutation pins {interpolation!r} RED — the filler windows are "
+            "justified by the language, and the proof of that justification is "
+            "this list; a window whose only red-required shape is gone is a window "
+            "with no falsifier")
+
+
+def test_every_refusal_names_the_over_block_ledger():
+    """The route out of a refusal is offered on EVERY refusal (#11258 round 19 `P2`).
+
+    ⛔ MEASURED, and this is why the test exists: the pointer paragraph hung off
+    `if ledger_hits else ""`, so a refusal was told its disclosure "REOPENS a gap
+    this row says is CLOSED" with NO route — the false-block path that ends with
+    the pin being deleted. `(a) is not closed.` is the honest case that matters:
+    `(a)` is an item of the row's OWN still-open list, so the statement is true,
+    and it is not one of the recorded entries.
+
+    ⛔ PRE-FIX BEHAVIOUR: every non-ledger shape in `not_in_ledger` below was
+    refused with a message that did not contain `_RESIDUAL_REFUSED_TRUTHFUL` at
+    all (104–105 chars at measurement TIME — the list is pinned by MEMBERSHIP, not
+    by that width, so adding a shape does not stale this sentence), while `(b2)` —
+    which IS in the ledger — carried the 634-char pointer. A
+    message whose help depends on membership in a hardcoded list is exactly the
+    false block the ledger's own instructions forbid.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    not_in_ledger = ("(a) is not closed.", "(c) is not closed.",
+                     "(e1) is not closed.")
+    for sentence in not_in_ledger:
+        with pytest.raises(AssertionError) as refused:
+            _assert_the_row_names_its_closure(_with_appended(text, sentence))
+        message = str(refused.value)
+        assert "_RESIDUAL_REFUSED_TRUTHFUL" in message, (
+            f"the refusal of {sentence!r} offers no route out — it does not name "
+            "the over-block ledger, so an honest disclosure of a still-open item "
+            f"reads as an accusation with no remedy: {message!r}")
+        assert "is still open" in message, (
+            "the refusal names the ledger but not a phrasing it accepts — a lane "
+            f"cannot rewrite its sentence from that: {message!r}")
+        assert "A LEDGER SHAPE IS ALSO IN THIS SENTENCE" not in message, (
+            f"{sentence!r} is NOT in the ledger, so claiming a ledger shape is "
+            f"in the sentence states something false about the artifact: {message!r}")
+    # and the SPECIFIC match is still reported when there is one — hoisting the
+    # pointer must not flatten the two cases into one message (#11258 round 11
+    # `P2`/`P3`: the sentence can carry BOTH an honest ledger shape and a real
+    # reopening, and a message that calls that a recorded over-block is false).
+    with pytest.raises(AssertionError) as refused:
+        _assert_the_row_names_its_closure(_with_appended(text, "(b2) is not closed."))
+    message = str(refused.value)
+    assert "A LEDGER SHAPE IS ALSO IN THIS SENTENCE" in message, (
+        f"the refusal of a DECLARED ledger shape no longer says so: {message!r}")
+    assert "(b2) is not closed." in message, (
+        f"the refusal does not name the entry that matched: {message!r}")
+
+
+def test_the_fails_open_over_block_is_in_the_ledger_not_only_a_comment():
+    """The `_RESIDUAL_FAIL_OPEN` cost is re-measured, not only written down.
+
+    ⛔ MEASURED at the pre-fix head: the `_RESIDUAL_FAIL_OPEN` note states the
+    over-block is "recorded here rather than left to be discovered", while both
+    of its sentences red at the append point and appear in NO ledger entry — so
+    changing that arm left the suite green and the record stale. The ledger is the
+    only place a cost is re-measured (`now_accepted` in
+    `test_the_residual_region_is_scanned_WHERE_a_lane_appends`), which is the
+    failure this file's own note calls "a stale entry is worse than no entry".
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    for sentence in ("the numeric side fails open on an unknown unit",
+                     "the numeric side still fails open on purpose",
+                     # ⛔ AND THE BOUNDED-LOOKBEHIND COST OF THE ARM'S NEW VETO
+                     # (#11258 review round 25 `P2`): the run admits a negator only
+                     # IMMEDIATELY before the verb, so an adverb between them is
+                     # refused though the sentence denies the predicate. Recorded,
+                     # so a widening of the run that stops refusing it reds here.
+                     "the ADJACENCY half does not actually fail open."):
+        assert sentence in _RESIDUAL_REFUSED_TRUTHFUL, (
+            f"the `fails open` over-block {sentence!r} is not in the ledger, so "
+            "nothing re-measures it — a cost recorded only in a comment can drift")
+        assert _reds(_with_appended(text, sentence)), (
+            f"{sentence!r} is no longer refused — that is an IMPROVEMENT, so move "
+            "it into `_RESIDUAL_TRUTHFUL_STATEMENTS` rather than leaving a stale "
+            "over-block entry behind")
+
+
+def test_every_apostrophe_shape_gives_the_same_verdict_in_EITHER_spelling():
+    """The negation class reads the typographic apostrophe too (#11258 round 22 `P2`).
+
+    ⛔ MEASURED, and this is why the test exists: the contraction ARM and every
+    spelling arm already accepted `’`, while the negation RUNS spelled only `'` —
+    so SEVEN truthful denials in `_RESIDUAL_TRUTHFUL_STATEMENTS` were REFUSED in
+    the spelling macOS supplies for free and GREEN in ASCII, and NO ledger entry
+    re-measured the difference. An unrecorded over-block is the one this artifact
+    forbids: it ends with the pin being deleted rather than with the guard fixed.
+
+    ⛔ PRE-FIX BEHAVIOUR (measured at `6c3c18b8280f`): this test fails on exactly
+    those seven — `the ADJACENCY gap hasn't been open again.`, `… half isn't yet
+    opened again.`, `… hasn't yet opened again.`, `… hasn't ever opened again.`,
+    the two `the SPELLING gap …` twins and `the ADJACENCY gap isn't kept open.`
+    each flip GREEN → RED when ONLY the apostrophe changes.
+
+    THE INVARIANT, rather than a second list: a spelling must never decide a
+    verdict, so every shape in the three proof lists that contains `'` is
+    re-measured with `’` substituted for EVERY apostrophe in it and has to keep
+    its OWN verdict — mutations RED, truthful statements GREEN, ledger entries
+    refused. A hand-picked partner list would cover the shapes someone thought
+    of; this covers every apostrophe shape the proof surface already carries, and
+    a shape added later is covered the moment it lands.
+    """
+    text = (pathlib.Path(__file__).resolve().parent.parent
+            / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    converted = 0
+    mismatches: list[tuple[str, str, str]] = []
+    for name, sentences in (("mutation", _RESIDUAL_REOPENING_MUTATIONS),
+                            ("truthful", _RESIDUAL_TRUTHFUL_STATEMENTS),
+                            ("ledger", _RESIDUAL_REFUSED_TRUTHFUL)):
+        for sentence in sentences:
+            if "'" not in sentence:
+                continue
+            converted += 1
+            curly = sentence.replace("'", "\u2019")
+            if _reds(_with_appended(text, curly)) != _reds(_with_appended(text, sentence)):
+                mismatches.append((name, sentence, curly))
+    assert mismatches == [], (
+        "the apostrophe SPELLING decided these verdicts — a lane writing one of "
+        "them with a typographic apostrophe gets a different answer than its own "
+        "proof list records, so one of the two is an UNRECORDED over-block: "
+        f"{mismatches}")
+    assert converted >= 21, (
+        f"only {converted} proof-list shapes carry an apostrophe — the invariant "
+        "above is measured on the shapes that exist, so a shrink here means the "
+        "surface it pins shrank. ⚠️ FLOOR IS THE CURRENT COUNT (21: 7 mutations + "
+        "14 truthful statements + 0 ledger entries — MEASURED at this head; the "
+        "apostrophe partners rounds 22-25 added are what carried it here), ZERO "
+        "SLACK, the "
+        "same rule the two proof-list floors carry: raise it in the same commit "
+        "that adds shapes.")
 
 
 def test_the_suffix_comes_from_the_last_digit_run():
@@ -1640,7 +5018,7 @@ def test_the_MINT_stores_the_refs_OWN_identity_prefix_so_the_5069_loop_closes():
         "operators": [{"src": ref, "dst": "the cache TTL is 20 minutes",
                        "op_type": "IMPL"}],
     }
-    result = v2.execute_embed(embed, {}, session_id="s_10360")
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360")
     minted = [p["content"] for p in result["payload"]["points"]]
     assert hard in minted, ([len(c) for c in minted], result["warnings"])
 
@@ -2106,7 +5484,7 @@ def test_the_S5_mint_leaves_a_single_token_ref_UNQUOTED_rather_than_misquoting_i
         "operators": [{"src": ref, "dst": "the quota is 20 requests",
                        "op_type": "IMPL"}],
     }
-    result = v2.execute_embed(embed, {}, session_id="s_10360", edus=[
+    result = v2.execute_embed(embed, _RESOLVED_SEARCH, session_id="s_10360", edus=[
         {"index": 0, "role": "user", "text": "maybe try intervals for speed"}])
     minted = [p for p in result["payload"]["points"] if p["id"].startswith("pt")]
     single = [p for p in minted if "storage/" in p.get("content", "")]
@@ -2623,3 +6001,184 @@ def test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity():
     assert v2._value_core(
         v2._value_bindings("the value was .5k miles")[0][1]) == (
             "", "500", "mi")
+
+
+def test_the_registry_rows_measured_disclosures_are_pinned():
+    """The four residual clauses named at the row's ⚠️ paragraph are pinned here.
+
+    The `state_value_carve_out` row is the residual ledger an auditor reads
+    ("⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number"). A
+    disclosure in that row with no pin can drift silently: closing the behaviour
+    leaves the row asserting the old state, and re-breaking it leaves the row
+    claiming a shape it no longer has — the "guarantee documented, mechanism
+    absent" defect #10360 exists to remove.
+
+    ⛔ WHAT THIS TEST DOES **NOT** CLAIM: that every clause of that row is now
+    pinned. Residuals (a) and (b2) are unpinnable in a unit test by construction
+    (a value the model never EMITS is upstream of selection; the survival target
+    needs an E2 LLM arm run), and (e)–(o) are pinned where they live or are
+    out of this test's scope. What it pins is the set the row's ⚠️ paragraph
+    names as a battery: (c) the `4:32` non-clock, (d) `per <unit>` rates,
+    (d2) the identifier fail-open, and `20k-mile`/`20000 miles`.
+
+    ⛔ TWO PAIRS IN THAT BATTERY ARE **RE**-PINS, and that is deliberate rather
+    than an oversight: `forty thousand requests per day`/`per week` is already
+    asserted by `test_the_carve_outs_own_ADJACENT_time_units_are_judged`, and
+    `UTC+03:00`/`UTC+3` by
+    `test_a_clock_valid_colon_form_is_excluded_but_a_duration_is_judged`. The
+    rest — `4:32` in both directions, `1:23 seconds`/`83 seconds`, `27:12`,
+    `x4k ms`, `20k-mile` and the two range refusals — had no pin before this
+    test. Repeating the two keeps ONE place that names the whole clause set, so
+    a lane editing a clause finds its verdict beside its siblings.
+
+    ⛔ EVERY VERDICT BELOW WAS MEASURED AT `origin/main` `277a559b1`, this file's
+    own head, and each assert that holds a row clause names it. NINE of them are
+    REFUSALS (`:MM` with a fused unit, its pre-existing `27:12` spelling, an
+    identifier against a quantity, a different identifier, an identifier with a
+    PLAIN unit tail against two different quantities — `x4 ms`/`5000 ms` and
+    `arr4 ms`/`9000 ms` — an identifier whose TAIL spells a known unit
+    (`arr4ms`/`4 seconds`), and the two range comparisons) and the TWELVE others
+    are TOLERANCES — a tolerance is not a bug, but an UNDISCLOSED or
+    UNPINNED tolerance is how a future narrowing ("why does this pair fail
+    open?") quietly reverses a measured decision.
+    """
+    # (c) a colon form that is a valid CLOCK SHAPE without being a clock — the
+    # row's own example, `4:32` read as a marathon time — is NOT caught, and
+    # neither is the same value converted to seconds. The exclusion is by SHAPE,
+    # so `4:32`/`3:59` is outside the judged set on both sides.
+    assert v2._value_slot_divergence("the marathon was 4:32",
+                                     "the marathon was 3:59") == ()
+    assert v2._value_slot_divergence("the marathon was 4:32",
+                                     "the marathon was 272 seconds") == ()
+    # …and the clock-VALID exclusion is the only one that may fire: the row
+    # records that a BARE-shape arm REFUSED this pair (one offset spelled two
+    # ways), which is why the CLOCK-VALID rung is the one that landed.
+    assert v2._value_slot_divergence("the offset was UTC+03:00",
+                                     "the offset was UTC+3") == ()
+
+    # (d) a RATE unit written as `per <unit>` — the carve-out's own fifth
+    # example — is not judged: no unit is ADJACENT to the number, so nothing is
+    # fused and the pair fails open. Pinned in both spellings, and the mechanism
+    # is asserted directly so a future adjacency widen cannot silently "fix" the
+    # row and leave it saying the opposite.
+    assert v2._value_bindings("we served 40000 requests per day") == (
+        ("served", "40000"),)
+    for content, quote in (
+        ("we served 40000 requests per day", "we served 40000 requests per week"),
+        ("we served forty thousand requests per day",
+         "we served forty thousand requests per week"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+    # the REFUSALS the row discloses, kept adjacent to the tolerances so no row
+    # edit can move one without the other:
+    #   * `1:23 seconds`/`83 seconds` — `_CLOCK_FORM` anchors on `$`, so a colon
+    #     token with a FUSED unit word after it is not a clock: the core is the
+    #     RATIO `1/23` with unit `s` (a conversion is a different identity);
+    #   * `27:12 minutes`/`27:12 seconds` — the pre-existing spelling of the same
+    #     shape, which is what proves the rule was always there.
+    assert v2._value_slot_divergence("the lap took 1:23 seconds",
+                                     "the lap took 83 seconds") == (
+        ("took", "1/23s", "83s"),)
+    assert v2._value_slot_divergence("the lap took 27:12 minutes",
+                                     "the lap took 27:12 seconds") == (
+        ("took", "27/12min", "27/12s"),)
+
+    # (d2) AN IDENTIFIER-SHAPED value beside a unit word fails OPEN (#10943, which
+    # records this clause as `(q2)`), and it fails open by INVENTING A SCALE
+    # rather than by declining to judge: `x4k ms` binds `x4kms` (core `4`, suffix
+    # `kms`), `_composed_identity` folds `k`+`ms` and multiplies to `4000 ms`, and
+    # the pair then AGREES. So the assert below does not hold because an array
+    # index is outside the judged set — measured, both sides bind slots — and the
+    # refusal against `5000 ms` shows the pair IS judged. The TOKEN-level reading
+    # is held separately by
+    # `test_an_IDENTIFIER_shaped_token_is_not_read_as_a_quantity`
+    # (`_NUMERIC_HEAD` keeps `x4k` from being read as 4000 in place); the GLUED
+    # token is not guarded by it, and that gap is the residual.
+    # ⛔ THESE pairs are the mutation-sensitive ones: drop the `x1000`
+    # multiplication — an OVER-BROAD stand-in for the #10943 fix, which scopes the
+    # fold by the token's HEAD, so under that fix `20k-mile` (head `2`) still
+    # composes and stays tolerated — and both the `x4k ms`/`4000 ms` pair below and
+    # its `s4[k ms` splice flip to a refusal `('see', '4kms', '4000ms')`; the
+    # `20k-mile`/`20000 miles` tolerance one block further down flips too, which is
+    # why the mutation is NOT a fix: it withholds a truthful point. The `5000 ms`
+    # refusal below does NOT move under that mutation — it is over-determined (core
+    # `4` vs `5000` and unit `kms` vs `ms` already differ before the fold) — so it
+    # is evidence that the pair is judged, never evidence about the multiplication.
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was 4000 ms") == ()
+    assert v2._value_slot_divergence("the see was s4[k ms",
+                                     "the see was 4000 ms") == ()
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was 5000 ms") == (
+        ("see", "4kms", "5000ms"),)
+    assert v2._value_slot_divergence("the see was x4k ms",
+                                     "the see was x5k ms") == (
+        ("see", "4kms", "5kms"),)
+    # ⛔ SCOPE, pinned (#10943 review cycle 2): (d2) is the PREFIX-TAIL shape, not
+    # a blanket identifier tolerance. An identifier followed by a PLAIN unit word
+    # is judged normally — `x4 ms` against a different quantity REFUSES, and
+    # `arr4 ms` against `9000 ms` REFUSES — while `x4 ms` against the SAME value
+    # tolerates. A future fix that broadens (d2) into "identifiers are not judged"
+    # has to move these.
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 5000 ms") == (
+        ("see", "4ms", "5000ms"),)
+    assert v2._value_slot_divergence("the field was arr4 ms",
+                                     "the field was 9000 ms") == (
+        ("field", "4ms", "9000ms"),)
+    assert v2._value_slot_divergence("the see was x4 ms",
+                                     "the see was 4 ms") == ()
+
+    # ⛔ AND THE SUFFIX IS READ AS A UNIT WITH NO IDENTIFIER/UNIT DISTINCTION,
+    # which is what the row's THE DISCRIMINATOR paragraph states: the identifier's
+    # own letters reach the identity through the SUFFIX slot, so a tail drives BOTH
+    # directions. A tail that SPELLS a known unit is compared AS that unit —
+    # `arr4ms` IS `4 ms`, so against `4 seconds` it REFUSES — while a tail that
+    # spells NOTHING in `_UNIT_EQUIV` leaves the unit UNJUDGEABLE on equal cores,
+    # the module's own unknown-unit tolerance, so `arr4zz` against `4 hours` fails
+    # open. Both sides BIND in that tolerance (`_value_bindings` yields a token on
+    # each side), which is what makes it a FAIL-OPEN rather than an absent
+    # binding. Only the `k` tail is ADDITIONALLY read as a SCALE — that is (d2)
+    # above and arm (i)'s bare shape — so the row must not be read as saying these
+    # are the only tails that reach the identity: that is how a lane scoping the
+    # #10943 fix to the `k` shape misses this class entirely.
+    # ⛔ MUTATION, measured: narrowing the SUFFIX read by the token's HEAD (drop
+    # the suffix when the token does not start with a numeral — the `_NUMERIC_HEAD`
+    # scope applied one slot too far, an OVER-BROAD stand-in for #10943) reads
+    # `('', '4', None)` and flips the `4 seconds` refusal to a tolerance, so the
+    # two asserts below it red. The `arr4zz` fail-open does NOT move under that
+    # narrowing, which is precisely why a `k`-scoped fix does not close it.
+    assert v2._value_core("arr4ms") == ("", "4", "ms")
+    assert v2._value_core("arr4zz") == ("", "4", "zz")
+    assert v2._value_slot_divergence("the field was arr4ms",
+                                     "the field was 4 seconds") == (
+        ("field", "4ms", "4s"),)
+    assert v2._value_slot_divergence("the field was arr4zz",
+                                     "the field was 4 hours") == ()
+
+    # a HYPHENATED compound is ONE token, so it never reaches the fusion arm and
+    # the composition folds `kmile` into `k`+`mile`: `20k-mile`/`20000 miles` is
+    # the SAME value, one spelling. It did DIVERGE before #10801 (core `20` +
+    # unit `kmile` against core `20000`), which WITHHELD a truthful point.
+    assert v2._value_slot_divergence("the drive was 20k-mile",
+                                     "the drive was 20000 miles") == ()
+    # ⛔ …and it did NOT buy that by reading a RANGE as one quantity: a
+    # hyphenated range carries ONE suffix for several numbers, so the core stays
+    # `20/30` and a different range still refuses. This is the hazard that keeps
+    # a blanket prefix peel out of `_value_core`, and the two refusals below are
+    # the second half of the `20k-mile` clause above.
+    assert v2._value_core("20k-30kmiles") == ("", "20/30", "kmiles")
+    assert v2._value_slot_divergence("the drive was 20k-30k miles",
+                                     "the drive was 20000 miles")
+    assert v2._value_slot_divergence("the drive was 20k-30k miles",
+                                     "the drive was 20k-40k miles")
+
+    # CONTROLS, holding row (i)'s `k`-as-unit identity: no clause above may be
+    # satisfied by a rule that refuses every `Nk` — the `k`-abbreviation bridge
+    # still lets `3k` name `3000 km`/`3000 kg`.
+    for content, quote in (
+        ("the load is 3000 kg", "the load is 3k"),
+        ("the trip is 3000 km", "the trip is 3k"),
+    ):
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)

@@ -232,6 +232,16 @@ top-level `approval_status` / `approval_principal` / `approval_pr` / `approval_d
 records right then. A re-cut resets the per-row `approval:` audit reference to `null`; it **refuses**
 (#4598) rather than blank a recorded one silently, so pass `--allow-approval-reset` to accept that drop
 deliberately (those references are optional audit records and nothing machine-validates them).
+
+   A re-cut **carries the observed-usage evidence forward** — `used_by` / `recommendation` /
+`basis` / `reason`, and a recorded `exemption: true` — instead of re-deriving it from
+`~/.tortoise/analytics_fallback.jsonl`, which is the cutting box's own call log and not a
+function of the code (#10914). So the census the owner reads does not move on a routine
+re-cut: it is **frozen evidence**, and a new row is recorded `never called` rather than
+stamped with whatever the lane happened to call. `--refresh-observations` is the one
+deliberate way to re-stamp those columns from this machine's log — use it when you mean to
+move the census, and it lands in a reviewed diff like any other edit.
+
 3. `uv run python tools/surface_manifest.py render` — regenerates
    [`docs/product/mcp-sdk-surface.md`](docs/product/mcp-sdk-surface.md).
 4. Get the owner's approval and record it in the canonical doc: `approval_status: approved`,

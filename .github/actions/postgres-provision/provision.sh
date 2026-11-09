@@ -23,8 +23,14 @@
 # skips, so the opt-in cannot be how the leg "passes".
 #
 # Exports (via $GITHUB_ENV, so every later step sees them):
-#   TEST_RECORD_DB_URI          postgresql://<user>:<pass>@127.0.0.1:<port>/<db>
-#   TORTOISE_CI_POSTGRES_LABEL  the ownership label the paired teardown selects
+#   $POSTGRES_DSN_VAR            postgresql://<user>:<pass>@127.0.0.1:<port>/<db>
+#                                (default name: TEST_RECORD_DB_URI)
+#   $POSTGRES_LABEL_VAR          the ownership label the paired teardown selects
+#                                (default name: TORTOISE_CI_POSTGRES_LABEL)
+# The two NAMES are inputs because a job may provision more than one server
+# (#9567 D8 restores into a second, scratch target) and $GITHUB_ENV is
+# last-one-wins: with fixed names the second call would overwrite the first DSN
+# and the first container's label, and neither mistake is visible from the job.
 set -euo pipefail
 
 IMAGE="${POSTGRES_IMAGE:?}"
@@ -32,20 +38,42 @@ HEALTH_TIMEOUT="${POSTGRES_HEALTH_TIMEOUT:-60}"
 DB_NAME="${POSTGRES_DB_NAME:-record}"
 DB_USER="${POSTGRES_DB_USER:-record}"
 DB_PASS="${POSTGRES_DB_PASSWORD:-record}"
+DSN_VAR="${POSTGRES_DSN_VAR:-TEST_RECORD_DB_URI}"
+LABEL_VAR="${POSTGRES_LABEL_VAR:-TORTOISE_CI_POSTGRES_LABEL}"
 
 log() { printf '#9551 %s\n' "$*" >&2; }
 annotate_error() { printf '::error::%s\n' "$*"; }
 
 # Fail closed on any value that is not a plain identifier, BEFORE anything is
-# pulled or created. All three are concatenated into a URI that is written
-# verbatim into $GITHUB_ENV, which is line-delimited — a newline in any of them
-# would append ARBITRARY env vars for every later step of the job. All callers
-# pass the defaults today, but this action is reusable and that is not a
-# property to depend on.
-for pair in "database:$DB_NAME" "username:$DB_USER" "password:$DB_PASS"; do
+# pulled or created. All of these are concatenated into a URI or into `NAME=value`
+# lines written verbatim into $GITHUB_ENV, which is line-delimited — a newline
+# (or a stray `=`) in any of them would append ARBITRARY env vars for every
+# later step of the job. All callers pass the defaults today, but this action is
+# reusable and that is not a property to depend on.
+for pair in "database:$DB_NAME" "username:$DB_USER" "password:$DB_PASS" \
+            "dsn_var:$DSN_VAR" "label_var:$LABEL_VAR"; do
   case "${pair#*:}" in
     ''|*[!A-Za-z0-9_]*)
       annotate_error "postgres ${pair%%:*} must be a plain identifier (A-Za-z0-9_); refusing a value that could inject into GITHUB_ENV or break the URI"
+      exit 1
+      ;;
+  esac
+done
+
+# ⛔ THE TWO NAME INPUTS NEED THE SHELL'S OWN RULE, not only the identifier one
+# (#11429 review cycle 5). `dsn_var`/`label_var` are used as INDIRECT references —
+# the teardown reads `LABEL="${!LABEL_VAR:-}"` — and bash REFUSES a name that
+# starts with a digit (`1FOO: invalid variable name`). The check above accepts
+# `1FOO` (every character is legal), so such a name passed validation, was written
+# into `$GITHUB_ENV`, and then aborted cleanup.sh — reddening a job on a diff that
+# never touched it, against the teardown's own contract that it must never change
+# a job's verdict. Names therefore match what bash will actually accept.
+for pair in "dsn_var:$DSN_VAR" "label_var:$LABEL_VAR"; do
+  case "${pair#*:}" in
+    [A-Za-z_]*)
+      ;;
+    *)
+      annotate_error "postgres ${pair%%:*} must be a valid shell variable name (leading A-Za-z_, then A-Za-z0-9_): it is used as an INDIRECT reference, and bash refuses a name that starts with a digit"
       exit 1
       ;;
   esac
@@ -106,7 +134,7 @@ NAME="tortoise-ci-postgres-${SUFFIX}"
 
 # Export the exact label BEFORE anything is created, so the paired teardown can
 # always select this job's container (the fallback is the EXIT trap below).
-echo "TORTOISE_CI_POSTGRES_LABEL=$LABEL" >> "$GITHUB_ENV"
+echo "${LABEL_VAR}=${LABEL}" >> "$GITHUB_ENV"
 
 # A failure mid-provision (pull, port read, health gate) must not leave a
 # container holding memory on the runner host. Disarmed on the success path:
@@ -173,8 +201,8 @@ if [ "$ready" -ne 1 ]; then
   exit 1
 fi
 
-echo "TEST_RECORD_DB_URI=postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:${PORT}/${DB_NAME}" >> "$GITHUB_ENV"
-log "exported TEST_RECORD_DB_URI for database $DB_NAME on port $PORT"
+echo "${DSN_VAR}=postgresql://${DB_USER}:${DB_PASS}@127.0.0.1:${PORT}/${DB_NAME}" >> "$GITHUB_ENV"
+log "exported ${DSN_VAR} for database $DB_NAME on port $PORT"
 
 # SUCCESS: disarm the EXIT trap. It fires on a normal exit as well, so leaving it
 # armed removes the container just started — every later step would then dial a

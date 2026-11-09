@@ -499,6 +499,43 @@ def _embedded_retry():
     )
 
 
+def _client_pool(db):
+    """``(pool, connection_kwargs)`` behind a client, or ``(None, None)``.
+
+    The redis-py client carries NO ``.host``/``.port`` of its own (measured on
+    the pinned ``redis 7.4.1``): the configured endpoint lives in
+    ``connection_pool.connection_kwargs``. Every in-repo reader of a store's
+    endpoint resolves it from that seam — see
+    ``tortoise/event_store.py::_store_identity`` and
+    ``tortoise/cypher_guard.py::_client_store_key`` — and so do the two callers
+    here. The pool may hang off the client itself or off ``client.connection``:
+    a vendor ``FalkorDB`` keeps the redis client under ``.connection``, a raw
+    redis-like client is the holder itself, and the embedded lane reaches this
+    with either.
+
+    Both are returned because the two callers need different halves: the
+    embedded connect-bound writer must ``disconnect()``/``reset()`` the POOL,
+    while the store-identity resolver only reads the KEYWORD ARGS.
+
+    ``(None, None)`` for a duck-typed or mock handle with no pool. That is the
+    one shape with no endpoint identity at all, and callers must treat it as
+    such rather than as an empty endpoint (a shared ``None`` bucket would
+    silence one store with another's verdict).
+    """
+    for holder in (getattr(db, "client", None),
+                   getattr(db, "connection", None), db):
+        pool = getattr(holder, "connection_pool", None)
+        kwargs = getattr(pool, "connection_kwargs", None)
+        if isinstance(kwargs, dict):
+            return pool, kwargs
+    return None, None
+
+
+def _client_pool_kwargs(db) -> dict | None:
+    """Just the keyword-args half of :func:`_client_pool`."""
+    return _client_pool(db)[1]
+
+
 def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
     """Deliver a socket CONNECT bound to an EMBEDDED client's pool (#3421).
 
@@ -547,13 +584,8 @@ def _apply_embedded_connect_timeout(db, connect_to: float | None) -> bool:
     per-lane ``TORTOISE_DB_SOCKET_CONNECT_TIMEOUT`` knob, which this lane does
     not consult.
     """
-    for holder in (getattr(db, "client", None),
-                   getattr(db, "connection", None), db):
-        pool = getattr(holder, "connection_pool", None)
-        kwargs = getattr(pool, "connection_kwargs", None)
-        if isinstance(kwargs, dict):
-            break
-    else:
+    pool, kwargs = _client_pool(db)
+    if pool is None:
         return False
     kwargs["socket_connect_timeout"] = connect_to
     # Close the pre-bound connections (fds), then forget them so the next
@@ -666,14 +698,66 @@ def _reset_falkordb_version_cache() -> None:
 _VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
 _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 
+# ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
+#
+# The positive report is an INFO on every non-embedded store setup, and that
+# includes the hosted PER-REQUEST path (`_data_sdk_offloaded(...,
+# attach_projection=True)` builds a projection per request) — the same reason
+# the #4997 WARNING above is latched rather than repeated. An unlatched INFO
+# here would put two label lists on the INFO stream at full request rate on the
+# paid tier.
+#
+# ⛔ The latch is on the PAIR VALUE, not merely on the key — and that is the
+# difference between deduplication and silence:
+#   * an unchanged pair (the steady state, and every per-request rebuild from
+#     the same catalogue) reports ONCE, which is all a repeated identical line
+#     can say;
+#   * a pair that CHANGES — the store was repaired, or a label lost its index —
+#     reports AGAIN, which is the only case where the line is news, and the
+#     case an over-eager latch would hide forever.
+# `_VECTOR_INDEX_GAP_WARNED` cannot express this (a set of keys with no value),
+# which is why it is a separate register rather than a reuse.
+#
+# ⛔ THE KEY CARRIES THE PORT. "host" alone is not a store: this repo's own
+# environment runs `localhost:6379` and `localhost:16379` side by side on the
+# default graph name `tortoise` (`tortoise/event_store.py::_store_identity`).
+# The port is NOT on the projection and NOT on the redis client — it is in
+# `connection_pool.connection_kwargs`, which is where `_stable_endpoint` reads
+# it. See that method.
+#
+# ⛔ THE KEY IS A STORE IDENTITY, NOT AN OBJECT ADDRESS, AND BOTH THIS REGISTER
+# AND THE WARNING LATCH USE IT. The key once came from
+# `_falkordb_version_cache_key() or id(self)`, and back then that helper answered
+# None on any redis-py that hides the endpoint behind
+# `connection_pool.connection_kwargs` (redis 7.4.1) — so on the per-request path
+# both the warning and this report were keyed on the ADDRESS of a projection
+# object: one entry (and one WARNING) per live request slot, never evicted, with
+# dedup depending on allocator address recycling rather than on store identity.
+# The helper now resolves that same pool seam (#11328), so on the hosted path it
+# carries the endpoint and `_stable_endpoint()` returns it directly;
+# `_stable_endpoint()`'s remaining lanes — the pool's host+port as a PAIR when the
+# key does not resolve, then `_host` with no port, then the address — exist for
+# clients that resolve no (or only half an) endpoint: a bare unit mock, and any
+# client whose endpoint is incomplete. A half-resolved client deliberately gets
+# NO endpoint identity rather than a mixed tuple (see that method).
+_VECTOR_INDEX_PAIR_REPORTED: dict[tuple, tuple[frozenset, frozenset]] = {}
+_VECTOR_INDEX_PAIR_LOCK = threading.Lock()
+
 
 def _reset_vector_gap_warnings() -> None:
-    """Test hook: drop the warned-graph latch (mirrors
+    """Test hook: drop BOTH per-`(endpoint, graph)` registers.
+
+    `_VECTOR_INDEX_GAP_WARNED` (the #4997 WARNING latch) and
+    `_VECTOR_INDEX_PAIR_REPORTED` (the #11087 pair report's value latch,
+    registered by `_record_vector_index_inventory`) are process-global, so
+    without this a latch entry from one test suppresses the warning — or the
+    REPORT — in the next one on the same (endpoint, graph). Mirrors
     `_reset_falkordb_version_cache`, which tests/test_falkordb_compat.py
-    already imports). Without this, a latch entry from one test suppresses the
-    warning in the next one on the same (endpoint, graph)."""
+    already imports."""
     with _VECTOR_INDEX_GAP_LOCK:
         _VECTOR_INDEX_GAP_WARNED.clear()
+    with _VECTOR_INDEX_PAIR_LOCK:
+        _VECTOR_INDEX_PAIR_REPORTED.clear()
 
 # P0 guard (#99): bulk graph-wipe classifier. Restored here in #49 Phase 2 —
 # the guard was lost from this (live) module during the v3.0 ontology rewrite
@@ -6367,9 +6451,18 @@ _FULLTEXT_INDEX_LABEL_FIELDS: tuple[tuple[str, list[str]], ...] = (
     # `sdk._source_search_text` — the indexer
     # (`_upsert_source`, title) and the capture
     # path (`_materialize_session_source`,
-    # title-else-summary). `summary`/`topics` are
+    # title-else-topics). `summary`/`topics` are
     # deliberately NOT indexed: a second
     # vocabulary the FTS surface does not read.
+    # ⛔ #10000: the capture path resolves its
+    # `_searchText` from `topics`, NOT from
+    # `summary` — `summary` carries the DISPLAY
+    # prefix ("session capture topics: "), and
+    # this leg OR-unions query terms, so indexing
+    # it would make every captured session match
+    # "session"/"capture"/"topics". Do not
+    # "simplify" the capture arm back to
+    # `summary`.
 )
 
 # #2981 — a FalkorDB/Redis server that has reached `maxmemory` with
@@ -6554,7 +6647,16 @@ def _caller_test_stem() -> str | None:
 # call it, so even a leaked TORTOISE_TEST_MODE=1 env cannot patch stdlib
 # (review P2-1); _record_current_test_stem additionally refuses records
 # outside an active session (prod parity).
-_ORIG_THREAD_START = threading.Thread.start
+# ⛔ The `globals().get(...)` guard is NOT redundant — it is what makes a RELOAD
+# safe. `importlib.reload` re-executes this body into the module's EXISTING dict,
+# so after `install_thread_stamp()` has run, a bare `threading.Thread.start`
+# here is the STAMP, not the original: it would rebind `_ORIG_THREAD_START` to
+# the stamp itself, and the stamp reads that name at CALL time — so every
+# `Thread.start()` raised `RecursionError` after a reload (measured: 2 frames of
+# `_thread_start_inherit_stem` recursing, #11217 round-3 review P1). The name is
+# captured once, at first import, when `Thread.start` is still the real one, and
+# the reload then KEEPS it. Deleting this guard silently re-opens that bug.
+_ORIG_THREAD_START = globals().get("_ORIG_THREAD_START") or threading.Thread.start
 
 
 # Module-load install gate (review P2-1): TORTOISE_TEST_MODE=1 alone is NOT
@@ -10841,7 +10943,8 @@ class FalkorProjection(
                  graph_name: str = "tortoise",
                  ssl: bool = False,
                  allow_nonstandard_path: bool = False,
-                 skip_health_check: bool = False):
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True):
 
         # Epic #1647 (D-1=A): capture whether the caller passed an explicit
         # path BEFORE the no-arg fallback below resolves it — the redirect
@@ -11224,6 +11327,15 @@ class FalkorProjection(
         # "what does the catalog say right now" (a READ-path measurement). They
         # can disagree in the fail-open lane and that is correct.
         self._vector_indexed_labels: set[str] | None = None
+        # #11087 (S4): the OTHER half of that pair — the labels the vector leg
+        # SERVES, retained so the store can state the contract instead of only
+        # its shortfall. Same three-valued semantics as `_vector_indexed_labels`
+        # and assigned on the same successful read, so the pair can never be
+        # half-populated: None means NOT MEASURED (gate skipped or read failed),
+        # never "serves nothing". Read BOTH halves to answer "is this graph fully
+        # indexed for what it serves" — an empty `_vector_indexed_labels` with a
+        # populated served set is a fully-unindexed store, not an unknown one.
+        self._vector_index_served_labels: set[str] | None = None
         # #5434: the rows `_schema_is_current()` read, published so the
         # vector-index inventory can reuse them instead of issuing a second
         # `CALL db.indexes()`. Initialised HERE and read via `getattr` at the
@@ -11264,7 +11376,32 @@ class FalkorProjection(
         # Its `None` default is set ABOVE, before the health check — the
         # recovery replay reads it through `required_embedding_dim`, so it must
         # exist first (#5119).
-        self._ensure_indexes()
+        #
+        # ``ensure_indexes=False`` is for a caller that must address the store
+        # WITHOUT writing to it (#11112: the #10017 purge census, which
+        # certifies a store it must not mutate). The DDL this call issues is a
+        # set of `GRAPH.QUERY` statements, and on a graph that does not exist
+        # yet the FIRST ONE CREATES IT — so a read-only instrument could not
+        # avoid minting the target it was asked to look at. Skipping the schema
+        # leaves `_vector_index_api` at its documented `None` and the index
+        # inventory at "not measured"; both are read-path-neutral (the census
+        # issues no vector query), and the schema is recreated by the next
+        # ordinary construction.
+        #
+        # ⛔ THIS FLAG ALONE IS NOT WRITE-FREEDOM — it skips only the schema
+        # DDL. The open-time health probe (`_auto_health_recover`, above) is a
+        # `GRAPH.QUERY` too and creates a missing graph just the same: measured
+        # with `ensure_indexes=False` and `skip_health_check` left at its
+        # default, binding a graph the store did not hold ADDED it to
+        # `GRAPH.LIST` (#11113 review P2). Write-freedom is the PAIR —
+        # `skip_health_check=True, ensure_indexes=False` — which is what the
+        # census passes; pinned by
+        # `test_write_freedom_needs_the_flag_PAIR_not_ensure_indexes_alone`.
+        # Without this paragraph the comment sends the next fixer (e.g.
+        # `tools/purge_legacy_turns.py`'s default-binding sites, #11112
+        # residual 2) after a knob that does not deliver on its own.
+        if ensure_indexes:
+            self._ensure_indexes()
 
         # Lifecycle hardening (plan Task 4 + issue #1005):
         # - _closed flag for idempotent close()
@@ -11875,7 +12012,9 @@ class FalkorProjection(
                 result["corrupt_lines"], result.get("reason"))
 
     @classmethod
-    def from_uri(cls, uri: str, graph_name: str | None = None) -> "FalkorProjection":  # noqa: UP037
+    def from_uri(cls, uri: str, graph_name: str | None = None, *,
+                 skip_health_check: bool = False,
+                 ensure_indexes: bool = True) -> "FalkorProjection":  # noqa: UP037
         """Parse a connection URI into a projection.
 
         Supported schemes (all treated as docker://):
@@ -11914,7 +12053,9 @@ class FalkorProjection(
                    username=endpoint.username,
                    password=endpoint.password,
                    graph_name=graph_name,
-                   ssl=endpoint.ssl)
+                   ssl=endpoint.ssl,
+                   skip_health_check=skip_health_check,
+                   ensure_indexes=ensure_indexes)
 
     def _norm(self, ev: dict) -> dict:
         """Normalize event shape — tolerates API (flat) and script (nested point)."""
@@ -12993,6 +13134,20 @@ class FalkorProjection(
         # wrong engine (there is no #7951 re-assert in this engine).
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild")
+        # #11070: the same class, one node-property over. A pre-#10852 capture's
+        # `SourceCreated` record carries the transcript's first utterance in
+        # `summary`/`_searchText`, so this replay re-mints the §9.1/D1 prose that
+        # the repair exists to remove. Trailing sweep, after every pass, exactly
+        # like the identity reconciler above — and for the same reason: a
+        # graph-only repair is undone by the next wipe (#2296). Never raises.
+        # ⛔ With no record handle it is PLAN-ONLY: a replay engine has none, and
+        # the clear arm is destructive AND not self-correcting (its output is no
+        # longer a candidate), so clearing here would un-index the population
+        # irreversibly and report census==0 — a false PASS. It logs the count; the
+        # CLI run, which has the record, is what heals it (#11070 review, P1).
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild")
         # #4653: re-establish the watermark captured above. DEGRADES, never
         # raises — this runs after the wipe (#2943 "no loss without proof").
         try:
@@ -17715,6 +17870,18 @@ class FalkorProjection(
         # `reconcile_after_replay`.
         from tortoise.session_source_migration import reconcile_after_replay
         reconcile_after_replay(self, engine="rebuild_all")
+        # #11070: rebuild-DETECTED, not repaired. The pre-#10852 `SourceCreated`
+        # record still holds the utterance, so THIS replay re-mints the prose
+        # pair — and with no record handle the hook is PLAN-ONLY (writes
+        # nothing), so a rebuild does not restore the repair. Re-run the CLI after
+        # any rebuild with `--graph <this cache graph>` AND `--record-dsn`
+        # (`session_source_prose_migration` docstring: REBUILD DETECTION, NOT
+        # REBUILD REPAIR) — without `--graph` the CLI addresses the URI's default
+        # graph, which on a hosted box is not the tenant graph this replay wrote.
+        # Never raises.
+        from tortoise import session_source_prose_migration as sspm
+
+        sspm.reconcile_after_replay(self, engine="rebuild_all")
 
         # ── #4653: re-establish the event-log watermark ───────────────
         # AFTER every replay pass (pass 2b above) and BEFORE the sidecar is
@@ -18470,41 +18637,233 @@ class FalkorProjection(
     def _falkordb_version_cache_key(self):
         """Process-lifetime cache key for version detection.
 
-        Server mode → ('server', host, port) from the raw redis connection
-        (redis Connection objects carry ``_host``/``port``). Embedded mode →
+        Server mode → ('server', host, port). Embedded mode →
         ('embedded', db path) — redislite's bundled module version is fixed
         per binary, so the path just isolates distinct DBs. Returns None for
-        unidentified clients (unit mocks with no endpoint attrs) — those are
+        unidentified clients (unit mocks with no endpoint identity) — those are
         probed fresh every call.
+
+        ⛔ THE ENDPOINT IS NOT AN ATTRIBUTE OF THE CLIENT (#11328). On the
+        pinned ``redis 7.4.1`` a client carries NO ``.host``/``.port``/``._host``
+        of its own — the configured endpoint lives in
+        ``connection_pool.connection_kwargs``. This method used to read only the
+        connection's attributes, so it answered ``None`` on exactly the hosted
+        per-request lane, ``_get_falkordb_version`` never populated
+        ``_FALKORDB_VERSION_CACHE``, and its 2-RTT probe (MODULE LIST + INFO
+        server) ran on **every** projection construction — the cost the cache
+        exists to remove. So: connection attributes first (a raw
+        ``redis.Connection`` does carry them), then the pool kwargs, which is
+        the seam ``event_store._store_identity``, ``cypher_guard._client_store_key``
+        and ``_stable_endpoint`` all resolve a store's endpoint from. Both
+        fields always come from ONE source, so a partially-resolving client can
+        never mint a hybrid endpoint that matches neither.
+
+        Embedded stays keyed on its PATH: the fallback is skipped whenever a
+        `_path` is present — the same attribute the embedded key is built from,
+        so the guard and the fallthrough cannot disagree — and an embedded
+        client's pool kwargs carry ``path``, never ``host``/``port``.
         """
         conn = getattr(getattr(self, "db", None), "connection", None)
+        host = port = None
         if conn is not None:
-            host = getattr(conn, "_host", None) or getattr(conn, "host", None)
-            port = getattr(conn, "port", None)
-            if host is not None and port is not None:
-                return ("server", str(host), int(port))
+            conn_host = getattr(conn, "_host", None) or getattr(conn, "host", None)
+            conn_port = getattr(conn, "port", None)
+            # ⛔ BOTH fields from ONE source (#11360 review P3): filling host
+            # from the connection and port from the pool mints a hybrid tuple
+            # like ('server', conn-host, pool-port) that matches NEITHER
+            # source and can equal a different store's real endpoint — which
+            # would serve one store's version to another AND merge the two
+            # stores' `#4997`/`#11087` registers.
+            if conn_host is not None and conn_port is not None:
+                host, port = conn_host, conn_port
         path = getattr(self, "_path", None)
+        if host is None and path is None:
+            # The guard reads the SAME attribute the fallthrough below reads, so
+            # the two cannot disagree: an embedded store is keyed on its path by
+            # construction, never re-keyed as a network store by the fallback.
+            kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
+            pool_host = kwargs.get("host")
+            pool_port = kwargs.get("port")
+            if pool_host is not None and pool_port is not None:
+                host, port = pool_host, pool_port
+        if host is not None and port is not None:
+            try:
+                return ("server", str(host), int(port))
+            except (TypeError, ValueError):
+                # An unparseable port is no endpoint identity — fall through
+                # rather than mint a key that would collide across stores.
+                # (`int(float('inf'))` raises OverflowError, which is uncaught:
+                # a non-finite port is not a shape any client produces, and
+                # raising here would fail store construction at
+                # `__init__` — the loud failure, kept deliberately.)
+                pass
         if path is not None:
             return ("embedded", str(path))
         return None
 
+    def _stable_endpoint(self):
+        """The STORE identity both the `#4997` warning latch and the `#11087`
+        pair register key on — stable across projections of one store, for
+        every client shape a real projection can build.
+
+        `_falkordb_version_cache_key()` answers `None` when the client resolves
+        no endpoint — including a client that resolves only HALF of one — and
+        the lanes below add only what the key cannot, never a second field from
+        a second source:
+
+        * the pool's host AND port **together** (both, or this lane declines);
+        * else `_host` with **no** port, only when no port resolves anywhere —
+          a DEGRADED bucket (it cannot separate two servers on one host) but a
+          stable one;
+        * else the ADDRESS (`("instance", id(self))`), which is reached by a
+          bare unit mock AND by any client that resolves only part of an
+          endpoint.
+
+        ⛔ A HALF-RESOLVED CLIENT GETS NO ENDPOINT IDENTITY, and that is a
+        deliberate trade of STABILITY for SAFETY. It could be combined as
+        `(projection _host, pool port)`, but nothing proves the two fields name
+        the same server, and such a mixed tuple can equal the real endpoint of a
+        DIFFERENT store — which merges two stores' registers and silences one of
+        them. So the mixed shape falls to the address lane instead. The cost is
+        bounded and stated: if one projection of a store resolves its endpoint
+        fully while another resolves only half of it, the two land in different
+        buckets (two reports rather than one) — a duplicate, where the mixed key
+        would produce a MISSING warning on a genuinely different store. Real
+        clients do not split: redis-py's client resolves host+port from its pool
+        together, or carries neither.
+
+        ⛔ THE PORT IS PART OF THE IDENTITY, and keying on the host alone is a
+        defect rather than a graceful degradation
+        (`tortoise/event_store.py::_store_identity`): one host can carry several
+        FalkorDB servers, and this repo's own environment runs TWO on loopback —
+        `localhost:6379` (the test matrix) and `localhost:16379` (canonical/dev)
+        — both on the default graph name `tortoise`. Host-keyed, one store's
+        `pop` clears the other's register entry, its report suppresses the
+        other's, and its `#4997` WARNING latch silences a genuine full-scan gap
+        on a genuinely different store. The server shape here is
+        `("server", host, port)` — the SAME tuple `_falkordb_version_cache_key`
+        answers — so one store cannot land in two buckets depending on which of
+        the two lanes resolved its endpoint. The only host-only bucket left is
+        the no-port-anywhere lane above, which cannot distinguish two ports and
+        says so.
+        """
+        endpoint = self._falkordb_version_cache_key()
+        if endpoint is not None:
+            return endpoint
+        kwargs = _client_pool_kwargs(getattr(self, "db", None)) or {}
+        pool_host = kwargs.get("host")
+        raw_port = kwargs.get("port")
+        pool_port = None
+        if raw_port is not None:
+            try:
+                pool_port = int(raw_port)
+            except (TypeError, ValueError, OverflowError):
+                # ⛔ An unparseable port is NO PORT, not "a port is present" —
+                # the host-only lane below must still fire, or this shape loses
+                # its stable bucket and takes one address-keyed register entry
+                # per projection object (the never-evicted leak the pair
+                # register's own comment names) for no safety gain: a
+                # `("server", host, None)` bucket can never equal a real
+                # `("server", host, port)` one.
+                pool_port = None
+        if pool_host is not None and pool_port is not None:
+            return ("server", str(pool_host), pool_port)
+        own_host = getattr(self, "_host", None)
+        if own_host is not None and pool_port is None:
+            # ⛔ A HOST-ONLY bucket is a DEGRADED identity (it cannot separate
+            # two servers on one host) but it is all this store can offer, and
+            # it is *stable* — which is what keeps a per-request projection in
+            # one bucket. It is only minted when NO port resolves anywhere.
+            # Never combine `_host` with a pool port: nothing proves the two
+            # name the same server, and a mixed tuple can equal a real
+            # endpoint of a DIFFERENT store — merging two stores' registers
+            # and silencing one of them (round-2 review P3).
+            return ("server", str(own_host), None)
+        return ("instance", id(self))
+
     def _record_vector_index_inventory(self, catalogue_rows=None) -> None:
         """Measure which of the labels the vector leg SERVES carry a VECTOR
-        index on this engine, and report the gap. (#4997)
+        index on this engine, and REPORT THE PAIR — then the gap. (#4997, #11087)
 
-        Sets ``self._vector_indexed_labels`` to the INTERSECTION of the served
-        label set with the engine's VECTOR-indexed labels, or to ``None`` when
-        the set could not be measured. Never raises and never writes:
-        ``_ensure_indexes`` is reached unguarded from ``FalkorProjection.__init__``
-        as well as from two ``hosted_api`` per-request paths, so a hostile or
-        unavailable catalog must not break store construction.
+        #11087 (S4): the contract is reported POSITIVELY. This method retains
+        the served set (``self._vector_index_served_labels``) beside the measured
+        indexed set (``self._vector_indexed_labels``) and emits the pair at INFO
+        on every successful read whose pair has changed, whether or not there is
+        a gap. Before #11087 the report was gated on ``if gap:``, so "setup
+        reports what it serves and what it indexes" held only in the DEFICIENT
+        case: an operator asking "is this store fully indexed for what it
+        serves?" got an answer only when the answer was "no". A report that can
+        only name failures is unusable at the call site.
+
+        ⛔ The INFO is deduplicated on the PAIR VALUE, not left unlatched and not
+        latched on the key alone (``_VECTOR_INDEX_PAIR_REPORTED``). Both halves of
+        that choice are load-bearing: this method runs on the hosted PER-REQUEST
+        path, so a line emitted on every call would put two label lists on the
+        INFO stream at full request rate; and a key-only latch — the shape the
+        ``#4997`` WARNING uses — could never say that a previously-gapped store
+        has become fully indexed, because it records that a graph was reported,
+        not what it reported. Value-latching says exactly the news and nothing
+        else.
+
+        Sets ``self._vector_index_served_labels`` to the declared served set and
+        ``self._vector_indexed_labels`` to its INTERSECTION with the engine's
+        VECTOR-indexed labels. The THREE lanes, stated exactly, because a pair is
+        only readable if a caller can tell them apart:
+
+        * **measured** — a ROW LIST was returned: both halves are SET. That
+          includes the deliberately-empty case: a catalogue with no VECTOR
+          index anywhere gives ``indexes=set()``, which means "measured, and
+          nothing is indexed" — never "unknown". "Measured" is decided by the
+          SHAPE of the response, not by whether anything in it parsed: a
+          response that is not a row list at all (a bare string, a mapping, a
+          reshaped catalogue after an engine change) also lands here, because
+          the per-row walk skips what it cannot read — see the ⛔ below. A
+          response that is not iterable at all (an `int`, a `bool`) is NOT this
+          lane: it raises in the walk, so it reaches the fail-open lane below
+          and both halves are `None`.
+        * **NOT MEASURED** — the catalogue could not be read (the call raised, or
+          it answered ``None``): BOTH halves are ``None``, so the pair is never
+          half-populated. ``None`` never means "serves nothing".
+        * **NOT APPLICABLE** — the gate-skip lane (an embedded engine, or a <4.x
+          engine with no index API) returns BEFORE touching either half, so the
+          pair is left exactly as it was. That is safe rather than sloppy only
+          because both gates read init-immutable attributes (``_is_embedded``,
+          ``_falkordb_version``): a projection that skips here never measured
+          earlier, so there is no stale pair for it to leave behind.
+
+        ⛔ Malformed ROWS are a separate, PRE-EXISTING lane and are **NOT**
+        "not measured": rows are parsed PER ROW and an unparseable row is
+        skipped (#4997, pinned by ``test_malformed_rows_are_skipped_per_row``).
+        A catalogue that is RETURNED but parses to nothing therefore reports
+        ``serves=<every declared label> indexes=[]`` — "measured and empty" —
+        and warns on the gap. That is the pre-existing half's semantic and
+        #11087 does not change it; what #11087 changes is that this lane is now
+        REPORTED POSITIVELY too, instead of only warned about. Separating
+        "returned but unparseable" from "measured empty" would be a behaviour
+        change to the pinned half, deliberately not made here. ⚠️ Scope line,
+        stated rather than implied: #11087's "a raising **or malformed**
+        ``db.indexes()`` … the attribute absent/``None``" is met for the RAISING
+        and ANSWERED-``None`` inputs (``test_raising_inventory_read_is_fail_open``
+        + ``test_unmeasured_pair_is_none_in_both_halves``); for the
+        returned-but-unparseable input it is **not** ``None``, and this docstring
+        plus ``test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty``
+        are the record of that difference rather than a claim that it does not
+        exist.
+
+        Never raises and never writes: ``_ensure_indexes`` is reached unguarded
+        from ``FalkorProjection.__init__`` as well as from two ``hosted_api``
+        per-request paths, so a hostile or unavailable catalog must not break
+        store construction.
+
+        ⛔ The served set is READ from ``security.ENTITY_TYPE_LABELS`` (the one
+        declaration, #4997); this method introduces no second label vocabulary.
 
         ⛔ This does NOT create an index and does NOT assert that the served set
-        and the indexed set SHOULD be equal. Whether Object/Event/Source vectors
-        should be indexed is the owner's open decision V1
-        (docs/architecture/STORAGE-ARCHITECTURE.md §12.1c / §14.3, raised
-        2026-09-24); this method makes the RELATIONSHIP observable without
-        acting on it.
+        and the indexed set SHOULD be equal. WHERE an index lives is settled: V1
+        (docs/architecture/STORAGE-ARCHITECTURE.md §12.1c, resolved 2026-11-07)
+        moves it out of FalkorDB. Whether these labels carry an index at all is
+        §14.3 V3's question and stays open; this method makes the RELATIONSHIP
+        observable without acting on it.
 
         Row shape (measured on falkordb/falkordb:latest): 9 columns, where
         ``[0]`` is the label, ``[1]`` the properties and ``[2]`` the ``types``
@@ -18528,12 +18887,17 @@ class FalkorProjection(
             return
 
         log = logging.getLogger(__name__)
+        key = None
+        pair_key = None
         try:
             # Everything that can throw lives inside this guard — including
             # the latch-key computation, because `_falkordb_version_cache_key`
             # reads `self.db`, which is absent on a bare projection.
-            endpoint = self._falkordb_version_cache_key() or id(self)
+            endpoint = self._stable_endpoint()
             key = (endpoint, self._graph_name)
+            # Both registers key on the STORE (`_stable_endpoint`), never on the
+            # object address — see that method for why.
+            pair_key = key
 
             # #5434: reuse the rows `_schema_is_current` already read when the
             # caller supplied them (the fast path); otherwise probe HERE (the
@@ -18544,9 +18908,18 @@ class FalkorProjection(
                 # NOT the same thing as [] — see the attribute's docstring.
                 log.debug(
                     "#4997: vector-index inventory unavailable (empty response) "
-                    "— _vector_indexed_labels stays None"
+                    "— the serves/indexes pair stays None"
                 )
                 self._vector_indexed_labels = None
+                # #11087: BOTH halves of the pair are None — the pair is never
+                # half-populated, so `served is None` alone means "not measured".
+                self._vector_index_served_labels = None
+                # …and the pair register is DROPPED for this key: the store no
+                # longer knows its contract, so the next measured read is news
+                # rather than a repeat, even if it reports the same pair as
+                # before the read failed.
+                with _VECTOR_INDEX_PAIR_LOCK:
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(pair_key, None)
                 return
 
             served = set(ENTITY_TYPE_LABELS.values())
@@ -18567,11 +18940,49 @@ class FalkorProjection(
                     # A malformed row must not abort the scan — skip it.
                     continue
 
+            self._vector_index_served_labels = served
             self._vector_indexed_labels = measured & served
+            # #11087: sort INSIDE the guard. `sorted()` runs the labels'
+            # `__lt__`, and `measured & served` does NOT sanitise the type:
+            # when the catalogue is the shorter operand CPython keeps ITS
+            # objects, so an exotic label (a `str` subclass without a total
+            # order) reaches `sorted()` here. Outside this guard that would
+            # raise out of a method whose contract is "never raises" — the
+            # store would fail to construct. A sort failure is a read failure:
+            # both halves go None (below) and setup stays healthy.
+            serves_reported = sorted(served)
+            indexes_reported = sorted(self._vector_indexed_labels)
         except Exception as e:  # fail-open: never break store setup
             log.debug("#4997: vector-index inventory read failed: %s", e)
             self._vector_indexed_labels = None
+            self._vector_index_served_labels = None
+            # #11087: as in the answered-`None` lane — an unmeasured store has no
+            # pair to have already reported, so the register entry goes.
+            if pair_key is not None:
+                with _VECTOR_INDEX_PAIR_LOCK:
+                    _VECTOR_INDEX_PAIR_REPORTED.pop(pair_key, None)
             return
+
+        # #11087 (S4): REPORT THE PAIR whenever it has CHANGED — the positive
+        # half the store could not state before, "these labels are served, and
+        # THESE of them are indexed". Emitted on every measured setup whose pair
+        # differs from the last one reported for this (endpoint, graph), so a
+        # fully-indexed store answers the operator too, and a repaired store
+        # announces the repair — while a repeated identical line (the hosted
+        # per-request rebuild, the steady state) does not repeat. See
+        # `_VECTOR_INDEX_PAIR_REPORTED` for why the latch is on the VALUE.
+        pair = (frozenset(serves_reported), frozenset(indexes_reported))
+        with _VECTOR_INDEX_PAIR_LOCK:
+            changed = _VECTOR_INDEX_PAIR_REPORTED.get(pair_key) != pair
+            if changed:
+                _VECTOR_INDEX_PAIR_REPORTED[pair_key] = pair
+        if changed:
+            log.info(
+                "#11087: vector contract on %s: serves=%s indexes=%s",
+                self._graph_name,
+                serves_reported,
+                indexes_reported,
+            )
 
         gap = served - self._vector_indexed_labels
         if gap:
@@ -18581,12 +18992,13 @@ class FalkorProjection(
             if first_report:
                 log.warning(
                     "#4997: vector search on %s is unindexed for label(s) %s "
-                    "(indexed: %s) — those reads silently full-scan. This is "
-                    "the gap that decision V1 (STORAGE-ARCHITECTURE.md §12.1c) "
-                    "governs; indexing those labels is NOT done here.",
+                    "(indexed: %s) — those reads silently full-scan. Whether "
+                    "those labels get an index is §14.3 V3 of "
+                    "STORAGE-ARCHITECTURE.md; V1 settled only WHERE an index "
+                    "lives. Indexing them is NOT done here.",
                     self._graph_name,
                     sorted(gap),
-                    sorted(self._vector_indexed_labels) or "none",
+                    indexes_reported or "none",
                 )
 
     def _get_falkordb_version(self):
@@ -19317,14 +19729,22 @@ class FalkorProjection(
           * the VECTOR index on ``Point.embedding`` ONLY, resolved or created by
             ``_ensure_vector_index_api``, which then MEASURES the engine's
             vector-index inventory against the labels the vector leg SERVES
-            (``ENTITY_TYPE_LABELS.values()``) and reports the gap (#4997).
+            (``ENTITY_TYPE_LABELS.values()``), REPORTS THE PAIR at INFO whenever
+            it CHANGES for this ``(endpoint, graph)``, and warns on the gap
+            (#4997, #11087). ⛔ "On every setup" is NOT the contract: the pair
+            is value-latched (``_VECTOR_INDEX_PAIR_REPORTED``) because this
+            function is reached from the hosted PER-REQUEST path, where a line
+            per setup would put two label lists on the INFO stream at full
+            request rate. An unchanged pair reports once; a pair that CHANGES —
+            a repaired store, a label that lost its index — is always news.
 
         ⛔ The vector index stays ``Point``-only ON PURPOSE. Whether the other
         served labels (``Object`` / ``Event`` / ``Subject`` / ``Source``) should
-        carry one is the owner's OPEN decision V1
-        (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c / §14.3, raised
-        2026-09-24) — this store MAKES THE GAP A FACT (``_vector_indexed_labels``;
-        every served label absent from that set full-scans) and never spends that
+        carry one is §14.3 V3's question and stays open — V1 settled only WHERE
+        an index lives (``docs/architecture/STORAGE-ARCHITECTURE.md`` §12.1c,
+        resolved 2026-11-07) — this store MAKES THE RELATIONSHIP A FACT
+        (``_vector_index_served_labels`` vs ``_vector_indexed_labels``; every
+        served label absent from the latter full-scans) and never spends that
         decision. See ``_record_vector_index_inventory``.
 
         Wraps CREATE INDEX in try/except because FalkorDB raises

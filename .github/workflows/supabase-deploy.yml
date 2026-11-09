@@ -133,7 +133,7 @@ jobs:
           rc=$?
           set -e
           if [ "$rc" -eq 1 ]; then
-            echo "::warning::Migrations pending — read the check-migration-drift output above. Resolve any OUT OF ORDER versions FIRST (forward migration, or 'migration repair --linked --status applied <version>') and rename any duplicate-prefix pair; then dispatch Deploy Supabase (migrations + functions) to apply before the next app deploy."
+            echo "::warning::Migrations pending — read the check-migration-drift output above. Resolve any OUT OF ORDER versions FIRST (forward migration, or 'migration repair --linked --status applied <version> --yes') and rename any duplicate-prefix pair; then dispatch Deploy Supabase (migrations + functions) to apply before the next app deploy."
             exit 0
           fi
           exit "$rc"
@@ -197,9 +197,50 @@ jobs:
       # describes the runner, not the deploy. Provide the tool or fail NAMING it.
       - name: Runner tool contract — provide gh (#9018)
         run: bash .github/scripts/runner-tools.sh ensure gh
+      # ⛔ PINNED, not `latest` — exact, and on the v2 line ON PURPOSE (#10896, #10593).
+      # The CLI is not an ordinary dependency here: its MAJOR versions change the
+      # `supabase/config.toml` schema, and this workflow is the ONLY door that applies production
+      # DDL. So an unpinned third-party binary means a routine upstream release can silently disable
+      # production migration with no repo change to review — and the failure reads as "deploy
+      # blocked", not "the applier is broken", which is why it survived 18+ runs and two
+      # investigations.
+      #
+      # MEASURED: this step was `version: latest`, which resolved to 3.0.0 (published
+      # 2026-11-02T12:18Z) and refused to load the config, which THEN still declared `[inbucket]`
+      # (`DbConfigLoadError` => exit 1 at CONFIG LOAD, before `db push` contacts the database):
+      #
+      #   [inbucket] in supabase/config.toml is no longer supported. Use [local_smtp] instead.
+      #   ##[error]Process completed with exit code 1.          -- run 42091073635, 19:45:57Z
+      #
+      # TWO applies were dispatched in that window and BOTH died the same way — run 42091073635
+      # (`Apply migrations` 19:45:56Z) and run 42107006180 (same step 21:40:38Z, head `af36e9240`).
+      # That is why `deploy-hosted`'s drift gate stayed red after 2026-11-03T02:53:49Z naming
+      # `20261102000001`/`2`: its own prescribed remedy (`gh workflow run supabase-deploy.yml
+      # --ref main`) could never succeed.
+      #
+      # `supabase/config.toml` HAS since been migrated off `[inbucket]` (#10896), so v3 would now
+      # LOAD it — measured, not assumed: on this tree BOTH 2.122.1 and 3.0.0 reach
+      # `AccessTokenRequiredError` (both get past config load), and `--yes` is a GLOBAL flag in both,
+      # which is why the consent flags below are carried AT THIS PIN: a no-op on v2, and on v3 the
+      # difference between an apply and `HostedMutationConsentRequiredError` applying zero
+      # migrations.
+      #
+      # The pin still stays on the v2 line DELIBERATELY (#11100): the config is not yet v3-NATIVE
+      # (under 3.0.0 it still emits `auth.email.enable_signup` / `auth.sms.enable_signup`
+      # deprecations), so the major moves in its own PR with a full local validation —
+      # `supabase start` / `db reset` plus the local-auth harnesses.
+      # `tests/test_supabase_cli_pin_10593.py` and
+      # `tests/test_supabase_deploy_applier_config.py::test_the_production_applier_is_version_pinned`
+      # (which asserts `_PINNED_CLI_MAJOR`) enforce the coupling.
+      #
+      # The exact pin buys schema stability at the cost of MANUAL patch uptake: an `x.y.z` inside a
+      # `with:` input is invisible to Dependabot, so a v2-line security patch will not arrive on its
+      # own. That trade is deliberate (a major that moves itself is what cost the applies above); if
+      # you are here to relax the pin, read those two tests first — and if you decide to move it,
+      # change them deliberately rather than reading their red as a bug.
       - uses: supabase/setup-cli@v1
         with:
-          version: latest
+          version: 2.122.1
         env:
           SUPABASE_ACCESS_TOKEN: ${{ secrets.SUPABASE_ACCESS_TOKEN }}
       # Flip gating (#771): dispatch-only, so a routine supabase/** push can
@@ -212,7 +253,8 @@ jobs:
         # path reads is missing, every signup 500s/502s at runtime with no
         # deploy-time signal (post-#1110 hardening — CORS was masking
         # missing-secret failures). AUTH_HOOK_SECRET is deliberately NOT
-        # required (hook path inert since #832); SUPABASE_SERVICE_ROLE_KEY is
+        # required and is no longer read at all (#1120 deleted the hook path);
+        # SUPABASE_SERVICE_ROLE_KEY is
         # a platform-reserved secret auto-injected into edge functions, so it
         # is WARN-only here (secrets list may omit reserved names).
         # NOTE: current CLI (v2.x) prints `secrets list --output json` as a
@@ -234,7 +276,7 @@ jobs:
           if [ "${#missing[@]}" -gt 0 ]; then
             echo "::error::MISSING Supabase secrets required by tenant-provision:"
             for name in "${missing[@]}"; do echo "::error::  $name"; done
-            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...'"
+            echo "::error::Set them with: supabase secrets set --project-ref $SUPABASE_PROJECT_REF <NAME>='...' --yes"
             exit 1
           fi
           if present SUPABASE_SERVICE_ROLE_KEY; then
@@ -246,29 +288,43 @@ jobs:
       - name: Apply migrations
         # Token-based push (login role) — no DB password secret needed.
         # Proven 2026-08-10 against the premise-labs project.
+        #
+        # ⛔ `--yes` IS REQUIRED ON v3 (#10896). Every command that changes a HOSTED project is
+        # consent-gated, and the CLI cannot ask when stdin/stdout is not a terminal — which is
+        # every CI run. Without it v3.0.0 fails with `HostedMutationConsentRequiredError` and
+        # applies ZERO migrations, i.e. the same blast radius as the `[inbucket]` parse error this
+        # PR fixes, with a different message. Measured (v3.0.0 release notes): "Every command that
+        # changes a hosted project asks first, and fails unattended unless you pass `--yes` … This
+        # includes `db push`". `--yes` is also valid on v2, so this is not a forward-only change.
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
-        run: supabase db push --linked --include-all
+        run: supabase db push --linked --include-all --yes
       - name: Deploy waitlist-subscribe edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         run: |
           supabase functions deploy waitlist-subscribe \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       - name: Deploy deck-view edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
         # --no-verify-jwt: the gated /investors page POSTs from the browser with
         # no user JWT (#8732), same as waitlist-subscribe above.
         run: |
           supabase functions deploy deck-view \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       - name: Deploy tenant-provision edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
-        # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
-        # no user JWT. Caller auth is enforced inside the function (#802) via
-        # the hook's Standard-Webhooks signature (AUTH_HOOK_SECRET secret)
-        # or a matching user JWT; anon-key calls get 401.
+        # --no-verify-jwt stays, but NOT for the reason it used to give: the
+        # caller is verified INSIDE the function (#802) against a real user JWT,
+        # because the dashboard's same-origin BFF route (#3501/#4054) mints the
+        # signed-in user's access token from the `__Host-session` cookie and
+        # forwards it. So `verify_jwt=false` is not a JWT-less caller — bare
+        # anon-key calls get 401.
+        # The `after_user_created` auth hook path (and its AUTH_HOOK_SECRET /
+        # Standard-Webhooks signature) was DELETED by #1120: it is not a
+        # supported Supabase auth hook, so it was a platform-capability gap, not
+        # a configuration gap. Do not re-enable it here.
         run: |
           supabase functions deploy tenant-provision \
-            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt
+            --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       # ══ #3627: THE CO-MOVE — step 3 of the flip sequence, IN THIS RUN ══════
       # The tenancy rename (20260915000001_tenancy_team_to_org.sql) is a hard
       # cut at the wire level (`provision_team` recreated with `p_org_id`;

@@ -401,6 +401,18 @@ def test_non_main_run_is_refused_before_any_apply() -> None:
         "the ref guard must read the run's own ref from RUN_REF: "
         f"{_step(_REF_GUARD_STEP).get('env')!r}"
     )
+    # The refusal's `if:` — pinned as an EXPRESSION, not merely a polarity. The
+    # assertions above run the step's `run:` body directly, so a step that never
+    # EXECUTES is invisible to them. Measured (#11104 review P2): inverting
+    # either operand (`event_name == 'push'`, or `ACCESS_TOKEN == ''`) left the
+    # whole battery green while the refusal was skipped on every real dispatch —
+    # a branch dispatch would then apply that branch's migrations to the linked
+    # PRODUCTION project and flip main's app, the mismatched pair #3627 exists to
+    # prevent. Same gate as the applies, for the same reason as the dispatch.
+    assert _step(_REF_GUARD_STEP).get("if") == _APPLY_GATE, (
+        "the main-only refusal must carry the applies' EXACT gate, else it can be "
+        f"skipped on a real dispatch: {_step(_REF_GUARD_STEP).get('if')!r}"
+    )
 
 
 # ── 3b. Behaviour: the dispatch fails closed, and the guard refuses ────────

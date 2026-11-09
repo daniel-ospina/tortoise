@@ -1,10 +1,10 @@
-// Test stub for https://esm.sh/@supabase/supabase-js@2. Both auth paths are
-// exercised by the harness: Path 1 (user JWT) via a configurable getUser that
-// returns a fixed user when set, Path 2 (auth hook) never calls the client.
-// rpc() is configurable so the harness can drive the 502 (provision_team
-// error) and 201 (success) response paths, and it RECORDS every (name, params)
-// pair so a caller can assert the RPC ARGUMENTS an invariant depends on (the
-// deterministic per-user org id, #2810).
+// Test stub for https://esm.sh/@supabase/supabase-js@2. Path 1 (user JWT) is
+// exercised by the harness via a configurable getUser that returns a fixed
+// user when set — and since #1120 it is the ONLY auth path (the auth-hook
+// branch was deleted). rpc() is configurable so the harness can drive the 502
+// (provision_team error) and 201 (success) response paths, and it RECORDS every
+// (name, params) pair so a caller can assert the RPC ARGUMENTS an invariant
+// depends on (the deterministic per-user org id, #2810).
 let rpcResult: { error: unknown } = { error: new Error("default rpc failure") };
 let jwtUser: { id: string; email: string; user_metadata?: Record<string, unknown> } | null = null;
 const rpcCalls: { name: string; params: Record<string, unknown> | undefined }[] = [];

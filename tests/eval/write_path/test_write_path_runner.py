@@ -21,6 +21,7 @@ import pytest
 
 from tests.eval.write_path import corpus, runner, schema
 from tests.eval.write_path.judge import JUDGE_PIN_MECHANICAL
+from tortoise.session_import import parse_openclaw
 
 
 def _tmp_corpus(tmp_path) -> object:
@@ -69,6 +70,24 @@ def test_parser_roundtrip_is_byte_identical(session_id, harness, tmp_path):
     assert {k for t in conversation for k in t} == {"role", "content"}
 
 
+def test_harness_values_mirror_the_capture_boundary():
+    """The drift ``schema.HARNESS_VALUES``' own comment calls "a review item at
+    W2-b wiring time" — executed instead of remembered.
+
+    The literal had fallen behind the capture boundary (#2120 added ``openclaw``,
+    #2121 added ``hermes``), which is what made an OpenClaw fixture illegal
+    before anyone could write one. A future member added to the boundary and not
+    here fails this row rather than silently rejecting a corpus fixture.
+    """
+    from tortoise import hosted_api
+
+    assert frozenset(hosted_api._SESSION_HARNESS_VALUES) == schema.HARNESS_VALUES, (
+        "schema.HARNESS_VALUES has drifted from hosted_api._SESSION_HARNESS_VALUES: "
+        f"missing={sorted(set(hosted_api._SESSION_HARNESS_VALUES) - schema.HARNESS_VALUES)} "
+        f"extra={sorted(schema.HARNESS_VALUES - set(hosted_api._SESSION_HARNESS_VALUES))}"
+    )
+
+
 def test_parse_roundtrip_drift_raises(tmp_path):
     # #2174-lint F841: the old `conversation` fixture was unused — the drift
     # case builds its own `drifted` transcript below.
@@ -85,6 +104,103 @@ def test_unknown_harness_render_raises(tmp_path):
 
     with pytest.raises(ValueError):
         parse_transcript(tmp_path / "nope.jsonl", "not-a-harness")
+
+
+def test_openclaw_ingest_roundtrip_through_the_matrix_renderer(tmp_path):
+    """#2120's ingestion half, through the replay matrix's OWN renderer.
+
+    The renderer now supports OpenClaw (the plugin's spool shape, written by
+    ``index.mjs::captureRecords`` and filed by ``parse_openclaw``), and this
+    grades that path: a committed corpus conversation renders into it and the
+    REAL parser files it back byte-identically.
+
+    ⛔ SCOPE, stated exactly: this is NOT yet a CORPUS row.  The matrix iterates
+    committed FIXTURES and renders ``fixture["harness"]``; no committed fixture
+    declares ``openclaw``, so ``run_benchmark`` never replays one.  Adding a
+    fixture changes the corpus hash and therefore needs a justified re-bless
+    (``schema.bless`` refuses an unexplained ``fixtures_hash`` change), which is
+    why it is not done here.  ``schema.HARNESS_VALUES`` is widened and pinned by
+    ``test_harness_values_mirror_the_capture_boundary`` so the fixture row is
+    legal when it is written.
+
+    Non-vacuity: the row is asserted to be a DIFFERENT store from the ``pi``
+    row that parses to the SAME conversation, and the rendered record's keys
+    are the plugin's own — a ``pi`` render wearing an ``openclaw`` label, or a
+    renderer that quietly fell back to another harness, fails here.
+    """
+    session_id = "wp03_ember_design"
+    conversation = corpus.load_fixture(session_id)["conversation"]
+
+    runner.parse_roundtrip(
+        session_id, conversation, "openclaw", workdir=tmp_path
+    )
+
+    openclaw_render = runner.render_store_lines(session_id, conversation, "openclaw")
+    pi_render = runner.render_store_lines(session_id, conversation, "pi")
+    assert openclaw_render != pi_render, (
+        "the openclaw row rendered the pi store — the matrix row grades a "
+        "format nothing writes"
+    )
+
+    first = json.loads(openclaw_render.splitlines()[0])
+    # The keys THIS RENDER must carry. The shipped `captureRecords` writes two
+    # more (`session_id`, `agent_id`); `parse_openclaw` accepts either of
+    # `session_key`/`session_id` and ignores `agent_id`, so a faithful widening
+    # of this render is legal and must not red here.
+    assert set(first) >= {"session_key", "role", "text", "ts"}, (
+        f"the rendered record is missing a key the parser needs: {sorted(first)}"
+    )
+    assert first["session_key"] == session_id
+
+    # The spool is the parser's real input, per file (one session per file).
+    spool = tmp_path / f"{session_id}.jsonl"
+    assert parse_openclaw(spool) == [
+        {"role": t.get("role"), "content": t.get("content")} for t in conversation
+    ]
+
+
+def test_openclaw_ts_is_monotonic_past_the_seconds_field(tmp_path):
+    """The `ts` render must sort with the turn index at EVERY index, not just
+    the ones the committed fixtures happen to use.
+
+    `parse_openclaw` sorts a session's records on the raw `ts` STRING, and the
+    corpus is generated to grow (`generate_corpus.py`), so a seconds-field
+    interpolation is a latent trap: measured, ``sorted()`` of
+    ``"…%02dZ" % i`` is already monotonic for i in 0..23 (the 24-turn fixture
+    the ingest row uses, so THAT row cannot see the defect) and stops being
+    monotonic at 100 (``"…00:00:100Z"`` < ``"…00:00:11Z"``). The failure would
+    surface as `parse_roundtrip`'s drift `RunError`, whose message names the
+    PARSER for a renderer bug.
+
+    Reddens on: the pre-fix `f"2026-01-01T00:00:{i:02d}Z"` render, and on any
+    replacement that emits a CONSTANT stamp (a constant round-trips —
+    ``sorted`` is stable — but it is not a timestamp and loses the ordering the
+    parser is told to rely on).
+    """
+    turn_count = 120  # past both the 59-second and the 99-width traps
+    convo = [{"role": "user", "content": f"t{i}"} for i in range(turn_count)]
+
+    stamps = [
+        json.loads(line)["ts"]
+        for line in runner.render_store_lines("mono", convo, "openclaw").splitlines()
+    ]
+    assert len(stamps) == turn_count
+    ordered = sorted(stamps)
+    divergence = next(
+        (i for i, (got, want) in enumerate(zip(stamps, ordered, strict=True))
+         if got != want),
+        None,
+    )
+    assert stamps == ordered, (
+        "the rendered `ts` stops sorting with the turn index past the "
+        f"seconds-field width: first divergence at turn {divergence}"
+    )
+    assert len(set(stamps)) == turn_count, "a constant `ts` is not a timestamp"
+    # …and the CONSEQUENCE, end-to-end: the real parser files all 120 turns in
+    # order (a mis-sorting render fails here as a "parser drift").
+    assert runner.parse_roundtrip("mono", convo, "openclaw", workdir=tmp_path) == [
+        {"role": "user", "content": f"t{i}"} for i in range(turn_count)
+    ]
 
 
 # ── Pre-flight ─────────────────────────────────────────────────────────────
@@ -170,6 +286,398 @@ def test_receipt_rejects_partial_metrics_on_completed_run():
     receipt = runner.build_receipt(report)
     issues = runner.validate_receipt(receipt)
     assert any("missing metrics" in i for i in issues)
+
+
+def test_receipt_rejects_a_non_int_relation_write_count():
+    """#11237: the additive `relation_write` block is shape-checked (#11548 P2).
+
+    FAILS IF `validate_receipt`'s `relation_write` arm is deleted: a receipt
+    whose counts arrived as strings then validates as if it were intact, and a
+    reader downstream does arithmetic on a string.
+    """
+    report = _completed_report()
+    report["relation_write"] = {"written": "35", "dropped": 1}
+    receipt = runner.build_receipt(report)
+    assert receipt.get("relation_write") is not None, receipt.keys()
+    issues = runner.validate_receipt(receipt)
+    assert any("relation_write.written" in i for i in issues), issues
+
+
+def test_a_pre_accounting_receipt_must_say_its_fold_count_is_absent():
+    """#11237: an absent `folded` must be DECLARED, not silently tolerated (P2).
+
+    ``validate_receipt`` used to skip a missing ``folded`` so receipts written
+    before the fold accounting existed kept validating — which made a receipt
+    that PREDATES the accounting indistinguishable from one that measured no
+    folds, and left ``written + dropped + folded == stated`` undemonstrable
+    with nothing saying so (#11548 review, P2). The shape is allowed, but only
+    when the receipt declares it.
+
+    FAILS IF the bare absence is accepted again (first arm), or if the declared
+    form is refused (second arm).
+    """
+    report = _completed_report()
+    report["relation_write"] = {"written": 35, "dropped": 1}
+    issues = runner.validate_receipt(runner.build_receipt(report))
+    assert any("fold_accounting" in i for i in issues), issues
+
+    report["relation_write"] = {
+        "written": 35, "dropped": 1, "fold_accounting": "absent"}
+    issues = runner.validate_receipt(runner.build_receipt(report))
+    assert not any("relation_write" in i for i in issues), issues
+
+    # and the accounting the runner now emits always carries the marker
+    report["relation_write"] = runner._aggregate_relation_write({
+        "s1": {"written": 1, "dropped": 0, "folded": 1,
+               "collapsed": [{"folded": ["supports"], "src": "a",
+                              "dst": "b", "predicate": "IMPL"}],
+               "edges": [], "drops": []}})
+    assert report["relation_write"]["fold_accounting"] == "recorded"
+    issues = runner.validate_receipt(runner.build_receipt(report))
+    assert not any("relation_write" in i for i in issues), issues
+
+
+class _CensusResult:
+    def __init__(self, rows):
+        self.result_set = rows
+
+
+class _CensusGraph:
+    """Answers each census query by identity, so no DB is needed."""
+
+    def __init__(self, object_edge_rows, present_edges: set | None = None,
+                 all_written: bool = True):
+        self.object_edge_rows = object_edge_rows
+        #: ``{(src_id, dst_id, rel)}`` the fake graph HOLDS; a recorded edge not
+        #: in here is the "the leg said it wrote it and the graph does not have
+        #: it" case.
+        self.present_edges = present_edges if present_edges is not None else set()
+        #: when True, EVERY recorded edge is held (the ordinary, green case).
+        self.all_written = all_written
+        self.seen: list[str] = []
+
+    def query(self, sql, params=None):
+        self.seen.append(sql)
+        if sql == runner.SESSION_OBJECT_QUERY:
+            return _CensusResult([(11, "the retry storm"), (12, "the slip")])
+        if sql == runner.OBJECT_DERIVATION_LINK_QUERY:
+            return _CensusResult([(0,)])
+        if sql == runner.SESSION_REFERENCES_ANCHOR_QUERY:
+            return _CensusResult([(0, 0, 0, 0)])
+        if sql == runner.SESSION_OBJECT_EDGES_QUERY:
+            return _CensusResult(self.object_edge_rows)
+        if sql == runner.WRITTEN_EDGE_VERIFY_QUERY:
+            key = ((params or {}).get("src"), (params or {}).get("dst"),
+                   (params or {}).get("rel"))
+            held = self.all_written or key in self.present_edges
+            return _CensusResult([(1 if held else 0,)])
+        if "extractedFrom" in sql:
+            return _CensusResult([(0, 0)])
+        return _CensusResult([])
+
+
+class _CensusSDK:
+    def __init__(self, graph):
+        self._graph = graph
+
+    def _get_proj(self):
+        class _Proj:
+            g = self._graph
+        _Proj.g = self._graph
+        return _Proj()
+
+
+def _written(src: str, dst: str, rel: str, stated: str | None = None) -> dict:
+    return {"src_id": src, "dst_id": dst, "predicate": rel,
+            "stated_predicate": stated or rel, "direction": None}
+
+
+def test_graph_census_counts_only_the_edges_this_session_wrote():
+    """#11237: the E6 row is ATTRIBUTABLE, not "an edge nearby" (#11548 P2).
+
+    ``:Object`` nodes are MERGEd by ``(name, label)``, so a source-bounded
+    incident read reports another session's edge as this session's work —
+    measured on the committed receipt (``wp05_retro_writeup`` reported
+    ``related: 1`` while its own leg wrote zero). Three properties are pinned
+    here, and each is a hole the old read had:
+
+    1. an edge the session's own leg did NOT record is not counted, however
+       visible it is through a shared Object (``object_edges == {}`` while the
+       incident row still shows it, as context only);
+    2. an edge the leg DID record and the graph holds is counted, INCLUDING a
+       Subject-targeted one (``ownedBy``) the Object→Object incident read
+       cannot see;
+    3. an edge the leg recorded that the graph does NOT hold is reported by
+       name in ``object_edges_missing`` — never silently dropped, and never
+       counted as written.
+
+    FAILS IF ``graph_census`` goes back to counting the incident read as
+    ``object_edges``, or stops verifying the leg's record against the graph.
+    """
+    graph = _CensusGraph([("related", 1)])
+    census = runner.graph_census(
+        _CensusSDK(graph), "wp05", ["pt-1"],
+        relation_write={"edges": [], "written": 0, "dropped": 0, "folded": 0})
+    assert census["object_edges"] == {}, census
+    assert census["object_edges_incident"] == {"related": 1}, census
+    assert census["object_edges_basis"] == "write-leg-record-verified", census
+
+    recorded = _CensusGraph([], all_written=False,
+                            present_edges={("o-1", "s-1", "ownedBy")})
+    verified = runner.graph_census(
+        _CensusSDK(recorded), "wp01", ["pt-1"],
+        relation_write={"written": 2, "dropped": 0, "folded": 0, "edges": [
+            _written("o-1", "s-1", "ownedBy", stated="ownedBy"),
+            _written("o-1", "o-2", "dependsOn", stated="dependsOn"),
+        ]})
+    assert verified["object_edges"] == {"ownedBy": 1}, verified
+    assert verified["object_edges_missing"] == [{
+        "session_id": "wp01", "src_id": "o-1", "dst_id": "o-2",
+        "predicate": "dependsOn", "stated_predicate": "dependsOn",
+    }], verified
+
+    # a capture whose relation-write leg RAISED is neither "wrote nothing" nor
+    # "stated nothing": the row is not answerable, and it says so (#11548
+    # review round 4, P2 — `relation_write` is absent on a raised leg too, so a
+    # bare absence would have read as a measured zero).
+    raised = runner.graph_census(
+        _CensusSDK(_CensusGraph([])), "wp02", [],
+        relation_leg_error="narrative relation write leg failed (RuntimeError: x)")
+    assert raised["object_edges_basis"] == "leg-raised", raised
+    assert "write leg failed" in raised["object_edges_error"], raised
+    assert raised["object_edges"] == {}, raised
+
+    aggregate = runner.aggregate_graph_census({
+        "wp02": raised,
+        "wp05": {
+            "session_id": "wp05", "objects": {"total": 1},
+            "object_edges": {},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"related": 1},
+            "object_edges_missing": [],
+        },
+    })
+    assert aggregate["object_edges_basis"] == {
+        "leg-raised": 1, "write-leg-record-verified": 1}, aggregate
+    notes = runner.graph_census_notes({"aggregate": aggregate,
+                                      "sessions": {"wp02": raised}})
+    assert any("RAISED" in note for note in notes), notes
+
+    # …and a capture that never entered the leg is a THIRD state, a measured
+    # absence rather than a zero dressed up as a measurement. It is counted in
+    # the aggregate's basis map (below) and deliberately NOT a note: most runs
+    # of most corpora state no relations at all, so a note per such run would
+    # train a reader to skip the channel.
+    absent = runner.graph_census(_CensusSDK(_CensusGraph([])), "wp01", [])
+    assert absent["object_edges"] == {}, absent
+    assert absent["object_edges_basis"] == "absent", absent
+    assert absent["object_edges_missing"] == [], absent
+
+
+def test_the_aggregate_keeps_the_two_measures_apart():
+    """#11237: attributable and incident rows are summed separately (#11548 P2).
+
+    Mixing them would let the shared-Object over-count re-enter the number the
+    E6 pre-registration reads. FAILS IF the aggregate sums either row into the
+    other, or drops ``object_edges_missing``.
+    """
+    aggregate = runner.aggregate_graph_census({
+        "wp05": {
+            "session_id": "wp05", "objects": {"total": 1},
+            "object_edges": {},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"related": 1},
+            "object_edges_missing": [],
+        },
+        "wp07": {
+            "session_id": "wp07", "objects": {"total": 1},
+            "object_edges": {"IMPL": 2},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"related": 2, "IMPL": 2},
+            "object_edges_missing": [{"session_id": "wp07", "src_id": "a",
+                                      "dst_id": "b", "predicate": "NAND"}],
+        },
+    })
+    assert aggregate["object_edges"] == {"IMPL": 2}, aggregate
+    assert aggregate["object_edges_total"] == 2, aggregate
+    assert aggregate["object_edges_incident"] == {"related": 3, "IMPL": 2}, \
+        aggregate
+    assert aggregate["object_edges_incident_total"] == 5, aggregate
+    assert aggregate["object_edges_missing"][0]["predicate"] == "NAND", \
+        aggregate
+
+
+def test_a_census_this_run_could_not_READ_is_not_a_measured_absence():
+    """⛔ #11548 review cycle 2 (P2): three states, not two.
+
+    ``aggregate_graph_census`` folded a session whose census could not be read
+    (``{"session_id", "error": …}``, the shape ``build_graph_census`` and
+    ``census_or_error`` both emit) into ``object_edges_basis["absent"]`` — the
+    word that means *the capture never entered the leg and stated no
+    relations*. That is a measured absence reported for a session nothing
+    measured, and it is the exact fail-silent #11237 fixed one layer down ("a
+    crashed leg would read as a measured 'nothing stated' in the E6 slot"),
+    left unfixed for the census read.
+
+    The unreadable session therefore gets its OWN basis (so it can never be
+    summed — only ``write-leg-record-verified`` is), and the run note names E6
+    beside E1/E3 as unanswerable. FAILS IF the error shape defaults to
+    ``absent``, or if the note still names only E1/E3.
+    """
+    aggregate = runner.aggregate_graph_census({
+        "wp01": {"session_id": "wp01", "error": "RuntimeError: graph down"},
+        "wp02": {
+            "session_id": "wp02", "objects": {"total": 1},
+            "object_edges": {"IMPL": 2},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"IMPL": 2},
+            "object_edges_missing": [],
+        },
+    })
+    assert aggregate["object_edges_basis"] == {
+        "census-error": 1, "write-leg-record-verified": 1}, aggregate
+    assert aggregate["object_edges_total"] == 2, aggregate
+    assert aggregate["sessions_errored"] == ["wp01"], aggregate
+    notes = runner.graph_census_notes({"aggregate": aggregate})
+    _note = next(n for n in notes if "graph census unavailable" in n)
+    assert "E1/E3/E6" in _note, (
+        "the unreadable-census note must name E6 as UNANSWERABLE too — the E6 "
+        "row is a per-session answerability question since #11237: "
+        f"{_note!r}")
+
+
+def test_a_row_whose_basis_is_not_the_verified_one_is_NOT_summed():
+    """A superseded reading can never re-enter `object_edges_total`.
+
+    The committed `w2b-relations-2026-11-08-11237.json` predates the
+    attributable read and carries `object_edges_basis:
+    "incident-source-bounded"` with SOURCE-BOUNDED numbers under
+    `object_edges`. Summing those would put the shared-Object over-count
+    (measured: `wp05_retro_writeup` reported `related: 1` while its own leg
+    wrote ZERO) back into the single number the E6 pre-registration is read
+    against — a receipt from the past publishing a measurement the code
+    disowns.
+
+    The row is REFUSED from the sum, NAMED on the aggregate, and NAMED in the
+    run's notes. FAILS IF the aggregate sums every non-empty `object_edges`
+    regardless of its basis, or if it drops such a row silently.
+    """
+    aggregate = runner.aggregate_graph_census({
+        "wp05": {
+            "session_id": "wp05", "objects": {"total": 1},
+            "object_edges": {"related": 1},
+            "object_edges_basis": "incident-source-bounded",
+            "object_edges_incident": {"related": 1},
+            "object_edges_missing": [],
+        },
+        "wp07": {
+            "session_id": "wp07", "objects": {"total": 1},
+            "object_edges": {"IMPL": 2},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"IMPL": 2},
+            "object_edges_missing": [],
+        },
+    })
+    assert aggregate["object_edges"] == {"IMPL": 2}, aggregate
+    assert aggregate["object_edges_total"] == 2, aggregate
+    assert aggregate["object_edges_unattributed"] == [{
+        "session_id": "wp05", "basis": "incident-source-bounded",
+        "object_edges": {"related": 1}}], aggregate
+    # The refused numbers stay readable as what they are.
+    assert aggregate["object_edges_incident"] == {"related": 1, "IMPL": 2}, \
+        aggregate
+    notes = runner.graph_census_notes({
+        "aggregate": aggregate,
+        "sessions": {"wp05": {"object_edges_basis":
+                             "incident-source-bounded"}}})
+    assert any("NOT summed" in note and "wp05" in note for note in notes), notes
+
+
+def test_the_object_edge_row_reaches_the_RUN_LEVEL_total():
+    """`object_edges_total` is the single number the E6 row is read against.
+
+    `graph_census`'s per-session block is only half the instrument: the receipt
+    carries `graph_census.aggregate`, and `object_edges_total` is what a reader
+    compares with the pre-registration's before-arm of **0**. A census that
+    counted per session but whose aggregate dropped the sum would publish the
+    baseline as the corpus total — the "a zero is a measurement" failure one
+    layer up.
+
+    Mutation: delete the `object_edges`/`object_edges_total` arms of
+    `aggregate_graph_census` and this leg reds (KeyError / a short sum).
+
+    ⚠️ The row is read from the leg's OWN RECORD (verified in the graph), not
+    from the source-bounded read, so a census handed no `relation_write` block
+    has no attributable row at all — that is `absent`, a MEASURED absence (see
+    `test_graph_census_counts_only_the_edges_this_session_wrote`). This case
+    therefore feeds the leg record; a block-less census' numbers land in
+    `object_edges_incident`.
+    """
+    one = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 2), ("hasPart", 1)])), "s1", ["pt-1"],
+        relation_write={"edges": [
+            {"src_id": "o1", "dst_id": "o2", "predicate": "IMPL"},
+            {"src_id": "o1", "dst_id": "o3", "predicate": "IMPL"},
+            {"src_id": "o1", "dst_id": "o4", "predicate": "hasPart"},
+        ]})
+    two = runner.graph_census(
+        _CensusSDK(_CensusGraph([("IMPL", 1), ("related", 4)])), "s2", ["pt-2"],
+        relation_write={"edges": [
+            {"src_id": "o5", "dst_id": "o6", "predicate": "IMPL"},
+            {"src_id": "o5", "dst_id": "o7", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o8", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o9", "predicate": "related"},
+            {"src_id": "o5", "dst_id": "o10", "predicate": "related"},
+        ]})
+    agg = runner.aggregate_graph_census({"s1": one, "s2": two})
+    assert agg["object_edges"] == {"IMPL": 3, "hasPart": 1, "related": 4}, agg
+    assert agg["object_edges_total"] == 8, agg
+    assert agg["object_edges_basis"] == {"write-leg-record-verified": 2}, agg
+    assert agg["object_edges_unattributed"] == [], agg
+
+
+def test_the_relation_write_aggregate_sums_written_dropped_and_folded():
+    """The run-level block SUMS the three outcomes and keeps each one's session.
+
+    `relation_write.apply_relation_edges` promises that `written + dropped +
+    folded` reconciles with the stated population; the run-level block is where
+    a reader checks it across the corpus, so a bucket that quietly stopped
+    being summed would make the corpus total understate what the leg did
+    (#11548 review — `runner.py::_aggregate_relation_write` had NO assertion:
+    deleting it left the suite green).
+
+    `folded` counts MEANINGS (one edge can absorb two verbs), so it is summed
+    from each row's own `folded` list rather than from the row count.
+
+    Mutation: drop any of the three from the sum and the totals disagree with
+    the per-session blocks.
+    """
+    runs = {
+        "s1": {"written": 1, "dropped": 0, "folded": 0,
+               "write_paths": {"direct": 1}, "edges": [], "drops": [],
+               "collapsed": []},
+        "s2": {"written": 3, "dropped": 1, "folded": 2,
+               "write_paths": {"structural": 2, "direct": 1},
+               "edges": [{"predicate": "hasPart"}],
+               "drops": [{"predicate": "transacts", "src": "a", "dst": "b",
+                          "reason": "no path"}],
+               "collapsed": [{"src": "a", "dst": "b", "predicate": "IMPL",
+                              "kept": "causes",
+                              "folded": ["supports", "refutes"],
+                              "reason": "one edge per (src, tgt, type)"}]},
+    }
+    block = runner._aggregate_relation_write(runs)
+    assert block["written"] == 4, block
+    assert block["dropped"] == 1, block
+    assert block["folded"] == 2, block
+    assert block["written"] + block["dropped"] + block["folded"] == 7, block
+    assert block["write_paths"] == {"structural": 2, "direct": 2}, block
+    # The per-statement records keep their SESSION, so a named refusal/fold can
+    # be traced to the capture that made it.
+    assert [row["session_id"] for row in block["drops"]] == ["s2"], block
+    assert [row["session_id"] for row in block["collapsed"]] == ["s2"], block
+    # Pure: same receipts -> same block.
+    assert runner._aggregate_relation_write(runs) == block
 
 
 def test_failed_run_receipt_allows_null_pin_and_empty_metrics():

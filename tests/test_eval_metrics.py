@@ -20,7 +20,6 @@ from __future__ import annotations
 
 import json
 import math
-import os  # noqa: F401
 import re
 import sys
 from pathlib import Path
@@ -32,16 +31,15 @@ _REPO_ROOT = Path(__file__).resolve().parents[1]
 if str(_REPO_ROOT) not in sys.path:
     sys.path.insert(0, str(_REPO_ROOT))
 
-from tests.eval import metrics as eval_metrics  # noqa: E402, I001
+from tests.eval import metrics as eval_metrics  # noqa: E402
+from tests.eval.eval_types import Label, MetricsReport, RelationLabel, Window  # noqa: E402
 from tests.eval.metrics import (  # noqa: E402
     BAND_N_ACCEPT,
     DECISIONS_FP_BAND,
     compute_metrics,
     kappa,
 )
-from tests.eval.types import Label, MetricsReport, RelationLabel, Window  # noqa: E402
 from tools import kappa as tools_kappa  # noqa: E402
-
 
 # ── Fixture helpers ─────────────────────────────────────────────────────────
 

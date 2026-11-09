@@ -163,8 +163,14 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement")
         assert result == query_sdk.points
-        name, kind, kwargs = query_sdk.calls[-1]
-        assert (name, kind) == ("query", "statement")
+        # #10602: the un-paginated path is BOUNDED, so it reaches the one SDK
+        # accessor that applies a LIMIT (`paginated_query`) and takes only its
+        # page — `sdk.query` has no LIMIT in its Cypher at all, so the whole
+        # label came back and blew the 10 s transport wait bound. The RETURN
+        # contract is unchanged: still a plain list, all rows while under the cap.
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]
+        assert (name, kind, skip) == ("paginated_query", "statement", 0)
+        assert limit == 100, "the plain path's own computed default cap"
         assert kwargs.get("include_retracted") is False
 
     def test_pagination_params_route_to_paginated_query(self, query_sdk):
@@ -273,7 +279,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         result = tortoise_query(kind="statement", filters={"include_retracted": True})
         assert result == query_sdk.points
-        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True  # filters value honored
 
     def test_explicit_include_retracted_wins_over_filters(self, query_sdk):
@@ -281,7 +287,7 @@ class TestQueryConsolidation:
         from tortoise.mcp_server import tortoise_query
         tortoise_query(kind="statement", include_retracted=True,
                        filters={"include_retracted": False})
-        name, kind, kwargs = query_sdk.calls[-1]  # noqa: RUF059
+        name, kind, skip, limit, kwargs = query_sdk.calls[-1]  # noqa: RUF059
         assert kwargs.get("include_retracted") is True
 
     def test_malformed_json_filters_does_not_raise(self, query_sdk):
@@ -510,17 +516,28 @@ class TestToolFunctions:
 
 
 class TestGraphBoundTeamSurfaceReject:
-    """#2300 completeness sweep: EVERY MCP tool that touches team-level
-    state (the seven onboarding tools + pack install) must reject a
+    """#2300 completeness sweep: EVERY team-surface tool must reject a
     graph-bound resolution outright — no tool left asymmetric vs the REST
     team-surface reject set (C5 #2114). Direct function-body probe with the
     resolution ContextVars set (the same context the HTTP middleware
     attaches to a deleg=0 per-graph key after #2300's registry-lane fix).
+
+    ⚠️ Scope after #4282 Phase 3.2: the five dropped `run_onboarding` tools are
+    NO LONGER on the MCP surface, but their function bodies are retained (the
+    self-host REST suite drives two of them, and the others stay for this
+    sweep's body-level probe because the reject is identical code). So this
+    class measures the *bodies*, served and unserved alike — "every MCP tool"
+    would now overstate it. The served set is: `_session_recording`,
+    `_github_index`, `tortoise_pack_install`, `tortoise_manage_sources`.
     """
 
     # tool name → call kwargs the function body needs BEFORE its reject
     # fires (required params only — the reject is the first gate in every
     # body; only demo_create checks org_id first, so the probe sets it).
+    # The five `run_onboarding` entries are UNSERVED since #4282 Phase 3.2 and
+    # are kept deliberately: the reject code is identical, so probing them still
+    # pins it (see the class docstring for what this class does and does not
+    # claim).
     TOOL_ARGS = {  # noqa: RUF012
         "tortoise_onboarding_demo_create": {},
         "tortoise_onboarding_state": {},
@@ -1166,22 +1183,25 @@ class TestStdioEntrypointToolRegistration:
             # Onboarding-critical tools must be present (Step 0 + the set).
             # #3883: tortoise_health is RETIRED — the consolidator is advertised
             # and the retired name still answers, with a warning, off the list.
-            assert "tortoise_overview" in names
+            # #4282: the orientation container is `tortoise_graph_overview`;
+            # `tortoise_overview` retired into it and `tortoise_health` into that.
+            assert "tortoise_graph_overview" in names
+            assert "tortoise_overview" not in names
             assert "tortoise_health" not in names
-            onboarding = {
-                "tortoise_onboarding_demo_create",
-                "tortoise_onboarding_state",
-                "tortoise_onboarding_github_connect",
-                "tortoise_onboarding_github_status",
-                "tortoise_onboarding_seed",  # #1999 (W3)
-            }
             # #3540: the two retired switches are no longer advertised; the
             # consolidated replacement is steady-state and stays listed.
             assert "tortoise_manage_sources" in names
             assert "tortoise_onboarding_session_recording" not in names
             assert "tortoise_onboarding_github_index" not in names
-            missing = onboarding - set(names)
-            assert not missing, f"missing onboarding tools: {sorted(missing)}"
+            # #4282 Phase 3.2: the five dropped `run_onboarding` members are no
+            # longer advertised either (owner ruling 2026-09-22). Their REST
+            # routes survive, so this asserts the MCP surface only.
+            for gone in ("tortoise_onboarding_demo_create",
+                         "tortoise_onboarding_state",
+                         "tortoise_onboarding_github_connect",
+                         "tortoise_onboarding_github_status",
+                         "tortoise_onboarding_seed"):
+                assert gone not in names, gone
         finally:
             proc.terminate()
             try:

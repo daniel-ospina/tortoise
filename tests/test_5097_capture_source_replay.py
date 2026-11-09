@@ -92,9 +92,10 @@ from tortoise.sdk import TortoiseSDK
 SESSION_ID = "sess_5097_source_replay"
 SECRET = "ghp_" + "A" * 36
 CONV = [
-    # The credential is in the FIRST turn on purpose: `summary` is the first
-    # substantive utterance and `topics` are the most frequent content words,
-    # so a carrier built from RAW text would put the secret in both.
+    # The credential is in the FIRST turn on purpose: `topics` are the most
+    # frequent content words and `summary` is built from that lexicon (#10000 —
+    # it used to be the first substantive utterance), so a carrier built from
+    # RAW text would put the secret in both.
     {"role": "user", "content": f"Use this key {SECRET} for the weekly rebuild."},
     {"role": "assistant", "content": "Agreed, the weekly job is fine."},
     {"role": "user", "content": "Also rotate the staging key tomorrow."},

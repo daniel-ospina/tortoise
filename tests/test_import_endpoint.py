@@ -972,8 +972,17 @@ class TestImportPackConfigShape422:
         {"packs": 42},            # non-list packs
         "x",                      # non-dict pack_config
         {"schema_version": 2, "packs": []},  # unsupported schema_version
+        # #1936 review F1 (P1): an UNHASHABLE status. The status check is a
+        # frozenset membership, which hashes its operand — `{}`/`[]` raised
+        # TypeError, and the route catches only _ImportVerifyError, so it
+        # escaped as a 500 with NO quarantine audit and NO ledger stamp.
+        {"schema_version": 1, "packs": [{"namespace": "dev", "status": {}}]},
+        {"schema_version": 1, "packs": [{"namespace": "dev", "status": []}]},
+        # out-of-vocabulary string: the same pre-restore 422, not a 500
+        {"schema_version": 1, "packs": [{"namespace": "dev", "status": "inactive"}]},
     ], ids=["entry-not-dict", "packs-not-list", "pc-not-dict",
-           "schema-version-2"])
+           "schema-version-2", "status-dict", "status-list",
+           "status-inactive"])
     def test_malformed_pack_config_422_pre_restore(self, sb_client, as_user,
                                                    capture_audit, pc):
         tc, fake, db_path = sb_client

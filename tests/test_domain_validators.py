@@ -754,11 +754,14 @@ def _transport_context(monkeypatch):
 
 class TestMCPValidateTool:
     def test_registry_entry_readonly(self):
-        from tortoise.tool_registry import TOOL_REGISTRY
+        # #4282: the `validate_domain` DOOR retired into `graph_overview`'s
+        # `section="validate_domain"`; the read-only property now rides the container.
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY
         entry = next(t for t in TOOL_REGISTRY
-                     if t.name == "tortoise_validate_domain")
+                     if t.name == "tortoise_graph_overview")
         assert entry.annotations.readOnlyHint is True
-        assert entry.sdk_method == "validate_domain"
+        assert 'section="validate_domain"' in RETIRED_USE_INSTEAD[
+            "tortoise_validate_domain"]
 
     def test_handler_returns_violations(self, graph_sdk, monkeypatch):
         import tortoise.mcp_server as mcp_mod

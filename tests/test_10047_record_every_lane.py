@@ -920,18 +920,29 @@ def _enclosing_scope(node, parents, lane) -> object:
 def _is_conditional(node, parents, scope) -> bool:
     """Does `node` sit inside a branch of `scope` that may NOT execute?
 
-    Conditional = under an `if`/`for`/`while`, an `except` handler, or a `try`'s
-    `orelse`. Straight-line for this purpose = the function's own body, a
-    `try`/`with` body, and a `finally` — those run on every path that reaches a
-    later write. The walk stops at `scope`, so a nested `def` does not make the
-    code INSIDE it conditional; `_enclosing_scope` already gave it a scope of
-    its own.
+    Conditional = under an `if`/`for`/`while`, an `except` handler, a `match`
+    arm, or a `try`'s `orelse`. Straight-line for this purpose = the function's
+    own body, a `try`/`with` body, and a `finally` — those run on every path that
+    reaches a later write. The walk stops at `scope`, so a nested `def` does not
+    make the code INSIDE it conditional; `_enclosing_scope` already gave it a
+    scope of its own.
+
+    `match`/`case` is here for the same reason `if` is (#10723 review P2): a
+    `case` body runs only when that pattern matches, so a rebind inside one is a
+    branch, not a kill. Leaving it out read such a rebind as UNCONDITIONAL — the
+    shape `_handle_state_at` treats as "the earlier definition is dead" — and
+    measured a false GREEN: `sdk = _make_sdk(namespace=org_id)` followed by
+    `match …: case "a": sdk = _data_sdk(_org(org_id))` then a write answered
+    `[]`, where the `if` spelling of the same code correctly flags it (the arm
+    may not run, so the unbound handle is still live). The package has 0
+    `match` statements today, so this is latent — and it is the fail-OPEN
+    direction, which is why it is modelled rather than declared out.
     """
     child = node
     parent = parents.get(id(child))
     while parent is not None and parent is not scope:
         if isinstance(parent, (ast.If, ast.For, ast.AsyncFor, ast.While,
-                               ast.ExceptHandler)):
+                               ast.ExceptHandler, ast.Match, ast.match_case)):
             return True
         if isinstance(parent, ast.Try) and any(
                 child is statement for statement in parent.orelse):
@@ -1857,6 +1868,50 @@ def _early_bind(org_id: str) -> None:
     assert _flagged(early) == [], (
         "the control: the SAME lane with the install before the write is clean, "
         "so the flag above is ordering rather than a broken harness")
+
+
+def test_a_match_ARM_is_a_branch_like_an_if_body():
+    """#10723 review P2: a `case` body may not run, so its rebind is not a kill.
+
+    `_is_conditional` listed `if`/`for`/`while`/`except` and `try`'s `orelse` but
+    not `ast.Match`, so a rebind inside a `case` arm read as UNCONDITIONAL — the
+    shape `_handle_state_at` treats as "the earlier definition is dead". The
+    direction is worth naming because it is the DANGEROUS one: this test's first
+    snippet measured `[]` (GREEN) before the fix, while its `if` twin was RED.
+    A conditional rebind to a BOUND opener leaves an unbound handle live on the
+    path where the pattern does not match, and only treating the arm as a branch
+    says so.
+
+    Mutation this reddens on: dropping `ast.Match`/`ast.match_case` from
+    `_is_conditional`'s isinstance tuple.
+    """
+    match_unbound_live = '''
+def _match_rebind(org, mode):
+    sdk = _make_sdk(namespace=org["org_id"])
+    match mode:
+        case "bound":
+            sdk = _data_sdk(org)
+        case _:
+            pass
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(match_unbound_live), (
+        "the arm may not run, so the unbound handle still reaches the write — "
+        "reading the `case` body as unconditional killed it and went GREEN")
+
+    match_all_bound = '''
+def _match_bound(org, mode):
+    sdk = _data_sdk(org)
+    match mode:
+        case "again":
+            sdk = _data_sdk(org)
+        case _:
+            pass
+    sdk.create_point("Subject", {})
+'''
+    assert _flagged(match_all_bound) == [], (
+        "the control: an all-bound lane is clean whichever arm runs — making "
+        "`case` a branch must not manufacture a false positive")
 
 
 def test_a_rebind_to_a_BOUND_opener_before_the_write_clears_the_handle():

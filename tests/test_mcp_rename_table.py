@@ -37,6 +37,8 @@ import re
 import sys
 from pathlib import Path
 
+from tests._docs_drift_step import EXPECTED_DOCS_DRIFT_STEP
+
 ROOT = Path(__file__).resolve().parent.parent
 GENERATOR = ROOT / "tools" / "mcp_rename_table.py"
 DOC = ROOT / "docs" / "product" / "mcp-rename-table.md"
@@ -55,7 +57,7 @@ RETIRED_LITERAL: dict[str, str] = {
     "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
     "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
     "tortoise_get_point": 'tortoise_get_entity(id, type="point")',
-    "tortoise_health": 'tortoise_overview(section="health")',
+    "tortoise_health": 'tortoise_graph_overview(section="health")',
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
     # #3540 ruling B: the two per-source switches retired into the ONE
@@ -65,14 +67,31 @@ RETIRED_LITERAL: dict[str, str] = {
         ' (no per-repo scope: it indexes every connected repo)',
     "tortoise_onboarding_session_recording":
         'tortoise_manage_sources(action="enable" or "disable", source="agent_sessions")',
-    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
-    "tortoise_list_sources": 'tortoise_overview(section="sources")',
-    "tortoise_list_tags": 'tortoise_overview(section="tags")',
+    "tortoise_list_pointkinds": 'tortoise_graph_overview(section="pointkinds")',
+    "tortoise_list_sources": 'tortoise_graph_overview(section="sources")',
+    "tortoise_list_tags": 'tortoise_graph_overview(section="tags")',
+    # #4282 — the `graph_overview` container (approved row 6) absorbs these FIVE names
+    # here, and `tortoise_overview` itself retires into the container it used to be. Every
+    # pointer names the container plus a section it dispatches, so it resolves in ONE hop.
+    # (Row 6 names seven: the other two are NOT in this map — `tortoise_check_structure`
+    # is absorbed as a SECTION while its door stays live, because it carries the #8482
+    # wrap-envelope repair a `-> Any` container cannot, and `issue_insight` is not
+    # executed in this batch — its bridge destination is `search_knowledge`.)
+    "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
+    "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
+    "tortoise_overview": 'tortoise_graph_overview(section=...)',
+    "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
+    "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
-    "tortoise_stale": 'tortoise_overview(section="stale")',
-    "tortoise_status": 'tortoise_overview(section="status")',
-    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
+    # #11057 review F3: the RETIREMENT POINTER is part of the served contract, and the
+    # bare `tortoise_query(tag=...)` is the read this PR bounded at 100 rows with a plain
+    # list and no `hasMore`/`total` — pointing a retired caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one. The literal oracle
+    # carries the WALK for that reason, not the shortest spelling.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
+    "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
+    "tortoise_status": 'tortoise_graph_overview(section="status")',
+    "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
 }
 
 # The names whose 0.1 destination differs from the destination of their redirect.
@@ -467,8 +486,11 @@ def test_b1_states_plainly_that_there_are_no_disagreements() -> None:
     assert f"the same {len(RETIRED_LITERAL)} names" in _doc(), (
         "the Part B intro no longer states the redirect-map size the table covers"
     )
-    assert len(RETIRED_LITERAL) == 18, (
-        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 18"
+    # 18 after #3540; 23 after #4282's `graph_overview` batch retired five more names
+    # into the container (and `tortoise_overview` itself into its target). The pin moves
+    # with each landed container batch.
+    assert len(RETIRED_LITERAL) == 23, (
+        f"the redirect map is {len(RETIRED_LITERAL)} names, not the landed 23"
     )
 
 
@@ -795,7 +817,9 @@ def test_rendezvous_hint_fires_only_for_the_landed_registry_split() -> None:
     # An unrelated stale key must NOT be described as the #4031 rendezvous: a
     # current name dropped from the rows leaves the retired set stale PLUS one
     # more, so the stale set is no longer exactly the retired set.
-    with_stray = [r for r in current_only if r["name"] != "tortoise_audit"]
+    # Any CURRENT name works as the stray; it had to move when `tortoise_audit` retired
+    # into the container (#4282), because a retired name is not in `current_only`.
+    with_stray = [r for r in current_only if r["name"] != "tortoise_create_point"]
     assert mrt._rendezvous_hint(with_stray) is None, (
         "an unrelated stale map key was mislabelled as the #4031 rendezvous"
     )
@@ -1096,22 +1120,22 @@ def test_docs_only_edit_of_the_generated_doc_is_guarded_by_the_docs_job() -> Non
     # pin GREEN). Exactness is what closes the family — `|| true`, `; true`, an
     # `echo` decoy, and a commented-out command alike, since `_code` has already
     # filtered comments.
-    expected = (
-        "pip install -e . --quiet\n"
-        "python3 tools/bridge_table.py --check\n"
-        "python3 tools/mcp_rename_table.py --check\n"
-        "python3 tools/sdk_surface.py --check\n"
-        # #5086: the doc↔tree guard joins the same step for the same `#4454`
-        # reason (a docs-only edit selects no surface), plus one of its own: its
-        # `measured_at_commit` ancestry claim needs HISTORY, and this job is the
-        # one that checks out at `fetch-depth: 0` (#5086 review P1-1). Listed
-        # here, not exempted: the exactness of this assertion is the point.
-        "python3 tools/substrate_map_check.py --check"
-    )
+    # ONE list, shared with `tests/test_merge_throughput.py` (#11412 root 2): the
+    # two copies were hand-typed and byte-identical, so an added invocation reded
+    # BOTH shards on every PR at once. The list, its order and the reason each
+    # command is there live in `tests/_docs_drift_step.py`, so an addition is ONE
+    # edit and cannot move one pin without the other — including the map guard's
+    # TWO arms, which `#11084` extended the step with.
+    #
+    # The count is deliberately NOT in this message: saying "the five verify-only
+    # commands" is the drift that made the duplicated copies stale, because an
+    # invocation added later does not necessarily carry a `--check` flag.
+    expected = EXPECTED_DOCS_DRIFT_STEP
     assert _code(str(step.get("run", ""))).strip() == expected, (
-        "the drift step must invoke EXACTLY the installer plus the four "
-        "`--check` commands — no shell operator, no `echo` decoy, no wrapper, no "
-        f"trailing anything, or a real failure reports green (#2656); got "
+        "the drift step must invoke EXACTLY the commands in "
+        "`tests/_docs_drift_step.py`, in that order — no shell operator, no "
+        "`echo` decoy, no wrapper, no trailing anything, or a real failure "
+        f"reports green (#2656); got "
         f"{_code(str(step.get('run', '')))!r}"
     )
     assert not docs_job.get("continue-on-error"), (

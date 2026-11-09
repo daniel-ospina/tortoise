@@ -296,13 +296,31 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         id="surface.query",
         description="Query points by pointKind and/or property filters — structural exact-match "
                     "retrieval for known shapes (Epic #888: paginated_query + query_points_by_tag "
-                    "merged in). Pagination via offset=/limit= (or 1-based page=); tag= filters "
-                    "Points by TAGGED edge; include_retracted=True surfaces tombstones. For "
+                    "merged in). BOTH the structural read and the `tag=` arm return at most `limit` "
+                    "rows — default 100, or 20 when you page (`offset=`/`page=`) without an explicit "
+                    "`limit`. The RESPONSE is what is bounded (and a truncated answer is not "
+                    "distinguishable from a complete one): on the structural read, walk "
+                    "offset=/limit= — or 1-based page= — until hasMore is false when you need "
+                    "every row; a bare `limit=` bounds the answer but gives you no "
+                    "hasMore/total. On the `tag=` arm that walk is NOT lossless yet — its "
+                    "accessor has no total order (#5346/#11062) — so treat a walked tag as "
+                    "approximate, not as the complete set. The `tag=` read itself "
+                    "still scans the whole tagged population before slicing, so a very large tag "
+                    "can still be slow. "
+                    "include_retracted=True surfaces tombstones. For "
                     "semantic relevance use tortoise_search; for a single known ID use "
                     "tortoise_get_point.",
         risk="read",
         http_policy=True,
-        sdk_method="query",
+        # #10602: `query` → `paginated_query`. The un-paginated path used to call
+        # `sdk.query`, which has no LIMIT in its Cypher (`MATCH (n:Point) WHERE …
+        # RETURN properties(n)`), so `tortoise_query(kind="statement", limit=3)`
+        # returned the whole 15,708-row label and blew the 10 s transport wait
+        # bound with `-32009`. The bound now reaches the accessor that APPLIES a
+        # limit; `sdk.query` is no longer on this tool's path. No tool was
+        # added, removed or renamed — this is the declared binding corrected to
+        # match the handler the AST guard reads.
+        sdk_method="paginated_query",
     ),
     ToolDefinition(
         name="tortoise_paginated_query",
@@ -452,6 +470,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         name="tortoise_query_points_by_tag",
         id="surface.query_points_by_tag",
         description="DEPRECATED (Epic #888) — thin alias for tortoise_query(tag=). "
+                    "Returns the raw tag result set (incl. tombstones). It takes no "
+                    "offset/page, so a truncated answer cannot be walked — keep that in mind "
+                    "above 10000 tagged rows, where it truncates. "
                     "Kept for one release; will be removed in the next release — migrate now.",
         risk="read",
         http_policy=True,
@@ -1420,6 +1441,21 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
     ),
     # ── Orient / Direct consolidation (epic #888 W3) ────────────────
     ToolDefinition(
+        name="tortoise_graph_overview",
+        id="surface.graph_overview",
+        description="What is in this memory graph and how it is shaped — ONE orientation "
+                    "call (#4282 row 6). section: taxonomy|structure|structure_check|"
+                    "pointkinds|tags|sources|namespaces|graphs|topics|health|status|"
+                    "stale (the consolidated list_*/status/health zoo); validate_domain "
+                    "(requires domain); audit (optional point_kinds); dream_health. "
+                    "Omit section → a compact combined summary in the same envelope "
+                    "this family has always returned. topics requires entity_id; "
+                    "stale takes days (default 30) and limit (default 50).",
+        risk="read",
+        http_policy=True,
+        sdk_method="",  # custom handler in mcp_server.py (dispatches per section)
+    ),
+    ToolDefinition(
         name="tortoise_overview",
         id="surface.overview",
         description="Graph orientation in one call — consolidates the list_*/status/health/"
@@ -1451,51 +1487,27 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         sdk_method="backfill_v25",
     ),
     # ── Onboarding tools (#498/#499/#500) ─────────────────────────
-    ToolDefinition(
-        name="tortoise_onboarding_demo_create",
-        id="surface.onboarding_demo_create",
-        description="Create the demo epistemic graph (4 layers) for this team. The "
-                    "SEED is sentinel-gated (a repeat files no new nodes), but the "
-                    "call is NOT idempotent: the handler then writes its onboarding "
-                    "receipt, whose CAS leg re-stores the state and advances "
-                    "state_version on every repeat.",
-        risk="write",
-        # ⛔ NOT idempotent, though it read as one for several rounds of this PR
-        # (#10849 review). `_seed_demo_graph` is sentinel-gated, so the GRAPH does
-        # not change — but `tortoise_onboarding_demo_create` then calls
-        # `_update_onboarding_state(org_id, demo_created=True)` UNCONDITIONALLY, and
-        # `demo_created` is an OPERATIONAL key, so it takes the CAS leg
-        # (`SET t.onboarding_state = $state, t.state_version = $expected + 1`) with
-        # no value-unchanged short-circuit. A repeat therefore re-stores the state
-        # and advances the epoch: a real write, by the same standard that keeps
-        # `tortoise_get_source_reliability` out of this set.
-        idempotent=False,
-        http_policy=True,
-        sdk_method="",  # custom handler in mcp_server.py
-        rest_spec=RestSpec(method="POST", path="/v1/demo"),
-    ),
-    ToolDefinition(
-        name="tortoise_onboarding_state",
-        id="surface.onboarding_state",
-        description="Return this team's onboarding progress (Q6 verification).",
-        risk="read",
-        http_policy=True,
-        sdk_method="",
-        rest_spec=RestSpec(method="GET", path="/v1/onboarding/state"),
-    ),
-    ToolDefinition(
-        name="tortoise_onboarding_seed",
-        id="surface.onboarding_seed",
-        description=("File the two onboarding anchor Subjects (Organization/"
-                     "organization + User/naturalPerson linked memberOf) — "
-                     "interactive, ontology-precise (#1999 W3): call without "
-                     "names to discover gaps/collisions, with user-confirmed "
-                     "names to file."),
-        risk="write",
-        http_policy=True,
-        sdk_method="",
-        rest_spec=RestSpec(method="POST", path="/v1/onboarding/seed"),
-    ),
+    # ⛔ FIVE of the seven `onboarding_*` tools are REMOVED from the MCP surface
+    # (#4282 Phase 3.2). Owner ruling 2026-09-22: the `run_onboarding` container
+    # is DROPPED for `check_connection`, and its two tenant-visible reads are
+    # REHOMED to the tenancy block (SDK/REST) — so the MCP loses them by design,
+    # not by accident. Removed here: `tortoise_onboarding_demo_create`,
+    # `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
+    # `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`.
+    #
+    # NO capability is lost on the HOSTED surface — every one of these routes is
+    # HAND-WRITTEN in `tortoise/hosted_api.py` (`POST /v1/demo`,
+    # `GET|PATCH /v1/onboarding/state`, `POST /v1/onboarding/seed`,
+    # `POST /v1/onboarding/github/connect`, `GET /v1/onboarding/github/status`).
+    # ⚠️ SELF-HOST is narrower, and stated so the claim is not read as universal:
+    # `tortoise/selfhost_api.py` serves only TWO of the five (`GET
+    # /v1/onboarding/state`, `POST /v1/onboarding/seed`), so `demo_create` and the
+    # two `github_*` tools are HOSTED-ONLY. A self-hosting operator loses the
+    # demo-graph step; its fallback is the ordinary write path (file the demo
+    # points with `tortoise_create_point`).
+    # `tortoise_manage_sources` is the surviving
+    # agent-callable source-management tool, and the two per-source switches it
+    # replaced stay RETIRED (see `RETIRED_USE_INSTEAD`).
     ToolDefinition(
         name="tortoise_manage_sources",
         id="surface.manage_sources",
@@ -1507,8 +1519,9 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
             "act only within the caller's own permission for this team — a key "
             "without graphs:write is REFUSED, never self-granted — and no "
             "action accepts, returns or echoes a credential: authorising "
-            "GitHub stays a host/user-side step (use "
-            "tortoise_onboarding_github_connect for that). source is required "
+            "GitHub stays a host/user-side step — the OAuth handshake is "
+            "deliberately not an agent-callable operation (it runs from the "
+            "dashboard, `POST /v1/onboarding/github/connect`). source is required "
             "for enable/disable and ignored by list. The two GitHub sources "
             "share ONE connection but have SEPARATE enable intent (#1924), so "
             "disable switches off only the named source and leaves the "
@@ -1537,15 +1550,6 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         rest_spec=RestSpec(method="POST", path="/v1/onboarding/session-recording"),
     ),
     ToolDefinition(
-        name="tortoise_onboarding_github_connect",
-        id="surface.onboarding_github_connect",
-        description="Initiate GitHub OAuth — returns authorize URL + CSRF state (Q1).",
-        risk="admin",
-        http_policy=True,
-        sdk_method="",
-        rest_spec=RestSpec(method="POST", path="/v1/onboarding/github/connect"),
-    ),
-    ToolDefinition(
         name="tortoise_onboarding_github_index",
         id="surface.onboarding_github_index",
         description="Start background GitHub indexing of an org's issues/PRs (Q2).",
@@ -1553,15 +1557,6 @@ _ENTRY_DECLARATIONS: list[ToolDefinition] = [
         http_policy=True,
         sdk_method="",
         rest_spec=RestSpec(method="POST", path="/v1/index/github"),
-    ),
-    ToolDefinition(
-        name="tortoise_onboarding_github_status",
-        id="surface.onboarding_github_status",
-        description="Return GitHub connection status for this team (Q1 verify).",
-        risk="read",
-        http_policy=True,
-        sdk_method="",
-        rest_spec=RestSpec(method="GET", path="/v1/onboarding/github/status"),
     ),
 
 ]
@@ -1587,9 +1582,15 @@ def get_write_tool_names() -> frozenset[str]:
     a read. FOUR retired shims ARE writers (`tortoise_ingest_corpus`,
     `tortoise_index_sessions`, and the two #3540 onboarding retirements
     `tortoise_onboarding_github_index` / `tortoise_onboarding_session_recording`),
-    so the served census (48) exceeds the live census (44) — the derivation over
+    so the served census (45) exceeds the live census (41) — the derivation over
     the served set is what keeps them counted, and it stops the census from
-    silently shrinking when a live writer is retired."""
+    silently shrinking when a live writer is retired.
+
+    Both censuses moved 48/44 -> 45/41 in #4282 Phase 3.2, which deleted the
+    three SERVED writers `tortoise_onboarding_github_connect` (admin),
+    `tortoise_onboarding_seed` and `tortoise_onboarding_demo_create` (write).
+    The four-shim / live gap is unchanged by that: the two #3540 retirements
+    are still members of the four shims, so 45 - 41 = 4 still holds."""
     return frozenset(
         t.name for t in (*TOOL_REGISTRY, *RETIRED_TOOL_REGISTRY) if t.writes
     )
@@ -1657,12 +1658,7 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
     "tortoise_pack_install",
     "tortoise_packs_list",
     "tortoise_manage_sources",
-    "tortoise_onboarding_state",
-    "tortoise_onboarding_seed",
-    "tortoise_onboarding_demo_create",
     "tortoise_onboarding_session_recording",
-    "tortoise_onboarding_github_connect",
-    "tortoise_onboarding_github_status",
     "tortoise_onboarding_github_index",
 })
 
@@ -1671,17 +1667,13 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #:
 #: `GRAPH_ARGUMENT_EXCLUDED` answers ONE question — "does this tool take the
 #: routing argument?" — and the disclosure used to read a second answer out of
-#: it ("so it touches no graph"), which is false for these five. Each says the
+#: it ("so it touches no graph"), which is false for these members. Each says the
 #: opposite in its own body, and each rejects a graph-BOUND key outright
 #: (`_reject_graph_bound_mcp_org_surface`), so `workspace-default` is the only
 #: arm they can be on and the disclosure is true unconditionally:
 #:   * `tortoise_pack_install` — the manifest is stored graph-natively in the
 #:     tenant's (default) graph as `:PackManifest`; a per-custom-graph install
 #:     would orphan pack state that `tortoise_packs_list` never sees.
-#:   * `tortoise_onboarding_demo_create` — "the demo seeds the org's DEFAULT
-#:     graph" (its own comment, C5 #2114).
-#:   * `tortoise_onboarding_seed` — the two anchor Subjects file into the org
-#:     DEFAULT graph.
 #:   * `tortoise_onboarding_github_index` — "indexes into the DEFAULT graph".
 #:   * `tortoise_manage_sources` — a `source` **enable** of a GITHUB source
 #:     starts the index job that writes into that same default graph. The seam
@@ -1695,9 +1687,15 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 #:
 #: ⛔ The remaining excluded writers stay SILENT because they write NO graph at
 #: all, and a graph on them would be the wrong-graph claim this feature removes:
-#: `tortoise_org_create` provisions the WORKSPACE,
-#: `tortoise_onboarding_session_recording` flips a control-plane flag, and
-#: `tortoise_onboarding_github_connect` stores OAuth CSRF state.
+#: `tortoise_org_create` provisions the WORKSPACE, and
+#: `tortoise_onboarding_session_recording` flips a control-plane flag.
+#:
+#: ⛔ #4282 Phase 3.2 removed the other three members this set used to carry
+#: (`tortoise_onboarding_demo_create`, `tortoise_onboarding_seed` and
+#: `tortoise_onboarding_github_connect`, which wrote no graph) together with the
+#: rest of the dropped `run_onboarding` tools, so the set SHRANK rather than
+#: changed meaning. A tool re-added here without that history re-derives the
+#: disclosure for a call that no longer exists.
 #:
 #: Membership criterion, in one line: an excluded WRITE tool whose handler body
 #: writes GRAPH DATA into the org default graph. The invariant the disclosure's
@@ -1709,9 +1707,7 @@ GRAPH_ARGUMENT_EXCLUDED: frozenset[str] = frozenset({
 GRAPH_ARGUMENT_EXCLUDED_DEFAULT_TARGET: frozenset[str] = frozenset({
     "tortoise_pack_install",
     "tortoise_manage_sources",
-    "tortoise_onboarding_demo_create",
     "tortoise_onboarding_github_index",
-    "tortoise_onboarding_seed",
 })
 
 #: ⛔ The OPENING of this description is load-bearing, not prose (#10084). A model
@@ -2003,6 +1999,7 @@ GROUP_BY_NAME: dict[str, str] = {
     # reasoning
     "tortoise_check_structure": "reasoning", "tortoise_validate_domain": "reasoning",
     "tortoise_summarize_structure": "reasoning",
+    "tortoise_graph_overview": "reasoning",
     "tortoise_overview": "reasoning",
     "tortoise_traverse": "reasoning", "tortoise_entity_profile": "reasoning",
     "tortoise_analyze": "reasoning", "tortoise_taxonomy": "reasoning",
@@ -2046,17 +2043,13 @@ GROUP_BY_NAME: dict[str, str] = {
     "tortoise_org_create": "admin", "tortoise_get_governance": "admin",
     "tortoise_backfill_v25": "admin",
     # onboarding
-    "tortoise_onboarding_demo_create": "onboarding", "tortoise_onboarding_state": "onboarding",
-    "tortoise_onboarding_seed": "onboarding",  # #1999 (W3)
     # #3540 ruling B: the consolidated source-management tool. The two
     # per-source switches it replaces keep their entries (they are RETIRED via
     # RETIRED_USE_INSTEAD, so they resolve and warn) and therefore keep their
     # group mapping too.
     "tortoise_manage_sources": "onboarding",
     "tortoise_onboarding_session_recording": "onboarding",
-    "tortoise_onboarding_github_connect": "onboarding",
     "tortoise_onboarding_github_index": "onboarding",
-    "tortoise_onboarding_github_status": "onboarding",
 }
 
 
@@ -2091,17 +2084,53 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     "tortoise_get_events": 'tortoise_get_entity(None, type="events")',
     "tortoise_get_operator": 'tortoise_get_entity(id, type="operator")',
     "tortoise_get_governance": 'tortoise_get_entity(id, type="governance")',
-    # Tier 1 — tortoise_overview() already calls the handler; the name is redundant.
-    "tortoise_list_pointkinds": 'tortoise_overview(section="pointkinds")',
-    "tortoise_list_tags": 'tortoise_overview(section="tags")',
-    "tortoise_list_sources": 'tortoise_overview(section="sources")',
-    "tortoise_taxonomy": 'tortoise_overview(section="taxonomy")',
-    "tortoise_health": 'tortoise_overview(section="health")',
-    "tortoise_status": 'tortoise_overview(section="status")',
-    "tortoise_stale": 'tortoise_overview(section="stale")',
+    # Tier 1 — `tortoise_graph_overview` is the approved container for the whole
+    # orientation family (#4282 row 6, `docs/product/canonical-mcp-tools.md`).
+    # `tortoise_overview` retires INTO it and the seven pointers that used to name
+    # `tortoise_overview(section=...)` name the container directly: a replacement
+    # must RESOLVE in one hop. GitHub's own `DeprecatedToolAliases` states the same
+    # limit (aliases are not transitive), and a chain here would send a caller of
+    # `tortoise_health` to a name that is itself retired.
+    "tortoise_overview": 'tortoise_graph_overview(section=...)',
+    "tortoise_list_pointkinds": 'tortoise_graph_overview(section="pointkinds")',
+    "tortoise_list_tags": 'tortoise_graph_overview(section="tags")',
+    "tortoise_list_sources": 'tortoise_graph_overview(section="sources")',
+    "tortoise_taxonomy": 'tortoise_graph_overview(section="taxonomy")',
+    "tortoise_health": 'tortoise_graph_overview(section="health")',
+    "tortoise_status": 'tortoise_graph_overview(section="status")',
+    # `days`/`limit` are shown for the same reason `point_kinds` is: the door took them
+    # (`tortoise_stale(days=30, limit=50)`), so a migrating caller that omits them silently
+    # narrows its window and row cap.
+    "tortoise_stale": 'tortoise_graph_overview(section="stale", days=..., limit=...)',
+    # #4282 row 6 — the remaining four members the approved container absorbs. Each
+    # was reachable only as its own tool; the section names above are the container's
+    # own dispatch values, so every pointer names a call that resolves.
+    #
+    # The destinations come from `tools/bridge_table.py`'s authored Phase-0.1 map, which
+    # is the finer-grained record where the two disagree: `tortoise_issue_insight` goes to
+    # `search_knowledge`, and `tortoise_list_graphs` / `_namespaces` / `_topics` go to the
+    # tenancy block and to `list_knowledge` respectively — so those four are NOT retired
+    # here. `tortoise_check_structure` is not retired either, and for a different reason:
+    # it is the one member with a WRAP envelope, so it carries the #8482 failure repair
+    # that a `-> Any` container cannot (see `tortoise_graph_overview`'s docstring). `docs/product/canonical-mcp-tools.md` describes them as absorbed transitively
+    # through `overview`; the authored map names where each capability actually lands, and
+    # that is the one `tools/mcp_rename_table.py` cross-checks against.
+    "tortoise_summarize_structure": 'tortoise_graph_overview(section="structure")',
+    "tortoise_validate_domain": 'tortoise_graph_overview(section="validate_domain", domain=...)',
+    # `point_kinds` is shown, not dropped: a caller migrating an `audit(point_kinds=[...])`
+    # call must keep its scope, and calling the container without it audits the whole
+    # graph (different per-check counts, different `exit_code`).
+    "tortoise_audit": 'tortoise_graph_overview(section="audit", point_kinds=...)',
+    "tortoise_dream_health": 'tortoise_graph_overview(section="dream_health")',
     # Tier 2 — the entry's own description already named its replacement.
     "tortoise_paginated_query": "tortoise_query(offset=..., limit=...)",
-    "tortoise_query_points_by_tag": "tortoise_query(tag=...)",
+    # #11057 review F3: the walk, not the bare read. `tortoise_query(tag=...)`
+    # caps its RESPONSE at the un-paginated default and answers a plain list with
+    # no `hasMore`/`total`, so pointing a retired-tool caller at it lands them on a
+    # truncated answer they cannot distinguish from a complete one — the #8447 §1
+    # shape the alias's own `Migrate to:` text repudiates 1000 lines away. The
+    # paged form is the only destination that can be walked to the whole population.
+    "tortoise_query_points_by_tag": "tortoise_query(tag=..., offset=..., limit=...)",
     "tortoise_index_sessions": "tortoise_index_files(directory)",
     "tortoise_ingest_corpus": "tortoise_index_files(directory)",
     # #3540 ruling B (owner, 2026-10-12): ONE consolidated source-management
@@ -2111,10 +2140,11 @@ RETIRED_USE_INSTEAD: dict[str, str] = {
     #
     # These two are RETIRED, not deleted: #3883 requires a retired name to keep
     # resolving and to name its replacement, and a deletion would answer "tool
-    # not found" instead. `tortoise_onboarding_github_connect` is deliberately
-    # NOT here — it is the OAuth handshake, and the ruling's own "credentials
-    # never pass through the model" condition is what keeps it out of an
-    # agent-callable list/enable/disable operation.
+    # not found" instead. (`tortoise_onboarding_github_connect` was never here —
+    # the OAuth handshake, and the ruling's own "credentials never pass through
+    # the model" condition kept it out of an agent-callable list/enable/disable
+    # operation; #4282 Phase 3.2 removed that tool from the MCP surface entirely,
+    # leaving `POST /v1/onboarding/github/connect` as its only door.)
     # NB: no `|` in these values. `RETIRED_USE_INSTEAD` is rendered into
     # markdown table cells (docs/product/mcp-rename-table.md, Part A and Part B),
     # where an unescaped pipe ends the cell — it produced a row with one cell too

@@ -1,7 +1,50 @@
 {
  "schema": "e1-e2-scores/1",
  "corpus_sha256": "sha256:dd7e85200f4809f701b9e9c11816b541acea63afd0b2472998975e2ebcb035dc",
- "corpus_pin_source": "docs/evidence/7949-capstone/preregistration.json#corpus.fixtures_hash \u2014 e1_paired_arm.py refuses to run unless the checkout's corpus matches this pin (G1)",
+ "corpus_pin_source": "docs/evidence/7949-capstone/preregistration.json#corpus.fixtures_hash \u2014 re-verified from on-arm.log's own `# corpus:` line for the AFTER arm, and checked per run at PRODUCER time (e1_paired_arm.py refuses to start unless the checkout's corpus matches this pin, G1). The BEFORE arms cannot re-prove it: see `before_arm_provenance`",
+ "before_arm_provenance": {
+  "status": "unpinned",
+  "pin_fields": [
+   "head",
+   "fixtures_hash",
+   "object_floor",
+   "min_before_share"
+  ],
+  "probe_revision": null,
+  "probe_revision_source": "docs/evidence/9889/README.md#which-probe-revision-produced-each-artifact",
+  "arms": [
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-1.json",
+    "graph": "capstone_off_54922a800_1793378986",
+    "head": null,
+    "fixtures_hash": null,
+    "pin_fields_present": [],
+    "pin_fields_absent": [
+     "head",
+     "fixtures_hash",
+     "object_floor",
+     "min_before_share"
+    ],
+    "unpinned": true
+   },
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-2.json",
+    "graph": "capstone_off_54922a800_1793379347",
+    "head": null,
+    "fixtures_hash": null,
+    "pin_fields_present": [],
+    "pin_fields_absent": [
+     "head",
+     "fixtures_hash",
+     "object_floor",
+     "min_before_share"
+    ],
+    "unpinned": true
+   }
+  ],
+  "why": "`e1_paired_arm.py` writes four pin fields (`head`, `fixtures_hash`, `object_floor`, `min_before_share`) and refuses to run on a corpus other than the pre-registration's; the committed before arms predate those fields, so which corpus they measured is a PRODUCER-time fact (G1) that nothing in the pair can re-prove. The producing revision is disclosed in the README section cited above.",
+  "limitation": "E1's bar is a FRACTION of these two shares, so their corpus is part of the bar (#9076: a bar is a threshold AND its corpus). The after arm's corpus is re-verified against the frozen pin; theirs is not re-verifiable from the record \u2014 an asymmetry the treatment side alone never shows. It is not material to the shipped verdict (E1 is REFUSED at n=1, so nothing scores green off these arms); it becomes material at the `n >= 2 per arm` the README names as the next requirement, where the first DECIDED E1 will be computed from before shares whose corpus the record cannot show. Re-recording the pair at the shipped probe closes it."
+ },
  "head": "54922a800f96858935b58ef250da569a4896df44",
  "graph": "capstone_on_54922a800_1793378318",
  "after_arm": {
@@ -9,6 +52,27 @@
   "TORTOISE_CLASSIFY_LATER": "1",
   "TORTOISE_VALUE_GATE": "<unset>",
   "TORTOISE_S2_DECISION_SEAM": "<unset>"
+ },
+ "value_gate_pin": {
+  "default_on_keys": [
+   "TORTOISE_VALUE_GATE"
+  ],
+  "legacy_head": "54922a800f96858935b58ef250da569a4896df44",
+  "after": {
+   "pin": "legacy-absent",
+   "basis": "legacy log @ 54922a800 (produced by the pre-`#10996` `capstone_measure`, which popped the pin instead of setting it; the shipped producer writes TORTOISE_VALUE_GATE=0 and reads it back)"
+  },
+  "before": [
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-1.json",
+    "pin": "legacy-absent"
+   },
+   {
+    "artifact": "docs/evidence/9889/e1-paired-off-arm-2.json",
+    "pin": "legacy-absent"
+   }
+  ],
+  "limitation": "`TORTOISE_VALUE_GATE` is recorded as ABSENT in every arm here, and since `#10996` an absent value gate is the ON arm. These records predate the flip, so absence really was OFF when they were taken, and they are admitted only on that licence (the producer pins the key explicitly now, so a NEW record cannot express OFF this way). Re-recording the pair at the shipped probes \u2014 `TORTOISE_VALUE_GATE=0` written and read back \u2014 is what closes the residual; that is a re-take of E1's arms and belongs to #7949, not to this record."
  },
  "bars_source": "docs/evidence/7949-capstone/preregistration.json#criteria + #denominator_floors, parsed by capstone_measure.parse_bars \u2014 the same reader the scoring probe uses, so this record and that row cannot read two bars",
  "denominators": {

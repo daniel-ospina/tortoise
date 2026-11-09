@@ -6,6 +6,59 @@ Read-only on BOTH stores. It never deletes, never writes, never issues a
 feature. What it does is answer the ONE question #10017 gates the destructive
 half on, per session, exactly:
 
+⚠️ "Read-only" is a statement about the COMMANDS it issues, and it is now also
+a statement about the STORE's graph list: the graph leg refuses a graph the
+store does not already hold, instead of creating it (#11112 — a typo'd
+`--graph-name` used to leave a stub graph behind). It is NOT a claim that
+opening the store is free of side effects. On the EMBEDDED leg the redislite
+open rewrites the RDB on EVERY open/close — measured at this head: two
+consecutive read-only CLI runs of the same store left it with a DIFFERENT
+sha256 each time (and a different size; the exact bytes are version- and
+payload-dependent, so they are deliberately not quoted as a figure) — so the
+#10017 byte census is taken AROUND a run, never from a copy the run itself
+touched. It also leaves a
+`<db>.tortoise-construct.lock` beside the store (the suffix is a CONSTANT,
+not the graph's name — measured), and a `<db>.settings` that lives
+ONLY while the daemon does (measured: present mid-run, GONE after `close()`). A
+`--db-path` that does not exist gets an empty 118-byte store file plus that
+lock — the file has no graphs in it (`GRAPH.LIST` → `[]`), which is the claim
+below, but a typo'd path still leaves FILE residue to explain. On the URI leg
+the bind issues no graph write (measured: `GRAPH.LIST` unchanged), but it IS a
+connection, and "no graph write" is not "no server-side effect" — the census
+never claims the latter.
+
+⚠️ THE URI LEG NEEDS A CREDENTIAL THAT MAY RUN `GRAPH.LIST` (#11113 review P2).
+That refusal is proven by LISTING the store (`GRAPH.LIST`, which creates
+nothing), and `GRAPH.LIST` is an INDIVIDUALLY GRANTED command — FalkorDB's own
+ACL docs grant it separately, and `-@all +GRAPH.QUERY` does not imply it
+(`docs.falkordb.com/commands/acl`). So a credential that cannot list graphs is
+a REFUSAL on this leg (exit 3, "nothing was created"), never a pass, and the
+message names the credential rather than blaming the store.
+
+⚠️ …AND A CREDENTIAL THAT MAY RUN `INFO` AT THE HANDSHAKE (measured). The
+refusal the tenant user actually hits is NOT at the presence check: the pinned
+client's constructor issues `INFO` (`falkordb/sentinel.py` → `conn.info(…)`),
+`-@all +GRAPH.QUERY +GRAPH.RO_QUERY +PING` denies it, and the run dies in the
+BIND with `NoPermissionError: … no permissions to run the 'info' command`.
+That arm is diagnosed as the credential too — same predicate, same remedy —
+because "the graph could not be read" sent the operator after the store. So
+the requirement is the pair (`INFO` + `GRAPH.LIST`), and a per-graph tenant
+user fails on the first one.
+
+⛔ Do NOT answer that refusal by granting `GRAPH.LIST` to a per-graph tenant
+user. That user is minted with `+GRAPH.QUERY +GRAPH.RO_QUERY +PING` over `-@all`
+and is expressly forbidden every unkeyed enumeration command — `GRAPH.LIST`
+lists EVERY graph in the keyspace, so the grant would let a single-tenant
+credential enumerate every other tenant's graph name (`tortoise/acl_graph_users.py`,
+#2113/#8617, pinned by `tests/test_acl_graph_users.py`). Run this gate with an
+administrative credential instead.
+
+⚠️ REPLACING THE PROBE IS A REOPEN, NOT A FIX. `GRAPH.RO_QUERY` is measured
+non-creating (`tortoise/cache_eviction.py`) and IS in the tenant user's grant
+set, so a probe on that verb would work for a tenant credential — but #11112
+records `GRAPH.LIST` as the presence source for both legs, so swapping it out
+is a decision to take back to that issue, not a fix to make here.
+
     For every turn node the graph holds, does the record hold a row with the
     SAME key and the SAME transcript-bearing fields — so that deleting the
     graph copy loses nothing?
@@ -380,12 +433,24 @@ USAGE
                      `tortoise` for --db-path). It selects the GRAPH leg only
                      — it never scopes the record read; the record's tenant is
                      chosen with --org-id/--graph-id. A wrong --graph-name is
-                     indistinguishable from a drained graph, which is why
-                     --expect-empty exists.
+                     checked against the store before any graph is opened or
+                     queried — the presence check, which runs first: a name the
+                     store does NOT
+                     hold exits 3 naming what it does hold, and never becomes
+                     a graph. ⛔ That check proves the NAME EXISTS — it does
+                     not prove it is the graph you meant. A wrong name the
+                     store DOES hold (another tenant's graph of that name, a
+                     typo that a previous run created, or a wrong --db-path
+                     pointing at another store) is still indistinguishable
+                     from a drained graph, and --expect-empty will certify it
+                     CLEAN. Pass --expect-empty only when you know THIS graph
+                     is the one that was drained.
     --expect-empty   allow a graph holding ZERO turn-shaped nodes to certify.
-                     Without it that is exit 3: a drained graph and a wrong
-                     --graph-name / --db-path are indistinguishable from the
-                     read side, and the census does not guess which it saw.
+                     Without it that is exit 3. It does not make a wrong
+                     target safe: presence refuses a name the store does not
+                     hold, but a name that EXISTS and is not the intended one
+                     still certifies under this flag, so it is an armed flag,
+                     not a convenience.
 """
 
 from __future__ import annotations
@@ -410,11 +475,21 @@ import re
 import struct
 from collections.abc import Iterable
 from pathlib import Path
+from typing import Any
 
 #: The all-decimal suffix rule (`sdk._capture_turn_ids` — `isdecimal`, never
 #: prefix alone, so `sec` cannot claim `sec_t0_t3` and a `²`-class suffix is
 #: excluded rather than unparseable).
 _TURN_ID_RE = re.compile(r"^(?P<sid>.+)_t(?P<idx>[0-9]+)$")
+
+#: This artifact's OWN identity, emitted in every report. The census that consumes it
+#: (`tortoise/cache_eviction.py::load_parity_report`) REQUIRES the field, because a
+#: report naming nothing is attributable to whatever population the caller wants: a
+#: hand-written `{"verdict": "CLEAN", ...}` opened a gate that a real report with an
+#: unrecognised instrument name could not (#11004 review, gate-fail-open). A literal,
+#: not `__file__`-derived: the artifact must name the same instrument wherever it is
+#: copied to, and `PARITY_INSTRUMENTS` in the consumer keys on exactly this string.
+INSTRUMENT = "tools/turn_parity_census.py"
 
 #: Keyset page size for the graph leg. Must sit well UNDER FalkorDB's
 #: `RESULTSET_SIZE` (default 10_000) so a page is never truncated; the
@@ -689,6 +764,182 @@ def _graph_rows(g) -> list:
             return rows
 
 
+def empty_graph_target_flag(args: Any) -> str | None:
+    """The refusal message for a graph-target flag passed EMPTY, else ``None``.
+
+    ⛔ ONE IMPLEMENTATION, TWO CALLERS. `turn_parity_census` and
+    `purge_legacy_turns` both open a graph from the same three flags, and both were
+    exposed to the same shell accident: `--uri "$TORTOISE_DB_URI"` with the variable
+    UNSET is a set-but-EMPTY value, `read_graph_turns` selects its arm by TRUTHINESS,
+    so the run silently read the EMBEDDED store — and because this tool now authors the
+    graph identity into the artifact, the report then named a graph on an instance the
+    run never touched, which the cache census accepts for a hosted graph of the same
+    name (review P2 on #11097, both cycles). `--graph-name ""` is the mirror: it won
+    `graph_name is not None`, so the artifact said ``graph: ""`` while the read fell
+    back to ``tortoise``.
+
+    An empty flag value is NOT "no flag". Both callers must refuse it BY NAME before
+    anything is read, and both say the same thing, because a second copy of this rule
+    is a second chance to disagree about it.
+    """
+    for flag in ("--uri", "--db-path", "--graph-name"):
+        value = getattr(args, flag.lstrip("-").replace("-", "_"), None)
+        if value is not None and not str(value).strip():
+            return (
+                f"{flag} was passed but is EMPTY (a shell expansion like {flag} "
+                f"\"$UNSET_VAR\" yields nothing). An empty flag value is NOT 'no "
+                f"flag': falling through reads the EMBEDDED store instead of the "
+                f"target you named, and the report would then name a graph on an "
+                f"instance this run never touched. Refusing instead."
+            )
+    return None
+
+
+def resolve_graph_name(uri: str | None, db_path: str | None,
+                       graph_name: str | None) -> str:
+    """The graph this run MEASURED — the name the report must carry.
+
+    ⛔ NOT A SECOND URI PARSER. The URI arm delegates to
+    ``tortoise.projection.resolve_db_endpoint``, the canonical derivation
+    ``FalkorProjection.from_uri`` itself calls, so the name written into the artifact is
+    the name the connection actually addressed. A report naming a graph the read never
+    opened is exactly the defect this closes (review P1 on PR #11004), and re-deriving
+    the name here with a hand-rolled parse would be the same class one layer down.
+
+    ``--graph-name`` still overrides the URI's own name (multi-tenant isolation, #7886),
+    and the embedded store selects the graph by name too, defaulting to ``tortoise`` —
+    the same default :func:`read_graph_turns` applies.
+
+    An EMPTY ``uri`` is not treated as "no URI": it is the URI arm, and the canonical
+    derivation refuses a degenerate one. Passing the embedded default instead would let
+    a shell accident write a graph name onto an artifact measured on a different store
+    (review P2 on #11097).
+    """
+    if graph_name is not None:
+        return graph_name
+    if uri is not None:
+        # ⛔ `is not None`, NOT truthiness: an EMPTY value is not "no URI" (the CLI
+        # refuses it by name before reaching here, and a library caller must not get
+        # the embedded default for a target it did not ask for). The canonical
+        # derivation refuses a degenerate URI rather than inventing a name.
+        # The import is GUARDED for the same reason `read_graph_turns` guards its own:
+        # a broken/partial install must read as "the graph could not be resolved"
+        # (exit 3), never as a traceback a caller mistakes for the exit-1 usage code.
+        try:
+            from tortoise.projection import resolve_db_endpoint
+        except Exception as exc:  # pragma: no cover - import env problem
+            raise CensusError(
+                f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
+
+        return resolve_db_endpoint(uri).graph_name
+    return "tortoise"
+
+
+def _refuse_unless_graph_present(proj, requested: str | None) -> None:
+    """Refuse BEFORE addressing a graph this store does not already hold.
+
+    `FalkorProjection`'s bind is NOT inert: `__init__` runs the schema DDL
+    (`_ensure_indexes`) and, unless skipped, an open-time health probe — and the
+    first `GRAPH.QUERY` on a graph that does not exist CREATES IT. Measured on
+    the embedded leg (#11112): seeding a store with `tortoise` only and then
+    binding `tortise` left `GRAPH.LIST` at `['tortoise', 'tortise']`. The caller
+    here therefore binds with `skip_health_check=True, ensure_indexes=False`,
+    which issues no `GRAPH.QUERY` (the version probe's `INFO`/`MODULE LIST` may
+    still run, and the embedded leg rewrites its own RDB on open — see the
+    module docstring), and only then asks.
+
+    Presence is asked of the STORE (`GRAPH.LIST`, which creates nothing). The
+    name asked about is the projection's OWN resolved name, not the caller's
+    argument: a redirect or a test-name derivation can change which graph is
+    addressed, and refusing on the argument would refuse a graph the store
+    actually holds.
+
+    A store that cannot be listed is a refusal, never a skip — in a gate, "I
+    could not ask" is not "it is there".
+
+    ⛔ A REFUSED LISTING IS DIAGNOSED AS THE CREDENTIAL, NOT THE STORE (#11113
+    review P2). `GRAPH.LIST` is an individually-granted command, and the repo's
+    own per-graph tenant user is forbidden it by design, so "the store could
+    not be listed" sent an operator after the wrong cause — the store was
+    healthy and their credential was scoped to one graph. The two refusals stay
+    distinct: which one fired is the difference between "check the deployment"
+    and "change the credential". Both are fail-closed and both create nothing.
+
+    The classification is the ACL layer's OWN predicate, imported rather than
+    respelled (`tortoise.acl_graph_users._is_permission_refusal` — the module
+    that mints the per-graph user, so the rule that defines the grant and the
+    rule that diagnoses its refusal cannot drift apart). Measured on the pinned
+    client (`redis` 7.4.1): the vendor parser maps every `NOPERM` wording —
+    `NOPERM this user has no permissions …`, Redis 7's `NOPERM User <u> has no
+    permissions …`, and the key-scoped form — onto
+    `redis.exceptions.NoPermissionError`, whose message the predicate matches.
+    It is NOT a `ConnectionError` test: on this client `AuthenticationError`
+    and `AuthorizationError` SUBCLASS `ConnectionError`, so a transport check
+    would classify an ANSWERED refusal as an outage (`tortoise/retry.py`
+    records that trap from its own incident, #8827).
+    """
+    # ⛔ PRESENCE-NOT-TRUTHINESS, ON THE NAME ITSELF (#11113 review, P2).
+    # A falsy name is NOT "no name": an `or`-chain here substituted a DIFFERENT
+    # name for it — `FalkorProjection(path, graph_name="")` keeps
+    # `_graph_name == ""` (measured), and `resolve_db_endpoint(uri, "")`
+    # returns `""`, so the guard fell through to `requested` / `"tortoise"`,
+    # verified a graph this run would NOT open, PASSED, and the read then
+    # created the nameless one: `GRAPH.LIST` went `['tortoise']` →
+    # `['tortoise', '']`. That is the #11112 defect one layer down, with this
+    # function's own contract ("asked about the projection's OWN resolved
+    # name") inverted. Neither an empty nor an absent name can be verified, so
+    # both REFUSE before the handle is addressed — and `read_graph_turns` must
+    # therefore hand this bind the name it was GIVEN. Its embedded branch used
+    # `graph_name or "tortoise"`, which coerced a caller's `""` into a
+    # DIFFERENT graph before this guard could refuse it (measured: the read
+    # returned `tortoise`'s nodes while `resolve_graph_name` named `""` in the
+    # artifact). The coercion is now `is not None`, so only an ABSENT name
+    # (the documented default) is defaulted and an EMPTY one is refused here.
+    wanted = getattr(proj, "_graph_name", None)
+    if wanted is None:
+        wanted = getattr(proj, "graph_name", None)
+    if wanted is None:
+        wanted = requested
+    if not wanted:
+        raise CensusError(
+            f"the graph this run would open has no NAME ({wanted!r}) — so its "
+            "presence cannot be established, and the first query on a nameless "
+            "graph CREATES one. Refused before the handle was addressed "
+            "(#11112); nothing was created.")
+    try:
+        present = sorted(str(n) for n in proj.db.list_graphs())
+    except Exception as exc:
+        try:
+            from tortoise.acl_graph_users import _is_permission_refusal
+            refused_by_credential = _is_permission_refusal(exc)
+        except Exception:  # pragma: no cover - import env problem
+            # An unimportable classifier must not turn a refusal into a pass or
+            # into a crash: the generic arm below still REFUSES, it just cannot
+            # say whose problem it is.
+            refused_by_credential = False
+        if refused_by_credential:
+            raise CensusError(
+                f"this credential may not run GRAPH.LIST ({type(exc).__name__}: "
+                f"{exc}) — the command this gate uses to prove {wanted!r} "
+                "already exists was REFUSED, so an absence is NOT established "
+                "and the graph was not opened (nothing was created). Run this "
+                "gate with a credential that may list graphs. Do NOT grant "
+                "GRAPH.LIST to a per-graph tenant user: it is unkeyed, so the "
+                "grant would let that credential enumerate every tenant's "
+                "graph name (#2113/#8617, tortoise/acl_graph_users.py).") from exc
+        raise CensusError(
+            f"the store could not be listed ({type(exc).__name__}: {exc}) — "
+            "an absence is NOT established") from exc
+    if wanted in present:
+        return
+    raise CensusError(
+        f"the graph {wanted!r} does not exist in this store — refused BEFORE "
+        f"opening it, so no graph was created (#11112). The store holds: "
+        f"{present or '[]'}. A wrong --graph-name / --db-path is NOT the same "
+        "thing as a drained graph, and this gate does not create the target "
+        "it certifies")
+
+
 def read_graph_turns(uri: str | None, db_path: str | None,
                      graph_name: str | None, *,
                      node_ids: Iterable[str] | None = None,
@@ -733,19 +984,67 @@ def read_graph_turns(uri: str | None, db_path: str | None,
                 f"tortoise import failed ({type(exc).__name__}: {exc})") from exc
         try:
             if uri:
-                proj = FalkorProjection.from_uri(uri, graph_name=graph_name)
+                proj = FalkorProjection.from_uri(
+                    uri, graph_name=graph_name,
+                    skip_health_check=True, ensure_indexes=False)
             else:
                 # `--graph-name` is a TARGET selector, not a URI-only flag: the
                 # embedded store selects the graph by name too. Dropping it
                 # here censused the default `tortoise` graph while the operator
                 # asked for another — a wrong-target read that still reported a
                 # verdict.
-                proj = FalkorProjection(db_path,
-                                        graph_name=graph_name or "tortoise")
+                #
+                # `skip_health_check=True, ensure_indexes=False`: this tool
+                # CERTIFIES a store, so its bind must issue nothing (#11112).
+                # Both defaults write — the health probe and the schema DDL are
+                # `GRAPH.QUERY` statements, and on a graph that does not exist
+                # the first one creates it.
+                proj = FalkorProjection(
+                    db_path,
+                    # ⛔ `is not None`, NOT truthiness (#11113 review, P3): an
+                    # EMPTY name is a name the caller supplied, and coercing it
+                    # to `tortoise` opened a DIFFERENT graph than the one the
+                    # artifact then reported (`resolve_graph_name` returns
+                    # `""`). Only an ABSENT name is the documented default.
+                    graph_name=(graph_name if graph_name is not None
+                                else "tortoise"),
+                    skip_health_check=True, ensure_indexes=False)
         except Exception as exc:
+            # ⛔ A REFUSED BIND IS DIAGNOSED AS THE CREDENTIAL, LIKE A REFUSED
+            # `GRAPH.LIST` (#11113 review, P3). Measured: the per-graph tenant
+            # user this docstring names is denied `INFO`, which the pinned
+            # client's constructor issues BEFORE any graph command — so the run
+            # never reaches the presence check and used to report "the graph
+            # could not be read", sending the operator after a healthy store.
+            # Same predicate as the listing arm, imported (not respelled) for
+            # the same reason: one rule, one spelling.
+            try:
+                from tortoise.acl_graph_users import _is_permission_refusal
+                refused_by_credential = _is_permission_refusal(exc)
+            except Exception:  # pragma: no cover - import env problem
+                refused_by_credential = False
+            if refused_by_credential:
+                raise CensusError(
+                    f"this credential was REFUSED while opening the graph "
+                    f"({type(exc).__name__}: {exc}) — an absence is NOT "
+                    "established and nothing was created. A per-graph tenant "
+                    "user is denied the commands the client issues BEFORE any "
+                    "graph command (INFO at the handshake, then the GRAPH.LIST "
+                    "this gate uses to prove presence), so it fails here rather "
+                    "than at the presence check: run this gate with a "
+                    "credential that may run INFO and GRAPH.LIST. Do NOT widen "
+                    "the tenant user's grant — it is deliberately kept off "
+                    "every unkeyed enumeration command (#2113/#8617, "
+                    "tortoise/acl_graph_users.py).") from exc
             raise CensusError(
                 f"the graph could not be read ({type(exc).__name__}: {exc}) — "
                 "an absence is NOT established") from exc
+        # Presence BEFORE any query on the selected graph: the query is what
+        # creates it. A caller that already holds `g` is exempt by construction
+        # — it is addressing a store it can already read.
+        _refuse_unless_graph_present(proj, graph_name)
+        # ⛔ A LOST STORE IS NOT A DRAINED ONE (#11113 review cycle 4, P1).
+        _refuse_if_the_store_looks_LOST(proj)
         g = proj.g
     try:
         if ids is None:
@@ -779,6 +1078,363 @@ def read_graph_turns(uri: str | None, db_path: str | None,
             "torn. Refusing to certify parity over a population it did not "
             "see: an absence is NOT established")
     return {"nodes": nodes, "unidentifiable": unidentifiable}
+
+
+#: A lost-store log bigger than this is treated as REPLAYABLE without being read.
+_LOST_LOG_MAX_BYTES = 64 * 1024 * 1024
+
+
+def _graph_total_node_count(g) -> int:
+    """How many nodes the graph holds, of ANY label.
+
+    Distinct from the CENSUS population on purpose: `is_episodic` counts the
+    delete set, and the lost-versus-drained question is about the whole graph.
+    """
+    return int(g.query("MATCH (n) RETURN count(n)").result_set[0][0])
+
+
+def _refuse_if_the_store_looks_LOST(proj) -> None:
+    """Refuse the LOST-STORE shape, which `--expect-empty` must never bless.
+
+    ⛔ #11113 review cycle 4, P1. The write-free bind (`skip_health_check=True`)
+    is load-bearing — the open-time probe replays the adjacent event log, which
+    would RESURRECT purged turns — but the probe was also a DETECTOR, and
+    `recover_from_log` draws the line precisely (`tortoise/consistency.py`):
+    it rebuilds only when the graph has **0 TOTAL nodes**, there is **exactly
+    one** adjacent `.jsonl` (two is "ambiguous", and it refuses), and that log
+    holds **at least one parsable event**. This arm applies the SAME three
+    conditions, so that "recovery would have replayed this" is a measured
+    statement rather than a plausible one (#11113 review cycle 5, P2).
+
+    So the two states ARE distinguishable:
+
+      * a PURGED graph keeps its non-turn nodes (the bind's `(:Meta)`, any
+        neighbouring Points) — total > 0 — and the emptiness verdict is the
+        legitimate #10017 post-purge state. This arm does not touch it.
+      * a LOST graph has ZERO nodes of any label while a replayable log sits
+        beside it (redislite starts fresh on a corrupt RDB, an interrupted
+        restore, a manual deletion). Pre-PR, the bind replayed it and the
+        census then refused; with the probe skipped it read as "drained" and
+        `--expect-empty` certified it CLEAN — a false PASS about a store that
+        lost its graph.
+
+    Embedded leg only, decided BEFORE any query (#11113 review cycle 5, P3):
+    the store's own DIRECTORY decides that, because a URI projection carries no
+    `_path`, and asking first is what keeps every remote run free of an
+    unbounded `MATCH (n)` scan. (Derived from `_path` rather than from
+    `_find_local_jsonl_dir`, which answers None when the directory holds no
+    `.jsonl` at all — exactly the pending-sidecar case below, #11113 review
+    cycle 7.) ⛔ "I COULD NOT ASK" IS NOT "NOT LOST" (#11113 review cycle 11,
+    P1). This arm's whole claim is that it applies `recover_from_log`'s three
+    conditions, and recovery's FIRST one is an explicit refusal of an
+    unanswerable count (`if db_count is None: … "graph unresponsive —
+    recovery requires a live DB"`). Leaving the count to the read arm instead
+    does not work: that arm runs a DIFFERENT query over a DIFFERENT population
+    (`MATCH (t:Point) WHERE t.is_episodic = true`), so it can succeed where the
+    all-label aggregate failed, and a 0-node store then certified CLEAN under
+    `--expect-empty` — the same false PASS this arm exists to prevent.
+    """
+    path = getattr(proj, "_path", None)
+    if not path or str(path) == ":memory:":
+        # A URI leg has no `_path`; an IN-MEMORY store has one but no directory
+        # (deriving one from it would point at the process CWD — measured: it
+        # refused a `:memory:` store over an unrelated `.jsonl` in the working
+        # directory, #11113 review cycle 10, P3). Recovery never applies to
+        # either.
+        return
+    try:
+        events_dir = os.path.dirname(
+            os.path.abspath(os.path.expanduser(str(path))))
+    except (OSError, ValueError):
+        return
+    # ⛔ ORDER IS PART OF THE MIRROR (#11113 review cycle 9, P2): the node count
+    # comes FIRST, because `recover_from_log` returns early on `db_count > 0`
+    # ("graph already has nodes — no rebuild") and therefore never looks at the
+    # records at all. Probing them first made an untrustworthy sidecar refuse a
+    # HEALTHY store — the #10017 pre-purge census — over a file recovery would
+    # not even read, and the message invited the operator to delete a rescue
+    # file. Only a 0-node graph asks what recovery would act on.
+    try:
+        total = _graph_total_node_count(proj.g)
+    except Exception as exc:
+        # ⛔ AN UNANSWERABLE COUNT REFUSES (#11113 review cycle 11, P1).
+        # `recover_from_log` returns `{"recovered": False, … "reason": "graph
+        # unresponsive — recovery requires a live DB"}` on exactly this state,
+        # so mirroring its conditions means refusing here too. Returning
+        # instead delegated the diagnosis to the read arm — a different query
+        # over a different population that can succeed while this one fails —
+        # and the store then certified CLEAN. Measured red-first: patching only
+        # the count query to raise returned `nodes={}` and exit 0.
+        raise CensusError(
+            "the graph's own total-node count could not be read "
+            f"({type(exc).__name__}: {exc}) — so whether this store is DRAINED "
+            "or LOST is UNKNOWN, not answered, and --expect-empty must not "
+            "certify it. tortoise's own recovery refuses on this same state "
+            "('graph unresponsive — recovery requires a live DB'). Check that "
+            "the store is reachable and retry (#11113 review cycle 11).") from exc
+    if total:
+        return                    # non-empty graph: drained, not lost
+    # 0 nodes: ask what recovery would act on, in ITS order — the pending
+    # sidecar first (the loader can REFUSE it as untrustworthy, which recovery
+    # propagates), then the log.
+    snapshot = _pending_prewipe_snapshot(events_dir)   # may raise: untrustworthy
+    log = _one_replayable_log(events_dir)
+    # ⛔ THE LOG COUNT, not `log is None`, decides the diagnosis (#11113 review
+    # cycle 10, P2): `_one_replayable_log` answers None for "no logs" (recovery
+    # rebuilds from a pending snapshot) AND for "2+ logs" (recovery REFUSES them
+    # as ambiguous), and those two states need opposite sentences.
+    logs = _jsonl_names(events_dir)
+    if snapshot is None and log is None:
+        return                    # recovery would refuse this record set too
+    record = snapshot or log
+    if snapshot is not None and len(logs) > 1:
+        why = ("tortoise's own recovery REFUSES to auto-rebuild here — a pending "
+               f"pre-wipe snapshot plus {len(logs)} adjacent JSONL logs is an "
+               "ambiguous log set (#2943/#428)")
+    elif snapshot is not None:
+        why = ("tortoise's own recovery REBUILDS from that pending pre-wipe "
+               "snapshot — it is the only surviving record of a rebuild's "
+               "graph-only Points (#2943)")
+    else:
+        why = ("tortoise's own recovery ACTS on that log — it replays it, and "
+               "refuses it outright when the log carries a torn tail it cannot "
+               "replay (#3316); either way it never treats the log as absent")
+    kind = "pre-wipe snapshot" if snapshot is not None else "event log"
+    raise CensusError(
+        "the graph EXISTS and holds ZERO nodes of ANY label, while the "
+        f"{kind} {record!r} beside the store is a record it could be "
+        "rebuilt from — that is the LOST-STORE shape (a fresh redislite "
+        "daemon on a corrupt RDB, an interrupted restore, a manual delete), "
+        f"not a drained graph: {why}. An empty graph with such a record is "
+        "NOT evidence of a drained graph, so --expect-empty must not certify "
+        "it. This gate never recovers — a replay here would "
+        "resurrect purged turns (#10017). Restore or rebuild deliberately "
+        "(python -m tortoise rebuild --dir <log-dir> --db <db>) and re-run; if "
+        "the store really is meant to be empty, remove or archive that record "
+        "first so the state is unambiguous.")
+
+
+def _jsonl_names(events_dir: str, *, strict: bool = False) -> list[str]:
+    """The `*.jsonl` entries in `events_dir`, sorted.
+
+    Answers `[]` on error, EXCEPT under `strict=True`, where only
+    `FileNotFoundError` answers `[]` and every other listing failure RAISES
+    `CensusError` (see below).
+
+    ⛔ `strict=True` re-raises instead of answering `[]` (#11113 review cycle 9,
+    P2). `[]` means "no logs here", and one caller refuses on that answer — so
+    an UNLISTABLE directory must not be indistinguishable from an empty one.
+    The directory is derived from the store's own path (the store exists in it),
+    so it is expected to be there; when it cannot be LISTED, that is "I could
+    not ask". The lenient default exists for the DIAGNOSIS callers, which only
+    word a message and never decide a verdict.
+    """
+    try:
+        return sorted(n for n in os.listdir(events_dir) if n.endswith(".jsonl"))
+    except FileNotFoundError:
+        return []                 # the directory is gone: nothing is adjacent
+    except OSError as exc:
+        if strict:
+            raise CensusError(
+                f"the event-log directory beside the store ({events_dir!r}) "
+                f"could not be LISTED ({type(exc).__name__}: {exc}) — so "
+                "whether a replayable log sits there is UNKNOWN, not "
+                "answered. An unreadable directory is not an absent one, so "
+                "--expect-empty must not certify a graph whose replayability "
+                "this gate could not establish.") from exc
+        return []
+
+
+def _one_replayable_log(events_dir: str) -> str | None:
+    """The single `.jsonl` recovery would replay from `events_dir`, else None.
+
+    Mirrors `recover_from_log`'s preconditions rather than approximating them:
+    exactly ONE `*.jsonl` (two is AMBIGUOUS and recovery refuses), and at least
+    one PARSABLE event in it (an empty or garbage log is "nothing to recover").
+    "Parsable" means what `tortoise/log.py::read_all` means — `json.loads`
+    succeeded, any JSON value — NOT "a dict" (#11113 review cycle 6, P3): being
+    stricter than the reader would leave this arm silent where recovery still
+    attempts a replay.
+
+    A FIFO cannot hang it, and a SYMLINK is followed (#11113 review cycle 6,
+    P2/P3). The two hardening bits that matter are `O_NONBLOCK` and `S_ISREG`
+    (measured: `open(fifo, O_RDONLY|O_NONBLOCK)` returns a fd in ~0.1 ms and
+    fails `S_ISREG`). `O_NOFOLLOW` is deliberately NOT used: recovery follows a
+    symlinked `.jsonl` and replays it, so refusing to look through that link
+    made this arm FAIL OPEN — measured end-to-end, a 0-node store whose log was
+    a symlink certified `CLEAN` (rc 0) while the identical file under a regular
+    name refused (rc 3). A link to a FIFO is still rejected, by `S_ISREG` on
+    the fd.
+
+    Bounded: a file larger than `_LOST_LOG_MAX_BYTES` counts as REPLAYABLE
+    without being read — the conservative direction, because a huge log does
+    hold events and reading it on a shared directory is how a certification run
+    exhausts memory.
+
+    The decoded text is read line by line and each line is decoded STRICTLY,
+    like `read_all` (#11113 review cycle 9, P3): a record carrying an invalid
+    UTF-8 byte is "0 events, torn tail" to the reader, so decoding the whole
+    file with `errors="replace"` made this arm refuse where recovery does
+    nothing.
+
+    ⛔ AND THE LOADER'S THIRD ANSWER IS A REFUSAL HERE TOO (#11113 review
+    cycle 9, P2). `None` means "recovery would have nothing to replay", and the
+    caller proceeds on it — so it is only ever a genuine NEGATIVE: zero or 2+
+    `*.jsonl`, an empty/garbage log, `not S_ISREG` (a FIFO, where "not
+    replayable" is the honest answer precisely because a plain open would
+    block), or a name whose target VANISHED between the listing and the open
+    (ENOENT — a dangling symlink, or a writer rotating the log: the state is
+    KNOWN ABSENT there, unlike the EACCES arm below, which is UNASKABLE). A log
+    that `os.listdir` has just shown to EXIST but that this
+    process cannot OPEN or READ is the third answer, and it was being reported
+    here as the second: measured on the parent of this commit, a 0-node store
+    with a readable log REFUSED while the identical store with the same log at
+    mode 000 RETURNED (`nodes={}`) and certified `CLEAN` — the same false PASS
+    the sidecar branch above was just fixed for, one record over. It is also a
+    divergence from the predicate this function claims to mirror:
+    `recover_from_log` CATCHES that `OSError` and answers
+    `{"recovered": False, "reason": "event log unreadable: …"}`
+    (`tortoise/consistency.py`), i.e. recovery DECLINES on this state rather
+    than replaying it. It raises `CensusError` instead, for the reason the
+    presence check states three functions up: in a gate, "I could not ask" is
+    not "it is absent".
+    """
+    import stat
+
+    names = _jsonl_names(events_dir, strict=True)
+    if len(names) != 1:           # 0 = nothing; 2+ = ambiguous, recovery refuses
+        return None
+    path = os.path.join(events_dir, names[0])
+    try:
+        fd = os.open(path, os.O_RDONLY | getattr(os, "O_NONBLOCK", 0))
+    except FileNotFoundError:
+        # The NAME vanished between the listing and the open (a dangling
+        # symlink, a log rotated or deleted by the writer that shares this
+        # directory). That IS an absence — and the sibling `_jsonl_names`
+        # answers `[]` for the same errno one frame up, so refusing here would
+        # both over-block and hand the operator a file that does not exist.
+        return None
+    except OSError as exc:
+        # `os.listdir` has just proved this name EXISTS, so an unopenable one is
+        # NOT an absence — see the third-answer rule in the docstring.
+        raise CensusError(
+            f"the single event log beside the store ({path!r}) could not be "
+            f"OPENED ({type(exc).__name__}: {exc.strerror or exc}) — so whether "
+            "recovery would replay it is UNKNOWN, not answered. An unreadable "
+            "log is not an absent one, and tortoise's own recovery REFUSES on "
+            "this state rather than proceeding, so this gate refuses too "
+            "(#11113 review cycle 9). Inspect the file and make it readable, "
+            "or remove / archive it to accept the loss deliberately, then "
+            "re-run.") from exc
+    try:
+        info = os.fstat(fd)
+        if not stat.S_ISREG(info.st_mode):
+            return None           # FIFO/device/directory: not a log we can read
+        if info.st_size > _LOST_LOG_MAX_BYTES:
+            return path           # too big to read, but it certainly has events
+        # The dup'd descriptor must not survive a failure in `fdopen` itself —
+        # the `with` closes it only AFTER `fdopen` returns one.
+        dup_fd = os.dup(fd)
+        try:
+            with os.fdopen(dup_fd, "rb") as fh:
+                dup_fd = None     # `fdopen` took ownership; the `with` closes it
+                raw = fh.read()
+        finally:
+            if dup_fd is not None:
+                os.close(dup_fd)
+    except OSError as exc:
+        # The same third answer, one frame down: a read that DIES mid-file is
+        # "could not ask", not "nothing to replay". The handler also covers the
+        # HANDLE preparation around the read (`fstat`, `dup`, `fdopen`, e.g. an
+        # `EMFILE`), so the message names both and does not claim a read that
+        # may not have been attempted; the refusal is right either way.
+        raise CensusError(
+            f"the single event log beside the store ({path!r}) could not be "
+            f"READ to completion, or its handle could not be prepared "
+            f"({type(exc).__name__}: {exc.strerror or exc}) "
+            "— so whether recovery would replay it is UNKNOWN, not answered. "
+            "An unreadable log is not an absent one, so --expect-empty must "
+            "not certify a graph whose replayability this gate could not "
+            "establish.") from exc
+    finally:
+        os.close(fd)
+    # Mirror `EventLog.read_all`'s READER, not only its event test (#11113 review
+    # cycle 7, P2/P3): it normalises a bare `\r` to `\n` (a CR-separated record
+    # is a record it replays — measured: the arm was silent, recovery refilled
+    # the store, and `--expect-empty` certified it CLEAN), and it parses TEXT,
+    # decoding each line STRICTLY (a line with an invalid byte is a torn tail to
+    # it, not an event), so `json.loads(bytes)`'s implicit BOM stripping must not
+    # make this arm refuse where the reader finds nothing.
+    raw = raw.replace(b"\r\n", b"\n").replace(b"\r", b"\n")
+    for chunk in raw.split(b"\n"):
+        if not chunk.strip():
+            continue
+        try:
+            line = chunk.decode("utf-8")
+        except UnicodeDecodeError:
+            continue              # torn/noise tail: the reader sees no event
+        try:
+            json.loads(line)
+        except ValueError:
+            continue
+        return path
+    return None
+
+
+def _pending_prewipe_snapshot(events_dir: str) -> str | None:
+    """A pending pre-wipe snapshot — the OTHER record recovery replays.
+
+    `recover_from_log` checks the sidecar BEFORE its "no logs" return (#2943):
+    with zero `.jsonl` files the snapshot is the only record of a rebuild's
+    graph-only Points, and it is replayed. So a 0-node store whose sole record
+    is a pending sidecar is the LOST shape too (#11113 review cycle 7, P3), and
+    the loader — not `lexists` — is what decides presence.
+
+    ⛔ AND THE LOADER'S THIRD ANSWER IS A REFUSAL, NOT AN ABSENCE (#11113 review
+    cycle 8, P2). `_load_prewipe_snapshot` raises for a sidecar that exists but
+    cannot be trusted (unparsable, a symlink, a FIFO, absurdly large), because
+    it may be the only surviving record; `recover_from_log` turns that into its
+    own refusal. Swallowing it into `None` made this arm report "no record here"
+    for a state recovery refuses on, and `--expect-empty` then certified it
+    CLEAN — the same false-PASS class the arm exists to prevent.
+    """
+    try:
+        from tortoise.consistency import _load_prewipe_snapshot
+        from tortoise.projection import prewipe_snapshot_path
+    except Exception as exc:      # pragma: no cover - import env problem
+        # ⛔ AN UNIMPORTABLE HELPER IS A REFUSAL, NOT AN ABSENCE (#11113 review
+        # cycle 11, P2). `None` here means "no record sits beside this store" —
+        # the answer that lets a 0-node graph certify as drained. If the loader
+        # cannot even be imported we have measured NOTHING, not "nothing is
+        # there". The module's own policy agrees: `read_graph_turns`' guarded
+        # import raises `CensusError("tortoise import failed …")`, and the
+        # neighbouring classifier arm above still REFUSES when its classifier
+        # is unimportable.
+        raise CensusError(
+            "the pre-wipe snapshot check could not be loaded "
+            f"({type(exc).__name__}: {exc}) — whether a surviving record sits "
+            "beside this store is UNKNOWN, not answered, so an emptiness "
+            "verdict here would certify a store whose record set was never "
+            "read (#11113 review cycle 11).") from exc
+    try:
+        path = prewipe_snapshot_path(events_dir)
+    except Exception:             # pragma: no cover - path derivation
+        return None
+    if not os.path.lexists(path):
+        return None               # nothing there: the ordinary case
+    try:
+        pending = _load_prewipe_snapshot(path) is not None
+    except Exception as exc:
+        raise CensusError(
+            f"a pre-wipe snapshot exists at {path} and cannot be trusted "
+            f"({type(exc).__name__}: {exc}) — it may be the only surviving "
+            "record of a rebuild's graph-only Points, and tortoise's own "
+            "recovery REFUSES on this state rather than proceeding. An "
+            "emptiness verdict here would certify a store whose surviving "
+            "record is unreadable, so this gate refuses too (#11113 review "
+            "cycle 8). Inspect the file and repair it, or delete it to accept "
+            "the loss deliberately, then re-run.") from exc
+    return path if pending else None
 
 
 def _classify_graph_rows(rows) -> tuple[dict, list[dict]]:
@@ -1544,8 +2200,18 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
     }
 
 
-def census(graph: dict, record: dict, *, sample: int) -> dict:
-    """The comparison and the classification. Pure: no I/O, no verdict I/O."""
+def census(graph: dict, record: dict, *, sample: int,
+           graph_name: str | None = None) -> dict:
+    """The comparison and the classification. Pure: no I/O, no verdict I/O.
+
+    ``graph_name`` is the graph the GRAPH leg actually read (:func:`resolve_graph_name`)
+    and it is emitted in the report as ``graph``. It is not decoration: the consumer
+    (``tortoise/cache_eviction.load_parity_report``) refuses a report that names no
+    graph, because a loader that fills the name in with the CALLER's own has nothing
+    left to compare — the binding then proves only that the operator typed one string
+    (review P1 on PR #11004). The identity is therefore authored HERE, by the leg that
+    opened the graph, and never by the consumer.
+    """
     nodes, rows = graph["nodes"], record["rows_by_key"]
     # The record's own declaration of what it cannot compare. It narrows the
     # comparison, so it is validated HERE and surfaces in the report — a
@@ -1799,6 +2465,18 @@ def census(graph: dict, record: dict, *, sample: int) -> dict:
     anomaly_ids = sorted({a["id"] for entries in anomalies.values()
                           for a in entries})
     return {
+        # ⚠️ REQUIRED by the consumer (`load_parity_report` refuses a nameless report):
+        # emitting it here is what keeps the honest path open without making provenance
+        # a caller's assertion.
+        "instrument": INSTRUMENT,
+        # ⚠️ REQUIRED by the consumer for the same reason, one level up: a report with
+        # no graph identity was ATTRIBUTED to whatever graph the consumer asked about,
+        # so `mismatched`/`unbound` could never fire on the only path that produces a
+        # real report — a CLEAN census of another instance licensed a sweep of this one
+        # (review P1 on PR #11004). ``None`` is emitted as ``None`` rather than omitted:
+        # an artifact that does not know its target must say so, not look like a shape
+        # from before the field existed.
+        "graph": graph_name,
         "compared_fields": compared_fields,
         "declared_absent": sorted(declared_absent),
         "population": {
@@ -1943,7 +2621,17 @@ def main(argv: list[str] | None = None) -> int:
                     "graph turn nodes vs record turn rows. Read-only.",
     )
     src = parser.add_mutually_exclusive_group(required=True)
-    src.add_argument("--uri", help="FalkorDB URI of the target graph")
+    # ⚠️ The presence check lists the store, so the credential has to be allowed
+    # to run GRAPH.LIST — and that is an individually-granted command a
+    # per-graph tenant user deliberately does not hold (#2113/#8617). The help
+    # is where an operator reads the requirement BEFORE choosing the flag, so
+    # the requirement is stated here rather than discovered from a refusal.
+    src.add_argument("--uri", help="FalkorDB URI of the target graph; the graph "
+                                   "leg proves the graph already exists with "
+                                   "GRAPH.LIST, so this credential must be "
+                                   "allowed to run it AND the handshake's INFO "
+                                   "(a per-graph tenant user is allowed "
+                                   "neither, by design)")
     src.add_argument("--db-path", help="embedded graph path instead of a URI")
     # ⛔ THE HELP MUST NOT CLAIM A SCOPE THE CODE DOES NOT HAVE (review P3).
     # This read "applies to BOTH legs" while `--graph-name` is passed to
@@ -1975,13 +2663,36 @@ def main(argv: list[str] | None = None) -> int:
                         help="sample size per session in the dry-run report")
     parser.add_argument("--expect-empty", action="store_true",
                         help="allow a graph holding ZERO is_episodic nodes to "
-                             "certify; without it that is exit 3 (a drained "
-                             "graph and a wrong --graph-name look identical "
-                             "from here)")
+                             "certify; without it that is exit 3. Presence "
+                             "refuses a name the store does not hold; a "
+                             "name it DOES hold but that was not the "
+                             "intended graph still certifies under this "
+                             "flag, so pass it only for a graph known to "
+                             "have been drained")
     args = parser.parse_args(argv)
 
     if args.sample < 0:
         parser.error("--sample must be >= 0")
+
+    # ⛔ THE GRAPH TARGET GETS THE SAME PRESENCE-NOT-TRUTHINESS RULE the record flags
+    # already carry below (review P2 on #11097). `--uri "$TORTOISE_DB_URI"` with the
+    # variable UNSET is a set-but-empty value; `read_graph_turns` tests truthiness, so
+    # the run silently fell through to the EMBEDDED store — and because this tool now
+    # authors the graph identity into the artifact, that accident produced a report
+    # naming `tortoise`, which the cache census accepts for a hosted graph of the same
+    # name. A shell accident therefore licensed a sweep of an instance the census never
+    # touched: the exact `different instance` shape the binding exists to refuse.
+    # `--graph-name` is in the same rule for the mirror reason (review P2, cycle 2):
+    # `--graph-name ""` used to win `graph_name is not None` and be written into the
+    # artifact as `graph: ""` while the EMBEDDED read fell back to `tortoise` — an
+    # artifact that misstates its own target AND can never be loaded as evidence.
+    # The rule itself is `empty_graph_target_flag` — ONE implementation, because
+    # `purge_legacy_turns` opens a graph from the same three flags and was exposed to
+    # the same accident (review P2, cycle 3).
+    empty_flag = empty_graph_target_flag(args)
+    if empty_flag:
+        sys.stderr.write(f"turn_parity_census: {empty_flag}\n")
+        return 1
 
     # ⛔ THE FLAG'S PRESENCE, NOT ITS TRUTHINESS (review P2). `if
     # args.local_record_dir:` treated a set-but-EMPTY value as "no flag", so
@@ -2063,17 +2774,34 @@ def main(argv: list[str] | None = None) -> int:
             return 1
 
     try:
-        graph = read_graph_turns(args.uri, args.db_path, args.graph_name)
+        measured_graph = resolve_graph_name(args.uri, args.db_path,
+                                            args.graph_name)
+        graph = read_graph_turns(args.uri, args.db_path, measured_graph)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
+    except ValueError as exc:
+        # The canonical URI → endpoint derivation refuses a scheme it does not know.
+        # Same outcome as an unreachable graph (exit 3), never a traceback: the target
+        # was never established, so nothing may be certified about it.
+        sys.stderr.write(f"turn_parity_census: the graph could not be resolved "
+                         f"from {args.uri!r} ({exc}) — an absence is NOT "
+                         f"established\n")
+        return 3
 
-    # Zero episodic nodes is not evidence of parity — it is the same answer a
-    # wrong --graph-name, or a --db-path typo that opens a fresh empty DB, gives
-    # (`FalkorProjection.from_uri` does not verify the graph exists). The record
-    # axis refuses a wrong tenant loudly; the graph axis must refuse a wrong
-    # target too, so an empty graph is exit 3 unless the operator says the
-    # draining is expected (#10017's post-purge re-run).
+    # Zero episodic nodes is not evidence of parity — it is also the answer a
+    # wrong --graph-name gives when the store HAPPENS to hold a graph of that
+    # name, or when a wrong --db-path points at another store that does. (A
+    # --db-path typo that opens a FRESH store does NOT reach this branch: the
+    # store lists nothing, so the presence check above refuses it first — which
+    # is why the presence check, not this branch, is what closed the create-a-
+    # graph defect #11112.) So by the time this branch is reached the named graph
+    # is KNOWN to EXIST, but not known to be the one the operator meant. The
+    # record axis refuses a wrong tenant loudly; the graph axis can only refuse
+    # an absent name, and this branch is exit 3 unless the operator says the
+    # draining is expected (#10017's post-purge re-run) — an affirmative claim
+    # about THIS graph, which is why --expect-empty is not a way to silence a
+    # suspicious run.
     # ... and `unidentifiable` is part of that population: a graph whose
     # episodic nodes ALL came back without a usable `t.id` is not an EMPTY
     # graph, and reporting it as "ZERO is_episodic nodes" would be factually
@@ -2084,9 +2812,9 @@ def main(argv: list[str] | None = None) -> int:
     if graph_is_empty and not args.expect_empty:
         sys.stderr.write(
             "turn_parity_census: the graph holds ZERO is_episodic nodes — an "
-            "absence is NOT established (a wrong --graph-name / --db-path is "
-            "indistinguishable from a drained graph). Pass --expect-empty if "
-            "the graph is known to hold no turn nodes.\n")
+            "absence is NOT established. The graph DOES exist (presence was "
+            "checked first); it is its emptiness that is unproven, so pass "
+            "--expect-empty if the graph is known to hold no turn nodes.\n")
         return 3
 
     # ⛔ THE RECORD LEG IS OPENED ONLY WHEN THERE IS SOMETHING TO COMPARE
@@ -2122,7 +2850,8 @@ def main(argv: list[str] | None = None) -> int:
             return 3
 
     try:
-        report = census(graph, record, sample=args.sample)
+        report = census(graph, record, sample=args.sample,
+                        graph_name=measured_graph)
     except CensusError as exc:
         sys.stderr.write(f"turn_parity_census: {exc}\n")
         return 3
@@ -2131,6 +2860,10 @@ def main(argv: list[str] | None = None) -> int:
             json.dumps(report, indent=2, default=str), encoding="utf-8")
 
     pop = report["population"]
+    # The target is PRINTED as well as emitted: an operator reading the run must be
+    # able to see which graph produced it, and that is the same fact the artifact
+    # carries for the consumer.
+    print(f"graph      : {report['graph']}")
     print(f"population : {pop['episodic_graph_nodes']} episodic graph node(s) "
           f"(the delete set), {pop['turn_shaped_nodes']} of them turn-shaped, "
           f"across {pop['sessions_with_graph_turns']} session(s)")

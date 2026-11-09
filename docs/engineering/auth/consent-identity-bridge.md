@@ -173,24 +173,26 @@ both bypassable, which is worth recording because each looked complete:
   gating the fill alone re-opened the hole through the mint.
 
 The delivered rule is that **the flow belongs to a browser, not to whoever knows the `state`**:
-the `attempt_key` (32 random bytes) is minted on whichever leg reaches the flow with none present —
-by the AS on its bounce leg (`consent_bounce_url` in `tortoise/oauth.py`, so a COLD START has a key
-before the app ever sees the flow, #10487) and by `/api/consent/start` only when it is handed
-none — and only its **SHA-256** is stored on the row; the raw key travels in the carrier of
-the leg that produced it — the AS bounce's `next` for a key the AS minted, and the `selfPath`
-**return target** for one `/api/consent/start` adopted; the owner fill and the
-mint both require it. The key is INSERT-ONLY — written only when the row is created, never on a
-re-entry, so a later caller can never rotate it, because rotation *is* the takeover. A row that predates
-the column (its hash is `NULL`) is therefore **dead, never adoptable**: COALESCE-ing a key into it let the
-first caller to name the `state` own the flow while the mint read the same row as nobody's — the two legs
-disagreeing about one row — so such an attempt is refused and the visitor restarts. A missing, wrong, or
-pre-column key answers the SAME `403 no_authorize_attempt` as an unrecorded flow, so the route is not an
+the attempt key is 32 random bytes, minted by the **AS on the `GET /oauth/authorize` bounce leg**
+(`consent_bounce_url`) and **ADOPTED** by `/api/consent/start` on the insert. Adoption is the normal
+path, not a guarantee: **the entry leg still mints one when it is handed none** — a request presented
+STRAIGHT to `/api/consent/start`, bypassing the AS (`start.ts:255-256`, `presentedKey ||
+newAttemptKey()`; tracked OPEN on #10884/#10865) — so the AS can only ever ADOPT a key it handed out
+on the bounce, never constrain what a direct caller invents. The row stores **only the key's SHA-256**, and the raw key rides the `selfPath` **return
+target**; the owner fill and the mint both require it. The key is INSERT-ONLY — written only when the
+row is created, never on a re-entry, so a later caller can never rotate it, because rotation *is* the
+takeover. A row that predates the column (its hash is `NULL`) is therefore **dead, never adoptable**:
+COALESCE-ing a key into it let the first caller to name the `state` own the flow while the mint read the
+same row as nobody's — the two legs disagreeing about one row — so such an attempt is refused and the
+visitor restarts. A missing, wrong, or pre-column key answers the SAME `403 no_authorize_attempt` as an unrecorded flow, so the route is not an
 oracle for guessing a `state`.
 
 What a DEAD (pre-column) row actually does, stated precisely because "the visitor restarts" is not what the
-code shows on the cold leg: the entry leg still answers `302` to `/auth` (it has no owner to compare yet and
-its return target carries no key), and the refusal arrives AFTER sign-in as `403 no_authorize_attempt /
-flow_not_yours`. Because a keyless re-entry no longer refreshes `expires_at`, that row dies at its original
+code shows on the cold leg: the entry leg still answers `302` to `/auth` (it has no owner to compare yet),
+and the refusal arrives AFTER sign-in as `403 no_authorize_attempt / flow_not_yours`. The key the AS now
+mints onto that hop does not rescue it — `attempt_key_hash` is assigned to ITSELF on conflict, so a
+pre-column row can never be adopted; minting just means the visitor arrives holding a key this row cannot
+match. Because a keyless re-entry no longer refreshes `expires_at`, that row dies at its original
 TTL instead of shadowing every retry — and a client that reuses the same `state` for a new attempt is
 reusing a per-attempt value, which an OAuth client does not do (it mints a fresh `state` per authorize
 request). Reloading the SAME url does NOT recover: it is refused (`403 flow_not_yours` once signed in,
@@ -202,12 +204,17 @@ misread as the whole one): the key rides the `selfPath` return target **and** `a
 the mint's only caller), so it passes through the AS page URL, the visitor's history, the sign-in hop's
 return target — which `auth/start.ts` PERSISTS as `auth_flows.next` in this same D1 database — plus the page's GoTrue `redirectTo` flow state, WHICH WAS THE FIFTH CARRIER AND IS GONE: §9 step 4
 deleted the sign-in itself, so the page has no `redirectTo` hop and no `STRIP_PARAMS`
-(`grep -c 'signInWithOAuth\|redirectTo\|STRIP_PARAMS' tortoise/oauth.py` = 0). Read access to that (or those flow records) inside the
-window is therefore equivalent to holding the key. The two windows are DIFFERENT and neither is the
-attempt's: the persisted `auth_flows.next` copy lives `FLOW_MAX_AGE_S` (30 min), while the attempt's own
+(`grep -c 'signInWithOAuth\|redirectTo\|STRIP_PARAMS' tortoise/oauth.py` = 0). Because the mint now happens
+on the bounce, the FIRST carrier is upstream of all of those: the `302 Location` of `GET /oauth/authorize`
+itself, which carries `next=…attempt_key=…`. It is a RESPONSE header, not a request parameter — so it
+lands in api-side response/access logs rather than in the request log, and on the wire before any URL
+exists that the visitor's browser could put in history (the history copy is the `/auth?next=…` hop
+already listed). Read access to that (or those flow records) inside the window is therefore equivalent
+to holding the key. The two windows are DIFFERENT and neither is the attempt's: the persisted `auth_flows.next` copy lives `FLOW_MAX_AGE_S` (30 min), while the attempt's own
 `expires_at` is `CONSENT_ATTEMPT_TTL_S` (15 min) and is refreshed ONLY by the key's holder — a foreign or
-keyless re-entry does not extend it, because a renewable dead row would bound nothing. Add the request logs
-of both hops (`/api/consent/start?attempt_key=…`, `/auth?next=…attempt_key=…`) to the carrier list: they
+keyless re-entry does not extend it, because a renewable dead row would bound nothing. Add the request and
+response logs of all three hops (`GET /oauth/authorize` — its `302 Location` is where the key first appears —,
+`/api/consent/start?attempt_key=…`, `/auth?next=…attempt_key=…`) to the carrier list: they
 are the cheapest read path and need no database access at all. That is the accepted cost of a carrier that
 is not a cookie; §4 records why no cheaper carrier proves the CHANNEL. The reduction that was available
 when this was measured — stripping the param on the `redirectTo` hop — **shipped** (§9 step 4 removed that
@@ -486,7 +493,7 @@ is **DELIVERED** by this diff (`functions/api/consent/start.ts`, `functions/api/
 | 1. ~~The `jti` store + `CONSENT_TOKEN_SECRET` provisioning + the manifest declaration~~ — **DELIVERED** (`ControlPlaneJtiStore` + migration `20261030000001_oauth_consent_tickets.sql`; the accepted-`kid` allowlist is deliberately NOT BUILT (ONE `CONSENT_TOKEN_SECRET` is configured, so an allowlist of one is vacuous and §2.3’s two-`kid` rotation window does not exist yet — a key rotation is a VALUE SWAP that invalidates in-flight tokens, and the verifier accepts any non-empty `kid` for presence only, so treat that promise in §2.3/`§5` as IMPLEMENTATION WORK, not as a property)) | infrastructure; the mechanism choice is §2.3 |
 | 2. ~~`POST /oauth/consent` accepting a consent token alongside the bearer (verify `aud`/`iss`/`exp`/`bind`/`jti`, then `issue_auth_code` with the *bound* params)~~ — **DELIVERED**, see the paragraph after this table | the AS half; testable in Python (`tests/test_oauth_*`), and it had to land **before** any page change so the bearer path stays live meanwhile |
 | 3. ~~The `/api/consent/token` mint route + the `/api/consent/start` sign-in bounce~~ — **DELIVERED** (evidence: `tests/test_oauth_consent_bff_routes.py`, incl. the TS→Python token round trip, the per-attempt key that closes the ownerless window, and the startup pin `tests/test_oauth_consent_bridge.py::test_startup_installs_the_SHARED_register`) | the BFF half; proved by `tests/test_oauth_consent_bff_routes.py` (route refusals + a TS-minted token accepted by the Python verifier) |
-| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (60 cases / 44 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
+| 4. ~~The page rewrite~~ — **DELIVERED** (#3524 §9 step 4). The page authenticates nobody: no provider buttons, no password form, no cookie write, no inline client, no bearer. It reads the per-attempt key from its own URL, mints the bound assertion from the session origin, and redeems it at `POST /oauth/consent`. Unauthenticated `GET /oauth/authorize` now 302s to `{app}/auth?next=/api/consent/start?{query}`. Evidence: `tests/test_oauth_consent_page_step4.py` (65 cases / 47 test functions: the bounce, the REAL `signup.html` return-to allowlist executed over the emitted URL, the page's inline script run under node, byte-exact `state`, a bound token redeeming to a live code, and the org chooser — sole-team, multi-team with the pick posted, and an unresolvable preview leaving Authorize inert) | replaces `tests/test_oauth_consent_pkce.py` wholesale — its 22 invariants have no subject once the inline client is gone, so this is a **test-surface migration**, not a patch |
 | 5. ~~`SCOPE.md` §9 class 4(i) — attested client identity~~ — **DELIVERED** by [#8218](https://github.com/daniel-ospina/tortoise/issues/8218) (step 4's rehome left it out of #3524's body, so it was tracked — and closed — on its own ticket). Decision + rejected alternatives: the module docstring of `tortoise/client_identity.py`. Evidence: `tests/test_oauth_consent_client_identity_8218.py` | the page asserts no client name unless an allowlist entry or a CIMD origin backs it; an unattested client is labelled unverified and handled by `client_id` |
 
 **What the "together" rule binds, and what it does not.** Steps 2→4 were scoped to land together because

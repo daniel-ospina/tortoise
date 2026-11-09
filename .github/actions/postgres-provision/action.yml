@@ -43,6 +43,24 @@ inputs:
       never a credential, and never a value a real deployment reads.
     required: false
     default: record
+  dsn_var:
+    description: >-
+      Name of the exported DSN variable. Defaults to `TEST_RECORD_DB_URI`, which
+      every existing caller reads. A job that needs a SECOND server (#9567 D8:
+      the restore drill restores into a target that is not the record) calls this
+      action twice and passes a different name for the second call — `$GITHUB_ENV`
+      writes are last-one-wins, so a shared name would silently overwrite the
+      first DSN and the drill would restore the record into itself.
+    required: false
+    default: TEST_RECORD_DB_URI
+  label_var:
+    description: >-
+      Name of the exported ownership-label variable the paired teardown selects
+      on. Must be UNIQUE per call within a job, for the same reason as `dsn_var`:
+      a shared name means the second provision clobbers the first label, and the
+      first container is then never torn down.
+    required: false
+    default: TORTOISE_CI_POSTGRES_LABEL
 runs:
   using: composite
   steps:
@@ -54,4 +72,6 @@ runs:
         POSTGRES_DB_NAME: ${{ inputs.database }}
         POSTGRES_DB_USER: ${{ inputs.username }}
         POSTGRES_DB_PASSWORD: ${{ inputs.password }}
+        POSTGRES_DSN_VAR: ${{ inputs.dsn_var }}
+        POSTGRES_LABEL_VAR: ${{ inputs.label_var }}
       run: bash ${{ github.action_path }}/provision.sh

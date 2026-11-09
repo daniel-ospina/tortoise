@@ -45,6 +45,7 @@ from tools.longmem_eval.evidence import (  # noqa: E402, RUF100
 from tools.longmem_eval.ingest import _session_transcript, ingest_haystack  # noqa: E402, RUF100
 from tools.longmem_eval.report import build_report  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import retrieve_for_question  # noqa: E402, RUF100
+from tools.longmem_eval.w7_publish import GOLD_CUTOFF_ROW  # noqa: E402, RUF100
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
@@ -1380,6 +1381,38 @@ def test_report_retrieval_by_category_is_non_abs_and_per_type():
     # carries the per-question FRACTIONS; w7_publish owns recall_all@k
     # (one implementation of the official semantics)
     assert "recall_all@5" not in by_cat["full_mix"]
+
+
+def test_report_retrieval_by_category_carries_the_gold_cutoff_fraction():
+    """#2516 (C1) / #10538: the per-category block also carries the gold-cutoff
+    variant's FRACTION (``session_recall@n_gold``) — the only cutoff under
+    which a spread-evidence question is not arithmetically pinned to 0.0.
+    The BINARY projection stays in ``w7_publish`` alone, which is why the
+    official ``recall_all@5`` must remain ABSENT here (R12, pinned by
+    ``test_report_retrieval_by_category_is_non_abs_and_per_type``).
+
+    An outcome that does not carry the fraction is counted in ``n_missing``,
+    never coerced to 0.0.
+    """
+    o1 = _answer_evidence_outcome("m1", "multi-session", ae=1.0)
+    o1["session_recall@n_gold"] = 1.0
+    o2 = _answer_evidence_outcome("m2", "multi-session", ae=1.0)
+    o2["session_recall@n_gold"] = 0.0
+    o3 = _answer_evidence_outcome("m3", "multi-session", ae=1.0)
+    report = _answer_evidence_report([o1, o2, o3])
+    row = report["retrieval"]["retrieval_by_category"][
+        "Multi-Session Reasoning"]
+    assert row["session_recall@n_gold"] == {"value": 0.5, "n": 2,
+                                            "n_missing": 1}
+    # R12 / one-implementation: the BINARY row (``recall_all@N_gold``) is
+    # emitted by ``w7_publish`` alone, so it must stay out of this block. Assert
+    # it with the CONSTANT: a hand-spelled literal can be a string this block
+    # can never emit — the old one was ``recall_all@n_gold``, which the fraction
+    # key does not even share a stem with (the fraction is
+    # ``session_recall@n_gold``) — and such an assertion passes over a real
+    # violation while looking like it pins one (proven by mutation, #11598
+    # review).
+    assert GOLD_CUTOFF_ROW not in row
 
 
 def test_report_retrieval_by_category_counts_missing_denominators():

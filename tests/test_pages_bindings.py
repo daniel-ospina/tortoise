@@ -1443,7 +1443,6 @@ _WEBSITE_FIXTURE = (
     "consent.js",
     "assets/app.css",
     "blog/blog.js",
-    "blog/og-image.png",
     "functions/_middleware.ts",
     "functions/auth/start.ts",
     "functions/api/session.ts",

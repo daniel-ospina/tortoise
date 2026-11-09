@@ -6054,6 +6054,47 @@ def _measurement_only(monkeypatch):
     # here keeps each block's coverage in the block that owns it, instead of making every ordering
     # test depend on a step declaration the ordering rule does not consume.
     monkeypatch.setattr(check, "check_step_partition_applies", lambda directory, pins, record: False)
+    # …and the ROW→FLOOR map the completeness half now binds its floor-clause exemption against
+    # (#11331 review round 9). It is read from the machine record, which these fixtures
+    # deliberately do not commit (that is what the `check_machine_record` stub above replaces), so
+    # without this the ABSENT record reads as "this row has no pinned floor" — which is now a
+    # REFUSAL of any comparator, and the REAL `A4` cell carries a legitimate one. Supplying the
+    # real map is again "satisfied rather than exercised": no arm below measures floors, and the
+    # floor binding has its own arms in `test_capstone_a_rows_10982.py`. Capturing the function
+    # before patching is required — calling `check._registered_floor_values` from inside the
+    # replacement would resolve to the replacement.
+    _real_floor_values = check._registered_floor_values
+    monkeypatch.setattr(check, "_registered_floor_values",
+                        lambda directory: _real_floor_values(PREREG_DIR))
+
+
+def test_the_gate_SUPPLIES_the_floor_map_so_a_missing_pin_cannot_excuse_a_bar(tmp_path, monkeypatch):
+    """FAILS IF `check()` stops handing the floor map to `check_completeness`.
+
+    ⛔ The fail-closed binding is only as good as its WIRING. `check()` passes
+    `_registered_floor_values(directory)` into `check_completeness`, and reverting that one call to
+    `check_completeness(rows)` leaves every other capstone arm GREEN — measured at #11331 review
+    round 10 (`552 passed` either way), because with no map the checker takes the legacy
+    strip-by-shape branch and the real `A4` cell still passes.
+
+    So this drives the WHOLE gate with a map that OMITS `A4` — the state a record-only edit
+    produces by deleting `criteria[A4].floor`. The real `A4` cell's legitimate
+    `floor of >= 30 typed statements` can then no longer be told from a bar, so the gate must
+    REFUSE. If the wiring is removed, `run()` returns ok and this test reds.
+    """
+    _repo, bundle = _bundle_with_published_registration(tmp_path, monkeypatch)
+    _measurement_only(monkeypatch)
+    real = check._registered_floor_values(PREREG_DIR)
+    assert real is not None and "A4" in real, real
+    without_a4 = check.FloorMap(
+        {k: v for k, v in real.items() if k != "A4"},
+        {k: v for k, v in real.units.items() if k != "A4"},
+    )
+    monkeypatch.setattr(check, "_registered_floor_values", lambda directory: without_a4)
+
+    report = check.run(bundle, use_git=True, use_corpus=False)
+    assert report["ok"] is False, "the gate must refuse when A4's floor pin is missing"
+    assert any("outside its floor" in f for f in report["failures"]), report["failures"]
 
 
 def test_a_bundle_with_no_log_does_not_claim_a_measured_ordering(tmp_path, monkeypatch, capsys):
@@ -6332,6 +6373,15 @@ def test_an_ordering_violation_is_not_reported_as_a_verified_claim(tmp_path, mon
     prereg = _commit_prereg(repo, epoch=1_700_003_000,
                             text=(PREREG_DIR / check.PREREG_NAME).read_text())
     _publish_base(repo)
+    # ⛔ The completeness half's floor binding reads the machine record, and this fixture commits
+    # only the DOCUMENT. Without the map, the ABSENT record means "A4 has no pinned floor", so the
+    # real A4 cell's legitimate floor clause is refused and its `UNMEASURED(...)` text lands in the
+    # output this test scans for an UNMEASURED *ordering* outcome — a red about a half the test does
+    # not measure (#11331 review round 9). Same "satisfied rather than exercised" shape as
+    # `_measurement_only`; the floor binding has its own arms in `test_capstone_a_rows_10982.py`.
+    _real_floor_values = check._registered_floor_values
+    monkeypatch.setattr(check, "_registered_floor_values",
+                        lambda directory: _real_floor_values(PREREG_DIR))
     log = prereg.parent / "capstone.log"
     log.write_text("x\n")
     _git(repo, "add", str(log.relative_to(repo)))

@@ -397,10 +397,10 @@ def test_the_two_carriers_are_independent_of_their_arrival_order():
 
 
 def test_a_summary_without_the_narrative_is_not_the_narrative_column():
-    """The capture's own session `:Source` sets `summary` to the transcript's
-    first utterance — not the S1 narrative. Projecting it unconditionally would
-    let the narrative's companion column hold a prose snippet, and would make a
-    D7 read look satisfied against text that is not the narrative."""
+    """The capture's own session `:Source` sets `summary` to a descriptor — not
+    the S1 narrative. Projecting it unconditionally would let the narrative's
+    companion column hold a display line derived from the transcript, and would
+    make a D7 read look satisfied against text that is not the narrative."""
     record = {"type": "SourceCreated", "url": "session:s1",
               "sessionId": "s1", "summary": "first thing said"}
     assert _narrative_statements(record) == []

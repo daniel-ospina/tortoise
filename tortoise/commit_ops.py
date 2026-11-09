@@ -22,6 +22,7 @@ from .entity_identity import (  # #3633 structured non-folded record
     display_holder_ids,
     record_non_folded,
 )
+from .exceptions import UnaddressableClaimError  # #9754 per-item refusal
 from .live import (
     epistemic_disjunction,  # #7902 epistemic-label traversal clause
     is_terminal_status,  # #2498 shared terminal vocabulary
@@ -488,8 +489,37 @@ def apply_payload_operators(proj, sdk, operators: list, *,
             # stored a DOUBLE prefix whenever the reason could not be
             # resolved (#4716 review P2). Fall back to the raw ref.
             reason = str(src)
-        sdk.mitigate_operator(op_id, reason=reason,
-                              strength=_op_attr(op, "strength") or 0.5)
+        try:
+            sdk.mitigate_operator(op_id, reason=reason,
+                                  strength=_op_attr(op, "strength") or 0.5)
+        except UnaddressableClaimError as e:
+            # #9754 (owner prescription, option 1): one unaddressable
+            # mitigation is a PER-ITEM skip, not an abort. ``mitigate_operator``
+            # REFUSES with ``UnaddressableClaimError`` when the operator's
+            # existing mitigation Point carries no ``id``, because every write
+            # on that path is id-keyed — it used to return ``{}``, a false
+            # success. Classifying it here (rather than letting it unwind) is
+            # what keeps the refusal from turning a single unrepairable node
+            # into a whole payload's write loop dying mid-graph, which is why
+            # #9262 shipped a silent guard instead.
+            # The skip is LOUD (warning, naming the operator) and the loop
+            # continues: the remaining MITIGATES records still land.
+            #
+            # ⛔ CATCH THE SUBCLASS, NOT ``ValueError`` (review F3). The
+            # parent would swallow this door's OTHER ``ValueError`` guards —
+            # strength outside [0, 1] (``sdk.py``), operator not found, point
+            # is not an operator, an unknown credibility word — and turn a
+            # payload that must ABORT into a warning plus ``continue``. Those
+            # are defects in the CALLER's own record, not an unrepairable
+            # graph node, and ``apply_payload_operators`` returns only
+            # ``created_ids``, so a swallowed one survives as a log line and a
+            # silently missing mitigation. ``UnaddressableClaimError`` is a
+            # ``ValueError`` subclass (``exceptions.py``), so callers keep one
+            # class to reason about while this site says exactly what it means.
+            _logger.warning(
+                "MITIGATES %r skipped — the target operator's mitigation "
+                "cannot be written: %s", src, e)
+            continue
     return created_ids
 
 

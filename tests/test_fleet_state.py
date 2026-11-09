@@ -1283,12 +1283,12 @@ def test_every_reader_prints_the_age_it_answered_from(tmp_path, monkeypatch, cap
 
 def test_gh_json_declares_whether_the_read_was_measured(monkeypatch) -> None:
     """"Could not read it" and "the answer is empty" are different facts (#7957 H5)."""
-    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: '[{"number": 1}]')
+    monkeypatch.setattr(fs, "_capture", lambda cmd, timeout=60: ('[{"number": 1}]', 0, ""))
     rows = fs.gh_json(["pr", "list"])
     assert rows == [{"number": 1}]
     assert rows.measured is True and rows.error == ""
 
-    monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60: "")
+    monkeypatch.setattr(fs, "_capture", lambda cmd, timeout=60: ("", 0, ""))
     rows = fs.gh_json(["pr", "list"], what="gh pr list")
     assert rows == [] and rows.measured is False
     assert "no parsable JSON" in rows.error
@@ -1296,12 +1296,258 @@ def test_gh_json_declares_whether_the_read_was_measured(monkeypatch) -> None:
     # a chatty failure, a null, and a non-list payload are all UNMEASURED
     for payload, expect in (("rate limit exceeded", "no parsable JSON"),
                             ("null", "NoneType")):
-        monkeypatch.setattr(fs, "_run", lambda cmd, timeout=60, p=payload: p)
+        monkeypatch.setattr(
+            fs, "_capture", lambda cmd, timeout=60, p=payload: (p, 0, ""))
         r = fs.gh_json(["pr", "list"], what="gh pr list")
         assert r.measured is False and expect in r.error
 
     # a PLAIN sequence carries no provenance and is UNMEASURED — never assumed read
     assert fs.GitHubRows([{"number": 2}]).measured is False
+
+
+# ── #11202: the read's FAILURE IS CLASSIFIED, not collapsed ─────────────────
+#
+# Every test below fails on the pre-#11202 code: `_run` degraded a timeout, a
+# refused command and a corrupt body to the SAME empty string, so `gh_json`
+# answered "returned no parsable JSON" for all three — the string the claim gate
+# printed about a read that was merely slow, with a remedy that sent the operator
+# to check auth for a 37 s read against a 60 s bound.
+
+
+def test_a_timed_out_read_names_the_timeout_not_a_corrupt_payload(monkeypatch) -> None:
+    """A KILL is its own class: the one failure whose answer is retry-or-widen."""
+    monkeypatch.setattr(
+        fs, "_capture", lambda cmd, timeout=60: ("", fs.GH_READ_TIMEOUT_RC, ""))
+    rows = fs.gh_json(["issue", "list"], timeout=100, what="gh issue list")
+
+    assert rows.measured is False          # fail-closed: never an answer
+    assert "TIMED OUT after 100s" in rows.error
+    assert "killed for being slow" in rows.error
+    # The defect: this string used to be the WHOLE cause, for every failure class.
+    assert "no parsable JSON" not in rows.error
+
+
+def test_a_real_kill_reaches_the_reader_as_a_timeout(monkeypatch) -> None:
+    """⛔ THE `TimeoutExpired` ARM ITSELF IS PINNED (#11202 review round 14).
+
+    Every other case in this block stubs `_capture`, so the CLASSIFICATION could be
+    deleted — `except subprocess.TimeoutExpired` folded back into the generic
+    "could not be run" arm below it — and the whole suite stayed green. That fold IS
+    the defect #11202 was filed for (a slow read reported as a missing binary, then
+    rendered as "returned no parsable JSON"), so a revert would reinstate the bug
+    with no red. Measured before this case existed: reverting only that arm gave
+    `600 passed, 239 subtests passed`.
+
+    The stub therefore sits BELOW `_capture` — `fs.subprocess` itself — so the real
+    `except` clause is what the assertion observes and no `_capture` stand-in can
+    satisfy it. Hermetic: no sleep, no real process.
+    """
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+
+    class _KilledSubprocess:
+        """A `subprocess` stand-in whose every call is a kill."""
+
+        class TimeoutExpired(Exception):
+            def __init__(self, cmd, timeout):
+                super().__init__(cmd, timeout)
+
+        @staticmethod
+        def run(cmd, **kwargs):
+            raise _KilledSubprocess.TimeoutExpired(cmd, kwargs.get("timeout", 1))
+
+    monkeypatch.setattr(fs, "subprocess", _KilledSubprocess)
+
+    out, rc, err = fs._capture(["gh", "issue", "list"], timeout=5)
+    assert (out, rc) == ("", fs.GH_READ_TIMEOUT_RC)
+    assert "timed out after 5s" in err
+    # The other arm must NOT be what caught it.
+    assert "could not be run" not in err
+
+    rows = fs.gh_json(["issue", "list", "--limit", "2000"], timeout=100,
+                      retries=1, what="gh issue list")
+
+    assert rows.measured is False          # fail-closed: a kill is never an answer
+    assert "TIMED OUT after 100s" in rows.error
+    assert "no parsable JSON" not in rows.error
+    assert "could not be run" not in rows.error
+
+
+def test_a_refused_read_carries_the_commands_own_cause(monkeypatch) -> None:
+    """A 403 says WHY. Discarding stderr is how three causes became one."""
+    monkeypatch.setattr(
+        fs, "_capture",
+        lambda cmd, timeout=60: ("", 1, "API rate limit exceeded for user ID 1.\n"))
+    rows = fs.gh_json(["issue", "list"], what="gh issue list")
+
+    assert rows.measured is False
+    assert "FAILED (1 exit" in rows.error
+    assert "API rate limit exceeded" in rows.error
+    assert "no parsable JSON" not in rows.error
+
+
+def test_a_refusal_with_empty_stderr_never_renders_stdout_chatter(monkeypatch) -> None:
+    """⛔ THE DISCRIMINATING SHAPE FOR THE STDERR-ONLY RULE (#11202 review round 8).
+
+    The refusal arm passes stderr ONLY, because a progress line on stdout is not a
+    cause. Every existing fixture gives that arm a NON-EMPTY stderr, so `_gh_said`'s
+    stream ORDER alone produced the right answer and passing `stdout` in as well was
+    undetectable: the mutation `_gh_said(err)` -> `_gh_said(err, out)` left the whole
+    suite green. This case is the one that only the rule itself can answer — empty
+    stderr WITH chatter on stdout.
+    """
+    monkeypatch.setattr(
+        fs, "_capture", lambda cmd, timeout=60: ("Fetching page 2 of 19...\n", 1, ""))
+    rows = fs.gh_json(["issue", "list"], what="gh issue list")
+
+    assert rows.measured is False
+    assert "FAILED (1 exit" in rows.error
+    # The chatter must never be rendered as the CAUSE…
+    assert "Fetching" not in rows.error, rows.error
+    # …and the empty stderr must be reported as such, not as "either stream" (the
+    # refusal arm never read stdout at all).
+    assert "it printed nothing on stderr" in rows.error
+    assert "either stream" not in rows.error
+
+
+def test_gh_said_empty_is_stream_aware() -> None:
+    """A claim about a stream nobody read is the same defect class as a wrong cause."""
+    assert fs._gh_said("") == "it printed nothing on stderr"
+    # A whitespace-only OTHER stream is what makes "either stream" TRUE. (A stream
+    # carrying text is not empty: `_gh_said("", "body")` returns that text.)
+    assert fs._gh_said("", "body") == "'body'"
+    assert fs._gh_said("", "\n  \n") == "it printed nothing on either stream"
+    # …and a non-empty stream still wins, stderr first.
+    assert "boom" in fs._gh_said("boom", "chatter")
+
+
+def test_the_timeout_retry_answers_the_measured_intermittency(monkeypatch) -> None:
+    """Contention passes, so ONE retry turns a killed read into a real answer.
+
+    The seam is deleted from the environment first: with `FLEET_STATE_GH_READ_BOUND=fixed`
+    armed the retry is OFF BY DESIGN (that is the pre-#11202 path), so an ambient export
+    would turn this into a false red on a correct change.
+    """
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+    replies = [("", fs.GH_READ_TIMEOUT_RC, ""), ('[{"number": 7}]', 0, "")]
+    monkeypatch.setattr(fs, "_capture", lambda cmd, timeout=60: replies.pop(0))
+
+    rows = fs.gh_json(["issue", "list"], timeout=100, retries=1, what="gh issue list")
+
+    assert rows.measured is True and rows == [{"number": 7}]
+
+
+def test_two_timeouts_still_fail_closed(monkeypatch) -> None:
+    """⛔ A RETRY MUST NOT FABRICATE AN ANSWER. Retried, still killed, still UNMEASURED."""
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+    calls: list[int] = []
+
+    def capture(cmd, timeout=60):
+        calls.append(timeout)
+        return ("", fs.GH_READ_TIMEOUT_RC, "")
+
+    monkeypatch.setattr(fs, "_capture", capture)
+    rows = fs.gh_json(["issue", "list"], timeout=100, retries=1, what="gh issue list")
+
+    assert rows.measured is False and len(calls) == 2
+    assert "(2 attempt(s)" in rows.error and "(retried)" in rows.error
+
+
+def test_a_refusal_is_not_retried_because_it_is_already_an_answer(monkeypatch) -> None:
+    calls: list[list[str]] = []
+
+    def capture(cmd, timeout=60):
+        calls.append(list(cmd))
+        return ("", 1, "HTTP 403: Resource not accessible")
+
+    monkeypatch.setattr(fs, "_capture", capture)
+    rows = fs.gh_json(["issue", "list"], retries=1)
+
+    assert rows.measured is False and len(calls) == 1
+    assert "Resource not accessible" in rows.error
+
+
+def test_the_list_bound_scales_with_the_declared_page_count(monkeypatch) -> None:
+    """A list read's cost is linear in what it asks for; a flat bound is not (#11202).
+
+    Measured 2026-11-07: ~7 ms/row — 1.0 s at limit=100, 13.0-13.7 s at 2000 (1854
+    open issues), 37.4 s on the owner's Mac, and 2.2x under four concurrent
+    pre-flights. Against a flat 60 s those are simultaneously fine and fatal.
+
+    The seam is DELETED from the environment first (review, LOW): `gh_list_timeout`
+    reads ambient env, so an operator who armed `FLEET_STATE_GH_READ_BOUND=fixed` —
+    exactly the slow-Mac case this change advertises — would get a RED suite on a
+    correct change, and the next lane would read that as a regression.
+    """
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+    assert fs.gh_list_timeout(2000) == 100          # 2000 rows x 50 ms
+    assert fs.gh_list_timeout(400) == fs.GH_LIST_MIN_S   # small reads keep the floor
+    assert fs.gh_list_timeout(0) == fs.GH_LIST_MIN_S     # no declared size -> floor
+    assert fs.gh_list_timeout(2000) > fs.gh_list_timeout(400)
+
+
+def test_the_off_switch_restores_the_pre_11202_path(monkeypatch) -> None:
+    """`FLEET_STATE_GH_READ_BOUND=fixed` -> flat 60 s and NO retry, as before.
+
+    What the old path does when off, stated: a read that contention slowed past 60 s
+    is killed again and the board answers INCOMPLETE — fail-closed, and the cause now
+    names the timeout. It selects no path and no target; the bound is arithmetic.
+
+    ⛔ ONE ATTEMPT IS THE POINT, SO IT IS ASSERTED (review, HIGH). The first draft
+    collected the attempt count and asserted only `measured is False`, while its own
+    comment promised "the single attempt is what the old path did" — and the code then
+    did NOT honour that, because `retries=1` at the call sites overrode the seam. A
+    switch a caller can silently outvote is not a switch: `gh_json` clamps the retry
+    on the seam, and this assertion is what keeps it clamped.
+    """
+    monkeypatch.setenv(fs.GH_READ_BOUND_ENV, "fixed")
+    assert fs.gh_read_bound_enabled() is False
+    assert fs.gh_list_timeout(2000) == fs.GH_LIST_MIN_S
+
+    calls: list[int] = []
+
+    def capture(cmd, timeout=60):
+        calls.append(timeout)
+        return ("", fs.GH_READ_TIMEOUT_RC, "")
+
+    monkeypatch.setattr(fs, "_capture", capture)
+    rows = fs.gh_json(["issue", "list"], timeout=fs.gh_list_timeout(2000), retries=1)
+    assert rows.measured is False
+    # ONE attempt at the FLAT bound — the caller's `retries=1` does not outvote the seam.
+    assert calls == [fs.GH_LIST_MIN_S]
+    assert "(1 attempt(s)" in rows.error and "FIXED seam" in rows.error
+    assert "retried" not in rows.error
+
+
+def test_the_off_switch_off_state_still_fails_closed_end_to_end(monkeypatch) -> None:
+    """The switch must not become a way to make the gate answer without a read."""
+    monkeypatch.setenv(fs.GH_READ_BOUND_ENV, "fixed")
+    monkeypatch.setattr(
+        fs, "_capture", lambda cmd, timeout=60: ("", fs.GH_READ_TIMEOUT_RC, ""))
+    rows = fs.open_issues("o/r")
+
+    assert rows.measured is False and rows == []
+    assert "TIMED OUT" in rows.error
+
+
+
+def test_the_open_issue_read_uses_the_scaled_bound(monkeypatch) -> None:
+    """The expensive surface must actually RECEIVE the bound it derives (#11202)."""
+    monkeypatch.delenv(fs.GH_READ_BOUND_ENV, raising=False)
+    seen: dict[str, object] = {}
+
+    def capture(cmd, timeout=60):
+        seen["cmd"] = list(cmd)
+        seen["timeout"] = timeout
+        return ("[]", 0, "")
+
+    monkeypatch.setattr(fs, "_capture", capture)
+    assert fs.open_issues("o/r") == []
+    assert seen["timeout"] == fs.gh_list_timeout(fs.OPEN_ISSUES_LIMIT)
+    assert "--limit" in seen["cmd"] and "2000" in seen["cmd"]
+
+    fs.open_prs("o/r")
+    assert seen["timeout"] == fs.gh_list_timeout(400)
+
 
 
 def test_build_state_records_the_board_provenance(monkeypatch) -> None:

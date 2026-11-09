@@ -175,9 +175,12 @@ to a query-free CPU regression, which is exactly why the on-loop scrub above shi
 ### Three persistence consumers, one control
 
 Review reproduced a P0 the original scope missed: `_capture_turn_texts` is where the stored **turn**
-text is defined, but the same capture also materializes the session `:Source`, whose `summary` is the
+text is defined, but the same capture also materializes the session `:Source`, whose `summary` was the
 first substantive utterance and whose `topics` are the six most frequent content words — i.e. turn
-text, one property over. Redacting only the turn Points left the credential in the graph on the SAME
+text, one property over. (`#10000` has since replaced that `summary` derivation with a topic-lexicon
+descriptor, so the column no longer carries a sentence at all; the consumer set and the scrubbing
+obligation are unchanged, and the credential below was on the column while it did.) Redacting only
+the turn Points left the credential in the graph on the SAME
 write. A second P0 landed on the Source itself: scrubbing the *assembled* transcript is too late,
 because it is sentence-split and newline-flattened first, so a JWT arrived split into three
 space-separated fragments that no pattern matches. Both are closed by scrubbing per turn at ONE

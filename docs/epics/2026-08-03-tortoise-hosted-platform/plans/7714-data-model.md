@@ -432,6 +432,15 @@ def migrate_teams_to_registry(self) -> dict:
 
 ### Task 8: MCP Tool Exposure
 
+> ⛔ **SUPERSEDED IN PART BY `#4282` (2026-10-27).** The plan below calls SDK
+> methods that have since been DELETED as dead public surface:
+> `membership_list`, `apikey_list` and `invitation_create` are no longer on
+> `TortoiseSDK`, so `_safe(sdk.membership_list, …)` as written raises
+> `AttributeError`. The registry access they described is reachable through the
+> surviving `team_*` / `invitation_*` methods and the registry itself; the M2
+> gaps are tracked on `#10227`. This plan is kept as the historical record of
+> the design, not as an instruction to follow verbatim.
+
 **Intent:** Expose registry CRUD methods as MCP tools with correct safety hints.
 **Acceptance:** Read-only tools have `readOnlyHint=true`; destructive tools have `destructiveHint=true` and require human confirmation.
 **Files:**

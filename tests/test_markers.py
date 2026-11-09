@@ -1032,6 +1032,29 @@ def test_no_redirect_stems_registry_exact():
         # declaration — so the pin reding on the addition is the pin working as
         # designed.
         "test_10121_recency_tie",
+        # #11083: the per-pack relation census's `written` column, measured over a
+        # real store. The fixture builds `TortoiseSDK(<tmpfile>)`, injects it as
+        # the probe's SDK, and reads the graph back off that store, so a URI-set
+        # lane would redirect the construction and the read-back assertion — the
+        # only one that can catch a lie ABOUT THE GRAPH — would be gone.
+        # Registered in all three homes (config/ci-surfaces.yml `carve_out:`,
+        # TEST_NO_REDIRECT_STEMS, and this declaration); this pin is the one that
+        # caught the omission, reding `test-slow (b)` at 9b2851b72b because the
+        # other two homes were registered and this one was not.
+        "test_pack_logic_writeprobe_11083",
+        # #8099 (epic #2080 W4 phase 2; the why half of #2081's indicator 2):
+        # the dream-cycle precompute of why-blocks and the push path that reads
+        # them. Every case builds a PATH-built store
+        # (`TortoiseSDK(<tmpdir>/test.db)`) and asserts on it — `_fresh_sdk`
+        # even wipes it — and the module carries module-level
+        # `pytestmark = pytest.mark.embedded_only`, so the exemption's
+        # load-bearing reason is the SKIP *and* the REDIRECT: an explicit
+        # `db_path` alone does NOT win (the #9209 finding), so a URI-set lane
+        # would point the wipe and the snapshot counts at a shared server
+        # graph. Registered in all three homes — config/ci-surfaces.yml
+        # `carve_out:`, TEST_NO_REDIRECT_STEMS and this declaration — so the pin
+        # reding on the addition is the pin working as designed.
+        "test_why_snapshot_8099",
     })
     assert frozenset(TEST_NO_REDIRECT_STEMS) == expected, (
         "TEST_NO_REDIRECT_STEMS drifted from the pinned carve-out stems "

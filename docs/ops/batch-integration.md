@@ -7,7 +7,7 @@ subjects.team: epistemic-team
 aboutSubjects: batch-integration, ci-wall-clock, ci-headroom-guards
 aboutObjects: tortoise, "#10399", "#10897", "#2148", .mergify.yml, .github/workflows/python-ci.yml, .github/workflows/post-merge-validation.yml, config/ci-surfaces.yml, tools/batch_open.py, superseded-by-fold
 created: 2026-10-31
-updated: 2026-11-04
+updated: 2026-11-06
 ---
 
 # Batch integration — the gate is the batch, not the PR
@@ -1208,7 +1208,7 @@ work rather than reordering it, and they are the larger half of the answer:
 |---|---|---|
 | **1. Entry gate** | a superseded constituent cannot ENTER the queue (`-label=superseded-by-fold` in `queue_conditions`) | `.mergify.yml`, PR #10902 |
 | **2. Close at fold-open** | `tools/batch_open.py` proves the constituent's head is contained in the fold's tree, then labels, comments and closes it | `tools/batch_open.py`, PR #10902 |
-| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue | this change |
+| **3. CI priority for the fold** | the fold's own matrix rows get their own runner class, and the fold is ordered first in the queue — ⛔ bounded by the matrix fan-out cap: 3 legs of a matrix run at once, on a fold run too (`docs/ops/ci-wall-clock.md` §7 "What the cap does NOT exempt") | this change |
 
 Entry, not merge, is where mechanism 1 must bite: a PR blocked at entry never costs a CI cycle, while
 one blocked at merge has already spent the queue's validation run — and under the queue's own
@@ -1239,7 +1239,7 @@ it does not deprioritise the job — it makes the eight non-`canary_producer` le
 **unstartable**, and those legs feed the required `python-ci-gate`, so the result is a red-less,
 progress-less pending check. `parse_fold_runner` cannot catch this: it validates the **shape** of the
 declaration, never the live pool — whether a runner carries a label is a fact about the fleet, not
-about the string (`tools/ci_selection.py:4493-4500`). So the fail-safe covers typos in the JSON, not
+about the string (`tools/ci_selection.py::parse_fold_runner`). So the fail-safe covers typos in the JSON, not
 typo'd or invented labels. At this writing the pool offers `["self-hosted"]`,
 `["self-hosted", "self-hosted-x64"]`, or `["ubuntu-latest"]`.
 
@@ -1252,8 +1252,8 @@ contended box — holds the fold's required legs PENDING with nothing to answer 
 `docs/ops/ci-runner-x64.md` records for every pool-only departure (`:773-779`); and the pool is
 MEASURABLY slower than hosted, in both of its architectures. On the x64 box, `test-slow (a)` over the
 same 365 nodeids took **1352.5 s against 246.5 s hosted — 5.49×** (`docs/ops/ci-runner-x64.md:208`); the
-ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:1844`) and one of them
-killed the canary at **32m12s of a 30m budget** (`python-ci.yml:1911`) — the same failure this section
+ARM64 VMs resolve `ubuntu-latest` to a **~2× slower** class (`python-ci.yml:2105`) and one of them
+killed the canary at **32m12s of a 30m budget** (`python-ci.yml:2172`) — the same failure this section
 cites as the reason the `canary_producer` row is exempt. A priority mechanism that routes a fold onto a
 slower or stalled class makes the fold slower, which is the opposite of its purpose. Declare the class
 **and** the reason the fold may have it: on this fleet that reason is "dedicated fold capacity exists",
@@ -1275,6 +1275,16 @@ comparison of runner classes — the failure measured 2026-10-27..30, when run `
 `5a2ae6aa1`) had `test (i)`, the canary, taken by `pi-runner-vm-5` (ARM64) and killed at 32m12s of a
 30m budget (`docs/ops/ci-runner-x64.md:847`, `:888`). A fold gets priority on the legs that carry the
 wall; the producer stays where the streak expects it.
+
+⛔ **The class does not buy PARALLEL legs.** `strategy.max-parallel: 3` (#6744) is a bare literal on
+all three shard matrices, so it applies to a fold's validation run exactly as to any other PR: even
+with dedicated fold capacity for all eight wall-carrying legs, at most **three** of them run at
+once, and the matrix-band regression `docs/ops/ci-wall-clock.md` §7 measures and accepts
+(`+17.9 m p50 / +23.2 m max`) applies to the fold's own band as well. `max-parallel` is a JOB-level
+`strategy` key, not per-row data like `runs-on`, so a fold cannot be exempted per row — an
+exemption would have to be an expression on the key itself, which is unverified here and **not**
+taken. The invariants behind the cap are about fairness between PRs, which is why a fold is throttled
+by the same bound; see `docs/ops/ci-wall-clock.md` §7, "What the cap does NOT exempt".
 
 `CI_PR_LABELS` and `CI_FOLD_RUNNER_LABELS` ride **both** matrix emitters (`Emit push matrix`,
 `Tier-2 duration split`) at STEP scope. Job scope is barred — `tests/test_capstone_preregistration_9075.py`
@@ -1306,8 +1316,9 @@ left.
   times.** The Mergify half is evaluated server-side against the live PR, so a label added later does
   reach the queue. The runner half does not: both emitters read `CI_PR_LABELS:
   ${{ join(github.event.pull_request.labels.*.name, ',') }}`, which is the **webhook payload snapshot
-  captured when the run was created** (`tools/ci_selection.py:4631` is a plain `os.environ.get`), and
-  `on: pull_request:` carries no `types:`, so labelling an existing PR starts **no new run**. Consequences,
+  captured when the run was created** (`tools/ci_selection.py::fast_matrix_include` reads both
+  through a plain `os.environ.get`), and `on: pull_request:` carries no `types:`, so labelling an
+  existing PR starts **no new run**. Consequences,
   in operator terms: apply `batch-fold` in the PR-create call (`labels:` on
   `POST /repos/{o}/{r}/pulls` — the shape `tools/batch_open.py` should use when #10902 takes this over),
   or push a commit after labelling so the `synchronize` event runs the emitters again. **A label added to

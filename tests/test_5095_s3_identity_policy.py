@@ -749,14 +749,21 @@ class TestTheRemainingAbsence:
     `#5095` made the prompt and the record truthful; it deliberately did NOT
     suppress a write (the correct seam is a create gate inside S5, and
     `execute_embed({})` also drops retractions, supersessions and chain notes).
-    So the run still mints a candidate whose identity was never established, and
-    that is the whole of what remains missing from `failure_policy`.
 
-    ⛔ This test exists to make the absence FALSIFIABLE rather than narrated: the
-    day a create gate lands, the payload below is empty for an unresolved lookup,
-    this reds, and `config/v4-mechanisms.yml`'s row must flip to `implemented`.
-    A register whose absence claim no call can see is the drift the register
-    exists to prevent (#5095 review A3).
+    ⚠️ **The MINTED candidate's half LANDED with `#10997`**, and this pin is
+    re-stated to cover only what is still absent: `_mint_endpoint` no longer
+    fabricates a `statement` Point from a model ref on an `unresolved`/`partial`
+    lookup — it HOLDS the edge with its endpoint (`held`, `test_10997_identity_hold.py`)
+    — while a Point and an entity the MODEL itself emitted are still created on
+    that same lookup. So the payload below is still non-empty for `{}`, and it is
+    non-empty **for the model-emitted candidates only**: the `_EMBED` fixture
+    carries no operator, so nothing in it is a minted endpoint.
+
+    ⛔ This test exists to make the REMAINING absence FALSIFIABLE rather than
+    narrated: the day the model-emitted half is gated too, the payload below is
+    empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s
+    row must flip to `implemented`. A register whose absence claim no call can see
+    is the drift the register exists to prevent (#5095 review A3).
     """
 
     def test_an_unresolved_lookup_still_mints(self):

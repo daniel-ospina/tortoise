@@ -30,6 +30,15 @@ public _headers
 public _redirects
 public 404.html
 public assets
+# The icon trio and the shared link-preview image (PR #11318). `favicon.ico` is the
+# bare path a browser, feed reader and crawler fetch WITHOUT reading the HTML, so it
+# must be staged at the site root: an excluded — or forgotten — entry is exactly the
+# 404 this trio exists to remove, on BOTH custom domains of this project. The shared
+# preview image needs no row of its own: it is nested under the already-public
+# `assets/` (the table decides the TOP level only).
+public apple-touch-icon.png
+public favicon.ico
+public favicon.png
 public blog
 public consent.js
 public contact.html

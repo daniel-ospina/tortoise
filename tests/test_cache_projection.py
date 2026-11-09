@@ -132,28 +132,87 @@ def _node(label: str, row: dict):
 # ── 1. the read shape is total and lossless ────────────────────────────────
 
 
+def _declared_not_projectable() -> set[tuple[str, str]]:
+    """`{(table, column)}` the projection DECLARES it must not materialise.
+
+    Read from `cache_projection.CACHE_FORBIDDEN_COLUMNS`, never restated: the
+    two tests below use it as the ONLY permitted reason for a PRIMARY row not
+    to project, so a column that stops projecting for any other reason still
+    reds them (#10394).
+    """
+    return {(table, column)
+            for table, columns in cp.CACHE_FORBIDDEN_COLUMNS.items()
+            for column in columns}
+
+
 def test_every_primary_property_has_a_canonical_spelling_that_is_projected():
     """The record's PRIMARY field set survives, spelled the GRAPH's way.
 
     `pointKind` is the graph property; `point_kind` is the column. A projection
     that wrote the column name would rename the whole namespace, and the S1/S3
     field contract would be broken by a spelling.
+
+    ⛔ ONE DECLARED EXCEPTION, and it is a THIRD category rather than a hole in
+    the rule (`#10394`): a column can be PRIMARY in the record — authority that
+    must be stored — and forbidden in the CACHE, because the target store is
+    where §9.1/D1 says the value must not live at all (`source.story_arc`,
+    `event.story_arc`: the S1 narrative, whose home is
+    `public.session_narrative`). The exemption is not a wildcard: the set of
+    exemptions ASSERTED below is derived from
+    `CACHE_FORBIDDEN_COLUMNS` and must equal the set of PRIMARY rows that fail
+    to project, so any OTHER column that stops projecting reds this test.
     """
+    exempt: set[tuple[str, str]] = set()
     unresolved = []
     for table, prop in _rows("P"):
         if table not in cp.placement_columns():
             continue  # a predicate-only row (no property, e.g. `mitigated_by.*`)
         canonical = cp.canonical_property(table, rp.snake(prop))
         if canonical not in cp.projected_properties(table):
+            if rp.snake(prop) in cp.cache_forbidden_columns(table):
+                exempt.add((table, rp.snake(prop)))
+                continue
             unresolved.append((table, prop, canonical))
     assert not unresolved, (
         "a PRIMARY property the placement table declares is NOT projected — "
         f"the cache would be poorer than the record: {unresolved}"
     )
+    # ⛔ THE SET'S CONTENTS ARE PINNED SEPARATELY, because the equality above
+    # cannot catch an OVER-BROAD entry (measured: adding a live PRIMARY column —
+    # `source.title` — to the declaration reds NOTHING; the gate ratifies it,
+    # since `exempt` is built from the same declaration). One explicit allowance
+    # per table means a new entry forces a deliberate edit here, and a leaked
+    # one is a red rather than a silently narrower projection.
+    assert {
+        "source": frozenset({"story_arc"}),
+        "event": frozenset({"story_arc"}),
+    } == cp.CACHE_FORBIDDEN_COLUMNS, (
+        "the not-projectable declaration changed: "
+        f"{ {t: sorted(c) for t, c in cp.CACHE_FORBIDDEN_COLUMNS.items()} }. "
+        "Every entry is a PRIMARY column the cache will NEVER write — adding one "
+        "silently narrows the restored field set, so it is a decision that "
+        "belongs in this test and in §9.1's placement rows, not in a one-line "
+        "dict edit (#10394)")
+    assert exempt == _declared_not_projectable(), (
+        "the set of PRIMARY rows that do not project is not the set the "
+        f"projection DECLARES it must not materialise: {sorted(exempt)} vs "
+        f"{sorted(_declared_not_projectable())}. Either a column silently "
+        "stopped projecting, or `CACHE_FORBIDDEN_COLUMNS` names a column that "
+        "is not a PRIMARY row (and the entry is then doing nothing)")
 
 
 def test_a_primary_property_round_trips_through_a_record_row():
-    """Arrange a real row shape and assert the value lands under its own name."""
+    """Arrange a real row shape and assert the value lands under its own name.
+
+    The DECLARED not-projectable columns are asserted the other way round: a row
+    that CARRIES one must not have it on the node, and must still carry its
+    neighbours. Both directions are here so the exemption cannot become a place
+    where a column's presence/absence is simply unobserved — the behaviour is
+    the seam the RECORD → CACHE restore runs through (`#10394` door 2), and
+    `tests/test_9555_narrative_cache_rebuild.py` measures it on a real restore.
+    """
+    forbidden = _declared_not_projectable()
+    checked_forbidden: set[tuple[str, str]] = set()
     for table, prop in _rows("P"):
         if table == "relation":
             continue  # exercised by the relation test below
@@ -161,11 +220,87 @@ def test_a_primary_property_round_trips_through_a_record_row():
             continue
         label = next(k for k, v in cp.NODE_TABLES.items() if v == table)
         canonical = cp.canonical_property(table, rp.snake(prop))
-        got = _node(label, {rp.snake(prop): "v"})
+        # The NEIGHBOUR is a `props`-tail key: an ordinary open-set property
+        # that reaches the node through the same function, and one that can
+        # never collide with the placement row under test (`summary` is itself a
+        # PRIMARY row on `source`/`event`).
+        row = {rp.snake(prop): "v", "props": {"openSetProp": "kept"}}
+        got = _node(label, row)
+        if (table, rp.snake(prop)) in forbidden:
+            checked_forbidden.add((table, rp.snake(prop)))
+            assert canonical not in got.props, (
+                f"{table}.{rp.snake(prop)} is DECLARED not-projectable "
+                f"(`CACHE_FORBIDDEN_COLUMNS`) but a row carrying it projected "
+                f"{canonical!r} anyway — the deny is not reaching the seam")
+            assert got.props.get("openSetProp") == "kept", (
+                f"{table}: the not-projectable deny dropped the whole row "
+                "instead of the one column")
+            continue
         assert got.props.get(canonical) == "v", (
             f"{table}.{rp.snake(prop)} did not project to {canonical!r} "
             f"(the placement table spells it {prop!r})"
         )
+    assert checked_forbidden == forbidden, (
+        f"a declared not-projectable column was never exercised: "
+        f"{sorted(forbidden - checked_forbidden)} — a stale entry would keep "
+        "guarding a name while the real column projected freely")
+
+
+def test_the_props_tail_filters_a_not_projectable_column_in_PROPERTY_space(
+        monkeypatch):
+    """The tail is keyed by GRAPH PROPERTY names; the deny set is COLUMN names.
+
+    ⛔ WHY THIS IS PINNED WITH A SYNTHETIC ENTRY. `_props_from_row`'s tail filter
+    widens `forbidden` through `placement_spellings()`, because five columns are
+    AMBIGUOUS (`ambiguities()`: `event.session_id` → `sessionId`/`session_id`, …)
+    and filtering on the column name alone would let a forbidden AMBIGUOUS column
+    walk through the open-set door while the column door stayed shut. But
+    `story_arc` — the one column `CACHE_FORBIDDEN_COLUMNS` declares today — spells
+    IDENTICALLY in both spaces, so `tail_denied == forbidden` on every declared
+    entry and deleting the widening changes no test outcome: the same
+    cannot-red shape the column door one screen up documents. Rather than assume
+    the widening works, this arm makes a forbidden column AMBIGUOUS and asserts
+    the GRAPH spelling is what the tail drops.
+
+    Nothing here states a policy: the column is borrowed from the placement
+    table's own ambiguity list and the declaration is monkeypatched, so the real
+    `CACHE_FORBIDDEN_COLUMNS` is untouched.
+
+    ⛔ THE CACHE MUST BE CLEARED IN BOTH `try` AND `finally`, and this is not
+    housekeeping — it is the difference between a test and a landmine. The
+    monkeypatched entry REPLACES `event`'s set, so during the patch `story_arc`
+    is not forbidden and the `projected_columns("event")` call this test makes
+    caches a projection that KEEPS it. `monkeypatch` restores the dict and not
+    that cache, so the stale entry then outlives the test — and
+    `test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`
+    reports this PR's own seam as re-opened (`projected_columns('event') still
+    keeps 'story_arc' …`) on a CORRECT tree. Measured: running this test and
+    that pin together in one selection failed 1 of 2 before this clear was
+    added, and passes after. Clearing in `finally` too, so a failure inside the
+    asserts cannot leak it either. The `props`-tail arm in
+    `test_9555_narrative_cache_rebuild.py` (2c) already does exactly this.
+    """
+    column = "session_id"
+    spellings = cp.placement_spellings()["event"][column]
+    property_name = next(s for s in spellings if s != column)
+    assert property_name != column, "the column no longer spells itself the graph's way"
+
+    monkeypatch.setitem(cp.CACHE_FORBIDDEN_COLUMNS, "event",
+                        frozenset({column}))
+    cp.projected_columns.cache_clear()
+    try:
+        row = {"props": {property_name: "the S1 narrative",
+                         "openSetProp": "kept"}}
+        got = _node("Event", row)
+        assert property_name not in got.props, (
+            f"`event.{column}` is declared not-projectable but its GRAPH spelling "
+            f"{property_name!r} reached the node through the `props` tail — the "
+            "tail filter is keyed in COLUMN space and cannot deny an ambiguous "
+            "column")
+        assert got.props.get("openSetProp") == "kept", (
+            "the tail deny dropped the whole tail instead of the one property")
+    finally:
+        cp.projected_columns.cache_clear()
 
 
 def test_no_derived_property_has_a_record_column():
@@ -683,22 +818,23 @@ def test_relation_props_ride_the_edge_and_the_predicate_is_the_rel_type():
 
 
 def test_rebuild_equals_record_no_extra_node_and_no_extra_field():
-    """The rebuild's field set is EXACTLY the record's — never a superset.
+    """The rebuild's field set is EXACTLY the record VIEW's — never a superset of it.
 
-    ⚠️ ONE DECLARED EXCEPTION (#9634): the properties in
-    `cp.FOLD_ON_CREATE_DEFAULTS` are the FOLD's `ON CREATE` constants, applied
-    where the record row is silent, so the view carries them before this test
-    runs. That is why the comparison below cannot see this class — the bound on
-    the exception is
-    `test_the_declared_fold_defaults_are_the_folds_own_constants`, not this
-    assertion. Everything NOT in that table is still pinned exactly here.
-
-    This is S3's contract clause at the STATEMENT level: a superset would be the
-    cache carrying state the record does not hold, i.e. the cache becoming a
-    second authority. ⛔ The assertion runs over `plan.statements` — the thing
-    that decides what is written — NOT over `plan.node_props()`, which returns
-    `RecordNode.props` and would compare the record to itself (a mutation that
-    made `node_statement` drop a field was invisible to the model-level check).
+    ⚠️ "The record VIEW's", not "the record's COLUMNS". ⛔ Comparing the plan
+    against `projected_columns()` is the field-set/VALUE-and-SPELLING conflation
+    §17.2 exists to forbid, and it manufactures a difference both ways: measured on
+    this file's own `_view()` `:Object` row (`{"id","name","props":{}}`), the plan
+    is `{id, name, objectKind, title}`, which against the 16 COLUMN names reports
+    `objectKind` as "extra" — while `object_kind` IS a projected column; only the
+    camelCase spelling differs. Against the record's projected PROPERTIES the same
+    plan is a strict SUBSET (no extra, 12 of 16 missing), because `_props_from_row`
+    SKIPS a column whose value is `None`. The ONE widening name is `status`, and it
+    appears only when the row carries a supersession carrier: then the plan is
+    `_view()`'s set + `{status}`, i.e. one property with no column at all. So the
+    identity that holds is against `set(node.props)` — the VIEW — and `§17.2`
+    states the same distinction by direction. The assertion below compares `written`
+    against that set, which is the only comparison where both sides speak the same
+    vocabulary.
     """
     view = _view()
     plan = cp.record_plan(view.nodes, view.relations)
@@ -2136,7 +2272,7 @@ def test_the_fold_vocabulary_is_status_folds_one_home_and_not_a_copy():
         "EVENT_STREAM_FOLDS gained or lost a derived property — every member "
         "needs its own evidence that the record's event stream decides it. "
         "`Subject` joined at #9974: its `status` is the projection-owned cache "
-        "`ONTOLOGY.md:421` reaches (\"Projection-owned since #1423 — the Subject "
+        "`ONTOLOGY.md:424` reaches (\"Projection-owned since #1423 — the Subject "
         "twin of the Object status cache\"; §2.6 rules on the Object half), it "
         "reaches the record only through the same `state.status` write, and "
         "leaving it out left one of the two labels that carry the field "
@@ -2239,7 +2375,7 @@ def test_a_subject_restatus_is_folded_too():
 
     #9974's Subject evidence is the `mutations_for({… "label": "Subject",
     "state": {"status": "archived"}})` measurement on the issue (its headline
-    reproduction is the Object), and `ONTOLOGY.md:421` carries the Subject twin
+    reproduction is the Object), and `ONTOLOGY.md:424` carries the Subject twin
     of the cache — so a fold that stopped at `:Object` would close the issue on
     one of the two labels that rule on the field.
     """

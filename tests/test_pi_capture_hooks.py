@@ -369,7 +369,24 @@ def _run_installed_probe(tmp_home: Path, installed: Path, node: str):
     `_scrubbed_env` strips the capture credential but NOT
     `TORTOISE_CAPTURE_SPOOL_DIR`, so `PROBE_SPOOL` is passed explicitly —
     otherwise a real spool could be written.
+
+    ⛔ The temp HOME declares its OWN module type, because Node decides a `.ts`
+    file's format from the NEAREST parent `package.json` and the fixture cannot
+    own what sits above it. A `.ts` with no `package.json` in its chain is
+    AMBIGUOUS — Node retries it as ESM, which is why the source-tree probes
+    load — but one ancestor declaring `"type": "commonjs"` settles it as
+    CommonJS and the seam dies with `SyntaxError: Cannot use import statement
+    outside a module`. The temp HOME lives under `/tmp`, and a host or CI runner
+    carrying agent-infra's own `/tmp/package.json` (`"type": "commonjs"`)
+    poisons every path beneath it: measured on this PR's `test (f)` job, where
+    both installed-seam checks redded on the MACHINE's `/tmp`, not on the
+    artifact. That is the same coupling `_scrubbed_env` exists to remove
+    (#3721), so the fixture pins the type the way it already pins HOME. Written
+    at the temp HOME root, NOT beside the seam: the artifact's install directory
+    must stay sibling-free, which is the property the anti-vacuity check below
+    exercises.
     """
+    (tmp_home / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
     probe = tmp_home / "probe.mjs"
     probe.write_text(_PROBE_SOURCE, encoding="utf-8")
     return subprocess.run(
@@ -492,6 +509,40 @@ def test_installed_seam_probe_fails_when_the_artifact_is_not_self_contained():
         assert proc.returncode != 0, combined
         assert "ERR_MODULE_NOT_FOUND" in combined, combined
         assert "helper.ts" in combined, combined
+
+
+def test_the_installed_seam_probe_survives_a_hostile_ancestor_package_json():
+    """#11124 CI: the fixture's module type is PINNED, not inherited from `/tmp`.
+
+    Anti-vacuity for the `package.json` `_run_installed_probe` writes. Node takes
+    a `.ts` file's format from the nearest parent `package.json`, so an ancestor
+    declaring `"type": "commonjs"` turns the seam into a CommonJS module and it
+    fails to LOAD — `SyntaxError: Cannot use import statement outside a
+    module` — which is a verdict about the host's `/tmp` rather than about the
+    artifact. This test builds that exact ancestor and asserts the probe still
+    fires: delete the pinning `package.json` and this REDs, while the host `/tmp`
+    of the machine running it is irrelevant either way.
+    """
+    node = _require_node()
+    with tempfile.TemporaryDirectory() as outer:
+        outer_path = Path(outer)
+        # The poisoning shape measured in CI: agent-infra's own /tmp/package.json.
+        (outer_path / "package.json").write_text(
+            '{"type": "commonjs"}\n', encoding="utf-8"
+        )
+        tmp_home = outer_path / "home"
+        tmp_home.mkdir()
+        result = install_capture("pi", home=tmp_home)
+        assert result.ok, result.error or "install refused"
+        installed = _installed_seam_path(tmp_home)
+        assert installed.is_file(), f"installer wrote no seam at {installed}"
+        proc = _run_installed_probe(tmp_home, installed, node)
+        assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+        assert "PROBE_JSON:" in proc.stdout, proc.stdout
+        assert "Cannot use import statement outside a module" not in proc.stderr, (
+            f"an ancestor package.json decided the seam's module type — the "
+            f"fixture must pin its own\nstderr:\n{proc.stderr}"
+        )
 
 
 # ── #4897: the two-language truncation-marker contract ────────────────────

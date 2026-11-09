@@ -797,6 +797,7 @@ def test_refresh_durations_is_text_preserving_and_carries_forward(tmp_path: Path
     assert 'durations_captured_at: "2026-09-28T00:00:00Z"' in text
     assert stats == {"sampled_keys": 2, "manifest_keys": 3, "added_keys": 0,
                      "carried_forward": 1, "kept_as_lower_bound": 0,
+                     "kept_at_declared_cap": 0,
                      "captured_at": "2026-09-28T00:00:00Z"}
     # the result is still valid YAML and still passes the manifest-side gate
     manifest = yaml.safe_load(text)
@@ -917,10 +918,10 @@ carve_out: []
 push_extra: []
 durations:
   test_surface_manifest.py: 199.1  # #9017 CI-junit 2026-10-18 (run 39165691659); was 180.7
+  test_6211_ep_scale.py: 19.0
   # #6211: locally measured on this host, docker lane, whole-file wall time over
   # several runs (shape: 23 tests / 12-19 s; scale: 4 tests / 10-19 s incl. the
   # 3,353-claim fixture build).
-  test_6211_ep_scale.py: 19.0
   test_raised.py: 87.4
   test_unchanged.py: 12.0  # #9017 CI-junit 2026-10-18 (run 39165691659); was 11.0
 """
@@ -1043,6 +1044,209 @@ def test_an_absent_denominator_is_unknown_not_fully_covered(tmp_path: Path) -> N
                if ln.strip().startswith("test_unknown.py:"))
     assert "no declared testcase count" in row
     assert "#3554: a local estimate" in row
+
+
+# ── #11607: a parametrised file's row must be able to record an IMPROVEMENT ──
+#
+# `declared_test_counts` OMITS a `parametrize` file (a `def` count is a floor of
+# the collected count, and admitting a floor once licensed a 10x discount —
+# #9134). The unremarked consequence was that the row became MONOTONIC: absent
+# denominator -> UNKNOWN -> "raisable, never lowerable", so even a measured 4.25x
+# speedup could not reach the map. That is what deadlocked PR #11602: its wall pin
+# reads `test_ci_selection.py: 545.1` and refused to move, while the real cost of
+# that file was 84 % uncached YAML parsing.
+#
+# These four pins are the falsifier the issue asks for: a parametrised file with a
+# COMPLETE, lower reading must move DOWN, and one with a TRUNCATED reading must
+# not — and the collection probe must be the thing that decides, so removing it
+# puts every assertion back to the pre-fix (monotonic) answer.
+
+_PARAMETRISED_MANIFEST = (
+    "surfaces:\n  core:\n    - test_param.py\n"
+    "durations:\n"
+    "  test_param.py: 545.1  # ci-timing junit-census+top-15 2026-11-09 "
+    "(run 42546828652); was 389.2\n"
+)
+
+
+def _rendered_parametrised(tmp_path: Path, *, observed: int,
+                           collected: dict | None) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, _PARAMETRISED_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(),
+        # the measured post-fix census of `tests/test_ci_selection.py`
+        {"test_param.py": 126.5},
+        "2026-11-09T09:00:00Z",
+        # the AST denominator is ABSENT for a parametrised file — that is the
+        # whole shape under test, so `declared` is 0 and the AST cannot decide
+        coverage={"test_param.py": (observed, 0)},
+        sample_label=_LOWER_BOUND_LABEL,
+        collected=collected,
+    )
+
+
+def test_a_parametrised_row_moves_down_when_collection_proves_full_coverage(
+        tmp_path: Path) -> None:
+    """THE #11607 DEFECT. The reading saw every testcase pytest collects, so it is
+    comparable to the recorded weight and the row MUST move — the direction the
+    map could not take for any parametrised file.
+
+    Non-vacuity: drop `collected=` and the identical render keeps 545.1 (the next
+    pin asserts exactly that), so this assertion is the one the fix buys.
+    """
+    text, stats = _rendered_parametrised(tmp_path, observed=486,
+                                         collected={"test_param.py": 486})
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_param.py"] == 126.5
+    assert stats["kept_as_lower_bound"] == 0
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "was 545.1" in row, row
+    assert ci_timing.validate_refreshed_manifest(text) == []
+
+
+def test_the_same_parametrised_row_is_still_monotonic_without_a_collection(
+        tmp_path: Path) -> None:
+    """The control: SAME manifest, SAME reading, no collection probe. The row is
+    held and the note says why — this is the pre-#11607 behaviour the fix must not
+    silently retire for keys the probe cannot answer for (a probe that failed, a
+    pytest that could not import the file, a `--allow-window-only` sweep)."""
+    text, stats = _rendered_parametrised(tmp_path, observed=486, collected=None)
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "no declared testcase count" in row, row
+    assert "kept 545.1" in row, row
+
+
+def test_a_truncated_reading_on_a_parametrised_file_cannot_lower_the_row(
+        tmp_path: Path) -> None:
+    """THE DIRECTION THE #9134 GUARD PROTECTS, kept. 400 of the 486 testcases is
+    a LOWER bound: it can raise a weight but it cannot discount one, exactly as
+    before. Without this arm the fix would be a licence to discount from any
+    partial census."""
+    text, stats = _rendered_parametrised(tmp_path, observed=400,
+                                         collected={"test_param.py": 486})
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    # and the witness now names WHERE the denominator came from, so a reader can
+    # tell a collected count from a declared one
+    assert "the reading saw 400 of 486 testcases pytest collects" in row, row
+
+
+def test_a_skipped_case_cannot_be_counted_as_a_measured_one(
+        tmp_path: Path) -> None:
+    """#11602 review, P1 — A `<skipped>` CASE IS NOT A MEASURED CASE.
+
+    `parse_junit` counts every testcase the report CARRIED in `tests` and only the
+    ones that EXECUTED in `ran`, while `total_ms` sums the executed ones alone. A
+    witness built from `tests` therefore reads "every case was measured" out of a
+    reading that measured the cheap remainder, and the row is discounted to it —
+    the #9651 under-weight `coverage` exists to prevent, and reachable for a
+    `parametrize` file only since #11607 gave that class a denominator at all.
+
+    TWO ARMS, and neither stands in for the other (#11602 review, P3 — this
+    docstring used to claim the arms below it red on the witness swap, which they
+    cannot: they read the READING, not the witness):
+
+    * HERE — the divergence is real in the collector (`tests` 3 beside `ran` 2 for
+      this junit) and the renderer HOLDS a `ran` witness: measured, swapping this
+      call's witness to `(entry["tests"], 0)` makes coverage (3, 3) against 3
+      collected, `observed >= declared` holds, the row re-bases to 0.1 s and the
+      two assertions BELOW THIS PARAGRAPH (the 545.1 hold and
+      `kept_as_lower_bound == 1`) red. Reverting the renderer's
+      `observed >= declared` rule reds them too;
+    * `test_the_cli_witness_counts_executed_testcases_not_reported_ones` — the
+      CALLER wiring (`main` reading `m["ran"]`), measured by reverting it to
+      `m["tests"]`: that pin reds with `(4, 4)` against `(3, 4)`. This test cannot
+      see that swap, because it supplies its own witness.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_param.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('arm', [1, 2, 3])\n"
+        "def test_one(arm):\n    pass\n", encoding="utf-8")
+    write_junit(tmp_path, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="3">'
+                + "".join(
+                    '<testcase classname="tests.test_param" '
+                    f'name="test_one[{i}]" file="tests/test_param.py" '
+                    'time="0.05"/>' for i in (1, 2))
+                + '<testcase classname="tests.test_param" name="test_one[3]" '
+                  'file="tests/test_param.py" time="0">'
+                  '<skipped type="pytest.skip" message="needs a live DB"/>'
+                  "</testcase>"
+                "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(tmp_path / "logs")
+    entry = measurements["test_param.py"]
+    # the two counts DIVERGE on exactly this shape, and only `ran` describes the
+    # seconds beside it
+    assert (entry["tests"], entry["ran"]) == (3, 2)
+    # the reading IS the cost of the two cases that ran, so it is a LOWER bound
+    assert entry["seconds"] == 0.1
+
+    text, stats = ci_timing.render_refreshed_manifest(
+        _PARAMETRISED_MANIFEST, {"test_param.py": entry["seconds"]},
+        "2026-11-09T09:00:00Z",
+        coverage={"test_param.py": (entry["ran"], 0)},
+        sample_label=_LOWER_BOUND_LABEL,
+        # the collection probe DOES answer (3 collected) — so the hold is decided
+        # by the skip, not by a missing denominator
+        collected={"test_param.py": 3})
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "the reading saw 2 of 3 testcases pytest collects" in row, row
+
+
+def test_collected_test_counts_probes_pytest_and_fails_closed(
+        tmp_path: Path) -> None:
+    """The probe is the denominator's whole basis, so it is pinned against
+    pytest's own answer rather than against a constant that could drift."""
+    repo_root = Path(__file__).resolve().parent.parent
+    counts = ci_timing.collected_test_counts(
+        ["test_dialog_tile_key.py", "test_no_such_file_11607.py"], repo_root)
+    # a real, parametrised-by-fixture file collects a positive count
+    assert counts.get("test_dialog_tile_key.py", 0) > 0
+    # an absent file is ABSENT (not 0, not guessed) — absent stays UNKNOWN
+    assert "test_no_such_file_11607.py" not in counts
+    # and the count agrees with what pytest reports for that same file
+    proc = subprocess.run(
+        [sys.executable, "-m", "pytest",
+         str(repo_root / "tests" / "test_dialog_tile_key.py"),
+         "--collect-only", "-q", "-p", "no:cacheprovider"],
+        cwd=str(repo_root), capture_output=True, text=True, timeout=300)
+    assert proc.returncode == 0, proc.stderr[-400:]
+    assert counts["test_dialog_tile_key.py"] == sum(
+        1 for line in proc.stdout.splitlines()
+        if ci_timing._COLLECTED_NODEID_RE.match(line))
+
+
+def test_only_the_rows_a_collection_can_change_are_probed() -> None:
+    """The probe costs a subprocess, so it is scoped to the rows where it can
+    change the verdict: an absent AST denominator AND a discount. A key with a
+    declared count is decided by the AST; a reading that RAISES needs no proof; a
+    key with no committed row is an ADD, which an absent denominator never
+    blocked."""
+    manifest = (
+        "surfaces:\n  core:\n"
+        "    - test_param.py\n    - test_declared.py\n"
+        "    - test_raise.py\n    - test_new.py\n"
+        "durations:\n"
+        "  test_param.py: 100.0\n  test_declared.py: 100.0\n"
+        "  test_raise.py: 10.0\n"
+    )
+    weights = {"test_param.py": 50.0,   # absent AST count + discount -> PROBE
+               "test_declared.py": 50.0,  # AST count decides -> no probe
+               "test_raise.py": 99.0,   # absent AST count but a RAISE -> no probe
+               "test_new.py": 5.0}      # no committed row -> an add, no probe
+    assert ci_timing.discount_candidate_keys(
+        weights, manifest, {"test_declared.py": 7}) == ["test_param.py"]
 
 
 def test_a_held_row_states_one_basis_across_refreshes(tmp_path: Path) -> None:
@@ -2559,7 +2763,22 @@ def test_the_artifact_and_the_map_cite_the_same_run() -> None:
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     stamp = re.search(r'^durations_captured_at:\s*"(\d{4}-\d{2}-\d{2})', text, re.M)
     assert stamp, "durations_captured_at is missing or unparseable"
-    notes = re.findall(r"ci-timing top-15 (\d{4}-\d{2}-\d{2}) \(run ([^)]+)\)", text)
+    # BOTH sample-label shapes, via the writer's OWN pattern — not the legacy one.
+    # `ci-timing top-15 …` is the pre-2026-10 label; the writer emits
+    # `ci-timing junit-census+top-15 …` (the same pair `_SAMPLE_LABEL_RE` spells in
+    # `tools/ci_timing.py`). Reading only the legacy spelling makes the arm that
+    # #9134's P1 exists for UNREACHABLE: the newest legacy note is 2026-10-20, so
+    # `newest == sampled_date` can never hold (the artifact samples 2026-11-02) and
+    # the guard always falls to its `else` (date-vs-stamp only) — so a pair sampling
+    # run A while the map cites run B ON THE SAME DAY passes, which is the exact
+    # mismatch this test is named for. Measured on the shipped pair at this head:
+    # the legacy pattern finds 5 notes, newest 2026-10-20; the both-shapes pattern
+    # finds 1117, newest 2026-11-02 = the sampled date, citing 41375596528. Two
+    # labels, two behaviours, so the pattern is pinned to the writer's rather than
+    # restated (#10575 review, P3).
+    notes = re.findall(
+        rf"{ci_timing._SAMPLE_LABEL_RE} (\d{{4}}-\d{{2}}-\d{{2}}) \(run ([^)]+)\)",
+        text)
     assert notes, "the map carries no capture-dated note, so this guard is vacuous"
     newest = max(date for date, _ in notes)
     newest_runs = {run for date, run in notes if date == newest}
@@ -2865,7 +3084,9 @@ def test_a_partial_reading_of_a_parametrised_file_cannot_lower_a_weight(
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     declared = ci_timing.declared_test_counts(measurements, repo)
-    coverage = {path: (m["tests"], declared[path])
+    # `ran`, not `tests`: a skipped case is not a measured one (#11602 review,
+    # P1). No skips in this fixture, so both counts are 1 here.
+    coverage = {path: (m["ran"], declared[path])
                 for path, m in measurements.items() if path in declared}
     # The parametrised file has NO denominator, so the caller supplies no witness
     # for it — not a floor it could satisfy with a fifth of the file.
@@ -2956,7 +3177,11 @@ def test_a_phase_only_reading_cannot_pass_itself_off_as_full_coverage(
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     declared = ci_timing.declared_test_counts(measurements, repo)
-    coverage = {path: (m["tests"], declared[path])
+    # `ran`, not `tests`: the witness certifies EXECUTED testcases (#11602 review,
+    # P1). This fixture has no skips, so the two counts agree here — the
+    # distinction is pinned by
+    # `test_a_skipped_case_cannot_be_counted_as_a_measured_one`.
+    coverage = {path: (m["ran"], declared[path])
                 for path, m in measurements.items() if path in declared}
     assert coverage == {"test_alpha.py": (1, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
@@ -3002,7 +3227,8 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
-                                             "tests": 2, "source": "top-15"}
+                                             "tests": 2, "ran": 2,
+                                             "source": "top-15"}
     # A CENSUS reading that wins is what makes the label say `junit-census+top-15`
     # — the label is derived from this field, never from a file listing.
     write_junit(logs.parent, "junit.xml",
@@ -3013,8 +3239,13 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
                 'file="tests/test_alpha.py" line="2" time="6.0"/>'
                 "</testsuite></testsuites>")
     measurements = ci_timing.collector_file_measurements(logs)
+    # `ran` travels with the winning reading for the same reason `tests` and
+    # `source` do — it is the count the coverage witness reads (#11602 review, P1),
+    # so pairing it with the LOSER's reading would be the same defect one layer on.
+    # No skips in this census, so `ran == tests` here.
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(18.0),
-                                             "tests": 2, "source": "census"}
+                                             "tests": 2, "ran": 2,
+                                             "source": "census"}
     # the long-standing weights-only view is a projection of the same reading
     assert ci_timing.collector_file_weights(logs) == {
         "test_alpha.py": pytest.approx(18.0)}
@@ -3081,11 +3312,85 @@ def test_the_cli_wires_the_lower_bound_witness(
         "--allow-window-only", "--allow-non-push-run",
     ])
     assert ci_timing.main() == 0
+    # `ran`, not `tests` (#11602 review, P1): this window has no skips, so the two
+    # counts agree — the DIVERGENCE arm is
+    # `test_the_cli_witness_counts_executed_testcases_not_reported_ones`.
     assert captured["coverage"] == {"test_alpha.py": (1, 4)}
     # A window-only sweep says so: its only justification is
     # `--allow-window-only`, so the label may not claim a census it never read.
     assert captured["sample_label"] == (
         "ci-timing top-15 2026-10-19 (run 39191149586)")
+
+
+def test_the_cli_witness_counts_executed_testcases_not_reported_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#11602 review, P1 — THE CALLER MUST WIRE `ran`, and nothing pinned that.
+
+    A `<skipped>` case is CARRIED by the report and EXECUTED by nobody: the
+    census counts it in `tests` and sums no time for it. A witness built from
+    `tests` therefore certifies "the report was complete" while the figure it
+    guards is the cost of the cheap remainder — and `coverage` exists precisely so
+    a partial reading cannot discount a row.
+
+    This is the arm the sibling CLI pin cannot be: `test_the_cli_wires_the_lower_
+    bound_witness` reads a `--durations` window (where a skip never appears, so
+    `tests == ran` by construction). Here the skip is real, so a caller that
+    reverts to `m["tests"]` reports (4, 4) — fully covered — and discounts the row
+    to 3.75 s; the assertions below fail on exactly that shape.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # 3 of the file's 4 cases ran (1.25 s each); the fourth needs a live DB and
+    # SKIPPED, so the census reading is 3.75 s for a 4-test file.
+    write_junit(tmp_path, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="4">'
+                + "".join(
+                    '<testcase classname="tests.test_alpha" '
+                    f'name="test_{i}" file="tests/test_alpha.py" '
+                    'time="1.25"/>' for i in range(3))
+                + '<testcase classname="tests.test_alpha" name="test_3" '
+                  'file="tests/test_alpha.py" time="0">'
+                  '<skipped type="pytest.skip" message="needs a live DB"/>'
+                  "</testcase>"
+                "</testsuite></testsuites>")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+
+    def must_not_fetch(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError(
+            "the refresh shelled out to `gh api` for run metadata — this test is "
+            "about the witness WIRING and must not touch the network")
+
+    monkeypatch.setattr(ci_timing, "fetch_run", must_not_fetch)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-11-09T05:02:37Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--run-id", "42546828652",
+        "--logs-dir", str(logs), "--refresh-durations",
+        "--manifest", str(manifest),
+        "--allow-non-push-run",
+    ])
+    assert ci_timing.main() == 0
+    # 3 EXECUTED of 4 declared — the reading was not the whole file, so it may
+    # raise the row but never lower it.
+    assert captured["coverage"] == {"test_alpha.py": (3, 4)}
+    assert captured["sample_label"].startswith("ci-timing junit-census+top-15 ")
 
 
 def test_the_basis_label_names_the_reading_the_sweep_actually_took(
@@ -3775,8 +4080,12 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
     broken["carve_shards"] = None
     carve_case = (broken, "carve_shards is explicitly null")
 
-    # `duplicate_entries`: a same-surface repeat — what `merge=union` emits when
-    # two lanes append the same registration (#5373).
+    # `duplicate_entries`: a same-surface repeat (#5373). A duplicate is not
+    # EVIDENCE that a `merge=union` driver ran — union never dedupes, which is
+    # precisely how it can itself leave two copies: a conflicting hunk whose two
+    # sides differ (the same entry plus a differing trailing comment) keeps both.
+    # It also appears with no conflict at all, when the same row is appended at a
+    # different anchor (see `duplicate_entries`).
     dup = yaml.safe_load(real)
     surface = next(iter(dup["surfaces"]))
     entry = dup["surfaces"][surface][0]
@@ -3798,6 +4107,95 @@ def test_integrity_problems_mirrors_the_spot_checked_validators() -> None:
             f"integrity_problems does not surface the {name} validator the "
             f"gate of record runs — the weekly refresh could write a manifest "
             f"--integrity refuses: {problems}")
+
+
+def test_integrity_problems_catches_a_duplicate_durations_key() -> None:
+    """#10726 MUTATION PROOF: the refresh gate must SEE a duplicate mapping key.
+
+    `config/ci-surfaces.yml` is `merge=union`, so a replay can leave the same
+    `.durations` key in the file twice; `yaml.safe_load` keeps the LAST while
+    `render_refreshed_manifest` rewrites the FIRST in the TEXT. Before this
+    wiring `--integrity` reported the class and :func:`integrity_problems`
+    returned `[]` — so `--refresh-durations` (whose sole pre-write gate this
+    is) could PERSIST a manifest the required `manifest-integrity` job reds,
+    rewriting a weight the shard packer never reads.
+
+    Non-vacuous both ways, and graded on the TEXT rather than a path, because
+    the whole point is the document that has not been written yet: the path
+    form would grade the file the refresh is about to replace.
+
+    ⛔ THE PLANTED ROW MUST CARRY A DIFFERENT VALUE FROM THE ROW IT SHADOWS —
+    the property is load-bearing (#10648 review P3), and only because the
+    resolution is ASSERTED below rather than stated here: with the SAME value
+    the planted row would be indistinguishable from the one it precedes, so
+    "last-wins" would be unfalsifiable. First-wins would surface the planted
+    value to every reader of the map; last-wins surfaces the real weight, which
+    is exactly why a persisted duplicate is silent rather than loud.
+
+    The planted value is DERIVED from the real one instead of hard-coded, so
+    that property holds whatever a `--refresh-durations` sweep does to this
+    row: a hard-coded figure collides with the row's own weight the moment a
+    sweep lands on it, which turns this pin into a red about its own FIXTURE
+    rather than about the defect it exists to catch. The difference is asserted
+    below either way, so a botched derivation reds here too.
+    """
+    import ci_selection as cs
+
+    real = cs.MANIFEST.read_text()
+    assert ci_timing.integrity_problems(real) == []
+
+    key = "test_7818_plan_record_5362.py"
+    anchor = f"  {key}: "
+    real_value = yaml.safe_load(real)["durations"][key]
+    # derive a value that provably DIFFERS from the real one, whatever it is
+    other_value = 0.9 if real_value != 0.9 else 0.8
+    dup = f"  {key}: {other_value}  # duplicate planted by this test\n"
+    at = real.index(anchor)
+    planted = real[:at] + dup + real[at:]
+
+    # The loader the shard packer uses cannot see it …
+    assert sum(1 for line in planted.splitlines()
+               if line.startswith(anchor)) == 2
+    # … and it resolves LAST-wins, which is the mechanism that makes a persisted
+    # duplicate inert: `render_refreshed_manifest` rewrites the FIRST row in the
+    # TEXT while every reader of the map loads the LAST, so the refresh would
+    # report a weight the shard packer never reads. Pinned, not assumed.
+    assert yaml.safe_load(planted)["durations"][key] == real_value
+    assert real_value != other_value, (
+        "the planted value must differ from the row it shadows, otherwise "
+        "last-wins and first-wins are indistinguishable here and the "
+        "assertion above proves nothing")
+
+    # … and the refresh's pre-write gate SEES it, by name.
+    problems = ci_timing.integrity_problems(planted)
+    assert any("duplicate mapping key 'test_7818_plan_record_5362.py'" in p
+               for p in problems), (
+        "the refresh's pre-write gate must compose the duplicate-key walk "
+        "(#5373) — otherwise --refresh-durations writes what --integrity "
+        "rejects")
+
+    # SECOND ARM — the shape that actually REACHES the writer (#10726 review).
+    # A duplicated `.durations:` ROW cannot get there: `_locate_durations_block`
+    # refuses it, raising `DurationsBridgeError` ("duplicate `durations:` key
+    # 'test_7818_plan_record_5362.py' on lines <n> and <n+1>") before anything is
+    # rendered — the figures are deliberately not quoted, because they move with
+    # every union merge above the row (they were 8566/8567 when this arm was
+    # written and 8586/8587 at `59692c8c6`). What DOES reach it is a duplicated
+    # TOP-LEVEL `durations:` key:
+    # that locator `break`s at the first block's end, so the renderer never sees
+    # the second — measured, it emits TWO `durations:` blocks and
+    # `validate_refreshed_manifest` reports nothing. Without this arm the pin
+    # above covers only a shape the writer would have refused anyway.
+    top_level_dup = real + f"\ndurations:\n  {key}: {other_value}\n"
+    top_problems = ci_timing.integrity_problems(top_level_dup)
+    assert any("duplicate mapping key 'durations'" in p for p in top_problems), (
+        "a duplicated TOP-LEVEL durations: key is emitted twice by the renderer "
+        "and is NOT reported by validate_refreshed_manifest — the composed "
+        "duplicate-key walk is the only term that refuses it")
+    assert not any("duplicate" in p.lower()
+                   for p in ci_timing.validate_refreshed_manifest(top_level_dup)), (
+        "if this ever starts catching the shape, this arm's premise changed — "
+        "re-derive which gate is load-bearing instead of deleting the arm")
 
 
 def test_integrity_problems_mirrors_the_listed_integrity_composition(
@@ -3872,6 +4270,14 @@ def test_integrity_problems_mirrors_the_listed_integrity_composition(
         "watchdog_headroom_issues",
         "duration_coverage_issues",
         "duplicate_entries",
+        # #10726 review: the DUPLICATE-KEY walk (#5373) must run on BOTH entry
+        # points. It was added to `--integrity` alone, and this tuple — whose own
+        # docstring says it "must be extended when a validator is added" — was
+        # not extended, so the omission was invisible. Measured: with a duplicate
+        # `.durations` key planted, `--integrity` reported it and
+        # `integrity_problems` returned `[]`, i.e. `--refresh-durations` could
+        # persist a manifest the required `manifest-integrity` job reds.
+        "duplicate_mapping_key_issues",
         "workflow_matrix_issues",
         "workflow_halves_issues",
     )
@@ -4018,6 +4424,152 @@ def test_ci_timing_workflow_is_the_durations_bridge_scheduler() -> None:
     assert "cp generated-map/ci-surfaces.yml config/ci-surfaces.yml" in open_pr["run"]
     assert ("git add docs/ci-timing.md docs/ci-timing.json "
             "config/ci-surfaces.yml" in open_pr["run"])
+
+
+def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
+    """#11602 review, P1 — AN INERT-ENFORCER PIN for #11607.
+
+    `collected_test_counts()` is the only thing that lets a `parametrize` file's
+    durations row ever move DOWN, and it works by shelling out to
+    `python -m pytest --collect-only`. That makes the whole import surface of
+    `tests/conftest.py` an INSTALL-TIME dependency of the weekly writer, and the
+    capability has now shipped INERT there twice, for two different reasons:
+
+    1. the job installed PyYAML alone, so `python -m pytest` was not even on PATH
+       (the probe exited 1, contributed no denominator, every gate stayed green);
+    2. the job then installed `pyyaml pytest httpx` — and that is still one
+       dependency short, because collecting ANY file under `tests/` executes
+       `tests/conftest.py`, whose module body imports the product package
+       (`conftest.py` -> `tortoise.embeddings` -> `numpy`). MEASURED at PR
+       #11602's second review: `pytest tests/test_ci_selection.py
+       --collect-only -q` exits 4 with `ModuleNotFoundError: No module named
+       'numpy'` under exactly that install line, while the step above reported
+       success.
+
+    ⛔ SO A TOKEN SCAN OF THE INSTALL LINE IS NOT THE PIN. That was the previous
+    form of this test, and it passed on the state that was broken: the failure
+    mode is a missing IMPORT, which no substring of an install line can reveal.
+    Two arms replace it, and both were exercised against the state that shipped:
+
+    - the job must install the PROJECT (`pip install -e .` / `uv sync`), not a
+      hand-picked token list that cannot converge on a conftest's import surface;
+    - the job must RUN the probe's own command on a real test file, in a step
+      that cannot swallow a failure — an OUTCOME the sweep can observe, not a
+      promise about what is installed.
+    """
+
+    def _install_lines(run_blocks) -> list[str]:
+        return [
+            line
+            for block in run_blocks
+            for line in str(block or "").splitlines()
+            if "pip install" in line
+        ]
+
+    def _installs_the_projects_own_env(run_blocks) -> bool:
+        """The INSTALL must carry the project, so `tests/conftest.py` resolves.
+
+        `pip install -e .`/`-e '.[test]'` (every other CI leg's path) and
+        `uv sync` both do; an enumerated token list does not.
+        """
+        return any(
+            re.search(r"(?:^|\s)pip\s+install\b.*(?:-e\s+['\"]?\.|\.[\[\s])", line)
+            or re.search(r"(?:^|\s)uv\s+sync\b", line)
+            for line in _install_lines(run_blocks)
+        )
+
+    def _proves_the_probe_runs(steps) -> bool:
+        """A step that RUNS `-m pytest --collect-only` over a real test file and
+        cannot swallow its exit status."""
+        for step in steps:
+            body = str(step.get("run") or "")
+            invocation = [
+                line for line in body.splitlines()
+                if re.search(r"-m\s+pytest\b", line)
+                and "--collect-only" in line and "tests/" in line
+            ]
+            if not invocation:
+                continue
+            if step.get("continue-on-error") in (True, "true"):
+                continue
+            if re.search(r"\|\|\s*true", body):
+                continue
+            # A pipe swallows the exit status unless `pipefail` is set — the
+            # cheapest way to write this step and have it green while broken.
+            if any("|" in line for line in invocation) and "pipefail" not in body:
+                continue
+            return True
+        return False
+
+    wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
+    steps = wf["jobs"]["measure"]["steps"]
+    run_blocks = [s.get("run") for s in steps]
+
+    assert _installs_the_projects_own_env(run_blocks), (
+        "the `measure` job installs a hand-picked package list instead of the "
+        "project, so `python -m pytest --collect-only` cannot load "
+        "`tests/conftest.py` (it imports the product package) and every "
+        "parametrised row is silently back to raisable-never-lowerable (#11607) "
+        "— this is the inert state, not a style problem")
+    assert _proves_the_probe_runs(steps), (
+        "nothing in the `measure` job RUNS `python -m pytest --collect-only` over "
+        "a tests/ file, so the probe's runnability is asserted nowhere the sweep "
+        "could notice — it shipped inert twice while every gate read green")
+
+    # Non-vacuity, executable: each predicate must REJECT the states that
+    # actually shipped, so neither can go vacuous the way the token scan did.
+    # `pip install pyyaml==6.0.2 pytest httpx` is the SECOND inert state exactly
+    # as it was measured (exit 4, no numpy) — a token list, not the project.
+    assert not _installs_the_projects_own_env(
+        ["pip install pyyaml==6.0.2 pytest httpx"]
+    ), "the env arm would pass the install line that shipped the probe inert"
+    assert not _installs_the_projects_own_env(["pip install pyyaml==6.0.2"])
+    # …and the outcome arm must reject: no such step at all; a step that tolerates
+    # failure; and the piped form without `pipefail` (a `| tail` returns tail's
+    # status, so a red collection would read green).
+    probe = [{"run": "python3 -m pytest tests/test_ci_selection.py "
+                       "--collect-only -q -p no:cacheprovider"}]
+    assert _proves_the_probe_runs(probe), "the outcome arm rejects a real probe step"
+    assert not _proves_the_probe_runs(
+        [{"run": "python3 tools/ci_timing.py --refresh-durations"}]
+    ), "the outcome arm would pass a job that never runs the probe"
+    assert not _proves_the_probe_runs(
+        [{"run": probe[0]["run"], "continue-on-error": True}]
+    ), "a step that tolerates the probe failing is not an outcome pin"
+    assert not _proves_the_probe_runs(
+        [{"run": probe[0]["run"] + " | tail -2"}]
+    ), ("a piped probe without `pipefail` returns tail's exit status — the "
+        "outcome arm must reject it")
+    assert _proves_the_probe_runs(
+        [{"run": "set -euo pipefail\n" + probe[0]["run"] + " | tail -2"}]
+    ), "the outcome arm rejects the correct piped form; the pipefail guard is wrong"
+
+
+def test_a_failed_collection_probe_is_loud_and_fails_closed(capsys) -> None:
+    """The other half of the inert-enforcer finding: the probe must SAY when it
+    cannot produce a denominator.
+
+    It stays fail-closed — the key is absent, so the row remains UNKNOWN and a
+    lower reading cannot re-base it — but a capability that switches itself off
+    with no output is indistinguishable from one that works, which is how #11607
+    shipped inert. Non-vacuity: the pre-review code `continue`d silently, so this
+    capture would be empty.
+    """
+    real = ci_timing.subprocess.run
+
+    def _no_pytest(cmd, *a, **kw):
+        raise FileNotFoundError("No module named pytest")
+
+    ci_timing.subprocess.run = _no_pytest
+    try:
+        counts = ci_timing.collected_test_counts(
+            ["test_dialog_tile_key.py"], Path(__file__).resolve().parent.parent)
+    finally:
+        ci_timing.subprocess.run = real
+    assert counts == {}, "a failed probe must contribute NO denominator"
+    err = capsys.readouterr().err
+    assert "::warning::" in err and "test_dialog_tile_key.py" in err, (
+        f"a probe that cannot run must say so, naming the file: {err!r}")
 
 
 # ── The refresh job's missing token + its fail-open swallow (#3092) ──────
@@ -5828,7 +6380,7 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
     measurements = ci_timing.collector_file_measurements(partial)
     declared = ci_timing.declared_test_counts(measurements, repo)
     assert declared == {"test_alpha.py": 4}
-    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"],
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["ran"],
                                   declared["test_alpha.py"])}
     assert coverage == {"test_alpha.py": (1, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
@@ -5851,7 +6403,7 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
                     f'line="{i}" time="1.25"/>' for i in range(4))
                 + "</testsuite></testsuites>")
     measurements = ci_timing.collector_file_measurements(whole)
-    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"], 4)}
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["ran"], 4)}
     assert coverage == {"test_alpha.py": (4, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
         manifest_text,
@@ -5951,6 +6503,60 @@ def test_the_unmeasured_note_repair_is_not_vacuous() -> None:
     flat = _rendered_note(text, "test_flat.py")
     assert "packs at the flat 2.0s default" in flat, (
         f"the legitimate counterfactual was cut with the stale claim: {flat}")
+
+
+# ── the SAME claim, spelled with the constant's NAME ──────────────────────────
+# Review P3 on #11057 (`4727c013a`) found two rows on the REAL map carrying a
+# measured value beside a note asserting the flat default, in this spelling:
+# `The weight stays the flat `DEFAULT_FAST_WEIGHT` declaration …`
+# (`test_10602_query_limit_bound.py: 2.3`) and `it takes the header's flat
+# `DEFAULT_FAST_WEIGHT`` (`test_5095_s3_identity_policy.py: 0.4`). Neither the
+# writer's cutter nor `tests/test_ci_selection.py::_FLAT_DEFAULT_CLAIM_RE` could
+# match it — the verb list was `takes|carries|holds` and the first alternation
+# requires the literal `2.0s` — so those rows would have asserted the default
+# through every future refresh. The fixture below is the pre-fix row verbatim.
+_NAMED_CONSTANT_CLAIM_MANIFEST = """\
+surfaces:
+  core:
+    - test_weight.py
+    - test_packs.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+surfaces_x: []
+durations:
+  test_weight.py: 2.0  # #10602: new file. The weight stays the flat `DEFAULT_FAST_WEIGHT` declaration the #3400/#4348 trap requires for a file a PR ADDS. `tools/ci_selection.py --integrity` is the authority.
+  test_packs.py: 2.0  # #10602: new file. Its absence packs it at the flat `DEFAULT_FAST_WEIGHT`, and `--integrity` is the authority.
+"""
+
+
+def test_a_refresh_cuts_the_flat_default_claim_spelled_with_the_CONSTANT_NAME() -> None:
+    """The claim is not always spelled `flat 2.0s default`, so the cut must not be either.
+
+    Two arms: the CLAIM spelling goes with the adopted reading, and the
+    COUNTERFACTUAL spelling of the same name survives — it states what the row
+    buys, not what its value is, so cutting it would delete a record.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _NAMED_CONSTANT_CLAIM_MANIFEST,
+        {"test_weight.py": 0.9, "test_packs.py": 0.7},
+        "2026-11-05T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-05 (run 1)")
+
+    weight = _rendered_note(text, "test_weight.py")
+    assert weight.startswith("  test_weight.py: 0.9"), weight
+    assert "stays the flat `DEFAULT_FAST_WEIGHT`" not in weight, (
+        "the row carries a 0.9 s reading and still states the flat default as its "
+        f"basis — the #2818 claim/value disagreement the cutter exists to remove: {weight}")
+    assert "`tools/ci_selection.py --integrity` is the authority" in weight, (
+        f"the repair cut the surviving authority instruction: {weight}")
+    assert "was 2.0" in weight, f"the adopted value did not record its basis: {weight}"
+
+    packs = _rendered_note(text, "test_packs.py")
+    assert packs.startswith("  test_packs.py: 0.7"), packs
+    assert "Its absence packs it at the flat `DEFAULT_FAST_WEIGHT`" in packs, (
+        f"the legitimate COUNTERFACTUAL was cut with the stale claim: {packs}")
 
 
 def test_a_durations_note_states_ONE_count_for_the_head_it_was_read_at() -> None:
@@ -6113,3 +6719,1259 @@ def test_a_stripped_basis_clause_does_not_orphan_a_parenthesis() -> None:
         "(measured on the private lane); required for the durations coverage half")
     assert _balanced(stripped), stripped
     assert "required for the durations coverage half" in stripped, stripped
+
+
+# ── a WRAPPED note is ONE note (the 2026-11-02 refresh's half-parenthesis) ────
+#
+# A row's note is not the tail on its row line: a note CAN wrap across indented `#`
+# continuation lines (measured at `a91123c76`: 1 row of 1222 did — the block's
+# dominant shape is the PREAMBLE for the row below, so almost every indented block
+# in it opens a note of its own; re-derive both figures at your own head),
+# and the guard that judges a written map joins them before judging
+# (`tests/test_ci_selection.py`
+# `_durations_row_comments`). The renderer used to reason about the row-line
+# FRAGMENT only, so a cut on the fragment dropped half a sentence and
+# `_balance_cut_parens` — seeing an unclosed `(` whose `)` sat on a continuation —
+# deleted the OPENER. The real casualty, at the 2026-11-02 head:
+#
+#   test_ci_catch_history.py: 3.1  # ci-timing junit-census+top-15 … ; was 9.5
+#     # never ran cannot appear in an artifact), so this is the LOCAL wall of …
+#
+# which reddened `test_no_durations_row_keeps_half_a_parenthesis` on the required
+# legs (run 41395489623, job 125131177056).
+_WRAPPED_NOTE_MANIFEST = """\
+surfaces:
+  core:
+    - test_wrapped_cut.py
+    - test_wrapped_append.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_wrapped_cut.py: 9.5  # #10131: a file has no CI junit measurement (a file that
+  # never ran cannot appear in an artifact), so this is the LOCAL wall: 69 of them
+  # — the count is re-derived, not trusted. Keep this sentence.
+# ⛔ COLUMN-0 PROSE inside the block: it is the map's own header, never a row's
+# note (186 such lines at the 2026-11-02 head), and a rewrite must not touch it.
+  test_wrapped_append.py: 6.8  # #9524: what it costs is a parse of three lockfiles
+  # plus, on a shallow clone, one `git ls-files` population read.
+"""
+
+
+def test_a_cut_on_a_wrapped_note_does_not_orphan_a_parenthesis() -> None:
+    """The renderer joins the span before cutting it, and re-emits the survivor.
+
+    Non-vacuity (measured against the renderer before `50f60d5f8`, which introduced
+    the span join): the cut ran on the row-line fragment, `_balance_cut_parens` deleted the `(` whose
+    `)` was on a continuation, and the emitted row was
+    `test_wrapped_cut.py: 3.1  # ci-timing … ; was 9.5` followed by the orphaned
+    `# never ran cannot appear in an artifact), …` lines — an unbalanced note and
+    a dangling clause, which is exactly what this test fails on.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _WRAPPED_NOTE_MANIFEST, {"test_wrapped_cut.py": 3.1},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    note = _rendered_note(text, "test_wrapped_cut.py")
+    assert _balanced(note), f"a wrapped-note cut orphaned a parenthesis: {note}"
+    # The falsified claim goes with its clause; the record that survives stays, and
+    # it is not left dangling behind the row line as a stray continuation.
+    assert "no CI junit measurement" not in note, note
+    assert "never ran cannot appear in an artifact)" not in note, (
+        f"the continuation half of the cut clause survived as a fragment: {note}")
+    assert "Keep this sentence" in note, f"a surviving clause was lost: {note}"
+    assert "#10131" in note, f"the note lost its issue anchor: {note}"
+    assert note.strip().endswith("was 9.5"), note
+    # Nothing of the row is left as a continuation comment: the survivor is whole.
+    lines = text.splitlines()
+    at = lines.index(note)
+    assert not lines[at + 1].startswith("  # "), (
+        f"the cut note left an orphaned continuation line: {lines[at + 1]}")
+    # …and the block's COLUMN-0 prose is not a note, so the cut never touched it.
+    assert "\n# ⛔ COLUMN-0 PROSE inside the block" in text
+
+
+def test_an_appended_basis_lands_at_the_end_of_a_wrapped_note() -> None:
+    """An APPEND keeps the writer's line breaks and adds the basis at the end.
+
+    A re-base of `test_wrapped_append.py` leaves its rationale intact, so the note
+    must not be re-flowed and the added clause must not be spliced into the middle
+    of a sentence — the row line is mid-thought by construction when the note wraps.
+
+    Non-vacuity: pre-fix the basis was written onto the row-line fragment, giving
+    `… three lockfiles — ci-timing junit-census+top-15 …` with the note's second
+    sentence stranded after it.
+    """
+    text, _ = ci_timing.render_refreshed_manifest(
+        _WRAPPED_NOTE_MANIFEST, {"test_wrapped_append.py": 4.4},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    lines = text.splitlines()
+    row = _rendered_note(text, "test_wrapped_append.py")
+    assert row == (
+        "  test_wrapped_append.py: 4.4  # #9524: what it costs is a parse of "
+        "three lockfiles"), row
+    continuation = next(
+        ln for ln in lines if ln.startswith("  # plus, on a shallow clone"))
+    assert continuation.endswith("population read. — ci-timing junit-census+top-15 "
+                                "2026-11-02 (run 41375596528); was 6.8"), continuation
+    # One appended clause, not two: a second render at the same reading is a no-op
+    # on the note (a duplicated basis is how a note grows a sentence per refresh).
+    again, _ = ci_timing.render_refreshed_manifest(
+        text, {"test_wrapped_append.py": 4.4}, "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    assert again == text, "a second render at the same reading rewrote the note"
+
+
+# ── …and a REGISTRATION must not be spliced INTO a wrapped note either ────────
+#
+# The span rule binds the writer twice: the cutters were the visible half (the
+# 2026-11-02 half-parenthesis), and this is the other one. A key with no row is
+# APPENDED to the block; the append point was `max(entries.values()) + 1`, i.e. the
+# line right after the last row's ROW LINE — which on a wrapped note is its first
+# continuation. The new row therefore landed mid-sentence, the continuations left
+# below it read as the NEW row's note, and the old row kept only its first half.
+#
+# The committed map's last row (`test_worktree_report.py`) carries no continuation,
+# which is the only reason this never materialised: it is one wrapped last row away,
+# and the damage it produces is what `_joined_note_tail` exists to prevent.
+_REGISTRATION_AFTER_WRAP_MANIFEST = """\
+surfaces:
+  core:
+    - test_last_row_wraps.py
+    - test_newly_registered.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_last_row_wraps.py: 12.0  # #4348: do not drop this row. Its note opens here
+  # and continues on this indented wrap line, which belongs to THE ROW ABOVE.
+"""
+
+
+def test_a_registered_row_is_appended_after_the_last_rows_wrapped_note() -> None:
+    """A new row is appended after the SPAN, never between a row and its wrap.
+
+    Non-vacuity (measured against the pre-fix renderer, whose append point was
+    `max(entries.values()) + 1`): the emitted block was
+
+      test_last_row_wraps.py: 12.0  # #4348: do not drop this row. Its note opens here
+      test_newly_registered.py: 5.0
+      # and continues on this indented wrap line, which belongs to THE ROW ABOVE.
+
+    — the new row mid-sentence, and the wrap line silently re-owned by it, so the
+    row it documented lost half its note. Both assertions below fail on that text.
+    """
+    text, stats = ci_timing.render_refreshed_manifest(
+        _REGISTRATION_AFTER_WRAP_MANIFEST,
+        {"test_last_row_wraps.py": 12.0, "test_newly_registered.py": 5.0},
+        "2026-11-02T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-02 (run 41375596528)")
+    assert stats["added_keys"] == 1, stats
+    lines = text.splitlines()
+    row = lines.index(
+        "  test_last_row_wraps.py: 12.0  # #4348: do not drop this row. "
+        "Its note opens here")
+    wrap = lines.index(
+        "  # and continues on this indented wrap line, which belongs to THE ROW ABOVE.")
+    assert wrap == row + 1, (
+        f"the wrap line is no longer the row's own continuation: {lines[row:row + 3]}")
+    assert lines.index("  test_newly_registered.py: 5.0") == wrap + 1, (
+        "the appended row was spliced into the last row's note: "
+        f"{lines[row:row + 4]}")
+
+
+# ── …and the OTHER convention: a block that OPENS a note is not the row above's ──
+#
+# This map's dominant convention is the block that PRECEDES the row it documents
+# (almost every block beside a row opens a note of its own — re-derive the ratio at
+# the head you are reading; it moves with the map),
+# and nothing in YAML says which row a comment belongs to — §3.2.3.3 of the spec:
+# comments are “a presentation detail … not associated with a particular node”.
+#
+# The re-emit paths are DESTRUCTIVE (an APPEND writes into the last continuation; a
+# CUT re-emits the joined note on the row line and DROPS the continuations), so a
+# block claimed from the wrong side is folded into the row ABOVE and deleted from
+# where it documents its own row — which is left with no note at all. Measured on
+# the real map at this head, every row re-based once: **36 rows lost their block,
+# 349 lines folded into row lines**. The committed instance is the
+# `355.0 IS A DELIBERATE CAP … #9172` block: it lies directly under
+# `test_work_claim.py: 3.8` and documents `test_lane_stash.py: 355.0`.
+_NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST = """\
+surfaces:
+  core:
+    - test_above.py
+    - test_below.py
+tier1: []
+slow_files: []
+carve_out: []
+push_extra: []
+durations_held_equal: {}
+surfaces_x: []
+durations:
+  test_above.py: 3.8  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (2.5s) is a LOWER bound; kept 3.8
+  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s, 216.6s.
+  #
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING. Raising it is a CI-budget
+  # decision recorded on #9172 rather than smuggled in with a weight.
+  test_below.py: 25.4  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 355.0
+"""
+
+
+#: The block above `test_below.py`'s row — a NEIGHBOUR's note, byte-for-byte.
+_NOTE_BLOCK_FOR_THE_ROW_BELOW = [
+    "  # #8051: LOCAL readings on this fleet-loaded host — 366.4s, 422.9s, 216.6s.",
+    "  #",
+    "  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING. Raising it is a CI-budget",
+    "  # decision recorded on #9172 rather than smuggled in with a weight.",
+]
+
+
+def test_a_note_block_that_opens_of_its_own_is_never_this_rows() -> None:
+    """A HELD row must not write its basis into a neighbour's block (nor eat it).
+
+    The row above the block has no declared testcase count, so it is HELD on every
+    refresh — and a HELD row's basis is APPENDED, which is the path that wrote
+    `… kept 3.8` onto the last line of the `355.0` cap block. One refresh later the
+    prior basis sits at the end of the joined “note”, `_strip_prior_held_basis`
+    leaves a survivor set that is not a prefix of it, and the CUT branch folds the
+    whole block into the row line and drops the continuation lines.
+
+    Non-vacuity (measured against the module before `66c88704b`, which introduced
+    the opener rule, and against the two refreshes below, each with its OWN run
+    label as a weekly sweep has):
+    refresh 1 emits `  # decision recorded on #9172 rather than smuggled in with a
+    weight. — ci-timing junit-census+top-15 2026-11-09 …` (the decision text now
+    carries a 3.8 row's provenance), and refresh 2 emits a single 653-char
+    `test_above.py` row line with all four block lines gone. On the real map the
+    same two refreshes fold 36 rows and 349 lines, the largest a 2512-char row.
+    """
+    held = {"test_above.py": 2.5}
+    coverage = {"test_above.py": (0, 0)}  # UNKNOWN denominator: cannot prove coverage
+    first, _ = ci_timing.render_refreshed_manifest(
+        _NOTE_BLOCK_FOR_THE_ROW_BELOW_MANIFEST, held, "2026-11-02T00:00:00Z",
+        coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert [ln for ln in first.splitlines()
+            if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW] == _NOTE_BLOCK_FOR_THE_ROW_BELOW, (
+        "a refresh wrote into a block that documents another row: "
+        f"{first.splitlines()[11:18]}")
+    # The HELD basis still lands on the row it belongs to.
+    row = next(ln for ln in first.splitlines() if ln.startswith("  test_above.py:"))
+    assert row.endswith("kept 3.8"), row
+    assert "#9172" not in row, row
+    # …and the NEXT week's refresh (a new run, so a new basis) does not fold the
+    # block into that row either.
+    second, _ = ci_timing.render_refreshed_manifest(
+        first, held, "2026-11-09T00:00:00Z", coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41379999998)")
+    assert [ln for ln in second.splitlines()
+            if ln in _NOTE_BLOCK_FOR_THE_ROW_BELOW] == _NOTE_BLOCK_FOR_THE_ROW_BELOW, (
+        "the next week's render folded the neighbour's block into the row above: "
+        f"{second.splitlines()[11:18]}")
+    assert "355.0 IS A DELIBERATE CAP" not in next(
+        ln for ln in second.splitlines() if ln.startswith("  test_above.py:"))
+
+
+
+
+# ── a prior basis is REPLACED on a re-base, even when it sits MID-note ────────
+#
+# The join above turns a wrapped note into one paragraph, which moves a basis that
+# a previous refresh appended to the ROW LINE into the MIDDLE of the text. The
+# end-anchored `_PRIOR_BASIS_RE` cannot see it there, so the re-base kept the
+# superseded basis AND appended this sample's — the row stated two bases, one of
+# them from two refreshes ago, which is the stale-provenance shape #9134's P2
+# exists to prevent. Nothing caught it: no test asserted one basis per row, and the
+# one row it happens to is not synthetic — the refresh itself wrote that layout.
+#
+# ⛔ EVERY expectation below is read from the ARTIFACT, never from its current
+# value. This row is the map's only wrapped one AND one of its two most volatile
+# (its own note calls it fleet-contention sensitive, 2.3-3.2), while
+# `tests/test_ci_timing.py` is registered on `sdk` ONLY and the weekly refresh PR is
+# data-only (`config/*` → `core`) — so a guard pinned to today's `2.3` goes red on a
+# HEALTHY map at the next sweep, in whichever later unrelated leg selects `sdk`, and
+# this PR cannot see its own time bomb (#10575 review, P2).
+_BASIS_LABEL_RE = re.compile(
+    r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}")
+
+
+def _durations_row_note(text: str, key: str) -> str:
+    """`key`'s note in map `text`, joined across its continuations.
+
+    The join is the writer's own (`_joined_note_tail`), so what this reads is the
+    note the cutters see — a wrapped note is ONE note.
+    """
+    lines = text.split("\n")
+    # Look INSIDE the `durations:` block: a declared floor/cap RESTATES the same key
+    # above the block (`durations_floors`), and a whole-file scan takes that
+    # declaration for the row — reporting a weight and a note that belong to the
+    # declaration, with nothing to trip on (#10575 delta review, P3).
+    block_start, _ = ci_timing._locate_durations_block(lines)
+    assert block_start is not None, "the map declares no `durations:` block"
+    index = next(i for i in range(block_start + 1, len(lines))
+                 if lines[i].startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(lines[index])
+    assert match is not None, lines[index]
+    continuation = ci_timing._row_continuation_lines(lines, index)
+    return (ci_timing._joined_note_tail(match.group("tail"),
+                                       [lines[j] for j in continuation])
+            if continuation else match.group("tail"))
+
+
+def _durations_row_value(text: str, key: str) -> float:
+    """`key`'s committed weight, at the precision the map stores it.
+
+    Scoped to the `durations:` block for the same reason as `_durations_row_note`:
+    a floored/capped key is also declared in `durations_floors` ABOVE the block.
+    """
+    lines = text.split("\n")
+    block_start, _ = ci_timing._locate_durations_block(lines)
+    assert block_start is not None, "the map declares no `durations:` block"
+    line = next(lines[i] for i in range(block_start + 1, len(lines))
+                if lines[i].startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(line)
+    assert match is not None, line
+    return round(float(match.group("value")), 1)
+
+
+def _assert_a_re_base_supersedes_the_newest_basis(text: str) -> None:
+    """The mid-note prune's contract, asserted against ARTIFACT `text`.
+
+    The contract is stated relative to whatever `text` commits, on purpose: a
+    re-base must (a) make this render's basis the NEWEST one, (b) drop the newest
+    basis `text` carried, and (c) not grow the note's basis count. Those three are
+    what a module with NO mid-note span pattern violates on a WRAPPED note, and what
+    a no-op prune violates on ANY note — the committed row's span is END-anchored
+    (#11602), so it no longer reaches the first case, and
+    `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle` is what pins the
+    mid-note pattern — and unlike a literal `"was 2.3"` they stay true
+    after any weekly sweep re-values the row, including the HOLD outcome where
+    `#9134`'s P2 deliberately keeps an older ADOPTED basis beside the new one.
+    """
+    key = "test_source_staleness_sweep_5038.py"
+    committed_note = _durations_row_note(text, key)
+    committed_bases = _BASIS_LABEL_RE.findall(committed_note)
+    assert committed_bases, f"the row states no basis to supersede: {committed_note}"
+    previous = _durations_row_value(text, key)
+    # A date STRICTLY newer than everything `text` cites, derived rather than
+    # hard-coded: the assertion is "the newest committed basis is GONE", and a fixed
+    # label would quietly stop meaning that as soon as a sweep reached its date.
+    year = max(int(b.rsplit(" ", 1)[-1][:4]) for b in committed_bases)
+    label = f"ci-timing junit-census+top-15 {year + 1}-01-01 (run 41379999999)"
+    rebased, _ = ci_timing.render_refreshed_manifest(
+        text, {key: previous + 2.7}, f"{year + 1}-01-02T00:00:00Z", sample_label=label)
+    note = _durations_row_note(rebased, key)
+    bases = _BASIS_LABEL_RE.findall(note)
+    assert bases[-1] == f"ci-timing junit-census+top-15 {year + 1}-01-01", (
+        f"this render's basis is not the newest one: {note}")
+    assert committed_bases[-1] not in bases, (
+        f"the superseded basis survived the re-base: {note}")
+    assert len(bases) <= len(committed_bases), (
+        f"the note gained a basis instead of replacing one: {note}")
+    assert f"was {previous:.1f}" in note, (
+        f"the new basis lost the value it replaced: {note}")
+    # The prune replaces the SPAN, not the note: the row's own text is untouched.
+    assert "deliverable 3: 34 tests" in note, note
+    assert "never correct a weight downward" in note, note
+
+
+def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
+    """A prior basis is replaced, not accumulated — asserted on the COMMITTED map.
+
+    Every expectation is DERIVED from the map (see the helper): this row is
+    re-valued by most sweeps, and
+    `test_the_wrapped_row_prune_guard_survives_the_next_sweep` pins the sweep
+    outcomes that a value-pinned version of this test used to red on a healthy map.
+
+    ⛔ NON-VACUITY IS GONE HERE, measured at #11602 — and the paragraph this
+    replaced claimed otherwise. This test's subject was
+    `test_source_staleness_sweep_5038.py` because its note opened on the row line and
+    continued across five indented lines, with the `2026-11-02` basis appended in the
+    MIDDLE (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded
+    (…) lane …`), where an end-anchored match finds nothing. The `2026-11-09` refresh
+    flattened that note, so the row is now ONE line whose only basis ENDS it (its row
+    under `durations:` in `config/ci-surfaces.yml`; `spans[-1][1] == len(note.rstrip())`).
+    ⛔ Cited by MECHANISM, never by line number (#11602 review P3): this sentence
+    carried a line number that was correct when written and rotted **in this same PR**,
+    when the `origin/main` merge pushed the row 77 lines down onto the `durations:`
+    preamble. `test_any_ci_surfaces_line_citation_here_resolves_to_a_durations_row`
+    is the executable pin on that convention. The
+    flattening is the writer's documented CUT behaviour (see
+    `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), not a
+    defect — but its consequence is that a module whose `_prior_basis_spans` is
+    END-ANCHORED-ONLY (the pre-`643bbaf12` production behaviour) PASSES this test,
+    and so does an end-anchored-only `_strip_prior_basis`. The mid-note arm is
+    therefore BUILT in `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle`,
+    which does red on that module; pinning the arm to whichever row the last sweep
+    happened to leave wrapped is what let it go vacuously green.
+    """
+    _assert_a_re_base_supersedes_the_newest_basis(
+        (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+
+
+_CITED_MANIFEST_LINE_RE = re.compile(r"config/ci-surfaces\.yml:(\d+)")
+
+# The row this file's wrapped-row docstrings cite by KEY. A mechanism citation is
+# only durable if the key it names is still a row, so the pin below checks that too.
+_MECHANISM_CITED_ROW = "test_source_staleness_sweep_5038.py"
+
+
+def _cited_manifest_lines_that_are_not_durations_rows(
+    source: str, manifest_lines: list[str]
+) -> list[int]:
+    """Every 1-based line cited as `config/ci-surfaces.yml:<n>` that is NOT a row.
+
+    A citation resolves only when it lands on the line that CARRIES a `durations:`
+    key — not on the preamble between two rows, and not past the end of the file.
+    """
+    _block_start, entries = ci_timing._locate_durations_block(manifest_lines)
+    row_lines = set(entries.values())
+    offenders = []
+    for match in _CITED_MANIFEST_LINE_RE.finditer(source):
+        number = int(match.group(1))
+        if not 0 < number <= len(manifest_lines) or (number - 1) not in row_lines:
+            offenders.append(number)
+    return offenders
+
+
+def test_any_ci_surfaces_line_citation_here_resolves_to_a_durations_row() -> None:
+    """A `config/ci-surfaces.yml` LINE citation must land on a `durations:` row.
+
+    #11602 review (P3), executed. The docstring of
+    `test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits` cited the row it
+    describes by LINE NUMBER, and that number rotted **inside the PR that wrote it**:
+    at `05026c4` the row sat where the number said, and at the head `1dc63b1` merged
+    `origin/main` into the branch and the 22 added rows pushed it down — so the
+    citation landed on unrelated `durations:` PREAMBLE prose, while the sentence it
+    was the evidence for stayed put. No pin read citations inside a test docstring, so
+    it would have shipped silently. ⚠️ NOT "the map pins its own citations, for the same
+    reason" — a first draft said that and named a pin that reads a DIFFERENT artifact:
+    `tests/test_substrate_map.py::test_every_cited_line_in_this_section_still_carries_the_prose_it_describes`
+    resolves the SUBSTRATE map's `cache_eviction.py:<n>` pointers, and
+    `tests/test_deploy_workflow.py` pins its own workflow citations. Neither reads
+    `config/ci-surfaces.yml`, which had no citation pin at all — that absence is exactly
+    why the pin below exists instead of an existing one being pointed at.
+
+    The fix is the manifest's own rule — *named by mechanism, not by line number* —
+    plus this pin, so a re-introduced `:<n>` citation is CHECKED rather than banned.
+    ⚠️ **The pin is CONDITIONAL, and says so:** it verifies the citations that EXIST,
+    and the sentence that prompted it now cites by mechanism, so a green run means
+    *"no rotten pointer here"*, not *"a pointer was verified"* — a scanner matching
+    nothing looks identical to one that checked everything. The non-vacuity arm below
+    is therefore SYNTHETIC (so it cannot rot): it reds the resolver on the exact shape
+    that fooled the original — an indented preamble line between two rows — and greens
+    it on a row line and reds it past the end of the file.
+
+    ⛔ Quoting a rotten pointer as HISTORY: write it without the `:<n>` suffix, or this
+    pin (and the sibling in `test_deploy_workflow.py`) will read the quotation as a live
+    claim.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    manifest_lines = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text(
+        encoding="utf-8").splitlines()
+    _block_start, entries = ci_timing._locate_durations_block(manifest_lines)
+
+    offenders = _cited_manifest_lines_that_are_not_durations_rows(source, manifest_lines)
+    detail = "\n  ".join(
+        f"line {n}: "
+        + (manifest_lines[n - 1].strip()[:120] if 0 < n <= len(manifest_lines)
+           else "<beyond the file>")
+        for n in offenders
+    )
+    assert not offenders, (
+        "a `config/ci-surfaces.yml` line citation in this file does not resolve to a "
+        "`durations:` row — it points at preamble prose (or past EOF):\n  " + detail + "\n"
+        "Cite the row by KEY (e.g. `its row under `durations:` in "
+        "config/ci-surfaces.yml`) — a line number here has already rotted once, in the "
+        "very PR that wrote it (#11602 review P3)"
+    )
+
+    # The mechanism arm: a key citation is durable only while the key is a row.
+    assert _MECHANISM_CITED_ROW in entries, (
+        f"the docstrings in this file cite the `durations:` row for "
+        f"{_MECHANISM_CITED_ROW} by KEY, and that key is not a row of the map — a "
+        f"mechanism citation that names nothing is the same defect as a rotten line "
+        f"number"
+    )
+
+    # NON-VACUITY, on a synthetic map (a committed-map arm would rot with the next
+    # sweep, the failure mode the sibling test's docstring describes).
+    synthetic = [
+        "durations:",
+        "  test_alpha.py: 1.0  # a row",
+        "  # indented preamble between two rows — the shape the original citation hit",
+        "  test_beta.py: 2.0",
+    ]
+
+    def cite(number: int) -> str:
+        return "`" + "config/ci-surfaces.yml" + f":{number}`"
+
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(2), synthetic) == []
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(4), synthetic) == []
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(3), synthetic) == [3], (
+        "the resolver would stay GREEN on the very shape that rotted this docstring: an "
+        "indented preamble line between two `durations:` rows"
+    )
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(99), synthetic) == [99]
+    assert _cited_manifest_lines_that_are_not_durations_rows(cite(1), synthetic) == [1], (
+        "the `durations:` key line itself carries no row, so a citation onto it is a "
+        "citation onto nothing"
+    )
+
+
+def test_a_mid_note_span_does_not_leave_a_space_before_a_sentence_period() -> None:
+    """A re-join glues an ATTACHING mark, and keeps the space everywhere else.
+
+    `_without_span` removes a prior basis from the MIDDLE of a joined note, where
+    the ` — ` it consumes is the RENDERER's separator and not the note's: the writer
+    appended its basis to the row-line FRAGMENT, which can end mid-sentence, so the
+    note's own remainder starts wherever the fragment stopped. `#5256`'s row is that
+    shape — the fragment ends `… not carve_out-registered` and the continuation
+    opens `. The count is re-derived …` — and joining with a space emitted
+    `… carve_out-registered . The count …`. No guard catches that: the map carries
+    zero such occurrences today (so a map scan cannot prove it), and the wrapped-row
+    guard asserts surviving WORDS, which a spurious space does not change. So the
+    predicate is pinned directly, in both directions (#10575 review, P3).
+    """
+    tail = ("… rows in the run — but it is not carve_out-registered"
+            " — ci-timing junit-census+top-15 2026-11-02 (run 1); was 3.2"
+            " . The count is re-derived at your head")
+    start = tail.index(" — ci-timing")
+    end = tail.index(". The count") - 1  # leave the ` . ` separator's own space out
+    assert ci_timing._without_span(tail, start, end).endswith(
+        "carve_out-registered. The count is re-derived at your head"), \
+        ci_timing._without_span(tail, start, end)
+    # CONTROL: an ordinary (non-attaching) continuation keeps the single space the
+    # dash occupied, so the fix is not "glue everything".
+    control = tail.replace(". The count", "x The count")
+    start = control.index(" — ci-timing")
+    end = control.index("x The count") - 1
+    assert ci_timing._without_span(control, start, end).endswith(
+        "carve_out-registered x The count is re-derived at your head"), \
+        ci_timing._without_span(control, start, end)
+    # CONTROL: a QUOTE is both an opening and a closing mark, so the predicate does
+    # NOT glue it — `… "quoted clause"` keeps the word separator the space carries.
+    # Gluing it emitted `word"quoted clause"` (#10704 review round 2).
+    quoted = "word — SPAN \"quoted clause\" here"
+    start = quoted.index(" — ")
+    end = quoted.index('"')
+    assert ci_timing._without_span(quoted, start, end) == 'word "quoted clause" here', \
+        ci_timing._without_span(quoted, start, end)
+
+
+def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
+    """The prune guard must not red a map the writer's own sweep has re-valued.
+
+    The writer re-derives this row every week, so a guard whose expectation is the
+    committed VALUE or the committed BASIS COUNT inherits the sweep as a test
+    dependency. Both ordinary sweep outcomes are driven here and the guard's own body
+    is then re-run on the map each produces:
+
+    * ADOPT — an upward reading is taken unconditionally (`measured > previous` never
+      sets `kept`), so the committed value moves and the note's basis is replaced;
+    * HOLD — a lower reading whose denominator the census cannot cover keeps the
+      weight, and `#9134`'s P2 keeps the older ADOPTED basis beside the new one, so
+      the note legitimately ends up with TWO bases.
+
+    The pre-fix guard failed both: `"was 2.3"` stopped matching the moment the value
+    moved, and `len(bases) == 1` / `"2026-11-02" not in note` failed on the held
+    shape (#10575 review, P2). Neither is a compact on the row — both are the writer
+    working correctly, on a map that is healthy in every respect.
+    """
+    key = "test_source_staleness_sweep_5038.py"
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    previous = _durations_row_value(text, key)
+    # ⛔ THE SIMULATED SWEEP'S DATE IS DERIVED, EXACTLY AS THE GUARD'S OWN HELPER
+    # DERIVES IT. A fixed label is the same time-bomb the helper's docstring warns
+    # about (`a fixed label would quietly stop meaning that as soon as a sweep reached
+    # its date`): the sweep this test simulates is meant to supersede whatever the map
+    # commits, and the `2026-11-09` refresh gave the committed row a basis carrying the
+    # very date a hard-coded label named (#11602). On the HOLD arm #9134's P2 keeps the
+    # older basis beside the new one, so both spans then read `2026-11-09`
+    # (`… 2026-11-09 (run 42546828652); was 2.3 — … 2026-11-09 (run 41379999999); was
+    # 2.6`) and "the newest committed basis is gone" can no longer be told apart from
+    # "the new basis arrived" — the guard reds on a map that is healthy in every
+    # respect, which is the exact class `cd96ad0800` fixed for the helper.
+    committed_bases = _BASIS_LABEL_RE.findall(_durations_row_note(text, key))
+    assert committed_bases, f"the row states no basis to supersede: {key}"
+    sweep_year = max(int(b.rsplit(" ", 1)[-1][:4]) for b in committed_bases) + 1
+    sweep_at = f"{sweep_year}-01-01T00:00:00Z"
+    sweep_label = (f"ci-timing junit-census+top-15 {sweep_year}-01-01 "
+                   "(run 41379999999)")
+    adopted, _ = ci_timing.render_refreshed_manifest(
+        text, {key: previous + 1.0}, sweep_at, sample_label=sweep_label)
+    assert _durations_row_value(adopted, key) == previous + 1.0, (
+        "the simulated ADOPT sweep did not take the new reading, so it does not "
+        "exercise the state a value-pinned guard failed on")
+    held, _ = ci_timing.render_refreshed_manifest(
+        text, {key: 0.1}, sweep_at, coverage={key: (0, 0)},
+        sample_label=sweep_label)
+    assert _durations_row_value(held, key) == previous, (
+        "the simulated HOLD sweep did not keep the weight, so it does not exercise "
+        "the two-basis shape a value-pinned guard failed on")
+    for swept, outcome in ((adopted, "ADOPT"), (held, "HOLD")):
+        try:
+            _assert_a_re_base_supersedes_the_newest_basis(swept)
+        except AssertionError as exc:  # pragma: no cover - the failure message
+            raise AssertionError(f"after one {outcome} sweep: {exc}") from exc
+
+
+def test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle() -> None:
+    """The mid-note prune reaches a basis an END-ANCHORED match cannot see.
+
+    The subject is BUILT from the writer's own fragment-plus-continuation join
+    rather than read off the committed map, because the map can no longer supply
+    this layout: the writer's CUT arm flattens a wrapped note on re-base, and the
+    `2026-11-09` refresh flattened the last row that carried a mid-note basis
+    (#11602) — measured at that head, `HOLD` appends its clause at the END of the
+    joined note and `ADOPT` flattens the note to one line, so no committed
+    `durations:` row yields a newest span that sits mid-note.
+
+    The shape is a property of the NOTE, not of whichever row the last sweep left
+    wrapped. Pinning it to a committed row is what let
+    `test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits` go vacuously green
+    on the MID-note arm while still passing on the end-anchored one.
+    """
+    tail = ("# #5038: deliverable 3: 34 tests embedded — "
+            "ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.2")
+    continuations = [
+        "# THE NOTE CONTINUES past the basis, so an end-anchored match finds "
+        "nothing here.",
+    ]
+    note = ci_timing._joined_note_tail(tail, continuations)
+    spans = ci_timing._prior_basis_spans(note)
+    assert spans, f"the constructed note states no basis: {note}"
+    # NON-VACUITY: the basis is NOT at the end, so an end-anchored rule cannot reach
+    # it. Without this the test would pass on a note whose only basis ends it, which
+    # is the vacuous state this test exists to rule out.
+    assert spans[-1][1] < len(note.rstrip()), (
+        f"the constructed basis ends the note, so the mid-note arm is not "
+        f"exercised: {note}")
+    pruned = ci_timing._strip_prior_basis(note)
+    assert "ci-timing junit-census+top-15 2026-11-02" not in pruned, pruned
+    assert "deliverable 3: 34 tests" in pruned, pruned
+    assert "an end-anchored match finds nothing here" in pruned, pruned
+
+
+def _indented_block_shape(text: str) -> tuple[int, int, int]:
+    """`(wrapped, preamble, column0)` for a map's `durations` block.
+
+    `wrapped` counts rows whose note `_row_continuation_lines` accepts a
+    continuation for, `preamble` the indented blocks beside a row (the map's
+    dominant convention: they document the row BELOW), and `column0` the column-0
+    `#` prose lines that the span's indentation bound is what keeps out of a note.
+    """
+    lines = text.split("\n")
+    index, _entries = ci_timing._locate_durations_block(lines)
+    end = next((i for i in range(index + 1, len(lines))
+                if lines[i] and not lines[i][0].isspace()
+                and not lines[i].startswith("#")), len(lines))
+    wrapped = preamble = column0 = 0
+    for i in range(index + 1, end):
+        if lines[i].startswith("#"):
+            column0 += 1
+        if ci_timing._DURATION_LINE_RE.match(lines[i]) is None:
+            continue
+        if ci_timing._row_continuation_lines(lines, i):
+            wrapped += 1
+        if ci_timing._row_indented_comment_run(lines, i):
+            preamble += 1
+    return wrapped, preamble, column0
+
+
+def _assert_preamble_shape(wrapped: int, preamble: int) -> None:
+    """The claim `_row_continuation_lines`' rationale actually rests on.
+
+    Deliberately NO `wrapped >= 1` clause. The writer FLATTENS a wrapped note on a
+    CUT or a wholesale replacement — `lines[index] = f"{rendered_row}{tail}"` plus
+    `drop.update(continuation)`, because a survivor set cannot be mapped back onto
+    line breaks chosen for the clauses it dropped — so the committed map reaches
+    ZERO wraps as soon as one weekly sweep adopts a new reading for its last
+    wrapped row. Measured at `ce2f91428` with this module: committed
+    `(wrapped=1, preamble=74)` → after one adopting render `(0, 73)`.
+
+    A guard that demanded a committed wrap therefore went red on a HEALTHY map, on
+    the first adopting sweep, in whatever later unrelated leg selected `sdk` — the
+    red asserting that "the dominant convention is no longer the preamble" while 74
+    of the 74 indented blocks still were (#10575 review, P2). The wrapped re-emit
+    paths stay pinned by their own tests — the committed re-base
+    (`test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits`) asserts on the
+    flattened result, and the two `_WRAPPED_NOTE_MANIFEST` fixtures drive the CUT
+    and APPEND arms synthetically — so neither depends on a committed wrap
+    surviving, and the flatten is exactly what those tests assert.
+    """
+    assert preamble > 10 * wrapped, (
+        f"the block's dominant convention is no longer the preamble for the row "
+        f"below ({preamble} indented blocks beside a row, {wrapped} of them real "
+        f"wraps); the opener rule and `_row_continuation_lines`' rationale rest on "
+        f"that inversion")
+
+
+def test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped() -> None:
+    """The distribution the writer's span rationale rests on, re-derived.
+
+    `_row_continuation_lines` is conservative because the map's indented blocks
+    beside a row are overwhelmingly PREAMBLES for the row BELOW — only a handful
+    actually wrap the row above. The prose used to state that backwards, quoting the
+    count of NON-continuing blocks (72) as the count of wrapped rows, which made one
+    wrapped row look like 72 and hid the regression the opener rule exists to stop
+    (#10575 review, P3).
+
+    Computed, not frozen: a refresh re-emits notes and moves these counts (this
+    branch's own refresh flattened one wrapped row), so a hardcoded figure would
+    re-stale. What must hold is the SHAPE — an order-of-magnitude gap between the
+    preambles and the wraps — and it must hold on what the WRITER emits, not only on
+    the committed bytes, because the writer's CUT arm flattens a wrapped note.
+
+    Non-vacuity: restore a `wrapped >= 1` clause here (the shape this test shipped
+    at `ce2f91428`) and the post-sweep half fails — the render below returns 0
+    wraps — while the committed half passes. That is the false red the clause caused.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    wrapped, preamble, column0 = _indented_block_shape(text)
+    _assert_preamble_shape(wrapped, preamble)
+    assert column0 > 100, (
+        f"the block carries only {column0} COLUMN-0 prose lines, so the "
+        f"indentation bound the span relies on is no longer load-bearing")
+    # …and the same claim must hold on the map the writer emits from these bytes.
+    # The row is chosen dynamically: while the map still has a wrapped row the render
+    # flattens it (the case the removed clause went red on), and once it does not, the
+    # render still exercises a re-base — so this half does not itself re-stale.
+    lines = text.split("\n")
+    _index, entries = ci_timing._locate_durations_block(lines)
+    keys = list(entries)
+    wrapped_keys = [k for k in keys
+                    if ci_timing._row_continuation_lines(lines, entries[k])]
+    key = (wrapped_keys or keys)[0]
+    reading = float(ci_timing._DURATION_LINE_RE.match(
+        lines[entries[key]]).group("value")) + 5.0
+    rendered, _ = ci_timing.render_refreshed_manifest(
+        text, {key: reading}, "2026-11-09T00:00:00Z",
+        coverage={key: (34, 34)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    after_wrapped, after_preamble, _after_column0 = _indented_block_shape(rendered)
+    assert after_wrapped <= wrapped, (
+        f"a re-base of {key} CREATED a wrapped note ({wrapped} → {after_wrapped}); "
+        f"the writer's CUT arm drops continuations rather than creating them")
+    _assert_preamble_shape(after_wrapped, after_preamble)
+
+
+def test_a_re_base_keeps_a_live_count_outside_the_stale_basis_claim() -> None:
+    """A refresh must not take a LIVE fact with the falsified clause beside it.
+
+    `test_ci_catch_history.py`'s note carries the count of its own offline tests and
+    the command that re-derives it, and `test_the_durations_note_counts_the_tests_this_
+    file_actually_has` RUNS that command. The 2026-11-02 refresh re-based the row
+    (its first CI junit reading), which made the clause `a NEW file has no CI junit
+    measurement … so this is the LOCAL wall of its offline tests: 69 of them` stale
+    as a whole — and the stale-basis cutter took the clause atomically, count
+    included, so the committed note stopped stating a number and the guard went red.
+    This is the #9134 "a live instruction went with the falsified claim" shape, and
+    the repair is that the count now sits in its own clause, ahead of any dated one.
+
+    Non-vacuity: on the map before `42a624e02` (which re-stated the count in its own
+    clause) the same render emits no `N of them` at all and the first assertion
+    fails — that is exactly the red the guard in
+    `tests/test_ci_catch_history.py` reported.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    key = "test_ci_catch_history.py"
+    rebased, _ = ci_timing.render_refreshed_manifest(
+        text, {key: 1.5}, "2026-11-09T00:00:00Z",
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    lines = rebased.split("\n")
+    index = next(i for i, ln in enumerate(lines) if ln.startswith(f"  {key}: "))
+    match = ci_timing._DURATION_LINE_RE.match(lines[index])
+    assert match is not None, lines[index]
+    continuation = ci_timing._row_continuation_lines(lines, index)
+    note = (ci_timing._joined_note_tail(match.group("tail"),
+                                       [lines[j] for j in continuation])
+            if continuation else match.group("tail"))
+    stated = re.search(r"\b(\d+) of them", note)
+    assert stated, f"the re-base dropped the note's own count: {note}"
+    actual = len(re.findall(r"^def test_",
+                            (REPO_ROOT / "tests" / key).read_text(), re.MULTILINE))
+    assert int(stated.group(1)) == actual, (
+        f"the note states {stated.group(1)} offline tests; the file defines {actual}")
+    assert len(re.findall(r"ci-timing (?:junit-census\+top-15|top-15) \d{4}-\d{2}-\d{2}",
+                          note)) == 1, note
+
+
+# ── `durations_floors`: a DECLARED FLOOR is not a reading ────────────────────
+
+_FLOOR_MANIFEST = """\
+# hand-curated sweep-basis header
+surfaces:
+  core:
+    - test_capped.py
+    - test_plain.py
+    - test_other.py
+durations_held_equal: {}
+# a BARE NUMBER is a FLOOR only: a reading may raise the row above it
+durations_floors:
+  test_capped.py: 355.0
+durations_captured_at: "2026-10-26T04:45:51Z"
+durations:
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the two loaded post-#8423
+  # readings are ABOVE it and a quiet-host one below; erring high is the rule.
+  test_capped.py: 355.0
+  test_plain.py: 4.0  # a normal row, no floor declared
+  test_other.py: 2.0
+"""
+
+_CAP_MANIFEST = """\
+# hand-curated sweep-basis header
+surfaces:
+  core:
+    - test_capped.py
+    - test_plain.py
+# a `pinned` declaration is a CAP: the weight in BOTH directions
+durations_held_equal: {}
+durations_floors:
+  test_capped.py: {value: 355.0, pinned: true}
+durations_captured_at: "2026-10-26T04:45:51Z"
+durations:
+  # ⛔ 355.0 IS A DELIBERATE CAP, NOT A READING — the loaded post-#8423 reading is
+  # ABOVE it and a quiet-host one below; erring high is the rule.
+  test_capped.py: 355.0
+  test_plain.py: 4.0  # a normal row, no declaration
+"""
+
+
+def _rendered_floor(tmp_path: Path, weights: dict[str, float], *,
+                    coverage: dict[str, tuple[int, int]] | None = None
+                    ) -> tuple[str, dict]:
+    path = _bridge_manifest(tmp_path, _FLOOR_MANIFEST)
+    return ci_timing.render_refreshed_manifest(
+        path.read_text(), weights, "2026-11-09T00:00:00Z",
+        coverage=coverage,
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)",
+    )
+
+
+def test_a_declared_floor_cannot_be_lowered_even_by_a_provable_reading(
+        tmp_path: Path) -> None:
+    """THE #10575 P1 DEFECT. A row whose weight is a DECLARED FLOOR records what
+    the pack SHALL assume, not what the file cost — so no reading discounts it,
+    including one that provably saw every testcase.
+
+    This is the measured shape: `test_lane_stash.py` went `355.0 -> 25.4` on the
+    2026-11-02 sweep, 6.8x below the lowest reading the file has ever recorded,
+    while the `355.0 IS A DELIBERATE CAP, NOT A READING … #9172` block above its own
+    row stayed byte-identical. The coverage witness then read 115 of 115, so the
+    ordinary lower-bound guard (`declared > 1 and observed >= declared`) declared it
+    PROVABLE and adopted the discount. A decision the writer cannot honour is a
+    decision the next sweep re-decides.
+
+    Non-vacuity: against the pre-fix renderer (no `durations_floors` reader) the row
+    is adopted at 25.4 and BOTH value assertions fail while the note carries no
+    floor reason — the `; was 355.0` re-base instead.
+    """
+    text, stats = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4, "test_plain.py": 3.0},
+        coverage={"test_capped.py": (115, 115), "test_plain.py": (4, 4)})
+    durations = yaml.safe_load(text)["durations"]
+    assert durations["test_capped.py"] == 355.0, durations["test_capped.py"]
+    # …and a floor is a MINIMUM, not a pin: an ordinary row is still re-based, so
+    # the mechanism cannot be mistaken for a blanket freeze.
+    assert durations["test_plain.py"] == 3.0
+    assert stats["kept_as_lower_bound"] == 1
+    # Look INSIDE the `durations:` block: the same key is also declared in
+    # `durations_floors` above it, and a whole-file scan finds that declaration
+    # instead of the row it guards.
+    block = text.split("\ndurations:\n", 1)[1]
+    row = next(ln for ln in block.split("\n")
+               if ln.strip().startswith("test_capped.py:"))
+    assert "DECLARED FLOOR (355.0)" in row, row
+    assert "kept 355.0" in row, row
+    assert "; was 355.0" not in row, row
+    # the cap block is left byte-identical: the row's note is rewritten, the
+    # neighbour's prose is not
+    assert "⛔ 355.0 IS A DELIBERATE CAP, NOT A READING" in text
+    assert ci_timing.validate_refreshed_manifest(text) == []
+    # A floor is also HONOURED on a RAISE: a reading above it is adopted normally,
+    # so a file that genuinely got more expensive still moves.
+    raised, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 400.0}, coverage={"test_capped.py": (115, 115)})
+    assert yaml.safe_load(raised)["durations"]["test_capped.py"] == 400.0
+
+
+def test_a_floored_row_states_one_basis_across_consecutive_sweeps(
+        tmp_path: Path) -> None:
+    """The floor reason is re-prunable, so a weekly sweep cannot grow the note.
+
+    The reason text is deliberately free of an em dash: `_PRIOR_BASIS_RE` /
+    `_PRIOR_BASIS_SPAN_RE` bound a basis with `[^—]*`, so a ` — ` inside the reason
+    made the note UNRECOGNISABLE as a prior held basis and every sweep appended
+    another sentence. Measured while writing this: the committed row grew from one
+    basis to two on the first render.
+    """
+    first, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4}, coverage={"test_capped.py": (115, 115)})
+    second, _ = _rendered_floor(
+        tmp_path, {"test_capped.py": 25.4}, coverage={"test_capped.py": (115, 115)})
+    # Feed the first render back in, which is what the next week's sweep does.
+    third, _ = ci_timing.render_refreshed_manifest(
+        first, {"test_capped.py": 25.4}, "2026-11-16T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41399999999)")
+    floors_at = [ln for ln in third.split("\ndurations:\n", 1)[1].split("\n")
+                 if ln.strip().startswith("test_capped.py:")]
+    assert len(floors_at) == 1, floors_at
+    assert floors_at[0].count("DECLARED FLOOR") == 1, floors_at[0]
+    assert third.count("ci-timing junit-census+top-15") == 1, third
+    assert yaml.safe_load(second)["durations"]["test_capped.py"] == 355.0
+
+
+def test_a_floor_that_names_no_row_or_sits_above_one_is_red() -> None:
+    """Both ways a declared floor can mean nothing are named, not ignored.
+
+    A floor guarding a key the map does not carry never applies (the file packs at
+    the flat default instead — the #3400/#4348 "a row must EXIST" trap), and a row
+    BELOW its own floor makes the map say "this is a declared minimum" and write a
+    smaller number. Neither is reachable through the writer, so each is a hand-edit
+    that left the other half behind — the state a reader cannot reconcile.
+
+    Non-vacuity: every arm below calls `floor_issues` DIRECTLY, so this test pins the
+    check's own logic and says nothing about whether it is WIRED — that half is
+    `test_the_floor_check_is_composed_into_the_shared_map_contract` below.
+    """
+    import ci_manifest
+
+    good = {"durations": {"test_a.py": 355.0},
+            "durations_floors": {"test_a.py": 355.0}}
+    assert ci_manifest.floor_issues(good) == []
+    # a row ABOVE its floor is fine: a floor is a minimum, and the sweep can raise
+    assert ci_manifest.floor_issues({"durations": {"test_a.py": 400.0},
+                                     "durations_floors": {"test_a.py": 355.0}}) == []
+    # a floor for a row that is not there — the silent one
+    missing = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 20.0},
+         "durations_floors": {"test_absent.py": 355.0}})
+    assert len(missing) == 1 and "test_absent.py" in missing[0], missing
+    # a row sitting BELOW its own declared floor
+    below = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 25.4},
+         "durations_floors": {"test_a.py": 355.0}})
+    assert len(below) == 1 and "25.4" in below[0] and "355.0" in below[0], below
+    # a floor nobody can read is not "no floor"
+    unreadable = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": {"test_a.py": "a lot"}})
+    assert len(unreadable) == 1 and "not a number" in unreadable[0], unreadable
+    # A CAP (`pinned`) is TWO-SIDED: a row ABOVE the declaration is a red, not a
+    # raise the sweep may take (#10575 delta review, P2).
+    assert ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}}) == []
+    above_cap = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 390.0},
+         "durations_floors": {"test_a.py": {"value": 355.0, "pinned": True}}})
+    assert len(above_cap) == 1 and "390.0" in above_cap[0], above_cap
+    assert "CAP" in above_cap[0], above_cap
+    # an UNPINNED declaration keeps the one-directional meaning: 390.0 over a 355.0
+    # minimum is exactly what a floor permits
+    assert ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 390.0},
+         "durations_floors": {"test_a.py": {"value": 355.0}}}) == []
+    # …and every shape that could silently mean "no declaration" is a red instead
+    # (#10575 review, F2): a per-row list, a non-numeric value, a non-boolean
+    # `pinned`, an unknown key, and a whole block written as a list.
+    for bad in ({"test_a.py": [355.0]},
+                {"test_a.py": {"value": "a lot"}},
+                {"test_a.py": {"value": 355.0, "pinned": "yes"}},
+                {"test_a.py": {"value": 355.0, "cap": True}}):
+        red = ci_manifest.floor_issues({"durations": {"test_a.py": 355.0},
+                                        "durations_floors": bad})
+        assert len(red) == 1, (bad, red)
+    block_as_list = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0},
+         "durations_floors": ["test_a.py"]})
+    assert len(block_as_list) == 1 and "mapping" in block_as_list[0], block_as_list
+    # …and the container's OTHER face: PRESENT but NULL. Deleting a block's entries
+    # while leaving the key line is a plausible "tidy" (and the shape this repo's
+    # duplicate-row repairs take), and reading it as "no declarations" un-enforced
+    # every declared cap on both sides at once with nothing red anywhere
+    # (#10575 review, P3).
+    null_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": None})
+    assert len(null_block) == 1 and "null" in null_block[0], null_block
+    # …and the THIRD face: an EMPTY mapping. A YAML-aware editor or a `safe_dump`
+    # round-trip produces `{}` rather than `null` when a block is emptied, and it is
+    # the same silent revert (#10704 review round 2).
+    empty_block = ci_manifest.floor_issues(
+        {"durations": {"test_a.py": 355.0}, "durations_floors": {}})
+    assert len(empty_block) == 1 and "empty" in empty_block[0], empty_block
+    # An ABSENT map is `check`'s UNKNOWN, not this check's red: there is no map for
+    # a floor to be inconsistent with, and one red per declared floor would turn
+    # that UNKNOWN into a wall of reds.
+    assert ci_manifest.floor_issues({"durations_floors": {"test_a.py": 355.0}}) == []
+
+
+def test_the_floor_check_is_composed_into_the_shared_map_contract() -> None:
+    """`floor_issues` must be reached through `map_issues`, not only called directly.
+
+    `tools/ci_manifest.py`'s `+ floor_issues(manifest)` inside `map_issues` is the
+    ONLY line that makes a declared cap enforcing at BOTH entry points
+    (`ci_selection --integrity` and `ci_timing.integrity_problems`, via `check`).
+    Every other floor test calls the function directly, so deleting that one line
+    disabled every declared cap with the whole suite green — a false PASS in the
+    required `manifest-integrity` leg, which is why this pin exists.
+
+    Driven on the REAL map, because a hand-built one raises inside `duration_issues`
+    (it has no `surfaces:`), and because the point is that the committed map's own
+    declarations are enforced.
+
+    Non-vacuity: remove `floor_issues(manifest)` from `map_issues` and both
+    assertions below fail.
+    """
+    import ci_manifest
+
+    manifest = yaml.safe_load((REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
+    assert manifest["durations"]["test_lane_stash.py"] == 355.0
+    assert ci_manifest.map_issues(manifest) == []
+    # A hand-edit that discounts a DECLARED CAP is what the sweep must never do
+    # silently: this is the #10575 P1 reading, injected.
+    manifest["durations"]["test_lane_stash.py"] = 25.4
+    assert any("durations_floors" in issue for issue in ci_manifest.map_issues(manifest))
+    red, _unknown = ci_manifest.check(manifest)
+    assert any("durations_floors" in issue for issue in red), red
+
+
+def test_the_real_maps_cap_is_a_declared_floor_and_is_never_lowered(
+        tmp_path: Path) -> None:
+    """The committed `355.0` cap rows are guarded, not just documented.
+
+    `test_lane_stash.py`, `test_calibration.py` and
+    `eval/write_path/test_write_path_operator_lane.py` all carry a 355.0 cap whose
+    rationale sits in prose above a row. The declaration is what makes it binding —
+    and this pin is deliberately NON-vacuous in the way that matters: it drives the
+    real map with BOTH defeat directions (a discount reading and a raise reading)
+    for every declared key and requires every one to survive at its cap. The raise
+    half is the delta review's P2: each of those rows states a CEILING and says not
+    to read 355.0 as a measurement, so a sweep adopting the 390.0/386.2/366.4
+    readings the notes cite would leave the row contradicting its own note.
+    """
+    text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    floors = ci_timing._declared_floors(text)
+    assert floors, "the committed map declares no floors any more"
+    assert floors["test_lane_stash.py"].value == 355.0
+    # These three are CAPS, not floors: the notes record a weighing choice, and
+    # raising one is a #9172 CI-budget decision, never a sweep's side effect.
+    assert all(decl.pinned for decl in floors.values()), floors
+    for weights in ({key: 1.0 for key in floors},
+                    {"test_lane_stash.py": 366.4, "test_calibration.py": 390.0,
+                     "eval/write_path/test_write_path_operator_lane.py": 386.2}):
+        rendered, stats = ci_timing.render_refreshed_manifest(
+            text, weights, "2026-11-09T00:00:00Z",
+            coverage={key: (400, 400) for key in floors},
+            sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+        durations = yaml.safe_load(rendered)["durations"]
+        for key, declared in floors.items():
+            assert durations[key] == declared.value, (key, durations[key], declared)
+        assert sum((stats["kept_as_lower_bound"], stats["kept_at_declared_cap"])) \
+            == len(floors)
+        assert ci_timing.validate_refreshed_manifest(rendered) == []
+
+
+def test_a_capped_row_is_held_in_BOTH_directions(tmp_path: Path) -> None:
+    """A `pinned` declaration is the weight, not a one-way boundary.
+
+    The three committed caps record a weighing choice (#6133/#9172) over a
+    measurement their own notes say must NOT become the weight. A one-directional
+    floor thereby let an ordinary sweep write `test_calibration.py: 390.0` beside a
+    note reading `#6133 CEILING, not a reading … do not read 355.0 as a measurement
+    of this file` — the hand-edit a human had already made once, done silently
+    (#10575 delta review, P2). This drives the writer with a RAISE and requires the
+    row to hold, and with a DISCOUNT to show the same declaration still bounds the
+    other direction.
+    """
+    path = _bridge_manifest(tmp_path, _CAP_MANIFEST)
+    text = path.read_text()
+    raised, up = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 390.0}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(raised)["durations"]["test_capped.py"] == 355.0
+    assert up["kept_at_declared_cap"] == 1, up
+    assert up["kept_as_lower_bound"] == 0, up
+    row = _row_inside_the_block(raised, "test_capped.py")
+    assert "DECLARED CAP (355.0)" in row, row
+    assert "refused as a raise" in row, row
+    # the value did not move, so no `; was 355.0` — that is the ADOPTED shape
+    assert "; was 355.0" not in row, row
+    assert ci_timing.validate_refreshed_manifest(raised) == []
+    # A cap is a CEILING, not a blanket freeze: the discount direction is still
+    # refused, and it is refused by the floor half of the same declaration.
+    lowered, down = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 25.4}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(lowered)["durations"]["test_capped.py"] == 355.0
+    # The hold is COUNTED by the declaration, not by the direction: a pinned row
+    # held from below is still a cap-hold, and counting it as a lower-bound hold
+    # made a run's two stats unreadable apart — which is why the split exists
+    # (#10575 review, F1). The wording half is pinned by
+    # `test_a_cap_read_from_BELOW_still_states_the_CAP_rule`.
+    assert down["kept_at_declared_cap"] == 1, down
+    assert down["kept_as_lower_bound"] == 0, down
+    # …and the declared value itself is not a hold: nothing was refused.
+    same, flat = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 355.0}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(same)["durations"]["test_capped.py"] == 355.0
+    assert sum((flat["kept_as_lower_bound"], flat["kept_at_declared_cap"])) == 0, flat
+    # A second hold states ONE basis: a weekly sweep cannot grow the note.
+    again, _ = ci_timing.render_refreshed_manifest(
+        raised, {"test_capped.py": 390.0}, "2026-11-16T00:00:00Z",
+        coverage={"test_capped.py": (126, 126)},
+        sample_label="ci-timing junit-census+top-15 2026-11-16 (run 41399999999)")
+    second = _row_inside_the_block(again, "test_capped.py")
+    assert second.count("DECLARED CAP") == 1, second
+    assert again.count("ci-timing junit-census+top-15") == 1, again
+
+
+def test_a_cap_read_from_BELOW_still_states_the_CAP_rule(tmp_path: Path) -> None:
+    """A CAP is a CAP whichever direction the reading came from (#10575 review, F1).
+
+    The ordinary weekly case for all three committed caps is a reading BELOW the
+    cap, and the hold's sentence/counter used to be chosen by DIRECTION — so a
+    `pinned` row held up from 25.4 stated its weight was a "DECLARED FLOOR … a
+    sweep may RAISE it", the opposite of the #9172 CI-budget decision it is held
+    under, and it overwrote prose the branch had already hand-corrected. The
+    counter was wrong the same way: the cap-hold landed in
+    `kept_as_lower_bound`, so a run's stats said no cap was in play.
+
+    Non-vacuity: pre-fix, `DECLARED CAP` is absent and `may RAISE` is present on
+    the `down` render, and `kept_at_declared_cap` is 0.
+    """
+    path = _bridge_manifest(tmp_path, _CAP_MANIFEST)
+    text = path.read_text()
+    lowered, down = ci_timing.render_refreshed_manifest(
+        text, {"test_capped.py": 25.4}, "2026-11-09T00:00:00Z",
+        coverage={"test_capped.py": (115, 115)},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    assert yaml.safe_load(lowered)["durations"]["test_capped.py"] == 355.0
+    row = _row_inside_the_block(lowered, "test_capped.py")
+    assert "DECLARED CAP (355.0)" in row, row
+    assert "may RAISE" not in row, row
+    assert "DECLARED FLOOR" not in row, row
+    assert "refused as a discount" in row, row
+    assert down["kept_at_declared_cap"] == 1, down
+    assert down["kept_as_lower_bound"] == 0, down
+    assert ci_timing.validate_refreshed_manifest(lowered) == []
+    # …and the COMMITTED map's caps render that sentence too, so the next sweep
+    # reproduces the hand-corrected prose instead of replacing it.
+    committed_text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+    floors = ci_timing._declared_floors(committed_text)
+    below = {"test_lane_stash.py": 25.4, "test_calibration.py": 23.0}
+    assert set(below) <= set(floors), floors
+    rendered, stats = ci_timing.render_refreshed_manifest(
+        committed_text, below, "2026-11-09T00:00:00Z",
+        coverage={key: (115, 115) for key in below},
+        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+    for key in below:
+        committed_row = _row_inside_the_block(rendered, key)
+        assert f"DECLARED CAP ({floors[key].value:.1f})" in committed_row, committed_row
+        assert "DECLARED FLOOR" not in committed_row, committed_row
+    assert stats["kept_at_declared_cap"] == len(below), stats
+    assert stats["kept_as_lower_bound"] == 0, stats
+
+
+def test_the_unmeasured_markers_qualifier_goes_with_the_marker() -> None:
+    """`# unmeasured by CI` loses the WHOLE marker phrase (#10575 review, F2).
+
+    Both marker paths consumed only the word `unmeasured`, so the qualifier was
+    left stranded with nothing to modify: an ADOPTED row shipped
+    `# by CI — #10046: …` and a HELD one shipped
+    `# carried forward (not a full-file CI measurement) — by CI — #10025: …`. Two
+    rows carried that stub in this PR's own diff, and it recurs on every future
+    sweep of any `# unmeasured … CI` row.
+
+    Non-vacuity: pre-fix both assertions see `# by CI — …`.
+    """
+    assert ci_timing._strip_unmeasured_marker(
+        "  # unmeasured by CI — #10046: some rationale") == \
+        "  # #10046: some rationale"
+    assert ci_timing._restate_unmeasured_marker(
+        "  # unmeasured by CI — #10025: some rationale") == \
+        (f"  # {ci_timing._CARRIED_FORWARD} — #10025: some rationale")
+    # the guard's own spelling (`_UNMEASURED_ON_CI_RE`) is the other two prepositions
+    for qualifier in ("on", "in"):
+        assert ci_timing._strip_unmeasured_marker(
+            f"  # unmeasured {qualifier} CI — #1: why") == "  # #1: why"
+    # …and the shapes with NO qualifier keep their established meaning: a bare
+    # marker, and the `— by the refresher —` rationale the restate path documents.
+    assert ci_timing._strip_unmeasured_marker(
+        "  # unmeasured — #7359: added after the sampled run"
+    ) == "  # #7359: added after the sampled run"
+    restated = ci_timing._restate_unmeasured_marker(
+        "  # unmeasured — by the refresher — #2296: x")
+    assert "by the refresher" in restated, restated
+    assert restated.count("—") == 2, restated
+
+
+def _row_inside_the_block(text: str, key: str) -> str:
+    """`key`'s `durations:` row, read INSIDE the block (the declaration restates it)."""
+    block = text.split("\ndurations:\n", 1)[1]
+    return next(ln for ln in block.split("\n") if ln.strip().startswith(f"{key}:"))
+
+
+def test_an_unreadable_or_pinned_odd_declaration_refuses_the_write() -> None:
+    """The WRITE side fails closed on every shape that could mean "no cap".
+
+    A per-row list, a non-numeric value, a non-boolean `pinned`, an unknown key and
+    a whole block written as a list each either silently disabled the mechanism or
+    downgraded a cap to a one-directional floor, on BOTH sides at once (#10575
+    review, F2 and delta review, P2).
+    """
+    header = "durations:\n  test_capped.py: 355.0\n"
+    for bad in ("durations_floors: [test_capped.py]\n",
+                # PRESENT but NULL — the container's OTHER face. Its entries deleted
+                # is exactly how a merge-resolution "tidy" drops duplicate twins in
+                # this repo, and reading it as "absent" reverted every cap with
+                # nothing red on either side (#10575 review, P3).
+                "durations_floors:\n",
+                "durations_floors: null\n",
+                # …and the THIRD face, the one a YAML editor / `safe_dump` round-trip
+                # produces when a block is emptied (#10704 review round 2).
+                "durations_floors: {}\n",
+                "durations_floors:\n  test_capped.py: [355.0]\n",
+                'durations_floors:\n  test_capped.py: "a lot"\n',
+                "durations_floors:\n  test_capped.py: {value: 355.0, pinned: maybe}\n",
+                "durations_floors:\n  test_capped.py: {value: 355.0, cap: true}\n"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(f"{bad}{header}")
+    # …and the OUTERMOST face: a document that is not parseable at all. This one
+    # returned `{}` ("no declarations") while the docstring above promised
+    # `UNREADABLE -> DurationsBridgeError, NEVER "no declarations"`, so the contract
+    # was false on the one shape a whole-document parse cannot distinguish from an
+    # absent key — the same fail-open the `null`, empty-mapping and list containers
+    # are refused for (#10704 review round 4, P3).
+    with pytest.raises(ci_timing.DurationsBridgeError):
+        ci_timing._declared_floors(
+            "durations_floors:\n  test_capped.py: 355.0\n  twin.py: [oops\n"
+            f"{header}")
+    # …and the ROW-NAME face: a declaration keyed on something that is not a string.
+    # `355.0` (a row name typed as a number) or `yes:` (which YAML keys as `True`)
+    # used to be `continue`d — dropped by the WRITER while `ci_manifest.floor_issues`
+    # red the same document from the READ side, so the two halves of one contract
+    # disagreed about the same bytes (#10704 review round 5, P3).
+    for bad_row_name in ("355.0", "yes"):
+        with pytest.raises(ci_timing.DurationsBridgeError):
+            ci_timing._declared_floors(
+                f"durations_floors:\n  {bad_row_name}: 355.0\n{header}")
+    # …and the shapes that ARE readable parse to what they say
+    parsed = ci_timing._declared_floors(
+        "durations_floors:\n  a.py: 355.0\n  b.py: {value: 12.5, pinned: true}\n"
+        f"{header}")
+    assert parsed["a.py"] == ci_timing.DeclaredFloor(355.0, False), parsed
+    assert parsed["b.py"] == ci_timing.DeclaredFloor(12.5, True), parsed
