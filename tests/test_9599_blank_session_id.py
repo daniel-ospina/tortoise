@@ -23,9 +23,11 @@ citing the wrong home is how a later lane "tidies" it into a refusal.)
 What this module pins is the half that IS ours, with TWO homes at two layers:
 
 * the DOOR half — a caller-supplied ``session_id`` — is
-  ``tortoise.ids.session_id_refusal``, applied at the SDK capture doors and the
-  hosted ``/v1/sessions`` boundary (the ``capture_consent`` idiom: one
-  predicate, every door); and
+  ``tortoise.ids.session_id_refusal``, applied at all FOUR caller-id doors —
+  the two SDK capture doors (``capture_session`` / ``commit_session``), the
+  hosted ``/v1/sessions`` ``SessionRequest`` boundary, and
+  ``commit_schema.CommitPayload`` (the ``POST /v1/sessions/commit`` model) —
+  (the ``capture_consent`` idiom: one predicate, every door); and
 * the REPLAY half — a merge key on a journal record or a sidecar/record restore
   — is ``projection._writable_container_id`` (``_writable_id`` PLUS the blank
   clause), applied at FOUR gates: the two journal folds

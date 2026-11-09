@@ -20806,3 +20806,44 @@ def test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it():
     assert "test_gh_read_cache.py" in m.get("durations", {}), (
         "an absent row packs the file at the flat default AND trips the coverage floor"
     )
+
+
+def test_the_blank_session_id_guard_runs_on_an_ids_only_diff():
+    # #8290 review (P3): `tests/test_9599_blank_session_id.py` pins the blank
+    # and RESERVED session-id rule — whose DOOR half lives in `tortoise/ids.py`.
+    # `SOURCE_PATTERNS` maps `tortoise/ids.py` to the NAMED surface `sdk`, and a
+    # named-surface match REPLACES the `core` fallback, so the `core`-only row
+    # was asleep on the exact change it guards: measured before the `sdk` arm,
+    # `--changed-files tortoise/ids.py` selected 246 files and NOT ONE of them
+    # was this suite — deleting the reservation, or the
+    # `_writable_container_id(reserved) is True` asymmetry this PR adds, merged
+    # green (#1349/#3332/#3616/#4309 silent-drop class). Dual `core` + `sdk` is
+    # the established pattern in the manifest (cf. `test_7936_stable_stub_ids.py`).
+    root = Path(__file__).resolve().parents[1]
+    assert (root / "tortoise/ids.py").exists(), "the guarded module is gone"
+    r = _sel(["tortoise/ids.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["sdk"], r
+    assert "test_9599_blank_session_id.py" in r["test_files"], (
+        "a `tortoise/ids.py`-only diff does not select "
+        "tests/test_9599_blank_session_id.py, so the blank/reserved door rule "
+        "could be reverted with the suite asleep (#8290 review P3, #4309 class)"
+    )
+
+
+def test_the_blank_session_id_guard_keeps_its_core_arm_too():
+    # #8290 review (P3): the `sdk` arm is an ADDITION, never a move. The two
+    # replay folds (`projection/`) fall through to `core`, so dropping the
+    # `core` row would sleep the REPLAY half on a `projection/` diff — the
+    # other half of the same rule.
+    m = load_manifest()
+    assert "test_9599_blank_session_id.py" in m["surfaces"]["core"], (
+        "the `core` arm pins the REPLAY half (`projection/`) — do not drop it"
+    )
+    assert "test_9599_blank_session_id.py" in m["surfaces"]["sdk"], (
+        "the `sdk` arm pins the DOOR half (`tortoise/ids.py`)"
+    )
+    assert integrity(m) == [], integrity(m)
+    assert "test_9599_blank_session_id.py" in m.get("durations", {}), (
+        "a fast-pool file needs a durations row (the #3400/#4348 trap)"
+    )

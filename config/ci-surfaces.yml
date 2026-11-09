@@ -4137,10 +4137,15 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py  # #3365: capture ADMISSION key vs the graph the data path opens (dual: api)
   - test_capture_session.py
-  # #9599: a blank session id is refused at the CAPTURE DOORS (tortoise/ids.py
-  # + the two SDK doors + the hosted boundary) and at the two replay folds that
-  # merge the key. Registered beside its sibling capture suite; `core` owns
-  # `tortoise/ids.py`/`projection/`, and `sdk.py`/`hosted_api.py` are
+  # #9599: a blank session id is refused at the CAPTURE DOORS (`tortoise/ids.py`
+  # + the two SDK doors + the hosted boundary + `commit_schema.CommitPayload`)
+  # and at the two replay folds that merge the key. DUAL-REGISTERED with `sdk`
+  # (below): `core` owns `projection/`, but it does NOT own `tortoise/ids.py` —
+  # `SOURCE_PATTERNS` maps that file to the NAMED surface `sdk`, and a
+  # named-surface match REPLACES the `core` fallback, so an ids.py-only diff
+  # would silently skip this guard without the `sdk` arm (`#8290` review P3,
+  # measured: `--changed-files tortoise/ids.py` → `['sdk']`, and this file is
+  # absent from that run's `test_files`). `sdk.py`/`hosted_api.py` are
   # SHARED_MODULEs, so those diffs already run the full matrix.
   - test_9599_blank_session_id.py
   # #3945: the primary capture create site must map the extractor's validated
@@ -7472,6 +7477,13 @@ surfaces:
   # files could red if the reservation were deleted — the exclusion would silently
   # become a filter over ids the write doors admit, the exact hole the P1 closed.
   - test_demo_session_read_exclusion_8290.py
+  # #9599 (the `sdk` arm; the `core` row is in that block): same reason. The
+  # blank/reserved rule's DOOR half IS `tortoise/ids.py`, so an ids.py-only diff
+  # selects `sdk` and the `core`-only row would sleep through exactly the change
+  # it pins — including `_writable_container_id(reserved) is True`, the
+  # asymmetry this PR adds (dual `core` + `sdk`, the established pattern in this
+  # file — cf. `test_7936_stable_stub_ids.py` above).
+  - test_9599_blank_session_id.py
   # #5140 finding 12 (the `sdk` arm; the `core` row is in that block). NOT
   # because of `tortoise/sdk.py`: that module is a `SHARED_MODULES` entry, so a
   # `sdk.py`-only diff selects the FULL matrix anyway (the same NOTE sits above
