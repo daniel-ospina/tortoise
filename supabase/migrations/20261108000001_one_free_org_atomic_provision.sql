@@ -113,19 +113,37 @@
 --   * `claim_membership` (20260813000004) is the OTHER writer that can make a
 --     person the owner of an org (#2810's finding: claim an anon org → owned),
 --     and it does not PERFORM this function, so it neither takes this lock nor
---     runs this predicate. Its multi-worker window is filed separately; a
+--     runs this predicate. Its multi-worker window is filed separately (#11579); a
 --     second derivation site is exactly what the LOCK RESOURCE note above says
 --     must not be added casually, so it gets its own migration rather than a
 --     copy of this key.
---   * the REGISTRY lane (`tortoise.selfhost` / `TORTOISE_CONTROL_PLANE=
---     registry`) never reaches this function — it writes through
---     `sdk.org_create` into the graph, where Postgres constraints do not
---     exist. `Dockerfile.selfhost` runs a single `uvicorn` worker with no
---     control-plane create surface at all, so that lane is unchanged and the
---     in-process lock remains its only guard; the shipped hosted image is also
---     single-worker (`docs/capacity.md`: `Dockerfile.hosted` runs a single
---     `uvicorn` worker), so this backstop protects the N-workers / N-replica
---     configuration the single-worker assumption does not cover.
+--   * the REGISTRY lane (`TORTOISE_CONTROL_PLANE=registry`, i.e.
+--     `is_supabase_enabled()` false) never reaches this function — it writes
+--     through `sdk.org_create` into the GRAPH, where Postgres constraints do
+--     not exist at all. It `PERFORM`s nothing here, takes no lock, and runs no
+--     predicate: `_assert_free_org_allowance`'s registry arm reads the graph and
+--     then writes it, still spanned only by the per-process
+--     `_org_create_lock`. **#1954's window therefore REMAINS OPEN on this lane
+--     under N workers / N replicas, and this migration does not narrow it.**
+--     Say so plainly, because the honest answer here is "not covered", not
+--     "not affected": the lane is reachable (`create_org` falls through to
+--     `_create_org_registry_lane` whenever Supabase is disabled, and
+--     `/internal/provision` is refused only in Supabase mode) and its own
+--     docstring records the hazard — "the registry lane may run MULTI-PROCESS
+--     (selfhost uvicorn workers) — the in-process lock narrows the window there
+--     but is not bulletproof; DB-level enforcement is the multi-process backstop
+--     … follow-up".
+--     ⛔ "The shipped images are single-worker" is NOT an exemption, and must
+--     not be restated as one (this bullet previously did, conflating two
+--     different deployments). It is true — `Dockerfile.selfhost` runs
+--     `tortoise.selfhost:app`, the MCP-only daemon with no control-plane create
+--     surface, and `Dockerfile.hosted` runs a single `uvicorn` worker — and it
+--     is the SAME assumption the Supabase half of this migration exists to stop
+--     relying on: the hazard is defined by deployments that are not the shipped
+--     single-worker image, so the default cannot bound it on either lane. A
+--     graph-level backstop (a claim written with the org create, a single-writer
+--     provisioner, or a fail-closed refusal of the multi-worker configuration)
+--     is its own change, filed as #11603 rather than assumed covered here.
 --
 -- ACL: the signature is unchanged, so `CREATE OR REPLACE` PRESERVES the
 -- existing grants (`REVOKE ALL ... FROM public, anon, authenticated`

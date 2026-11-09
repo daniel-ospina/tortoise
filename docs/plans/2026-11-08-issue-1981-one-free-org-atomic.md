@@ -55,8 +55,8 @@ re-check would be the wrong seam. Both fail — see §2.
 | `tortoise/hosted_api.py` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. Passes `p_user_id=owner_user_id` and `p_tier='free'`, so it is a user-path lane and is pinned as one. |
 | `tortoise/hosted_api.py` `_provision_new_org_from_checkout` | ⛔ **NOT "unaffected by construction"** — that was an assumption, not an invariant. It now REFUSES a free or absent tier loudly: defaulting a missing tier to `'free'` made the gate engage and refuse a provision the customer had already paid for, which the webhook re-raises as a 500 Stripe redelivers forever. The session-creation route rejects `free`/`anon` before checkout, so reaching here with one means the metadata was lost. |
 | `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | The entitlement gate does not fire (the identity path passes `p_user_id = NULL`). The namespace reclaim in `register_user` is **gated on attribution AND scoped to the provision step** — it used to delete on ANY exception, and it used to run the gate against the exception of a POST-provision step (`set_dashboard_key_login`), so a live account whose login flag failed lost its graph. It also runs through the shared `_drop_org_graph` off the event loop now. |
-| `tortoise/hosted_api.py` `_create_org_registry_lane` | Unchanged: registry (selfhost) mode writes into the graph, where Postgres constraints do not exist. |
-| claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. |
+| `tortoise/hosted_api.py` `_create_org_registry_lane` | **Unchanged, and the window is NOT closed here.** Registry mode writes into the graph, where Postgres constraints do not exist, so #1954's read-then-write persists on this lane under N workers / N replicas (the lane's own docstring says the in-process lock "is not bulletproof" there). A graph-level backstop is its own change — filed as **#11603**, recorded as a residual in the migration header. |
+| claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. Filed as **#11579**. |
 
 ## 5. Implementation steps (all landed in this PR)
 
@@ -104,10 +104,15 @@ re-check would be the wrong seam. Both fail — see §2.
   exit lands.
 - `T2` the marker matching a non-entitlement failure → non-vacuity test above.
 - `T3` the lock not taken by a second writer (`claim_membership`) → **out of scope here**, stated in
-  the migration header and filed; it is not a bypass of this diff, it is a different writer.
+  the migration header and filed (#11579); it is not a bypass of this diff, it is a different writer.
+- `T4` the backstop being read as covering the **registry/graph** lane, which it cannot → **out of
+  scope here**, stated in the migration header and filed (#11603). That lane keeps #1954's window
+  under N workers, and closing it needs a graph-level mechanism, not this one.
 
 **Out of scope — must NOT be raised:** the `claim_membership` multi-worker window (different RPC,
-its own derivation site), the registry/graph lane (no Postgres constraints), and whether the
+its own derivation site — #11579), whether the registry/graph lane keeps #1954's window (it does:
+no Postgres there to constrain it, so it is **not** closed by this PR and is filed as #11603 —
+do not re-derive it here, and do not fix it here), and whether the
 `create A → buy B → cancel B` hole should be closed (a settled product decision, #2789 §2).
 
 **Acceptance:** every R<n> has the named evidence green at the pushed head; `T3` is recorded, not
