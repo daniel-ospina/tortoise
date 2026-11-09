@@ -399,12 +399,22 @@ def summarize_belief_activation(
     # re-divide ``questions_with_ep / questions`` itself, so the ratio the issue
     # exists to publish was the only headline cell with no producer in the
     # runner — and two derivations of one number is how they disagree (#10137
-    # review's own rule; the probe carried the second one). Gated by the SAME
-    # rule as ``belief_eligible_ratio`` below and as the probe's fallback: a
-    # ratio over a denominator that is not a usable positive count is ``None``
-    # (UNKNOWN), never ``0.0`` — a run of zero questions has not measured a
-    # zero rate, and ``0.0`` there reads exactly like ``no question carried a
-    # posterior``, which is a finding.
+    # review's own rule; the probe carried the second one). The gate is the
+    # DENOMINATOR's: a ratio over a count that is not a usable positive
+    # denominator is ``None`` (UNKNOWN), never ``0.0`` — a run of zero questions
+    # has not measured a zero rate, and ``0.0`` there reads exactly like ``no
+    # question carried a posterior``, which is a finding.
+    #
+    # ⛔ That is NOT ``belief_eligible_ratio``'s gate, and this comment claimed it
+    # was until the #11645 review: that sibling also requires ``*_unread == 0`` on
+    # BOTH sides, whereas ``questions_with_ep`` has no ``_unread`` companion — so
+    # a population whose census was never read collapses into the numerator and
+    # publishes ``0.0`` here. Not reachable from the current producer (an armed
+    # pass always reports the census), and it is not repaired by borrowing the
+    # sibling's clause: the per-question read/unread split it needs does not
+    # exist (``_classify_question``'s last arm returns ``INERT_UNMEASURED`` for
+    # both "census unread" and "read, zero, unexplained"), so the honest fix is a
+    # companion cell with its own review. Filed as #11650.
     summary["questions_with_ep_ratio"] = (
         summary["questions_with_ep"] / summary["questions"]
         if summary["questions"] > 0 else None)

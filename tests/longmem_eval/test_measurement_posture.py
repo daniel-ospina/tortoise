@@ -66,9 +66,10 @@ def test_summary_publishes_the_headline_ratio_beside_its_two_cells():
 
 def test_the_headline_ratio_is_unknown_over_an_empty_population():
     """A run of ZERO questions has not measured a zero rate: the cell is
-    ``None`` (UNKNOWN), never ``0.0`` — the same gate ``belief_eligible_ratio``
-    and the probe's own fallback apply, because ``0.0`` there reads exactly
-    like the finding "no question carried a posterior".
+    ``None`` (UNKNOWN), never ``0.0`` — the same UNKNOWN-not-zero rule the probe's
+    own fallback applies, because ``0.0`` there reads exactly like the finding "no
+    question carried a posterior". (``belief_eligible_ratio`` shares that rule and
+    adds a completeness gate this cell does not have; see #11650.)
 
     Non-vacuous: an ungated ``with_ep / questions`` raises ``ZeroDivisionError``
     on this input, and an ``or 0`` spelling publishes a measured zero.
@@ -76,6 +77,28 @@ def test_the_headline_ratio_is_unknown_over_an_empty_population():
     summary = mp.summarize_belief_activation([], requested=True)
     assert summary["questions"] == 0
     assert summary["questions_with_ep_ratio"] is None
+
+
+def test_the_headline_ratio_rides_into_the_posture_block_a_report_carries():
+    """#11645 review P3: the ride from the summary into the block a REPORT carries
+    was an unpinned single assignment, so a whitelist added in ``build()`` (the
+    #10493 shape) could drop the new cell with every other test still green.
+
+    End to end and DISCRIMINATING: the activation dict's cell is overwritten with a
+    sentinel no re-derivation produces (``0.125`` where the cells say ``1/2``), and
+    the value the report carries must be the sentinel. A ``build()`` that divides
+    again publishes ``0.5`` and reds; a ``build()`` that re-keys or whitelists the
+    block drops the key and reds on the ``KeyError``.
+    """
+    summary = mp.summarize_belief_activation(
+        [_covered_outcome(), _inert_outcome()], requested=True)
+    assert summary["questions_with_ep_ratio"] == 0.5
+    summary["questions_with_ep_ratio"] = 0.125  # sentinel: not `1/2`
+    report = {"methodology": {
+        "measurement_posture": mp.build(ingest_mode="v2", activation=summary)}}
+    activation = mp.of_report(report)["activation"]
+    assert activation["questions_with_ep_ratio"] == 0.125
+    assert (activation["questions_with_ep"], activation["questions"]) == (1, 2)
 
 
 def _covered_outcome() -> dict:
