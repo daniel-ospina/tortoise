@@ -436,7 +436,7 @@ jobs:
         # the non-gating lane (each entry → its resolved file count) and the
         # shard → file-count map the run is about to expand. A reader can then
         # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
-        # nine shards instead of inferring it from a total.
+        # ten shards (nine when #11602 wrote this) instead of inferring it from a total.
         #
         # Report-only on purpose: it reads the same `push_legs()` derivation the
         # matrix step above emits, and it exits 0 on every path. The gate on this
@@ -746,12 +746,12 @@ jobs:
     strategy:
       fail-fast: false
       # #6744: BOUND THE FAN-OUT. Unset, a matrix ADMITS its whole shard set at
-      # once — a PR that selects all three lanes requests 17 matrix jobs at the
-      # same instant (9 fast + 5 slow + 3 carve-out). The `test-slow` and
+      # once — a PR that selects all three lanes requests 18 matrix jobs at the
+      # same instant (10 fast + 5 slow + 3 carve-out). The `test-slow` and
       # `test-carve-out` matrices are `if:`-guarded on the diff, but `test` is
       # NOT conditionally skippable: `changes` writes `python=true` on every
       # pull request (`# tier-1 smoke runs on every PR`), so every PR hands the
-      # pool all 9 fast legs at once — which is the fan-out this bounds.
+      # pool all 10 fast legs at once — which is the fan-out this bounds.
       # Measured over 9 `python-ci` runs (2026-10-30T21:48Z ..
       # 2026-10-31T02:54Z, jobs API `filter=all`, completed jobs only): ONE PR's
       # peak simultaneous jobs was p50 11 / **max 18** against a 12-runner pool
@@ -769,10 +769,10 @@ jobs:
       # choice of ONE cap, not the invariants:
       #   (a) DO NOT INVENT WAVES THE POOL ALREADY CREATES. Measured per-shard
       #       wall p50 10.5m (range 5.8–15.7m) against a measured start stagger
-      #       across the 9 shards of 4.0–23.9m (p50 ~10m): under the present
+      #       across the 10 shards of 4.0–23.9m (p50 ~10m): under the present
       #       queue the pool already delivers these shards in 2–4 waves. A cap
       #       that needs MORE than 4 waves is strictly new wall —
-      #       `ceil(9/C) <= 4  =>  C >= 3`.
+      #       `ceil(10/C) <= 4  =>  C >= 3`.
       #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
       #       `changes` and overlap, so a PR's maximum MATRIX hold is
       #       `C_fast + C_slow + C_carve`. Keeping 3 of the 12 measured
@@ -795,7 +795,7 @@ jobs:
       # 8 of this workflow's 12 non-matrix jobs are eligible concurrently with
       # the matrices (3 carry no `needs:`; the fourth `needs:`-less job is
       # `changes`, which the matrices wait on and so cannot overlap them; 5 need
-      # only `changes`). On a full selection a PR REQUESTS 28 jobs (17 matrix
+      # only `changes`). On a full selection a PR REQUESTS 29 jobs (18 matrix
       # legs + 11 non-matrix; `canary-streak` is push-gated), at most 17 of them
       # in flight at once (9 capped matrix slots + the 8 eligible non-matrix).
       # The POOL does not bound that -- it bounds only the subset that lands on
@@ -1032,10 +1032,18 @@ jobs:
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
       # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
-      # any cache-write term is 50.6 m — 10 m last-failed pre-phase + 27 m emitted
+      # any cache-write term is 51.6 m — 10 m last-failed pre-phase + 28 m emitted
       # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
-      # uncapped pre-suite + 0.38 m last-failed save — so <= 9.4 m is available;
-      # this shape takes 8 (1 m prune + 7 m save), SUM 58.6, x 1.5 = 87.9.
+      # uncapped pre-suite + 0.38 m last-failed save — so <= 8.4 m is available;
+      # this shape takes 8 (1 m prune + 7 m save), SUM 59.6, x 1.5 = 89.5.
+      # (The watchdog read 32 m at `fast_shards: 9` on the 2026-11-09 map; #11602
+      # raised it to 10, which re-packs the worst shard to 28 m. Two numbers, two
+      # owners: the emission is `tools/ci_selection.py --emit-push-matrix`'s, and
+      # §2's own copy in `docs/ops/ci-wall-clock.md` is held to it by
+      # `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
+      # (that pin parses §2's phrase `the emitted <N> m per-shard watchdog`). THIS
+      # paragraph is NOT pin-read — that is why the sub-total here read 52.6 for a
+      # 28 m watchdog until it was recomputed by hand (#11602 review, P2).)
       #
       # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
       # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
@@ -1044,17 +1052,17 @@ jobs:
       # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
       # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
       # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
-      # against the ~10.4 m of room: over the bound either way, but by ~1.3x rather
+      # against the ~8.4 m of room: over the bound either way, but by ~1.6x rather
       # than 8x. Splitting the payload is what brings it inside — not an assumption
       # that this pool cannot write it.
       #
       # FAIL-OPEN IN EVERY BRANCH: a prune or save that aborts on its bound is a
       # MISS, never a red — both are `continue-on-error: true` — and the save is
       # gated on the restore's own `cache-hit`, so a HIT writes nothing at all.
-      # On a MISS the cost is that all nine shards tar their payload before one of
+      # On a MISS the cost is that all ten shards tar their payload before one of
       # them can win the key: `@actions/toolkit` `cache.ts` orders `createTar()`
       # before `reserveCache()`, and a lost reservation is logged and exits 0.
-      # Nothing blocks and nothing reds, but ~8 shards' work is wasted per
+      # Nothing blocks and nothing reds, but ~9 shards' work is wasted per
       # cold key (the first run after this lands, and every `uv.lock` bump) — which
       # is why the bound is 7 m and not 30.
       - name: Restore pip dependency cache (#7612, read-only — #11063)

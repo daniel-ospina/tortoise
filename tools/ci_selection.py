@@ -56,6 +56,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import copy
 import json
 import math
 import os
@@ -3890,8 +3891,69 @@ def parse_manifest_text(text: str) -> dict:
     return parsed
 
 
+#: `(path, st_mtime_ns, st_size)` + the RAW BYTES the parse was made from + the
+#: parsed manifest. Keyed on the file's identity, never on call order, so a
+#: rewrite of `config/ci-surfaces.yml` (or a `monkeypatch.setattr(cs,"MANIFEST",
+#: other_path)` in a test) is a cache MISS rather than a stale read.
+_LOAD_MANIFEST_CACHE: tuple[tuple[str, int, int], bytes, dict] | None = None
+
+
 def load_manifest() -> dict:
-    return _normalize_surfaces(parse_manifest_text(MANIFEST.read_text()))
+    """Parse `config/ci-surfaces.yml` into the normalised manifest.
+
+    CACHED on the file's identity and returned as a DEEP COPY.
+
+    WHY. The manifest is 1.18 MB and one parse costs ~0.73 s. Nothing in the tree
+    cached it, so every caller paid the full parse: MEASURED on
+    `tests/test_ci_selection.py` at the #11602 head — **632 calls in one suite
+    run**, i.e. ~460 s of a 554 s run. That is why the FILE alone projected
+    9.09 m against a slow-leg budget of 8.00 m and red the capacity pins: the
+    cost was the parse, not the tests' work. Caching it took the same suite from
+    **554.33 s to 130.21 s wall** (4.25x) with 483 passed / 2 failed — the same
+    two capacity pins, which are arithmetic on the committed map and so are
+    untouched by a runtime change.
+
+    WHY A DEEP COPY AND NOT THE CACHED OBJECT. Callers MUTATE the result — the
+    tests build poisoned variants in place (`m["surfaces"]["api"] = bad`, and
+    `tests/test_ci_selection.py` already deep-copies one call site by hand).
+    Handing back the cached dict would let one caller's edit leak into the next
+    and turn a passing pin green for the wrong reason. `deepcopy` of this
+    structure is ~1 ms, i.e. ~700x cheaper than the parse it replaces.
+
+    WHY THE KEY CARRIES THE RAW BYTES, AND NOT JUST `(path, mtime_ns, size)`.
+    A metadata key alone is NOT sufficient proof of freshness, and the first
+    version of this cache shipped on the assumption that it was — which is the
+    classic RACY TIMESTAMP problem (git's index and rsync both handle it, for the
+    same reason). A rewrite that lands within the filesystem's mtime GRANULARITY
+    and keeps the byte length re-uses the key, so the cache serves the PREVIOUS
+    parse. MEASURED here: with the metadata-only key, a full
+    `tests/test_ci_selection.py tests/test_ci_timing.py tests/test_ci_new_failure_gate.py
+    tests/test_10194_eval_suite_non_gating.py tests/test_ci_check_repair.py
+    tests/test_ci_manifest.py` run went from 991 passed to 8 FAILED — every one a
+    test reading a FIXTURE manifest where the real (or another fixture) one was
+    expected (`duplicate manifest entries: ['core: test_top.py']`,
+    `half a entry test_init_apikey_validation is not in any manifest surface`).
+    Each of those suites alone was green, which is what made it a cross-test
+    contamination rather than a broken tree.
+
+    So the freshness test is now the CONTENT: the file is read every call (1.18 MB,
+    ~1 ms) and the bytes are compared against the bytes the cached parse came from.
+    A rewrite cannot be missed at ANY timestamp granularity, because the digest is
+    the thing being compared. The expensive half — `parse_manifest_text` +
+    `_normalize_surfaces`, ~0.73 s — still runs once. 1 ms of read against 730 ms
+    of parse is the whole win, and it is a win with no freshness assumption in it.
+    """
+    global _LOAD_MANIFEST_CACHE
+    raw = MANIFEST.read_bytes()
+    st = MANIFEST.stat()
+    key = (str(MANIFEST), st.st_mtime_ns, st.st_size)
+    cached = _LOAD_MANIFEST_CACHE
+    if cached is None or cached[0] != key or cached[1] != raw:
+        cached = (key, raw,
+                  _normalize_surfaces(
+                      parse_manifest_text(raw.decode("utf-8"))))
+        _LOAD_MANIFEST_CACHE = cached
+    return copy.deepcopy(cached[2])
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
@@ -3934,7 +3996,7 @@ def slow_leg_by_surface(manifest: dict) -> dict[str, set[str]]:
     slow_selected subset to slow_gating_files(); the tier-2 intersection
     tests pin the per-surface splits."""
     # #6884: the test-slow legs are URI-empty on a tier-2 PR too (python-ci.yml
-    # :1367-1368; :600-602 for the fast job — URI is set only when full==true),
+    # :2516-2518; :1243-1245 for the fast job — URI is set only when full==true),
     # and they build their collect-only input from `slow_selected`. A
     # `uri_requiring` file in `slow_selected` therefore contributes no tests to
     # that step, and when it is the leg's ONLY file the collect step exits 5 and
@@ -4240,8 +4302,8 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # cannot run in a URI-SET leg; these cannot run in a URI-EMPTY one, and the
     # tier-2 PR legs ARE URI-empty BY DESIGN — both the URI and EXPECT_URI are
     # emptied, which is what keeps the E2E-6 tripwire INERT on the tier-2 shape
-    # (it arms only when full==true, where both are set; python-ci.yml:600-602
-    # and 1367-1368; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
+    # (it arms only when full==true, where both are set; python-ci.yml:1243-1245
+    # and 2516-2518; epic #1647 Task 9, cycle-6 P2-8), so 'provision the URI' is
     # a reversal of a recorded
     # decision, not an available fix. Handed to such a leg each of these
     # module-skips at import, so it collects ZERO tests and `pytest
@@ -4250,10 +4312,10 @@ def select(changed_files: list[str], event: str, manifest: dict,
     # no `FAILED <nodeid>` for the merge rail to attribute — it refuses for want
     # of a failure identity (the #6798 shape; #6390 was clean-reviewed AT HEAD,
     # `mergeable=true`, `behind=0`, and still unlandable). A shard left with no
-    # files hits the empty-shard branch at python-ci.yml:652 ('no selected files
-    # for this shard - no manifest (guard skips)') and greys out green having run
+    # files hits the empty-shard branch at python-ci.yml:1283 ('no selected files
+    # for this shard — no manifest (guard skips)') and greys out green having run
     # nothing — honest only because a tier-2 selection cannot get that small
-    # (`tier1` is FAR larger than `fast_shards:` 9 — 73 rows at the commit that
+    # (`tier1` is FAR larger than `fast_shards:` 10 — 73 rows at the commit that
     # re-derived this, and re-derive it rather than trust that count), which is a
     # margin, not a guarantee this comment should claim.
     #
@@ -5292,7 +5354,8 @@ def non_gating_report(manifest: dict) -> str:
     identical from a green run. This prints, on every run, which lane entries are
     non-gating, how many files each one resolves to, and the shard → file-count
     map the run is about to expand — so a reader can SEE that the 42 files are
-    absent from all 9 shards rather than infer it from a total.
+    absent from every fast shard (9 when this was written, 10 since #11602)
+    rather than infer it from a total.
     """
     lane = on_demand_files(manifest)
     prefixes = on_demand_subtree_prefixes(manifest)
@@ -5611,7 +5674,8 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
         # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
         # (`docs/ops/ci-runner-x64.md:847`, `:888`).
-        # A fold gets priority on the eight legs that carry the wall; the producer
+        # A fold gets priority on the nine legs that carry the wall (the fast
+        # matrix's 10 shards minus the canary_producer row); the producer
         # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
         # the whole matrix (`::warning::` is capped at 10 per step).
         is_producer = i == len(shards) - 1
