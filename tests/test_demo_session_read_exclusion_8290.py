@@ -12,8 +12,10 @@ surfaces disagreeing about whether the sample content was the user's own.
 the prefix test's soundness — BOTH halves of it, the minted population AND
 the door reservation (#8290 review: the mint half alone is a lemma about
 ``mint_session_id``, not about the capture doors, which accept a
-CALLER-SUPPLIED id) — the ONE-predicate contract, and the source pins that keep
-the three read surfaces bound to that predicate instead of re-spelling it. The
+CALLER-SUPPLIED id) — the ONE-DECLARATION contract, and the source pins that
+keep the three read surfaces bound to that one declaration (the detail door and
+the SDK mirror through the predicate, the list query through the
+``$demo_prefix`` parameter) instead of re-spelling it. The
 BEHAVIOURAL half — demo absent, a real session still served, on the list /
 detail / SDK doors — lives in
 ``tests/test_onboarding_seed_endpoint.py::TestDigestExcludesDemo`` because it
@@ -177,7 +179,7 @@ def test_no_mintable_session_id_can_carry_the_demo_prefix():
         "argument in session_schema.py before trusting the exclusion")
 
 
-# ── the three surfaces are BOUND to the one predicate ─────────────────────
+# ── the three surfaces are BOUND to the one DECLARATION (2 predicate, 1 param) ─
 
 
 def _src(rel: str) -> str:
