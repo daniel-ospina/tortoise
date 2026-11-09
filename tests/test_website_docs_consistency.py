@@ -2813,12 +2813,15 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
 
     SCOPE, stated so it cannot be mistaken for "every sitemap": the walk is
     `website/sitemap-*.xml`, so `website/apps/dashboard/public/sitemap.xml` is NOT walked.
-    That file belongs to the app origin, which is a SEPARATE Pages project: its pages are
-    not in this tree and its root is served by that project's own default document, so
-    `_document_for_loc` cannot resolve its `<loc>`s (`HOST_ROOT_PAGE` has no app entry by
-    design). What IS asserted about it is that it is advertised and servable —
-    `test_every_advertised_sitemap_is_servable_from_this_tree` — and that a change to it
-    selects this file (tests/test_ci_selection.py).
+    That file belongs to the app origin, a SEPARATE Pages project. Its root document IS in
+    this tree (`website/apps/dashboard/index.html`, served by that project's own build), so
+    `_document_for_loc` could resolve its `<loc>` — it does not, because `HOST_ROOT_PAGE`
+    deliberately carries no app entry: the mapping describes THIS project's middleware, and
+    the app is not served by it. Covering the app sitemap's `<loc>`s is therefore a one-line
+    mapping plus a walk entry (no impossibility), and it is owned by #11624 together with
+    the per-host index. What IS asserted about that file today: it is advertised and
+    servable (`test_every_advertised_sitemap_is_servable_from_this_tree`), and a change to
+    it selects this file (tests/test_ci_selection.py).
     """
     problems: list[str] = []
     for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
@@ -2842,9 +2845,10 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
     derivation the blog-link guard uses.
 
     The advertised side is the TOP-LEVEL `website/sitemap-*.xml` walk, for the reason
-    `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` states: the app
-    origin's pages live in a separate Pages project and are not part of
-    `_in_scope_pages`, so the two sides describe the same population.
+    `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` states: that walk and
+    `_in_scope_pages` describe the same population (this project's served pages). The app
+    origin's `<loc>`s are covered there — deliberately not here — and the gap is owned by
+    #11624.
     """
     advertised = {
         _document_for_loc(loc).resolve()
