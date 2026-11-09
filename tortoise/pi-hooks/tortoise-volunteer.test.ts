@@ -265,7 +265,8 @@ test("an EXHAUSTED chain is a timeout, never an inert install", async () => {
   //
   // Reached with NO new seam: `timeoutMs: 0` makes `deadline` already past, and
   // the test builds the config object itself, so `positiveInt`'s `n > 0` clamp
-  // (tortoise-volunteer.ts:209) is not in the path. Discriminating: mutating
+  // (the `positiveInt` helper, named rather than line-numbered because this
+  // file's line numbers drift) is not in the path. Discriminating: mutating
   // this branch's `timeout` to `inert` reds this row.
   const home = tmpHome();
   const cli = fakeCli(join(home, "bin"), "sleep 1; exit 1");
@@ -303,7 +304,9 @@ test("the reflex chain shares ONE deadline across candidates", async () => {
   // unreachable without a new clock/runner seam; that was false. A config
   // literal with `timeoutMs: 0` reaches it with no seam at all, because a test
   // builds the config object directly and so bypasses `positiveInt`'s `n > 0`
-  // clamp (tortoise-volunteer.ts:209). Do not re-open that residual.
+  // clamp (`positiveInt`, by name — a line number here went stale once and a
+  // reader chasing it found `VolunteerConfig` instead of the clamp). Do not
+  // re-open that residual.
   const home = tmpHome();
   // ⛔ NON-TIMEOUT failures, on purpose (#11584 review, round 6). The first
   // version of this row used a `sleep 5` first candidate, which ABORTS the

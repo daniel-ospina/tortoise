@@ -523,6 +523,14 @@ class InstallResult:
     changed: bool = False
     actions: tuple[str, ...] = ()
     error: str = ""
+    #: Which artifact(s) THIS run changed, by INSTALL NAME (``tortoise-capture.ts``
+    #: / ``tortoise-volunteer.ts``). ``changed`` stays the union, because most
+    #: callers only ask "did anything happen" — but Pi installs TWO artifacts
+    #: from one call, so a caller that names one of them in a user-facing
+    #: sentence must ask about that artifact, not about the union (#11584
+    #: review finding 1: the summary printed "Pi capture extension installed."
+    #: for a run that wrote only the read seam).
+    changed_artifacts: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1959,16 +1967,29 @@ def _install_pi(
     # any shape => let `_install_pi_volunteer_artifact` apply its guards, which
     # is where those shapes are classified.
     read_seam_present = os.path.lexists(ext_dir / PI_VOLUNTEER_EXTENSION_NAME)
+    # The capture half's OWN verdict, taken BEFORE the union below: `changed`
+    # answers "did this install write anything", which is the wrong question
+    # for a caller that names one of the two artifacts in a sentence.
+    capture_changed = changed
+    read_seam_changed = False
     if introduce_read_seam or read_seam_present:
         v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
             ext_dir, home, dry_run=dry_run)
         changed = changed or v_changed
+        read_seam_changed = v_changed
         actions.extend(v_actions)
         if v_error:
             return InstallResult(harness, changed=changed,
                                  actions=tuple(actions), error=v_error)
 
-    return InstallResult(harness, changed=changed, actions=tuple(actions))
+    changed_artifacts = tuple(
+        name for name, did_change in (
+            (PI_EXTENSION_NAME, capture_changed),
+            (PI_VOLUNTEER_EXTENSION_NAME, read_seam_changed),
+        ) if did_change
+    )
+    return InstallResult(harness, changed=changed, actions=tuple(actions),
+                         changed_artifacts=changed_artifacts)
 
 
 def openclaw_home(home: Path) -> Path:

@@ -5733,15 +5733,26 @@ def _pi_volunteer_is_provably_ours(target: Path) -> bool:
 
     contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
     source = getattr(contract, "volunteer_source", None)
+    # ⛔ THE TWO READS ARE SEPARATE ON PURPOSE (#11584 review finding 3). One
+    # `try` around BOTH comparisons made an unavailable SHIPPED SOURCE read as
+    # "the target is not provable": the `OSError` from `Path(source).read_bytes()`
+    # returned False before the marker fallback was ever consulted, so a
+    # partially-extracted wheel (or a downgrade) made `--uninstall` print
+    # "is not a Tortoise artifact this installer wrote" about the user's own
+    # marked seam and refuse the delete. A missing source is a fact about the
+    # PACKAGE; the marker fallback below is exactly the evidence that survives
+    # it, and it is consulted because every generation carries the marker.
     try:
-        if (
-            source is not None
-            and target.is_file()
-            and target.read_bytes() == Path(source).read_bytes()
-        ):
-            return True
-    except OSError:  # pragma: no cover - an unreadable file is not provable
+        installed = target.read_bytes() if target.is_file() else None
+    except OSError:  # pragma: no cover - an unreadable target is not provable
         return False
+    if installed is not None and source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+        if shipped is not None and installed == shipped:
+            return True
     return _hook_install.read_hook_version(target) is not None
 
 
@@ -5835,7 +5846,19 @@ def _install_capture_seam(args, install_capture) -> int:
     if args.harness == "pi" and not getattr(args, "dry_run", False):
         # Under `--dry-run` nothing was written, so the success sentence would
         # be a lie (the action lines already said what WOULD happen).
-        claim = "Pi capture extension installed. " if result.changed else ""
+        # ⛔ THE CLAIM NAMES THE CAPTURE HALF, SO IT IS GATED ON THE CAPTURE
+        # HALF (#11584 review finding 1). `result.changed` is the UNION of the
+        # two artifacts `install_capture("pi", ...)` writes, so keying this
+        # sentence off it made the run that wrote ONLY the read seam — a stale
+        # read seam, or `install pi` after `--uninstall` — print "Pi capture
+        # extension installed." about a capture artifact it never touched. The
+        # action lines above stay truthful either way; this is the one sentence
+        # an operator uses to answer "did capture get reinstalled?", which is
+        # the #3808 R13 over-claim this function's docstring forbids.
+        from tortoise.capture_install import PI_EXTENSION_NAME
+
+        capture_installed = PI_EXTENSION_NAME in result.changed_artifacts
+        claim = "Pi capture extension installed. " if capture_installed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
         # #2119: name the READ half too. It is a separate extension file, and
         # an injection seam that is silent by default (empty graph) is

@@ -3503,6 +3503,86 @@ def test_cli_install_pi_uninstall_removes_an_older_generation_it_did_write(cli):
     assert not ext.exists(), "a marked artefact of ours is removable"
 
 
+def test_cli_install_pi_uninstall_proves_ownership_without_the_shipped_source(
+        cli, monkeypatch):
+    """The SHIPPED SOURCE being unavailable is a fact about the PACKAGE, not
+    about the target — and it must not turn a marked artefact of ours into
+    an unprovable one (#11584 review finding 3).
+
+    The bug: one `try` wrapped BOTH byte comparisons, so the `OSError` from
+    `Path(source).read_bytes()` in a partially-extracted wheel (or after a
+    downgrade) returned False before the marker fallback below it was ever
+    consulted. `--uninstall` then printed "is not a Tortoise artifact this
+    installer wrote" — a false accusation — about the user's own seam and
+    refused the delete.
+
+    Mutation: put both reads back in one `try` — this REDs on the verdict.
+    """
+    from dataclasses import replace
+
+    _run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    ext.write_text(
+        "// tortoise-hook-version: 17\n// an older read seam\n",
+        encoding="utf-8",
+    )
+
+    contracts = dict(hook_install.ARTIFACT_CONTRACTS)
+    contracts["pi"] = replace(contracts["pi"],
+                              volunteer_source=home / "no-such-source.ts")
+    monkeypatch.setattr(hook_install, "ARTIFACT_CONTRACTS", contracts)
+
+    from tortoise.__main__ import _pi_volunteer_is_provably_ours
+
+    assert _pi_volunteer_is_provably_ours(ext) is True, (
+        "the canonical marker is proof on its own — an unavailable shipped "
+        "source must fall through to it, not short-circuit to 'not ours'")
+
+
+def test_cli_install_pi_names_only_the_half_it_actually_installed(cli):
+    """The summary sentence must name a half that was WRITTEN, not the union
+    (#11584 review finding 1).
+
+    `capture_install._install_pi` writes TWO artifacts (capture + read seam)
+    and unions their change into `InstallResult.changed`, so the old
+    `claim = "Pi capture extension installed. " if result.changed` printed the
+    capture sentence for a run that wrote ONLY the read seam — the #3808 R13
+    over-claim the function's own docstring forbids. Reproduced on both
+    shapes below.
+
+    Mutation: gate `claim` on `result.changed` again — both assertions RED.
+    """
+    run, _root, home = cli
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    read_seam = ext_dir / capture_install.PI_VOLUNTEER_EXTENSION_NAME
+
+    first = run("install", "pi")
+    assert first.returncode == 0, first.stderr
+    assert "Pi capture extension installed" in first.stdout, first.stdout
+
+    # (a) capture byte-identical; ONLY the read seam is stale.
+    read_seam.write_text("// tortoise-hook-version: 17\n// stale read seam\n",
+                         encoding="utf-8")
+    stale = run("install", "pi")
+    assert stale.returncode == 0, stale.stderr
+    assert "per-turn read seam" in stale.stdout, stale.stdout
+    assert "Pi capture extension installed" not in stale.stdout, (
+        "the capture half was byte-identical, so naming it is a claim about a "
+        "file this run never touched:\n" + stale.stdout)
+
+    # (b) the same after a read-seam uninstall: the capture half is untouched
+    #     and only the read seam is written back.
+    gone = run("install", "pi", "--uninstall")
+    assert gone.returncode == 0, gone.stderr
+    assert not read_seam.exists(), gone.stdout
+    again = run("install", "pi")
+    assert again.returncode == 0, again.stderr
+    assert "per-turn read seam" in again.stdout, again.stdout
+    assert "Pi capture extension installed" not in again.stdout, again.stdout
+
+
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
     """A second `tortoise install pi` is a no-op: it must report the no-op and
     NOT claim it installed the extension.
