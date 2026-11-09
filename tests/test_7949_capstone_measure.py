@@ -10909,8 +10909,16 @@ _CITE_QUALIFIER_PATTERN = (
     # they had already added (measured by a fresh-context review at `f885a51663`).
     # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
     # yields no qualifier and still reds, so the range spelling cannot become a false
-    # PASS — the qualifier is what this group captures, never the tail.
-    r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])"
+    # PASS — the qualifier is what this group captures, never the tail. ⛔ AND BOTH
+    # ENDPOINTS ARE SITES: `_unqualified_number_cites` reads its sites from the same range
+    # grammar, so a bare `:12943-12944` reds for 12944 too — a range whose TRAILING member
+    # is the live line rots exactly like a bare cite of it, and matching only `:<n>` left
+    # that half uncovered (measured by a fresh-context review at `35a53c4ccc`).
+    # The bound is 40, not 24, because the base predicate both call sites use is
+    # `[0-9a-f]{7,40}`: at `{0,24}` a full 40-char sha in the PARENTHESISED spelling never
+    # matched `\s*[,)]` and was reported UNQUALIFIED — a false block that told the author to
+    # add the base they had already written in the other spelling (measured, same review).
+    r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,40})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,40})\s*[,)])"
 )
 
 
@@ -10927,7 +10935,13 @@ def _cite_qualifier_matches(region: str) -> list[tuple[int, str, str]]:
     out: list[tuple[int, str, str]] = []
     for m in re.finditer(_CITE_QUALIFIER_PATTERN, region):
         n, at_q, paren_q = m.group(1), m.group(2), m.group(3)
-        q = (at_q or paren_q).strip("*`().,;")
+        # ⛔ `or ""`, because `finditer` yields `None` for a NON-PARTICIPATING group where the
+        # `findall` this replaced yielded `""`. Without it, a degenerate qualifier that leaves
+        # the `at` group empty and the parenthesis group absent (`:12944 at )`) raised
+        # `AttributeError` out of BOTH readers instead of classifying as "no qualifier" — a
+        # regression introduced by the offset split, measured by a fresh-context review at
+        # `35a53c4ccc`, and fail-closed only by accident.
+        q = (at_q or paren_q or "").strip("*`().,;")
         if q:
             out.append((m.start(), n, q))
     return out
@@ -10999,7 +11013,16 @@ def _unqualified_number_cites(region: str, number: str) -> list[int]:
     opposite of the code and is corrected here; measured by a fresh-context review at
     `f885a51663`).
     """
-    sites = [m.start() for m in re.finditer(rf":{re.escape(number)}\b", region)]
+    # ⛔ SITES COME FROM THE SAME RANGE GRAMMAR the qualifier scan uses, so BOTH endpoints of
+    # `:M-N` are sites. Matching only `:number` made a bare `:12943-12944` return `[]` for
+    # 12944 — the trailing endpoint of a range is exactly as HEAD-relative as a bare cite of
+    # it, so the arm was blind to half the spelling it exists to catch (measured by a
+    # fresh-context review at `35a53c4ccc`).
+    sites = [
+        m.start()
+        for m in re.finditer(r":(\d+)(?:-(\d+))?", region)
+        if number in (m.group(1), m.group(2))
+    ]
     if not sites:
         return []
     # ⛔ A BASE IS PAIRED WITH THE OCCURRENCE IT STARTS AT: a site is discharged only when a
@@ -11172,6 +11195,25 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "of the same number must not ride its base (the ±window false pass)")
     assert _unqualified_number_cites("`:13011` at HEAD", "12944") == [], (
         "the arm names ITS number — a neighbour's qualifier is not this cite's")
+    assert _unqualified_number_cites("`:12943-12944`", "12944") == [1], (
+        "⛔ THE TRAILING ENDPOINT OF A RANGE is as HEAD-relative as a bare cite, and reading "
+        "sites from `:number` alone made it invisible — a bare `:12943-12944` returned `[]` "
+        "for 12944 while `:12944-12945` redded, i.e. the arm covered half the spelling it "
+        "exists to catch (measured at `35a53c4ccc`)")
+    assert _unqualified_number_cites("`:12944-12945`", "12944") == [1], (
+        "and the LEADING endpoint still reds when the range carries no base")
+    assert _unqualified_number_cites(
+        "`:12944` (5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d)", "12944") == [], (
+        "a FULL 40-CHAR base in the PARENTHESISED spelling is the same repair as the `at` "
+        "spelling: the qualifier bound was 24 while the base predicate is `{7,40}`, so a "
+        "40-char sha was reported UNQUALIFIED — the exact false block the range tail removed, "
+        "in the other spelling")
+    assert _cite_qualifiers(":12944 at )") == [], (
+        "⛔ a DEGENERATE `at` (empty qualifier, no parenthetical) must classify as 'no "
+        "qualifier', not raise: `finditer` yields `None` where `findall` yielded `""`, so the "
+        "offset split briefly raised `AttributeError` out of both readers")
+    assert _cite_qualifiers(":12944 at") == [], (
+        "the same degenerate shape at end-of-region")
     assert _unqualified_number_cites("`:12944` bare, see `:12944` at `b3c2b1a`", "12944") == [1], (
         "⛔ THE MIRROR ORDER — a BARE cite printed BEFORE its base-qualified twin. Only the "
         "qualified-first order was asserted, so a forward window that let the bare cite inherit "
