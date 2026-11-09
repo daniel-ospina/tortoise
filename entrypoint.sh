@@ -651,14 +651,23 @@ _argv_is_shell_wrapped() {
     # such as `--header "X: Y"` does not trip it.
     local _arg=""
     for _arg in "$@"; do
-        # ⛔ ANY short-option bundle ending in `c` — `-c`, `-lc`, `-ic`, `-cl`,
-        # and equally `-ec`, `-euc`, `-xc`, `-euo pipefail -c`. An enumerated
-        # list is a coverage claim that goes stale the first time someone adds a
-        # shell flag, and the whole point of this arm is that it must not miss a
-        # wrapped command line. (An unmatched option does not reach here as a
-        # wrapper anyway: it is just an option this block cannot read.)
+        # ⛔ "IS THIS A SHELL FLAG BUNDLE CARRYING `c`" — expressed as two arms,
+        # not one glob. A first cut used `-[[:alpha:]]*c`, which matches only a
+        # bundle that ENDS in `c`, so `-cl` (i.e. `sh -cl "..."`) stopped
+        # matching while the enumerated list it replaced HAD covered it — a
+        # fail-OPEN regression (`bash -cl "./serve.sh --lifespan off"` went from
+        # refused to permitted). A second cut, `-[[:alpha:]]*c[[:alpha:]]*`, still
+        # missed `-cl`, because the `c` is the FIRST letter and the leading
+        # `[[:alpha:]]` needs a character before it.
+        # Globs cannot say "contains"; so: a LONG option is never a bundle (the
+        # `--*` arm), and any single-dash token that CONTAINS `c` is one.
         case "$_arg" in
-            -[[:alpha:]]*c) return 0 ;;
+            --*) ;;
+            -*)
+                case "$_arg" in
+                    *c*) return 0 ;;
+                esac
+                ;;
         esac
         case "$_arg" in
             *[[:space:]]*)
@@ -680,27 +689,53 @@ _wrapped_argv_disables_lifespan() {
     # stays a REPORT, because there the app gate does run and refuses the
     # children.
     _argv_is_shell_wrapped "$@" || return 1
-    local _arg=""
+    # ⛔ NORMALIZE THE SHELL STRING INSTEAD OF LISTING SPELLINGS. `/bin/sh -c`
+    # word-splits on ANY whitespace run and strips quotes, so `--lifespan  off`
+    # (two spaces), `--lifespan<TAB><TAB>off` and `--lifespan "off"` all reach
+    # uvicorn as `--lifespan off`. An enumerated pattern list matched only the
+    # one-space form, and the rest fell through to the REPORT arm with rc=0 — a
+    # real uvicorn of 4 workers, the lifespan never run, and NEITHER gate
+    # installed (MEASURED on the shipped 8e53978395 block, 2026-11-09).
+    # So: strip the quotes, collapse every whitespace run to one space, and match
+    # the RESULT. That is one rule instead of a spelling table.
+    #
+    # ⛔ AND IT MUST NOT REFUSE ON A MERE MENTION. A first cut refused any string
+    # naming `--lifespan` at all, which hard-refused `--lifespan on` and even
+    # `--lifespan auto` (uvicorn's DEFAULT, so a compose `command:` that merely
+    # restates it) under a message asserting "the APP LIFESPAN IS DISABLED" — a
+    # false diagnosis on a legitimate boot. A wrapped lifespan that is ON is the
+    # REPORT arm's job, because there the app gate does run and refuses the
+    # children.
+    local _arg="" _norm="" _word="" _ifs=""
     for _arg in "$@"; do
-        # ⛔ ANY MENTION of the lifespan input, not a spelling of `off`.
-        # An enumerated pattern list is the SAME defect this function exists to
-        # close, one level down: `/bin/sh -c` word-splits on any whitespace run
-        # and strips quotes, so `--lifespan  off` (two spaces), `--lifespan		 off`
-        # and `--lifespan "off"` all reach uvicorn as `--lifespan off` while
-        # matching none of `*--lifespan=off*` / `*"--lifespan off"*`. MEASURED on
-        # the shipped block (2026-11-09): the one-space form refused and the
-        # two-space and quoted forms fell through to the REPORT arm, rc=0, real
-        # uvicorn 4 workers, lifespan never runs.
-        # The block cannot PARSE a command line that lives inside one token, and
-        # a lifespan flag it cannot parse IS the unreadable case — so the honest
-        # answer is to refuse on the mention, which is also the fail-closed
-        # direction. `--no-lifespan` does not exist in uvicorn, so a mention is
-        # never a benign one.
         case "$_arg" in
-            *--lifespan*) return 0 ;;
-            *UVICORN_LIFESPAN*) return 0 ;;
+            --*) ;;
+            -*)
+                case "$_arg" in
+                    *c*) ;;
+                    *) continue ;;
+                esac
+                ;;
+            *[[:space:]]*) ;;
+            *) continue ;;
         esac
+        _arg="${_arg//\"/}"
+        _arg="${_arg//\'/}"
+        # `set -f` so a literal `*` in the string is not glob-expanded.
+        _ifs="$IFS"; IFS=$' \t\n'
+        set -f
+        for _word in $_arg; do _norm="$_norm $_word"; done
+        set +f
+        IFS="$_ifs"
     done
+    case "$_norm" in
+        # An expansion this block cannot resolve is the UNREADABLE case, and with
+        # the lifespan unreadable no gate is installed — so it refuses. This is
+        # the only arm that refuses without seeing a literal `off`.
+        *'$'*--lifespan*|*'$'*UVICORN_LIFESPAN*) return 0 ;;
+        *--lifespan=off*|*'--lifespan off'*) return 0 ;;
+        *UVICORN_LIFESPAN=off*) return 0 ;;
+    esac
     return 1
 }
 

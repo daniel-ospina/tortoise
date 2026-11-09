@@ -1195,9 +1195,17 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         (("sh", "-c", "uvicorn app:app --lifespan  off --workers 4"), {}),
         (("sh", "-c", 'uvicorn app:app --lifespan "off" --workers 4'), {}),
         (("sh", "-c", "uvicorn app:app --lifespan\t\toff --workers 4"), {}),
-        # ⛔ AND A WRAPPED SCRIPT THAT IS NOT `-c`-ONLY. The shell-flag list was
-        # the enumerated `-c|-lc|-ic|-cl`, which missed `-euc` / `-ec` / `-xc`.
-        (("bash", "-euc", "uvicorn app:app --lifespan off --workers 4"), {}),
+        # ⛔ AND A WRAPPED SCRIPT THAT IS NOT A BARE `-c`, AND THAT NAMES NO
+        # `uvicorn`. The shell-flag test was the enumerated `-c|-lc|-ic|-cl`,
+        # which missed `-cl` (a fail-OPEN: `sh -cl "..."` stopped being seen as
+        # wrapped), `-euc`, `-ec` and `-xc`. The string deliberately does NOT
+        # contain the word `uvicorn`: with `uvicorn` in it the OTHER wrapper arm
+        # (a token carrying both whitespace and `uvicorn`) fires on both heads,
+        # so the row could never discriminate the flag-bundle test. MEASURED on
+        # the `8e53978395` block: each of these exited 0.
+        (("bash", "-euc", "./serve.sh --lifespan off"), {}),
+        (("sh", "-cl", "./serve.sh --lifespan  off"), {}),
+        (("bash", "-xc", "./serve.sh --lifespan=off"), {}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)
@@ -1225,6 +1233,26 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         "the block printed a count it never measured for a wrapped command line: "
         f"{proc.stdout!r}"
     )
+
+    # ⛔ AND AN EXPLICIT `--lifespan on` / `auto` INSIDE the wrapped string is
+    # still a REPORT, never a refusal. A first cut of the wrapped-off arm refused
+    # any wrapped string that merely NAMED the lifespan input, which hard-refused
+    # `--lifespan auto` — uvicorn's own DEFAULT, so a compose `command:` that
+    # restates it — under a message asserting "the APP LIFESPAN IS DISABLED".
+    # That is a false diagnosis on a legitimate, gated boot. `auto` is the
+    # important row: it is the default, so refusing it would refuse a boot that
+    # changed nothing.
+    for _wrapped_on in ("uvicorn app:app --lifespan on --workers 4",
+                        "uvicorn app:app --lifespan auto --workers 4"):
+        proc = _run_worker_block(
+            ("sh", "-c", _wrapped_on),
+            {"TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"],
+             wt.ACK_ENV: "1"})
+        assert proc.returncode == 0, (_wrapped_on, proc.stderr)
+        assert "DISABLED" not in proc.stderr, (
+            f"a wrapped `--lifespan on/auto` was refused as DISABLED: {_wrapped_on!r} -> {proc.stderr!r}"
+        )
+        assert "UNVERIFIED" in proc.stdout, (_wrapped_on, proc.stdout)
 
     # ⛔ AND THE CONTROL — the wrapper predicate must stay NARROW. A legitimate
     # spaced VALUE (`--header "X: Y"`) is not a shell string, so a provably
