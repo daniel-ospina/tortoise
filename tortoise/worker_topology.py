@@ -262,11 +262,34 @@ RELOAD_FLAG = "--reload"
 #: (``--no-access-log --reload --workers 4``) was refused although uvicorn
 #: serves one reloader child.
 #:
-#: Transcribed from `uvicorn.main.main.params` (0.52.1) — ``opts`` and
-#: ``secondary_opts`` of every ``is_flag``/``flag_value`` param — and PINNED
-#: against that parser (both lists) by
-#: `tests/test_worker_topology.py::test_the_uvicorn_flag_set_is_uvicorns_own`,
-#: so a uvicorn bump reds instead of silently re-opening the bypass.
+#: ⛔ ARITY IS CLICK'S OWN BIT, ``param.is_flag`` — NEVER ``flag_value``. click
+#: 8.5.1 stopped normalising the "unset" sentinel, so ``opt.flag_value`` stays
+#: ``UNSET`` (truthy) on EVERY option: a transcription (or a pin) that tested
+#: ``is_flag or flag_value`` calls all 55 of uvicorn's long options flags — the
+#: fail-open this table exists to prevent, written into the table itself.
+#: MEASURED: `uvicorn.main.main.params` is 14 flags under click 8.4.2 and 55
+#: under 8.5.1, same uvicorn 0.52.1, so the test that pins this table reads
+#: ``is_flag`` alone.
+#:
+#: Transcribed from `uvicorn.main.main.params` (0.52.1 — the pin in `uv.lock`)
+#: as ``opts`` + ``secondary_opts`` of every ``param.is_flag``, and pinned from
+#: BOTH sides by
+#: `tests/test_worker_topology.py::test_the_uvicorn_flag_set_is_uvicorns_own`:
+#: a boolean flag the installed parser defines and this table OMITS reds (the
+#: walk would swallow the token after it), and a value-taking option this table
+#: CALLS A FLAG reds (the walk would read that option's value as a flag).
+#:
+#: ⛔ The pin is those two directions, NOT equality, because this repo runs more
+#: than one uvicorn: the test job's `pip install -e .` resolves 0.54.0 while
+#: `uv.lock` pins 0.52.1, and they differ by exactly one flag (``--http2``
+#: below). An entry the installed parser does not define at all is inert.
+#:
+#: ⛔ ``--http2`` is the one entry the PIN does not have: uvicorn 0.54.0 added it
+#: as a BOOLEAN flag (``@click.option("--http2", is_flag=True)``,
+#: ``uvicorn/main.py``), so a real boot can name it and this gate must read it
+#: as consuming NOTHING. Inert on the pin — 0.52.1 has no such option, so no
+#: boot it accepts can carry the token — which is why the pin test accepts it as
+#: a DECLARED entry ahead of the pin (`_AHEAD_OF_THE_PIN`) instead of reddening.
 UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--reload",
     "--access-log",
@@ -282,6 +305,8 @@ UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--version",
     "--reset-contextvars",
     "--factory",
+    # ⛔ ahead of the pin — uvicorn 0.54.0's boolean; see the note above.
+    "--http2",
 })
 
 #: click's ``context_settings={"auto_envvar_prefix": "UVICORN"}``

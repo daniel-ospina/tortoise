@@ -1498,9 +1498,9 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     # it — which is what makes this row discriminating.)
     for _shell in (("bash", "--noprofile"), ("bash", "--login"),
                    ("sh", "--login")):
-        proc = _run_worker_block(_shell + ("-c", "./serve.sh", "--lifespan", "off"), {})
+        proc = _run_worker_block((*_shell, "-c", "./serve.sh", "--lifespan", "off"), {})
         assert proc.returncode == 1, (
-            f"{_shell + ('-c',)} was NOT refused: a shell long option swallowed "
+            f"{(*_shell, '-c')} was NOT refused: a shell long option swallowed "
             f"its `-c`, so a shell-string launch read as a direct argv: "
             f"{(proc.stdout, proc.stderr)!r}"
         )
@@ -1952,6 +1952,15 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
 # ARITY — a value that looks like a flag is not a flag
 # ─────────────────────────────────────────────────────────────────────────────
 
+#: Options a uvicorn NEWER than the pin (0.52.1) defines, and that
+#: `UVICORN_FLAG_OPTIONS` therefore carries so the gate is arity-correct there too.
+#: They are INERT on the pin — uvicorn 0.52.1 has no such option, so no argv it
+#: ACCEPTS can contain the token. DECLARED, not tolerated: an entry that is
+#: neither a flag in the installed parser nor listed here still reds, so the
+#: table cannot quietly grow a spelling nobody measured.
+_AHEAD_OF_THE_PIN = frozenset({"--http2"})
+
+
 def test_the_uvicorn_flag_set_is_uvicorns_own():
     """`UVICORN_FLAG_OPTIONS` cannot drift from uvicorn's click parser.
 
@@ -1968,10 +1977,36 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
     --workers 2` read as "reloading" and the gate PERMITTED two workers on an
     embedded database (measured: click parses `reload=False`, `workers=2`,
     `app_dir="--reload"`).
+
+    ⛔ ARITY IS `param.is_flag`, NEVER `param.flag_value`. click 8.5.1 stopped
+    normalising its "unset" sentinel, so `flag_value` is a TRUTHY `UNSET` on
+    EVERY option and `is_flag or flag_value` matches all 55 of uvicorn's long
+    options. MEASURED on the same uvicorn 0.52.1: 14 flags under click 8.4.2,
+    55 under click 8.5.1 — i.e. the pre-fix predicate reddened on a CORRECT
+    table under the click that the CI test job's `pip install -e .` resolves
+    (it ignores `uv.lock`).
+
+    ⛔ THE PIN IS TWO DIRECTIONS, NOT EQUALITY. This repo runs more than one
+    uvicorn (`uv.lock` pins 0.52.1; the test job's pip resolution is 0.54.0),
+    and the two differ by one flag, so an equality assert reds on whichever
+    environment is not the pin. What is actually dangerous is asymmetric, so
+    both dangerous directions are asserted instead:
+
+      * a flag the parser defines that the table OMITS — the arity walk consumes
+        the token after it, which is how `--reload` became `--reload-include`'s
+        value; and
+      * a value-taking option the table CALLS A FLAG — its VALUE is then read as
+        a flag, which is how `--reload-include --reload` read as a reloader.
+
+    An entry the installed parser does not define AT ALL can never appear in an
+    argv that parser accepts, so it is inert rather than dangerous: allowed only
+    when declared in :data:`_AHEAD_OF_THE_PIN`, and still red when a future
+    uvicorn turns one of those names into a VALUE-TAKING option (`overread`).
     """
     from uvicorn.main import main as uvicorn_main
 
-    flags = set()
+    flags: set[str] = set()
+    value_taking: set[str] = set()
     for param in uvicorn_main.params:
         opts = [
             o
@@ -1981,9 +2016,35 @@ def test_the_uvicorn_flag_set_is_uvicorns_own():
         ]
         if not opts:
             continue
-        if getattr(param, "is_flag", False) or getattr(param, "flag_value", None):
-            flags.update(opts)
-    assert flags == set(wt.UVICORN_FLAG_OPTIONS)
+        # ⛔ `is_flag` alone — see the `flag_value` note in this docstring.
+        (flags if getattr(param, "is_flag", False) else value_taking).update(opts)
+
+    # Non-vacuity: a params shape this test cannot read must red, not pass on
+    # two empty sets.
+    assert flags, "uvicorn's parser exposes no boolean flags — the pin went stale"
+    assert value_taking, "uvicorn's parser exposes no value-taking options"
+
+    table = set(wt.UVICORN_FLAG_OPTIONS)
+    missing = flags - table
+    assert not missing, (
+        f"{sorted(missing)} are BOOLEAN FLAGS in the installed uvicorn's parser "
+        f"but absent from UVICORN_FLAG_OPTIONS: the arity walk would consume "
+        f"the token after each of them (the `--reload-include --reload` "
+        f"fail-open)"
+    )
+    overread = table & value_taking
+    assert not overread, (
+        f"{sorted(overread)} TAKE A VALUE in the installed uvicorn's parser but "
+        f"are listed as flags: their value would be read as a flag (the same "
+        f"fail-open, from the other side)"
+    )
+    undeclared = (table - flags) - _AHEAD_OF_THE_PIN
+    assert not undeclared, (
+        f"{sorted(undeclared)} are in UVICORN_FLAG_OPTIONS but are neither a "
+        f"flag in the installed parser nor declared in _AHEAD_OF_THE_PIN — a "
+        f"removed/renamed uvicorn flag (or a typo) must be DECLARED, not left "
+        f"to drift"
+    )
 
 
 def test_a_reload_lookalike_value_is_not_a_reloader():
