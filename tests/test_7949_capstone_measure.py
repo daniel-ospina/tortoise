@@ -11472,19 +11472,23 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
         # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
         # at all" was asserted here and is FALSE: no rule here refuses the number `:12944` itself,
-        # and nothing in §2 refuses a live number outside the two the arms beside this one hold —
+        # and nothing in §2 refuses a BARE `:N` cite outside the two the arms beside this one hold —
         # the `:12929` base PAIR and `:12779` at `62248db88` (measured — injecting `:12944` at
         # `HEAD` into §2 leaves the whole leg GREEN; re-staling §2's `:12779` to `HEAD` reds, at
-        # the `:12779` arm). The one row that reads the number holds the capstone bundle's
+        # the `:12779` arm). ⛔ FILE-QUALIFIED §2 cites are NOT in that hole: §2's
+        # `identity_hold.py:125`, `tortoise/value_gate.py:81` and `sdk.py:16516-16530` each
+        # re-stale to RED against the arms below (`_cite` loop, and the count-3 range arm).
+        # The one row that reads the number holds the capstone bundle's
         # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
         # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
         # grammar leaves open is stated in the paragraph below.
         # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
         # of a number NO ARM HOLDS (`:13011` at HEAD) reds NOTHING (measured: whole file green).
-        # `:12929` and `:12779` are the two §2 numbers the arms beside this one DO hold — by the
-        # base PAIR and by `62248db88` — so those two red; the hole is every other number §2
-        # carries. The §5 block is NOT that hole — its qualified cites are
+        # `:12929` and `:12779` are the two §2 BARE numbers the arms beside this one DO hold — by
+        # the base PAIR and by `62248db88` — so those two red; the hole is every OTHER BARE `:N`
+        # cite §2 carries (`:10052`→`:10053` measured GREEN), NOT every cite: the three
+        # file-qualified ones red, measured. The §5 block is NOT that hole — its qualified cites are
         # classified below. Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
