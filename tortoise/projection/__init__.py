@@ -19068,12 +19068,23 @@ class FalkorProjection(
                 # because the line it looks for no longer exists. The subject did
                 # not change, only the level and the sentence explaining it.
                 log.info(
+                    # ⛔ MERGED, not picked (#11660 review F1 x round 2 P1):
+                    # the `#4997` marker the eleven parity pins key on, AND the
+                    # scope the round-2 reviewer showed the sentence needed. A
+                    # projection cannot know this request's tenant, so it must
+                    # not assert the leg IS served from Postgres — it says where
+                    # it is served WHEN a tenant resolves (either door), and
+                    # names the three cases that still fall back.
                     "#4997/#11642: %s holds no in-graph vector index for %s — "
-                    "RETIRED, not missing: the dense leg is served from the "
-                    "Postgres record (pgvector), and a graph full scan is the "
-                    "documented fallback for the labels the record does not "
-                    "carry. Set projection.VECTOR_INDEX_RETIRED = False to "
-                    "restore the #4997 warning and the in-graph index.",
+                    "RETIRED, not missing: a record-armed dense read is served "
+                    "from the Postgres record (pgvector) WHERE the request's "
+                    "tenant resolves (either door — ambient or carried), and a "
+                    "graph full scan is the documented fallback for the labels "
+                    "the record does not carry, for a request whose tenant "
+                    "resolves nowhere, and for a store whose record is still "
+                    "empty (it is a fold with no backfill). Set "
+                    "projection.VECTOR_INDEX_RETIRED = False to restore the "
+                    "#4997 warning and the in-graph index.",
                     self._graph_name,
                     sorted(gap),
                 )
@@ -20367,10 +20378,12 @@ class FalkorProjection(
         if dropped:
             _log.info(
                 "#11642: dropped the in-graph Point.embedding vector index on %s "
-                "— the dense leg is served from the Postgres record "
-                "(pgvector), and a retired index is no longer rebuilt on a cold "
-                "restore (#7846: 436.5 s at 20k nodes, 191.8 s tuned, and it "
-                "deadlocked the instance)", self._graph_name)
+                "— the dense leg is served from the Postgres record (pgvector) "
+                "where a record tenant resolves, and a graph without the index "
+                "pays none of the index-bearing restore cost #7846 measured "
+                "(436.5 s at 20k nodes, 191.8 s tuned, instance blocked) — for "
+                "dumps taken AFTER this sweep; a dump taken before it still "
+                "carries the index", self._graph_name)
         _wrote_index = dropped
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation

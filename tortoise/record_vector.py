@@ -158,18 +158,35 @@ def armed(record_dsn: str | None = None) -> bool:
     return searcher(record_dsn) is not None
 
 
-def _resolve_scope() -> _Scope | None:
+def _resolve_scope(carried: tuple[str, str] | None = None) -> _Scope | None:
     """The request's tenant, or ``None`` — never a guess.
 
-    ``record_tenant()`` is a ContextVar both credential lanes install, so this is
-    the same pair the record's write door files rows under. A one-element or
-    non-string answer is refused: a mis-scoped read returns ZERO rows under RLS
-    with no error, so "half a tenant" is the one input that produces a silent
-    empty leg.
-    """
-    from .record_writer import record_tenant
+    ⛔ THE RESOLUTION IS ``record_tenant_effective``, NOT ``record_tenant``, and
+    the difference is a whole LANE (#11642 review round 2, P1). The tenants
+    arrive by two different doors:
 
-    tenant = record_tenant()
+    * AMBIENT — the ``use_record_tenant`` ContextVar, which the MCP lane installs;
+    * BY VALUE — ``sdk._record_tenant`` on the SDK the hosted REST lane opens
+      (``hosted_api._data_sdk`` → ``_bind_record_tenant``, "#the auth seam is a
+      plain dependency … holds no `with`").
+
+    Reading the ContextVar alone answers "no tenant" on the hosted lane, so
+    ``pg_vector`` would be ``None`` on every ``/v1/search`` and the two former
+    ``db.idx.vector.queryNodes`` sites would NEVER read Postgres there — while
+    this same change retires the in-graph index, turning every hosted dense read
+    into a brute-force ``:Point`` scan. That is the silent-degradation class
+    ``#10067`` already paid for once (its producer asked ``record_tenant`` while
+    the write seam applied the carried tenant), which is why
+    ``record_tenant_effective(carried=…)`` exists and why this is the ONE
+    resolver that must be called here.
+
+    A one-element or non-string answer is refused: a mis-scoped read returns ZERO
+    rows under RLS with no error, so "half a tenant" is the one input that
+    produces a silent empty leg.
+    """
+    from .record_writer import record_tenant_effective
+
+    tenant = record_tenant_effective(carried=carried)
     if not isinstance(tenant, tuple) or len(tenant) != 2:
         return None
     org_id, graph_id = tenant
@@ -266,6 +283,7 @@ def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> st
 
 def searcher(
     record_dsn: str | None = None,
+    carried: tuple[str, str] | None = None,
 ) -> Callable[[str, Sequence[float], int], list[tuple[str, float, Any]]] | None:
     """A dense searcher bound to this request's tenant, or ``None`` when unarmed.
 
@@ -275,9 +293,16 @@ def searcher(
     `run_vector_query`'s single ordering pass consumes both legs identically and
     the ranking cannot drift between them by construction.
 
-    ``None`` means "not armed" for every reason there is: no DSN, no installed
-    tenant, no driver. The caller takes the graph branch in all of them — it is
-    the branch that has always answered, and the payload has not moved out of
+    ``carried`` is the request's ``(org_id, graph_id)`` when the caller holds it
+    BY VALUE — the hosted REST lane's shape, where the tenant rides the SDK
+    rather than a ContextVar. It is threaded to
+    :func:`tortoise.record_writer.record_tenant_effective`, so both doors resolve
+    identically; see :func:`_resolve_scope` for why reading the ContextVar alone
+    would leave a whole lane unserved.
+
+    ``None`` means "not armed" for every reason there is: no DSN, no tenant from
+    either door, no driver. The caller takes the graph branch in all of them — it
+    is the branch that has always answered, and the payload has not moved out of
     the graph.
     """
     try:
@@ -297,7 +322,7 @@ def searcher(
         return None
     if not dsn:
         return None
-    scope = _resolve_scope()
+    scope = _resolve_scope(carried)
     if scope is None:
         return None
 

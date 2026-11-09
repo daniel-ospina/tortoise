@@ -168,8 +168,8 @@ raised) and §17.1-correct (record after the append, before the cache fold).
 
 ### A5. Embeddings — **durable today, not searchable, and that is not a defect**
 
-`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`** — `grep -riE 'pgvector|vector\('` over all 81
-migrations returned **0** at that pin, and `git grep -il pgvector -- 'tortoise/*'` was **0**. **At this head it is 81 migrations and 26 matching lines in ONE file** (`20261109000001_record_embedding_vector.sql` — the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes), and `git grep -il pgvector -- 'tortoise/*'` is **4** (`record_projection.py`, `projection/__init__.py`, `record_vector.py`, `search_engine.py`) — `#11642` implemented V1. The word itself
+`embedding jsonb` on `source` (`…01:175`), `event` (`…01:233`), `point` (`…03:66`). ⛔ **THIS PARAGRAPH WAS TRUE UNTIL `#11642` AND IS KEPT AS THE MEASURED RECORD OF WHAT THE MOVE REPLACED — do not read it as the state of this head.** At the census point **no migration and no module used `pgvector`**. **At this head** the same census is: `grep -riE 'pgvector|vector\('` over all 81
+migrations returns **28** (it returned **0** at that pin), all 28 in ONE file — `20261109000001_record_embedding_vector.sql` (the `CREATE EXTENSION`, the `record_embedding_vector` converter, three `vector(384)` GENERATED columns and three HNSW indexes) — and `git grep -il pgvector -- 'tortoise/*'` is **4**, in `record_projection.py`, `projection/__init__.py`, `record_vector.py` and `search_engine.py` (it was **0**). `#11642` implemented V1. The word itself
 appears in prose only — e.g. this document, §12.1c's decided record, this epic's
 `03-schema.md`, and the competitor notes. So the record is a **durability carrier** for vectors, not a retrieval index — which was
 exactly right while §2.0 kept the cache fully populated, and **V1 is now DECIDED** (§12.1c/§14.3, 2026-11-07):
@@ -1107,7 +1107,7 @@ cd supabase/tests/pglite && npm install && npm run validate
 ```text
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
   docs/infra-runbook.md                    → (no output) when taken; ⚠️ 1 line after #9556/R8 (see below)
-grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0   ⚠️ 26 after #11642 (one file: 20261109000001_record_embedding_vector.sql)
+grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0   ⚠️ 28 after #11642 (one file: 20261109000001_record_embedding_vector.sql)
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters   ⚠️ see below
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 1 (the verb's docstring)

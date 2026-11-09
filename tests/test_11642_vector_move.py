@@ -135,6 +135,56 @@ def test_a_half_tenant_is_not_a_tenant():
         rw.record_tenant = original
 
 
+def test_the_carried_tenant_arms_the_leg_without_a_contextvar(monkeypatch):
+    """The BY-VALUE door (#11642 review round 2, P1) — the hosted REST lane.
+
+    Two lanes deliver a tenant by two different doors: the MCP lane installs the
+    `use_record_tenant` ContextVar, while `hosted_api._data_sdk` carries it BY
+    VALUE on the SDK it opens (`sdk._bind_record_tenant`, "the auth seam is a
+    plain dependency … holds no `with`"). A resolver that read only the
+    ContextVar would answer "no tenant" on every `/v1/search`, so `pg_vector`
+    would be `None` there and — because this change retires the in-graph index —
+    every hosted dense read would silently become a brute-force `:Point` scan.
+
+    `record_tenant_effective(carried=…)` is the ONE resolver that knows the
+    precedence (carried > scope > env pair), and it exists because `#10067`
+    already paid for this exact split on the write path.
+    """
+    import tortoise.record_writer as rw
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
+
+    assert record_vector.searcher() is None, (
+        "with NO tenant from either door the leg must be unarmed")
+    armed = record_vector.searcher(carried=("org_1", "graph_1"))
+    assert armed is not None, (
+        "the carried tenant did not arm the leg — the hosted REST lane would "
+        "never read Postgres, on the change that retired the in-graph index")
+
+
+def test_the_sdk_searcher_passes_its_carried_tenant(monkeypatch):
+    """`sdk._record_vector_searcher(sdk)` threads `sdk._record_tenant` down.
+
+    The SDK resolves the searcher on the REQUEST thread, where the instance —
+    and therefore the by-value tenant — is in reach. A module-level helper that
+    ignored the handle is how the hosted lane goes unserved.
+    """
+    from tortoise import sdk as sdk_mod
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    import tortoise.record_writer as rw
+
+    monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
+
+    class _WithTenant:
+        _record_tenant = ("org_9", "graph_9")
+
+    assert sdk_mod._record_vector_searcher(_WithTenant()) is not None, (
+        "the SDK's carried tenant was not consulted")
+    assert sdk_mod._record_vector_searcher() is None
+
+
 def test_an_unarmed_box_reports_unarmed_rather_than_raising():
     """`armed()` is a fact, not an exception — the SDK calls it per read."""
     assert record_vector.armed("") is False

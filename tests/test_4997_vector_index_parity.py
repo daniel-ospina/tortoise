@@ -1212,7 +1212,12 @@ def test_report_never_gates_index_RETIREMENT():
     #     mode this gate exists to prevent (it would be a failing DDL round trip
     #     on every setup, and on an engine whose catalogue cannot be read at all
     #     it could target an index the store never had).
-    blind = _bare(None)
+    # ⛔ `raise_on_indexes=True`, NOT `None` (#11642 review round 2, P3).
+    # `_RecordingGraph(index_rows=None)` is the CLEAN store (it substitutes
+    # `[]`), so the earlier spelling re-asserted case 3 and left the fail-SAFE
+    # arm unpinned — an `except: _has_vector_index = True` would have kept it
+    # green while dropping blind on every store whose catalogue cannot be read.
+    blind = _bare(raise_on_indexes=True)
     blind._ensure_indexes()  # must not raise
     assert not any(_is_vector_drop(c) for c in blind.g.calls), (
         "an unreadable catalogue must not authorise a DROP")

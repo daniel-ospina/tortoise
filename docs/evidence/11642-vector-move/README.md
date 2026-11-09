@@ -110,16 +110,38 @@ this assertion as required before private-beta; this is it.
 | …its split: `--section=pre-data --section=data` **11.0 s**, then the HNSW build alone **4.3 s** | TAKEN HERE |
 | `GRAPH.COPY` of 5,000 nodes + an HNSW index, on falkordb **4.20.6** | **TAKEN HERE — 0.66 s**, and the copy's catalogue AND kNN both intact (5 rows on the first query) |
 
-⚠️ **What the `GRAPH.COPY` row means, and what it does NOT.** It shows that on
-this build `GRAPH.COPY` carries the index, so it is NOT the mechanism behind
-`#7846` — the deadlocking rebuild belongs to the dump/snapshot path those figures
-were taken on, and this lane did not reproduce it. The claim this change can
-make is narrower and still the point: **after the move there is no in-graph
-vector index for ANY restore path to rebuild**, because
-`_ensure_vector_index_api` creates none and drops one it finds (pinned by
-`tests/test_4997_vector_index_parity.py`). The Postgres half, where the index now
-lives, rebuilds in **10.9 s** on a full logical restore at 20k — and on a
-physical/base-backup restore it does not rebuild at all.
+⚠️ **What the `GRAPH.COPY` row means, and what the WIDER claim would be —
+corrected by review round 2, P2.** `GRAPH.COPY` carries the index on this build,
+and the repo's OWN measured evidence says the same about the graph-KEY path:
+`tortoise/graph_key_restore.py` (quoted at its:163) records that the vector index
+"travels INSIDE the graph key's serialized payload (measured —
+`docs/evidence/7846-indexed-graph-restore/README.md` §4a)", which is why
+`restore_graph_key_safe` drops the index before the `DUMP` and re-creates it from
+the captured definition after the `RESTORE`. **So an earlier draft of this file
+and of the migration header were wrong to say the index "is not carried in a
+dump", and wrong again to conclude that "no restore path has anything to
+rebuild".**
+
+What survives, at the width the evidence supports:
+
+* `#7846` §3's **436.5 s / 191.8 s / instance blocked** is the cost of restoring
+  a payload that CARRIES the index — the price of the index existing anywhere in
+  the restore path.
+* After this change an index-free graph pays **none** of it: nothing to drop
+  before the `DUMP`, nothing to re-create after the `RESTORE`, because
+  `_ensure_vector_index_api` creates no in-graph index and drops one it finds
+  (pinned by `tests/test_4997_vector_index_parity.py` and
+  `tests/test_falkordb_compat.py`).
+* ⛔ **And the scope that qualifies it: the saving is earned for every dump taken
+  AFTER the retirement has swept that graph.** A dump taken BEFORE it still
+  carries the index and still costs what §3 measured. `graph_key_restore` reads
+  the definition from `CALL db.indexes()` rather than hardcoding it, so a retired
+  store simply reports none and its re-create step becomes a no-op — that path
+  needed no change here, and this change makes none.
+
+The Postgres half, where the index now lives, rebuilds in **10.9 s** on a full
+logical restore at 20k — and on a physical/base-backup restore it does not
+rebuild at all.
 
 ## 7. The two defects this measurement found that reading did not
 

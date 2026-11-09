@@ -467,6 +467,12 @@ _PREREQ_MIGRATION_COUNT_RE = re.compile(r"at this head, (?P<count>\d+) migration
 # editing the number, which is a hand-copied figure that goes stale the moment a
 # second migration mentions the extension. The count is captured and checked
 # against the tree below.
+#: §A5's census line: "`grep -riE 'pgvector|vector\('` over all 81
+#: migrations returns **28**" — the FILE-with-a-count claim is the index row's;
+#: this one is the LINE count of the same grep, and the two are separate facts.
+_PREREQ_A5_LINES_RE = re.compile(
+    r"over all \d+\s+migrations returns \*\*(?P<occurrences>\d+)\*\*")
+
 _INDEX_MIGRATION_COUNT_RE = re.compile(
     r"`pgvector` = (?P<occurrences>\d+) of (?P<count>\d+) migrations"
 )
@@ -1566,19 +1572,35 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
         1 for path in _MIGRATIONS_DIR.glob("*.sql")
         if re.search(r"pgvector|vector\(", path.read_text(encoding="utf-8"),
                      re.I))
-    for label, pattern, text in (
-        ("docs/00_index.md's #7879 row",
-         _INDEX_MIGRATION_COUNT_RE, index_row),
-        ("08-hosted-prerequisites.md §A5", _PREREQ_PGVECTOR_TOTAL_RE, prerequisites),
-    ):
-        if label.startswith("08"):
-            continue  # §A5 states a LINE count, not a file count — see its prose
-        stated = [int(m.group("occurrences")) for m in pattern.finditer(text)]
-        assert stated, f"{label} no longer states its pgvector occurrence count"
-        assert set(stated) == {on_disk_pgvector}, (
-            f"{label} says pgvector appears in {sorted(set(stated))} migration(s); "
-            f"the tree has {on_disk_pgvector} (the grep the sentence names) — "
-            "re-state it at this head")
+    # ⛔ §A5 STATES A LINE COUNT, NOT A FILE COUNT, and it is DERIVED here rather
+    # than skipped (#11642 review round 2, P3). The earlier draft `continue`d on
+    # it, which made the arm dead code — and that dead arm is exactly why a
+    # stale `26` shipped in both §A5 and the index row when the file actually
+    # matched 28 lines. The two units are different questions about the same
+    # grep, so each is measured against its own command.
+    # ⛔ LINES, not matches: the command §A5 names is `grep -riE … | wc -l`, which
+    # counts LINES carrying at least one match. A `findall` count is a different
+    # number (measured: 31 matches on 28 lines), and taking it would have made
+    # this pin demand a figure the stated command cannot produce.
+    on_disk_pgvector_lines = sum(
+        sum(1 for line in path.read_text(encoding="utf-8").splitlines()
+            if re.search(r"pgvector|vector\(", line, re.I))
+        for path in _MIGRATIONS_DIR.glob("*.sql"))
+    stated = [int(m.group("occurrences"))
+              for m in _INDEX_MIGRATION_COUNT_RE.finditer(index_row)]
+    assert stated, ("docs/00_index.md's #7879 row no longer states its pgvector "
+                    "occurrence count")
+    assert set(stated) == {on_disk_pgvector}, (
+        f"docs/00_index.md says pgvector appears in {sorted(set(stated))} "
+        f"migration(s); the tree has {on_disk_pgvector} — re-state it at this head")
+    # §A5's figure is the LINE count of `grep -riE 'pgvector|vector\('`; the
+    # pattern it states is `over all N migrations returns **M**`.
+    a5 = _PREREQ_A5_LINES_RE.search(prerequisites)
+    assert a5, ("08-hosted-prerequisites.md §A5 no longer states the grep's LINE "
+                "count — restate it rather than deleting the phrase")
+    assert int(a5.group("occurrences")) == on_disk_pgvector_lines, (
+        f"§A5 says the pgvector grep returns {a5.group('occurrences')} lines; the "
+        f"tree has {on_disk_pgvector_lines} — re-state it at this head")
     for path in _COUNT_OF_DOCS:
         stated = [int(m.group("occurrences"))
                   for m in _MIGRATION_COUNT_OF_RE.finditer(

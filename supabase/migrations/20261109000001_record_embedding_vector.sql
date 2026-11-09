@@ -12,14 +12,32 @@
 -- surface is untouched. Do not read this migration as licence to move any of
 -- those.
 --
--- WHY THE MOVE IS WORTH A MIGRATION AT ALL, measured rather than asserted:
--- FalkorDB's `vectorset` index is NOT carried in a graph dump, so every cold
--- restore REBUILT it — **436.5 s at 20k nodes, 191.8 s tuned** — and the
--- rebuild DEADLOCKED the instance (`#7846`). After this file there is no
--- in-graph vector index to rebuild: `projection/__init__.py`'s
--- `_ensure_vector_index_api` no longer creates one, and the ANN index is an
--- ordinary Postgres index (page-cached, disk-backed, need not fit in RAM —
--- `pgvector`'s own README, quoted in `STORAGE-ARCHITECTURE.md` §2.1).
+-- WHY THE MOVE IS WORTH A MIGRATION AT ALL, stated at the width the evidence
+-- supports. ⛔ THE WIDE CLAIM IS FALSE AND THIS FILE DOES NOT MAKE IT: FalkorDB's
+-- `vectorset` index is **carried INSIDE a graph key's serialized payload** —
+-- measured, `docs/evidence/7846-indexed-graph-restore/README.md` §4a, and that
+-- is why `tortoise/graph_key_restore.py::restore_graph_key_safe` drops the index
+-- BEFORE the `DUMP` and re-creates it from the captured definition after the
+-- `RESTORE`. So "an index is not carried in a dump" would be wrong, and a
+-- "restore rebuilds it because it is lost" would be wrong with it.
+--
+-- What IS measured (`#7846` §3) is the cost of restoring a payload that CARRIES
+-- the index: **436.5 s at 20k nodes, 191.8 s tuned**, with the instance blocked
+-- (`#7846`) — the price of the index existing anywhere in the restore path.
+-- After this file, an index-free graph pays NONE of it: there is nothing to
+-- drop before the DUMP and nothing to re-create after the RESTORE, because
+-- `projection/__init__.py`'s `_ensure_vector_index_api` no longer creates an
+-- in-graph index and drops one it finds. The ANN index is an ordinary Postgres
+-- index instead (page-cached, disk-backed, need not fit in RAM — `pgvector`'s
+-- own README, quoted in `STORAGE-ARCHITECTURE.md` §2.1).
+--
+-- ⚠️ THE SCOPE OF THAT SAVING, because a claim without it is the wide claim
+-- again: it is earned for every DUMP TAKEN AFTER the retirement has swept that
+-- graph. A dump taken BEFORE it still carries the index and still costs what
+-- `#7846` §3 measured on its restore. `graph_key_restore` reads the definition
+-- from `CALL db.indexes()` rather than hardcoding it, so a retired store simply
+-- reports none and its re-create step becomes a no-op — that path needs no
+-- change here, and this file makes none.
 --
 -- THE SHAPE, AND WHY THE PAYLOAD COLUMN IS NOT CONVERTED
 -- ------------------------------------------------------
@@ -129,13 +147,19 @@ IMMUTABLE
 STRICT
 PARALLEL SAFE
 AS $$
+    -- ⛔ NESTED CASE, NOT `AND` (#11642 review round 2, P3). SQL does not
+    -- promise left-to-right evaluation of `AND` (PostgreSQL's own docs give the
+    -- `x <> 0 AND 1/x > 2` counterexample), so the previous spelling could
+    -- evaluate `jsonb_array_length(doc)` on a NON-array and raise
+    -- "cannot get array length of a non-array" — the one outcome this function
+    -- exists to prevent, on the record's write path. A CASE's branches are
+    -- ordered by definition, so the guard holds whatever the planner does.
     SELECT CASE
-        WHEN jsonb_typeof(doc) = 'array'
-         AND jsonb_array_length(doc) = 384
-         AND NOT EXISTS (SELECT 1
-                           FROM jsonb_array_elements(doc) AS e
-                          WHERE jsonb_typeof(e) <> 'number')
-        THEN (doc::text)::public.vector(384)
+        WHEN jsonb_typeof(doc) <> 'array' THEN NULL
+        WHEN jsonb_array_length(doc) <> 384 THEN NULL
+        WHEN EXISTS (SELECT 1 FROM jsonb_array_elements(doc) AS e
+                      WHERE jsonb_typeof(e) <> 'number') THEN NULL
+        ELSE (doc::text)::public.vector(384)
     END
 $$;
 
