@@ -289,8 +289,11 @@ def test_the_commit_door_refuses_a_reserved_id_too():
     the one that did not participate.
 
     REDS IF: the validator reverts to the blank-only test (a reserved id would
-    then be returned unchanged instead of raising), or the validator stops
-    being bound to the `session_id` field.
+    then be returned unchanged instead of raising). ⚠️ Whether the rule is still
+    BOUND to the ``session_id`` field is NOT observable here — this arm calls the
+    helper directly, so a dropped decorator or a renamed field leaves it green;
+    that half is ``test_the_commit_door_rule_is_BOUND_to_the_session_id_field``
+    below.
     """
     from tortoise.commit_schema import CommitPayload
 
@@ -539,7 +542,7 @@ def test_the_list_where_survives_a_legacy_non_string_session_id(tmp_path):
 
 
 def test_the_hosted_capture_door_refuses_a_reserved_id_too():
-    """The FOURTH door, BOUND to ``SessionRequest.session_id`` (#8290 review P2).
+    """The THIRD caller-id door, BOUND to ``SessionRequest.session_id`` (#8290 P2).
 
     ``CommitPayload`` has a bound arm above; ``SessionRequest`` — the model the
     public ``POST /v1/sessions`` boundary validates — had none, so reverting its
