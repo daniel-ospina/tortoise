@@ -2038,8 +2038,11 @@ def test_every_source_pattern_is_selectable():
     # 92.5 s of a 300 s pytest-timeout budget on a quiet box, i.e. a
     # load-dependent flake on a congested runner (test-slow leg c, run
     # 41534018861). `select()` is a pure function of (changed, event, manifest)
-    # — it only ever `.get`s from it, and `load_manifest()` has no cache — so
+    # — it only ever `.get`s from it, and `select()` does not mutate it — so
     # hoisting the parse changes the timing and nothing else: same calls, same
+    # (`load_manifest()` DOES cache since #11602 — identity-keyed, deep copy
+    # out — so the reason hoisting is safe is what `select()` does with the
+    # value, not the absence of a cache.)
     # assertions. The guard reads the SAME parsed value instead of parsing a
     # second time, so the comment's claim is true by construction rather than
     # by the reader subtracting one (review note, PR #10631).
@@ -14464,7 +14467,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the uv save's `timeout-minutes` is {save_bound!r}; it must be a positive "
         "integer <= 8. Arm 2 of `docs/ops/ci-wall-clock.md` §2 caps the `test` "
         "job's SUM at 60 m (x1.5 <= the 90 m cap) and the measured SUM without a "
-        "cache-write term is 49.6 m, so the prune + save terms have <= 10.4 m between "
+        "cache-write term is 51.6 m, so the prune + save terms have <= 8.4 m between "
         "them; a larger bound does not make the payload smaller, it only spends "
         "the margin a real regression needs.")
     save_paths = [ln.strip() for ln in _path_of(uv_save).splitlines() if ln.strip()]
@@ -17825,6 +17828,64 @@ def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, mon
         monkeypatch.setattr(cs, "MANIFEST", poisoned)
         monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
         assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"
+
+
+def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, monkeypatch):
+    """#11602: `load_manifest()` caches, so the two ways a cache goes WRONG here are
+    pinned — a stale read after a rewrite, and one caller's mutation reaching the
+    next.
+
+    The cache exists because one parse of the 1.18 MB map costs ~0.73 s and
+    `tests/test_ci_selection.py` alone called it 632 times (~460 s of a 554 s
+    suite, which is what red the slow-lane wall pin). Its key is the file's
+    IDENTITY `(path, st_mtime_ns, st_size)`, so a rewrite INVALIDATES; the value
+    handed out is a DEEP COPY, because callers mutate the result in place (the
+    poison tests below do exactly that, through a hand-made copy).
+
+    Non-vacuity: without the deep copy, arm 2 poisons the cache and arm 3 reds;
+    without the identity key, arm 4 serves the pre-rewrite bytes.
+    """
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+
+    def _write(path, surge):
+        doc = yaml.safe_load(cs.MANIFEST.read_text())
+        key = cs.fast_pool(cs.load_manifest())[0]
+        doc["durations"] = dict(doc.get("durations") or {})
+        doc["durations"][key] = surge
+        path.write_text(yaml.safe_dump(doc))
+        return key
+
+    copy_path = tmp_path / "cached-ci-surfaces.yml"
+    _write(copy_path, 11.0)
+    monkeypatch.setattr(cs, "MANIFEST", copy_path)
+
+    # arm 1 — a distinct object every call, nested state included
+    first = cs.load_manifest()
+    second = cs.load_manifest()
+    assert first is not second
+    key = cs.fast_pool(first)[0]
+    assert first["durations"] is not second["durations"]
+
+    # arm 2 — an in-place mutation by one caller is invisible to the next
+    first["durations"][key] = 99999.0
+    first["surfaces"]["core"].append("test_injected_by_a_caller.py")
+    third = cs.load_manifest()
+    assert third["durations"][key] == 11.0, (
+        "a caller's mutation of the returned manifest leaked into the cache — the "
+        "next reader would pack shards from a value no file on disk contains")
+    assert "test_injected_by_a_caller.py" not in third["surfaces"]["core"]
+
+    # arm 3 — a REWRITE is a cache miss, not a stale read
+    _write(copy_path, 22.0)
+    assert cs.load_manifest()["durations"][key] == 22.0, (
+        "the cache served pre-rewrite bytes: this is the failure mode the identity "
+        "key exists to prevent, and it would silently keep a corrected weight out "
+        "of the gate")
+    assert _sys  # the import above mirrors the sibling tests' harness
 
 
 def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path, monkeypatch):

@@ -1247,9 +1247,22 @@ def collected_test_counts(keys, repo_root: Path,
                  "--collect-only", "-q", "-p", "no:cacheprovider"],
                 cwd=str(repo_root), capture_output=True, text=True,
                 timeout=timeout)
-        except (OSError, subprocess.SubprocessError):
+        except (OSError, subprocess.SubprocessError) as exc:
+            _warn_probe_failed(key, f"could not run pytest: {type(exc).__name__}")
             continue
         if proc.returncode != 0:
+            # ⛔ NOT SILENT (#11602 review, P1). `ci-timing.yml`'s `measure` job
+            # installed PyYAML ONLY, so `sys.executable -m pytest` exited 1 there
+            # and this `continue` made the whole #11607 capability inert in its
+            # only production caller — with no warning, no stderr line and exit 0,
+            # which is exactly the no-op enforcer this repo files as a defect. The
+            # refusal is still FAIL-CLOSED (the row stays UNKNOWN and raisable),
+            # but it is now VISIBLE, and `tests/test_ci_timing.py` pins that the
+            # refresh job can execute the probe at all.
+            detail = (proc.stderr or proc.stdout or "").strip().splitlines()
+            _warn_probe_failed(
+                key, f"pytest --collect-only exited {proc.returncode}"
+                     + (f": {detail[-1][:200]}" if detail else ""))
             continue
         nodeids = sum(1 for line in proc.stdout.splitlines()
                       if _COLLECTED_NODEID_RE.match(line))
@@ -1260,9 +1273,29 @@ def collected_test_counts(keys, repo_root: Path,
                 summary = int(m.group(1))
                 break
         if not nodeids or (summary is not None and summary != nodeids):
+            _warn_probe_failed(
+                key, f"unusable collection output ({nodeids} nodeid lines, "
+                     f"summary {summary!r})")
             continue
         counts[key] = nodeids
     return counts
+
+
+def _warn_probe_failed(key: str, why: str) -> None:
+    """Say WHY a coverage probe produced no denominator (#11602 review, P1).
+
+    The refusal itself is unchanged and fail-closed; this exists because the
+    SILENCE was the defect: a probe that cannot run turns the #11607 capability
+    off, and a capability that switches itself off without a word is not
+    distinguishable from one that works.
+    """
+    print(
+        f"::warning::ci_timing: no collected-testcase denominator for {key} "
+        f"({why}) — that row is UNKNOWN for this sweep, so a LOWER reading "
+        f"cannot re-base it. The refresh job must be able to run "
+        f"`python -m pytest --collect-only` against the tree (pytest, plus "
+        f"whatever `tests/conftest.py` imports).",
+        file=sys.stderr)
 
 
 def _committed_duration_rows(manifest_text: str) -> dict[str, float]:

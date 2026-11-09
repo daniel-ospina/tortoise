@@ -55,14 +55,26 @@ jobs:
         run: bash .github/scripts/runner-tools.sh ensure gh
       # tools/ci_timing.py carries the inline >=3.12 guard (#5128) — this pin is
       # what supplies the >=3.12 interpreter it needs.
-      # PyYAML only: the durations bridge validates the refreshed manifest with
+      # PyYAML: the durations bridge validates the refreshed manifest with
       # `ci_selection.duration_issues()` + `duration_coverage_issues()`. Pinned
       # for the same reason `manifest-integrity` pins it.
+      #
+      # ⛔ AND pytest + httpx, which are NOT for the bridge — they are for the
+      # #11607 COLLECTED-TESTCASE PROBE (`collected_test_counts` runs
+      # `python -m pytest --collect-only` to get a denominator that is not a FLOOR
+      # for a `parametrize` file). Without them that probe exits non-zero in this
+      # job, contributes no denominator, and the capability ships INERT in its only
+      # scheduled caller — measured at PR #11602's review: this job installed
+      # PyYAML alone, so the whole fix was a no-op here while every gate stayed
+      # green. `httpx` is `tests/conftest.py`'s import; a further missing dependency
+      # fails closed AND emits a `::warning::` naming the file, so the residual is
+      # visible rather than silent. `tests/test_ci_timing.py` pins that this job
+      # can execute the probe, so it cannot go inert again quietly.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install pyyaml
-        run: pip install pyyaml==6.0.2
+      - name: Install pyyaml, and the probe's own dependencies (#11607)
+        run: pip install pyyaml==6.0.2 pytest httpx
 
       - name: Find latest completed push-to-main Python CI run
         id: find

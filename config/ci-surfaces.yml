@@ -34,8 +34,9 @@ version: 1
 # consistent`, which recomputes the ratio from the committed map. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
-# file — so extra shards do keep reducing max(shard). S=9 is held by the
-# lane-parity contract above, not by that argument.
+# file — so extra shards do keep reducing max(shard). The lane-parity contract
+# above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
+# labels, so it forbids a SHRINK and is what PERMITS 10, not what caps it at 9.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
@@ -10085,7 +10086,7 @@ durations:
   # base merge (this note shipped the pre-forward-merge reading and was already
   # wrong at the merge head, which is that rule firing). What dropping the row does
   # is pack this file at `DEFAULT_FAST_WEIGHT` (2.0 s) instead of 92.0, taking ~90 s
-  # out of the fast-pool TOTAL: LPT re-packs, so all nine shards drop ~10 s each —
+  # out of the fast-pool TOTAL: LPT re-packs, so all ten shards drop ~9 s each —
   # NOT one named shard by 90 s. The shards are positional letters and `core` is a
   # SURFACE name, so the shard holding this file loses only its own share and not
   # the whole row. Refresh from the first post-merge push run that includes it.
