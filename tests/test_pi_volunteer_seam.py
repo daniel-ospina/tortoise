@@ -316,8 +316,8 @@ def test_a_repair_never_reports_success_over_a_broken_seam_shape(home, shape):
     """
     from types import SimpleNamespace
 
-    from tortoise.__main__ import _upgrade_artifact_seam
     from tortoise import hook_install
+    from tortoise.__main__ import _upgrade_artifact_seam
 
     assert _install(home).ok
     root = _ext_dir(home)
