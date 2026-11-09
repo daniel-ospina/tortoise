@@ -7960,6 +7960,11 @@ surfaces:
   - test_vocab_gating_callers_5163.py
   - test_kind_eval_set.py
   eval:
+  # #3519: the read-side acceptance for the same embeddings — a paraphrase of
+  # captured session content must retrieve the turn. A change to
+  # `tortoise/embeddings.py` selects `eval`, so it is dual-registered here and
+  # in `core` (same #2938 convention as the #4194 file above).
+  - test_session_semantic_retrieval.py
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
   # #10465 (review P1): the `eval` arm of the #5090 DoD instrument. Its §12.2a
   # predicate pin and its `encode_for_row` seam enumeration guard
