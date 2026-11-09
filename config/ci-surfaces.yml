@@ -19,10 +19,16 @@ version: 1
 # test (`test_real_workflow_halves_are_consistent`) and the lane-parity
 # superset test below, both of which recompute from the map.
 #
-# S=9 is also what the lane-parity contract requires: main publishes
+# S=10 is also what the lane-parity contract permits: main publishes
 # `test (a)`…`test (i)` and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
-# merge rail refuses a removal).
+# merge rail refuses a removal). #11602 raised S 9 -> 10 because the 2026-11-09
+# sweep took the worst committed shard to 32 m, which put the `test` job's SUM
+# arm 2 at 63.64 m x 1.5 = 95.46 m against a 90 m cap; at S=10 the same map packs
+# to 28 m, i.e. 59.64 x 1.5 = 89.46 m, which clears it (#11605 measured both).
+# That is a CONSEQUENCE of the refresh's own map, not a cap move — `#3239`'
+# stale-head exposure is untouched, and `#6792`'s 10 m SLOW-leg ceiling is a
+# different number on a different lane and is not touched by this line.
 #
 # The 1.25x balance band is enforced by `test_real_workflow_halves_are_
 # consistent`, which recomputes the ratio from the committed map. The old
@@ -34,7 +40,7 @@ version: 1
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
 # free win.
-fast_shards: 9
+fast_shards: 10
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
