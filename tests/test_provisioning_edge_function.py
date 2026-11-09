@@ -721,6 +721,37 @@ def test_the_specifier_pattern_cannot_backtrack_exponentially():
     )
 
 
+# ── The deleted `after_user_created` hook path's REQUEST-SHAPED fingerprints ──
+# Matched on the METHOD and for ANY receiver name, never on the identifier `req`.
+# That is not cosmetic: a verifier restored into a helper defined OUTSIDE the
+# handler CANNOT name its parameter `req` — that identifier is the handler's own
+# local, out of scope in a top-level function — so a `req.`-spelled pin covers
+# only the restore shape that reuses the handler's name. MEASURED at this head
+# (PR #11553 review):
+#
+#     const _hdr = (r: Request) => { const h: Record<string, string> = {};
+#       r.headers.forEach((v, k) => { h[k] = v; }); return h; };
+#
+# inserted above `authenticateCaller` left `test_edge_function_hook_path_is_gone`
+# GREEN while the pins read `req.headers.forEach`, and reds under this table —
+# which is why the shape lives here as data, so the snippet test below can hold
+# it to the classes it must see.
+_HOOK_REQUEST_SHAPED: tuple[tuple[re.Pattern[str], str], ...] = (
+    (
+        re.compile(r"\.headers\.forEach\s*\("),
+        "header enumeration (.headers.forEach on ANY receiver)",
+    ),
+    (
+        re.compile(r"\.headers\.entries\s*\("),
+        "header enumeration (.headers.entries on ANY receiver)",
+    ),
+    (
+        re.compile(r"fromEntries\s*\(\s*[\w$]+\s*\.\s*headers"),
+        "header enumeration (Object.fromEntries(<any>.headers))",
+    ),
+)
+
+
 def test_edge_function_hook_path_is_gone():
     """#1120: the `after_user_created` auth-hook path (AUTH_HOOK_SECRET /
     Standard-Webhooks) is DELETED, not merely disabled.
@@ -798,10 +829,31 @@ def test_edge_function_hook_path_is_gone():
     # calling it from inside — one benign-looking line — left ALL 19 static
     # tests green while the branch was a live authentication path. The slice
     # cannot see a function it does not contain, so the artifacts of a webhook
-    # signature path are pinned across the WHOLE file (all four are 0 today):
-    #   req.headers.forEach  — header enumeration
+    # signature path are pinned across the WHOLE file and its import closure — as
+    # a SHAPE, never as a count, because a count that must track a growing file is
+    # a self-inflicted staleness:
+    #   .headers.forEach / .headers.entries / Object.fromEntries(x.headers)
+    #                        — header enumeration, matched on the METHOD and for
+    #                          ANY receiver name (`_HOOK_REQUEST_SHAPED`), not on
+    #                          the identifier `req`. A helper defined OUTSIDE the
+    #                          handler cannot reuse `req` — that identifier is the
+    #                          handler's local — so a `req.`-spelled pin covers only
+    #                          the restore shape that keeps the same name. MEASURED
+    #                          at this head: `const _hdr = (r: Request) => {
+    #                          r.headers.forEach(…) }` above `authenticateCaller`
+    #                          — the natural way to write that helper — left the
+    #                          `req.`-spelled version of this pin GREEN, which is
+    #                          the very hole the closure sweep exists to close.
+    #                          `test_the_hook_fingerprint_ignores_the_request_
+    #                          parameter_name` pins that separation on a snippet.
     #   req.clone            — a SECOND body read (the live handler reads it once,
-    #                          with `req.text()`, and passes it in as an argument)
+    #                          with `req.text()`, and passes it in as an argument).
+    #                          Still name-bound, and deliberately so: a restore that
+    #                          renames the receiver STILL has to read the
+    #                          `webhook-signature` header to verify anything, so the
+    #                          enumeration pins above (or the literal name pin
+    #                          below) catch it — this pin is redundancy, not the
+    #                          only door.
     #   webhook-id / webhook-timestamp / webhook-signature — the protocol's own
     #                          header names, LITERALLY SPELLED
     #   createHmac           — the signature computation
@@ -915,9 +967,7 @@ def test_edge_function_hook_path_is_gone():
     )
     for rel, text in closure:
         for banned in (
-            "req.headers.forEach",
             "req.clone",
-            "Object.fromEntries(req.headers)",
             "webhook-id",
             "webhook-timestamp",
             "webhook-signature",
@@ -929,6 +979,16 @@ def test_edge_function_hook_path_is_gone():
                 "outside authenticateCaller's body, and not just outside "
                 "index.ts, because a helper in either place reaches the same "
                 "request and the slice-based pins above cannot see it"
+            )
+        for pattern, what in _HOOK_REQUEST_SHAPED:
+            match = pattern.search(text)
+            assert match is None, (
+                f"the deleted hook path's fingerprint `{what}` must not appear "
+                f"ANYWHERE in the code this function runs (`{rel}`) — matched by "
+                f"SHAPE ({pattern.pattern}) on any receiver name, because a helper "
+                "defined outside the handler cannot name its parameter `req` and a "
+                "name-spelled pin cannot see it. Offending text: "
+                f"`{match.group(0) if match else ''}`"
             )
     assert 'req.headers.get("authorization")' in auth_body, (
         "the one header authenticateCaller reads must be Authorization"
@@ -950,6 +1010,50 @@ def test_edge_function_hook_path_is_gone():
         "authentication path beside the user JWT, which is what the deleted "
         "Standard-Webhooks branch was: "
         f"{sorted(auth_envs - {'SUPABASE_URL', 'SUPABASE_ANON_KEY'})}"
+    )
+
+
+def test_the_hook_fingerprint_ignores_the_request_parameter_name():
+    """Non-vacuity for `_HOOK_REQUEST_SHAPED`: it must see a header ENUMERATION
+    whatever the receiver is called, and must still separate a benign single
+    header read from one.
+
+    This is the snippet pin for the reason the pattern is receiver-agnostic. The
+    first sample is the shape MEASURED at this head: a helper above
+    `authenticateCaller` cannot use `req` (the handler's local), so the natural
+    spelling is `(r: Request) => r.headers.forEach(…)` — and it kept the
+    `req.`-spelled pin GREEN. Every sample below therefore deliberately contains
+    NO `req.`, and the last block asserts that, so the samples cannot quietly
+    become shapes the old pin would also have caught.
+    """
+    samples = [
+        # the natural helper form — a renamed receiver, forEach
+        "const _hdr = (r: Request) => { const h: Record<string, string> = {}; "
+        "r.headers.forEach((v, k) => { h[k] = v; }); return h; };",
+        # the iterator form, which the deleted path could equally have used
+        "for (const [k, v] of request.headers.entries()) { hdrs[k] = v; }",
+        # the one-line form with a destructured/gathered parameter
+        "const headers = Object.fromEntries(inner . headers);",
+    ]
+    for sample in samples:
+        assert "req." not in sample, (
+            "each sample must be free of `req.`, or it would pass under the "
+            "name-spelled pin this test exists to prove is not sufficient: "
+            f"{sample}"
+        )
+        matched = [what for pattern, what in _HOOK_REQUEST_SHAPED if pattern.search(sample)]
+        assert matched, (
+            "a header enumeration on a receiver that is NOT named `req` must be "
+            "caught — otherwise a restored hook verifier in a helper above the "
+            "handler is invisible to the guard: " + sample
+        )
+    # …and it must still SEPARATE the benign shape from those: the live code's
+    # one header read is a `get`, which no enumeration pin may match.
+    benign = 'const authz = req.headers.get("authorization") ?? "";'
+    assert not [p for p, _ in _HOOK_REQUEST_SHAPED if p.search(benign)], (
+        "the enumeration pins must not match a single header read — an "
+        "over-matching pin would red the live code and train the next author to "
+        "delete it rather than fix it"
     )
 
 
