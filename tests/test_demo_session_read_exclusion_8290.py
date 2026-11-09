@@ -739,6 +739,182 @@ def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
         f"the census collapsed: {data!r}")
 
 
+#: The scorecard note spells the pivot THREE times. Each spelling is a figure the
+#: census must be able to COMPARE and REWRITE — an uncaptured one is invisible to
+#: both verbs (see ``test_the_census_refresh_restates_every_pivot_spelling``).
+_PIVOT_SPELLINGS = (
+    ("the ``hosted_api.py:<pivot>`` cite",
+     r"PRODUCTION execution is ``hosted_api\.py:(\d+)``"),
+    ("the ``LARGER than <pivot>`` bound of the ABOVE range",
+     r"LARGER than (\d+)"),
+    ("the ``the remainder is <pivot> itself`` tail",
+     r"the remainder is (\d+) itself"),
+)
+
+
+def test_every_pivot_spelling_in_the_note_is_the_pivot_the_test_derives():
+    """All three prose spellings of the pivot must equal ``_PIVOT``.
+
+    Why this exists (review of #11576, P2): the scorecard note states the pivot at
+    three sites, and before this pin the fast suite re-derived ``_PIVOT`` from
+    ``hosted_api.py`` (``pivot_is_the_lifetime_site``) without ever comparing it to
+    the PROSE. The third spelling — the ``LARGER than <pivot>`` bound — was not
+    even captured by the census tool's own pattern table, so a hand-edit to that
+    number (or a pivot move that ``--refresh`` failed to restate) left every
+    assertion here green.
+
+    REDS IF: any of the three spellings disagrees with ``_PIVOT``.
+    """
+    scorecard = _src("tortoise/activation_scorecard.py")
+    for description, pattern in _PIVOT_SPELLINGS:
+        assert _stated(pattern, scorecard) == _PIVOT, (
+            f"{description} in tortoise/activation_scorecard.py does not state "
+            f"the pivot the test derives ({_PIVOT}) — the note says otherwise; "
+            f"re-state it with `uv run python tools/hosted_api_cite_census.py "
+            f"--refresh`")
+
+
+def _census_tmp_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """A throwaway copy of the three note files, with the census pointed at it.
+
+    The census verbs WRITE, so nothing here may touch the real checkout: ``_sweep``
+    resolves every path through the module-global ``REPO``, which is redirected.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    for rel in (census_mod._SCORECARD, census_mod._HOSTED, census_mod._TEST):
+        dest = tmp_path / rel
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        dest.write_text(_src(rel), encoding="utf-8")
+    monkeypatch.setattr(census_mod, "REPO", tmp_path)
+    return tmp_path
+
+
+def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
+    """``--check`` must exit 1 when a stated figure is not the measured one.
+
+    Why this exists (review of #11576, P3): ``--check`` is the ONLY detector of a
+    stale note — the nightly job runs it and nothing else does — and it had no test
+    at all. Mutating ``if stated == want:`` to ``if True:`` left ``--check``
+    reporting "every stated figure is the measured one" with RC 0 and the whole
+    fast suite green. The two arms below are the discriminating pair.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    measured = census_mod.census(_PIVOT)
+
+    # arm 1: the notes as written agree with the tree — green.
+    assert census_mod._sweep(measured, refresh=False) == 0, (
+        "the shipped notes must be in agreement with the measured census")
+
+    # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
+    scorecard = repo / census_mod._SCORECARD
+    text = scorecard.read_text(encoding="utf-8")
+    assert "**434**" in text, (
+        "the BELOW count this arm degrades must still be the figure the note "
+        "states; re-point the degradation at the new one")
+    scorecard.write_text(text.replace("**434**", "**999**", 1), encoding="utf-8")
+    assert census_mod._sweep(measured, refresh=False) == 1, (
+        "`--check` green-lit a note whose stated figure is not the measured one — "
+        "that is the false green the nightly census-drift job exists to prevent")
+
+
+def test_the_census_refresh_restates_every_pivot_spelling(tmp_path, monkeypatch):
+    """A pivot MOVE must be restated at all three prose sites, not two.
+
+    Why this exists (review of #11576, P2): ``--refresh`` is documented as
+    re-stating "every figure", and the ``LARGER than <pivot>`` bound was matched by
+    an UNCAPTURED digit run, so a pivot move left the note saying 24500 and 23128
+    at once while ``--check`` reported it clean. A pivot move is not exotic: the
+    pivot IS the ``LIFETIME_MEMORY_QUERY`` execution site, so any commit that adds
+    a line above it moves the pivot — the exact event both notes say `--refresh`
+    exists for.
+
+    REDS IF: any pivot spelling survives the refresh with its old value.
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    moved = dict(census_mod.census(_PIVOT), pivot=_PIVOT + 1372, at_pivot=0)
+
+    assert census_mod._sweep(moved, refresh=True) == 1, (
+        "a pivot move is stale work: the refresh pass must report it")
+
+    text = (repo / census_mod._SCORECARD).read_text(encoding="utf-8")
+    for description, pattern in _PIVOT_SPELLINGS:
+        assert _stated(pattern, text) == _PIVOT + 1372, (
+            f"`--refresh` left {description} stating the OLD pivot — this figure "
+            f"is outside the census's figure set, so `--check` would then call the "
+            f"self-contradictory note clean")
+
+    # and the next pass converges (a rewrite that cannot be re-matched is the
+    # corruption Finding 2 of the same review names).
+    assert census_mod._sweep(moved, refresh=True) == 0
+
+
+def test_the_census_refuses_an_unmeasurable_figure_instead_of_writing_None(
+        tmp_path, monkeypatch):
+    """An EMPTY side of the pivot is a REFUSAL, never a write of ``None``.
+
+    Why this exists (review of #11576, P3): ``census()`` returns `None` for the
+    min/max of an empty side, and ``_restate`` stringified it into the prose as the
+    word ``None`` — destroying the very sentence the next pass must match to
+    repair it, so the tool then printed "nothing was written" over a file it had
+    already modified (both documented contracts false on that path).
+
+    REDS IF: the note is modified, ``(None … None)`` reaches the prose, or the
+    exit code is not the documented refusal (2).
+    """
+    from tools import hosted_api_cite_census as census_mod
+
+    repo = _census_tmp_repo(tmp_path, monkeypatch)
+    scorecard = repo / census_mod._SCORECARD
+    before = scorecard.read_text(encoding="utf-8")
+
+    empty_below = dict(census_mod.census(_PIVOT), below_pivot=0,
+                       min_target=None, max_below=None)
+    assert census_mod._sweep(empty_below, refresh=True) == 2, (
+        "an unmeasurable figure must be a REFUSAL (2), not a rewrite")
+
+    after = scorecard.read_text(encoding="utf-8")
+    assert after == before, "`nothing was written` must be true: the file changed"
+    assert "(None … None)" not in after, "`None` reached the note's prose"
+
+
+def test_the_nightly_census_drift_job_still_runs_the_check_verb():
+    """The nightly ``census-drift`` job is the ONLY thing that runs ``--check``.
+
+    Why this exists (review of #11576, P3): the previous round's fix was "nothing
+    runs the command", and that fix is itself unpinned — deleting the whole job
+    left the suite green and ``grep -rn census-drift tests/`` empty, so the same
+    defect could return silently.
+
+    The ``timeout-minutes`` arm pins the floor ``docs/ops/ci-wall-clock.md`` states
+    (15 m, not 5 m): that doc measured a ~9 m runner-side stall on a one-minute
+    job, and a cap under the observed stall false-reds the check — here it would
+    erase the only channel that reports the drift. (A timed-out job is reported
+    `cancelled`, which is non-red, so the signal would vanish silently.)
+    """
+    import yaml
+
+    workflow = yaml.safe_load(
+        _src(".github/workflows/main-health-nightly.yml"))
+    jobs = workflow["jobs"]
+    assert "census-drift" in jobs, (
+        "the nightly census-drift job is gone — `--check` then runs NOWHERE and "
+        "the two notes can drift with every signal green")
+
+    job = jobs["census-drift"]
+    commands = [step.get("run", "") for step in job.get("steps", [])]
+    assert any("tools/hosted_api_cite_census.py --check" in c for c in commands), (
+        f"the census-drift job no longer runs the `--check` verb: {commands!r}")
+    assert job.get("timeout-minutes", 0) >= 15, (
+        f"timeout-minutes: {job.get('timeout-minutes')!r} is under the floor "
+        f"`docs/ops/ci-wall-clock.md` states (15 m, from a measured ~9 m"
+        f" runner-side stall) — a stall would false-red the only drift signal")
+
+
 def test_the_predicate_docstring_names_every_production_caller():
     """``is_demo_session_id`` is shared by THREE production callers, not two.
 

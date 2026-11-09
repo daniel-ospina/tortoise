@@ -56,9 +56,13 @@ jobs:
     # `--refresh`", and the remedy is one command.
     name: census-drift
     runs-on: ubuntu-latest
-    # One `git grep` over the tracked tree plus two file reads. 5m is the
-    # runner-stall floor (see docs/ops/ci-wall-clock.md); measured locally at ~0.4s.
-    timeout-minutes: 5
+    # One `git grep` over the tracked tree plus two file reads. 15 m is the floor
+    # `docs/ops/ci-wall-clock.md` states for a cheap job — NOT 5 m: that doc measured
+    # a ~9 m runner-side stall on a one-minute job, which is why it is "floored at
+    # 15 m and not 5 m". A cap under the observed stall would false-red (or, since a
+    # timed-out job reports `cancelled`, silently swallow) the only channel that
+    # reports the drift, so the headroom is cheaper than the lost signal.
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
       # tools/hosted_api_cite_census.py carries the inline >=3.12 guard (#5128).

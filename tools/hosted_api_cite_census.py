@@ -23,6 +23,19 @@ converge as a FIXPOINT: re-writing a note's own pivot cite retires one cite targ
 and adds another, which changes the population the figures describe, so the command
 re-measures until the tree and the notes agree.
 
+⛔ EVERY figure a note states must have a capture group here, including the PIVOT
+wherever it is spelled. The scorecard note spells the pivot THREE times (the
+`hosted_api.py:<pivot>` cite, the `LARGER than <pivot>` bound of the ABOVE range,
+and `the remainder is <pivot> itself`); a digit run matched but NOT captured is a
+figure no verb can compare or rewrite, so `--check` would report the note clean
+while `--refresh` left it self-contradictory — measured, and the reason the ABOVE
+range row captures its pivot (#11576 review, P2).
+
+⛔ A figure the census cannot measure (an EMPTY side of the pivot, where `census`
+returns `None`) is a REFUSAL, never a write: stringifying `None` into the prose
+would corrupt the note AND break the sentence the next pass needs to match, so
+the tool would report "nothing was written" after writing (#11576 review, P3).
+
 Do NOT assert the population in a fast-suite test: it belongs to EVERY tracked file,
 so a test that compared it to prose would red unrelated PRs (measured: ~1 commit in
 30 adds a `hosted_api.py:<N>` citation). The test in
@@ -75,8 +88,12 @@ _NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
      r"PRODUCTION execution is ``hosted_api\.py:(\d+)``", ("pivot",)),
     ("scorecard ABOVE count", _SCORECARD,
      r"\*\*(\d+)\*\* distinct cite", ("above_pivot",)),
+    # ⛔ The pivot is CAPTURED here, not matched as a bare digit run: this sentence
+    # is the note's second of three spellings of it, and an uncaptured one is a
+    # figure neither verb can see (#11576 review, P2 — `--check` greened a note
+    # that said 23128 and 24500 at once after a pivot move).
     ("scorecard ABOVE range", _SCORECARD,
-     r"LARGER than \d+ \((\d+) … (\d+)\)", ("above_min", "max_above")),
+     r"LARGER than (\d+) \((\d+) … (\d+)\)", ("pivot", "above_min", "max_above")),
     ("scorecard BELOW count", _SCORECARD,
      r"\*\*(\d+)\*\* have a number smaller", ("below_pivot",)),
     ("scorecard BELOW range", _SCORECARD,
@@ -204,6 +221,16 @@ def _sweep(measured: dict, refresh: bool) -> int:
                 f"in tools/hosted_api_cite_census.py at the new wording")
             continue
         want = [measured[k] for k in keys]
+        if any(value is None for value in want):
+            # `census()` returns None for the min/max of an EMPTY side. Writing it
+            # would put the word `None` into prose and, worse, destroy the sentence
+            # the NEXT pass must match to repair it — after which the tool prints
+            # "nothing was written" over a file it has already modified. Refusing
+            # here keeps that report true: `rewritten` is never persisted.
+            refused.append(
+                f"{label}: the census has no figure for {keys} — that side of the "
+                f"pivot is EMPTY, so there is no measured number to state")
+            continue
         if stated == want:
             if not refresh:
                 print(f"  ok    {label}: {stated} == measured")
