@@ -135,6 +135,52 @@ def test_a_poison_record_is_dead_lettered_without_blocking_the_ones_behind_it(
     assert second["queued"] == 0
 
 
+@pytest.mark.parametrize("status", [401, 403, 407])
+def test_a_policy_refusal_defers_instead_of_dead_lettering(
+        tmp_path: Path, status: int) -> None:
+    """#5051 / #4895 — a credential or entitlement refusal is not a filing verdict.
+
+    401/403/407 are `policy`: the CALLER is wrong (a rotated key, a suspended
+    org), the bytes are fine. Dead-lettering them CROSSES the cursor, and on a
+    session that has ended that is final — the turns can never be re-shipped and
+    nothing reports a failure. So the record is deferred, the cursor stays where
+    it is, and the same pass re-ships once the key is fixed.
+
+    This is the drain leg's DISCRIMINATING test, and it exists because the fix
+    was otherwise unpinned: every other status this file drives (402/429/422)
+    answers the same in both the old 2-class expression and `may_keep_entry`, so
+    reverting `session_events_drain.py`'s decision line left the whole suite
+    green.
+
+    MUTATION THAT REDS THIS: restore
+    `verdict = classify_failure(...); if verdict == "retry":` at the decision
+    site -> a 401/403/407 is read as terminal and the record is dead-lettered.
+    """
+    root, store = tmp_path / "session-events", tmp_path / "store-sync"
+    _write_day(root, "2026-10-01.jsonl", [_record("s0"), _record("s1")])
+    refused = Recorder({f"s{i}": PostOutcome(
+        ok=False, status=status, detail="Organization is suspended")
+        for i in range(2)})
+
+    summary = _drain(root, store, refused)
+
+    assert summary["dead_lettered"] == 0, (
+        f"a {status} policy refusal was dead-lettered — the reversible state "
+        "became permanent (#4895)")
+    assert read_dead_letter_count(store) == 0
+    assert summary["deferred"] >= 1
+    # The substrate is untouched: nothing was crossed, so the next pass re-ships
+    # the same records once the caller fixes the credential.
+    assert len(_read_records(root / "2026-10-01.jsonl")) == 2
+    # ...and a genuinely permanent refusal on the same leg still dead-letters,
+    # so the fix cannot have widened `permanent` away.
+    hard = Recorder({f"s{i}": PostOutcome(ok=False, status=422, detail="bad lane")
+                     for i in range(2)})
+    hard_summary = _drain(root, store, hard)
+    assert hard_summary["dead_lettered"] == 2
+    assert read_dead_letter_count(store) == 2
+
+
 def test_a_transient_refusal_stops_the_pass_and_loses_nothing(tmp_path: Path) -> None:
     """A rate-limited API ends the pass; the record is retried, never crossed."""
     root, store = tmp_path / "session-events", tmp_path / "store-sync"

@@ -310,8 +310,17 @@ def cells(path: str) -> dict:
         "questions": q,
         "questions_with_ep": with_ep,
         "questions_with_ep_ratio": (
-            (with_ep / q) if isinstance(with_ep, int) and isinstance(q, int)
-            and q else None),
+            # ONE derivation (#10137 indicator (a)): the summarizer now publishes
+            # the quotient, so the probe READS it instead of dividing again.
+            # Two derivations of one number is how they disagree, and this one
+            # is the artifact's headline cell. The fallback is for an input
+            # carrying a summary produced before the cell existed (an older
+            # checkpoint is still readable); it is the same arithmetic, so a
+            # pre-change input and a post-change one cannot report two values.
+            summary.get("questions_with_ep_ratio")
+            if isinstance(summary.get("questions_with_ep_ratio"), (int, float))
+            else ((with_ep / q) if isinstance(with_ep, int)
+                  and isinstance(q, int) and q else None)),
         # A FLOOR on claim coverage, not claim coverage (see the module
         # docstring); the name says only what the denominator is.
         "point_coverage": {

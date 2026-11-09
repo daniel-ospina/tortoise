@@ -4,7 +4,7 @@ type: evidence
 domain: platform
 doc_status: live
 created: 2026-11-01
-updated: 2026-11-01
+updated: 2026-11-09
 subjects.team: epistemic-team
 aboutSubjects: extraction prior-injection (S3), write-path corpus, pre-registered two-arm ablation
 aboutObjects: "#10463, #5087, tools/s3_prior_ablation.py, tests/eval/write_path, docs/evidence/7949-capstone/probes/capstone_measure.py"
@@ -18,6 +18,16 @@ on the frozen `tests/eval/write_path` corpus.
 **VERDICT: `HYPOTHESIS-FALSIFIED (ratio 0.870)`** — telling extraction what already exists in the
 graph cut created nodes by **13 %**, not the pre-registered **≥ 25 %**; and it did so while recovering
 **fewer** real facts and wiring **fewer** operator edges, so the cut was not a saving at all.
+
+⛔ **This page is run 1's record, and `0.870` is not the figure to quote.** The `#10463` ruling
+withdrew run 1's log from the checked set (`withdrawn/WITHDRAWN.md` states what is and is not
+retracted), and the ruling's base-registered re-measurement (`#10554`, log `s3-ablation-a83c23a8.log`)
+reports created nodes **253 → 250** — ratio **`0.988`** — with both guards **met** (real facts
+41 → 44, operator edges 141 → 166) rather than fallen. `0.870` reads as *"priors cut creates by about
+a seventh"*; the second run supports only *"no measurable effect"*, because the **untreated** arm
+drifted **284 → 253** (**10.9 %**) between the two runs — about ten times the 3-node ON−OFF difference
+the second run measured. Read `REMEASUREMENT-a83c23a8.md` before quoting any figure: the verdict is
+the same either way, the magnitude is not.
 
 ⚠️ The parenthetical is what pre-registration rule 5 **freezes**, and it is the same measurement the
 rest of this page reports — but the shipped log's `VERDICT:` line was written before the probe emitted

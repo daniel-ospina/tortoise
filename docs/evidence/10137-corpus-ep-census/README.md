@@ -55,6 +55,17 @@ score    = PARTIAL(24 of 500) — a complete sample of a sample, never presented
 | `belief_eligible_with_ep` / `belief_eligible_unmeasured` | **UNKNOWN** (`null`, `_unread: 24`) — same reason |
 | `belief_eligible_ratio` | **UNKNOWN** (`null`) — withheld, because a ratio over a population nobody read is the fabricated figure the `_unread` companions exist to prevent |
 
+> **`questions_with_ep_ratio` now has a producer in the RUNNER (2026-11-09) — indicator (a).** In this
+> artifact the headline quotient was derived by `probes/census.py` alone, so the number the issue exists
+> to publish had no producer on the run-report path: a report carried the numerator and the denominator
+> and left every consumer to divide, which is two spellings of one cell waiting to disagree.
+> `measurement_posture.summarize_belief_activation` now publishes `questions_with_ep_ratio` beside the
+> two cells it divides, gated exactly like its sibling ratios — `None` (UNKNOWN) over an empty
+> population, never `0.0`, because zero questions has not measured a zero rate. Every run report's
+> `methodology.measurement_posture.activation` carries it; the probe READS that cell instead of dividing
+> again (falling back to the same arithmetic for an input whose summary predates it), and the pin below
+> divides the two cells independently. The committed value is unchanged: `24 / 24 = 1.00`.
+
 ### Per question type
 
 | question type | questions | with_ep | operators | inert | neutral | off_neutral | points moved |

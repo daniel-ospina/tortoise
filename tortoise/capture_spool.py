@@ -56,6 +56,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple
 
+from tortoise.capture_receipts import capture_outcome, may_keep_entry
 from tortoise.session_attribution import sanitize_attribution_field
 
 __all__ = [
@@ -450,15 +451,30 @@ def entry_key(session_id: str) -> str:
 
 
 def classify_failure(status: int | float | None, detail: str = "") -> str:
-    """``"retry"`` (transient) or ``"permanent"``.
+    """``"retry"`` | ``"policy"`` | ``"permanent"`` — a PROJECTION of the contract.
 
-    TRANSIENT: no status (network / timeout / an unparseable status), 5xx, 3xx (a
-    redirect on a stored api_url must not delete the capture), the retryable 4xx
-    family (402/408/425/429), and EVERY 409. On this idempotent upsert a 409 is either
-    #3713's in-flight concurrency condition (retry then replays) or a policy
-    state (recording disabled) the user can reverse — a capture must not be
-    destroyed because recording was briefly off. Matching the server's prose is
-    deliberately avoided: the client ships independently.
+    The status→class table lives ONCE, in
+    :func:`tortoise.capture_receipts.capture_outcome` (``#5051``). This function
+    keeps the narrower, pre-existing answer its callers ask — *"may this become
+    valid by waiting?"* — so that ``#4675``'s receipt gates (pinned to the exact
+    ``retry`` set by ``tests/test_session_confirm.py``) are unchanged by the
+    re-declaration. **Consequence sites must not read this**: whether an entry
+    may be KEPT is :func:`tortoise.capture_receipts.may_keep_entry` — ``retry``
+    and ``policy`` are both kept, and only ``permanent`` terminalises (``#4895``:
+    a suspended org's 403 is not a refusal of the bytes).
+
+    TRANSIENT (``"retry"``): no status (network / timeout / an unparseable
+    status), 5xx, 3xx (a redirect on a stored api_url must not delete the
+    capture), the retryable 4xx family (402/408/425/429), and EVERY 409. On this
+    idempotent upsert a 409 is either #3713's in-flight concurrency condition
+    (retry then replays) or a policy state (recording disabled) the user can
+    reverse — a capture must not be destroyed because recording was briefly
+    off. Matching the server's prose is deliberately avoided: the client ships
+    independently.
+
+    POLICY (``"policy"``): 401/403/407 — a reversible authorization/entitlement
+    refusal, resolved by fixing the credential or the org state rather than by
+    re-sending the same bytes.
 
     402 is TRANSIENT, and calling it permanent destroyed user data (#4714).
     The hosted quota gate refuses a capture whose *estimated* point cost would
@@ -492,8 +508,9 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     loss #4714 closed: any entry this drain would otherwise file later would be
     unlinked instead. The category is for REPORTING and for the surfaces that
     can act on it (`website/apps/dashboard`, the `capture-errors` breadcrumb);
-    the spool keeps deferring. #5051 holds the question of when a refusal is
-    genuinely terminal; until it is answered, retry is the safe direction.
+    the spool keeps deferring. #5051 has now ANSWERED the question of when a
+    refusal is genuinely terminal: only the ``permanent`` class terminalises
+    (`capture_receipts.capture_outcome`), and a ``policy`` refusal is kept.
 
     Any 402 is retried, with the ENTRY's `backoff_delay` capping the cadence —
     carried across turns, so a growing session is retried on the backoff clock
@@ -525,29 +542,20 @@ def classify_failure(status: int | float | None, detail: str = "") -> str:
     # strictly worse than either verdict this function can return, and it also
     # made the Python leg diverge from the Pi leg, which pins the same absurd
     # magnitude to Infinity and answers "retry".
-    if status is None or isinstance(status, bool):
-        # `bool` FIRST, because in Python a bool IS an int: `math.isfinite(True)`
-        # is True, so `True`/`False` would fall through every transient arm and
-        # land on "permanent" — routing a corrupt status to `_discard_entry` and
-        # DELETING the capture. The Pi leg is correct here only by accident
-        # (`Number.isFinite(true)` is false because `isFinite` requires
-        # `typeof === "number"`), which is exactly the sort of accident the
-        # cross-leg parity test cannot see once the two legs stop matching.
+    #
+    # `capture_outcome` owns all of that totality (including the `bool`-first
+    # arm, because in Python a bool IS an int and `math.isfinite(True)` is True —
+    # letting one fall through would route a corrupt status to a terminal
+    # consequence and destroy a live capture).
+    verdict = capture_outcome(status, detail)
+    # ``landed`` is not reachable from a correct caller (every leg checks ``ok``
+    # first) and projects onto this function's PRE-EXISTING answer for a 2xx
+    # (``"permanent"`` — a 2xx is not a failure any caller should route), so
+    # this stays a pure re-declaration rather than a behaviour change. Every
+    # other class passes through unchanged.
+    if verdict == "retryable":
         return "retry"
-    try:
-        if not math.isfinite(status):
-            return "retry"
-    except (TypeError, ValueError, OverflowError):
-        return "retry"
-    if 300 <= status < 400:
-        return "retry"
-    if status >= 500:
-        return "retry"
-    if status in (402, 408, 425, 429):
-        return "retry"
-    if status == 409:
-        return "retry"
-    return "permanent"
+    return "permanent" if verdict == "landed" else verdict
 
 
 def quota_refusal(outcome: PostOutcome) -> dict | None:
@@ -3024,13 +3032,18 @@ def _flush_one(root: Path, meta: dict, sid: str, summary: FlushSummary, post: Po
         # and stays unfiled, so they are re-posted next time.
         summary.filed += 1
         return
-    if classify_failure(outcome.status, outcome.detail) == "permanent":
-        # TERMINAL, NEVER DESTRUCTIVE (#7708). A permanent refusal is a *filing*
-        # failure, not a *capture* failure: ``_quarantine_entry`` records the
-        # refusal and marks the entry terminal while KEEPING the turn log —
-        # ``_discard_entry`` here used to unlink the only copy. The
-        # ``classify_failure`` VERDICT is deliberately unchanged (the Python/Pi
-        # parity contract depends on it); what changed is its consequence.
+    if not may_keep_entry(outcome.status, outcome.detail):
+        # TERMINAL, NEVER DESTRUCTIVE (#7708). A ``permanent`` refusal is a
+        # *filing* failure, not a *capture* failure: ``_quarantine_entry``
+        # records the refusal and marks the entry terminal while KEEPING the
+        # turn log — ``_discard_entry`` here used to unlink the only copy.
+        #
+        # The question asked here is the CLASS's (#5051), not
+        # ``classify_failure``'s: a ``policy`` refusal (401/403/407 — a
+        # suspended org, a rotated key) is NOT terminal, so the entry is kept
+        # and retried once the caller fixes the credential or the org state
+        # (#4895). Only a genuinely unrecoverable refusal (#422, #400, …)
+        # terminalises.
         summary.discarded.append(_quarantine_entry(
             root, meta, DISCARD_HTTP_REJECTED,
             f"HTTP {outcome.status if outcome.status is not None else 'none'}: "

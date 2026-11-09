@@ -2536,7 +2536,69 @@ function saturatedForMetas(
 }
 
 /**
- * Classify an upload failure.
+ * The per-attempt OUTCOME CONTRACT (#5051) — the TS mirror of
+ * `tortoise/capture_receipts.py::capture_outcome`, asserted equal to it over
+ * the full status space by `tests/test_capture_spool.py`'s parity test.
+ *
+ * The Python spool and this hook share ONE spool directory
+ * (`~/.tortoise/capture-spool`), so a status the two answer differently about
+ * is a capture one leg keeps and the other terminalises.
+ *
+ * `landed`     — 2xx: the commit is durable. Mint the receipt, retire the entry.
+ * `retryable`  — the MOMENT was wrong, not the bytes: no status, non-finite,
+ *                3xx, 402, 408, 409, 425, 429, EVERY 5xx (503 and 504 are the
+ *                same class — #4925).
+ * `policy`     — 401/403/407: a REVERSIBLE authorization/entitlement state,
+ *                resolved by fixing the credential or the org state, never by
+ *                re-sending the same bytes (#4895). KEEP it; never
+ *                terminalise it.
+ * `permanent`  — these bytes can never succeed: 400, 404, 405, 406, 413, 415,
+ *                422, any other 4xx. Terminalise — record + KEEP (#7708).
+ *
+ * `detail` is accepted for signature symmetry with the Python leg and is
+ * deliberately NOT interpreted (see `classifyFailure` below: keying on server
+ * prose would couple this client to a wording it ships independently of).
+ */
+export function captureOutcome(
+  status: number | null | undefined,
+  detail?: string,
+): "landed" | "retryable" | "policy" | "permanent" {
+  void detail;
+  // TOTAL over "no status": `undefined`, `null`, `NaN`/`Infinity` and — via
+  // `typeof` — any non-number a corrupt caller passes. `null >= 300` is FALSE,
+  // so an unguarded fall-through sent a transport failure to "permanent" and
+  // unlinked the capture while the Python leg kept it.
+  if (typeof status !== "number" || !Number.isFinite(status)) return "retryable";
+  if (status >= 200 && status < 300) return "landed";
+  if (status >= 300 && status < 400) return "retryable";
+  if (status >= 500) return "retryable";
+  // 401/403/407 are a refusal of the CALLER, not of the bytes.
+  if (status === 401 || status === 403 || status === 407) return "policy";
+  if (status === 402 || status === 408 || status === 425 || status === 429) return "retryable";
+  if (status === 409) return "retryable";
+  return "permanent";
+}
+
+/**
+ * May an entry be retried again? — the SPOOL's question (`#5051`).
+ *
+ * True for every class except `permanent`, so a `policy` refusal (a suspended
+ * org's 403, a rotated key's 401) is KEPT and retried once the caller fixes the
+ * credential or the org state, instead of being stranded terminal.
+ */
+export function mayKeepEntry(status: number | null | undefined, detail?: string): boolean {
+  return captureOutcome(status, detail) !== "permanent";
+}
+
+/**
+ * Classify an upload failure — a PROJECTION of {@link captureOutcome}.
+ *
+ * The status→class table lives ONCE, in `captureOutcome`. This keeps the
+ * narrower, pre-existing answer its callers ask — *"may this become valid by
+ * waiting / is this a retry?"* — so the Python/Pi parity contract on
+ * `classifyFailure` (pinned by `tests/test_capture_spool.py`) is unchanged by
+ * the re-declaration. Consequence sites must NOT read this: whether an entry
+ * may be kept is {@link mayKeepEntry}.
  *
  * TRANSIENT (retry with backoff): no status (network / timeout), 5xx, 3xx (a
  * redirect on a stored api_url must not delete the capture), the retryable 4xx
@@ -2545,10 +2607,11 @@ function saturatedForMetas(
  *
  * "No status" is TOTAL, and it has to be: `undefined` (the fetch never
  * resolved), `null` (a transport/fetchImpl that models absence as null), and a
- * non-finite value (an unparseable status). JS's `null >= 300` and `null >= 500`
- * are both FALSE, so `null` used to fall through to "permanent" -> discardEntry
- * -> unlink the capture, while the Python leg returned "retry" for the same
- * input. A missing status is a network condition, never a server verdict.
+ * non-finite value (an unparseable status). A missing status is a network
+ * condition, never a server verdict.
+ *
+ * POLICY ("policy"): 401/403/407 — a reversible authorization/entitlement
+ * refusal (#4895).
  *
  * On this idempotent upsert a 409 is either #3713's in-flight concurrency
  * condition (retry then replays) or a policy state (recording disabled) that
@@ -2590,13 +2653,15 @@ function saturatedForMetas(
 export function classifyFailure(
   status: number | null | undefined,
   detail?: string,
-): "retry" | "permanent" {
-  if (status === undefined || status === null || !Number.isFinite(status)) return "retry";
-  if (status >= 300 && status < 400) return "retry";
-  if (status >= 500) return "retry";
-  if (status === 402 || status === 408 || status === 425 || status === 429) return "retry";
-  if (status === 409) return "retry";
-  return "permanent";
+): "retry" | "policy" | "permanent" {
+  const verdict = captureOutcome(status, detail);
+  // `landed` is unreachable from a correct caller (every leg checks `ok`
+  // first) and projects onto this function's PRE-EXISTING answer for a 2xx
+  // (`"permanent"` — a 2xx is not a failure any caller should route), so this
+  // stays a pure re-declaration rather than a behaviour change. Every other
+  // class passes through unchanged.
+  if (verdict === "retryable") return "retry";
+  return verdict === "landed" ? "permanent" : verdict;
 }
 
 /** `attempts` as a small non-negative int, however corrupt the stored value is.
@@ -2921,12 +2986,16 @@ export async function flushSpool(
         summary.filed += 1;
         continue;
       }
-      if (classifyFailure(res.status, res.detail) === "permanent") {
+      if (!mayKeepEntry(res.status, res.detail)) {
         // TERMINAL, NEVER DESTRUCTIVE (#7708): record the refusal and mark the
         // entry terminal while KEEPING the turn log — `discardEntry` here used
-        // to unlink the only copy. The `classifyFailure` VERDICT is deliberately
-        // unchanged (the Python/Pi parity contract depends on it); what changed
-        // is its consequence.
+        // to unlink the only copy.
+        //
+        // The question asked here is the CLASS's (#5051), not
+        // `classifyFailure`'s: a `policy` refusal (401/403/407 — a suspended
+        // org, a rotated key) is NOT terminal, so the entry is kept and
+        // retried once the credential or the org state is fixed (#4895). Only
+        // a genuinely unrecoverable refusal (422, 400, …) terminalises.
         summary.discarded.push(
           quarantineEntry(
             dir,
