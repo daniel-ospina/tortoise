@@ -11521,6 +11521,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # cases are asserted with the classifier's above) — which reds exactly the shape `#11555`
         # retired, a `:NNNN` standing alone, and never the base-qualified form that policy
         # prescribes.
+        # ⚠️ WHAT THIS ARM STILL DOES **NOT** SEE, restored because an earlier rewrite of this
+        # comment deleted it (#11523 review at `f885a51663`): it covers the LIVE number —
+        # `vet_enabled = (`'s own line, derived below — and `:12929`, and NOTHING ELSE. A
+        # re-stale of any OTHER number in §2 to the live/HEAD shape (`:13011` at HEAD) still reds
+        # nothing (measured: whole file green). That was a true statement when `#11517` added it
+        # and it is still true, so it stays: closing it needs a citation grammar §2 does not have
+        # yet — its cites are base-qualified, file-qualified AND git-grep output, and a blanket
+        # "every `:NNNN` carries a base" rule would false-block the symbol-only cites the record's
+        # policy explicitly prefers — which is a separate piece of work, not a wording change
+        # here.
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
