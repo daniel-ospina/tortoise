@@ -1001,13 +1001,22 @@ def test_check_batch_gained_no_actionable_key():
 
     `vet_gate`'s allow-list is the boundary the successor must not cross — a new
     key here would make the coverage detector a gap-filler.
+
+    ⛔ `partial_gaps` (#11534) is the ONE admitted addition, and it is admitted
+    because it is a REPORT, not a remedy: it names WHICH clause span no candidate
+    accounts for (with a char span into the narrative) and nothing in this module
+    acts on it. The consumer is the `S2.2b-ADD` stage behind
+    `TORTOISE_PARTIAL_GAP_FILL`, which is DEFAULT OFF — so the gate itself still
+    selects and never fills, which is the property this arm pins. A key that a
+    SELECTOR could act on (e.g. a pre-computed candidate to append) would not
+    belong in this set.
     """
     from tortoise import vet_gate
 
     keys = set(vet_gate.check_batch({}, "one. two."))
     assert keys == {
         "narrative_statements", "candidates", "by_section",
-        "coverage_ratio", "coverage_suspect",
+        "coverage_ratio", "coverage_suspect", "partial_gaps",
     }
 
 
@@ -1478,7 +1487,7 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     assert model.s4_prompts, "S4 ran, so it saw a narrative"
     # ⛔ A phrase UNIQUE TO THE NARRATIVE, never the bare entity name (review round
     # 6, P3). `run_s4` appends `_render_source_transcript(edus)` to its prompt
-    # (`extractor_v2.py:3627`, called with the run's `edus` at `:13216`), and this
+    # (`extractor_v2.py:3656`, called with the run's `edus` at `:13802`), and this
     # fixture's transcript opens "Alice decided the budget is 40k" — so
     # `"Alice" in s4_prompts[0]` is satisfied by the TRANSCRIPT regardless of
     # `story`, and the positive leg pinned nothing. "Alice set a budget" is arm A's
@@ -1497,7 +1506,7 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     )
     # ⛔ AND THE ARM-A HALF, not only the `second: None` that clears arm B
     # (review round 5, P3). `mention_s2_stats` is a PAIR — the record's own
-    # contract (`extractor_v2.py:13009-13016`) is "ONE SHAPE ALWAYS:
+    # contract (`extractor_v2.py:13372-13378`) is "ONE SHAPE ALWAYS:
     # `{first, second}` on BOTH returns" — and the assertion above is satisfied
     # by a PARTIAL restore that drops arm A's half entirely (measured: replacing
     # the handler's dict with `{"second": None}` left 464 tests green). That is

@@ -20620,6 +20620,44 @@ def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
         assert "test_s4_reeemit_tax.py" in r["test_files"], (changed, r)
 
 
+def test_the_11534_evidence_artifacts_select_the_pins_that_read_them():
+    # #11534 review round 6 (P2): the `core` row for `test_11534_partial_gap.py`
+    # claims in `config/ci-surfaces.yml` that an artifact retargeted under
+    # `docs/evidence/1789-s4-reeemit-tax/` makes the pins measure something else
+    # "and the guard test says so first". That ordering is a property of the
+    # SELECTOR, not of the comment: `docs/` and `tests/` are flat
+    # NON_PYTHON_PREFIXES entries, so an artifact-only or receipt-only diff takes
+    # the docs-only tier-1 early return unless a keep-and-claim entry covers it —
+    # the #1349/#3332/#3616 silent-drop class, one level up from the pins.
+    #
+    # Reviewer-measured at `06052ea0dd9e`: the artifact came back `surfaces=[]`
+    # with the #11534 pins absent, which is why the finding was filed. That
+    # reading does NOT reproduce at this head — `docs/evidence/1789-s4-reeemit-
+    # tax/` carries a CORE_ALSO entry (added by #11385, whose own suite
+    # `test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change` above pins the
+    # same entry from the instrument's side), so this arm is the executable form
+    # of the claim rather than a fix to the selector: removing that entry reds
+    # HERE first, which is exactly what the comment says happens.
+    for changed, expected_surfaces, why in (
+        ("docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json",
+         ["core"],
+         "the artifact the flag-rate and recall pins are re-derived from"),
+        ("tests/eval/write_path/receipts/7947-arms-2026-10-18/"
+         "wp01_quarry_debug.arms.json",
+         # `tests/eval/write_path/` is ALSO a SOURCE_PATTERNS row, so the
+         # `eval` surface is legitimately co-selected here — the claim under
+         # test is that `core` comes along, not that it comes alone.
+         ["core", "eval"],
+         "a receipt in the read-path population the detector is measured on"),
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, why, r["surfaces"])
+        assert r["surfaces"] == expected_surfaces, (changed, why, r["surfaces"])
+        assert "test_11534_partial_gap.py" in r["test_files"], (
+            f"a diff to {why} ({changed}) must select the #11534 pins — "
+            "otherwise they run on a LATER core-selecting PR instead of first")
+
+
 def test_dashboard_deploy_script_change_selects_core_not_tier1():
     # PR #8852 review P2: `website/apps/dashboard/deploy.sh` is the documented
     # manual deploy, and the #8816 guard (`tests/test_e2e_wrangler_prewarm.py`,
