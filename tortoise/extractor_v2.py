@@ -115,9 +115,9 @@ what stood between the pre-condition and the deletion was the §4.4 F3 measureme
 on 2026-11-08, and it FIRES on BOTH arms (4/7 primary, 3/7 re-run, 5/7 union on `legacy`;
 2/7 either run of `delta`): `run_s4` STAYS, removal → #11534; name the arm — see the §4.4 note.
 ⛔ #11534 SHIPS A SECOND, NARROWER ADD-CAPABLE STAGE — and it meets that
-pre-condition for ONE of the two gap classes and NOT for the other.
- for ONE of the two gap classes and NOT for the other. State both halves,
-always, because each half alone is a different wrong answer. Presence is not
+pre-condition for ONE of the two gap classes and NOT for the other. State
+both halves always — never one alone, because each half alone is a
+different wrong answer, and also because presence is not
 sufficiency either: neither folded stage
 can ADD a candidate, so neither of them satisfies the removal pre-condition stated below.
 
@@ -13696,10 +13696,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 # session from an EMPTY S2 base (the merge is otherwise the
                 # normal E4 merges-not-replaces on every healthy capture —
                 # counting those would corrupt the measurement).
-                # ⛔ The SAME `_batch_has_candidates` predicate the S2.2b-ADD arm
-                # above uses (review round 7, P2). Mapping truthiness was
-                # defeated by `route_mentions`'s `mention_stats` key on every
-                # referentiality-armed run, which silently zeroed this counter.
+                # ⛔ S4's own predicate and deliberately NOT the S2.2b-ADD arm's
+                # (`_gap_fill_sees_candidates`, round 9 P2): the two differ by a
+                # SECTION. Mapping truthiness was defeated by `route_mentions`'s
+                # `mention_stats` key on every referentiality-armed run.
                 if not _batch_has_candidates(embed_list):
                     s4_full_rescues += 1
                 # #1789 Task 6: the delta-compliance signal — a delta-mode
@@ -17547,5 +17547,5 @@ def _gap_fill_sees_candidates(embed_list: object) -> bool:
     """
     try:
         return bool(_vet_gate.check_batch(embed_list, "").get("candidates"))
-    except Exception:  # noqa: BLE001 — a detector that raises must not arm a call
+    except Exception:  # noqa: BLE001, RUF100 — a detector that raises must not arm a call
         return False

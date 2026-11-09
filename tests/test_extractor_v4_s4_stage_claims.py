@@ -1332,11 +1332,10 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # population and then deleted `run_s4`. These tests pin both halves: the LANDED
 # verdict with its ADD proof, and the FOLD stages' unchanged inability to produce
 # candidates — so a future lane cannot read a stage list as "gap-filling moved" a
-# second time.
-# deletes `run_s4` believing gap-filling moved. What decides it is the REMEDY
-# half: neither folded stage can ADD an item a coverage check found missing.
-# These tests pin that half, so the pre-condition for removal stays measurable
-# instead of inferable from a stage list.
+# second time, and then delete `run_s4` believing gap-filling moved. What decides
+# it is the REMEDY half: neither folded stage can ADD an item a coverage check
+# found missing. These tests pin that half, so the pre-condition for removal
+# stays measurable instead of inferable from a stage list.
 #
 # ⛔ AND IT IS TWO HALVES SINCE `#11534` — a fact this guard itself missed. The
 # record said "no stage … performs S4's gap review-and-fill" in the PRESENT
