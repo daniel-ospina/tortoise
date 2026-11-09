@@ -819,8 +819,10 @@ def test_edge_function_hook_path_is_gone():
     assert "req.clone" not in auth_body, (
         "authenticateCaller must not clone the request: a signature-verifying "
         "hook path re-reads the RAW BODY, so a clone here is the fingerprint of "
-        "one — the live code reads it ONCE, in the handler, and passes it in "
-        "(`origin/main` `:238`, `:242`):"
+        "one. At THIS head the handler reads the body ONCE (`index.ts` `:175`) "
+        "and uses that string itself (`:193`, `:206`); `authenticateCaller` takes "
+        "only `req` (`:101`, `:179`). `origin/main` (`:238`, `:242`) is where the "
+        "raw body WAS passed in, and that shape went with the hook path it served:"
         f"\n{auth_body}"
     )
     # ⛔ AND THE SAME PINS FILE-WIDE, because `auth_body` is a SOURCE SLICE and a
