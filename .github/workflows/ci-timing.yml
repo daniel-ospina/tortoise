@@ -59,22 +59,54 @@ jobs:
       # `ci_selection.duration_issues()` + `duration_coverage_issues()`. Pinned
       # for the same reason `manifest-integrity` pins it.
       #
-      # ⛔ AND pytest + httpx, which are NOT for the bridge — they are for the
-      # #11607 COLLECTED-TESTCASE PROBE (`collected_test_counts` runs
-      # `python -m pytest --collect-only` to get a denominator that is not a FLOOR
-      # for a `parametrize` file). Without them that probe exits non-zero in this
-      # job, contributes no denominator, and the capability ships INERT in its only
-      # scheduled caller — measured at PR #11602's review: this job installed
-      # PyYAML alone, so the whole fix was a no-op here while every gate stayed
-      # green. `httpx` is `tests/conftest.py`'s import; a further missing dependency
-      # fails closed AND emits a `::warning::` naming the file, so the residual is
-      # visible rather than silent. `tests/test_ci_timing.py` pins that this job
-      # can execute the probe, so it cannot go inert again quietly.
+      # ⛔ AND THE PROJECT'S REAL ENVIRONMENT, not a hand-picked token list.
+      # pytest + httpx were added first for the #11607 COLLECTED-TESTCASE PROBE
+      # (`collected_test_counts` shells out to `python -m pytest --collect-only`
+      # for a denominator that is not a FLOOR on a `parametrize` file), and that
+      # was still one dependency short: collecting ANY file under `tests/` runs
+      # `tests/conftest.py`, whose module body imports the product package
+      # (`conftest.py` -> `tortoise.embeddings` -> `numpy`), and none of the
+      # declared dependencies were installed. MEASURED at PR #11602's second
+      # review: with `pyyaml pytest httpx` alone the probe exits 4 with
+      # `ModuleNotFoundError: No module named 'numpy'` while the step above still
+      # reports success — the same INERT state, one import deeper.
+      #
+      # So the env is installed the way every other CI leg installs it
+      # (`pip install -e '.[test]'`, the repo's canonical install path): a token
+      # list cannot converge on a conftest's transitive import surface, and each
+      # addition only moves the failure to the next missing module. `.[test]`
+      # also PINS the probes this job depends on behaviourally — pytest's own
+      # `N tests collected` summary shape is what `collected_test_counts`
+      # cross-checks, so an unpinned pytest major could change the output shape
+      # silently. PyYAML stays explicitly pinned: the durations bridge validates
+      # the refreshed manifest with `ci_selection.duration_issues()` +
+      # `duration_coverage_issues()`, for the same reason `manifest-integrity`
+      # pins it.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Install pyyaml, and the probe's own dependencies (#11607)
-        run: pip install pyyaml==6.0.2 pytest httpx
+      - name: Install the project env — the probe collects a real conftest (#11607)
+        run: pip install -e '.[test]' pyyaml==6.0.2
+
+      # ⛔ THE PROBE'S RUNNABILITY IS PINNED AS AN OUTCOME, NOT AS A TOKEN.
+      # `tests/test_ci_timing.py` can only read this file, so its install-line
+      # scan proves `pytest` is *installed* — it cannot see a missing import,
+      # which is the way this capability actually went inert (twice). This step
+      # runs the probe's own command once, on the tree this sweep measures: if
+      # `python -m pytest --collect-only` cannot collect here, the job REDS
+      # rather than shipping a sweep whose every `parametrize` row is
+      # raisable-never-lowerable (#11607).
+      #
+      # Deliberate trade: a broken collection now blocks the weekly refresh
+      # instead of silently producing monotonic rows. `set -o pipefail` + no
+      # pipe is load-bearing — `| tail` would swallow the exit status and turn
+      # this back into the green-while-broken step it replaces.
+      - name: Prove the collected-testcase probe can run here (#11607)
+        run: |
+          set -euo pipefail
+          python3 -m pytest tests/test_ci_selection.py --collect-only -q \
+            -p no:cacheprovider > /tmp/collect.txt
+          tail -2 /tmp/collect.txt
 
       - name: Find latest completed push-to-main Python CI run
         id: find

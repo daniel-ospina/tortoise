@@ -4278,66 +4278,118 @@ def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
 
     `collected_test_counts()` is the only thing that lets a `parametrize` file's
     durations row ever move DOWN, and it works by shelling out to
-    `python -m pytest --collect-only`. That makes `pytest` an INSTALL-TIME
-    dependency of the weekly writer, and the job installed PyYAML alone — so the
-    probe exited 1 there, contributed no denominator, and the whole capability was
-    a no-op in its only scheduled caller while every gate read green (measured at
-    PR #11602: the committed 545.1 -> 103.8 re-base came from a hand-run on a box
-    with the venv, not from this workflow).
+    `python -m pytest --collect-only`. That makes the whole import surface of
+    `tests/conftest.py` an INSTALL-TIME dependency of the weekly writer, and the
+    capability has now shipped INERT there twice, for two different reasons:
 
-    `tests/conftest.py` imports `httpx` at module scope, so pytest alone is not
-    enough to COLLECT anything. Both are asserted, because either one missing puts
-    the capability back to inert — and the second is the non-obvious half.
+    1. the job installed PyYAML alone, so `python -m pytest` was not even on PATH
+       (the probe exited 1, contributed no denominator, every gate stayed green);
+    2. the job then installed `pyyaml pytest httpx` — and that is still one
+       dependency short, because collecting ANY file under `tests/` executes
+       `tests/conftest.py`, whose module body imports the product package
+       (`conftest.py` -> `tortoise.embeddings` -> `numpy`). MEASURED at PR
+       #11602's second review: `pytest tests/test_ci_selection.py
+       --collect-only -q` exits 4 with `ModuleNotFoundError: No module named
+       'numpy'` under exactly that install line, while the step above reported
+       success.
 
-    ⛔ Scoped to the `pip install` LINES, not the whole job. The `measure` job
-    already contains the substring `pytest` in its artifact-assert and bridge steps
-    (`pytest-log-*` globs), so a job-wide substring test passes on the PRE-FIX
-    state it exists to reject — the inert-enforcer vacuity this pin was written to
-    close, recurring inside the pin itself. The predicate below is exercised
-    against a pre-fix install line, so the arm cannot go vacuous again silently.
+    ⛔ SO A TOKEN SCAN OF THE INSTALL LINE IS NOT THE PIN. That was the previous
+    form of this test, and it passed on the state that was broken: the failure
+    mode is a missing IMPORT, which no substring of an install line can reveal.
+    Two arms replace it, and both were exercised against the state that shipped:
+
+    - the job must install the PROJECT (`pip install -e .` / `uv sync`), not a
+      hand-picked token list that cannot converge on a conftest's import surface;
+    - the job must RUN the probe's own command on a real test file, in a step
+      that cannot swallow a failure — an OUTCOME the sweep can observe, not a
+      promise about what is installed.
     """
 
-    def _installs_pytest_and_httpx(run_blocks) -> bool:
-        """The pin's own predicate: the INSTALL lines must carry both."""
-        lines = [
+    def _install_lines(run_blocks) -> list[str]:
+        return [
             line
             for block in run_blocks
             for line in str(block or "").splitlines()
             if "pip install" in line
         ]
-        return any(re.search(r"\bpytest\b", line) for line in lines) and any(
-            re.search(r"\bhttpx\b", line) for line in lines
+
+    def _installs_the_projects_own_env(run_blocks) -> bool:
+        """The INSTALL must carry the project, so `tests/conftest.py` resolves.
+
+        `pip install -e .`/`-e '.[test]'` (every other CI leg's path) and
+        `uv sync` both do; an enumerated token list does not.
+        """
+        return any(
+            re.search(r"(?:^|\s)pip\s+install\b.*(?:-e\s+['\"]?\.|\.[\[\s])", line)
+            or re.search(r"(?:^|\s)uv\s+sync\b", line)
+            for line in _install_lines(run_blocks)
         )
+
+    def _proves_the_probe_runs(steps) -> bool:
+        """A step that RUNS `-m pytest --collect-only` over a real test file and
+        cannot swallow its exit status."""
+        for step in steps:
+            body = str(step.get("run") or "")
+            invocation = [
+                line for line in body.splitlines()
+                if re.search(r"-m\s+pytest\b", line)
+                and "--collect-only" in line and "tests/" in line
+            ]
+            if not invocation:
+                continue
+            if step.get("continue-on-error") in (True, "true"):
+                continue
+            if re.search(r"\|\|\s*true", body):
+                continue
+            # A pipe swallows the exit status unless `pipefail` is set — the
+            # cheapest way to write this step and have it green while broken.
+            if any("|" in line for line in invocation) and "pipefail" not in body:
+                continue
+            return True
+        return False
 
     wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
     steps = wf["jobs"]["measure"]["steps"]
     run_blocks = [s.get("run") for s in steps]
-    installs = " ".join(
-        line
-        for block in run_blocks
-        for line in str(block or "").splitlines()
-        if "pip install" in line
-    )
-    assert "pytest" in installs, (
-        "the `measure` job no longer installs pytest, so `collected_test_counts` "
-        "cannot run there and a parametrised row is silently back to "
-        "raisable-never-lowerable (#11607) — this is the inert state, not a "
-        "style problem")
-    assert "httpx" in installs, (
-        "`tests/conftest.py` imports httpx at module scope, so `pytest "
-        "--collect-only` fails without it and contributes no denominator; "
-        "pytest alone is not enough to make the probe runnable")
 
-    # Non-vacuity, executable: the job as a whole always contains the string
-    # `pytest` (the artifact-assert/bridge steps), so a job-wide test cannot fail.
-    # The predicate must REJECT the pre-#11607 install line, which is the state
-    # that shipped inert — `pip install pyyaml==6.0.2` and nothing else.
-    assert not _installs_pytest_and_httpx(
-        ["pip install pyyaml==6.0.2"]
-    ), "the pin would pass the pre-#11607 install line — it is reading the whole job, not the install"
-    assert _installs_pytest_and_httpx(run_blocks), (
-        "the real `measure` job's install lines do not carry both pytest and httpx "
-        "— the predicate above and the assertions below disagree")
+    assert _installs_the_projects_own_env(run_blocks), (
+        "the `measure` job installs a hand-picked package list instead of the "
+        "project, so `python -m pytest --collect-only` cannot load "
+        "`tests/conftest.py` (it imports the product package) and every "
+        "parametrised row is silently back to raisable-never-lowerable (#11607) "
+        "— this is the inert state, not a style problem")
+    assert _proves_the_probe_runs(steps), (
+        "nothing in the `measure` job RUNS `python -m pytest --collect-only` over "
+        "a tests/ file, so the probe's runnability is asserted nowhere the sweep "
+        "could notice — it shipped inert twice while every gate read green")
+
+    # Non-vacuity, executable: each predicate must REJECT the states that
+    # actually shipped, so neither can go vacuous the way the token scan did.
+    # `pip install pyyaml==6.0.2 pytest httpx` is the SECOND inert state exactly
+    # as it was measured (exit 4, no numpy) — a token list, not the project.
+    assert not _installs_the_projects_own_env(
+        ["pip install pyyaml==6.0.2 pytest httpx"]
+    ), "the env arm would pass the install line that shipped the probe inert"
+    assert not _installs_the_projects_own_env(["pip install pyyaml==6.0.2"])
+    # …and the outcome arm must reject: no such step at all; a step that tolerates
+    # failure; and the piped form without `pipefail` (a `| tail` returns tail's
+    # status, so a red collection would read green).
+    probe = [{"run": "python3 -m pytest tests/test_ci_selection.py "
+                       "--collect-only -q -p no:cacheprovider"}]
+    assert _proves_the_probe_runs(probe), "the outcome arm rejects a real probe step"
+    assert not _proves_the_probe_runs(
+        [{"run": "python3 tools/ci_timing.py --refresh-durations"}]
+    ), "the outcome arm would pass a job that never runs the probe"
+    assert not _proves_the_probe_runs(
+        [{"run": probe[0]["run"], "continue-on-error": True}]
+    ), "a step that tolerates the probe failing is not an outcome pin"
+    assert not _proves_the_probe_runs(
+        [{"run": probe[0]["run"] + " | tail -2"}]
+    ), ("a piped probe without `pipefail` returns tail's exit status — the "
+        "outcome arm must reject it")
+    assert _proves_the_probe_runs(
+        [{"run": "set -euo pipefail\n" + probe[0]["run"] + " | tail -2"}]
+    ), "the outcome arm rejects the correct piped form; the pipefail guard is wrong"
 
 
 def test_a_failed_collection_probe_is_loud_and_fails_closed(capsys) -> None:

@@ -17847,7 +17847,17 @@ def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, m
 
     Non-vacuity: without the deep copy, arm 2 poisons the cache and arm 3 reds;
     without the raw-bytes comparison, arm 3 serves the pre-rewrite bytes.
+
+    ⛔ ARM 3 HAS TO PRESERVE THE IDENTITY TUPLE, or it does not test that second
+    claim (#11602 review, P3). `path.write_text(...)` bumps `st_mtime_ns`, so a
+    metadata-ONLY key already misses on the rewrite and the arm passes on the
+    very cache it exists to reject — the raw-bytes comparison is never reached.
+    The rewrite below therefore restores `st_mtime_ns` (and asserts the byte
+    length did not move) after writing, leaving the BYTES as the only thing that
+    differs: delete the `cached[1] != raw` conjunct in `load_manifest()` and this
+    arm reds on `11.0` instead of serving `22.0`.
     """
+    import os
     import sys as _sys
 
     import yaml
@@ -17882,8 +17892,23 @@ def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, m
         "next reader would pack shards from a value no file on disk contains")
     assert "test_injected_by_a_caller.py" not in third["surfaces"]["core"]
 
-    # arm 3 — a REWRITE is a cache miss, not a stale read
+    # arm 3 — a REWRITE is a cache miss, not a stale read.
+    #
+    # The identity tuple must NOT move, or this arm proves nothing: `write_text`
+    # would bump `mtime_ns` and a metadata-only key would miss on its own, so the
+    # raw-bytes comparison — the actual guarantee — would never be exercised.
+    # Same byte length (11.0 -> 22.0) plus a restored `st_mtime_ns` leaves the
+    # bytes as the only difference between the cached parse and the file.
+    before = copy_path.stat()
     _write(copy_path, 22.0)
+    written = copy_path.stat()
+    assert written.st_size == before.st_size, (
+        "the rewrite changed the byte length, so the identity tuple moved and "
+        "this arm no longer isolates the raw-bytes comparison")
+    os.utime(copy_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert copy_path.stat().st_mtime_ns == before.st_mtime_ns, (
+        "could not restore st_mtime_ns, so the identity tuple moved and the "
+        "metadata-only key would miss on its own — arm 3 would be vacuous")
     assert cs.load_manifest()["durations"][key] == 22.0, (
         "the cache served pre-rewrite bytes: this is the failure mode the raw-bytes "
         "comparison exists to prevent (the identity tuple alone cannot see a "
