@@ -1031,9 +1031,8 @@ def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole(
     The bundle's own `README.md` is a FOURTH surface, and it is the one §10's `Bundle:` link lands a
     reader on: it published `VERDICT: HYPOTHESIS-FALSIFIED (ratio 0.870)` as the settled form, with
     no reference to the re-measurement at all, so the same defect lived one file over from the one
-    #10557 names (`#10548` r15 F1 made exactly this observation about the same document). The
-    verdict is unchanged either way, so the README keeps its record of run 1 — what it may not keep
-    is the figure unqualified and unsourced.
+    #10557 names. The verdict is unchanged either way, so the README keeps its record of run 1 —
+    what it may not keep is the figure unqualified and unsourced.
 
     The qualitative verdict must keep reading as the same verdict, so the check also refuses a
     reversion to the unqualified "MEASURED … and the answer is NO by the margin the design assumed".
