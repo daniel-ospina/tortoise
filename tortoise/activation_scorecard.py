@@ -363,12 +363,15 @@ FUNNEL_QUERY = (
 # targets have a line number LARGER than 23128 (23284 … 99999) and those are the
 # ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
 # move. (449 distinct targets in all — the remainder is 23128 itself, which this
-# very comment names, and which is why these counts are re-measured whenever
-# ``hosted_api.py`` gains or loses a line above it —
-# ``tests/test_demo_session_read_exclusion_8290.py`` now DOES that re-measurement
-# and reds on the numbers above rather than leaving it to a reviewer's hand count
-# (review of #11576: a "re-measurement" round flipped these to 450/435 and said
-# so in a commit message, and no test could see it).)
+# very comment names. Re-take every figure with
+# `uv run python tools/hosted_api_cite_census.py` whenever ``hosted_api.py`` gains
+# or loses a line above the pivot. ⛔ These figures are NOT pinned by a tree-wide
+# test: that population belongs to every citing file (measured: ~1 commit in 30
+# adds a cite), so asserting it would red PRs that touch neither this note nor
+# ``hosted_api.py``. What the fast suite pins is what this change OWNS — the two
+# notes state one number, the three figures are arithmetic, and the pivot cite is
+# the query's production execution site. A "re-measurement" round flipped these to
+# 450/435 by counting with a `*` regex, so the census is a command, not a hand count.)
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a

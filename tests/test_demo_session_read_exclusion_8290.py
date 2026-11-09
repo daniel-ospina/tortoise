@@ -47,7 +47,6 @@ the P1 regression pin (`STARTS WITH` on a non-string id).
 from __future__ import annotations
 
 import re
-import subprocess
 from pathlib import Path
 
 import pytest
@@ -665,28 +664,12 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
 #: stack into a fast suite.
 _PIVOT = 23128
 
-#: The one pattern that defines a "cite target". Written with regex escapes so
-#: this file cannot match itself: an unescaped form here would add a target to
-#: the very population it measures.
-_CITE_RE = r"hosted_api\.py:[0-9]+"
-
-
-def _tracked_cite_targets() -> list[int]:
-    """Every distinct cited line number, over the TRACKED tree."""
-    proc = subprocess.run(
-        ["git", "grep", "-o", "-h", "-E", _CITE_RE],
-        cwd=str(_REPO), capture_output=True, text=True, check=False)
-    assert proc.returncode == 0, (
-        f"the measurement needs `git grep` in a checkout: {proc.stderr!r}")
-    return sorted({int(tok.rsplit(":", 1)[1]) for tok in proc.stdout.split()})
-
-
-def _tracked_citing_file_count() -> int:
-    proc = subprocess.run(
-        ["git", "grep", "-l", "-E", _CITE_RE],
-        cwd=str(_REPO), capture_output=True, text=True, check=False)
-    assert proc.returncode == 0, proc.stderr
-    return len([ln for ln in proc.stdout.splitlines() if ln.strip()])
+#: The one pattern that defines a "cite target" lives in
+#: ``tools/hosted_api_cite_census.py`` — ONE implementation, so the note's stated
+#: remedy and this pin cannot measure two different populations. It requires
+#: DIGITS (`[0-9]+`); the `*` form also matches a bare ``hosted_api.py:`` and
+#: ``sort -u`` then counts that empty run as one more target, which is how the
+#: count was briefly "re-measured" from 449 to 450.
 
 
 def _stated(pattern: str, src: str) -> int:
@@ -697,44 +680,63 @@ def _stated(pattern: str, src: str) -> int:
     return int(found.group(1))
 
 
-def test_the_hosted_api_cite_counts_are_the_measured_ones():
-    """The two notes state a MEASUREMENT, so a test does the measuring.
+def test_the_hosted_api_cite_notes_state_one_measurement_and_the_pivot():
+    """The two cite-count notes must state ONE measurement, and it must be arithmetic.
 
-    Why this exists (review of #11576, P2): the scorecard note says its counts
-    are "re-measured whenever ``hosted_api.py`` gains or loses a line", and a
-    review round then "re-measured" **449 / 434 / 14** into **450 / 435 / 14** —
-    a false correction, marked as a re-measurement, that no test could see. The
-    count is cheap to take and it has now been wrong once in each direction, so
-    it is taken here instead of in a commit message.
+    Why this exists (review of #11576, P2): the scorecard note's figures are a
+    hand count, and a review round "re-measured" **449 / 434 / 14** into
+    **450 / 435 / 14** — a false correction, marked as a re-measurement, that no
+    test could see. The `*` form of the count regex admits a bare
+    ``hosted_api.py:`` and ``sort -u`` counts that empty run as one more target;
+    the tool requires digits.
 
-    REDS IF: either note's stated numbers drift from the tree (a new cite above
-    the pivot, or a hand-edited figure that does not match). The numbers are NOT
-    restated in this file's source on purpose — the test measures, it does not
-    copy.
+    Why it does NOT assert the tree-wide figures HERE (review of #11576, P2, second
+    round): that population belongs to EVERY tracked file, so a fast-suite test
+    comparing it to prose would red unrelated PRs — measured ~1 commit in 30 adds
+    a ``hosted_api.py:<N>`` citation, and the only remedy would be hand-editing
+    prose in a module the failing commit never touched. The census has its own
+    command, ``uv run python tools/hosted_api_cite_census.py``, which is what both
+    notes now point at. This pin covers what THIS change owns.
+
+    REDS IF: the two notes disagree about the number of distinct targets, the three
+    scorecard figures stop being arithmetic (below + above + the pivot target =
+    the total), or the pivot cite stops being the ``LIFETIME_MEMORY_QUERY`` site.
     """
-    targets = _tracked_cite_targets()
-    below = sum(1 for n in targets if n < _PIVOT)
-    above = sum(1 for n in targets if n > _PIVOT)
-    distinct = len(targets)
-    citing_files = _tracked_citing_file_count()
-    # the counted population must be big enough for the claim to mean anything
-    assert distinct > 100 and above > 0 and below > 0, (
-        f"the measurement collapsed: distinct={distinct} below={below} "
-        f"above={above}")
+    from tools.hosted_api_cite_census import census, pivot_is_the_lifetime_site
 
     scorecard = _src("tortoise/activation_scorecard.py")
-    assert _stated(r"\*\*(\d+)\*\* distinct cite", scorecard) == above, (
-        "the scorecard note's ABOVE-pivot count is not the measured one")
-    assert _stated(r"\*\*(\d+)\*\* have a number smaller", scorecard) == below, (
-        "the scorecard note's BELOW-pivot count is not the measured one")
-    assert _stated(r"\((\d+) distinct targets in all", scorecard) == distinct, (
-        "the scorecard note's total is not the measured one")
-
     hosted = _src("tortoise/hosted_api.py")
-    assert _stated(r"from (\d+) tracked files", hosted) == citing_files, (
-        "the list-helper note's citing-FILE count is not the measured one")
-    assert _stated(r"tracked files \((\d+) distinct", hosted) == distinct, (
-        "the list-helper note's distinct-target count is not the measured one")
+
+    below = _stated(r"\*\*(\d+)\*\* have a number smaller", scorecard)
+    above = _stated(r"\*\*(\d+)\*\* distinct cite", scorecard)
+    distinct = _stated(r"\((\d+) distinct targets in all", scorecard)
+    hosted_distinct = _stated(r"tracked files \((\d+) distinct", hosted)
+
+    # ONE measurement, stated twice — two figures at two sites can drift apart
+    assert hosted_distinct == distinct, (
+        f"the two notes disagree about the target count: {distinct} vs "
+        f"{hosted_distinct}")
+
+    # ... and it is ARITHMETIC: every distinct target is below the pivot, above it,
+    # or the pivot itself. A hand-edit of any one figure breaks this without any
+    # tree-wide scan, so an unrelated PR cannot fail it.
+    assert below + above + 1 == distinct, (
+        f"the figures are not arithmetic: below={below} + above={above} + the "
+        f"pivot target (1) != distinct={distinct} — one of the three was "
+        f"hand-edited; run `uv run python tools/hosted_api_cite_census.py`")
+
+    # The pivot cite is not a bare number: it is the query's ONE production
+    # execution site. This is a real invariant an unrelated doc edit cannot break.
+    assert pivot_is_the_lifetime_site(_PIVOT), (
+        f"hosted_api.py:{_PIVOT} is no longer the LIFETIME_MEMORY_QUERY site — "
+        "re-derive the pivot and both notes' figures with "
+        "`uv run python tools/hosted_api_cite_census.py --pivot <line>`")
+
+    # the census command is the notes' stated remedy, so it must work and must not
+    # collapse to nothing (that, and only that, about the population is pinned here)
+    data = census(_PIVOT)
+    assert data["distinct_targets"] > 100 and data["above_pivot"] > 0, (
+        f"the census collapsed: {data!r}")
 
 
 def test_the_predicate_docstring_names_every_production_caller():

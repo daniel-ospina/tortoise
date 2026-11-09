@@ -164,9 +164,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
    `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
-   ⛔ **superseded in the merged tree: `#11548` added the production caller**, `relation_write.py:631`
-   — see the fifth-landing amendment in §0)
-   `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
+   `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner).
+   ⛔ **Superseded in the merged tree: `#11548` added the production caller**, `relation_write.py:631`
+   — see the fifth-landing amendment in §0. The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
