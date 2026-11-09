@@ -27,8 +27,12 @@ that must be settled before a scope can converge.
 
 - The enforcement chain is broken, and this is the third link. Confirmed at `origin/main`:
   `create_edge` validates the **predicate** (`projection/edges.py:2910-2911`) and never reads a kind.
-- `fromKind`/`toKind` are acted on in exactly **one** place, `domain_validators.py:396-410`, and only to
-  derive one pack's portfolio-shape rule.
+- `fromKind`/`toKind` are acted on in **three** places, and none of them is a general write gate.
+  ⚠️ **Correction (revision 2):** this said "exactly one place". The three are —
+  `domain_validators.py:396-410` (one pack's portfolio-shape rule); `sdk._resolve_traversal_path`
+  (`:41450`, live at `:37465`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
+  job (but by bare suffix, first-match-wins, so unusable as a gate); and
+  `value_extractor._relation_endpoint_refs` (`:44`), the kind→kind adjacency wired to kind co-selection.
 - The rule belongs on the write path, not in a per-pack validator: a customer's pack ships tomorrow and
   has no validator.
 
@@ -47,10 +51,11 @@ declare `mechanism: IMPL`; they are the only two that **additionally** bind the 
 | **operator** — `create_operator(op_type, source, targets, label)` | `(source)-[:INPUT]->(op:Point)-[:IMPL\|:NAND]->(target)` | **32 of 32** |
 | **structural** — `create_edge` / `create_about_edge` | a plain edge `(a)-[:pred]->(b)` | **2 of 32**, *in addition* — `hasPart`, `dependsOn` |
 
-⇒ **A gate at `create_edge` alone binds at most 2 of 32 declared relations — 6 % — and a gate at
-`create_operator` binds all 32.** The issue's target ("zero declared relations writable on mismatched
-endpoint kinds") would be satisfiable on paper and false in practice. The plan (`04-plan.md` §5.3a
-point 3) already states this routing; this is its consequence for #11656.
+⇒ **A gate at `create_edge` alone binds at most 2 of 32 declared relations — 6 % — while `create_operator`
+and `create_direct_edge` together reach all 32.** The issue's target ("zero declared relations writable on
+mismatched endpoint kinds") would be satisfiable on paper and false in practice. The epic's
+`docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` §5.3a point 3 already states this routing; this
+is its consequence for #11656.
 
 ### 2.2 On the operator path the declared pair is not on any edge
 
@@ -69,12 +74,33 @@ Consequences, both load-bearing:
    `(source, target)` from the `INPUT idx 0` + `IMPL` pair. This is why the sixth capstone row (#11083)
    measures *written*, not *correctly-kinded*.
 
-### 2.3 `ingest` is a router, not a third writer
+### 2.3 `ingest` is a router — and that is why THREE primitives are needed, not two
 
 `ingest` connections take `relation` → `create_edge`, `operator` + `reify` → `create_operator`, plain
-`operator` → `create_direct_edge`. Enforcing at the two primitives covers `ingest` automatically. The
-issue's "three writers" is a miscount; the real boundary is **two primitives, two more bypass classes**
-(§3.3).
+`operator` → **`create_direct_edge`**. ⚠️ **Correction (revision 2):** this section used to conclude "two
+primitives". It is **three**, because the third one takes a `label` — and a label *is* a declared
+`relations[].predicate`. See §2.4. `ingest` is still a router (it adds no writer of its own), so gating the
+three primitives covers it automatically; the point is that the third primitive is a real door.
+
+### 2.4 The third door, and why revision 1 of the scope got it wrong (the P0)
+
+`create_direct_edge(op_type, source_id, target_id, *, …, label=…)` (`sdk.py:28036`) accepts a **`label`** — and
+a label *is* a declared `relations[].predicate`. It validates **nothing** about declarations or kinds: its
+guards are `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists /
+not-an-operator / not-terminal, and the claim-class override. `undeclared_relation` fires only in
+`create_operator` (`sdk.py:22259`).
+
+Two callers reach it with a declared label:
+
+- `link_entities` (`sdk.py:17163-17171`): `if upper in ("IMPL","NAND") and operator is not True:` →
+  `create_direct_edge(upper, from, to, …, label=label, …)`.
+- `ingest`'s plain-operator arm (`sdk.py:27493`).
+
+**And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py:24066`) reifies only when a
+`:Point` is involved — *"Object↔Object keeps the direct shape"* — and **30 of the 32** kind-bearing
+declarations are Object→Object. So a declared IMPL label over a mismatched Object pair is writable today with
+no gate, and a scope that excludes this door leaves the issue's own target false. It is **in scope**, gating
+the `label` only (its epistemic semantics are untouched).
 
 ## 3. Three measured facts that decide refuse-vs-warn
 
@@ -102,13 +128,32 @@ turned on.
 
 | declared predicate | declared pairs | live edges | edges matching a declaration |
 |---|---|---|---|
-| `dependsOn` | `dev:api → dev:database` (1 pack) | **17** | **0** — all between `evidence`, `option`, `question`, `plan`, `incident`, `risk` |
-| `hasPart` | 4 packs, 4 different pairs | **47** | **0** — `evidence→operator`, `observation→operator`, `evidence→evidence` |
+| `dependsOn` | `dev:api → dev:database` (**1** declaration) | **17** | **0** — all between `evidence`, `option`, `question`, `plan`, `incident`, `risk` |
+| `hasPart` | `dev:theme → dev:epic` (**1** declaration) | **47** | **0** — `evidence→operator`, `observation→operator`, `evidence→evidence` |
+
+⚠️ **Correction (revision 2).** An earlier version of this table said `hasPart` was declared by *"4 packs,
+4 different pairs"*. **It is declared once.** The four were `semantics: hasPart` on **different predicates**
+(`decomposesInto`, `contains` ×2, `partOf`) — `semantics` was read as `predicate`. The 47 live `hasPart`
+edges are the operator **part/whole shape** (`edge_type = "hasPart" if op_type not in ("IMPL","NAND")`),
+which is why the single declaration matches none of them.
+
+**The multiplicity case that actually carries this argument is `addresses` — declared 6 times, 6 distinct
+pairs**, four of them inside `product-strategy` alone:
+
+```
+addresses  dev:issue→dev:incident · dev:pullRequest→dev:issue
+           product-strategy:feature→product-strategy:customerSegment
+           product-strategy:useCase→product-strategy:feature
+           product-strategy:requirement→product-strategy:architecture
+           product-strategy:feature→product-strategy:customerProblem
+contains   2 declarations, 2 pairs      targets  2 declarations, 2 pairs
+```
 
 `dependsOn` and `hasPart` are **core structural predicates** that a pack happens to *also* declare for one
-specific pair. Keying a constraint on the **predicate name** therefore does not describe a rule — it
-describes one pack's use of a shared word, and enforcing it globally would refuse 64 truthful edges that
-were never about that pack. This is the sharpest finding and it is **not in the issue body**.
+specific pair; `addresses` shows the same word carrying six. Keying a constraint on the **predicate name**
+therefore does not describe a rule — it describes one pack's use of a shared word, and enforcing it globally
+would refuse edges that were never about that pack. This is the sharpest finding and it is **not in the issue
+body**.
 
 ### 3.3 A gate at the two live primitives leaves the replay fold ungated
 
@@ -176,9 +221,9 @@ the direction is pinned.
 
 `rdfs:domain`/`rdfs:range` are stated **on the property, globally**, and multiple values **conjoin**.
 `schema:domainIncludes` / `rangeIncludes` were invented precisely to express union intent instead — and
-Tortoise merging four packs' `hasPart` pairs into one constraint would make the endpoint have to satisfy
-all four kinds simultaneously (nothing passes). This is the standard-semantics confirmation of §3.2:
-**the declaration must be scoped to the declaring pack's vocabulary, not to the predicate name.**
+constraining `addresses` by its **name** would force an endpoint to satisfy all six declared pairs
+simultaneously (nothing passes). This is the standard-semantics confirmation of §3.2: **the declaration must
+be scoped to the vocabulary it names, not to the predicate name.**
 
 ### 4.5 Grandfathering: the convergent practice is warn-first, with the violating set persisted
 
@@ -268,8 +313,10 @@ it, because getting either wrong refuses truthful edges:
 into D1 option C; recorded separately because it is a **scope-defining** decision, not just a
 refuse/warn modifier:
 
-- **A. Predicate-keyed globally** — refuses 64 existing edges; needs a data migration for `dependsOn`/`hasPart`.
-- **B. Pack-scoped** — binds only when both endpoint kinds resolve into the declaring pack's vocabulary.
+- **A. Predicate-keyed globally** — refuses the live `dependsOn`/`hasPart` edges and most of `addresses`'
+six pairs; needs a data migration.
+- **B. Scoped to the vocabulary the declaration names** — binds when each endpoint kind resolves into the
+  namespaces the declaration itself names (the declaring pack ∪ any it names explicitly).
 - **C. Predicate-keyed with core predicates exempt** — a core predicate is never constrained by a pack's
   declaration of it.
 
@@ -286,10 +333,10 @@ safe one here. No decision needed unless the owner wants a migration.
 
 | issue says | measured | effect |
 |---|---|---|
-| gate `create_edge` / `create_direct_edge` / `ingest` | `create_direct_edge` writes **IMPL/NAND epistemic** edges, not declared relations — it is off this scale; `ingest` is a router | gate **`create_operator`** (primary, **32/32**) + `create_edge`/`create_about_edge` (**2/32**, which also bind the operator path); `ingest` inherits both; `create_direct_edge` explicitly out of scope |
+| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:28036`), `link_entities` passes one (`:17163-17169`) and `ingest` reaches it too (`:27493`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape — 30 of 32 declarations. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/32**, which also bind the operator path) + the replay fold; `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; the fold (`_create_edges`) must call it too, or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
-| depende on `#11484` | #11484 owns the per-graph vocabulary **and** the kinds each predicate is declared between (`04-plan.md` §6 **I10**) | #11656 consumes I10's mapping; it must not build a second derivation |
+| depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:628` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 32/32 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (32 populated pairs). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |
 | `domain_validators` as a component | it is the **pattern to follow** (call-time read, fail-open-but-named, manifest-pinned test), for a *read-side* grader; a write gate must not fail open to a stale constant | keep both: the validator catches pre-existing damage, the gate prevents new |
 
 **Existing capability to reuse rather than re-implement** (duplication review, file:line evidence in the
@@ -311,7 +358,7 @@ review): `graph_census.kind_prop_for` (label → kind property), `StatusFoldInde
   kinds — and the read-side census reports the pre-existing population.
 
 **Known false-green to avoid:** asserting on `create_edge` only. **32 of 32** declarations ride the operator
-path, so a `create_edge`-only pin leaves **31** of them untested.
+path, so a `create_edge`-only pin leaves **30** of them untested.
 
 ---
 
