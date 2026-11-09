@@ -597,13 +597,34 @@ def validate_receipt(receipt: dict) -> list[str]:
     origin = receipt.get("failure_origin")
     if origin not in FAILURE_ORIGIN_VALUES:
         issues.append(f"receipt.failure_origin: unexpected {origin!r}")
+    # ⛔ The metric vocabulary is CORPUS-SCOPED (#2275). This used the module
+    # constant ``schema.METRIC_VALUES``, which is the v1 FIVE, so an
+    # adversarial receipt that had lost ``nand_recovery_rate``,
+    # ``high_severity_nand_recovery`` or ``contested_classification_accuracy``
+    # validated CLEAN: a completeness check against a SUBSET of the graded
+    # dimensions is a fail-open on an evidentiality artifact.
+    # ⛔ Do NOT reach for ``schema.corpus_of(receipt)`` here — it reads
+    # ``doc["config"]`` and a receipt's key is ``resolved_config``, so it
+    # falls through to ``doc.get("corpus")`` → None → DEFAULT_CORPUS and
+    # silently reproduces exactly the bug this fixes.
+    resolved_config = receipt.get("resolved_config")
+    receipt_corpus = (
+        resolved_config.get("corpus") if isinstance(resolved_config, dict) else None
+    )
+    if receipt_corpus not in schema.CORPUS_VALUES:
+        # Absent/unknown ⇒ the default corpus, the same convention
+        # ``schema.corpus_of`` states for pre-#2275 documents.
+        receipt_corpus = corpus.DEFAULT_CORPUS
     metrics = receipt.get("metrics")
     if not isinstance(metrics, dict):
         issues.append("receipt.metrics: expected an object")
     elif receipt.get("run_status") == "completed":
-        missing = sorted(schema.METRIC_VALUES - set(metrics))
+        missing = sorted(schema.metric_values(receipt_corpus) - set(metrics))
         if missing:
-            issues.append(f"receipt.metrics: completed run missing metrics {missing}")
+            issues.append(
+                f"receipt.metrics: completed {receipt_corpus} run missing metrics "
+                f"{missing}"
+            )
     rows = receipt.get("point_results")
     elided = receipt.get("point_results_elided")
     if receipt.get("run_status") == "completed":

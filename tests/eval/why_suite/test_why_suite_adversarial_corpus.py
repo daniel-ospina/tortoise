@@ -411,6 +411,79 @@ def test_bless_writes_every_failure_class_into_the_history_record(tmp_path, monk
     assert sorted(recorded) == sorted(schema.tripped_bars(metrics, adv))
 
 
+def _receipt(corpus_name: str, metrics: dict) -> dict:
+    """A minimal COMPLETED report run through `build_receipt`.
+
+    The receipt CONTRACT is what is under test here, so it is exercised
+    without a benchmark run (the lane tests cover the run-level numbers).
+    """
+    return runner.build_receipt(
+        {
+            "run_id": "r-receipt-contract",
+            "date": "2026-11-09",
+            "run_status": "completed",
+            "verdict": schema.VERDICT_INCONCLUSIVE,
+            "failure_origin": None,
+            "commit": "d16ea7358217",
+            "corpus_hash": "sha256:" + "a" * 64,
+            "judge_pin": judge.judge_pin(),
+            "resolved_config": {"corpus": corpus_name},
+            "cost_usd": 0.0,
+            "metrics": metrics,
+            "point_results": [{"point_id": "p1"}],
+        }
+    )
+
+
+def test_validate_receipt_checks_the_CORPUS_metric_vocabulary():
+    """`validate_receipt` must require the corpus's own metric set, not the v1 five.
+
+    PRE-FIX (fails this test): the completeness check used
+    `schema.METRIC_VALUES` — the v1 FIVE — so an adversarial receipt that had
+    lost `nand_recovery_rate`, `high_severity_nand_recovery` and
+    `contested_classification_accuracy` validated CLEAN: a subset check is a
+    fail-open on an evidentiality artifact, the same shape
+    `schema.tripped_bars` closed one file over.
+
+    Mutation check: restoring `schema.METRIC_VALUES` in
+    `runner.validate_receipt`, or "fixing" it with `schema.corpus_of(receipt)`
+    (which reads `config`, not `resolved_config`, and therefore resolves to the
+    default corpus), fails the three adversarial asserts below.
+    """
+    adv = corpus.ADVERSARIAL_CORPUS
+    v1 = corpus.DEFAULT_CORPUS
+    # Complete receipts are still clean on BOTH lanes — this is not a
+    # stricter-than-spec rejection of the v1 five or the adversarial eight.
+    assert runner.validate_receipt(
+        _receipt(adv, {m: 1.0 for m in schema.metric_values(adv)})
+    ) == []
+    assert runner.validate_receipt(
+        _receipt(v1, {m: 1.0 for m in schema.metric_values(v1)})
+    ) == []
+    # 🔑 The discriminating case: each ADVERSARIAL-ONLY arm is required.
+    adv_only = sorted(schema.ADVERSARIAL_METRIC_VALUES - schema.METRIC_VALUES)
+    assert adv_only == [
+        "contested_classification_accuracy",
+        "high_severity_nand_recovery",
+        "nand_recovery_rate",
+    ]
+    for missing_metric in adv_only:
+        metrics = {m: 1.0 for m in schema.metric_values(adv)}
+        del metrics[missing_metric]
+        issues = runner.validate_receipt(_receipt(adv, metrics))
+        assert issues, f"{missing_metric} missing from an adversarial receipt must be an issue"
+        assert missing_metric in issues[0], (missing_metric, issues)
+    # The v1 five are REQUIRED on the adversarial lane too — they are graded
+    # there, so the corpus scope widens the set, it does not swap it.
+    metrics = {m: 1.0 for m in schema.metric_values(adv)}
+    del metrics["support_chain_sufficiency"]
+    assert runner.validate_receipt(_receipt(adv, metrics))
+    # ... and the v1 lane keeps rejecting a missing v1 metric (unchanged).
+    metrics = {m: 1.0 for m in schema.metric_values(v1)}
+    del metrics["false_positive_rate"]
+    assert runner.validate_receipt(_receipt(v1, metrics))
+
+
 def test_aggregate_metrics_adversarial_arms_math():
     rows = [
         {  # live 3-NAND cluster: cap recovers 2, high one recovered
