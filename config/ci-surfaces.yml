@@ -1274,7 +1274,10 @@ surfaces:
   # module pins by source (`list_sessions`, `get_session_detail`) live in
   # `tortoise/hosted_api.py`, which SELECTS `api` — and a named-surface match
   # REPLACES the fallback, so a core-only entry would never run this guard. No
-  # graph lane here: the behavioural half is on
+  # DOCKER graph lane here — but NOT "DB-free": three of its tests RUN the
+  # composed WHERE against a throwaway EMBEDDED graph (TortoiseSDK at tmp_path;
+  # no docker, no server, no tenant graph), which is why the fast surfaces can
+  # carry it and the tenancy-graph behavioural half is on
   # `test_onboarding_seed_endpoint.py` (docker), which would not be selected by
   # a `session_schema.py` diff.
   - test_demo_session_read_exclusion_8290.py

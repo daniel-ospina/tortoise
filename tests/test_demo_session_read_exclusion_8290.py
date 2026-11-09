@@ -8,8 +8,8 @@ demo-seeded org therefore showed a capture the user never made in "Captured
 sessions", while the same sample's Points were excluded one screen away: two
 surfaces disagreeing about whether the sample content was the user's own.
 
-**What is asserted here (and what is not).** This module holds the FAST, DB-free
-half: the prefix test's soundness — BOTH halves of it, the minted population AND
+**What is asserted here (and what is not).** This module holds the FAST half:
+the prefix test's soundness — BOTH halves of it, the minted population AND
 the door reservation (#8290 review: the mint half alone is a lemma about
 ``mint_session_id``, not about the capture doors, which accept a
 CALLER-SUPPLIED id) — the ONE-predicate contract, and the source pins that keep
@@ -20,6 +20,17 @@ detail / SDK doors — lives in
 needs a real tenant graph (docker lane). Both halves are deliberate: a
 source-pin alone cannot see a route that quietly stops calling the predicate,
 and a behavioural test alone cannot see WHY the exclusion is safe.
+
+⚠️ **NOT "DB-free" — read this before re-laning the file.** Three tests here
+(``test_the_list_where_survives_a_legacy_non_string_session_id`` and the two
+lifetime-baseline pins) RUN the composed WHERE against a real graph. That graph
+is a throwaway EMBEDDED one (``TortoiseSDK(<tmp_path>/tortoise.db)``: no
+docker, no server, no tenant graph), which is why the file is registered on the
+FAST ``api``/``core``/``sdk`` surfaces and not the docker lane. The repo's own
+idiom defines "DB-free" as *no graph at all* (``config/ci-surfaces.yml``, the
+``test_10047_record_every_lane.py`` note) — this module is not that, and a
+header claiming so would invite exactly the re-laning that drops the P1
+regression pin (`STARTS WITH` on a non-string id).
 """
 from __future__ import annotations
 
