@@ -46,6 +46,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import tortoiseVolunteer, {
   CUSTOM_TYPE,
+  DEFAULT_API_URL,
   DEFAULT_TIMEOUT_MS,
   EXTENSION_NAME,
   HARNESS,
@@ -760,7 +761,21 @@ test("readVolunteerConfig: file-sourced key never takes the env URL (co-source, 
     { TORTOISE_API_KEY: "tt_env_key", TORTOISE_API_URL: "https://env.example" },
     cfgPath,
   );
-  assert.equal(fromEnv.apiUrl, "https://env.example", "an env key may use the env URL");
+  // ⛔ D1b (#11584 review): an env-only key is NOT a hosted credential for a
+  // TRANSMITTING per-turn surface. The env vars are set to values that WOULD
+  // win under an `envKey || fileKey` resolution — the file still wins for the
+  // key, and the env key contributes nothing at all, so this row REDs if the
+  // hosted leg ever becomes env-authorizable again. The canonical reflex does
+  // the same (`tortoise/__main__.py::_cmd_volunteer`, `include_env=False`).
+  assert.equal(fromEnv.apiKey, "tt_file_key", "the file key, never the env one");
+  assert.equal(fromEnv.apiUrl, "https://file.example", "an env URL cannot ride a file key");
+
+  const envOnly = readVolunteerConfig(
+    { TORTOISE_API_KEY: "tt_env_key", TORTOISE_API_URL: "https://env.example" },
+    join(home, "absent.json"),
+  );
+  assert.equal(envOnly.apiKey, "", "env alone must never authorize hosted transmission");
+  assert.equal(envOnly.apiUrl, DEFAULT_API_URL);
 
   const defaults = readVolunteerConfig({}, join(home, "absent.json"));
   assert.equal(defaults.apiKey, "");

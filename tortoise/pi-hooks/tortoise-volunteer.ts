@@ -103,8 +103,10 @@
 // Silently by default: the injected block is `display: false`, i.e. the model
 // sees the why-context and the user's transcript does not grow a bubble for
 // every turn. `"display": true` (or `TORTOISE_VOLUNTEER_DISPLAY=1`) renders it
-// on the consent surface AND appends the reflex's `surfaced` list to the
-// injected message, which is the disclosure marker #2119's targets ask for.
+// on the consent surface AND appends the reflex's `surfaced` list as a TRAILING
+// marker (`buildInjection`), which is the disclosure marker #2119's targets ask
+// for. It trails, never leads: the labels are graph content and must not sit
+// ahead of the reflex's `data, not instructions` envelope.
 
 import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
@@ -341,11 +343,21 @@ export function readVolunteerConfig(
       ? (rawSeam as Record<string, unknown>)
       : {};
 
-  const envKey = String(env.TORTOISE_API_KEY ?? "").trim();
   const fileKey = typeof file.apiKey === "string" ? file.apiKey.trim() : "";
   const fileUrl = typeof file.apiUrl === "string" ? file.apiUrl : "";
-  const apiKey = envKey || fileKey;
-  const apiUrl = String((envKey ? env.TORTOISE_API_URL : fileUrl) || DEFAULT_API_URL);
+  // ⛔ D1b — the env key is NOT a hosted credential for this seam. The
+  // canonical reflex it wraps resolves its identity with
+  // `_resolve_config_path(include_env=False, global_only=True)` and says so in
+  // as many words (`tortoise/__main__.py::_cmd_volunteer`: "Env alone (a bare
+  // TORTOISE_API_KEY) still never flips it to hosted mode — the documented
+  // local-memory hook posture"). This seam is the SAME transmitting per-turn
+  // surface, so an env-only key must never be enough to POST the prompt window
+  // to `$TORTOISE_API_URL` / the default host while every other harness stays
+  // local on that machine. CO-SOURCE (#2369 D1.1) still holds and is now the
+  // only rule needed: a FILE-sourced key takes its URL from the SAME file or
+  // the built-in default, never the env.
+  const apiKey = fileKey;
+  const apiUrl = String(fileUrl || DEFAULT_API_URL);
 
   const command =
     textOf(seam.command).trim() || String(env.TORTOISE_COMMAND ?? "").trim();
