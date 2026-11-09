@@ -393,6 +393,21 @@ def summarize_belief_activation(
         "questions_with_ep": sum(
             1 for m in manifests if _classify_question(m)[1]),
     }
+    # #10137 indicator (a): the QUOTIENT is published beside its own two cells,
+    # because those two alone do not make a run disclose the number. Everything
+    # downstream (the census probe, the evidence bundle, a report reader) had to
+    # re-divide ``questions_with_ep / questions`` itself, so the ratio the issue
+    # exists to publish was the only headline cell with no producer in the
+    # runner — and two derivations of one number is how they disagree (#10137
+    # review's own rule; the probe carried the second one). Gated by the SAME
+    # rule as ``belief_eligible_ratio`` below and as the probe's fallback: a
+    # ratio over a denominator that is not a usable positive count is ``None``
+    # (UNKNOWN), never ``0.0`` — a run of zero questions has not measured a
+    # zero rate, and ``0.0`` there reads exactly like ``no question carried a
+    # posterior``, which is a finding.
+    summary["questions_with_ep_ratio"] = (
+        summary["questions_with_ep"] / summary["questions"]
+        if summary["questions"] > 0 else None)
     for key in _SUMMED_KEYS:
         summary[key] = sum(_as_int(m.get(key, 0)) for m in manifests)
     # #10137: a census cell that is UNKNOWN per manifest must not sum as a 0 —

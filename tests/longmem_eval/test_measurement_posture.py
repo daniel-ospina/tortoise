@@ -46,6 +46,48 @@ def test_summary_sums_the_manifests_and_counts_ep_runs():
     assert summary["errors"] == []
 
 
+def test_summary_publishes_the_headline_ratio_beside_its_two_cells():
+    """#10137 indicator (a): ``questions_with_ep / questions`` is PUBLISHED
+    per run, not left for every consumer to divide.
+
+    The summary carried the numerator and the denominator and not their
+    quotient, so the one number the issue exists to publish had no producer in
+    the runner — the census probe carried the only derivation
+    (``probes/census.py``), i.e. two spellings of one cell waiting to disagree.
+    The sibling ratios are already published this way
+    (``belief_eligible_ratio`` here, ``point_coverage.ratio`` in the probe), so
+    the headline was the odd one out.
+    """
+    summary = mp.summarize_belief_activation(
+        [_covered_outcome(), _inert_outcome()], requested=True)
+    assert (summary["questions_with_ep"], summary["questions"]) == (1, 2)
+    assert summary["questions_with_ep_ratio"] == 0.5
+
+
+def test_the_headline_ratio_is_unknown_over_an_empty_population():
+    """A run of ZERO questions has not measured a zero rate: the cell is
+    ``None`` (UNKNOWN), never ``0.0`` — the same gate ``belief_eligible_ratio``
+    and the probe's own fallback apply, because ``0.0`` there reads exactly
+    like the finding "no question carried a posterior".
+
+    Non-vacuous: an ungated ``with_ep / questions`` raises ``ZeroDivisionError``
+    on this input, and an ``or 0`` spelling publishes a measured zero.
+    """
+    summary = mp.summarize_belief_activation([], requested=True)
+    assert summary["questions"] == 0
+    assert summary["questions_with_ep_ratio"] is None
+
+
+def _covered_outcome() -> dict:
+    return {"belief_activation": _manifest(points_with_ep=1)}
+
+
+def _inert_outcome() -> dict:
+    """A question the pass measured NOTHING in (no operator minted)."""
+    return {"belief_activation": _manifest(points_with_ep=0, factors=0,
+                                           no_op_reason="no_ep_factors")}
+
+
 def test_summary_counts_a_fail_open_manifest_as_failed():
     """The runner records ``{"ep_ran": False, "error": ...}`` when activation
     raises — that question's belief layer is inert, so the run must not read
