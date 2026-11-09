@@ -35,8 +35,9 @@ version: 1
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
-# above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
-# labels, so it forbids a SHRINK and is what PERMITS 10, not what caps it at 9.
+# above sets a FLOOR at main's label count (a SUPERSET of main's labels: a PR
+# may add a label, never remove one), which is a floor and not a ceiling — it is
+# what PERMITS 10, and it cannot cap S at 9.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a

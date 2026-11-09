@@ -17842,8 +17842,14 @@ def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, m
     handed out is a DEEP COPY, because callers mutate the result in place (the
     poison tests below do exactly that, through a hand-made copy).
 
-    Non-vacuity: without the deep copy, arm 2 poisons the cache and arm 3 reds;
-    without the identity key, arm 4 serves the pre-rewrite bytes.
+    Non-vacuity, MUTATION-TESTED (each property removed in turn) — and stated on
+    the arm that actually bites, because the first version of this docstring named
+    the wrong ones: with `return copy.deepcopy(...)` replaced by the cached
+    object, ARM 1 reds (`first is not second`); with the rewrite arm's key
+    reduced to `(path,)`, ARM 3 reds ("the cache served pre-rewrite bytes"). The
+    fixture's two values are the same LENGTH (`11.0` -> `22.0`), so arm 3 pins
+    `st_mtime_ns` and NOT `st_size`; `st_size` is in the key for the reader, not
+    for this pin.
     """
     import sys as _sys
 

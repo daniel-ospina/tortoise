@@ -435,8 +435,8 @@ same step with the same tail is the investigation.
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
   many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work. It bounds
-  a `batch-fold` run too: 3 per matrix, so a fold with dedicated capacity for all 8 wall-carrying
-  legs still runs them 3 at a time (§7, "What the cap does NOT exempt").
+  a `batch-fold` run too: 3 per matrix, so a fold with dedicated capacity for all nine
+  wall-carrying legs still runs them 3 at a time (§7, "What the cap does NOT exempt").
 - **It does not restore post-merge validation.** §4 — 17 of 20 recent push-to-main runs never
   ran, for reasons that predate this change.
 - **It does not make a superseded PR cheap.** Cancelling the superseded run frees the slot it was
@@ -581,7 +581,7 @@ exemption's scope in its own words — "A fold gets priority on the nine legs th
 the fast matrix's 10 shards minus the `canary_producer` row, which stays on the hosted label for the
 streak. Those nine are legs this cap bounds, so while the class seam is engaged (it is OFF by
 default: with `CI_FOLD_RUNNER_LABELS` unset every row resolves to its own runner) a fold with
-dedicated capacity for all 8 still runs them **3 at a time**, and its own validation run carries the
+dedicated capacity for all nine still runs them **3 at a time**, and its own validation run carries the
 matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN COST of #6744, not
 as a decision that a fold run should be capped — the cap's justification ("no single PR may hold the
 pool") is a fairness bound between concurrent PRs, and a fold is not competing with them that way.

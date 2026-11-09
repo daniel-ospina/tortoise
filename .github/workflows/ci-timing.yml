@@ -66,15 +66,19 @@ jobs:
       # job, contributes no denominator, and the capability ships INERT in its only
       # scheduled caller — measured at PR #11602's review: this job installed
       # PyYAML alone, so the whole fix was a no-op here while every gate stayed
-      # green. `httpx` is `tests/conftest.py`'s import; a further missing dependency
-      # fails closed AND emits a `::warning::` naming the file, so the residual is
-      # visible rather than silent. `tests/test_ci_timing.py` pins that this job
-      # can execute the probe, so it cannot go inert again quietly.
+      # green. The closure is MEASURED, not guessed: a venv built from the first
+      # attempt (`pytest httpx`) died twice — `tests/conftest.py:278 ->
+      # tortoise/embeddings.py -> numpy`, then `tests/conftest.py:594 ->
+      # tortoise/sdk.py -> monitoring -> prometheus_client` — and collects 490
+      # tests with both added. A further missing dependency still fails closed
+      # AND emits a `::warning::` naming the file, so any residual is visible
+      # rather than silent, and `tests/test_ci_timing.py` pins the whole install
+      # line for every package in the closure, so this cannot go inert quietly.
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install pyyaml, and the probe's own dependencies (#11607)
-        run: pip install pyyaml==6.0.2 pytest httpx
+        run: pip install pyyaml==6.0.2 pytest httpx numpy prometheus_client
 
       - name: Find latest completed push-to-main Python CI run
         id: find

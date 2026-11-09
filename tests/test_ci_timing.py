@@ -4291,16 +4291,30 @@ def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
     """
     wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
     steps = wf["jobs"]["measure"]["steps"]
-    installs = " ".join(str(s.get("run") or "") for s in steps)
-    assert "pytest" in installs, (
-        "the `measure` job no longer installs pytest, so `collected_test_counts` "
-        "cannot run there and a parametrised row is silently back to "
-        "raisable-never-lowerable (#11607) — this is the inert state, not a "
-        "style problem")
-    assert "httpx" in installs, (
-        "`tests/conftest.py` imports httpx at module scope, so `pytest "
-        "--collect-only` fails without it and contributes no denominator; "
-        "pytest alone is not enough to make the probe runnable")
+    # ⛔ THE INSTALL STEP, NOT EVERY STEP'S `run:` (#11602 round 2, P2). The first
+    # version joined the whole job and then asked whether "pytest" appears
+    # anywhere — and `pytest-log-*` appears in two other steps, so deleting
+    # `pytest` from the install line left this pin GREEN over the exact inert
+    # state it exists to catch (executed by the reviewer: 1 passed). The pin now
+    # reads the one step that installs, which is the only place the dependency
+    # can be.
+    installs = " ".join(
+        str(s.get("run") or "") for s in steps
+        if "pip install" in str(s.get("run") or ""))
+    assert installs, "no `pip install` step in the `measure` job"
+    # The closure is MEASURED, not guessed: `pytest` alone fails on
+    # `tests/conftest.py`'s own import chain — numpy via `tortoise.embeddings`,
+    # prometheus_client via `tortoise.sdk`, and httpx directly. Any one missing
+    # puts the capability back to inert, which is why all four are asserted.
+    for pkg in ("pytest", "httpx", "numpy", "prometheus_client"):
+        assert pkg in installs, (
+            f"the `measure` job's install step no longer installs {pkg!r}, so "
+            "`collected_test_counts` cannot collect anything there and a "
+            "parametrised row is silently back to raisable-never-lowerable "
+            "(#11607) — this is the inert state, not a style problem. The "
+            "closure was measured: `tests/conftest.py` -> `tortoise.embeddings` "
+            "-> numpy, and `tests/conftest.py` -> `tortoise.sdk` -> monitoring "
+            "-> prometheus_client.")
 
 
 def test_a_failed_collection_probe_is_loud_and_fails_closed(capsys) -> None:
