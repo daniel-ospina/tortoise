@@ -743,6 +743,7 @@ def _worker_block(source: str) -> str:
                    "_resolve_raw_requested_workers",
                    "_resolve_requested_workers",
                    "_count_is_verifiable", "_app_env_file_in_play",
+                   "_argv_is_shell_wrapped", "_wrapped_argv_disables_lifespan",
                    "_app_lifespan_disabled"):
         assert f"{helper}() {{" in block, (
             f"`{helper}` is defined OUTSIDE the lifted entrypoint block — move it "
@@ -1130,6 +1131,15 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         # arm, and must not claim the count was verified.
         (("uvicorn", "app:app"),
          {"UVICORN_LIFESPAN": "off", "WEB_CONCURRENCY": "9" * 21}),
+        # ⛔ A WRAPPED command line that turns the lifespan off INSIDE the shell
+        # string. Every reader sees one opaque token, so the count resolves to 1
+        # and no lifespan flag exists — while uvicorn runs the string and starts
+        # N workers with the lifespan never run, i.e. NO gate on either side.
+        # MEASURED on the shipped block before this row: rc=0,
+        # "uvicorn workers = 1", real uvicorn = 4 workers, lifespan runs = 0.
+        (("sh", "-c", "uvicorn app:app --lifespan off --workers 4"), {}),
+        (("bash", "-lc", "uvicorn app:app --lifespan=off"), {}),
+        (("sh", "-c", "UVICORN_LIFESPAN=off uvicorn app:app --workers 4"), {}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)
@@ -1143,6 +1153,29 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
                               "TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"]})
     assert proc.returncode == 0, proc.stderr
     assert "UNVERIFIED" in proc.stdout, proc.stdout
+
+    # ⛔ A wrapped CMD whose lifespan is ON is REPORTED, not refused: the app's
+    # lifespan gate DOES run there and refuses the spawned children, so the only
+    # defect is a banner claiming a count this script never measured.
+    proc = _run_worker_block(
+        ("sh", "-c", "uvicorn app:app --workers 4"),
+        {"TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"],
+         "TORTOISE_MULTI_WORKER": "1"})
+    assert proc.returncode == 0, proc.stderr
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+    assert "workers = 1" not in proc.stdout, (
+        "the block printed a count it never measured for a wrapped command line: "
+        f"{proc.stdout!r}"
+    )
+
+    # ⛔ AND THE CONTROL — the wrapper predicate must stay NARROW. A legitimate
+    # spaced VALUE (`--header "X: Y"`) is not a shell string, so a provably
+    # single-worker boot with the lifespan off is still ALLOWED.
+    proc = _run_worker_block(
+        ("uvicorn", "app:app", "--lifespan", "off",
+         "--header", "X: Y"), {})
+    assert proc.returncode == 0, proc.stderr
+    assert "verified as ONE worker" in proc.stdout, proc.stdout
 
     # ⛔ AND THE MIRROR — the arity walk must not OVER-block. `--app-dir
     # --lifespan=off` makes the token `--app-dir`'s VALUE, so click keeps
@@ -1386,6 +1419,31 @@ def test_lifespan_calls_the_gate_FIRST():
         "— the refusal is unreachable from the app"
     )
 
+    def is_gate_call(inner: ast.AST) -> bool:
+        """True for a CALL of the gate in EITHER spelling.
+
+        ⛔ The scan below is what refuses an enclosing handler, so it must
+        recognise every way the gate can be *called*. It used to match only
+        ``ast.Name``, so a call written through the module —
+        ``tortoise.worker_topology.assert_multi_worker_admissible()``, an
+        ``ast.Attribute`` — left the position arm passing (index 0) while this
+        scan skipped it, and ``try: <qualified call>`` / ``except Exception:
+        pass`` then swallowed the refusal with all 194 cases green.
+        ``caught_names`` had already been taught the attribute spelling; the
+        call side had not — the same one-sided re-learning this pin has done
+        before (alias, then ``except*``).
+        """
+        if not isinstance(inner, ast.Call):
+            return False
+        func = inner.func
+        if isinstance(func, ast.Name):
+            return canonical(func.id) == "assert_multi_worker_admissible"
+        if isinstance(func, ast.Attribute):
+            return func.attr in gate_names or (
+                func.attr == "assert_multi_worker_admissible"
+            )
+        return False
+
     def caught_names(caught: ast.expr | None) -> set[str]:
         """Every CATCHABLE name in a handler, with aliases resolved."""
         if caught is None:                      # bare `except:`
@@ -1417,9 +1475,7 @@ def test_lifespan_calls_the_gate_FIRST():
         for handler in node.handlers:
             names = caught_names(handler.type)
             if names & swallowing and any(
-                    isinstance(inner, ast.Call)
-                    and isinstance(inner.func, ast.Name)
-                    and canonical(inner.func.id) == "assert_multi_worker_admissible"
+                    is_gate_call(inner)
                     for inner in ast.walk(node)):
                 raise AssertionError(
                     "hosted_api._lifespan wraps the #1677 admission gate in a "

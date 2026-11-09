@@ -315,6 +315,14 @@ UVICORN_WORKERS_ENV = "UVICORN_WORKERS"
 #: Every guard #1677 identifies as unlanded. This tuple IS the ledger: a lane
 #: that lands one deletes its row, and the deletion is the review artifact.
 #: Each row names the surface and the issue section that owns it.
+#:
+#: ⛔ ONE ROW PER HOLDER, deliberately. #1677's P1-C names FOUR in-memory
+#: per-worker holders (`_GITHUB_STATES`, `_INDEX_JOBS`, `_LAST_DRILL_AT`, the
+#: rate-limit buckets). A single `(P1-C)` row was read as "P1-C is listed, so
+#: P1-C is covered" while three of the four had no row at all — and the row's own
+#: maintenance rule ("delete it when it lands") would then have made landing the
+#: CSRF register read as "P1-C done". A holder that has no row cannot be
+#: disclosed, so each gets one and each lands on its own.
 UNLANDED_GUARDS: tuple[str, ...] = (
     "daemons (P1-2): the _lifespan BackupWatcher files GitHub issues and sends "
     "Telegram, and the hourly event-retention loop runs too — both arm once PER "
@@ -323,6 +331,22 @@ UNLANDED_GUARDS: tuple[str, ...] = (
     "_GITHUB_STATES (P1-C): the GitHub OAuth CSRF register is an in-memory dict, "
     "so an onboarding callback lands on a worker that never saw the state and "
     "answers 404 — onboarding CSRF-fails intermittently at N>=2.",
+    "_INDEX_JOBS/_INDEX_JOB_OWNERS (P1-C): index-job polling and its in-flight "
+    "dedup are per-process, so a poll that lands on another worker misses the "
+    "job this one started (a cross-worker 404) and the `is_new` dedup admits "
+    "the same job once per worker.",
+    "_LAST_DRILL_AT (P1-C): the drill-receipt timestamp is per-process, so each "
+    "worker holds its own view of when the last drill ran and the staleness "
+    "decision forks.",
+    "rate-limit buckets (P1-C): _SENSITIVE_/_SIGNUP_/_SESSION_/_CLAIM_/_RECOVER_"
+    "_INVITE_*(_TOKEN/_IP/_GLOBAL)/_INVITE_RESEND/_DREAM_FULL buckets are "
+    "per-process, so every anti-abuse budget multiplies by N and a caller gets "
+    "N times its intended allowance by spreading requests across workers.",
+    "memory envelope (P1-1): under spawn, each worker re-runs the ~85 s model "
+    "pre-warm and holds its own copy, so RSS is ~N x, not 1x + copy-on-write "
+    "pages. A sizing decision, not a bankable guard: recorded here so an "
+    "acknowledging operator is not told the residual list is about correctness "
+    "only.",
     "metrics: GoldenSignals/collect_signals compute P99, throughput, error-rate "
     "and saturation PER PROCESS, so no process holds the service-wide numbers.",
     "healthz: the 9090 listener binds on exactly one worker; every other "

@@ -630,6 +630,61 @@ _app_env_file_in_play() {
     [ -n "${UVICORN_ENV_FILE:-}" ]
 }
 
+_argv_is_shell_wrapped() {
+    # ⛔ TRUE when the server is launched through a SHELL STRING rather than as
+    # a direct argv — `CMD ["sh","-c","uvicorn app:app --workers 4"]`, a compose
+    # / k8s `command:` override, a Fly `[processes]` entry. There the `--workers`
+    # / `--lifespan` flags live INSIDE one argv token, so every reader above sees
+    # a single opaque word: the count resolves to 1, `_app_lifespan_disabled`
+    # finds no flag, and the block then reports "uvicorn workers = 1" for a boot
+    # uvicorn will run with N. MEASURED (the shipped block lifted verbatim):
+    #   ("sh","-c","uvicorn app:app --lifespan off --workers 4")
+    #     -> "tortoise: uvicorn workers = 1", rc=0, real uvicorn = 4 workers,
+    #        lifespan never runs, so NEITHER gate is installed and an embedded DB
+    #        opens four divergent copies of one file.
+    # Reachability: NOT produced by `Dockerfile.hosted`'s exec-form CMD, `fly.toml`
+    # or `docker-compose.yml` — it needs a CMD override. Reported rather than
+    # refused silently: an unmeasurable command line is treated exactly like
+    # `--env-file`, which is the same "I cannot see the count" shape.
+    # The signature is deliberately narrow (a token carrying BOTH whitespace and
+    # `uvicorn`, or a bare `-c`-style shell flag) so a legitimate spaced VALUE
+    # such as `--header "X: Y"` does not trip it.
+    local _arg=""
+    for _arg in "$@"; do
+        case "$_arg" in
+            -c|-lc|-ic|-cl) return 0 ;;
+        esac
+        case "$_arg" in
+            *[[:space:]]*)
+                case "$_arg" in
+                    *uvicorn*) return 0 ;;
+                esac
+                ;;
+        esac
+    done
+    return 1
+}
+
+_wrapped_argv_disables_lifespan() {
+    # ⛔ A shell-wrapped CMD that turns the lifespan off INSIDE the string.
+    # This is the one wrapped shape that must REFUSE rather than merely report,
+    # because with the lifespan off no gate is installed on either side: the app
+    # gate is the first statement of `_lifespan`, and the pre-exec gate cannot
+    # read a count that lives inside one opaque token. Every OTHER wrapped shape
+    # stays a REPORT, because there the app gate does run and refuses the
+    # children.
+    _argv_is_shell_wrapped "$@" || return 1
+    local _arg=""
+    for _arg in "$@"; do
+        case "$_arg" in
+            *--lifespan=off*) return 0 ;;
+            *"--lifespan off"*) return 0 ;;
+            *UVICORN_LIFESPAN=off*) return 0 ;;
+        esac
+    done
+    return 1
+}
+
 _resolve_requested_workers() {
     # uvicorn's own precedence: `--workers N` / `--workers=N` over the argv, else
     # $UVICORN_WORKERS (click's `auto_envvar_prefix` value for that flag), else
@@ -784,6 +839,12 @@ _app_lifespan_disabled() {
     # starts N server processes, runs the lifespan ZERO times, and exits 0 —
     # N divergent embedded databases certified as "one worker".
     local _want_value=0 _arg="" _value="" _skip=0
+    # A wrapped command line that disables the lifespan INSIDE its shell string is
+    # a disabled lifespan. The walk below deliberately skips that string (it
+    # follows `-c`, which consumes a value), so it is answered here — otherwise
+    # `sh -c "uvicorn app:app --lifespan off --workers 4"` reads as "lifespan on"
+    # and boots four workers with NO gate installed on either side.
+    if _wrapped_argv_disables_lifespan "$@"; then return 0; fi
     for _arg in "$@"; do
         if [ "$_want_value" = "1" ]; then _value="$_arg"; _want_value=0; continue; fi
         if [ "$_skip" = "1" ]; then _skip=0; continue; fi
@@ -827,6 +888,8 @@ if [ "$_IS_SERVER" = "1" ]; then
             _refuse_why="${TORTOISE_WEB_WORKERS} uvicorn workers"
         elif _app_env_file_in_play "$@"; then
             _refuse_why="a --env-file / \$UVICORN_ENV_FILE that sets the worker count AFTER this measurement"
+        elif _argv_is_shell_wrapped "$@"; then
+            _refuse_why="a command line this boot script cannot read (the server is launched through a shell string, so --workers/--lifespan are inside one argv word)"
         else
             _refuse_why=""
         fi
@@ -845,6 +908,10 @@ if [ "$_IS_SERVER" = "1" ]; then
         # and refuses the spawned children, so this is the REPORT being honest
         # about what it cannot see (`load_dotenv` happens after this measurement).
         echo "tortoise: uvicorn workers = UNVERIFIED — --env-file / \$UVICORN_ENV_FILE can set \$WEB_CONCURRENCY AFTER this measurement, so the count above is not the count uvicorn will run; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif _argv_is_shell_wrapped "$@"; then
+        # Same honesty for the wrapped-command shape: this block cannot read the
+        # count, and it must not print one it did not measure.
+        echo "tortoise: uvicorn workers = UNVERIFIED — the server is launched through a shell string, so the count cannot be read from this argv; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
     elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ] && [ "$_reload_env_undecidable" = "1" ]; then
         echo "tortoise: uvicorn workers = UNVERIFIED — \$UVICORN_RELOAD holds a value this boot script cannot classify the way click does (click trims with Python's str.strip(), which strips Unicode spaces a shell cannot), so this may be ONE reloader child instead of ${TORTOISE_WEB_WORKERS} workers; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
     elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
