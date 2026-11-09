@@ -1091,14 +1091,15 @@ export default function tortoiseVolunteer(
   pi: { on: (event: string, handler: (event: never, ctx: never) => unknown) => unknown },
   deps: VolunteerDeps = {},
 ): void {
-  // ⛔ FAIL-CLOSED TEST ISOLATION (#11584 review, P2) — the same guard the
-  // shipped sibling carries (`tortoise-capture.ts`'s `NODE_TEST_CONTEXT`
-  // throw, #3721), for the same reason and one layer further out.
+  // ⛔ FAIL-CLOSED TEST ISOLATION (#11584 review) — the same guard the shipped
+  // sibling carries (`tortoise-capture.ts`'s `NODE_TEST_CONTEXT` throw,
+  // #3721), for the same reason and one layer further out.
   //
   // Every input below defaults to the OPERATOR's machine: `configPath` is
   // `~/.pi/agent/tortoise-config.json` (which can carry a file-sourced
-  // `apiKey`), `home` resolves the installer's `~/.tortoise/hook-src-dir`
-  // record to the real CLI, and `env` is `process.env` (PATH, kill switch,
+  // `apiKey`, and whose `display` decides whether this seam is silent),
+  // `home` resolves the installer's `~/.tortoise/hook-src-dir` record to the
+  // real CLI, and `env` is `process.env` (PATH, kill switch,
   // `TORTOISE_API_KEY`, `TORTOISE_API_URL`). A row written as
   // `tortoiseVolunteer(mockPi())` under `node --test` therefore asserts the
   // machine it runs on instead of the code — and on a box with a configured
@@ -1107,19 +1108,24 @@ export default function tortoiseVolunteer(
   // the note above `hermetic()` in `tortoise-volunteer.test.ts`), and the only
   // thing preventing a repeat was convention.
   //
-  // `reflexImpl` is exempt because it replaces the resolver outright: with it
-  // there is no config read, no CLI resolution and no hosted request, so no
-  // path to the operator's machine exists.
+  // ⛔ NO EXEMPTION FOR `reflexImpl` (#11584 review, round 11). An earlier
+  // version exempted it on the argument that a stub reflex bypasses the
+  // resolver — which is true of the reflex, and false of the FACTORY: `cfg` is
+  // read below regardless of `reflexImpl`, and `cfg.display` decides whether
+  // the injected block is silent. MEASURED: a `reflexImpl`-only row on a box
+  // whose `~/.pi/agent/tortoise-config.json` is `{"volunteer":{"display":
+  // true}}` came back `display: true` — the operator's setting, not the test's
+  // — which is the `hermetic()` failure mode reached through the one shape the
+  // guard excused. One rule, no exemptions, and the exemption's false premise
+  // is gone with it.
   if (
     process.env.NODE_TEST_CONTEXT &&
-    !deps.reflexImpl &&
     !(deps.env && deps.configPath && deps.home)
   ) {
     throw new Error(
       "tortoise-volunteer: under `node --test` you must inject `env`, " +
-        "`configPath` and `home` (or a `reflexImpl`) — refusing to read the " +
-        "operator's config, resolve their install, or post with their " +
-        "credential",
+        "`configPath` and `home` — refusing to read the operator's config, " +
+        "resolve their install, or post with their credential",
     );
   }
   const env = deps.env ?? (typeof process === "undefined" ? {} : process.env);

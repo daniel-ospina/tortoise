@@ -147,13 +147,19 @@ test("under `node --test` an unhermetic factory THROWS instead of reading the op
       () => tortoiseVolunteer(mockPi() as never, { home: tmpHome() }),
       /must inject `env`, `configPath` and `home`/,
     );
-    // …and the two shapes that genuinely reach nothing ambient still construct.
-    assert.doesNotThrow(() => tortoiseVolunteer(mockPi() as never, hermetic()));
-    assert.doesNotThrow(() =>
-      tortoiseVolunteer(mockPi() as never, {
-        reflexImpl: () => ({ block: "- x", surfaced: [] }),
-      }),
+    // …and a `reflexImpl` does NOT lift the requirement: the factory still
+    // reads the config for `display`, so a stub reflex alone would grade the
+    // operator's `{"volunteer":{"display":true}}` (measured — the round-11
+    // finding). One rule, no exempt shape.
+    assert.throws(
+      () =>
+        tortoiseVolunteer(mockPi() as never, {
+          reflexImpl: () => ({ block: "- x", surfaced: [] }),
+        }),
+      /must inject `env`, `configPath` and `home`/,
     );
+    // …and the fully hermetic shape still constructs.
+    assert.doesNotThrow(() => tortoiseVolunteer(mockPi() as never, hermetic()));
   } finally {
     if (saved === undefined) delete process.env.NODE_TEST_CONTEXT;
     else process.env.NODE_TEST_CONTEXT = saved;
