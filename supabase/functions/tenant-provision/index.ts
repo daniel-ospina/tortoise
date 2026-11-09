@@ -459,8 +459,9 @@ Deno.serve(async (req: Request) => {
       //
       // ⛔ RESIDUAL, stated so this is NOT read as delivered (#11604). No client
       // reads it yet: the live consumer is a JWT call from `POST /api/provision`
-      // (the auth-hook path is inert post-#832 — see the note above
-      // ALLOWED_ORIGINS), and the dashboard's `provisionInApp` retries any
+      // (the `after_user_created` auth-hook path was DELETED by #1120, which also
+      // removed the origin allowlist — this function is server-only now), and the
+      // dashboard's `provisionInApp` retries any
       // non-ok once and renders "Could not create your organization — try
       // again." without parsing the body. The envelope does not match the
       // reader either: this function's errors are FLAT (`{error: ...}` here,

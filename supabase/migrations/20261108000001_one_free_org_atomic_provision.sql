@@ -51,7 +51,12 @@
 -- `after_user_created` Auth hook — it calls `provision_team` with a non-NULL
 -- `p_user_id` and no `p_tier`, so THE GATE DOES ENGAGE THERE; its refusal is now
 -- mapped to the product's 402 `one_free_org_limit` payload instead of an
--- unmapped 502 "try again", which was a dead end that could never succeed).
+-- unmapped 502 "try again", which was a dead end that could never succeed —
+-- that is the WIRE contract, and the residual is stated so this header is not
+-- read as a delivered UX: the dashboard's provision path still retries a
+-- non-ok and renders "try again" without reading the body, and this function's
+-- envelope is flat where the dashboard's coded-detail reader lifts
+-- `body.detail.code` (#11604)).
 -- `provision_team_with_token` PERFORM's THIS function rather than re-deriving
 -- anything, so there is exactly one derivation site and it cannot drift out of
 -- agreement with itself. A `hashtextextended` collision can

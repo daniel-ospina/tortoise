@@ -78,6 +78,35 @@ DO $$ BEGIN
     EXISTS (SELECT 1 FROM pg_indexes WHERE schemaname='public' AND tablename='org_memberships'
             AND indexname='uq_member_identity_org'),
     '0010: partial unique (identity, org_id) WHERE user_id IS NULL');
+  -- ── VOLATILITY is load-bearing, and nothing pinned it before #1981 round-5 ──
+  -- ⛔ IT IS PINNED HERE, IN SECTION 1, AND THE PLACEMENT IS THE POINT: the
+  -- suite's FIRST `provision_team` call is in SECTION 2, and a non-volatile
+  -- plpgsql function cannot write at all, so a relabelled function makes that
+  -- first call raise — a pin placed later in the file can therefore NEVER fire
+  -- (measured: with this assertion in §8, a STABLE mutant died at the section-2
+  -- call with `INSERT is not allowed in a non-volatile function` and the
+  -- assertion was never reached).
+  -- The property: the gate's correctness assumes the re-check takes a FRESH
+  -- snapshot after `pg_advisory_xact_lock`, and Postgres gives that to a VOLATILE
+  -- function only — per the manual, "STABLE and IMMUTABLE functions use a
+  -- snapshot established as of the start of the calling query, whereas VOLATILE
+  -- functions obtain a fresh snapshot at the start of each query they execute"
+  -- (xfunc-volatility).
+  -- ⛔ The failure mode is LOUD, not a silent fail-open (corrected #1981 round-5:
+  -- an earlier version of this note described a reopened window with every §8
+  -- case still green, which cannot be produced). Measured by mutating the
+  -- migration to `STABLE` and running
+  -- `npm --prefix supabase/tests/pglite run validate`:
+  --   exit 1 — `INSERT is not allowed in a non-volatile function`.
+  -- `p` is Postgres's spelling for volatile (pg_proc.provolatile).
+  PERFORM tests.assert(
+    (SELECT provolatile FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      = 'v',
+    '#1981: provision_team must stay VOLATILE. A STABLE/IMMUTABLE label makes it '
+    'unable to write at all, so every provision fails loudly on FIRST call '
+    '(`INSERT is not allowed in a non-volatile function`) — and the post-lock '
+    're-check loses the fresh snapshot the gate needs.');
 END $$;
 
 -- ============================================================================
@@ -721,32 +750,6 @@ DO $$ BEGIN
       !~ 'pg_advisory_lock\(',
     '#1981: the lock must be TRANSACTION-scoped (pg_advisory_xact_lock), not '
     'the session-scoped pg_advisory_lock');
-  -- VOLATILITY is load-bearing, and until now nothing pinned it (#1981 round-5
-  -- review). Two reasons, and the second is the MEASURED one:
-  --   * the gate's correctness assumes the re-check takes a FRESH snapshot after
-  --     `pg_advisory_xact_lock`, and Postgres gives that only to a VOLATILE
-  --     function — per the manual, "STABLE and IMMUTABLE functions use a
-  --     snapshot established as of the start of the calling query, whereas
-  --     VOLATILE functions obtain a fresh snapshot at the start of each query
-  --     they execute" (xfunc-volatility);
-  --   * ⛔ but the failure mode is LOUDER than that, and NOT a silent fail-open
-  --     (corrected here: this note first described a reopened window with every
-  --     §8 case still green — a claim that could not be produced). A relabel to
-  --     STABLE makes `provision_team` unable to write at all, so the FIRST call
-  --     raises and the suite reds: measured by mutating this migration to
-  --     `STABLE` and running `npm --prefix supabase/tests/pglite run validate`
-  --     -> exit 1, `INSERT is not allowed in a non-volatile function`.
-  --   The pin's job is therefore to NAME the property where a future editor
-  --   changes it, rather than leave the next reader decoding a plpgsql write
-  --   error — not to close a silent hole, which this one is not.
-  -- `p` is Postgres's spelling for volatile (pg_proc.provolatile).
-  PERFORM tests.assert(
-    (SELECT provolatile FROM pg_proc
-      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
-      = 'v',
-    '#1981: provision_team must stay VOLATILE — a STABLE/IMMUTABLE label makes '
-    'the post-lock re-check read a pre-lock snapshot and silently disables the '
-    'one-free-org gate');
 END $$;
 
 -- ── 8a. a user's FIRST free org provisions; the SECOND is refused ───────────
