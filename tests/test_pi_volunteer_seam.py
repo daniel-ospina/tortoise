@@ -95,7 +95,7 @@ _SEEDED_CLAIM = "CI pipeline deploys via GitHub Actions"
 
 
 def _base_env(home: Path) -> dict:
-    # ⛔ The seam's OWN switches are BLANKED here (#11584 review round 12).
+    # ⛔ The seam's OWN switches are BLANKED here (#11584 review).
     # `{**os.environ}` copies them into the dict `_run_driver` hands to node,
     # where the installed artifact reads them — so an operator or CI runner with
     # `TORTOISE_VOLUNTEER_DISPLAY=1` exported (a switch the seam documents)
@@ -109,14 +109,17 @@ def _base_env(home: Path) -> dict:
     #   E  assert True is False
     #
     # ⛔ THE MEASURED BLAST RADIUS IS EXACTLY ONE SWITCH, and saying otherwise
-    # is how a review record goes wrong (round 13 caught this one overstating
-    # it). `TORTOISE_VOLUNTEER_DISABLE` and `TORTOISE_COMMAND` were already
-    # clean BEFORE this fix — the fixture's own `monkeypatch.delenv` loop below
-    # removes them from `os.environ` during setup, and `_run_driver` builds its
-    # env at ROW time, so they never reached the subprocess; measured at the
-    # parent head they pass. `TORTOISE_SRC_DIR` also leaked and measured
-    # harmless. Only `TORTOISE_VOLUNTEER_DISPLAY` and `TORTOISE_VOLUNTEER_DEBUG`
-    # were neither deleted nor blanked, and only DISPLAY changes the assertion.
+    # is how a review record goes wrong — two review rounds caught this record
+    # overstating it, in opposite directions. `TORTOISE_VOLUNTEER_DISABLE`
+    # and `TORTOISE_COMMAND` were already clean BEFORE this fix — the fixture's
+    # own `monkeypatch.delenv` loop below removes them from `os.environ` during
+    # setup, and `_run_driver` builds its env at ROW time, so they never reached
+    # the subprocess; measured at the parent head they pass. `TORTOISE_SRC_DIR`,
+    # `TORTOISE_VOLUNTEER_DISPLAY` and `TORTOISE_VOLUNTEER_DEBUG` were neither
+    # deleted nor blanked, so all three DID reach the subprocess — and only
+    # `TORTOISE_VOLUNTEER_DISPLAY` changes the assertion (the other two measured
+    # inert: `TORTOISE_SRC_DIR` reaches the seam but `pathLookup` wins the
+    # candidate order first). Three switches leaked, one reds a row.
     #
     # They are blanked anyway because the fixture's `delenv` list is a
     # hand-maintained enumeration that does not name them: extending it would
