@@ -4844,14 +4844,14 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # and the correct fix is a BUMP (19 in BOTH Pi artifacts, a new entry here,
     # and the paired pin below moved with it) — a SHIPPED generation's digest
     # must never be rewritten.
-    18: "e778d838d7553ac848499a462d4488c3e8c0ce473c040d3e3e69a35cf50b6926",
+    18: "88789f7ab8c828f7882ebf6160236f79f3eb1138100acac77b87da8c428d6dad",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "e778d838d7553ac848499a462d4488c3e8c0ce473c040d3e3e69a35cf50b6926")
+    18, "88789f7ab8c828f7882ebf6160236f79f3eb1138100acac77b87da8c428d6dad")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

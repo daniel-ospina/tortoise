@@ -113,7 +113,22 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 
 export const HARNESS = "pi";
-/** Install name under `~/.pi/agent/extensions/` (hook_install derives it). */
+/** Install name under `~/.pi/agent/extensions/`.
+ *
+ * ⛔ TWO declarations, and NOTHING derives from this one (#11584 review
+ * finding 2 — the previous comment claimed "hook_install derives it", which is
+ * the opposite of the truth, and it is not even possible: no Python code can
+ * read a TS export). `hook_install.PI_VOLUNTEER_EXTENSION_NAME` is the source of
+ * truth — the installer, the `--uninstall` verb and the drift detector all
+ * derive from it, `capture_install` re-derives it off
+ * `ARTIFACT_CONTRACTS["pi"].volunteer_source` — and this literal only names the
+ * SOURCE file that contract points at, so the two must agree or
+ * `tortoise install pi` copies a path that is not there.
+ *
+ * The pair is pinned by
+ * `tests/test_pi_volunteer_seam.py::test_the_read_seam_export_names_the_file_the_contract_installs`
+ * (this export against the contract's own basename), which is what makes the
+ * sentence above a checked claim rather than prose. */
 export const EXTENSION_NAME = "tortoise-volunteer.ts";
 /** The custom-message type this seam injects, so a transcript reader can tell
  *  volunteered context from user text and from capture. */
@@ -190,9 +205,28 @@ export const MAX_OUTPUT_CHARS = 1 << 20;
  *  install as `install-inert` (review finding 3; the exact #4314 confusion the
  *  breadcrumb exists to prevent). */
 export const MAX_PROMPT_BYTES = 15 * 1024 - 64;
-/** The reflex's own block budget is 8 KiB (`volunteer.BLOCK_MAX_BYTES`); a
- *  longer body would mean the reflex contract moved, so bound on the way in. */
-export const MAX_INJECT_CHARS = 8000;
+/** The reflex's own block budget, in BYTES (`volunteer.BLOCK_MAX_BYTES` =
+ *  `8 * 1024`; `build_block` refuses to build anything larger), used here as a
+ *  CHARACTER bound on the body on the way in.
+ *
+ *  ⛔ `8 * 1024`, NOT 8000 (#11584 review finding 3). 8000 sat BELOW the
+ *  contract it said it bounded, so a legal 8192-byte all-ASCII block — the
+ *  reflex builds it, `validate` accepts it — was cut to 8000 chars with no
+ *  trace and no error, while the comment claimed the bound existed only for a
+ *  body that "would mean the reflex contract moved".
+ *
+ *  Chars ≥ bytes is the correct polarity for a bound that must never cut a
+ *  legal block: a block of at most 8192 UTF-8 bytes has at most 8192
+ *  characters, so deriving the same number here can only truncate a block the
+ *  reflex could not have produced. A character bound LOWER than the byte budget
+ *  is a real truncation, and a byte bound used as a char count would let a
+ *  non-ASCII body through over the producer's limit.
+ *
+ *  The two numbers are pinned together (this constant against
+ *  `BLOCK_MAX_BYTES` read out of `tortoise/volunteer.py`) in
+ *  `tortoise-volunteer.test.ts`, so a producer move reddens here instead of
+ *  silently re-opening the gap. */
+export const MAX_INJECT_CHARS = 8 * 1024;
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json");
 /** The reflex CLI's source-dir record, written by the shell-hook installs. */
 export const SRC_DIR_RECORD = join(homedir(), ".tortoise", "hook-src-dir");

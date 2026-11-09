@@ -571,6 +571,47 @@ test("visible surface: display renders the reflex's `surfaced` marker", () => {
   assert.equal(long?.content.length, MAX_INJECT_CHARS);
 });
 
+test("the inject bound is the reflex's own block budget, so no legal block is cut", () => {
+  // ⛔ #11584 review finding 3: `MAX_INJECT_CHARS` was 8000 while the producer's
+  // budget is 8 KiB, so a legal 8192-byte all-ASCII block was cut to 8000 chars
+  // silently — no trace, no error — by a bound whose comment said a longer body
+  // "would mean the reflex contract moved". 8000 could only mean that the SEAM
+  // had moved.
+  //
+  // Read the budget out of the Python producer rather than restating it: a pin
+  // against the literal 8000 (or against 8192 typed here twice) certifies the
+  // seam against itself and stays green when the reflex's budget moves. Chars ≥
+  // bytes is the polarity that cannot cut a block the reflex could have built.
+  const producer = readFileSync(
+    join(import.meta.dirname, "..", "volunteer.py"),
+    "utf8",
+  );
+  const match = /^BLOCK_MAX_BYTES\s*=\s*([0-9\s*]+)$/m.exec(producer);
+  assert.ok(match, "BLOCK_MAX_BYTES must stay a plain integer expression in tortoise/volunteer.py");
+  const budgetBytes = match[1]
+    .split("*")
+    .reduce((product, part) => product * Number(part.trim()), 1);
+  assert.ok(Number.isFinite(budgetBytes) && budgetBytes > 0, `unreadable BLOCK_MAX_BYTES: ${match[1]}`);
+
+  assert.equal(
+    MAX_INJECT_CHARS,
+    budgetBytes,
+    `the inject bound must be the reflex's block budget (${budgetBytes}), not a shorter number — ` +
+      "a bound below it truncates blocks the reflex legitimately builds",
+  );
+
+  // …and behaviourally: a block at exactly the producer's maximum survives
+  // WHOLE. On the 8000 bound this assertion is off by 192 chars.
+  const legalMax = "y".repeat(budgetBytes);
+  const injected = buildInjection(legalMax, [], false);
+  assert.equal(injected?.content.length, budgetBytes, "a legal block must not be truncated");
+  assert.equal(injected?.content, legalMax);
+
+  // The bound still EXISTS: one char over is cut to the budget, not passed through.
+  const over = buildInjection("y".repeat(budgetBytes + 1), [], false);
+  assert.equal(over?.content.length, budgetBytes);
+});
+
 test("reflexCandidates: PATH, the src-dir record, and $VIRTUAL_ENV — never a CWD guess", () => {
   const home = tmpHome();
   const bin = join(home, "bin");
