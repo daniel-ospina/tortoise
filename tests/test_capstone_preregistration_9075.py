@@ -2050,8 +2050,13 @@ def test_the_real_machine_record_agrees_with_the_pins():
     comment line. The field's OWN prose warns that this entry "is NOT
     cite-neutral" for exactly this reason, and nothing reddened: the checker
     (`tools/capstone_preregistration_check.py`) never reads `read_back`, and
-    no test or tool cited `capstone_measure.py:506` (the two `:506` matches in
-    `tests/` are a sha256 fragment and an unrelated `sdk.py:506` in a transcript). A field that warns about cite
+    no test or tool cited `capstone_measure.py:506` — measured with the probe's own
+    filename, which is the only spelling that can be a cite of it: `grep -rn
+    'capstone_measure\.py:506' tests/ tools/ docs/` printed this docstring and nothing
+    else (a bare `:506` count is not that measurement — it also matches a sha256
+    fragment, an unrelated `sdk.py:506` in a transcript, and the sentences around this
+    one once a sibling states the number, which is why the count here is scoped to the
+    spelling rather than to the token). A field that warns about cite
     drift cannot be the one place drift goes unwatched, so its
     `capstone_measure.py` cites are pinned here EXACTLY - the entry line, and the
     census range's own opening and closing lines - never as a window a shift can
