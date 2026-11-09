@@ -201,10 +201,13 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
 
       * BLANK is the shared rule — both layers refuse it;
       * a PADDED-but-real id and an ordinary id are admitted by both;
-      * ABSENT (``None``/``""``) is the ONE intentional asymmetry — a DOOR
-        mints for it, a FOLD has nothing to mint with and refuses it;
-      * the RESERVED demo/sample namespace (#8290) is the OTHER intentional
-        asymmetry — the DOOR refuses it, the FOLD must admit it (see below); and
+      * ABSENT (``None``/``""``) is the FIRST of THREE intentional asymmetries
+        (``tortoise/ids.py`` names all three) — a DOOR mints for it, a FOLD has
+        nothing to mint with and refuses it;
+      * the RESERVED demo/sample namespace (#8290) is the SECOND — the DOOR
+        refuses it, the FOLD must admit it (see below); and
+      * an id the ENGINE cannot parse (NUL, lone surrogate) is the THIRD — the
+        FOLD's ``_writable_id`` refuses it (pinned below), the DOOR admits it;
       * a non-``str`` is refused by both, with the door naming the SHAPE (the
         fold has no caller and says nothing).
 
@@ -253,6 +256,35 @@ def test_the_fold_gate_and_the_door_gate_are_one_rule():
         "the REPLAY fold must ADMIT a reserved-prefix id: an older tree "
         "legitimately wrote them, and refusing the fold loses those rows "
         "(#9594/#9553). The reservation is door-only BY DECISION.")
+
+
+def test_the_remedy_belongs_to_the_door_not_to_the_rule():
+    """ONE rule, TWO remedies — pinned in both directions (#11576 review P2).
+
+    All four doors share ``session_id_refusal``, but only three of them MINT for
+    ``None`` (the two SDK doors and the hosted ``SessionRequest`` boundary).
+    ``commit_schema.CommitPayload`` does not: its ``session_id`` is a required
+    ``str``, so the mint advice is a remedy that door rejects. The shared text
+    used to carry the mint clause to every door, and a caller who followed it at
+    the commit door got a 400 instead.
+
+    This pins the SPLIT: the three refusal CLASSES and their reasons are still
+    one string, and only the remedy clause follows the door.
+    """
+    from tortoise import session_schema
+
+    for value in (*BLANK_IDS, session_schema.demo_session_id("abcdef123456"), 0):
+        mint = ids_mod.session_id_refusal(value)
+        no_mint = ids_mod.session_id_refusal(value, may_mint=False)
+        assert mint and no_mint, value
+        # the REASON is shared, byte for byte — the door only chooses the remedy
+        assert mint.split("; ")[0] == no_mint.split("; ")[0], (mint, no_mint)
+        assert ids_mod.SESSION_ID_MINT_REMEDY in mint, (value, mint)
+        assert ids_mod.SESSION_ID_NO_MINT_REMEDY in no_mint, (value, no_mint)
+        assert ids_mod.SESSION_ID_MINT_REMEDY not in no_mint, (value, no_mint)
+    # The default is the MINTING door's remedy — three of the four doors take it
+    # by saying nothing, so a flipped default would silently re-break the fourth.
+    assert ids_mod.SESSION_ID_MINT_REMEDY in ids_mod.session_id_refusal("   ")
 
 
 @pytest.mark.parametrize("value", (0, False, 123, b"  "))

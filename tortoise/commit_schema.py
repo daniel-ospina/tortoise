@@ -974,21 +974,21 @@ class CommitPayload(BaseModel):
         # session read surface — written, durable (the replay fold is
         # BLANK-ONLY by #9594/#9553, so it survives), and invisible to its
         # owner. Delegating to ``ids.session_id_refusal`` keeps ONE predicate
-        # across all four doors AND yields the same refusal TEXT the SDK doors
-        # already return, so the 422 detail is one string rather than a fourth
-        # spelling.
+        # across all four doors — and, since #11576's review, one REASON plus THIS
+        # door's own REMEDY (``may_mint=False``): its ``session_id`` is required, so
+        # the mint advice the other three doors give is a remedy this one rejects.
         #
         # ⛔ Deliberately NOT widened: ``projection._writable_container_id`` (the
-        # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay
-        # that started refusing rows an older tree legitimately wrote would
-        # lose them.
+        # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay that
+        # started refusing rows an older tree legitimately wrote would LOSE those
+        # rows.
         #
         # ``is not None``, never truthiness: a refusal is a STRING and every
         # sibling door compares it that way, so an empty refusal can never
         # silently read as "admit" here either — the polarity this door exists
         # to share. (The module already imports ``session_id_refusal`` from
         # ``.ids`` beside ``content_hash``; no local re-import.)
-        refusal = session_id_refusal(v)
+        refusal = session_id_refusal(v, may_mint=False)
         if refusal is not None:
             raise ValueError(refusal)
         return v

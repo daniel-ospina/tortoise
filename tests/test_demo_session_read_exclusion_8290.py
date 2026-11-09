@@ -286,6 +286,63 @@ def test_the_commit_door_refuses_a_reserved_id_too():
     assert v("session_0123456789ab") == "session_0123456789ab"
 
 
+def test_the_commit_door_never_advises_a_mint_it_cannot_do():
+    """The 422 detail must not name a remedy this door rejects (#11576 review P2).
+
+    All four caller-id doors share ``ids.session_id_refusal``, but only three of
+    them MINT: ``CommitPayload.session_id`` is a required ``str``
+    (``Field(min_length=1)``) written VERBATIM by the handler, and ``None`` — or an
+    omission — is a 400 ``missing_required_fields``. The shared text used to end
+    with "pass None to let Tortoise mint one" for every door, reached this one
+    verbatim through ``shape_errors`` → the 422 ``detail``, and a caller who
+    followed it got a 400 for its trouble.
+
+    ⛔ The validator runs ``mode="after"``, so pydantic's ``str`` type gate answers
+    the non-``str`` class BEFORE it does (see the model arm below). The ``0`` case
+    in the loop is therefore reachable only by calling the validator directly; it
+    is here to pin what the predicate composes, not to claim that text reaches a
+    caller.
+
+    REDS IF: the validator stops passing ``may_mint=False``, or the shared
+    predicate starts appending the mint remedy regardless of the door.
+    """
+    from pydantic import ValidationError
+
+    from tortoise.commit_schema import CommitPayload
+    from tortoise.ids import SESSION_ID_MINT_REMEDY, SESSION_ID_NO_MINT_REMEDY
+
+    reserved = session_schema.demo_session_id("abcdef123456")
+    for value in ("   ", reserved, 0):
+        with pytest.raises(ValueError) as exc:
+            CommitPayload._non_blank_session_id(value)
+        detail = str(exc.value)
+        assert SESSION_ID_MINT_REMEDY not in detail, (
+            f"{value!r}: this door cannot mint, so it must not advise None — "
+            f"got {detail!r}")
+        assert SESSION_ID_NO_MINT_REMEDY in detail, (value, detail)
+
+    # ...and the advice reaches the caller through the REAL model, not only the
+    # validator: this is the string the 422 detail carries.
+    with pytest.raises(ValidationError) as exc:
+        CommitPayload.model_validate({"session_id": reserved})
+    msgs = [e.get("msg", "") for e in exc.value.errors()
+            if e.get("loc") == ("session_id",)]
+    assert msgs, exc.value.errors()[:3]
+    assert SESSION_ID_MINT_REMEDY not in msgs[0], msgs[0]
+    assert SESSION_ID_NO_MINT_REMEDY in msgs[0], msgs[0]
+
+    # ⛔ And the non-``str`` class really is answered UPSTREAM of the predicate, so
+    # the caveat in ``ids.SESSION_ID_NO_MINT_REMEDY`` is measured, not narrated: a
+    # ``mode="after"`` validator never sees an ``int``. If someone flips the mode,
+    # the door starts answering with the predicate's own text and this reds — which
+    # is the signal that the comment above needs to change with it.
+    with pytest.raises(ValidationError) as exc:
+        CommitPayload.model_validate({"session_id": 0})
+    kinds = {e.get("type") for e in exc.value.errors()
+             if e.get("loc") == ("session_id",)}
+    assert kinds == {"string_type"}, kinds
+
+
 def test_the_commit_door_rule_is_BOUND_to_the_session_id_field():
     """The committed model — not just the helper — refuses a reserved id.
 

@@ -38,26 +38,52 @@ def mint_session_id() -> str:
     return f"session_{uuid.uuid4().hex[:12]}"
 
 
-#: The CLIENT-FACING refusal text for a PRESENT-but-blank session id. One
-#: string, so the enforcement points that answer a caller (the two SDK doors,
-#: the hosted ``/v1/sessions`` boundary and ``commit_schema.CommitPayload`` —
-#: the last returns it as the ``POST /v1/sessions/commit`` 422 detail, since
-#: #8290's review made that door delegate to the same predicate) cannot drift
-#: into two explanations of one rule. It is returned verbatim to callers (a 422
-#: detail on the hosted surface), so it names the rule and the remedy only — the
-#: engine mechanics (:Session duplication / dropped CONTAINS edge) stay in the
-#: docstrings, never on a customer's wire (#9599 review P3).
-SESSION_ID_BLANK_REFUSAL = (
-    "session_id is blank — a session id must name something (be non-blank); "
-    "pass None to let Tortoise mint one"
-)
+#: ⛔ A refusal is REASON + REMEDY, and the REMEDY belongs to the DOOR, not to
+#: the rule (#11576 review P2). All four doors share :func:`session_id_refusal`,
+#: but only three of them MINT: the two SDK doors and the hosted
+#: ``/v1/sessions`` ``SessionRequest`` boundary. ``commit_schema.CommitPayload``
+#: — the ``POST /v1/sessions/commit`` model — does not: its ``session_id`` is a
+#: required ``str`` (``Field(min_length=1)``) written VERBATIM by the handler, so
+#: ``None`` — and an omission — is a 400 ``missing_required_fields`` raised before
+#: the model is ever validated
+#: (``commit_schema.missing_required_fields``, tested with
+#: ``raw.get(f) in (None, "")``). Serving "pass None to let Tortoise mint one"
+#: there told a caller to take a remedy that door rejects, and the text reaches
+#: it verbatim (``shape_errors`` copies ``msg`` into the 422 ``detail``). So this
+#: module owns every REASON and each door picks its own REMEDY (``may_mint``):
+#: still one home for the wording, so the doors cannot drift into two
+#: explanations of one rule. The engine mechanics (:Session duplication / dropped
+#: CONTAINS edge) stay in the docstrings, never on a customer's wire (#9599
+#: review P3).
+SESSION_ID_BLANK_REASON = (
+    "session_id is blank — a session id must name something (be non-blank)")
+
+#: The remedy for a door whose ``session_id`` is OPTIONAL — the two SDK doors
+#: and the hosted ``SessionRequest`` boundary, which mint for ``None``.
+SESSION_ID_MINT_REMEDY = "pass None to let Tortoise mint one"
+
+#: The remedy for a door whose ``session_id`` is REQUIRED and never minted —
+#: ``commit_schema.CommitPayload``. What it takes is the id itself, and the payload
+#: writes that id verbatim as a ``:Session``. ⛔ ONE caveat, measured: that door's
+#: ``@field_validator("session_id")`` is ``mode="after"``, so pydantic's own ``str``
+#: type gate answers the NON-``str`` class FIRST (``string_type``, e.g. for ``0``)
+#: and this predicate only ever composes the BLANK and RESERVED refusals there.
+#: The wording is therefore true of all three classes rather than pretending the
+#: third reaches it — pinned at the model in
+#: ``tests/test_demo_session_read_exclusion_8290.py::test_the_commit_door_never_advises_a_mint_it_cannot_do``.
+SESSION_ID_NO_MINT_REMEDY = (
+    "this door requires a non-blank string id outside the RESERVED "
+    "demo/sample namespace, and never mints one")
+
+#: The CLIENT-FACING refusal text for a PRESENT-but-blank session id at a
+#: MINT-CAPABLE door. One composed string, so the enforcement points that answer
+#: such a caller cannot drift apart.
+SESSION_ID_BLANK_REFUSAL = f"{SESSION_ID_BLANK_REASON}; {SESSION_ID_MINT_REMEDY}"
 
 #: A PRESENT session id of the wrong SHAPE. Refused with its own message rather
 #: than the blank one: naming "blank" for an int is the #8018 class (a report
 #: naming a cause that is false for the record it describes).
-SESSION_ID_NOT_STR_REFUSAL = (
-    "session_id must be a string — got %s; pass None to let Tortoise mint one"
-)
+SESSION_ID_NOT_STR_REASON = "session_id must be a string — got %s"
 
 #: A caller-supplied id inside the RESERVED demo/sample namespace (#8290).
 #:
@@ -81,17 +107,35 @@ SESSION_ID_NOT_STR_REFUSAL = (
 #: disagree about which ids may name a session. ⚠️ Three-of-four is NOT
 #: reserved (#8290 review P1): the commit payload boundary was the door that
 #: used to admit the namespace and file a session every read surface hides.
-SESSION_ID_RESERVED_REFUSAL = (
+SESSION_ID_RESERVED_REASON = (
     "session_id is inside the RESERVED demo/sample namespace (%s) — every "
     "session read surface excludes that namespace, so a capture filed under it "
-    "would be invisible to its owner; pass None to let Tortoise mint one"
-)
+    "would be invisible to its owner")
+#: ⛔ The three REASON constants compose with :func:`session_id_refusal`'s
+#: ``may_mint`` remedy — the mint-door spelling of this one, for instance, is
+#: ``SESSION_ID_RESERVED_REASON % prefix`` + ``"; " + SESSION_ID_MINT_REMEDY``.
+#: They are not restated as constants because the DOOR, not the rule, decides the
+#: tail: a fourth constant would be a second home to drift from.
+#: ``SESSION_ID_BLANK_REFUSAL`` is the exception — a test pins the exact wire
+#: string a mint-capable SDK door returns, so it is composed once, above.
 
 
-def session_id_refusal(session_id: object) -> str | None:
+def session_id_refusal(session_id: object, *,
+                       may_mint: bool = True) -> str | None:
     """The DOOR half of the session-id rule — one predicate, every door (#9599).
 
-    Returns a refusal reason, or ``None`` when the value may be used.
+    Returns a refusal (reason + the DOOR's remedy), or ``None`` when the value
+    may be used.
+
+    ``may_mint`` is the one thing the doors do not share (#11576 review P2): the
+    two SDK doors and the hosted ``SessionRequest`` boundary MINT for ``None``,
+    so they take the default and their refusal ends with "pass None to let
+    Tortoise mint one". ``commit_schema.CommitPayload`` passes
+    ``may_mint=False``, because its ``session_id`` is a REQUIRED ``str`` that the
+    handler writes verbatim — there, that advice is a remedy the door rejects
+    (a 400 ``missing_required_fields``), so it gets
+    :data:`SESSION_ID_NO_MINT_REMEDY` instead. The flag chooses the REMEDY only;
+    which values are refused, and the wording of every reason, stay here.
 
     ⛔ The blank rule has TWO homes at two layers, deliberately, and neither is
     a duplicate of the other (#9599 review P2):
@@ -152,7 +196,7 @@ def session_id_refusal(session_id: object) -> str | None:
       refusal, and it is the WATCHDOG for ``#8290``'s read exclusion: the prefix
       is how all three session read surfaces exclude the demo ``:Session``, so a
       capture filed under it would be written and then invisible everywhere —
-      the sinkhole the reservation closes (see ``SESSION_ID_RESERVED_REFUSAL``).
+      the sinkhole the reservation closes (see ``SESSION_ID_RESERVED_REASON``).
       ⚠️ This class is why the sentence "no real capture can carry the demo
       prefix" is a FACT rather than a convention about ``mint_session_id``:
       minted ids cannot collide, AND a caller-supplied one is refused.
@@ -185,12 +229,13 @@ def session_id_refusal(session_id: object) -> str | None:
     """
     if session_id is None or (isinstance(session_id, str) and session_id == ""):
         return None
+    remedy = SESSION_ID_MINT_REMEDY if may_mint else SESSION_ID_NO_MINT_REMEDY
     if not isinstance(session_id, str):
-        return SESSION_ID_NOT_STR_REFUSAL % type(session_id).__name__
+        return f"{SESSION_ID_NOT_STR_REASON % type(session_id).__name__}; {remedy}"
     if not session_id.strip():
-        return SESSION_ID_BLANK_REFUSAL
+        return f"{SESSION_ID_BLANK_REASON}; {remedy}"
     # #8290: the demo/sample namespace is RESERVED, because the session read
-    # surfaces exclude it by that prefix (see SESSION_ID_RESERVED_REFUSAL).
+    # surfaces exclude it by that prefix (see SESSION_ID_RESERVED_REASON).
     # Checked AFTER the shape/blank classes so each refusal names its own cause.
     #
     # Local import: `tortoise.session_schema` is stdlib-only and declares the
@@ -200,7 +245,7 @@ def session_id_refusal(session_id: object) -> str | None:
     from tortoise.session_schema import DEMO_SESSION_ID_PREFIX
 
     if session_id.startswith(DEMO_SESSION_ID_PREFIX):
-        return SESSION_ID_RESERVED_REFUSAL % DEMO_SESSION_ID_PREFIX
+        return f"{SESSION_ID_RESERVED_REASON % DEMO_SESSION_ID_PREFIX}; {remedy}"
     return None
 
 

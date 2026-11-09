@@ -133,9 +133,13 @@ from datetime import UTC, datetime, timedelta
 from typing import Any
 
 # The ONE owner of the reserved sample-session prefix (`session_demo_…`, derived
-# from the mint shape, never a re-spelled literal). Imported here because a
-# module-level QUERY has to interpolate it; `stage_counts` imports the predicate
-# locally for the same reason.
+# from the mint shape, never a re-spelled literal). Imported at MODULE level —
+# the module's ONLY non-stdlib module-level import — because the module-level
+# QUERY constants (`_SESSION_NOT_DEMO`, `LIFETIME_MEMORY_QUERY`) interpolate it at
+# import time. `stage_counts` imports the PREDICATE (`is_demo_session_id`)
+# function-locally instead: nothing at module level evaluates that row filter, so
+# there is nothing to hoist, and every other non-stdlib import in this module is
+# function-local too (see `analytics_write_path_configured`).
 from tortoise.session_schema import DEMO_SESSION_ID_PREFIX
 
 _logger = logging.getLogger(__name__)
@@ -353,9 +357,12 @@ FUNNEL_QUERY = (
 # the one PRODUCTION execution is ``hosted_api.py:23128`` (the module's own test
 # is the only other one), and a ``params=…`` argument there does not fit in 100
 # columns, so it wraps and pushes later lines down. Measured over every
-# ``hosted_api.py:<line>`` cite in the tree: **14** cite targets have a line
-# number LARGER than 23128 (23284 … 99999) and those are the ones that shift;
-# **418** have a line number smaller than it (22 … 22292) and cannot move.
+# ``hosted_api.py:<line>`` cite in the tracked tree: **14** distinct cite
+# targets have a line number LARGER than 23128 (23284 … 99999) and those are the
+# ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
+# move. (449 distinct targets in all — the remainder is 23128 itself, which this
+# very comment names, and which is why these counts are re-measured whenever
+# ``hosted_api.py`` gains or loses a line above it.)
 # ``STAGE3_PREDICATE`` is interpolated for the same reason. The
 # value is a module constant with no quote, backslash, ``$`` or backtick in it,
 # so it cannot break out of the single-quoted Cypher literal. ``toString`` is
@@ -656,8 +663,17 @@ def analytics_write_path_configured() -> bool:
     """
     import os
 
-    # Function-local import keeps this module import-pure (stdlib only at
-    # module level). The key is resolved through the SAME seam the analytics
+    # Function-local import, like every other non-stdlib import in this module
+    # EXCEPT one: the module-level ``from tortoise.session_schema import
+    # DEMO_SESSION_ID_PREFIX`` at the top, which the module-level QUERY constants
+    # (``_SESSION_NOT_DEMO``, ``LIFETIME_MEMORY_QUERY``) interpolate at import time
+    # and so cannot defer. That exception is stated rather than hidden — this
+    # comment used to claim "stdlib only at module level", which stopped being
+    # true when #8290 added the import (#11576 review: the two claims disagreed)
+    # — because the property is one a later lane would otherwise rely on. There is
+    # no cycle to fear either way: ``session_schema`` is stdlib-only.
+    #
+    # The key is resolved through the SAME seam the analytics
     # WRITER uses (``supabase_control._service_key()``) — re-deriving the
     # resolution here is how the write path ended up reading a name the hosted
     # deployment never sets (#3677). A second resolver could report "unset"

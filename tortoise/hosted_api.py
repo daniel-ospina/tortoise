@@ -47963,11 +47963,11 @@ app.mount("/mcp", mcp_http_app)
 # ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
 #
 # ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
-# ABSOLUTE line number from ~20 places across the tree (`sdk.py`,
-# `metering.py`, `quota.py`, `tools/`, several tests), so a definition inserted
-# next to its only caller would shift every cite below it. Python resolves the
-# name at CALL time, so `list_sessions` can call a function defined after it —
-# the same reason `extractor_v2` keeps its late helpers at the bottom.
+# ABSOLUTE line number from 179 tracked files (449 distinct
+# ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
+# caller would shift every cite below it. Python resolves the name at CALL time,
+# so `list_sessions` can call a function defined after it — the same reason
+# `extractor_v2` keeps its late helpers at the bottom.
 def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
     """The MATCH-level `WHERE` for `list_sessions`, as ``(conditions, params)``.
 

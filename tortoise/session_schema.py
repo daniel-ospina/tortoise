@@ -112,8 +112,9 @@ __all__ = [
 #:
 #: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
 #: 1000-mint population for (1), the door/exclusion agreement for (2), and one
-#: reserved-id refusal per real door (the two SDK doors AND the commit payload
-#: model) — because a vacuous prefix test would hide every leak instead of one.
+#: reserved-id refusal per real door — all FOUR of them: the two SDK doors, the
+#: hosted ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` —
+#: because a vacuous prefix test would hide every leak instead of one.
 #:
 #: ⚠️ RESIDUAL, stated and not claimed closed: the reservation is NOT
 #: retroactive. A capture a caller filed under this prefix BEFORE the doors
