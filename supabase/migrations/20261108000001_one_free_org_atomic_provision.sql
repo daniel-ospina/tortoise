@@ -52,6 +52,23 @@
 -- in-transaction re-check is), never under-serialise the same user, which is
 -- the only direction that loses mutual exclusion.
 --
+-- ⛔ WHY THE OTHER HALF OF #1879's REJECTION DOES NOT BIND HERE, stated because
+-- it is the half a future reader is most likely to re-raise (#1981 review,
+-- P2). That note also calls the hash "cross-version unstable", which is true of
+-- the function — and was fatal for a key some OTHER process has to compute: a
+-- value that must agree across versions has to be derived OUTSIDE the server.
+-- This key is never derived outside it. Every contender is a session on THIS
+-- server, in the same cluster at the same major version, so all of them run
+-- the identical function and produce the identical key; cross-version (or
+-- cross-platform, e.g. a cross-endian cluster migration) drift cannot make two
+-- LIVE contenders disagree, because contenders cannot be on different servers.
+-- What that reasoning DOES pin is the invariant, and it is the one to hold on
+-- to: "every writer contending for this key derives it byte-identically, HERE".
+-- A future writer that derives its own key is not serialized by this lock —
+-- which is exactly why `claim_membership`, the one other path that can make a
+-- person an owner, is a named RESIDUAL below rather than a copy of this
+-- expression, and why it must reuse THIS derivation rather than invent one.
+--
 -- The lock is transaction-scoped, so it is released at COMMIT/ROLLBACK — no
 -- leaked lock on a crash, no lease to expire (contrast a graph/table "claim"
 -- row, which would need stealing semantics).

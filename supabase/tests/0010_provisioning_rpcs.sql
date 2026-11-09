@@ -610,6 +610,23 @@ RESET ROLE;
 --     allowance and the create proceeds — see 8f, which asserts 3 orgs land).
 -- Every fixture id here ends in `-1981` (cleanup at the end of this section,
 -- idempotent re-runs).
+--
+-- ⛔ WHAT THIS SECTION DOES **NOT** PROVE — read before quoting "ATOMIC".
+-- PGlite is ONE connection, so no case here can race another: the matrix below
+-- shows the RPC REFUSES a second free org when it can SEE the first, and that
+-- a refusal writes nothing. It does not exercise two overlapping transactions,
+-- so it cannot itself distinguish a correct gate from a racy one. The shape
+-- assertions in the block before 8a close the two mutants that would otherwise
+-- pass the matrix silently (#1981 review, P2):
+--   * a lock keyed on `p_org_id` instead of `p_user_id` — two racing creates
+--     for ONE user carry different org ids, so they never serialise and the
+--     original TOCTOU is back, with every case below still green;
+--   * the `PERFORM` moved after the gate's `SELECT` — the check then reads a
+--     snapshot taken before the lock, which is the same race in miniature.
+-- The genuine two-connection proof needs a live Postgres lane
+-- (`test-record-postgres` / `TEST_RECORD_DB_URI`); until it exists, "atomic"
+-- is supported by the mechanism's SHAPE here plus the decision matrix, and is
+-- NOT claimed as measured under real concurrency.
 
 DELETE FROM public.api_keys WHERE org_id LIKE '%-1981';
 DELETE FROM public.org_memberships WHERE org_id LIKE '%-1981' OR identity LIKE '%1981%';
@@ -665,6 +682,45 @@ DO $$ BEGIN
       WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
       ~ 'RAISE[[:space:]]+EXCEPTION[[:space:]]+''one_free_org_limit:',
     '#1981: provision_team must RAISE the one_free_org_limit marker');
+  -- The LOCK KEY must derive from the PERSON, not the org (#1981 review, P2).
+  -- Keyed on `p_org_id` the lock never serialises two racing creates for one
+  -- user — they carry different org ids by construction — which restores the
+  -- exact TOCTOU this migration exists to close, while every behavioural case
+  -- in this section stays green (it holds one connection and never races).
+  PERFORM tests.assert(
+    (SELECT prosrc FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      ~ 'hashtextextended\([^)]*p_user_id',
+    '#1981: the advisory lock key must be derived from p_user_id');
+  PERFORM tests.assert(
+    (SELECT prosrc FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      !~ 'hashtextextended\([^)]*p_org_id',
+    '#1981: the advisory lock key must NOT be derived from p_org_id — per-org '
+    'keys let two racing creates for ONE user slip past each other');
+  -- The lock must be taken BEFORE the gate reads (#1981 review, P2): a
+  -- `PERFORM` after the `SELECT` leaves the re-check reading a snapshot taken
+  -- before any competitor could be excluded, so the gate no longer closes the
+  -- window it is there for.
+  PERFORM tests.assert(
+    (SELECT strpos(prosrc, 'pg_advisory_xact_lock') FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      > 0
+    AND
+    (SELECT strpos(prosrc, 'pg_advisory_xact_lock') FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      <
+    (SELECT strpos(prosrc, 'INTO v_blocking_org_id') FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace),
+    '#1981: the advisory lock must be acquired BEFORE the gate SELECT');
+  -- Session-level `pg_advisory_lock` is not a substitute: it is held until
+  -- explicit release, so on a pooled connection it leaks across requests.
+  PERFORM tests.assert(
+    (SELECT prosrc FROM pg_proc
+      WHERE proname='provision_team' AND pronamespace='public'::regnamespace)
+      !~ 'pg_advisory_lock\(',
+    '#1981: the lock must be TRANSACTION-scoped (pg_advisory_xact_lock), not '
+    'the session-scoped pg_advisory_lock');
 END $$;
 
 -- ── 8a. a user's FIRST free org provisions; the SECOND is refused ───────────
@@ -711,7 +767,11 @@ BEGIN
   END;
 END $$;
 
--- atomicity: the refusal wrote NOTHING (the gate runs before the first INSERT)
+-- atomicity: a REFUSED provision leaves no row behind. NOTE: this cannot
+-- discriminate WHERE the gate sits — the `EXCEPTION WHEN OTHERS` block above
+-- rolled its own implicit savepoint back, so `count(*)=0` holds whether the
+-- gate runs before or after the INSERTs. The ordering claim is pinned by the
+-- source-shape assertion (lock before SELECT), not here (#1981 review, P2).
 DO $$ BEGIN
   PERFORM tests.assert(
     (SELECT count(*) FROM public.organizations
