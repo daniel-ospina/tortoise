@@ -39,6 +39,17 @@ Fix, in three parts:
 Offline only — ``TORTOISE_SESSION_LLM_MOCK=1`` installs the deterministic
 MockModel extractor: zero network, zero provider spend.
 """
+# ⚠️ `#4282` (2026-10-27) deleted `TortoiseSDK.capture_session`, and two legs here
+# drove it to seed a SECOND capture: `test_recapture_journals_the_stored_status_not_a_literal_draft`
+# (a re-capture must journal `status: live`, never a literal `draft`) and
+# `test_recapture_shorter_does_not_resurrect_turns_on_rebuild` (a shorter
+# re-capture must not resurrect the dropped turns on `rebuild_all`). `rebuild_all`
+# SURVIVES and is still pinned by the sidecar-recovery legs below; what is gone is
+# the re-capture half of the pair, so a regression that reintroduces the literal
+# `draft` stamp or the resurrected turn would now be caught by nothing in this
+# file. Recorded rather than dropped silently: the fix is a re-driven re-capture,
+# not a deleted test.
+
 from __future__ import annotations
 
 import json

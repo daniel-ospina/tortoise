@@ -157,8 +157,16 @@ def _drive_capture(sdk, turns, session_id: str) -> dict:
     event_id = minted.get("id") or minted.get("eventId")
     assert event_id, f"the sessionCaptured mint returned no id: {minted!r}"
     sdk._materialize_session_source(session_id, event_id, now, turns)
-    sdk._extract_session_v2(turns, session_id, now)
-    return {"ok": True, "session_id": session_id, "event_id": event_id,
+    extracted, meta = sdk._extract_session_v2(turns, session_id, now)
+    # ⛔ `ok` is DERIVED, not asserted into existence: the deleted wrapper computed
+    # `ok = not extraction_errors and meta.get("mode") != "empty"` (`sdk.py`
+    # pre-#4282), and this reproduces that from the extractor's own answer. A
+    # literal `True` here would make every `receipt["ok"] is True` below
+    # unfalsifiable (review cycle 5, P2).
+    ok = bool(meta.get("mode") != "empty")
+    return {"ok": ok, "session_id": session_id, "event_id": event_id,
+            "extracted": len(extracted or []),
+            "extraction_mode": meta.get("mode"),
             "driver": "surviving-primitives"}
 
 CONV = [

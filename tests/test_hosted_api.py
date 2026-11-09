@@ -9342,6 +9342,34 @@ def _seed_team_graphs(sdk, org_id: str, tier: str, max_graphs,
     sdk._graph_create(org_id, "default", kind="default")
 
 
+def _list_api_keys(sdk, org_id: str) -> list[dict]:
+    """The org's API keys, read from the registry the way `apikey_list` did.
+
+    ⛔ `#4282` (2026-10-27) DELETED `TortoiseSDK.apikey_list` (one of the 26 dead
+    public methods the owner authorised removing), and these three legs used it
+    only as a READ of the registry — nothing here asserted the wrapper's
+    projection. The query and the row shape below are the deleted method's own
+    (`sdk.py` pre-#4282), kept verbatim so these legs test exactly what they
+    tested: no plaintext, the caller's orphan key revoked, the envelope's
+    `key.id` a real registry node. `tests/test_control_plane.py` reads the
+    registry node directly for the same deletion, for the same reason.
+    """
+    reg = sdk._get_registry()
+    rows = reg.query(
+        "MATCH (k:APIKey {org_id:$tid}) "
+        "RETURN k.id, k.key_prefix, k.created_by, k.created_at, "
+        "k.last_used_at, k.revoked_at, "
+        "k.graph_id, k.scopes, k.delegation_depth, k.created_by_key_id",
+        params={"tid": org_id},
+    ).result_set
+    return [{
+        "id": r[0], "key_prefix": r[1], "created_by": r[2],
+        "created_at": r[3], "last_used_at": r[4], "revoked_at": r[5],
+        "graph_id": r[6], "scopes": r[7] or [],
+        "delegation_depth": r[8], "created_by_key_id": r[9],
+    } for r in rows]
+
+
 def _mint_caller_key(sdk, org_id: str, *, scopes: list | None,
                      deleg: int | None = None) -> dict:
     """Mint an OWNER-level caller key (deleg NULL) with the given scopes —
@@ -9389,7 +9417,7 @@ class TestProvisioningService:
             assert body["key"]["scopes"] == ["graphs:read", "graphs:write"]
             assert body["key"]["graph_id"] == body["graph"]["id"]
             # Reveal-once: listing keys never re-exposes plaintext
-            keys = sdk.apikey_list(tid)
+            keys = _list_api_keys(sdk, tid)
             for k in keys:
                 assert "key_plaintext" not in k
             # minted key has deleg=0 (one-level-deep by construction)
@@ -9878,7 +9906,7 @@ class TestProvisioningService:
             # revoked it. Revoked keys stay listed (revoked_at set), so
             # assert revocation, not absence.
             caller_key_id = key["id"]
-            orphans = [k for k in sdk.apikey_list(tid)
+            orphans = [k for k in _list_api_keys(sdk, tid)
                        if k.get("created_by_key_id") == caller_key_id
                        and k.get("revoked_at") is None]
             assert not orphans, \
@@ -9908,7 +9936,7 @@ class TestGraphLifecycle:
             gid = r.json()["graph"]["id"]
             minted_plaintext = r.json()["key_plaintext"]
             # Envelope key.id is a REAL key (listable — the registry node id)
-            listed = [k["id"] for k in sdk.apikey_list(tid)]
+            listed = [k["id"] for k in _list_api_keys(sdk, tid)]
             assert r.json()["key"]["id"] in listed
             # Delete with a graphs:delete-scoped key
             delkey = _mint_caller_key(sdk, tid, scopes=["graphs:delete"])

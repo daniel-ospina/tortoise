@@ -7,6 +7,11 @@ import re
 import sys
 from pathlib import Path
 
+# The ONE definition of the per-attempt outcome contract and of the recorded
+# local-receipt refusal set (#5051). `capture_receipts` is dependency-free, so
+# importing it at module load costs nothing and keeps the two rules in one home.
+from tortoise.capture_receipts import REFUSAL_STATUSES
+
 # #2201: single source of truth for markdown discovery. The "Found N markdown
 # files" count announced during `tortoise init` and `tortoise onboard` (whose
 # step-3 index runs the REAL indexer, so the indexer's own line is the one
@@ -22,18 +27,19 @@ from pathlib import Path
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
 
-# The RECORDED local-receipt refusal set: a refusal in this set must never be
-# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
-# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
-# error, NO receipt) … that rule is correct and must not be weakened"*).
+# The RECORDED local-receipt refusal set — defined ONCE in
+# `tortoise/capture_receipts.py` (`REFUSAL_STATUSES`) beside the outcome
+# contract it must NOT be derived from, and imported under this name because
+# the receipt gates read it and `tests/test_session_confirm.py` pins it here.
 #
-# Named EXPLICITLY rather than derived from `classify_failure`, because the two
-# answer DIFFERENT questions, and both answers are correct:
+# It is deliberately INDEPENDENT of the outcome class (#5051), and both answers
+# are correct:
 #
-#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
-#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
-#     capture KEPT in the spool (its `est` is computed from the incoming
-#     capture, so the identical capture succeeds once a node is freed).
+#   * the class answers *"what does this attempt mean, and what may happen to
+#     the entry?"* — and 402 is RETRYABLE there, deliberately: #4614's
+#     data-loss fix needs a quota-refused capture KEPT in the spool (its `est`
+#     is computed from the incoming capture, so the identical capture succeeds
+#     once a node is freed).
 #   * this set answers *"is this a refusal the user must be shown?"* — and 402
 #     is.
 #
@@ -41,7 +47,7 @@ _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycac
 # weaken the receipt rule: the receipt gates stopped excluding it, so a 402
 # whose session happened to be durable minted a receipt for a refusal.
 # `tests/test_session_confirm.py` pins the two rules as independent.
-_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
+_NO_RECEIPT_REFUSAL_STATUSES = REFUSAL_STATUSES
 
 
 def _markdown_files(root: Path | str) -> list[Path]:
@@ -5499,13 +5505,24 @@ def _cmd_install_hooks(args) -> int:
     Two independent halves:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
-      cline / devin;
+      cline / devin — and, for pi, the in-repo ``tortoise-volunteer.ts``
+      EXTENSION (#2119), for openclaw the native plugin DIRECTORY
+      (``~/.openclaw/extensions/tortoise/``, #2120) and, for hermes, the
+      in-repo Python plugin DIRECTORY (``<dir>/.hermes/plugins/
+      tortoise-volunteer/``, the ``pre_llm_call`` surface, #2121) — none of
+      which is a shell hook at all;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
-      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      (``session-start.sh`` / ``session-end.sh`` / ``session-turn.sh``, the
+      per-turn spool added by #3963 so a killed session still files, plus
+      their merged ``settings.json`` entries at timeouts 60 / 60 / 30),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
-      sessionStart cold-context injection hook, #2122) and pi (the in-repo
-      capture extension).
+      sessionStart cold-context injection hook, #2122), pi (the in-repo
+      capture extension, written in the SAME run as the per-turn read
+      extension, and the pair is graded as ONE contract number, #2119) and
+      openclaw (the plugin DIRECTORY above plus its
+      ``plugins.entries.tortoise.enabled`` enablement — discovered is not
+      loaded, #2120).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -5530,16 +5547,13 @@ def _cmd_install_hooks(args) -> int:
     # (the cline target since #2124; the pre-#2124 `.cline/hooks` path is the
     # legacy one, removed by cline's own uninstall).
     if uninstall and harness == "pi":
-        # Derived from the install contract, never retyped (#3502). The
-        # `cursor` and `openclaw` sibling branches below already interpolate
-        # their layout; a literal here names a file the installer no longer
-        # writes the moment the contract's `install_name` moves — the exact
-        # hardcoded-copy drift class #3502 exists to close.
-        print("pi has no shell-hook read seam — nothing for --uninstall to "
-              "remove. The pi capture extension (~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()}) is left in place; delete that "
-              "file to uninstall it.")
-        return 0
+        # #2119: Pi's read seam is NOT a shell-hook registration — it is the
+        # second extension file `tortoise install pi` writes beside the capture
+        # artifact, so `--uninstall` (documented as "the read-hook
+        # registration only, never the capture scripts") removes exactly that
+        # file and leaves capture alone. Before #2119 there was no read seam to
+        # remove and this branch printed a no-op sentence instead.
+        return _uninstall_pi_volunteer(args)
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
     # HOME-scoped capture hook stayed live — the opposite of what a user
@@ -5610,8 +5624,8 @@ def _cmd_install_hooks(args) -> int:
     # root, a foreign cline hook) the command must fail with NOTHING written,
     # not leave a project with capture installed and the read registration
     # refused.  The read half's own dry run performs the exact checks the real
-    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
-    # capture.
+    # run does and writes nothing.  ``pi`` has no *shell-hook* read
+    # registration (its read half is the extension); ``cline`` no capture.
     if harness in ("claude", "codex"):
         refusal = _read_hook_refusal(args)
         if refusal != 0:
@@ -5626,9 +5640,11 @@ def _cmd_install_hooks(args) -> int:
         if rc != 0:
             return rc
     if harness == "pi":
-        # Pi has no shell-hook read seam — its only seam is the capture
-        # extension; `_install_capture_seam` already reported the install,
-        # the no-op, and the MCP/restart guidance.
+        # Pi's seam is TWO extension files, not a shell-hook registration —
+        # `_install_capture_seam` wrote both (the capture artifact and the
+        # per-turn read seam, #2119) and reported them. Falling through to
+        # `_install_read_hook` would inspect (and could rewrite) a CLINE
+        # registration via that helper's `else` branch.
         return 0
     # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
     # injection IS the native plugin, so the capture installer's report is the
@@ -5687,15 +5703,221 @@ def _pi_capture_extension_name() -> str:
     never existed anywhere in this repo or in agent-infra — and promise a
     per-turn context injection the SHIPPED extension does not do. Pi's
     extension API does have that seam (``before_agent_start`` can inject a
-    message, and our own extensions use it); what is missing is Tortoise's
-    wiring of it (#2119, still open). Saying otherwise is a false claim about
-    the harness, not honest copy. Nothing failed when the prose drifted from
-    the artifact because nothing coupled the two; deriving it here is that
-    coupling.
+    message, and our own extensions use it) — Tortoise's wiring of it is
+    ``_pi_volunteer_extension_name()`` below, shipped by #2119. Saying
+    otherwise was a false claim about the harness, not honest copy. Nothing
+    failed when the prose drifted from the artifact because nothing coupled the
+    two; deriving it here is that coupling.
     """
     from tortoise.capture_install import PI_EXTENSION_NAME
 
     return PI_EXTENSION_NAME
+
+
+def _pi_volunteer_extension_name() -> str:
+    """The Pi READ seam's real install name, derived from the contract (#2119).
+
+    A literal here would be the same hardcoded-prose drift #3502 closed for the
+    capture extension: the sentence a user acts on must name the file the
+    installer writes.
+    """
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    return PI_VOLUNTEER_EXTENSION_NAME
+
+
+def _pi_volunteer_is_provably_ours(target: Path) -> bool:
+    """True only when ``target`` is provably the artifact THIS installer writes.
+
+    ⛔ NOT ``_looks_like_our_script`` (review finding 2). That sniff is the
+    *doctor*'s install signal and its own docstring says it is FAIL-OPEN toward
+    "ours" — the bare identifier ``TORTOISE_API_KEY`` matches — and that it is
+    "not a security boundary". An INSTALL may rely on it because a false
+    positive is repaired by a replace that keeps a ``.bak`` copy; an UNINSTALL
+    DELETES, so a false positive is unrecoverable (measured: a 4-line
+    hand-written ``~/.pi/agent/extensions/tortoise-volunteer.ts`` that merely
+    referenced ``process.env.TORTOISE_API_KEY`` was deleted, rc 0, no backup).
+    The destructive path therefore requires proof — either
+
+      * byte-identity with the shipped source (exactly what ``install pi``
+        copies), or
+      * the canonical ``// tortoise-hook-version: N`` marker, which every
+        generation of this artifact carries,
+
+    and refuses anything else as the user's own file.
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    # ⛔ THE TWO READS ARE SEPARATE ON PURPOSE (#11584 review finding 3). One
+    # `try` around BOTH comparisons made an unavailable SHIPPED SOURCE read as
+    # "the target is not provable": the `OSError` from `Path(source).read_bytes()`
+    # returned False before the marker fallback was ever consulted, so a
+    # partially-extracted wheel (or a downgrade) made `--uninstall` print
+    # "is not a Tortoise artifact this installer wrote" about the user's own
+    # marked seam and refuse the delete. A missing source is a fact about the
+    # PACKAGE; the marker fallback below is exactly the evidence that survives
+    # it, and it is consulted because every generation carries the marker.
+    try:
+        installed = target.read_bytes() if target.is_file() else None
+    except OSError:  # pragma: no cover - an unreadable target is not provable
+        return False
+    if installed is not None and source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+        if shipped is not None and installed == shipped:
+            return True
+    return _hook_install.read_hook_version(target) is not None
+
+
+def _pi_volunteer_local_edit_backup(target: Path) -> tuple[Path, str] | None:
+    """Preserve a locally-edited read seam before ``--uninstall`` deletes it.
+
+    Returns ``(backup_path, why)`` — the copy written and the sentence telling
+    the operator why it was kept — or ``None`` when the bytes on disk are
+    PROVABLY the shipped ones (the ordinary case, where deleting loses nothing
+    but a copy this installer can rewrite).
+
+    A user edit KEEPS the ``// tortoise-hook-version: N`` marker, so it stays
+    "provably ours" while no longer being what we shipped: `hooks status` names
+    that shape ``modified-artifact`` ("local edit"), and it is the one seam a
+    delete can destroy unrecoverably (#11584 review round 9).
+
+    ⛔ THE COMPARISON IS ONLY SKIPPED WHEN IT PROVES EQUALITY — never when it
+    merely fails to run (#11584 review finding 1). One `try` around BOTH reads
+    made an unreadable SHIPPED SOURCE return ``None`` here, which the caller
+    reads as "nothing to preserve", so a partially-extracted wheel (or a
+    downgrade) silently deleted a locally-edited seam with no backup and rc 0 —
+    the same unrecoverable-delete hazard as round 9, re-opened through the
+    source side instead of the write side. It is reachable precisely because
+    :func:`_pi_volunteer_is_provably_ours` is DELIBERATELY built to pass when the
+    shipped source is missing (its marker fallback): on that path "provably
+    ours" no longer implies "we can read what we shipped", so the round-9
+    docstring's justification ("the ownership check has already run") does not
+    hold. An unavailable source makes equality UNPROVABLE, which is not the same
+    as PROVEN EQUAL, so the target is preserved.
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    # The two reads are SEPARATE (as in `_pi_volunteer_is_provably_ours`) so an
+    # unreadable TARGET cannot be confused with an unreadable SOURCE.
+    try:
+        installed = target.read_bytes()
+    except OSError:  # pragma: no cover - `_pi_volunteer_is_provably_ours` refuses this
+        # Nothing to copy, so nothing can be preserved: defence in depth only —
+        # the ownership check already returned False for an unreadable target.
+        return None
+    shipped: bytes | None = None
+    if source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+    if shipped is not None and installed == shipped:
+        return None
+    from tortoise.capture_install import _atomic_bytes, _backup_path
+
+    # `_atomic_bytes` (not `write_bytes`) for the same reasons `_install_pi`
+    # uses it: it replaces the directory entry rather than writing through a
+    # planted symlink or hard link, and mode 0o600 matches the sibling backup.
+    backup = _backup_path(target)
+    _atomic_bytes(backup, installed, 0o600)
+    why = ("local edits are preserved" if shipped is not None else
+           "the shipped source could not be read, so local edits cannot be "
+           "ruled out — the copy is kept")
+    return backup, why
+
+
+def _uninstall_pi_volunteer(args) -> int:
+    """`tortoise install pi --uninstall` — remove the per-turn READ seam.
+
+    Scoped exactly like the shell-hook harnesses' ``--uninstall``: it removes
+    the READ half and says what it left behind. Pi's read half is a file
+    (``tortoise-volunteer.ts``) rather than a settings.json entry, so removing
+    it is a delete of one path — and only a path PROVABLY ours
+    (:func:`_pi_volunteer_is_provably_ours`), because the extensions directory
+    is shared with every other extension the user installed. A delete has no
+    undo, so this is the one place in the family where the weakest ownership
+    evidence is not good enough.
+    """
+    from tortoise import hook_install as _hook_install
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    root = _hook_install.artifact_root("pi", Path.home())
+    target = (root / PI_VOLUNTEER_EXTENSION_NAME) if root is not None else None
+    if target is None:  # pragma: no cover - "pi" is a registered contract
+        print("pi has no registered artifact contract — nothing to remove.")
+        return 1
+    capture = _pi_capture_extension_name()
+    if not target.exists() and not target.is_symlink():
+        print(f"Pi per-turn memory injection is not installed ({target} is "
+              f"absent) — nothing to remove. The capture extension "
+              f"({capture}) is untouched.")
+        return 0
+    if not _pi_volunteer_is_provably_ours(target):
+        print(f"Refusing: {target} exists but is not a Tortoise artifact this "
+              "installer wrote — nothing was removed. Move it aside yourself "
+              "if you are sure it is not another extension.", file=sys.stderr)
+        return 1
+    # ⛔ `--dry-run` MEANS "without writing", and this branch is the one place
+    # in the family where the read seam is a FILE: before #2119 the `pi
+    # --uninstall` arm printed a sentence and touched nothing, so the dry-run
+    # contract could not be violated here. A delete is the strongest write the
+    # verb performs (there is no undo — the file was a copy, not a link), so it
+    # is printed and skipped, never performed (review finding 2).
+    if getattr(args, "dry_run", False):
+        print(f"[dry-run] would remove {target} (per-turn read seam)")
+        print(f"Note: the capture extension ({capture}) would be left in place.")
+        return 0
+    # ⛔ BACK UP A LOCALLY-EDITED SEAM BEFORE DELETING IT (#11584 review round
+    # 9). `_pi_volunteer_is_provably_ours` proves AUTHORSHIP, not that the bytes
+    # on disk are still the shipped ones — a user's edit to our file keeps the
+    # `// tortoise-hook-version: N` marker, so it is provably ours AND provably
+    # not what we shipped. `hooks status` calls that shape `modified-artifact`
+    # ("local edit"); deleting it with no copy is unrecoverable, which is the
+    # exact hazard this verb's own docstring names one level up ("an UNINSTALL
+    # DELETES, so a false positive is unrecoverable"). The sibling verb on the
+    # same file — `install pi` over a differing copy — already preserves it, so
+    # the two halves of the family disagreed about the same edit. A backup is
+    # written only when the bytes DIFFER from the shipped source; the ordinary
+    # unedited case still just removes the file.
+    try:
+        backup = _pi_volunteer_local_edit_backup(target)
+    except OSError as e:
+        # ⛔ FAIL CLOSED, AND FAIL WITH A SENTENCE (#11584 review round 10). The
+        # backup exists to make this delete recoverable, so a backup that cannot
+        # be WRITTEN must abort the delete rather than proceed without one — and
+        # it must not escape as a traceback. Before this guard the write was the
+        # one statement in this verb outside a `try`, so an unwritable extensions
+        # directory (a read-only mount, a root-owned dir) cost the user a raw
+        # `PermissionError` stack with no message, on the same verb whose sibling
+        # failure paths all name the path and say what happened.
+        print(f"Cannot preserve the local edits in {target} before removing "
+              f"it: {e.__class__.__name__}: {e}", file=sys.stderr)
+        print(f"Nothing was removed. Move {target} aside yourself, or re-run "
+              f"once {target.parent} is writable.", file=sys.stderr)
+        return 1
+    if backup is not None:
+        kept, why = backup
+        print(f"backed up {target} → {kept} ({why})")
+    try:
+        target.unlink()
+    except OSError as e:
+        print(f"Cannot remove {target}: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"removed {target} — per-turn memory injection is uninstalled.")
+    # The accounting rule (#3963/#3808 R14): a user who asked to uninstall must
+    # not conclude the whole seam is gone when capture is still live.
+    print(f"Note: `--uninstall` removes only the per-turn read seam. The "
+          f"capture extension ({capture}) is left in place and still files "
+          "sessions; delete that file to uninstall it.")
+    return 0
 
 
 def _install_capture_seam(args, install_capture) -> int:
@@ -5732,8 +5954,32 @@ def _install_capture_seam(args, install_capture) -> int:
     if args.harness == "pi" and not getattr(args, "dry_run", False):
         # Under `--dry-run` nothing was written, so the success sentence would
         # be a lie (the action lines already said what WOULD happen).
-        claim = "Pi capture extension installed. " if result.changed else ""
+        # ⛔ THE CLAIM NAMES THE CAPTURE HALF, SO IT IS GATED ON THE CAPTURE
+        # HALF (#11584 review finding 1). `result.changed` is the UNION of the
+        # two artifacts `install_capture("pi", ...)` writes, so keying this
+        # sentence off it made the run that wrote ONLY the read seam — a stale
+        # read seam, or `install pi` after `--uninstall` — print "Pi capture
+        # extension installed." about a capture artifact it never touched. The
+        # action lines above stay truthful either way; this is the one sentence
+        # an operator uses to answer "did capture get reinstalled?", which is
+        # the #3808 R13 over-claim this function's docstring forbids.
+        from tortoise.capture_install import PI_EXTENSION_NAME
+
+        capture_installed = PI_EXTENSION_NAME in result.changed_artifacts
+        claim = "Pi capture extension installed. " if capture_installed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
+        # #2119: name the READ half too. It is a separate extension file, and
+        # an injection seam that is silent by default (empty graph) is
+        # indistinguishable from one that never loaded — so the install says
+        # which file carries it and which switch turns on the visible surface.
+        print(f"Per-turn memory injection is installed as "
+              f"~/.pi/agent/extensions/{_pi_volunteer_extension_name()}: "
+              "`before_agent_start` runs the shared reflex over your prompt and "
+              "injects the why-context block silently. Set "
+              '`{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json to render it (with the "
+              "surfaced-pointer marker) instead; TORTOISE_VOLUNTEER_DISABLE=1 "
+              "switches the seam off.")
     if args.harness == "codex" and not getattr(args, "dry_run", False):
         # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
         # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
@@ -5942,8 +6188,9 @@ def _install_read_hook_impl(args) -> int:
               "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
-              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
-              "with a merged SessionStart/SessionEnd entry (timeout 60)")
+              "session-start.sh / session-end.sh / session-turn.sh into "
+              "<dir>/.claude/hooks with merged SessionStart/SessionEnd/"
+              "UserPromptSubmit entries (timeout 60 / 60 / 30)")
         print("  tortoise install cline   → <dir>/.clinerules/hooks/"
               "UserPromptSubmit (→ volunteer-turn.sh cline)")
         # Devin's file is the ONE JSON seam with no ``"hooks"`` wrapper: the
@@ -5957,8 +6204,11 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
               "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()} (the capture extension; Pi has "
-              "no shell-hook read seam)")
+              f"{_pi_capture_extension_name()} (capture) + "
+              f"{_pi_volunteer_extension_name()} (the per-turn READ seam: "
+              "`before_agent_start` → the shared reflex → an injected "
+              "message). Pi's hooks ARE extensions, so there is no shell-hook "
+              "registration to merge)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
@@ -5971,6 +6221,11 @@ def _install_read_hook_impl(args) -> int:
               "install needs HERMES_ENABLE_PROJECT_PLUGINS=1 AND "
               "`hermes plugins enable tortoise-volunteer` — Hermes plugins "
               "are opt-in, so the directory alone injects nothing)")
+        print("  tortoise install openclaw → ~/.openclaw/extensions/"
+              "tortoise/ (the plugin DIRECTORY: its before_prompt_build hook "
+              "is the per-turn READ seam and its llm_output hook the capture "
+              "seam) + plugins.entries.tortoise.enabled in "
+              "~/.openclaw/openclaw.json — discovered is not loaded (#2120)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
@@ -7047,6 +7302,21 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
     ``--dir`` is honoured rather than ignored in favour of the process HOME,
     which would install into a different tree and leave ``--dir`` untouched.
+
+    ⛔ ``introduce_read_seam=False``: repairing a capture install must never
+    TURN ON the per-turn read seam (#2119).  Until this flag existed, this
+    function called ``install_capture`` with its defaults — the same entry
+    point ``tortoise install pi`` uses — so the repair command that
+    ``hooks status`` prints reinstalled ``tortoise-volunteer.ts`` in a tree
+    where the user had explicitly run ``tortoise install pi --uninstall``
+    (which had said "per-turn memory injection is uninstalled").  The seam then
+    searched the prompt on every turn and, on a machine with no ``tortoise`` on
+    ``PATH`` but a configured key, POSTed the prompt window to the hosted
+    endpoint — after the user had opted out, and without the command's own
+    output ever saying the exposure changed.  That is a bypass of the recorded
+    W4 opt-in ("installing the extension IS the opt-in"), so the repair path
+    REFRESHES an installed seam (a stale copy is real drift, which is this
+    caller's job) and never introduces one.
     """
     import sys as _sys
 
@@ -7056,7 +7326,8 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     dry_run = getattr(args, "dry_run", False)
     try:
         result = install_capture(args.harness, root=root, home=home,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run,
+                                 introduce_read_seam=False)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -7649,14 +7920,11 @@ def _session_post(api_key: str, api_url: str):
             alone would confirm them. Uniformity is deliberate: a reviewer must
             not have to work out why one path confirms a 402 and the other does
             not. The deferral is recoverable either way (each is `retry`, so the
-            entry is kept and re-posted); #5051 holds the question of broadening
-            both.
+            entry is kept and re-posted).
             """
-            from tortoise.capture_spool import classify_failure
-            if (outcome.ok
-                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(
-                        outcome.status, outcome.detail) != "retry"):
+            from tortoise.capture_receipts import may_mint_local_receipt
+            if outcome.ok or not may_mint_local_receipt(
+                    outcome.status, outcome.detail):
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -9876,18 +10144,27 @@ def _cmd_sessions_import(args) -> int:
         return 1
 
     def _spool_if_retryable(status: int | None, detail: str) -> None:
-        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+        """Park the turns in the DURABLE SPOOL unless the refusal is TERMINAL.
 
         The server's capture guard REFUSES rather than enqueues (its capacity
-        gate advertises `Retry-After`), and `classify_failure` already treats
-        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
-        therefore a DEFERRAL, not a rejection of the content: the POST reached
-        the server, there is no server-side copy to fall back on, and without
-        this the turns are lost. `claude` and `pi` survive the identical 504
-        because `session capture` spools BEFORE its POST; this path must too.
+        gate advertises `Retry-After`), and #5051's contract
+        (`capture_receipts.capture_outcome`) says which refusals are worth
+        keeping: `retryable` (5xx / 402 / 408 / 425 / 429 / 409 / 3xx /
+        no-status) AND `policy` (401/403/407 — a reversible credential or
+        entitlement state, #4895). A refusal is therefore a DEFERRAL, not a
+        rejection of the content: the POST reached the server, there is no
+        server-side copy to fall back on, and without this the turns are lost.
+        `claude` and `pi` survive the identical 504 because `session capture`
+        spools BEFORE its POST; this path must too.
 
-        PERMANENT failures must NOT be parked here — a malformed payload never
-        becomes valid by waiting, and it would retry forever.
+        A `policy` refusal is the case this gate used to get WRONG: 401/403/407
+        were `permanent` here, so a suspended org's 403 was never spooled at
+        all — the capture was dropped with `exit 1` and an identity-less
+        breadcrumb as the only record (the parent's trace, #5051 §3).
+
+        PERMANENT failures (400/404/405/406/413/415/422/…) must NOT be parked
+        here — a malformed payload never becomes valid by waiting, and it would
+        retry forever.
 
         Best-effort by construction: the spool is ADDITIONAL to the
         `capture-failure` breadcrumb the caller already wrote, never a
@@ -9897,13 +10174,13 @@ def _cmd_sessions_import(args) -> int:
         try:
             import time as _time
 
+            from tortoise.capture_receipts import may_keep_entry
             from tortoise.capture_spool import (
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
                 _terminal_marker,
                 capture_key,
-                classify_failure,
                 read_spool_meta,
                 spool_dir,
                 write_spool_entry,
@@ -9914,7 +10191,7 @@ def _cmd_sessions_import(args) -> int:
                 sanitize_attribution_field,
             )
 
-            if classify_failure(status, detail) != "retry":
+            if not may_keep_entry(status, detail):
                 return
             # Clamp exactly as `session capture` does — through the SDK's ONE
             # clip definition (#4897), never a bare literal: the spool's
@@ -10024,15 +10301,12 @@ def _cmd_sessions_import(args) -> int:
         never replace the honest error with a traceback (fail-open contract).
         """
         try:
-            from tortoise.capture_spool import (
-                _clear_breadcrumb_for,
-                classify_failure,
-            )
+            from tortoise.capture_receipts import may_mint_local_receipt
+            from tortoise.capture_spool import _clear_breadcrumb_for
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
-            if (status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(status, detail) != "retry"):
+            if not may_mint_local_receipt(status, detail):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:
@@ -10094,9 +10368,13 @@ def _cmd_sessions_import(args) -> int:
             # Deliberately broad: reading a DIAGNOSTIC body must never replace
             # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
-        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
-        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
-        # later drain (#4714) but still exits 1 above with no receipt.
+        # A refusal that can still succeed later is SPOOLED for the next drain
+        # (#4714) and still exits 1 above with no receipt: `retryable`
+        # (402/408/409/425/429/5xx, INCLUDING 503) AND `policy` (401/403/407 —
+        # a suspended org or a rotated key, #5051/#4895). A `permanent` refusal
+        # (400/404/405/406/413/415/422/…) is NOT parked: a malformed payload
+        # never becomes valid by waiting. The 2xx-only LOCAL receipt rule is a
+        # separate question and is untouched (Task 15 acceptance, #4675).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         if _confirm_already_captured(e.code, body):
             return 0
@@ -11956,19 +12234,29 @@ def _print_harness_instructions(harness: str) -> None:
         # activate it, contradicting both the install report and the dashboard's
         # Pi setup.
         #
-        # The replacement says what the extension DOES, and scopes the gap to
+        # The replacement says what the extensions DO, and scopes the gap to
         # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
         # injection seam (``before_agent_start`` injects a message, and our own
         # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
         # "Pi cannot inject" would be a false impossibility claim of the same
-        # class as the promise it replaces. What is missing is Tortoise's use of
-        # that seam (#2119, still open).
+        # class as the promise it replaces.
+        #
+        # #2119 landed the wiring, so the honest copy changed again: BOTH
+        # artifacts are named (each derived from the install contract), and the
+        # sentence that said Pi injects nothing is GONE — keeping it would now
+        # be the same false claim in the other direction, and it is the one a
+        # user would act on by reaching for the MCP tools instead.
         _pi_ext = _pi_capture_extension_name()
+        _pi_vol = _pi_volunteer_extension_name()
         print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
+        print(f"  ✅ {_pi_vol} extension injects graph context per turn: Pi's")
+        print("  `before_agent_start` runs the shared reflex over your prompt and")
+        print("  adds the why-context block to the turn (silent unless you set")
+        print('  `{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json).")
         print(f"  {_PI_RESTART_GUIDANCE}")
-        print("  It files your sessions; it does not inject context per turn yet")
-        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
-        print("  want graph context.")
+        print("  Call tortoise_help() or the Tortoise MCP tools when you want to")
+        print("  query the graph yourself.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":

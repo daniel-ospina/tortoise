@@ -15,6 +15,22 @@ just the response.
 Runnable with the docker lane (default) or via an embedded db_path SDK —
 the sdk fixture uses a temp embedded FalkorDBLite like
 test_capture_session.py.
+
+⚠️ **`#4282` (2026-10-27) deleted `TortoiseSDK.capture_session`, and with it 17 of
+this file's 21 legs.** The end-to-end matrix that drove the SDK door — the m2
+in-capture repeat/paraphrase/drop/role-inversion cases, the v2 cross-session
+re-ingest cases, the noop-gate scoping leg, the fold-lane verb leg, the three
+promotion legs and the hosted/mirror parity leg — called `sdk.capture_session`
+as its DRIVER, and every one of them asserted a `DEDUP_*` verdict produced INSIDE
+that wrapper's write path. What survives and is still executed here: the
+ep-target fold/calibration leg, the two content-hash/rephrase unit legs, and the
+hosted-lane promotion leg (the hosted lane keeps the write path). The verdict
+vocabulary itself (`DEDUP_CONTENT_HASH_HIT`, `DEDUP_REPHRASE_LINKED`, …) is still
+produced by `tortoise/write_verb.py` and is unit-covered in
+`tests/test_write_verb.py`; what is gone is the END-TO-END re-ingest matrix, and
+nothing re-measures it today. Recording it here rather than letting 17 legs vanish
+silently: re-adding them means re-driving the surviving primitives (writer →
+mint → materialize → extract), not re-adding the module.
 """
 
 from __future__ import annotations

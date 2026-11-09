@@ -42,6 +42,18 @@ Run (docker lane):
   TORTOISE_DB_URI='docker://:falkordb@localhost:6379/tortoise_test_matrix' \\
       uv run pytest tests/test_journal_embedding_5004.py -q --tb=short
 """
+# ⚠️ `#4282` (2026-10-27) deleted `TortoiseSDK.capture_session`, and four legs of
+# this file drove it as their PRODUCER: `test_session_turn_producer_journals_the_vector`,
+# `test_turn_recapture_with_the_embedder_down_keeps_the_journalled_vector`,
+# `test_a_preserved_turn_vector_is_not_attested_to_the_active_model` and
+# `test_a_cleared_turn_vector_is_cleared_on_replay_too`. Their subject — the
+# turn-vector journal writer and its replay identity — SURVIVES, and the
+# `EventAPI`/`_write_session_and_turns` producer legs below still pin it, so the
+# writer is not unwatched; what is unmeasured is the CAPTURE-PATH producer and the
+# embedder-down RE-CAPTURE leg (a re-capture that must keep the journalled vector
+# rather than attesting a new model). Re-adding them means re-driving the surviving
+# capture primitives, not restoring this module's imports.
+
 from __future__ import annotations
 
 import json
