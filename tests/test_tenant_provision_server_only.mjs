@@ -297,14 +297,22 @@ try {
     call("POST", jwtHeaders, BODY),
     500
   );
-  // The status alone is NOT the assertion: any throw in the handler reaches the
-  // outer catch as 500. The row's own label promises a NAMED cause, so pin the
-  // message the guard writes.
+  // The status alone is NOT the assertion: the outer catch returns a BARE 500
+  // (`{"error":"Internal server error"}`, `index.ts` `:526-529`), so a 500 can
+  // come from anything that throws above it, while this row's own label promises
+  // a NAMED cause.
+  //
+  // ⛔ NOT because "status alone keeps the row green with the guard deleted" —
+  // measured with `if (!fastApiUrl)` changed to `if (false)`, the request falls
+  // through to `provision_team` and returns **502** (`index.ts` `:445-451`), which
+  // the status pin above already records as a failure. (The pepper IS set above,
+  // so `hashApiKey` cannot 500 here either.) This pin keeps the row's NAME true;
+  // it is not what catches a deleted guard.
   assert.match(
     await noFastapi.text(),
     /FASTAPI_URL missing/,
-    "the 500 must name FASTAPI_URL — a bare 500 is also what a pepper/RPC throw "
-      + "produces, so status alone would keep this row green with the guard deleted"
+    "the 500 must name FASTAPI_URL — a bare 500 from the outer catch says only "
+      + "'Internal server error', which leaves the operator no condition to act on"
   );
 
   envVars["FASTAPI_URL"] = "http://fastapi.test";
