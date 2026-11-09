@@ -1223,6 +1223,16 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         # and PERMITTED — with `V=off` that is N ungated workers. MEASURED on the
         # shipped block (2026-11-09): `permit`.
         (("sh", "-c", "uvicorn app:app --lifespan $V --workers 4"), {}),
+        # ⛔ BACKSLASH ESCAPING. `sh -c` removes a backslash-newline BEFORE
+        # word-splitting and unescapes `\<char>`, so a wrapped MULTI-LINE
+        # compose/k8s `command:` — the ordinary way to wrap a long one — reaches
+        # uvicorn as `--lifespan off`. The normaliser stripped quotes and
+        # collapsed whitespace but left the backslash in `_norm`, so the literal
+        # match missed: rc=0, UNVERIFIED, FOUR workers, the lifespan never run,
+        # NO gate on either side (MEASURED at 606029b21db7). Same hole for a
+        # backslash-escaped value.
+        (("sh", "-c", "uvicorn app:app --lifespan \\\n off --workers 4"), {}),
+        (("sh", "-c", "uvicorn app:app --lifespan \\off --workers 4"), {}),
         (("sh", "-c", "$UVICORN_LIFESPAN uvicorn app:app --workers 4"), {}),
     ):
         proc = _run_worker_block(argv, environ)
@@ -1284,6 +1294,21 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         ("uvicorn", "app:app", "--lifespan", "off",
          "--header", "X: Y"), {})
     assert proc.returncode == 0, proc.stderr
+    assert "verified as ONE worker" in proc.stdout, proc.stdout
+
+    # ⛔ A HEADER VALUE THAT CONTAINS THE WORD `uvicorn` IS STILL NOT A SHELL
+    # STRING. The wrapper test looked for `*uvicorn*` anywhere in a
+    # whitespace-bearing token, so this direct, provably-one-worker argv was
+    # REFUSED with the false cause "the server is launched through a shell
+    # string" (MEASURED at 606029b21db7). `X-Served-By: uvicorn 0.52.1` is
+    # exactly the header a uvicorn service sets, so the check is on the FIRST
+    # WORD of the token instead.
+    proc = _run_worker_block(
+        ("uvicorn", "app:app", "--lifespan", "off",
+         "--header", "X-Served-By: uvicorn 0.52.1"), {})
+    assert proc.returncode == 0, (
+        f"a header VALUE containing 'uvicorn' was refused as a shell string: {proc.stderr!r}"
+    )
     assert "verified as ONE worker" in proc.stdout, proc.stdout
 
     # ⛔ AND THE MIRROR — the arity walk must not OVER-block. `--app-dir

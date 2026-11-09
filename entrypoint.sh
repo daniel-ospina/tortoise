@@ -671,8 +671,16 @@ _argv_is_shell_wrapped() {
         esac
         case "$_arg" in
             *[[:space:]]*)
-                case "$_arg" in
-                    *uvicorn*) return 0 ;;
+                # ⛔ A whitespace-bearing token is a shell STRING only when its
+                # FIRST WORD is a command. Testing `*uvicorn*` anywhere in the
+                # token was an OVER-BLOCK: an exec-form CMD with
+                # `--header "X-Served-By: uvicorn 0.52.1"` is a direct argv whose
+                # count is provably ONE, and it was REFUSED with the false cause
+                # "the server is launched through a shell string" (MEASURED at
+                # 606029b21db7). A header value is not a command line.
+                case "${_arg%%[[:space:]]*}" in
+                    sh|bash|dash|ash|zsh|ksh|exec|uvicorn|python|python3\
+                    |/*|./*|../*) return 0 ;;
                 esac
                 ;;
         esac
@@ -719,6 +727,17 @@ _wrapped_argv_disables_lifespan() {
             *[[:space:]]*) ;;
             *) continue ;;
         esac
+        # ⛔ APPLY THE SHELL'S OWN ESCAPING RULE BEFORE THE SPLIT. `sh -c` removes
+        # a backslash-newline BEFORE word-splitting and unescapes `\<char>`, so a
+        # wrapped multi-line compose/k8s command — `--lifespan \<newline> off`,
+        # the ordinary way to wrap a long `command:` — reached uvicorn as
+        # `--lifespan off` while the normalised text still held the backslash and
+        # missed the literal match: rc=0, UNVERIFIED, FOUR workers, the lifespan
+        # never run, NO gate on either side (MEASURED at 606029b21db7). Same hole
+        # for `--lifespan \off`. Normalising quotes and whitespace but not
+        # BACKSLASHES was one more spelling of the same mistake.
+        _arg="${_arg//\\$'\n'/}"
+        _arg="${_arg//\\/}"
         _arg="${_arg//\"/}"
         _arg="${_arg//\'/}"
         # `set -f` so a literal `*` in the string is not glob-expanded.
