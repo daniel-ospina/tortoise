@@ -297,6 +297,14 @@ def test_an_unreadable_read_seam_is_not_readable_not_foreign(home):
     """
     from tortoise import hook_install
 
+    # #11584 review: `0o000` is not unreadable to uid 0 — `access(2)` on a
+    # privileged process bypasses the mode bits, so the detector's own
+    # `os.access(installed, os.R_OK)` gate answers True, the file grades clean,
+    # and this row reds on a HEALTHY tree. The same guard (twelve files, the
+    # sibling `test_capture_install.py` rows included) is the repo's precedent.
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores file mode bits, so the read would succeed")
+
     result = _install(home)
     assert result.ok, result.error
     root = _ext_dir(home)

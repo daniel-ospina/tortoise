@@ -329,12 +329,15 @@ export function clipToBytes(text: string, maxBytes: number): string {
  * MATCHES them; before this rule it was the one that did not.
  *
  * ⛔ IT STILL DIVERGES FROM THE **CAPTURE** FAMILY, AND THAT IS RECORDED, NOT AN
- * OVERSIGHT. `tortoise-capture.ts::resolveConfig` and the shipped CAPTURE hooks
- * (which call `tortoise session capture`) resolve `envKey || fileKey` under
- * `include_env=True`, so an env-only key DOES authorize their upload — the same
- * resolver's docstring rules on exactly this ("env alone can still make these
- * surfaces transmit where it cannot for [context/volunteer]",
- * `_resolve_config_path`). Two consequences, and both are load-bearing:
+ * OVERSIGHT. `tortoise-capture.ts::resolveConfig` (`apiKey = envKey || fileKey`)
+ * and the shipped CAPTURE hooks (which call `tortoise session capture`) keep the
+ * env channel, so an env-only key DOES authorize their upload: `session
+ * capture` resolves through `_resolve_transmit_config` →
+ * `_resolve_config_path(global_only=True)`, which drops the cwd FILE candidate
+ * but leaves `include_env=True`. The divergence is recorded by name, in the
+ * resolver's own docstring: "env alone can still make these surfaces transmit
+ * where it cannot for those two" (`_resolve_transmit_config`,
+ * `tortoise/__main__.py`). Two consequences, and both are load-bearing:
  * exporting only `TORTOISE_API_KEY` gives a Pi user the CAPTURE half hosted and
  * the READ half local, and a future lane must NOT "align" this seam back to
  * its capture twin — that would transmit prompt text from a per-turn surface
