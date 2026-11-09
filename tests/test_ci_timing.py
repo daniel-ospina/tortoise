@@ -1137,6 +1137,61 @@ def test_a_truncated_reading_on_a_parametrised_file_cannot_lower_the_row(
     assert "the reading saw 400 of 486 testcases pytest collects" in row, row
 
 
+def test_a_skipped_case_cannot_be_counted_as_a_measured_one(
+        tmp_path: Path) -> None:
+    """#11602 review, P1 — A `<skipped>` CASE IS NOT A MEASURED CASE.
+
+    `parse_junit` counts every testcase the report CARRIED in `tests` and only the
+    ones that EXECUTED in `ran`, while `total_ms` sums the executed ones alone. A
+    witness built from `tests` therefore reads "every case was measured" out of a
+    reading that measured the cheap remainder, and the row is discounted to it —
+    the #9651 under-weight `coverage` exists to prevent, and reachable for a
+    `parametrize` file only since #11607 gave that class a denominator at all.
+
+    Non-vacuity: with the witness built from `m["tests"]` — the shape that shipped
+    — coverage is (3, 3), `observed >= declared` holds and the row re-bases to
+    0.1 s, so both assertions below fail.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "tests" / "test_param.py").write_text(
+        "import pytest\n"
+        "@pytest.mark.parametrize('arm', [1, 2, 3])\n"
+        "def test_one(arm):\n    pass\n", encoding="utf-8")
+    write_junit(tmp_path, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="3">'
+                + "".join(
+                    '<testcase classname="tests.test_param" '
+                    f'name="test_one[{i}]" file="tests/test_param.py" '
+                    'time="0.05"/>' for i in (1, 2))
+                + '<testcase classname="tests.test_param" name="test_one[3]" '
+                  'file="tests/test_param.py" time="0">'
+                  '<skipped type="pytest.skip" message="needs a live DB"/>'
+                  "</testcase>"
+                "</testsuite></testsuites>")
+    measurements = ci_timing.collector_file_measurements(tmp_path / "logs")
+    entry = measurements["test_param.py"]
+    # the two counts DIVERGE on exactly this shape, and only `ran` describes the
+    # seconds beside it
+    assert (entry["tests"], entry["ran"]) == (3, 2)
+    # the reading IS the cost of the two cases that ran, so it is a LOWER bound
+    assert entry["seconds"] == 0.1
+
+    text, stats = ci_timing.render_refreshed_manifest(
+        _PARAMETRISED_MANIFEST, {"test_param.py": entry["seconds"]},
+        "2026-11-09T09:00:00Z",
+        coverage={"test_param.py": (entry["ran"], 0)},
+        sample_label=_LOWER_BOUND_LABEL,
+        # the collection probe DOES answer (3 collected) — so the hold is decided
+        # by the skip, not by a missing denominator
+        collected={"test_param.py": 3})
+    assert yaml.safe_load(text)["durations"]["test_param.py"] == 545.1
+    assert stats["kept_as_lower_bound"] == 1
+    row = next(ln for ln in text.split("\n")
+               if ln.strip().startswith("test_param.py:"))
+    assert "the reading saw 2 of 3 testcases pytest collects" in row, row
+
+
 def test_collected_test_counts_probes_pytest_and_fails_closed(
         tmp_path: Path) -> None:
     """The probe is the denominator's whole basis, so it is pinned against
@@ -3017,7 +3072,9 @@ def test_a_partial_reading_of_a_parametrised_file_cannot_lower_a_weight(
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     declared = ci_timing.declared_test_counts(measurements, repo)
-    coverage = {path: (m["tests"], declared[path])
+    # `ran`, not `tests`: a skipped case is not a measured one (#11602 review,
+    # P1). No skips in this fixture, so both counts are 1 here.
+    coverage = {path: (m["ran"], declared[path])
                 for path, m in measurements.items() if path in declared}
     # The parametrised file has NO denominator, so the caller supplies no witness
     # for it — not a floor it could satisfy with a fifth of the file.
@@ -3108,7 +3165,11 @@ def test_a_phase_only_reading_cannot_pass_itself_off_as_full_coverage(
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     declared = ci_timing.declared_test_counts(measurements, repo)
-    coverage = {path: (m["tests"], declared[path])
+    # `ran`, not `tests`: the witness certifies EXECUTED testcases (#11602 review,
+    # P1). This fixture has no skips, so the two counts agree here — the
+    # distinction is pinned by
+    # `test_a_skipped_case_cannot_be_counted_as_a_measured_one`.
+    coverage = {path: (m["ran"], declared[path])
                 for path, m in measurements.items() if path in declared}
     assert coverage == {"test_alpha.py": (1, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
@@ -3154,7 +3215,8 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
 """)
     measurements = ci_timing.collector_file_measurements(logs)
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(9.0),
-                                             "tests": 2, "source": "top-15"}
+                                             "tests": 2, "ran": 2,
+                                             "source": "top-15"}
     # A CENSUS reading that wins is what makes the label say `junit-census+top-15`
     # — the label is derived from this field, never from a file listing.
     write_junit(logs.parent, "junit.xml",
@@ -3165,8 +3227,13 @@ def test_collector_file_measurements_pairs_the_winning_reading_with_its_own_coun
                 'file="tests/test_alpha.py" line="2" time="6.0"/>'
                 "</testsuite></testsuites>")
     measurements = ci_timing.collector_file_measurements(logs)
+    # `ran` travels with the winning reading for the same reason `tests` and
+    # `source` do — it is the count the coverage witness reads (#11602 review, P1),
+    # so pairing it with the LOSER's reading would be the same defect one layer on.
+    # No skips in this census, so `ran == tests` here.
     assert measurements["test_alpha.py"] == {"seconds": pytest.approx(18.0),
-                                             "tests": 2, "source": "census"}
+                                             "tests": 2, "ran": 2,
+                                             "source": "census"}
     # the long-standing weights-only view is a projection of the same reading
     assert ci_timing.collector_file_weights(logs) == {
         "test_alpha.py": pytest.approx(18.0)}
@@ -3233,11 +3300,85 @@ def test_the_cli_wires_the_lower_bound_witness(
         "--allow-window-only", "--allow-non-push-run",
     ])
     assert ci_timing.main() == 0
+    # `ran`, not `tests` (#11602 review, P1): this window has no skips, so the two
+    # counts agree — the DIVERGENCE arm is
+    # `test_the_cli_witness_counts_executed_testcases_not_reported_ones`.
     assert captured["coverage"] == {"test_alpha.py": (1, 4)}
     # A window-only sweep says so: its only justification is
     # `--allow-window-only`, so the label may not claim a census it never read.
     assert captured["sample_label"] == (
         "ci-timing top-15 2026-10-19 (run 39191149586)")
+
+
+def test_the_cli_witness_counts_executed_testcases_not_reported_ones(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#11602 review, P1 — THE CALLER MUST WIRE `ran`, and nothing pinned that.
+
+    A `<skipped>` case is CARRIED by the report and EXECUTED by nobody: the
+    census counts it in `tests` and sums no time for it. A witness built from
+    `tests` therefore certifies "the report was complete" while the figure it
+    guards is the cost of the cheap remainder — and `coverage` exists precisely so
+    a partial reading cannot discount a row.
+
+    This is the arm the sibling CLI pin cannot be: `test_the_cli_wires_the_lower_
+    bound_witness` reads a `--durations` window (where a skip never appears, so
+    `tests == ran` by construction). Here the skip is real, so a caller that
+    reverts to `m["tests"]` reports (4, 4) — fully covered — and discounts the row
+    to 3.75 s; the assertions below fail on exactly that shape.
+    """
+    repo = tmp_path / "repo"
+    (repo / "tests").mkdir(parents=True)
+    (repo / "config").mkdir()
+    (repo / "tests" / "test_alpha.py").write_text(
+        "\n".join(f"def test_{i}():\n    pass" for i in range(4)) + "\n",
+        encoding="utf-8")
+    manifest = repo / "config" / "ci-surfaces.yml"
+    manifest.write_text(
+        "surfaces:\n  core:\n    - test_alpha.py\ndurations:\n  test_alpha.py: 19.0\n",
+        encoding="utf-8")
+    logs = tmp_path / "logs"
+    logs.mkdir()
+    # 3 of the file's 4 cases ran (1.25 s each); the fourth needs a live DB and
+    # SKIPPED, so the census reading is 3.75 s for a 4-test file.
+    write_junit(tmp_path, "junit.xml",
+                '<testsuites><testsuite name="pytest" tests="4">'
+                + "".join(
+                    '<testcase classname="tests.test_alpha" '
+                    f'name="test_{i}" file="tests/test_alpha.py" '
+                    'time="1.25"/>' for i in range(3))
+                + '<testcase classname="tests.test_alpha" name="test_3" '
+                  'file="tests/test_alpha.py" time="0">'
+                  '<skipped type="pytest.skip" message="needs a live DB"/>'
+                  "</testcase>"
+                "</testsuite></testsuites>")
+    captured: dict = {}
+
+    def fake_refresh(path, weights, captured_at, **kwargs):
+        captured.update(kwargs, path=path, weights=weights)
+        return 0
+
+    monkeypatch.setattr(ci_timing, "refresh_durations", fake_refresh)
+    monkeypatch.setattr(ci_timing, "_is_the_repo_manifest", lambda _p: False)
+
+    def must_not_fetch(*_args: object, **_kwargs: object) -> dict:
+        raise AssertionError(
+            "the refresh shelled out to `gh api` for run metadata — this test is "
+            "about the witness WIRING and must not touch the network")
+
+    monkeypatch.setattr(ci_timing, "fetch_run", must_not_fetch)
+    monkeypatch.setenv("CI_TIMING_NOW", "2026-11-09T05:02:37Z")
+    monkeypatch.setattr(sys, "argv", [
+        "ci_timing.py", "--repo", "o/r", "--run-id", "42546828652",
+        "--logs-dir", str(logs), "--refresh-durations",
+        "--manifest", str(manifest),
+        "--allow-non-push-run",
+    ])
+    assert ci_timing.main() == 0
+    # 3 EXECUTED of 4 declared — the reading was not the whole file, so it may
+    # raise the row but never lower it.
+    assert captured["coverage"] == {"test_alpha.py": (3, 4)}
+    assert captured["sample_label"].startswith("ci-timing junit-census+top-15 ")
 
 
 def test_the_basis_label_names_the_reading_the_sweep_actually_took(
@@ -6227,7 +6368,7 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
     measurements = ci_timing.collector_file_measurements(partial)
     declared = ci_timing.declared_test_counts(measurements, repo)
     assert declared == {"test_alpha.py": 4}
-    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"],
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["ran"],
                                   declared["test_alpha.py"])}
     assert coverage == {"test_alpha.py": (1, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
@@ -6250,7 +6391,7 @@ def test_a_partial_census_cannot_discount_a_weight_but_a_whole_one_can(
                     f'line="{i}" time="1.25"/>' for i in range(4))
                 + "</testsuite></testsuites>")
     measurements = ci_timing.collector_file_measurements(whole)
-    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["tests"], 4)}
+    coverage = {"test_alpha.py": (measurements["test_alpha.py"]["ran"], 4)}
     assert coverage == {"test_alpha.py": (4, 4)}
     text, stats = ci_timing.render_refreshed_manifest(
         manifest_text,

@@ -1000,8 +1000,13 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
             # that WON, so the basis label never cites a source this file's
             # value did not come from (PR #9651 review, P2).
             if seconds > out.get(path, {}).get("seconds", 0.0):
+                # `tests` and `ran` agree HERE by construction: a `--durations`
+                # block lists rows that EXECUTED (a skipped testcase has no time,
+                # so it never appears), and `parse_log` already counts distinct
+                # testcases rather than duration phases. `ran` is stated anyway so
+                # both arms expose the same one key for the coverage witness.
                 out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
-                             "source": "top-15"}
+                             "ran": int(entry["tests"]), "source": "top-15"}
 
     # THE CENSUS PASS (`parse_junit`): a leg's `junit.xml` reports EVERY executed
     # testcase, not its 15 slowest rows, so its `tests` witness is normally the
@@ -1036,9 +1041,24 @@ def collector_file_measurements(logs_dir: Path) -> dict[str, dict]:
             seconds = max(float(entry["total_ms"]) / 1000.0, DURATIONS_VALUE_FLOOR_S)
             # Same rule as the log pass: the LARGER reading wins, and ITS test
             # count and `source` are what describe it.
+            #
+            # ⛔ `tests` AND `ran` ARE DIFFERENT QUANTITIES HERE, and only `ran`
+            # may become the coverage witness (#11602 review, P1). `tests` counts
+            # every testcase the report CARRIED — `parse_junit` increments it
+            # before the skip `continue` (:920) — while `total_ms` sums only the
+            # ones that EXECUTED (:935). So a file whose expensive cases SKIPPED
+            # in every sampled run reports a full `tests` count beside a partial
+            # cost, and a witness taken from `tests` certifies "the report was
+            # complete" as though it certified "every case was measured":
+            # measured, one junit with 1 of 3 cases `<skipped>` discounts a 545.1
+            # row to 0.1 s — the cost of the two cases that ran — which is the
+            # #9651 under-weight failure this module's lower-bound rule exists to
+            # prevent, reachable for a `parametrize` file only since #11607 gave
+            # that class a denominator at all. `tests` is kept for the transcript
+            # stats that count it; `ran` is what the witness reads.
             if seconds > out.get(path, {}).get("seconds", 0.0):
                 out[path] = {"seconds": seconds, "tests": int(entry["tests"]),
-                             "source": "census"}
+                             "ran": int(entry["ran"]), "source": "census"}
     if out and not junit_sources:
         # The census is the whole point of this sweep: without it the refresh
         # re-writes the map from the 15-row window and re-stamps
@@ -2863,8 +2883,13 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     check at the end.
 
     `coverage` IS THE LOWER-BOUND GUARD (#9134 review, P1). It maps a MEASURED
-    path to `(observed, declared)` — the DISTINCT testcases the reading saw, and
-    the ones the file declares. The reading sums only the testcases that landed
+    path to `(observed, declared)` — the DISTINCT testcases the reading
+    EXECUTED, and the ones the file declares. `observed` counts cases that RAN,
+    not cases the report merely carried: a `<skipped>` case contributes no time,
+    so counting it would let a skip-laden reading pass as a complete measurement
+    of a file whose expensive work was never run (#11602 review, P1); the caller
+    therefore supplies `collector_file_measurements`' `ran`, never its `tests`.
+    The reading sums only the testcases that landed
     in a job's `--durations=15` block, so it is a SUM OVER A SUBSET of the file's
     work: it can prove a file costs AT LEAST that much (it may RAISE a weight)
     and it cannot prove the file got faster (it may not LOWER one). Landing it
@@ -3013,8 +3038,9 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         # merge-not-replace contract, and a refusal would let one partial reading
         # block the other 88 rows.
         #
-        # WHAT COUNTS AS PROOF, and the two cases that do NOT (both added by the
-        # #9134 review, because each was fail-OPEN in the discount direction):
+        # WHAT COUNTS AS PROOF, and the three cases that do NOT (two added by the
+        # #9134 review, the third by the #11602 review, because each was fail-OPEN
+        # in the discount direction):
         #   * `declared <= 1` — a single-`def` file is unprovable by construction:
         #     ANY measured entry gives `observed >= 1`, so `observed >= declared`
         #     is satisfied by a reading that saw one fixture line of a file whose
@@ -3027,7 +3053,14 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         #   its `def` count is a FLOOR of what pytest collects) is UNKNOWN, not
         #   "fully covered"; UNKNOWN must not licence a discount. A floor is not a
         #   denominator: 2 >= 2 held for a file pytest collects 9 from (#9134 review,
-        #   P1).
+        #   P1);
+        # * a CASE THAT DID NOT RUN — `observed` is the count of testcases the
+        #   reading EXECUTED (`collector_file_measurements`' `ran`), because the
+        #   seconds it totals exclude every `<skipped>` case. A witness built from
+        #   the REPORTED count would let a run whose expensive cases skipped look
+        #   fully covered and discount the row to the cheap remainder (#11602
+        #   review, P1 — measured: a 545.1 row went to 0.1 s on a junit with 1 of
+        #   3 cases skipped).
         # An absent WITNESS (`coverage=None`) is different: the caller supplied no
         # evidence at all, and the pre-#9134 adopt-always behaviour stands, so
         # every existing caller and test keeps its output.
@@ -4340,7 +4373,14 @@ def main() -> int:
         # could never move down. `declared` stays 0 for those keys; the renderer
         # decides them from `collected` below, and a key absent from BOTH is still
         # UNKNOWN (raisable, never lowerable).
-        coverage = {path: (m["tests"], declared.get(path, 0))
+        # ⛔ THE WITNESS COUNTS EXECUTED TESTCASES, NEVER REPORTED ONES (#11602
+        # review, P1). `m["tests"]` includes cases the report carried as
+        # `<skipped>`; pairing that with a `total_ms` that excludes them let a
+        # skip-laden reading satisfy `observed >= declared` and discount the row
+        # to the cost of the cases that happened to run. `m["ran"]` is the count
+        # of cases the reading actually measured, so a skip can only ever make the
+        # reading a LOWER bound — the fail-closed direction the guard exists for.
+        coverage = {path: (m["ran"], declared.get(path, 0))
                     for path, m in measurements.items()}
         # #11607 — THE SECOND DENOMINATOR, probed only where it can change a
         # verdict. `declared_test_counts` cannot count a parametrised file, so a
