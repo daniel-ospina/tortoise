@@ -6645,15 +6645,12 @@ def _assert_a_re_base_supersedes_the_newest_basis(text: str) -> None:
 
 
 def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
-    """A mid-note prior basis is replaced, not accumulated (#10575 review, P3).
+    """A prior basis is replaced, not accumulated — asserted on the COMMITTED map.
 
-    Pinned on the COMMITTED map's only wrapped row rather than on a fixture: the
-    layout that produces the defect is the one the refresh wrote.
-    `test_source_staleness_sweep_5038.py`'s note opens on its row line and continues
-    across five indented lines, and the 2026-11-02 refresh appended its basis to the
-    row line — so the joined note carries that basis in the middle
-    (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded (…)
-    lane …`), where an end-anchored match finds nothing.
+    Every expectation is DERIVED from the map (see the helper): this row is
+    re-valued by most sweeps, and
+    `test_the_wrapped_row_prune_guard_survives_the_next_sweep` pins the sweep
+    outcomes that a value-pinned version of this test used to red on a healthy map.
 
     Non-vacuity, measured against the module before `643bbaf12` (which introduced
     the mid-note prune): the
@@ -6661,10 +6658,18 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     new basis on the last continuation — two bases in one note, so both "the
     superseded basis survived" and `len(bases) <= len(committed_bases)` fail.
 
-    Every expectation is DERIVED from the map (see the helper): this row is
-    re-valued by most sweeps, and
-    `test_the_wrapped_row_prune_guard_survives_the_next_sweep` pins the sweep
-    outcomes that a value-pinned version of this test used to red on a healthy map.
+    ⛔ WHAT THIS NO LONGER COVERS, measured at #11602: the MID-note arm. This test
+    used to be pinned on `test_source_staleness_sweep_5038.py` BECAUSE its note
+    opened on its row line and continued across five indented lines, with the
+    `2026-11-02` basis appended in the MIDDLE (`… deliverable 3: 34 tests —
+    ci-timing … 2026-11-02 …; was 3.2 embedded (…) lane …`), where an end-anchored
+    match finds nothing. The `2026-11-09` refresh flattened that note, so the
+    committed row is now ONE line whose only basis ends it and this test exercises
+    the END-anchored arm. That flattening is the writer's documented CUT behaviour
+    (see `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), not a
+    defect — but pinning the mid-note arm to whichever row the last sweep happened
+    to leave wrapped is exactly what let it go vacuously green, so the mid-note case
+    is BUILT in `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle`.
     """
     _assert_a_re_base_supersedes_the_newest_basis(
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
@@ -6732,15 +6737,31 @@ def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
     key = "test_source_staleness_sweep_5038.py"
     text = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
     previous = _durations_row_value(text, key)
+    # ⛔ THE SIMULATED SWEEP'S DATE IS DERIVED, EXACTLY AS THE GUARD'S OWN HELPER
+    # DERIVES IT. A fixed label is the same time-bomb the helper's docstring warns
+    # about (`a fixed label would quietly stop meaning that as soon as a sweep reached
+    # its date`): the sweep this test simulates is meant to supersede whatever the map
+    # commits, and the `2026-11-09` refresh gave the committed row a basis carrying the
+    # very date a hard-coded label named (#11602). On the HOLD arm #9134's P2 keeps the
+    # older basis beside the new one, so both spans then read `2026-11-09`
+    # (`… 2026-11-09 (run 42546828652); was 2.3 — … 2026-11-09 (run 41379999999); was
+    # 2.6`) and "the newest committed basis is gone" can no longer be told apart from
+    # "the new basis arrived" — the guard reds on a map that is healthy in every
+    # respect, which is the exact class `cd96ad0800` fixed for the helper.
+    committed_bases = _BASIS_LABEL_RE.findall(_durations_row_note(text, key))
+    assert committed_bases, f"the row states no basis to supersede: {key}"
+    sweep_year = max(int(b.rsplit(" ", 1)[-1][:4]) for b in committed_bases) + 1
+    sweep_at = f"{sweep_year}-01-01T00:00:00Z"
+    sweep_label = (f"ci-timing junit-census+top-15 {sweep_year}-01-01 "
+                   "(run 41379999999)")
     adopted, _ = ci_timing.render_refreshed_manifest(
-        text, {key: previous + 1.0}, "2026-11-09T00:00:00Z",
-        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+        text, {key: previous + 1.0}, sweep_at, sample_label=sweep_label)
     assert _durations_row_value(adopted, key) == previous + 1.0, (
         "the simulated ADOPT sweep did not take the new reading, so it does not "
         "exercise the state a value-pinned guard failed on")
     held, _ = ci_timing.render_refreshed_manifest(
-        text, {key: 0.1}, "2026-11-09T00:00:00Z", coverage={key: (0, 0)},
-        sample_label="ci-timing junit-census+top-15 2026-11-09 (run 41379999999)")
+        text, {key: 0.1}, sweep_at, coverage={key: (0, 0)},
+        sample_label=sweep_label)
     assert _durations_row_value(held, key) == previous, (
         "the simulated HOLD sweep did not keep the weight, so it does not exercise "
         "the two-basis shape a value-pinned guard failed on")
@@ -6749,6 +6770,43 @@ def test_the_wrapped_row_prune_guard_survives_the_next_sweep() -> None:
             _assert_a_re_base_supersedes_the_newest_basis(swept)
         except AssertionError as exc:  # pragma: no cover - the failure message
             raise AssertionError(f"after one {outcome} sweep: {exc}") from exc
+
+
+def test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle() -> None:
+    """The mid-note prune reaches a basis an END-ANCHORED match cannot see.
+
+    The subject is BUILT from the writer's own fragment-plus-continuation join
+    rather than read off the committed map, because the map can no longer supply
+    this layout: the writer's CUT arm flattens a wrapped note on re-base, and the
+    `2026-11-09` refresh flattened the last row that carried a mid-note basis
+    (#11602) — measured at that head, `HOLD` appends its clause at the END of the
+    joined note and `ADOPT` flattens the note to one line, so no committed
+    `durations:` row yields a newest span that sits mid-note.
+
+    The shape is a property of the NOTE, not of whichever row the last sweep left
+    wrapped. Pinning it to a committed row is what let
+    `test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits` go vacuously green
+    on the MID-note arm while still passing on the end-anchored one.
+    """
+    tail = ("# #5038: deliverable 3: 34 tests embedded — "
+            "ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 3.2")
+    continuations = [
+        "# THE NOTE CONTINUES past the basis, so an end-anchored match finds "
+        "nothing here.",
+    ]
+    note = ci_timing._joined_note_tail(tail, continuations)
+    spans = ci_timing._prior_basis_spans(note)
+    assert spans, f"the constructed note states no basis: {note}"
+    # NON-VACUITY: the basis is NOT at the end, so an end-anchored rule cannot reach
+    # it. Without this the test would pass on a note whose only basis ends it, which
+    # is the vacuous state this test exists to rule out.
+    assert spans[-1][1] < len(note.rstrip()), (
+        f"the constructed basis ends the note, so the mid-note arm is not "
+        f"exercised: {note}")
+    pruned = ci_timing._strip_prior_basis(note)
+    assert "ci-timing junit-census+top-15 2026-11-02" not in pruned, pruned
+    assert "deliverable 3: 34 tests" in pruned, pruned
+    assert "an end-anchored match finds nothing here" in pruned, pruned
 
 
 def _indented_block_shape(text: str) -> tuple[int, int, int]:
