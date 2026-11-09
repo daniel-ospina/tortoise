@@ -485,8 +485,8 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 | **S2.3 CLASSIFY** | **assign each SURVIVING candidate its pack kind** — against the declared kind vocabulary | model (Jev), with a **mechanical kNN fast path** |
 | **S3 RESOLVE** | **find what already exists for these candidates**, disambiguate using **the narrative as context**, **and attach** | mechanical + model (ambiguity only) |
 | **S5 CONNECT** | (1) wire **this batch's own story**; (2) compare the batch **against the stored graph** — duplicate? lifecycle change? contradiction? | model decides, code writes |
+| **S6a EMBED-DECISION** *(sub-step of S6, per row — runs BEFORE the write it belongs to)* | decide whether **this written row** earns a vector — the shared rule set's second question, so rent is paid only for text a semantic query could want | **mechanical** |
 | **S6 COMMIT** | write entities + connections + metadata/lifecycle | **mechanical** |
-| **S6a EMBED-DECISION** *(sub-step of S6, per row)* | decide whether **this written row** earns a vector — the shared rule set's second question, so rent is paid only for text a semantic query could want | **mechanical** |
 
 **The test this table applies: can you state the step's purpose in one clause that no other step shares?** That test deleted **S4** and then deleted **S1.5** entirely — see §4.1.
 
@@ -510,11 +510,11 @@ S3  RESOLVE    look up what exists for these candidates → disambiguate (narrat
                context) → AND ATTACH the new context to the surviving entity — and the
                FUSION a `MERGE` flag asked for is executed HERE, after the gate
 S5  CONNECT    two distinct sets: within this batch · to the graph
-S6  COMMIT     create entities + connections + metadata/lifecycle
 S6a EMBED-DECISION   per row, INSIDE S6 and before that row's write clause is
                built: EMBED / NO-EMBED for THIS row, asked of the SAME rule set
                S2.2b asks the DISCARD question of (§12.2a, one rule set two
                questions) — the second enforcement point, given a home (G2)
+S6  COMMIT     create entities + connections + metadata/lifecycle
 ```
 
 **Eight steps.** No S4 and no S1.5 — both fail the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0, `S2.2a`/`S2.2b` sub-steps of S2.2 and `S6a` a sub-step of S6, so a sub-step does not make a ninth step. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists; the two must never drift apart. ⚠️ **The numbering gap is deliberate for now:** the S-numbers are fixed identifiers, so **renumber only once the design settles.**
@@ -912,9 +912,9 @@ S2.2b VET              the gate (identifier-only DISCARD) + adversarial      [Je
 S2.3 CLASSIFY          kNN fast path → Jev tail, on SURVIVORS only            [kNN + Jev]
 S3  RESOLVE + D-d      lookup → against-priors semantic dedup
 S5  CONNECT
-S6  COMMIT
 S6a EMBED-DECISION     per row, before its write clause is built — the second
                        question on the S2.2b rule set (G2, #5008)
+S6  COMMIT
 ```
 
 #### ⚠️ The against-store exact dedup has FOUR preconditions, and the fourth does not exist
@@ -993,12 +993,11 @@ S6a EMBED-DECISION     per row, before its write clause is built — the second
 
 ⚠️ **And not "before `execute_embed`", which is the order that reads as equivalent and is not.** `execute_embed` performs **no write at all**: it returns a `payload` dict (`extractor_v2.py::execute_embed`), and the commit that reaches `S6a` is the SDK / projection writer, *after* it returns. Stating the constraint against `execute_embed` would place the step in a pass that writes nothing — the placement the ordering is supposed to pin, asserted about the one step where it cannot be observed.
 
-**The asymmetry between the two points, stated because it is load-bearing.** The **`VALUE`** gate is subordinate to `VET` by ARMING: its flag switches the pass on, and it runs *inside* `vet_gate.vet_candidates`, so on its own it would be inert (`extractor_v2.vet_enabled` folds it in for exactly that reason). The **`EMBED`** gate is subordinate to `VET` by **PRECEDENCE**: it is read at submission, so folding it into `vet_enabled` would arm nothing while appearing to arm the gate — and the precedence that actually protects it is fact 1 above, a discarded candidate being absent from the list before the seam is ever reached. Correcting the reading that both flags are "folded in" is not a re-decision; it is what the code does, and `tests/test_embed_gate_5008.py::test_the_VET_pass_folds_the_VALUE_gate_and_never_the_EMBED_gate` pins it.
+**The asymmetry between the two points, stated because it is load-bearing.** The **`VALUE`** gate is subordinate to `VET` by ARMING: its flag switches the pass on, and it runs *inside* `vet_gate.vet_candidates`, so on its own it would be inert (the `vet_enabled` local that guards that pass — its `_value_gate_enabled` term (`tortoise/extractor_v2.py::_value_gate_enabled`) — folds it in for exactly that reason). The **`EMBED`** gate is subordinate to `VET` by **PRECEDENCE**: it is read at submission, so folding it into that same `vet_enabled` local would arm nothing while appearing to arm the gate — and the precedence that actually protects it is fact 1 above, a discarded candidate being absent from the list before the seam is ever reached. Correcting the reading that both flags are "folded in" is not a re-decision; it is what the code does, and `tests/test_embed_gate_5008.py::test_the_VET_pass_folds_the_VALUE_gate_and_never_the_EMBED_gate` pins it.
 
 **Pinned by code, not by this paragraph:** `tests/test_embed_decision_step_11086.py` drives a `DISCARD`ed candidate through the pass and the payload and asserts it is never submitted to the seam, and asserts the `VET`-wins direction with both gates armed.
 
-**Its failure policy is S6's, not a ninth declaration.** `S6a` is a sub-step of S6, so §4.4's `S6 COMMIT` row governs the transaction boundary it sits inside, and its own direction is **FAIL-OPEN**: no verdict — an unparseable candidate, a predicate that raises, an identifier merely *present* inside a longer claim — is an `EMBED`. The two mistakes are not symmetric. A false `NO-EMBED` silently destroys recall for a row nobody can re-find, while a false `EMBED` costs bytes and is recoverable from the text the node still carries, so this step may never be the reason a vector is missing. That is `tortoise/embed_gate.py::embedding_verdict`'s contract, stated here rather than left to a reader to infer from the module.
-
+**Its failure policy is S6's, not a ninth declaration.** `S6a` is a sub-step of `S6 COMMIT`, so §4.4's `S6 COMMIT` row governs the transaction boundary it sits inside, and its own direction is **FAIL-OPEN**: no verdict — an unparseable candidate, a predicate that raises, an identifier merely *present* inside a longer claim — is an `EMBED`. The two mistakes are not symmetric. A false `NO-EMBED` silently destroys recall for a row nobody can re-find, while a false `EMBED` costs bytes and is recoverable from the text the node still carries, so this step may never be the reason a vector is missing. That is `tortoise/embed_gate.py::embedding_verdict`'s contract, stated here rather than left to a reader to infer from the module.
 
 #### G5's destructive half — the target and the journaling arm EXIST; the bar, the arbiter and the RULING do not (`#5333`)
 

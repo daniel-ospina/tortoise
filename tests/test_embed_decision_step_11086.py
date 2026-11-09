@@ -11,9 +11,10 @@ true.
 G2's own wiring note says the danger is a `DISCARD`ed candidate still being classified and embedded;
 the invariant that prevents it is *ordering* rather than a check inside the gate —
 `vet_gate.apply_vet` removes a discarded candidate from `embed_list`, and every later step reads that
-list. If a future change makes `apply_vet` stop removing (or makes the commit read a pre-VET list),
-the DISCARD is written, `encode_for_row` is asked about it, and this test reds. An argument in a
-paragraph cannot do that.
+list. If `apply_vet` stops removing, the DISCARD reaches the payload and the test reds — and it is
+pinned as a **delta** (the same pair with the predicate's kill-switch pulled, where the candidate IS
+present in both the list and the payload), so the assertion is about the gate and not about the
+literal input this file builds. An argument in a paragraph cannot do that.
 
 **Two premises the placement had to correct, pinned so they cannot quietly return:**
 
@@ -211,11 +212,17 @@ def _stub_embedder(monkeypatch):
                         lambda texts, max_tokens=512: [[0.125] * 8 for _ in texts])
 
 
-def _vet_then_payload(monkeypatch):
-    """Drive the real S2.2b pass and the real payload builder over one pair."""
+def _vet_then_payload(monkeypatch, *, value_gate_on: bool = True):
+    """Drive the real S2.2b pass and the real payload builder over one pair.
+
+    ``value_gate_on=False`` is the DIFFERENTIAL arm: the same two candidates, the
+    same pass, the same payload builder, with the predicate's kill-switch pulled.
+    It is what makes the ON-arm assertion a measurement rather than a statement
+    about the literal list this helper happens to build.
+    """
     from tortoise import extractor_v2, vet_gate
 
-    monkeypatch.setenv(value_gate.ENV_FLAG, "1")
+    monkeypatch.setenv(value_gate.ENV_FLAG, "1" if value_gate_on else "0")
     monkeypatch.setenv("TORTOISE_VET", "1")
     monkeypatch.setenv(embed_gate.ENV_FLAG, "1")
 
@@ -228,21 +235,29 @@ def _vet_then_payload(monkeypatch):
 
 
 def test_a_discarded_candidate_is_never_offered_to_the_embed_seam(monkeypatch):
-    """⛔ The load-bearing pin: `DISCARD` before `EMBED`, measured end to end.
+    """⛔ The load-bearing pin: `DISCARD` before `EMBED`, measured as a DELTA.
 
-    Three claims, each measurable, and each a different way to be wrong:
+    Three claims on the armed arm, and a fourth that makes the first three mean
+    something:
 
-    1. the pass produced a real `DISCARD` (a test where nothing is discarded
+    1. the pass produced a real `DISCARD` (a run where nothing is discarded
        proves nothing);
     2. the discarded candidate is **absent** from the list every later step
        reads — that is the mechanism, not a restatement of the goal;
-    3. it is absent from the `payload` the commit is handed, so no writer can
-       reach `encode_for_row` for it. The loop at the end walks the payload the
-       way the writers do — one seam call per written row — so the assertion is
-       about the population the seam could see, not about a hand-picked pair.
-    """
-    from tortoise import embeddings
+    3. it is absent from the `payload` the commit is handed;
+    4. ⛔ **with the predicate's kill-switch pulled, it is PRESENT in both.** That
+       differential is what makes 2 and 3 measurements: without it, a helper that
+       simply never put the candidate in the input would satisfy them, and the
+       assertion would be about this file rather than about the gate. It also
+       states the precise scope — what this pins is that the removal `apply_vet`
+       performs is what keeps the candidate out of the payload.
 
+    ⚠️ **Not pinned here, and said rather than implied:** no real graph writer is
+    exercised (there is no store in this lane), so this does not prove that
+    `tortoise/projection/entities.py`'s upsert calls the seam for payload rows —
+    `tools/dod_5090_probe.py`'s DoD row 1 measures that writer population, and
+    `tests/test_embed_gate_5008.py` drives one writer end-to-end on a store.
+    """
     vet_gate, stats, kept, payload = _vet_then_payload(monkeypatch)
 
     decisions = stats["decisions"]
@@ -261,24 +276,24 @@ def test_a_discarded_candidate_is_never_offered_to_the_embed_seam(monkeypatch):
     assert _DISCARDED not in payload_texts, (
         "a DISCARDed candidate reached the commit payload — the write path would "
         f"embed it ({payload_texts!r})")
+    assert _PROSE in payload_texts, (
+        "the surviving candidate is missing from the payload, so the negative "
+        "assertion above is measuring the wrong population")
 
-    _stub_embedder(monkeypatch)
-    offered: list[str] = []
-    real = embeddings.encode_for_row
-
-    def spy(content, expected_dim):
-        offered.append(str(content))
-        return real(content, expected_dim)
-
-    monkeypatch.setattr(embeddings, "encode_for_row", spy)
-    for text in payload_texts:          # what each writer does, one row at a time
-        embeddings.encode_for_row(text, None)
-
-    assert offered == payload_texts, (
-        "the seam was offered something other than the payload's rows")
-    assert _DISCARDED not in offered, (
-        "the seam was asked about a DISCARDed candidate — the gate is bypassed "
-        "for discards")
+    # ── the differential: pull the kill-switch and the discard comes back ────
+    _vet_gate_off, off_stats, off_kept, off_payload = _vet_then_payload(
+        monkeypatch, value_gate_on=False)
+    assert not [iid for iid, d in off_stats["decisions"].items()
+                if d["outcome"] == _vet_gate_off.DISCARD], (
+        "the OFF arm still discarded, so it is not the counterfactual this test "
+        "needs")
+    assert _DISCARDED in [str(p.get("content")) for p in off_kept.get("points") or []], (
+        "with the predicate off the candidate is still absent from `embed_list` — "
+        "something other than the gate is removing it, so the ON-arm assertion "
+        "does not measure the gate")
+    assert _DISCARDED in [str(p.get("content")) for p in off_payload.get("points") or []], (
+        "with the predicate off the candidate never reaches the payload, so the "
+        "payload assertion in the ON arm cannot detect a bypass")
 
 
 def test_vet_precedence_a_discard_wins_while_the_survivor_still_embeds(monkeypatch):
@@ -383,3 +398,45 @@ def test_the_value_gate_default_is_the_reason_its_off_arm_is_a_counterfactual():
     finally:
         if prior is not None:
             os.environ[value_gate.ENV_FLAG] = prior
+
+
+def test_a_docs_only_edit_to_the_design_record_selects_the_step_pins():
+    """⛔ The silent-drop pin: a docs-only edit must SELECT these tests.
+
+    Every pin above lives in this file, and this file is reached by `core` (a
+    `tests/` change) and `eval` (`tortoise/embeddings.py`) — but the artifacts the
+    pins are ABOUT are `docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md` and
+    `docs/evidence/11086/gate-rate.json`. A docs-only edit to the design record
+    measures **`surfaces: []`** (the document matches no `SOURCE_PATTERNS` row —
+    pinned deliberately by
+    `test_ci_selection.py::test_v4_membership_gate_runs_on_both_architecture_docs`,
+    so registering the document as a surface would fight that contract). `tier1`
+    is therefore the ONLY path by which a docs-only diff reaches these pins:
+    without the `tier1` row in `config/ci-surfaces.yml`, `S6a` could be deleted
+    from both step blocks — or `gate-rate.json` hand-edited to any number — and
+    nothing reddened while the `docs` job stayed green on markdown and links.
+    That is the #1349/#2938/#3616 silent-drop class, and it defeats the whole
+    point of pinning a design document.
+
+    Pinned as a MEASUREMENT over `tools/ci_selection.py` rather than as a grep for
+    a manifest string, so a later re-organisation that moves the registration
+    still passes only if selection actually reaches this file.
+    """
+    import subprocess
+
+    tool = _ROOT / "tools" / "ci_selection.py"
+    for artifact in ("docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md",
+                     "docs/evidence/11086/gate-rate.json",
+                     "docs/evidence/11086/README.md"):
+        out = subprocess.run(
+            [sys.executable, str(tool), "--changed-files", "-",
+             "--event", "pull_request"],
+            input=artifact + "\n", capture_output=True, text=True, timeout=180,
+            cwd=str(_ROOT), check=True,
+        ).stdout
+        selected = json.loads(out)
+        assert "test_embed_decision_step_11086.py" in selected["test_files"], (
+            f"a docs-only edit to {artifact} does not select this file — the "
+            "pins on G2 and on the rate record never run on the only change that "
+            "can break them (surfaces: "
+            f"{selected.get('surfaces')!r})")

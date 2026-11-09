@@ -6268,13 +6268,17 @@ surfaces:
   # pattern), which runs on any lane.
   - test_embed_gate_5008.py
   # #11086: the EMBED decision's STEP (v4 §4.3 G2, now `S6a EMBED-DECISION`) and the
-  # ordering that makes it correct. Guards three source surfaces at once and none of them
-  # falls through to `core` on its own: `tortoise/extractor_v2.py` (the S2.2b pass and
-  # `execute_embed`'s payload), `tortoise/embeddings.py` (the submission seam — an `eval`
-  # SOURCE_PATTERN, hence the DUAL below) and `tortoise/kind_classifier.py`, plus the v4
-  # design document and `docs/evidence/11086/gate-rate.json`. The load-bearing pin is
+  # ordering that makes it correct. Guards three source surfaces at once: `tortoise/embeddings.py`
+  # (the submission seam) is an `eval` SOURCE_PATTERN that REPLACES the `core` fallback, while
+  # `tortoise/extractor_v2.py` (the S2.2b pass and `execute_embed`'s payload) and
+  # `tortoise/kind_classifier.py` match no named pattern and therefore select `core` by the
+  # fallback — which is exactly why BOTH arms below are needed and neither is redundant. Also
+  # pins the v4 design document and `docs/evidence/11086/gate-rate.json`, whose selection is
+  # registered in `tools/ci_selection.py` (a docs-only diff selects `eval`; measured).
+  # The load-bearing pin is
   # `test_a_discarded_candidate_is_never_offered_to_the_embed_seam`: it drives a DISCARD
-  # through the real pass and the real payload and reds if the discard stops being removed.
+  # through the real pass and the real payload, and is pinned as a DELTA against the
+  # predicate's kill-switch so it reds if the discard stops being removed.
   # Hermetic — no graph, no network, no model (the measurement stubs the embedder).
   - test_embed_decision_step_11086.py
   # #11085: the embedding-writer EXEMPTION REGISTER — `tortoise/embed_writer_register.py`, a leaf
@@ -8588,6 +8592,17 @@ tier1:
 # and the same docs-only PR is exactly the change that can re-introduce a
 # retracted passage.
 - test_extractor_v4_citation_rot.py
+# #11086: G2's step (`S6a EMBED-DECISION`) in the same document, plus the two-gate rate
+# record at `docs/evidence/11086/gate-rate.json` and the ordering that makes the step
+# correct. Same no-DB, no-network, no-model shape as the guards above (the measurement
+# stubs the embedder), so a docs-only PR runs it here. ⚠️ The `tier1` row is load-bearing
+# and NOT redundant with the `core`/`eval` registrations above: a docs-only diff to
+# `EXTRACTOR-V4-ARCHITECTURE.md` measures `surfaces: []` (the document matches no
+# SOURCE_PATTERNS row), so `tier1` is the ONLY path by which these pins run on the
+# change class that can delete `S6a` from both step blocks or hand-edit the record.
+# Pinned by
+# `tests/test_embed_decision_step_11086.py::test_a_docs_only_edit_to_the_design_record_selects_the_step_pins`.
+- test_embed_decision_step_11086.py
 # #1165: pointers INTO `docs/scoping/` and `docs/research/` must land on a line of
 # text (`core` above) — a stdlib file scan, and a docs-only PR is precisely the
 # diff that can shift a scoping document's line numbering and silently redirect
