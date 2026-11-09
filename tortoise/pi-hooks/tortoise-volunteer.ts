@@ -67,15 +67,22 @@
 //
 // ⛔ WHAT IS DELIBERATELY *NOT* BREADCRUMBED (review finding 3 — this header
 // used to claim the opposite, which sent a reader to the wrong conclusion):
-// `timeout`, `empty`, and `refused`. Their `kind` would have to say "reinstall",
-// and each of them can be TRUE OF A WORKING INSTALL — a reflex mid-upgrade, a
-// momentarily locked graph, a 402 that clears — so a breadcrumb (and worse, the
-// latch) would tell an operator to fix something that is not broken. The
-// distinction is the CAUSE, not the symptom: `inert` means nothing resolved,
-// the others mean the reflex RAN and declined. Their `detail` goes to stderr
-// under `TORTOISE_VOLUNTEER_DEBUG=1` instead (`trace`), so a persistent
-// misconfiguration — a wrong venv, a missing extra — is diagnosable without
-// being recorded as an install fault.
+// `timeout` and `refused`. Their `kind` would have to say "reinstall", and both
+// can be TRUE OF A WORKING INSTALL — a reflex mid-upgrade, a momentarily locked
+// graph, a 402 that clears — so a breadcrumb (and worse, the latch) would tell an
+// operator to fix something that is not broken. The distinction is the CAUSE,
+// not the symptom: `inert` means nothing resolved, the others mean the reflex
+// RAN and declined. Their `detail` goes to stderr under
+// `TORTOISE_VOLUNTEER_DEBUG=1` instead (`trace`) — `timeout`'s names the
+// candidate and the budget, `refused`'s names the actual cause — so a persistent
+// misconfiguration (a wrong venv, a missing extra, a 30 s budget below a healthy
+// reflex) is diagnosable without being recorded as an install fault. `empty` is
+// silent and carries no `detail`: a working reflex that cleared the confidence
+// gate is the healthy no-injection case, and there is nothing to report.
+// ⛔ Review finding 4: an earlier revision of this paragraph claimed the trace
+// covered `empty` and `timeout` too, while only `refused` was traced — the same
+// over-promise this section exists to remove. The tracing assertion in the suite
+// now covers BOTH traced classes, so the sentence cannot drift again silently.
 //
 // W4 USER-EXPOSURE GATE
 // ----------------------
@@ -92,7 +99,7 @@
 // on the consent surface AND prefixes the reflex's `surfaced` list, which is
 // the disclosure marker #2119's targets ask for.
 
-import { execFile } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
@@ -159,6 +166,12 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  * :func:`resolveBlock`.
  */
 export const DEFAULT_TIMEOUT_MS = 30000;
+
+/** Cap on a reflex's combined stdout+stderr, mirroring `execFile`'s `maxBuffer`.
+ *  `--json` output for one turn is small (surveyed at <10 KiB); this exists so a
+ *  broken or hostile reflex cannot eat the harness's memory, and exceeding it is
+ *  a FAILURE, never a silent truncation. */
+export const MAX_OUTPUT_CHARS = 1 << 20;
 /** The turn text is SEARCHED, never forwarded whole, and the bound is in
  *  BYTES because that is what the reflex's validator counts
  *  (`tortoise/volunteer.py`: `MAX_WINDOW_BYTES = 15 * 1024`, charged per turn
@@ -439,7 +452,27 @@ function isFile(path: string): boolean {
  * so that hangs the TURN — the one thing this file promises can never happen
  * (`FAIL-OPEN CONTENT, NEVER A BROKEN TURN`). The bound is therefore OUR OWN
  * timer: it resolves the promise FIRST (so resolution can never depend on the
- * child) and only then SIGKILLs the child, which cannot be trapped.
+ * child) and only then kills.
+ *
+ * ⛔ AND THE KILL MUST REACH THE PROCESS GROUP (review finding 5). A SIGKILL to
+ * the direct child is untrappable, but a reflex resolved from PATH is often a
+ * SHIM that forked the real worker: killing the shim alone REPARENTS the worker
+ * (measured: `sleep 600` survived with ppid 1), it keeps the stdout pipe open so
+ * node cannot exit, and each timed-out turn leaks one runaway process. So the
+ * child is spawned `detached` (its own process group, which its descendants
+ * inherit) and the deadline kills `-pid`. `detached` also means a terminal
+ * signal aimed at Pi no longer reaches a reflex mid-flight; that is acceptable
+ * because the reflex is bounded by this timer, and it is the price of not
+ * leaking orphans.
+ *
+ * ⛔ SO THIS USES `spawn`, NOT `execFile` (also review finding 5). `execFile`
+ * silently does NOT honour `detached`: measured on node 24, a child spawned
+ * `execFile(p, [], {detached: true})` reports `pgid=1829219` while its own pid is
+ * `1829308` (the parent's group), so `process.kill(-pid)` fails with ESRCH and
+ * the group kill is a no-op. The same child through `spawn(p, [], {detached:
+ * true})` reports `pgid === pid`. spawn costs us `execFile`'s buffering, so the
+ * stdout/stderr collection and the `maxBuffer` cap are done here — with the same
+ * observable result the tests pin for every other failure class.
  */
 export function runReflexCommand(
   command: string,
@@ -451,6 +484,7 @@ export function runReflexCommand(
     const args = ["volunteer", "--json"];
     if (sessionId) args.push("--session-id", sessionId);
     let settled = false;
+    let overflowed = false;
     let watchdog: ReturnType<typeof setTimeout> | undefined;
     const settle = (r: {
       ok: boolean;
@@ -463,50 +497,92 @@ export function runReflexCommand(
       if (watchdog !== undefined) clearTimeout(watchdog);
       resolve(r);
     };
-    // No `timeout` option: execFile's own bound would race this one and its
-    // SIGTERM cannot be trapped-out but also cannot be escalated, so it is our
-    // timer that owns the deadline (and the SIGKILL).
-    const child = execFile(
-      command,
-      args,
-      { maxBuffer: 1 << 20 },
-      (error, stdout, stderr) => {
-        if (error) {
-          // A TIMEOUT arrives here only when the child died of a signal it was
-          // NOT sent by the watchdog (the watchdog settles first, so this is a
-          // no-op then). `execFile` leaves `code` null for a signal death;
-          // `maxBuffer` overflow also sets `killed` but carries
-          // `code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"`, so excluding a non-null
-          // code keeps a real overflow reportable (measured against node 24).
-          const timedOut = settled ||
-            (error.killed === true && error.code === null &&
-              error.signal === "SIGTERM");
-          settle({
-            ok: false,
-            stdout: String(stdout ?? ""),
-            error: String(stderr ?? "").trim() ||
-              (timedOut ? `timed out after ${timeoutMs}ms` : error.message),
-            timedOut,
-          });
+    // Our timer owns the deadline (see the docstring), and `spawn` — not
+    // `execFile` — is what actually honours `detached`, which is what makes the
+    // group kill below reach a wrapper's forked worker.
+    const child = spawn(command, args, {
+      detached: true,
+      stdio: ["pipe", "pipe", "pipe"],
+    });
+    let out = "";
+    let err = "";
+    /** Kill the reflex's whole process GROUP, not just the direct child. */
+    const killGroup = (): void => {
+      const pid = child?.pid;
+      try {
+        if (typeof pid === "number" && pid > 0) {
+          process.kill(-pid, "SIGKILL");
           return;
         }
-        settle({ ok: true, stdout: String(stdout ?? ""), error: "", timedOut: false });
-      },
-    );
-    watchdog = setTimeout(() => {
-      // Resolve FIRST — a settled promise is what keeps the turn moving; the
-      // kill below is cleanup for a child we no longer wait on.
-      settle({
-        ok: false,
-        stdout: "",
-        error: `timed out after ${timeoutMs}ms`,
-        timedOut: true,
-      });
+      } catch {
+        // ESRCH (already gone) or a platform without group signals — fall
+        // through to the single-pid kill, which is the pre-finding-5 behaviour
+        // rather than no kill at all.
+      }
       try {
         child?.kill?.("SIGKILL");
       } catch {
         // A child that already exited is not an error: nothing to reap.
       }
+    };
+    const collect = (buf: Buffer, sink: "out" | "err"): void => {
+      if (settled || overflowed) return;
+      const next = (sink === "out" ? out : err) + buf.toString("utf8");
+      if (next.length > MAX_OUTPUT_CHARS) {
+        // `execFile`'s `maxBuffer` equivalent: a reflex that floods cannot eat
+        // the harness's memory, and it is a FAILURE, never a silent truncation.
+        overflowed = true;
+        settle({
+          ok: false,
+          stdout: out,
+          error: `reflex output exceeded ${MAX_OUTPUT_CHARS} characters`,
+          timedOut: false,
+        });
+        killGroup();
+        return;
+      }
+      if (sink === "out") out = next;
+      else err = next;
+    };
+    child.stdout?.on("data", (b: Buffer) => collect(b, "out"));
+    child.stderr?.on("data", (b: Buffer) => collect(b, "err"));
+    // A spawn that never started (ENOENT, EACCES) reports here, not in `close`.
+    child.on("error", (error: Error) => {
+      settle({
+        ok: false,
+        stdout: out,
+        error: err.trim() || error.message,
+        timedOut: false,
+      });
+    });
+    child.on("close", (code: number | null, signal: string | null) => {
+      // The watchdog settles FIRST, so a timeout lands there and this is a
+      // no-op: `settled` is the guard, never the signal's name.
+      if (settled) return;
+      if (code === 0) {
+        settle({ ok: true, stdout: out, error: "", timedOut: false });
+        return;
+      }
+      settle({
+        ok: false,
+        stdout: out,
+        error: err.trim() ||
+          (code === null
+            ? `reflex was terminated by ${signal ?? "a signal"}`
+            : `reflex exited with code ${code}`),
+        timedOut: false,
+      });
+    });
+    watchdog = setTimeout(() => {
+      // Resolve FIRST — a settled promise is what keeps the turn moving; the
+      // kill below is cleanup for a child we no longer wait on.
+      settle({
+        ok: false,
+        stdout: out,
+        error: `timed out after ${timeoutMs}ms`,
+        timedOut: true,
+      });
+      killGroup();
     }, timeoutMs);
     // A pending budget must never be the reason Pi's process stays alive.
     if (typeof watchdog === "object" && typeof watchdog?.unref === "function") {
@@ -947,7 +1023,15 @@ export default function tortoiseVolunteer(
       return null;
     }
     if (verdict.status === "empty") return null;
-    if (verdict.status === "timeout") return null;
+    if (verdict.status === "timeout") {
+      // Review finding 4: the single most operationally important failure this
+      // file documents (a reflex that exceeds the budget injects nothing on
+      // EVERY turn, forever) was undiagnosable even with the debug flag on —
+      // `detail` names the candidate AND the budget. Trace it; keep it out of
+      // the canonical slot and out of the latch, exactly as for `refused`.
+      trace(`timeout: ${verdict.detail}`, env);
+      return null;
+    }
     // A refusal is the same NO-VERDICT class as a timeout: the seam ran, so the
     // canonical `install-inert` slot stays untouched and the inert latch is not
     // set — a 402 that clears must not disable the seam for the whole process.

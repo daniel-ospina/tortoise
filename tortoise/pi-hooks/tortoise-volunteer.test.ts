@@ -348,6 +348,51 @@ test("a reflex that IGNORES SIGTERM is SIGKILLed and the turn is still bounded",
   );
 });
 
+test("the deadline kills the reflex's whole process GROUP, so a wrapper leaks no worker", async () => {
+  // Review finding 5 (P2). A reflex resolved from PATH is often a SHIM that
+  // forked the real worker. SIGKILL to the shim alone REPARENTS the worker
+  // (measured: `sleep 600` survived with ppid 1) and it keeps execFile's stdout
+  // pipe open, so node cannot exit — one runaway process per timed-out turn.
+  // So the child is spawned detached and the deadline kills `-pid`.
+  //
+  // The row reports the forked worker's pid, then asserts it is GONE. Mutation:
+  // drop `detached: true` and the `process.kill(-pid, …)` group kill → the
+  // worker survives and this REDs on the ESRCH assertion.
+  const home = tmpHome();
+  const pidFile = join(home, "worker.pid");
+  // The shim forks the worker, records its pid, then waits on it — the
+  // wrapper shape, and the fork is what a single-pid kill would orphan.
+  const shim = fakeCli(
+    join(home, "bin"),
+    `trap '' TERM; sleep 600 & echo $! > ${JSON.stringify(pidFile)}; wait`,
+  );
+
+  const result = await runReflexCommand(shim, "q", "", 300);
+  assert.equal(result.timedOut, true, "the deadline still settles first");
+
+  const workerPid = Number(readFileSync(pidFile, "utf-8").trim());
+  assert.ok(Number.isInteger(workerPid) && workerPid > 0, "the worker really started");
+
+  // Signal 0 is an existence probe: it throws ESRCH once the worker is gone.
+  let aliveFor = 0;
+  while (aliveFor < 3000) {
+    try {
+      process.kill(workerPid, 0);
+    } catch {
+      aliveFor = -1;
+      break;
+    }
+    await new Promise((r) => setTimeout(r, 100));
+    aliveFor += 100;
+  }
+  assert.equal(
+    aliveFor,
+    -1,
+    "a forked reflex worker must die with its group — otherwise every " +
+      "timed-out turn leaks a runaway process that also keeps node's pipe open",
+  );
+});
+
 test("the prompt is bounded in BYTES, not characters", async () => {
   // The reflex's validator charges `len(content.encode("utf-8"))` against a
   // 15 KiB window. A char-indexed bound passes ASCII and REFUSES the same
@@ -704,6 +749,56 @@ test("a REFUSED verdict stays out of the canonical slot, but its detail is trace
   const traced = await run({ TORTOISE_VOLUNTEER_DEBUG: "1" });
   assert.match(traced, /refused: every resolved tortoise reflex failed/, traced);
   assert.match(traced, /bin\/tortoise/, "the detail names WHICH candidate failed");
+});
+
+test("a TIMEOUT is traceable too, and stays out of the canonical slot", async () => {
+  // Review finding 4 (P2). The corrected header claimed the debug trace covered
+  // `timeout` as well as `refused`, while only `refused` was traced — the same
+  // over-promise finding 3 was about. It matters most for THIS class: a reflex
+  // that exceeds the budget injects nothing on every turn forever, and
+  // `detail` (which names both the candidate and the budget) is the only thing
+  // that explains it.
+  //
+  // Mutation: delete the `trace(`timeout: …`)` call → the debug assertion REDs;
+  // route the timeout branch into `recordInstallInert` → both the
+  // no-breadcrumb assertion and the "no latch" row above RED.
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const slow = fakeCli(join(home, "bin"), "sleep 5");
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ volunteer: { timeoutMs: 300 } }));
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: join(home, "bin"), TORTOISE_COMMAND: slow, TORTOISE_VOLUNTEER_DEBUG: "1" },
+    home,
+    configPath: cfgPath,
+    breadcrumbDir: crumbs,
+  });
+
+  const chunks: string[] = [];
+  const stderr = process.stderr as unknown as { write: (s: string) => boolean };
+  const original = stderr.write;
+  stderr.write = (s: string): boolean => {
+    chunks.push(String(s));
+    return true;
+  };
+  try {
+    assert.equal(
+      await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+      undefined,
+      "a timed-out reflex injects nothing",
+    );
+  } finally {
+    stderr.write = original;
+  }
+
+  const traced = chunks.join("");
+  assert.match(traced, /timeout: .*timed out after 300ms/, traced);
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a SLOW-but-working reflex must never be recorded as a broken INSTALL",
+  );
 });
 
 test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch", async () => {
