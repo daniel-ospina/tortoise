@@ -387,14 +387,16 @@ measured_at:
 #         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
 #         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
 #         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
-#         -> `1441 passed` at `a913fa8ec6` (two runs of this command at that head, same
-#         count), and `1442 passed` at the MERGE head `2f9a3aaf68`, each quoted from that
-#         run's OWN output — the command above is the check, and re-running it is the
-#         reproduction. ⛔ These are NOT `.worktree-report/` rows and must not be cited as
-#         them: no row in that export records either count (a fresh-context review measured
-#         it: the export's own first three rows are 356 / 280 / 957 of different commands,
-#         written hours before this head), which is exactly what the disclosure below says
-#         about the earlier cut that cited rows here. ⛔ THE SECOND
+#         -> `1441 passed` at `a913fa8ec6`, and `1442 passed` at the MERGE head
+#         `2f9a3aaf68`, each quoted from that run's OWN output — the command above is the
+#         check, and re-running it is the reproduction. ⛔ These are NOT `.worktree-report/`
+#         rows and must not be cited as them: no row in that export records either count (a
+#         fresh-context review measured it: the export's own first three rows are
+#         356 / 280 / 957 of different commands, written hours before this head), which is
+#         exactly what the disclosure below says about the earlier cut that cited rows
+#         here. The count is stated ONCE per head, from ONE run, because that is what can
+#         be pointed at; a "we also re-ran it and got the same number" sentence is a second
+#         claim with no artifact behind it. ⛔ THE SECOND
 #         NUMBER IS NOT DRIFT, IT IS MAIN'S: merging `e49788706a` (#11548) added one
 #         `def test_` to `tests/test_ci_selection.py` (473 -> 474; the other three files
 #         are unmoved at 230 / 270 / 146), so the same command legitimately collects one
