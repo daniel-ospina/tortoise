@@ -59,12 +59,30 @@ from typing import Any
 import pytest
 
 from tortoise import cache_projection as cp
+from tortoise import log as tlog
 from tortoise import monitoring, record_writer
 from tortoise import record_projection as rp
+from tortoise.projection import FalkorProjection, _GuardedGraph
 from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The four write doors `_instrument` patches, snapshotted as they are at IMPORT
+#: time — i.e. before any fixture in this module can install an instrument.
+#: `test_D3_the_capture_instrument_is_not_left_installed` compares the live
+#: attributes against these to prove the module-scoped capture does not leave its
+#: wrappers behind for D4–D12. Identity, not name: the wrappers are closures, so
+#: only the original object can tell "patched" from "restored".
+_UNPATCHED_AT_IMPORT = tuple(
+    (door, owner, attr, getattr(owner, attr))
+    for door, owner, attr in (
+        ("journal", tlog.EventLog, "append"),
+        ("record", record_writer, "write_live_record"),
+        ("fold", FalkorProjection, "apply"),
+        ("cache", _GuardedGraph, "query"),
+    )
+)
 
 #: The record's database — the arming surface `test_9078` and the CI job use.
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
@@ -390,8 +408,14 @@ def test_D3_no_write_path_bypasses_the_record():
 #   carrier. The census of lanes lives in the run's artifact, never as a
 #   constant here (DoD rule 4); the *set* is a pin, not a count.
 # * The criterion's `with no cache-only path` half is measured by the fourth
-#   leg, which takes the whole mutating-cache population (folded AND raw-handle)
-#   and requires a journal append and an APPLIED record write behind each one.
+#   leg at the FLOOR the trace can support: **no mutating cache statement
+#   precedes** the capture's first journal append and first APPLIED record
+#   write. It is NOT a per-write attribution, and this comment used to claim
+#   one — every other statement of this leg's scope (its docstring, its name,
+#   the artifact's §2 table, §4, §6.2 F6) already said FLOOR. A cache write
+#   injected MID-capture, after some append and its record have landed, leaves
+#   the leg green: call order carries no descriptor tying a raw-handle statement
+#   to the append it skipped. The residue is measured and carried by #11477.
 
 
 #: The `(event_type, lane)` pairs that fold AHEAD of their own append while
@@ -822,6 +846,39 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
             f"{first_r}: {stmt.statement!r}, in_fold={stmt.in_fold!r}) — the cache "
             "is ahead of the record on a door that claims journal-first"
         )
+
+
+def test_D3_the_capture_instrument_is_not_left_installed(traced):
+    """The capture's four monkeypatches are UNDONE before its fixture yields.
+
+    A module-scoped fixture's patches normally live until the module's last test
+    tears down, so every leg after the capture (D4–D12) would run against
+    instrumented doors: each statement re-classified by `_statement_writes` and
+    appended to this capture's trace, and every leg's write attributed to a
+    capture that had already finished. That is a leg-ORDER dependency in a file
+    whose round-2 fix existed to remove exactly that shape.
+
+    The fixture does undo before the `yield` — but nothing else in the file
+    reds if that call drifts back into the `finally`, so this leg is the PIN.
+    The property is asserted by IDENTITY against the doors as they were at import
+    time: a closure cannot be compared to itself by name, so an assertion that
+    "the doors look right" would be inert.
+
+    Falsifier: move `mp.undo()` back after the `yield` → every door below is this
+    module's wrapper and this reds naming it. Leg 2 installs its own instrument
+    on a private `probe_mp` for its probe and undoes it in its own `finally`, so
+    it does not trip this.
+    """
+    leaked = [
+        f"{door} ({getattr(owner, '__name__', type(owner).__name__)}.{attr})"
+        for door, owner, attr, original in _UNPATCHED_AT_IMPORT
+        if getattr(owner, attr) is not original
+    ]
+    assert not leaked, (
+        "the capture's instrumentation is still installed after the fixture "
+        f"yielded: {', '.join(leaked)} — every leg after this one would be "
+        "measuring an instrumented tree and appending to another leg's trace"
+    )
 
 
 def test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY(traced):
