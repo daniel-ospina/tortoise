@@ -728,19 +728,17 @@ _wrapped_argv_disables_lifespan() {
         set +f
         IFS="$_ifs"
     done
-    # ⛔ AN EXPANSION THIS BLOCK CANNOT RESOLVE, matched INDEPENDENTLY of where it
-    # sits. A first cut required the `$` to come BEFORE the flag (`*'$'*--lifespan*`),
-    # so `sh -c 'uvicorn app:app --lifespan $V'` — where the value is only known at
-    # run time — matched nothing and PERMITTED: with `V=off` the lifespan never
-    # runs, no gate is installed on either side, and N workers start. MEASURED on
-    # the shipped block (2026-11-09): `permit`. Two tests, not one ordered glob.
+    # ⛔ TWO INDEPENDENT TESTS, IN THIS ORDER. First: does the string mention the
+    # lifespan input AT ALL? If not, this is not the wrapped-off shape and the
+    # ordinary REPORT arm handles it — a wrapped `--app-dir $D` must stay a
+    # report, not become a refusal.
     case "$_norm" in
-        *'$'*) ;;
-        *) case "$_norm" in
-               *--lifespan*|*UVICORN_LIFESPAN*) ;;
-               *) return 1 ;;
-           esac ;;
+        *--lifespan*|*UVICORN_LIFESPAN*) ;;
+        *) return 1 ;;
     esac
+    # Then, given it does: refuse when the value is an expansion this block
+    # cannot resolve (the genuinely unreadable case — with the lifespan off no
+    # gate is installed on either side), or when it is a literal `off`.
     case "$_norm" in
         *'$'*) return 0 ;;
         *--lifespan=off*|*'--lifespan off'*) return 0 ;;

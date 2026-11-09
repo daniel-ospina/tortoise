@@ -1261,7 +1261,12 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     # important row: it is the default, so refusing it would refuse a boot that
     # changed nothing.
     for _wrapped_on in ("uvicorn app:app --lifespan on --workers 4",
-                        "uvicorn app:app --lifespan auto --workers 4"):
+                        "uvicorn app:app --lifespan auto --workers 4",
+                        # An unresolvable expansion that names NO lifespan input is
+                        # still a REPORT. The unreadable-refusal arm is scoped to a
+                        # string that mentions the lifespan, so a wrapped
+                        # `--app-dir $D` must not become a refusal.
+                        "uvicorn app:app --app-dir $D --workers 4"):
         proc = _run_worker_block(
             ("sh", "-c", _wrapped_on),
             {"TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"],
