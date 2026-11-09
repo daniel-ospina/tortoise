@@ -3,8 +3,8 @@
 The defect this pins: the tier-2 PR legs run with an **EMPTY `TORTOISE_DB_URI`**
 (present and empty, never unset) by design — both the URI and `EXPECT_URI` are
 emptied, which is what keeps the E2E-6 tripwire **inert** on the tier-2 shape (it
-arms only when `full==true`, where both are set; `python-ci.yml:600-602`
-and `:1367-1368`; epic #1647 Task 9, cycle-6 P2-8), so "provision the URI" is a
+arms only when `full==true`, where both are set; `python-ci.yml:1243-1245`
+and `:2516-2518`; epic #1647 Task 9, cycle-6 P2-8), so "provision the URI" is a
 reversal of a recorded decision, not a fix. A selected test module that
 module-skips at import on an empty URI therefore collects ZERO tests in such a
 leg: `pytest --collect-only` exits 5 and the fail-closed manifest step kills the
