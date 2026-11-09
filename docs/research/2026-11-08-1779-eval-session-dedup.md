@@ -163,7 +163,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 ## 5. What changed in the tree (and what deliberately did not)
 
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
-  `tests/test_haystack_overlap_1779.py` (21 tests: 20 hermetic + the real-split pin — a
+  `tests/test_haystack_overlap_1779.py` (23 tests: 22 hermetic + the real-split pin — a
   count this document's §5 line must match, asserted by
   `test_the_research_doc_publishes_this_files_REAL_test_count`). The test file lives at `tests/`
   ROOT, not under `tests/longmem_eval/`, and that placement is load-bearing: `on_demand:` carries
@@ -173,14 +173,14 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   `tests/longmem_eval/` (re-derive: `ci_selection.select(["tools/longmem_eval/ingest.py"],
   "pull_request", manifest)` — no count is published here on purpose, because moving this very
   file changed it from 142 to 143 in the commit that documented it). At the
-  root the 20 hermetic ratchets GATE, so a revert of the `_turn_text` extraction reds instead of
+  root the 22 hermetic ratchets GATE, so a revert of the `_turn_text` extraction reds instead of
   shipping byte-identically (same precedent as `test_temporal_leg_non_eviction_receipt_11494.py`,
   `config/ci-surfaces.yml`). Registered on the `eval` surface for OWNERSHIP
   (`tools/longmem_eval/` is a `SOURCE_PATTERNS` entry of it); `python tools/ci_selection.py
   --integrity` exits 0.
   ⚠️ The `@slow` real-split PIN inside that file stays UNARMED: no CI lane re-derives it (the
   on-demand lane provisions the embedder and FalkorDB but never the dataset cache), so it skips in
-  CI (measured: 20 passed, 1 skipped with an empty cache dir) and the numbers are re-derived only on
+  CI (measured: 22 passed, 1 skipped with an empty cache dir) and the numbers are re-derived only on
   a box holding the cached S split (§8).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
@@ -261,7 +261,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m tools.longmem_eval.haystack_overlap --json
 
-# the tests (20 hermetic pass; the @slow pin only runs with the cached S split)
+# the tests (22 hermetic pass; the @slow pin only runs with the cached S split)
 TORTOISE_TEST_CARVE_OUT=1 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m pytest tests/test_haystack_overlap_1779.py -q -p no:cacheprovider
 ```

@@ -21,6 +21,7 @@ from tools.longmem_eval import dataset as lme_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.haystack_overlap import (  # noqa: E402, RUF100
     CENSUS,
     MATERIAL_HIT_SHARE,
+    _summary,
     census_overlap,
     main,
 )
@@ -87,7 +88,7 @@ def test_prompt_cache_verdict_is_derived_from_the_CHUNK_cell_not_the_session():
     `extract_session_v2` chunks each session and calls `run_s1` per chunk with
     the session date, so the stored-response identity is (chunk text, date).
 
-The two sessions here share a chunk (`alpha`) under the SAME date but differ
+    The two sessions here share a chunk (`alpha`) under the SAME date but differ
     overall, so:
 
       * the SESSION cell never repeats (distinct transcripts) → session reuse
@@ -190,6 +191,57 @@ def test_identical_content_and_date_is_prompt_reuse():
         row = census["decision"][name]
         assert row["realizable"] is True
         assert row["blocked_by"] is None
+
+
+def test_every_NOT_realizable_row_carries_its_cause_and_its_magnitude():
+    """No row may reach a reader unexplained — the SHIPPED cache included.
+
+    ``encode_cache_text_keyed`` is passed no ``blocked_by`` and is rejected on
+    MATERIALITY alone, so on a small population it published
+    ``realizable: false`` with ``blocked_by: null``, and the default CLI printed
+    `encode_cache_text_keyed reuse 1.0009x — NOT realizable` **about the cache
+    the repo actually ships**, with no cause and no magnitude beside it
+    (measured: `--limit 3`). A missing explanation reads as "nothing to say",
+    which is the opposite of the verdict, and it lands on the one row a reader
+    is most likely to act on.
+
+    The two assertions are the contract ``_avenue``'s docstring states: the
+    cause is always present on a not-realizable row, and the magnitude is
+    always published beside the boolean.
+    """
+    # 200 sessions, one turn each, TWO carrying the same text: the identity
+    # DOES repeat (1 hit per leg) but the share is ~0.5% — below the 1% floor,
+    # which is the state that used to publish with no cause.
+    sessions = [[{"role": "user", "content": "shared"}],
+                [{"role": "user", "content": "shared"}]]
+    sessions += [[{"role": "user", "content": f"unique {n}"}]
+                 for n in range(198)]
+    dates = ["2024-01-01"] * 200
+    census = census_overlap([_instance("q1", sessions, dates)], chunk_turns=1)
+
+    encode_row = census["decision"]["encode_cache_text_keyed"]
+    assert encode_row["hit_slots"] == 2, (
+        f"fixture must produce exactly one repeated identity in EACH leg "
+        f"(2 encode-unit hits), got {encode_row['hit_slots']} — the assertions "
+        f"below would be vacuous")
+    assert encode_row["hit_share"] < encode_row["materiality_floor"]
+    assert encode_row["realizable"] is False
+    # ★ the defect: this used to be None, and the summary printed no cause.
+    assert encode_row["blocked_by"], (
+        "a not-realizable row must name its cause — the shipped cache is "
+        "rejected on materiality, not for want of an explanation")
+    assert "materiality floor" in encode_row["blocked_by"]
+    assert str(encode_row["hit_slots"]) in encode_row["blocked_by"]
+
+    # and the magnitude is on EVERY row of the rendered summary, so the boolean
+    # is never the only evidence in the default CLI output either.
+    summary = _summary(census)
+    for name in ("session_level_extraction_reuse",
+                 "prompt_level_response_cache", "encode_cache_text_keyed"):
+        row = census["decision"][name]
+        assert f"{row['hit_slots']} hits" in summary, (
+            f"the summary must publish the magnitude for {name}: {summary!r}")
+        assert f"{row['hit_share']:.2%} share" in summary
 
 
 def test_encode_units_use_the_product_renderers():
@@ -569,6 +621,36 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
         f"these sites must publish the REAL count (this file defines {total} "
         f"tests, {len(slow)} of them @slow → {hermetic} hermetic): "
         f"{stale}")
+
+
+def test_the_gated_file_carries_a_durations_row_and_is_really_in_the_fast_pool():
+    """The manifest SIDE of the move: gated means in `fast_pool()` AND given a weight.
+
+    This file lives at `tests/` ROOT on purpose — `on_demand`'s `longmem_eval/**`
+    would subtract it under the old path (#10194), so the ratchets would never run
+    on the edit they exist to prevent. That move has a second consequence the
+    earlier `on_demand` rebuttal missed: a `tests/`-root file is a **fast-pool**
+    member, and the `#3400/#4348` convention is that a fast file a PR ADDS must
+    carry a `durations:` row — "a default is not a reading". Absence reds no gate
+    (`duration_coverage_issues()` is a ratio against the pool with headroom), so
+    without this pin a missing row is invisible until a human notices it.
+
+    Both halves are asserted, because either alone can pass vacuously: a file that
+    is NOT in the pool needs no weight, and a row for a file that is not in the
+    pool records nothing. Proven non-vacuous at the pre-fix head — there the pool
+    assertion passed and the row assertion failed.
+    """
+    from tools import ci_selection
+
+    manifest = ci_selection.load_manifest()
+    name = Path(__file__).name
+    assert name in ci_selection.fast_pool(manifest), (
+        f"{name} must be in `fast_pool()` — that is the whole point of living at "
+        "`tests/` root instead of the subtracted `tests/longmem_eval/` subtree")
+    assert name in (manifest.get("durations") or {}), (
+        f"{name} is a fast-pool file, so it must carry a `durations:` row "
+        "(`#3400/#4348`: a default is not a reading, and a hand-written row is "
+        "the only record of a file a PR added)")
 
 
 @pytest.mark.slow

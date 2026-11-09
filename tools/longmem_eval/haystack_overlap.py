@@ -378,16 +378,39 @@ def _avenue(identity: str, cell: dict[str, Any], *,
     always published beside it (``hit_slots`` / ``hit_share``), so a reader never
     has to trust the boolean: 27 hits out of 124,345 is realizable in arithmetic
     and worthless in practice, and the row says both.
+
+    ⛔ ``blocked_by`` is NEVER ``None`` on a not-realizable row. The two LLM
+    avenues pass a richer cause; the SHIPPED cache was rejected on materiality
+    alone and published ``blocked_by: null``, so the default CLI output read
+    `encode_cache_text_keyed reuse 1.0009x — NOT realizable` about the cache the
+    repo actually ships, with no cause and no magnitude beside it (measured with
+    ``--limit 3``: 2 hits of 2,... over 0.09%). That is the "published verdict
+    with no producer" class this module retires, so the floor sentence is
+    synthesised here whenever the caller supplied none — no row can reach a
+    reader unexplained.
     """
     slots = cell["slots"]
     hits = slots - cell["distinct"]
     share = round(hits / slots, 4) if slots else 0.0
+    realizable = cell["reuse_factor"] > 1.0 and share >= MATERIAL_HIT_SHARE
+    if blocked_by is None and not realizable:
+        if slots == 0:
+            blocked_by = "no units to measure — nothing to reuse"
+        elif hits == 0:
+            blocked_by = (
+                f"the identity never repeats: {slots} units, "
+                f"{cell['distinct']} distinct")
+        else:
+            blocked_by = (
+                f"the identity repeats, but on only {hits} of {slots} units "
+                f"({share:.2%}) — below the {MATERIAL_HIT_SHARE:.0%} "
+                "materiality floor, so a cache would save a rounding error")
     return {
         "identity": identity,
         "reuse_factor": cell["reuse_factor"],
         "hit_slots": hits,
         "hit_share": share,
-        "realizable": cell["reuse_factor"] > 1.0 and share >= MATERIAL_HIT_SHARE,
+        "realizable": realizable,
         "blocked_by": blocked_by,
         "materiality_floor": MATERIAL_HIT_SHARE,
     }
@@ -492,7 +515,9 @@ def _summary(census: dict[str, Any]) -> str:
                  "prompt_level_response_cache", "encode_cache_text_keyed"):
         row = d[name]
         verdict = "REALIZABLE" if row["realizable"] else "NOT realizable"
-        lines.append(f"  {name:32s} reuse {row['reuse_factor']}x — {verdict}")
+        lines.append(f"  {name:32s} reuse {row['reuse_factor']}x — {verdict}"
+                     f"  [{row['hit_slots']} hits, {row['hit_share']:.2%} share,"
+                     f" floor {row['materiality_floor']:.0%}]")
         if row.get("blocked_by"):
             lines.append(f"      {row['blocked_by']}")
     return "\n".join(lines)
