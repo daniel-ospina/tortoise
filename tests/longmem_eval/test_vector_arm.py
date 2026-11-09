@@ -484,7 +484,7 @@ def test_encode_cache_disk_persistence(tmp_path):
 
 def test_encode_cache_intercepts_ingest_and_reuses(tmp_path, monkeypatch):
     """The cache must intercept the ingest-time encode path (the measured
-    1.299× cross-question redundancy — ``haystack_overlap.CENSUS``, #1779)
+    1.299× redundancy in one pass — ``haystack_overlap.CENSUS``, #1779)
     and survive across instances (crash-safe)."""
     _real = emb.compute_embedding
     calls = {"n": 0}

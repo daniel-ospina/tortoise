@@ -62,7 +62,8 @@ Derived from the scoping wiring table (code-verified across 5+ verifier passes).
 - **Race conditions:** encode-cache must be model-keyed (`sha256(model_id + prompt_name + text)`) — content-hash-only lets MiniLM vectors serve arctic runs. Per-model checkpoint keying prevents cross-model resume collision.
 - **N+1/queries:** cross-question encode caching (overlapping haystack content re-ingested per question — 5-10× redundant encodes).
   > ⚠️ **MEASURED 2026-11-08 (#1779): the "5-10×" here is NOT supported — the measured figure is 1.299×** (371,095 encode
-  > units / 285,608 distinct over the 500-Q S split, i.e. 23.0% cross-question hits), and prompt-identity reuse across
+  > units / 285,608 distinct over the 500-Q S split, i.e. 23.0% cache hits in one pass — a HIT share, not a strictly
+  > cross-question rate; see residual 6 of the research note), and prompt-identity reuse across
   > questions is exactly 1.000×. Kept rather than rewritten because this plan is the dated record of what was believed
   > when the cache was designed; the numbers that hold are in `tools/longmem_eval/haystack_overlap.py::CENSUS` and
   > `docs/research/2026-11-08-1779-eval-session-dedup.md`. Do not cite this line as a current premise.

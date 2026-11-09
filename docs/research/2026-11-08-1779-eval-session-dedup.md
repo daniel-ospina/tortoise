@@ -163,7 +163,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 ## 5. What changed in the tree (and what deliberately did not)
 
 - **New:** `tools/longmem_eval/haystack_overlap.py` (census + derived verdict + CLI) and its test
-  `tests/test_haystack_overlap_1779.py` (24 tests: 23 hermetic + the real-split pin — a
+  `tests/test_haystack_overlap_1779.py` (25 tests: 24 hermetic + the real-split pin — a
   count this document's §5 line must match, asserted by
   `test_the_research_doc_publishes_this_files_REAL_test_count`). The test file lives at `tests/`
   ROOT, not under `tests/longmem_eval/`, and that placement is load-bearing: `on_demand:` carries
@@ -173,14 +173,14 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   `tests/longmem_eval/` (re-derive: `ci_selection.select(["tools/longmem_eval/ingest.py"],
   "pull_request", manifest)` — no count is published here on purpose, because moving this very
   file changed it from 142 to 143 in the commit that documented it). At the
-  root the 23 hermetic ratchets GATE, so a revert of the `_turn_text` extraction reds instead of
+  root the 24 hermetic ratchets GATE, so a revert of the `_turn_text` extraction reds instead of
   shipping byte-identically (same precedent as `test_temporal_leg_non_eviction_receipt_11494.py`,
   `config/ci-surfaces.yml`). Registered on the `eval` surface for OWNERSHIP
   (`tools/longmem_eval/` is a `SOURCE_PATTERNS` entry of it); `python tools/ci_selection.py
   --integrity` exits 0.
   ⚠️ The `@slow` real-split PIN inside that file stays UNARMED: no CI lane re-derives it (the
   on-demand lane provisions the embedder and FalkorDB but never the dataset cache), so it skips in
-  CI (measured: 23 passed, 1 skipped with an empty cache dir) and the numbers are re-derived only on
+  CI (measured: 24 passed, 1 skipped with an empty cache dir) and the numbers are re-derived only on
   a box holding the cached S split (§8).
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
@@ -211,6 +211,18 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    census answers it (2.7 GB download, so it is never implicit);
 4. **A dataset refresh** changes any of the above numbers → the `@slow` pin reds and the docs get
    re-derived, which is the point of pinning them.
+5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
+   ingest renders per session (turn Points + raw chunks) because those are the only units derivable
+   from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
+   `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
+   whole-run denominator is larger and the published 23.0% is a SUBSET share.
+   **Its reuse is UNMEASURED, and it could go either way.** The embedded text is the extracted claim
+   string (`ingest_v2.py:216`), while the session date rides on separate point properties (`when` /
+   `validFrom`, `:259-261`) — so a re-dated repeat COULD emit an identical claim string and hit a
+   text-keyed cache, which would make the true share **larger** than 23.0%. Nothing in a
+   dataset-only census can settle it; a run with `--model` + `ingest_v2` and the cache's own hit
+   counters can.
+
 6. **⛔ The 23.0% is a HIT share, not a strictly cross-question rate.** The census publishes BOTH
    cells, so neither has to be derived: `encode_units.total.hit_slots` = **85,487 of 371,095**
    (23.0%) counts every repeat, including the **1,064 units that repeat *inside* a single
@@ -224,18 +236,6 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    needs and the one `encode_cache.py` acts on — but the qualifier matters for #1779's own question,
    so every live site says "cache hits in one pass" rather than "cross-question hits", and both
    cells are pinned (`within_question_hit_slots` / `cross_question_hit_slots` / `..._share`).
-5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
-   ingest renders per session (turn Points + raw chunks) because those are the only units derivable
-   from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
-   `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
-   whole-run denominator is larger and the published 23.0% is a SUBSET share.
-   **Its reuse is UNMEASURED, and it could go either way.** The embedded text is the extracted claim
-   string (`ingest_v2.py:216`), while the session date rides on separate point properties (`when` /
-   `validFrom`, `:259-261`) — so a re-dated repeat COULD emit an identical claim string and hit a
-   text-keyed cache, which would make the true share **larger** than 23.0%. Nothing in a
-   dataset-only census can settle it; a run with `--model` + `ingest_v2` and the cache's own hit
-   counters can.
-
 ## 7. Research provenance
 
 - **Internal (before deriving):** issue #1779 + its comment thread; `git log --all --grep` (no prior
@@ -274,7 +274,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m tools.longmem_eval.haystack_overlap --json
 
-# the tests (23 hermetic pass; the @slow pin only runs with the cached S split)
+# the tests (24 hermetic pass; the @slow pin only runs with the cached S split)
 TORTOISE_TEST_CARVE_OUT=1 TORTOISE_LME_CACHE_DIR=~/.cache/tortoise-longmemeval \
   python -m pytest tests/test_haystack_overlap_1779.py -q -p no:cacheprovider
 ```
