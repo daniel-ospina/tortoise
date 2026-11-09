@@ -168,26 +168,44 @@ def test_hosted_list_excludes_by_the_derived_prefix():
     A literal ``'session_demo_'`` in the query would be a second spelling of the
     declaration — the drift class this module's header exists to prevent — and a
     literal ORG-BOUND id would exclude only the orgs whose id happened to match.
+
+    The conditions live in ``_session_list_conds`` (defined at the END of
+    ``hosted_api.py`` so adding it shifts no line number cited elsewhere), so this
+    pins BOTH halves: the endpoint CALLS that helper, and the helper's predicate
+    is the derived, null-safe, string-coerced one.
     """
     src = _src("tortoise/hosted_api.py")
     start = src.index("async def list_sessions(")
     body = src[start:src.index("async def get_session_detail(", start)]
-    assert "NOT s.id STARTS WITH $demo_prefix" in body, (
-        "list_sessions lost its demo-Session exclusion")
-    assert '"demo_prefix": DEMO_SESSION_ID_PREFIX' in body, (
-        "list_sessions must bind the exclusion to the DERIVED prefix constant")
+    assert "_session_conds, _query_params = _session_list_conds(actor_filter)" in body, (
+        "list_sessions must compose its WHERE through the one helper — a local "
+        "rebuild is the drift this pins against")
+    helper = src[src.index("def _session_list_conds("):]
+    assert "NOT toString(s.id) STARTS WITH $demo_prefix" in helper, (
+        "the exclusion lost its DERIVED prefix binding, or the operand went "
+        "back to the raw `s.id` — `STARTS WITH` raises a type error on a "
+        "legacy non-string id and the handler then serves an EMPTY list for an "
+        "org that has sessions (#8290 review, P1; measured)")
+    assert '"demo_prefix": DEMO_SESSION_ID_PREFIX' in helper, (
+        "the exclusion must be bound to the DERIVED prefix constant")
     # Cypher three-valued logic: `NULL STARTS WITH $p` is NULL and a WHERE drops
     # a NULL predicate, so the bare `NOT ...` form would ALSO remove a Session
     # that carries no id — a session this list served before #8290. The
     # exclusion must be exactly the demo set, so the NULL arm is explicit.
-    assert "(s.id IS NULL OR NOT s.id STARTS WITH $demo_prefix)" in body, (
-        "the null-id arm is missing: a NULL-id Session would now be silently "
+    assert "(s.id IS NULL OR NOT toString(s.id) STARTS WITH $demo_prefix)" in helper, (
+        "the null-id arm is missing: a NULL-id Session would be silently "
         "dropped, which is not the demo set")
+    assert " NOT s.id STARTS WITH " not in src, (
+        "the raw-operand form is back: it aborts the whole query on a "
+        "non-string `:Session.id`, which the handler reports as zero sessions")
     # the query builds a WHERE from the condition list; a `MATCH ... ` with no
     # WHERE would drop the exclusion on the actor_filter=None path
     assert '"MATCH (s:Session) WHERE "' in body, (
         "the MATCH-level WHERE must be unconditional — an actor-filter-"
         "conditional WHERE drops the demo exclusion for the common case")
+    # #2600 rides the SAME condition list, so it cannot be appended on one branch
+    assert 'conds.insert(0, "s.actor_user_id = $uid")' in helper, (
+        "the actor filter must ride the same MATCH-level condition list")
 
 
 def test_detail_door_uses_the_shared_predicate():
@@ -359,3 +377,130 @@ def test_a_real_capture_cannot_be_filed_under_the_reserved_namespace(tmp_path):
         assert client.get_session(reserved) is None
     finally:
         client.close()
+
+
+# ── the WHERE clause, RUN (the P1 the source pins could not see) ──────────
+#
+# The source pins above say the predicate is bound; they cannot say what the
+# engine DOES with it. #8290's review found the difference the hard way.
+
+
+def test_the_list_where_survives_a_legacy_non_string_session_id(tmp_path):
+    """A legacy non-``str`` ``:Session.id`` must not empty the whole list (P1).
+
+    ``STARTS WITH`` is a STRING predicate. Against a non-NULL non-string ``id``
+    FalkorDB does not answer ``false`` — it RAISES
+    ``Type mismatch: expected String or Null but was Integer``, and
+    ``list_sessions``' fail-soft handler turns that into ``rows = []``:
+    ``200 {"sessions": []}`` for an org that HAS captures, the shape #3892
+    forbids. Such a row is legacy-producible — before #9599 the capture door kept
+    any TRUTHY caller id and wrote it verbatim as ``MERGE (s:Session {id:$sid})``
+    — so the predicate has to tolerate it.
+
+    This runs the REAL WHERE (the one `list_sessions` composes, read from its one
+    home) against a REAL graph holding four rows: the demo session, a normal one,
+    a legacy int id, and one with NO id at all. All three non-demo rows must come
+    back; the raw-operand form is asserted to raise on the same data, so this pin
+    cannot pass on a vacuous engine.
+    """
+    from tortoise.hosted_api import _session_list_conds
+    from tortoise.sdk import TortoiseSDK
+
+    client = TortoiseSDK(str(tmp_path / "tortoise.db"),
+                         event_log_path=str(tmp_path / "events" / "sdk.jsonl"))
+    try:
+        g = client._get_proj().g
+        for stmt in (
+            "CREATE (s:Session {id:'session_demo_abcdef12', "
+            "created_at:'2026-01-01T00:00:00Z'})",
+            "CREATE (s:Session {id:'session_0123456789ab', "
+            "created_at:'2026-01-02T00:00:00Z'})",
+            "CREATE (s:Session {id:123, created_at:'2026-01-03T00:00:00Z'})",
+            "CREATE (s:Session {created_at:'2026-01-04T00:00:00Z'})",
+        ):
+            g.query(stmt)
+        conds, params = _session_list_conds(None)
+        rows = g.query("MATCH (s:Session) WHERE " + " AND ".join(conds)
+                       + " RETURN s.id", params=params).result_set
+        seen = [r[0] for r in rows]
+        assert "session_0123456789ab" in seen, (
+            f"the real session went missing: {seen!r}")
+        assert 123 in seen, (
+            "the legacy non-string id must be SERVED, not fatal — `toString` "
+            f"makes it match nothing; got {seen!r}")
+        assert None in seen, (
+            "a NULL-id Session must survive the exclusion — the demo set is "
+            f"exactly the prefixed ids; got {seen!r}")
+        assert not any(isinstance(i, str) and i.startswith(
+            session_schema.DEMO_SESSION_ID_PREFIX) for i in seen), (
+            f"the demo Session is still listed: {seen!r}")
+        # NON-VACUITY: the raw-operand form really does abort on this data, so
+        # the assertion above is a fix and not an artefact of the fixture.
+        with pytest.raises(Exception) as exc:
+            _ = g.query(
+                "MATCH (s:Session) WHERE (s.id IS NULL OR NOT s.id STARTS "
+                "WITH $demo_prefix) RETURN s.id",
+                params={"demo_prefix": session_schema.DEMO_SESSION_ID_PREFIX},
+            ).result_set
+        assert "Type mismatch" in str(exc.value), exc.value
+    finally:
+        client.close()
+
+
+def test_the_hosted_capture_door_refuses_a_reserved_id_too():
+    """The FOURTH door, BOUND to ``SessionRequest.session_id`` (#8290 review P2).
+
+    ``CommitPayload`` has a bound arm above; ``SessionRequest`` — the model the
+    public ``POST /v1/sessions`` boundary validates — had none, so reverting its
+    validator to the old ad-hoc blank test would have red nothing. The namespace
+    is reserved only if EVERY id-accepting boundary refuses it.
+    """
+    from pydantic import ValidationError
+
+    from tortoise.hosted_api import SessionRequest
+
+    reserved = session_schema.demo_session_id("abcdef123456")
+    with pytest.raises(ValidationError) as exc:
+        SessionRequest.model_validate({
+            "conversation": [{"role": "user", "content": "probe"}],
+            "session_id": reserved,
+        })
+    hits = [e for e in exc.value.errors()
+            if e.get("loc") == ("session_id",)
+            and "RESERVED demo/sample namespace" in e.get("msg", "")]
+    assert hits, (
+        "the reserved-id refusal is no longer BOUND to "
+        f"SessionRequest.session_id — errors: {exc.value.errors()[:3]!r}")
+    # non-vacuity: a real id still validates, so the field is not simply refused
+    ok = SessionRequest.model_validate({
+        "conversation": [{"role": "user", "content": "probe"}],
+        "session_id": "session_0123456789ab",
+    })
+    assert ok.session_id == "session_0123456789ab"
+
+
+def test_the_activation_scorecard_does_not_count_the_demo_session():
+    """The aggregate surface agrees with the list (#8290 review, P2).
+
+    ``GET /v1/activation/scorecard`` counts ``:Session`` rows in its window, so a
+    demo-seeded org published ``captured_sessions: 1`` beside
+    ``GET /v1/sessions`` → ``{"sessions": []}`` — the same two-surfaces
+    disagreement one surface over. ``stage_counts`` reads its rows through the ONE
+    predicate, so the sample is not a capture.
+    """
+    from tortoise.activation_scorecard import stage_counts
+
+    rows = [
+        ("session_demo_abcdef12", "2026-01-01T00:00:00Z", 3, 3, 2),
+        ("session_0123456789ab", "2026-01-02T00:00:00Z", 1, 1, 4),
+    ]
+    stages, detail = stage_counts(rows, "2026-01-01T00:00:00Z",
+                                  "2026-01-03T00:00:00Z")
+    assert detail["captured_sessions"] == 1, (
+        f"only the real capture counts: {detail!r}")
+    assert stages["captured"]["value"] == 1, stages["captured"]
+    # non-vacuity: the same fixture WITHOUT the demo row is unchanged, so the
+    # assertion above is not passing because the loop counts nothing.
+    _stages2, detail2 = stage_counts(rows[1:], "2026-01-01T00:00:00Z",
+                                     "2026-01-03T00:00:00Z")
+    assert detail2["captured_sessions"] == 1, detail2

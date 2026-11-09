@@ -22293,14 +22293,14 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # remove a session that carries NO id at all, which this list served
         # before #8290. The exclusion must be exactly the demo SET, never also
         # "every session whose id happens to be null".
-        _session_conds = ["(s.id IS NULL OR NOT s.id STARTS WITH $demo_prefix)"]
-        if actor_filter:
-            # #2600: actor filter rides a MATCH-level WHERE (before the OPTIONAL
-            # CONTAINS so the count(p) grouping semantics hold).
-            _session_conds.insert(0, "s.actor_user_id = $uid")
-        _query_params: dict = {"demo_prefix": DEMO_SESSION_ID_PREFIX}
-        if actor_filter:
-            _query_params["uid"] = actor_filter
+        #
+        # The conditions + params live in `_session_list_conds` (END of module,
+        # where a definition shifts no cited line), so a test runs this WHERE
+        # against a real graph instead of string-matching it. ⛔ Its operand is
+        # `toString(s.id)`: `STARTS WITH` RAISES on a legacy non-string id and the
+        # fail-soft handler below then serves `{"sessions": []}` for an org that
+        # HAS captures (#3892) — see the helper for the measurement.
+        _session_conds, _query_params = _session_list_conds(actor_filter)
         query = (
             "MATCH (s:Session) WHERE " + " AND ".join(_session_conds) + " "
             + "OPTIONAL MATCH (s)-[:CONTAINS]->(p:Point) "
@@ -47958,3 +47958,56 @@ async def operator_data_source_demand(request: Request):
 # Restored in #833: accidentally deleted with the superseded file-based
 # replay surface (0875221) — guarded by TestMCPMount in test_hosted_api.py.
 app.mount("/mcp", mcp_http_app)
+
+
+# ── the `list_sessions` MATCH-level WHERE, in ONE place ────────────────────
+#
+# ⛔ DEFINED AT THE END OF THE MODULE ON PURPOSE. `hosted_api.py` is cited by
+# ABSOLUTE line number from ~20 places across the tree (`sdk.py`,
+# `metering.py`, `quota.py`, `tools/`, several tests), so a definition inserted
+# next to its only caller would shift every cite below it. Python resolves the
+# name at CALL time, so `list_sessions` can call a function defined after it —
+# the same reason `extractor_v2` keeps its late helpers at the bottom.
+def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
+    """The MATCH-level `WHERE` for `list_sessions`, as ``(conditions, params)``.
+
+    One home for a predicate whose exact text decides whether a tenant's session
+    list is right, so a test can run it against a REAL graph instead of
+    asserting the source string.
+
+    * **#8290 — the demo/sample Session is EXCLUDED.** "Captured sessions" is the
+      user's OWN filings, and #2360's owner-recorded exclusion already removes the
+      demo POINTS from the count-of-record digest — leaving the container visible
+      made two surfaces disagree about whether the sample was the user's own. The
+      prefix is DERIVED (`session_schema.DEMO_SESSION_ID_PREFIX`), never
+      re-spelled, and cannot collide with a mintable id (`mint_session_id()` =
+      `session_<12 hex>`); the namespace is also RESERVED at every caller-id door
+      (`ids.session_id_refusal`), so a caller cannot file a real capture into the
+      excluded set either.
+    * **The `s.id IS NULL` disjunct is Cypher three-valued-logic care**, not
+      noise: `NULL STARTS WITH $p` is NULL and a WHERE drops a NULL predicate, so
+      the bare `NOT ...` form would ALSO remove a Session that carries no id —
+      which this list served before #8290. The exclusion must be exactly the demo
+      SET.
+    * **`toString(s.id)`, not `s.id`** (#8290 review, P1 — MEASURED on the
+      embedded engine). `STARTS WITH` is a STRING predicate: against a non-NULL
+      non-string `id` the engine RAISES `Type mismatch: expected String or Null
+      but was Integer`, and the route's fail-soft handler turns that into
+      `rows = []` — `200 {"sessions": []}` for an org that HAS captures, the
+      "reports an org that has sessions as empty" shape `#3892` forbids. A
+      non-string id is legacy-producible (pre-#9599 the capture door kept any
+      TRUTHY id and wrote it verbatim as `MERGE (s:Session {id:$sid})` — which is
+      why `ids.session_id_refusal` exists now), so the predicate tolerates it:
+      `toString(123)` matches nothing, `toString(NULL)` is NULL and is still kept
+      by the disjunct.
+    * **#2600 — the actor filter rides the SAME MATCH-level WHERE.** It must not
+      be appendable only on a branch: the common (no-filter) path would then
+      silently lose the demo exclusion.
+    """
+    conds = ["(s.id IS NULL OR NOT toString(s.id) STARTS WITH $demo_prefix)"]
+    params: dict = {"demo_prefix": DEMO_SESSION_ID_PREFIX}
+    if actor_filter:
+        # before the OPTIONAL MATCH so the count(p) grouping semantics hold
+        conds.insert(0, "s.actor_user_id = $uid")
+        params["uid"] = actor_filter
+    return conds, params

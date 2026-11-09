@@ -514,8 +514,23 @@ def stage_counts(rows: Sequence[Sequence[Any]], since: str,
     """
     integrity: list[str] = []
     kept: list[tuple[int, int]] = []
+    # #8290: the demo/sample Session is NOT one of the org's captures, and the
+    # session read surfaces (GET /v1/sessions, the detail door, TortoiseSDK
+    # .get_session) already exclude it. Counting it here would publish
+    # `captured_sessions: 1` for a demo-seeded org whose session LIST is empty —
+    # two org-facing surfaces disagreeing about whether the sample content is the
+    # user's own, which is the exact defect #8290 exists to remove, one surface
+    # over. Excluded HERE (in the row loop, on the shared predicate) rather than in
+    # `FUNNEL_QUERY`: the query is also the evidence for the stage-2/3 arithmetic,
+    # and a Python filter keeps the exclusion identical to the one every other
+    # surface applies (`session_schema.is_demo_session_id`) instead of a second
+    # Cypher spelling of the prefix.
+    from tortoise.session_schema import is_demo_session_id
+
     for row in rows:
         sid, created_at = row[0], row[1]
+        if is_demo_session_id(sid if isinstance(sid, str) else None):
+            continue
         if len(row) >= 5:
             # the live shape: (sid, created_at, turn_nodes, turn_count, extracted)
             turn_points = max(int(row[2] or 0), int(row[3] or 0))
