@@ -169,7 +169,10 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   ROOT, not under `tests/longmem_eval/`, and that placement is load-bearing: `on_demand:` carries
   `longmem_eval/**`, and the subtraction is by PATH (`tools/ci_selection.py:4269`), so a file in
   that subtree is off every pre-merge leg — measured, a PR touching
-  `tools/longmem_eval/ingest.py` selects 142 test files and none from `tests/longmem_eval/`. At the
+  `tools/longmem_eval/ingest.py` selects the whole `eval` surface's test list and none from
+  `tests/longmem_eval/` (re-derive: `ci_selection.select(["tools/longmem_eval/ingest.py"],
+  "pull_request", manifest)` — no count is published here on purpose, because moving this very
+  file changed it from 142 to 143 in the commit that documented it). At the
   root the 20 hermetic ratchets GATE, so a revert of the `_turn_text` extraction reds instead of
   shipping byte-identically (same precedent as `test_temporal_leg_non_eviction_receipt_11494.py`,
   `config/ci-surfaces.yml`). Registered on the `eval` surface for OWNERSHIP

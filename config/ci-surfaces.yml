@@ -7948,9 +7948,15 @@ surfaces:
   # same #10194/#10206 reasoning as the `test_temporal_leg_non_eviction_receipt_11494.py`
   # sibling below. `on_demand_files()` SUBTRACTS `longmem_eval/**` from `test_files` on
   # every non-full selection (`tools/ci_selection.py:4269`), so a file under that
-  # subtree is off the gate entirely: measured on this branch, a PR touching
-  # `tools/longmem_eval/ingest.py` selects 142 test files and NOT ONE from
-  # `tests/longmem_eval/`. That would make the HERMETIC ratchets inert — notably
+  # subtree is off the gate entirely: a PR touching `tools/longmem_eval/ingest.py`
+  # selects the whole `eval` surface's test list and NOT ONE file from
+  # `tests/longmem_eval/`. ⛔ Deliberately NO file COUNT here — an earlier revision
+  # of this comment published one ("142"), and MOVING this very file to the root
+  # made the same command return 143, so the sentence contradicted its own evidence
+  # in the commit that documented it. Re-derive rather than trust a number:
+  # `ci_selection.select(["tools/longmem_eval/ingest.py"], "pull_request", manifest)`
+  # → assert no entry under `tests/longmem_eval/` and ours IS present.
+  # That would make the HERMETIC ratchets inert — notably
   # `test_both_ingest_legs_CALL_turn_text_and_keep_no_inline_twin`, whose whole job is
   # to red a PR that re-introduces the inline `f"[{role}] {{content}}"` twin in
   # `ingest.py`; a revert renders byte-identically, so an ungated ratchet cannot fire on

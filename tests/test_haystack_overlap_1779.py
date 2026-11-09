@@ -551,6 +551,12 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
         # skipped`) and was the one live site the first five-site check missed —
         # a published count with no instrument, one line below a checked one.
         (doc, f"measured: {hermetic} passed"),
+        # §5 ALSO restates the count as `N hermetic ratchets GATE`, two lines
+        # below the `N tests: M hermetic` sentence. The six-site check still
+        # only matched that phrase in `00_index.md`, so mutating §5's own copy
+        # to the previous count left this pin GREEN (measured). Both files are
+        # checked for it now.
+        (doc, f"{hermetic} hermetic ratchets"),
         (root / "docs" / "00_index.md", f"{hermetic} hermetic ratchets"),
         (root / "config" / "ci-surfaces.yml",
          f"The {hermetic} hermetic tests are therefore GATED"),
