@@ -389,9 +389,10 @@ measured_at:
 #         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
 #         -> `1442 passed` at the MERGE head `2f9a3aaf68`, re-measured at the PR head
 #         `117a5f96bba5` (`1442 passed in 1115.94s`), and `1441 passed` at `a913fa8ec6` —
-#         one `def test_` less, which is main's own addition and not drift. At this head
-#         (`2f8e86c9b28c`) the same four files collect `1442` (`--collect-only`), so the
-#         count did not move with the two later docstring commits. ⛔ EACH READING
+#         one `def test_` less, which is main's own addition and not drift. At `2f8e86c9b28c`
+#         (the head that reading was taken at, two docstring commits after `117a5f96bba5`) the
+#         same four files collect `1442` (`--collect-only`), and they collect `1442` at this
+#         file's head too — so the count did not move with the docstring-only commits. ⛔ EACH READING
 #         IS A DIRECT INVOCATION AND NO ARTIFACT HOLDS IT: the four-file command has never
 #         been run to completion THROUGH `tools/worktree_report.py` in this lane (the
 #         export's own `not_done` says so verbatim), so `1441` must not be presented as a
