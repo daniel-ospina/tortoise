@@ -39,6 +39,7 @@ re-check would be the wrong seam. Both fail — see §2.
 | Refusal → structured 402, create-org lane | HTTP (FastAPI TestClient) | `TestAtomicProvisionBackstop::test_rpc_refusal_surfaces_the_structured_402` |
 | Refusal → structured 402, onboarding lane | HTTP | `…::test_onboarding_lane_maps_the_refusal_to_the_same_402` |
 | Stranded graph namespace on refusal | unit | `…::test_rpc_refusal_drops_the_eagerly_materialized_graph` |
+| Reclaim is gated on PROOF the provision did not land (§4) | unit | `TestNamespaceReclaimAttribution::test_only_a_server_REJECTION_proves_nothing_landed` (4xx yes · 5xx/transport no) · `…::test_an_ambiguous_rpc_failure_does_not_drop_the_graph` · `…::test_a_duplicate_name_409_drops_the_graph` · register lane both ways: `…::test_a_provision_refusal_still_reclaims_in_the_register_lane` / `…::test_a_post_provision_failure_does_not_reclaim_the_committed_org` |
 | Non-vacuity (a 500 stays a 500) | HTTP | `…::test_unrelated_rpc_failure_is_not_laundered_into_a_402` |
 | SQL↔Python marker lockstep | static (file read) | `…::test_the_marker_is_the_one_the_migration_raises` |
 | Existing single-process burst behaviour | unchanged | `TestConcurrentTeamCreationTOCTOU` (still green) |
@@ -50,10 +51,10 @@ re-check would be the wrong seam. Both fail — see §2.
 | Call site | What it does after this change |
 |---|---|
 | `tortoise/supabase_control.py` `owned_free_org_ids` | Unchanged; **its predicate is now duplicated inside the RPC**, and the pair is pinned by `test_the_sql_predicate_is_the_python_predicate` on BOTH sides of the claim: the exclusion set is BUILT FROM `_BILLING_ACTIVE_STATUSES` / `_PENDING_PAYMENT_STATUS` (a constant change in either direction reddens it), and the NEGATIVE space is pinned too — the gate may reference only the columns the Python twin reads, and its WHERE clause is a golden text — so an ADDED condition (`o.tier`, `o.deleted_at`, `m.status <> 'deleted'`) reddens rather than silently changing what counts as free. Any future edit must move both. |
-| `tortoise/hosted_api.py` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and reclaims the eagerly materialized graph namespace — **gated on attribution** (`_rpc_failure_proves_nothing_landed`): only a PostgREST ANSWER proves nothing committed, so a transport failure never `GRAPH.DELETE`s a live org's namespace. The drop is bounded and cannot fail the refusal. |
+| `tortoise/hosted_api.py` `_create_org_supabase_lane` | Maps the RPC marker onto the same structured 402 and reclaims the eagerly materialized graph namespace — **gated on attribution** (`_rpc_failure_proves_nothing_landed`): only a server REJECTION (the 402 marker, or a 4xx) proves nothing committed, so a transport failure **or a 5xx** (a gateway 502/504 can be generated after a COMMIT) never `GRAPH.DELETE`s a live org's namespace. The drop is bounded and cannot fail the refusal. |
 | `tortoise/hosted_api.py` `_create_onboarding_org_lane` | Maps the marker onto the same 402 instead of its generic 400. Passes `p_user_id=owner_user_id` and `p_tier='free'`, so it is a user-path lane and is pinned as one. |
 | `tortoise/hosted_api.py` `_provision_new_org_from_checkout` | ⛔ **NOT "unaffected by construction"** — that was an assumption, not an invariant. It now REFUSES a free or absent tier loudly: defaulting a missing tier to `'free'` made the gate engage and refuse a provision the customer had already paid for, which the webhook re-raises as a 500 Stripe redelivers forever. The session-creation route rejects `free`/`anon` before checkout, so reaching here with one means the metadata was lost. |
-| `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | The entitlement gate does not fire (the identity path passes `p_user_id = NULL`). The namespace reclaim in `register_user` is **gated on attribution** — it used to delete on ANY exception, the same defect as the create-org lane, and a lost response after a committed registration would have destroyed a live account's graph. |
+| `/v1/register`, `/v1/agent/signup` (`provision_org`, `provision_org_with_token`) | The entitlement gate does not fire (the identity path passes `p_user_id = NULL`). The namespace reclaim in `register_user` is **gated on attribution AND scoped to the provision step** — it used to delete on ANY exception, and it used to run the gate against the exception of a POST-provision step (`set_dashboard_key_login`), so a live account whose login flag failed lost its graph. It also runs through the shared `_drop_org_graph` off the event loop now. |
 | `tortoise/hosted_api.py` `_create_org_registry_lane` | Unchanged: registry (selfhost) mode writes into the graph, where Postgres constraints do not exist. |
 | claim lanes (`claim_membership` RPC) | **Unchanged** — the other writer that can create an owned free org. Recorded as a residual in the migration header; it is a distinct RPC and a distinct derivation site. |
 
@@ -64,7 +65,9 @@ re-check would be the wrong seam. Both fail — see §2.
    `CREATE OR REPLACE` preserves the ACL. → `supabase/tests/0010_provisioning_rpcs.sql` §8.
 2. `_ONE_FREE_ORG_RPC_MARKER` + `_one_free_org_blocker_from_rpc` in `hosted_api`. →
    `test_marker_absent_yields_no_blocker`, `test_the_marker_is_the_one_the_migration_raises`.
-3. Create-org lane mapping (+ graph drop). → the 402 and graph-drop tests.
+3. Create-org lane mapping (+ graph drop, **gated on attribution** — see §4). → the 402 and
+   graph-drop tests, in BOTH directions (`test_a_duplicate_name_409_drops_the_graph`,
+   `test_an_ambiguous_rpc_failure_does_not_drop_the_graph`).
 4. Onboarding lane mapping. → `test_onboarding_lane_maps_the_refusal_to_the_same_402`.
 
 ## 6. Review Scope Contract
@@ -86,7 +89,11 @@ re-check would be the wrong seam. Both fail — see §2.
 - **R4** SQL and Python drift apart on the marker → caught by
   `test_the_marker_is_the_one_the_migration_raises`.
 - **R5** the refusal strands a materialized graph namespace → caught by
-  `test_rpc_refusal_drops_the_eagerly_materialized_graph`.
+  `test_rpc_refusal_drops_the_eagerly_materialized_graph`. Its mirror pins the destructive direction,
+  which is the more expensive mistake: `test_an_ambiguous_rpc_failure_does_not_drop_the_graph`
+  (5xx/transport ⇒ no drop), `test_a_post_provision_failure_does_not_reclaim_the_committed_org`
+  (a post-provision step's failure is not evidence about the provision), and
+  `test_only_a_server_REJECTION_proves_nothing_landed` (the predicate's whole truth table).
 - **R6** the ACL is lost because the function was redefined → `CREATE OR REPLACE` with an unchanged
   signature preserves grants (no `DROP FUNCTION`); the PGlite harness runs the ACL/RLS section of
   the 0010 suite against the new body.
