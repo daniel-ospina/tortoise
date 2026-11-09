@@ -4559,14 +4559,14 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # created.  A SHIPPED generation's digest must never be rewritten; it moves
     # to a new generation, which is a two-file change (`contract_version_for`
     # grades the pair).
-    18: "bf0d489dae7e8b51593aea36ebb92f93a93ce0b224052b118bb244cef1a15e42",
+    18: "fba94c2046b271ff57a8c0b73cf0a1428329a89e76990d1026f8cccdaa94e972",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "bf0d489dae7e8b51593aea36ebb92f93a93ce0b224052b118bb244cef1a15e42")
+    18, "fba94c2046b271ff57a8c0b73cf0a1428329a89e76990d1026f8cccdaa94e972")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

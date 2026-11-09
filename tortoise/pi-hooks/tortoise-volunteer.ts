@@ -167,10 +167,11 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  */
 export const DEFAULT_TIMEOUT_MS = 30000;
 
-/** Cap on a reflex's combined stdout+stderr, mirroring `execFile`'s `maxBuffer`.
- *  `--json` output for one turn is small (surveyed at <10 KiB); this exists so a
- *  broken or hostile reflex cannot eat the harness's memory, and exceeding it is
- *  a FAILURE, never a silent truncation. */
+/** Cap on a reflex stream's accumulated output, mirroring `execFile`'s
+ *  `maxBuffer` (which is per-stream in node 24 — measured: 800+800 bytes passes
+ *  `maxBuffer: 1000`). `--json` output for one turn is small (surveyed at
+ *  <10 KiB); this exists so a broken or hostile reflex cannot eat the harness's
+ *  memory, and exceeding it is a FAILURE, never a silent truncation. */
 export const MAX_OUTPUT_CHARS = 1 << 20;
 /** The turn text is SEARCHED, never forwarded whole, and the bound is in
  *  BYTES because that is what the reflex's validator counts
@@ -504,6 +505,17 @@ export function runReflexCommand(
       detached: true,
       stdio: ["pipe", "pipe", "pipe"],
     });
+    // ⛔ DECODE AS A STREAM, NEVER PER CHUNK (review finding 6). `buf.toString(
+    // "utf8")` on each `data` event emits U+FFFD for a multi-byte character
+    // that straddles a read boundary, and the reflex's block is free-form text
+    // — so a split `ó` used to be INJECTED CORRUPTED (or, when the split abuts
+    // JSON punctuation, made the body `unparseable`, which reads as a refused
+    // reflex on every turn). `execFile` set a StringDecoder for us; `spawn`
+    // does not, so it is set explicitly. Measured: the two bytes of `ó` split
+    // across chunks give `corrupci\uFFFD\uFFFDi\u2026` per-chunk and
+    // `corrupci\u00F3n` through the decoder.
+    child.stdout?.setEncoding?.("utf8");
+    child.stderr?.setEncoding?.("utf8");
     let out = "";
     let err = "";
     /** Kill the reflex's whole process GROUP, not just the direct child. */
@@ -525,9 +537,9 @@ export function runReflexCommand(
         // A child that already exited is not an error: nothing to reap.
       }
     };
-    const collect = (buf: Buffer, sink: "out" | "err"): void => {
+    const collect = (chunk: string, sink: "out" | "err"): void => {
       if (settled || overflowed) return;
-      const next = (sink === "out" ? out : err) + buf.toString("utf8");
+      const next = (sink === "out" ? out : err) + chunk;
       if (next.length > MAX_OUTPUT_CHARS) {
         // `execFile`'s `maxBuffer` equivalent: a reflex that floods cannot eat
         // the harness's memory, and it is a FAILURE, never a silent truncation.
@@ -544,8 +556,8 @@ export function runReflexCommand(
       if (sink === "out") out = next;
       else err = next;
     };
-    child.stdout?.on("data", (b: Buffer) => collect(b, "out"));
-    child.stderr?.on("data", (b: Buffer) => collect(b, "err"));
+    child.stdout?.on("data", (chunk: string) => collect(chunk, "out"));
+    child.stderr?.on("data", (chunk: string) => collect(chunk, "err"));
     // A spawn that never started (ENOENT, EACCES) reports here, not in `close`.
     child.on("error", (error: Error) => {
       settle({

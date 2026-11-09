@@ -393,6 +393,31 @@ test("the deadline kills the reflex's whole process GROUP, so a wrapper leaks no
   );
 });
 
+test("a multi-byte character split across two reads is decoded, not corrupted", async () => {
+  // Review finding 6 (P2). `spawn` handed us raw Buffers where `execFile` had
+  // set a StringDecoder, and `buf.toString("utf8")` PER CHUNK emits U+FFFD for
+  // a multi-byte character straddling a read. The block is free-form text, so
+  // the corruption was INJECTED into the model's context (and when the split
+  // abuts JSON punctuation the body became `unparseable`, i.e. a refused reflex
+  // on every turn). The child here writes the two bytes of `ñ` as two separate
+  // writes with a gap, so node necessarily sees two chunks:
+  //
+  //   printf '\303'  → 0xC3
+  //   sleep 0.3
+  //   printf '\261'  → 0xB1
+  //
+  // Mutation: decode per chunk (`Buffer#toString` in `collect`) → stdout is
+  // "\uFFFD\uFFFD" and this REDs on the equality below.
+  const home = tmpHome();
+  const splitter = fakeCli(join(home, "bin"), "printf '\\303'; sleep 0.3; printf '\\261'");
+
+  const result = await runReflexCommand(splitter, "q", "", 10000);
+
+  assert.equal(result.ok, true, "the split is not a failure of the reflex");
+  assert.equal(result.stdout, "ñ", "a boundary split must not corrupt the text");
+  assert.equal(result.stdout.includes("\uFFFD"), false, "no replacement characters");
+});
+
 test("the prompt is bounded in BYTES, not characters", async () => {
   // The reflex's validator charges `len(content.encode("utf-8"))` against a
   // 15 KiB window. A char-indexed bound passes ASCII and REFUSES the same
