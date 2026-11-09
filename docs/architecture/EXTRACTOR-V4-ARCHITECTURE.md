@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15558-15561`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:16232-16235`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -700,7 +700,8 @@ unfirable (block at the top of §10).
 > (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
-> sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
+> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two
+> halves are stated in the S2.2b-ADD note below). VET's **coverage signal**
 > only **detects** (`check_batch`'s `coverage_suspect` — reported by the gate, **acted on by the
 > PIPELINE** since `#11002` (which is what `in v1` used to defer), and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
@@ -710,7 +711,7 @@ unfirable (block at the top of §10).
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
 > item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
-> missing** — the fold's **remedy** half is unimplemented in both. ✅ **The successor is the bounded
+> missing** — the FOLD's two stages still cannot. ✅ **The successor is the bounded
 > S2.2 re-narrate (§4.4, `#11002`)** — `_renarrate_trigger` → `_arm_extract`, the `emphasis` seam in
 > `run_s1`: it fires **once**, re-extracts, and **unions both arms** with `merge_embed_lists` under
 > E4's identity-key rules, so it CAN add a candidate the coverage check found missing and it preserves
@@ -736,6 +737,31 @@ unfirable (block at the top of §10).
 > Not satisfiable by reasoning about the code: the artifacts are the instrument.
 > (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
+> ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — and it covers ONE of the two gap
+> classes.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps` — the
+> statement/clause coverage detector `check_batch` now reports (a char span into the narrative, so a
+> re-extraction has an address to read; it needs no `#2684` span layer) — and its consumer `S2.2b-ADD`
+> (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**).
+> ⛔ **Why the `-ADD` suffix:** `S2.2b` is the VET gate of §4.1/§4.2 — a RECORDED decision ("DECIDED
+> 2026-09-25: S2.2b, i.e. HERE") and the value `tests/test_extractor_v4_step_list_consistency.py`
+> pins as `GATE_ID`. One id may not name two stages, so the ADD stage is `S2.2b-ADD` everywhere it is
+> labelled; the `S2.2b` occurrences that mean the gate are unchanged. On the
+> F3 population (the seven recorded sessions) the **trigger** flags a span whose tokens overlap **8 of
+> the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds. The operator half is not a
+> tuning problem — an operator addition GENERALISES a claim the batch already carries ("a retry path
+> that does not re-establish ownership … defeats any downstream completion check"), so no narrative
+> span is uncovered even though the item is new, and a coverage detector cannot reach it by
+> construction. **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
+> ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half.
+> **`S2.2b-ADD`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
+> the right item, which needs live sessions and a key, so the coverage half is met by a *trigger*, not
+> by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged —
+> but the flagged population is MIXED (7 genuine clause-level elisions, 4 non-claims and 3
+> structural fragments in the 14 of 35 the record enumerates), so the stage's YIELD is unmeasured;
+> that, not a claim about which class dominates, is why it is armed OFF. The flag rate and the
+> per-session read-through are `docs/evidence/11534-partial-gap/README.md` §2, and the explicit
+> bounds are its §4.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
 > counterpart** — those two are v4 design names. ⚠️ **`S2.3` DOES have one; it is DISABLED, not absent:** the
@@ -1261,7 +1287,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** | retained |
 
-**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:296-312`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:425`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:526`), and `_granularity_text()` (`:1414`) appends `STATE_VALUE_CARVE_OUT` to S1.
+**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:325-341`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:455`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:556`), and `_granularity_text()` (`:1444`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
 **⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:724`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
 
