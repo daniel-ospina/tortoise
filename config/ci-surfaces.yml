@@ -1274,12 +1274,16 @@ surfaces:
   # module pins by source (`list_sessions`, `get_session_detail`) live in
   # `tortoise/hosted_api.py`, which SELECTS `api` — and a named-surface match
   # REPLACES the fallback, so a core-only entry would never run this guard. No
-  # DOCKER graph lane here — but NOT "DB-free": three of its tests RUN the
-  # composed WHERE against a throwaway EMBEDDED graph (TortoiseSDK at tmp_path;
-  # no docker, no server, no tenant graph), which is why the fast surfaces can
-  # carry it and the tenancy-graph behavioural half is on
+  # DOCKER graph lane here — but not a fake either: three of its tests build a
+  # throwaway EMBEDDED engine (`TortoiseSDK(<tmp_path>/tortoise.db)`: no docker,
+  # no server, no tenant graph) and run real Cypher against it — the SDK doors,
+  # the composed list WHERE, and `LIFETIME_MEMORY_QUERY`. That is why the fast
+  # surfaces can carry it; the tenancy-graph behavioural half is on
   # `test_onboarding_seed_endpoint.py` (docker), which would not be selected by
-  # a `session_schema.py` diff.
+  # a `session_schema.py` diff. ⛔ Do not summarise this as "DB-free" in either
+  # direction: this map uses the phrase both ways (a "no graph writes" note
+  # elsewhere, and "throwaway embedded" on several rows), so state what the
+  # file does instead of which label it earns.
   - test_demo_session_read_exclusion_8290.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
