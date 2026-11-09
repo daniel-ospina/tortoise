@@ -67,6 +67,11 @@ public self-hosted.html
 # signin.html was DELETED in #4054: /signin, /signin/ and /signin.html are 301'd
 # to /auth by _redirects (and the company host by _middleware.ts), so the asset
 # was unreachable and kept the last legacy-bridge page alive.
+# sitemap.xml is the CONVENTIONAL sitemap entry point (#11615) — a <sitemapindex>
+# naming the three static sitemaps plus the dynamic blog one. MUST be `public` and MUST
+# stay at the site ROOT: crawlers and Search Console probe `/sitemap.xml` by convention,
+# so a staged-elsewhere (or excluded) copy is the 404 that opened #11615.
+public sitemap.xml
 public sitemap-company.xml
 public sitemap-product.xml
 public tos.html

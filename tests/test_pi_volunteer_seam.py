@@ -280,7 +280,7 @@ def test_a_stale_read_seam_is_reported_and_its_absence_is_not(home):
 
     # …while a markerless copy that IS ours is the repairable class.
     shipped = VOLUNTEER_EXTENSION.read_text()
-    stale.write_text(shipped.replace("// tortoise-hook-version: 18\n", "", 1))
+    stale.write_text(shipped.replace("// tortoise-hook-version: 19\n", "", 1))
     findings = hook_install.detect_artifact_install(root, "pi")
     assert "unversioned-artifact" in {f.kind for f in findings}
 
@@ -568,7 +568,7 @@ def test_uninstall_preserves_an_edit_it_cannot_prove_is_one(tmp_path, monkeypatc
     ext_dir = fake_home / ".pi" / "agent" / "extensions"
     ext_dir.mkdir(parents=True)
     seam = ext_dir / VOLUNTEER_EXTENSION.name
-    edited = ("// tortoise-hook-version: 18\n"
+    edited = ("// tortoise-hook-version: 19\n"
               "// my local tweak\n")
     seam.write_text(edited, encoding="utf-8")
 

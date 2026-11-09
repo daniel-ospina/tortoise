@@ -1383,6 +1383,55 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
 
+def test_the_crawler_surface_selects_the_guard_that_reads_it():
+    """#11615: `robots.txt` and the sitemaps must select the sitemap contract.
+
+    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` drops every non-Python path
+    no `SOURCE_PATTERNS` row names. MEASURED before the entries, with the CI's own
+    selector: `select(["website/sitemap.xml"], "pull_request", load_manifest())` ->
+    `surfaces: []`, and `test_website_docs_consistency.py` was NOT in `test_files` — so
+    the diff that deletes the conventional `/sitemap.xml` (the 404 that opened #11615),
+    drops a `Sitemap:` line from robots.txt, or adds a `<loc>` for a page that no longer
+    exists would merge with the guard ABSENT, and then RED the next website diff. That is
+    the #1349/#3332/#3616 silent-drop class.
+
+    The population is derived, not hand-listed: every `Sitemap:`-bearing file and every
+    sitemap the tree actually serves. A hand-kept list here would let a NEW sitemap ship
+    with no registration while this test stayed green — the exact failure it exists for.
+    """
+    crawler = {
+        "website/robots.txt",  # the discovery file every crawler reads first
+        "website/sitemap.xml",  # the conventional index (#11615)
+    }
+    crawler |= {f"website/{p.name}" for p in (REPO / "website").glob("sitemap-*.xml")}
+    # The app origin serves its OWN sitemap out of the dashboard project (#11615).
+    # `robots.txt` advertises it and `test_every_advertised_sitemap_is_servable_from_this_tree`
+    # resolves it, so it is a subject of the same contract even though it is not a
+    # top-level `website/sitemap-*.xml` — the glob above cannot reach it, and leaving it
+    # out is how "every sitemap the tree serves" would quietly mean "the ones we listed".
+    crawler |= {
+        str(p.relative_to(REPO))
+        for p in (REPO / "website").glob("apps/*/public/sitemap*.xml")
+    }
+    assert {
+        "website/sitemap-company.xml",
+        "website/sitemap-product.xml",
+        "website/apps/dashboard/public/sitemap.xml",
+    } <= crawler, (
+        f"the sitemap population collapsed (found {sorted(crawler)}) — a glob stopped "
+        "matching a file this surface exists to cover")
+    for changed in sorted(crawler):
+        assert (REPO / changed).is_file(), f"the file this test guards is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a crawler file under website/ matches "
+            "no SOURCE_PATTERNS row and falls to the docs-only early return, so the "
+            "sitemap contract never runs on the one diff that can break it (#11615)")
+        assert "test_website_docs_consistency.py" in r["test_files"], (
+            f"{changed} does not select test_website_docs_consistency.py, which holds "
+            "the sitemap/robots contract")
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -2383,14 +2432,63 @@ def test_every_named_guard_runs_for_its_own_source():
     )
 
 
+def test_the_pi_volunteer_seam_guard_runs_on_the_cli_diff_it_guards():
+    """#2119: the read seam's CLI half is `api`-classified, so a `core`-only
+    registration would never run the guard for the change it guards.
+
+    The suite `tests/test_pi_volunteer_seam.py` is the ONLY guard for two
+    behaviours that live in `tortoise/__main__.py`:
+    `_uninstall_pi_volunteer`'s `--dry-run` branch (a no-op print became an
+    unconditional `unlink()`) and
+    `_upgrade_artifact_seam(..., introduce_read_seam=False)`, the W4 opt-in gate
+    that keeps `hooks upgrade` from re-arming per-turn prompt search in a tree
+    where the user ran `install pi --uninstall`.
+
+    `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` entry and a
+    named-surface match REPLACES the `core` fallback (`tortoise/__main__.py` is
+    not in `CORE_ALSO`), so registering the suite under `core`+`onboarding`
+    alone means a CLI-only diff selects `api` and runs none of it. Measured at
+    the head that shipped the gap: `select(['tortoise/__main__.py'])` returned
+    `surfaces=['api']` with `test_pi_volunteer_seam.py` absent.
+
+    Mutation: delete `- test_pi_volunteer_seam.py` from the `api:` list in
+    `config/ci-surfaces.yml` — this REDs. The `core` arm is asserted too, so
+    the fix cannot be "move it" instead of "dual-register it".
+    """
+    assert _sel(["tortoise/__main__.py"])["surfaces"] == ["api"], (
+        "the mechanism this guard exists for changed: a `__main__.py` diff no "
+        "longer selects `api` alone — re-derive the registration")
+    cli = _sel(["tortoise/__main__.py"])
+    assert "test_pi_volunteer_seam.py" in cli["test_files"], (
+        "a `tortoise/__main__.py`-only diff selects no leg that runs "
+        "tests/test_pi_volunteer_seam.py, the only guard for that file's Pi "
+        "read-seam wiring (`--uninstall --dry-run`, the refresh-only repair "
+        "gate). Register it on `api` in config/ci-surfaces.yml.")
+    mechanism = _sel(["tortoise/capture_install.py"])
+    assert "test_pi_volunteer_seam.py" in mechanism["test_files"], (
+        "the `core` arm regressed — the installer half is unguarded, so the "
+        "api entry alone would not be enough")
+
+
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
     A website path that owns no guard test keeps the old docs-only behavior
     (empty changed -> tier-1 smoke), so unrelated website edits do not drag the
     onboarding surface in.
+
+    The witness is `website/robots.txt` NO LONGER (#11615): its `Sitemap:` lines are the
+    discovery half of the sitemap/robots contract asserted by
+    `test_website_docs_consistency.py`, so a change to it must select that guard. When
+    this subject next gains a guard, move the witness again rather than deleting the
+    test — the property under test (an unguarded website path stays tier-1) is what keeps
+    unrelated website diffs cheap, and a file chosen because "nothing reads it" is only
+    inert until something does.
     """
-    r = _sel(["website/robots.txt"])
+    _inert = "website/assets/daniel-ospina.jpg"  # a bio photo; no guard parses its bytes
+    assert (Path(__file__).resolve().parents[1] / _inert).is_file(), (
+        f"the inert witness is gone: {_inert} — pick another unguarded website path")
+    r = _sel([_inert])
     assert r["surfaces"] == []
     assert r["full"] is False
     assert set(r["test_files"]) == _tier1()
@@ -4278,8 +4376,16 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
     # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
     # the reason an enumeration claiming to be exhaustive was wrong. The /docs
     # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
-    # (`tests/test_website_docs_consistency.py:56`) and derives an asserted
-    # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
+    # (in `tests/test_website_docs_consistency.py` — cited WITHOUT a line number on
+    # purpose, as `test_a_fold_never_moves_the_canary_producer_row`'s docstring
+    # does for its runbook row: that import lives in a block every branch appends
+    # to, so a `path:line` decays silently the moment one import is added above it.
+    # Measured 2026-11-09: #11623's sitemap contract added
+    # `from xml.etree import ElementTree` at the TOP of that file, the import moved
+    # 56 -> 57, and the harness pin redded on `main` with this paragraph unchanged.
+    # The sentinel that verifies the import still exists lives in
+    # `tests/test_ci_runner_x64_install.py`'s `symbol_citations`) and derives an
+    # asserted expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
     # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
     # a commit_schema-only diff selected `surfaces=['core']`, where that guard is
     # not registered. So relaxing `Point.source_ref` reds the contract tests, gets
@@ -20580,6 +20686,44 @@ def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_s4_reeemit_tax.py" in r["test_files"], (changed, r)
+
+
+def test_the_11534_evidence_artifacts_select_the_pins_that_read_them():
+    # #11534 review round 6 (P2): the `core` row for `test_11534_partial_gap.py`
+    # claims in `config/ci-surfaces.yml` that an artifact retargeted under
+    # `docs/evidence/1789-s4-reeemit-tax/` makes the pins measure something else
+    # "and the guard test says so first". That ordering is a property of the
+    # SELECTOR, not of the comment: `docs/` and `tests/` are flat
+    # NON_PYTHON_PREFIXES entries, so an artifact-only or receipt-only diff takes
+    # the docs-only tier-1 early return unless a keep-and-claim entry covers it —
+    # the #1349/#3332/#3616 silent-drop class, one level up from the pins.
+    #
+    # Reviewer-measured at `06052ea0dd9e`: the artifact came back `surfaces=[]`
+    # with the #11534 pins absent, which is why the finding was filed. That
+    # reading does NOT reproduce at this head — `docs/evidence/1789-s4-reeemit-
+    # tax/` carries a CORE_ALSO entry (added by #11385, whose own suite
+    # `test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change` above pins the
+    # same entry from the instrument's side), so this arm is the executable form
+    # of the claim rather than a fix to the selector: removing that entry reds
+    # HERE first, which is exactly what the comment says happens.
+    for changed, expected_surfaces, why in (
+        ("docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json",
+         ["core"],
+         "the artifact the flag-rate and recall pins are re-derived from"),
+        ("tests/eval/write_path/receipts/7947-arms-2026-10-18/"
+         "wp01_quarry_debug.arms.json",
+         # `tests/eval/write_path/` is ALSO a SOURCE_PATTERNS row, so the
+         # `eval` surface is legitimately co-selected here — the claim under
+         # test is that `core` comes along, not that it comes alone.
+         ["core", "eval"],
+         "a receipt in the read-path population the detector is measured on"),
+    ):
+        r = _sel([changed])
+        assert r["full"] is False, (changed, why, r["surfaces"])
+        assert r["surfaces"] == expected_surfaces, (changed, why, r["surfaces"])
+        assert "test_11534_partial_gap.py" in r["test_files"], (
+            f"a diff to {why} ({changed}) must select the #11534 pins — "
+            "otherwise they run on a LATER core-selecting PR instead of first")
 
 
 def test_dashboard_deploy_script_change_selects_core_not_tier1():

@@ -4906,12 +4906,20 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     while the address can never go stale. ⛔ What is NOT asserted is that the citing paragraph still
     points at the target — the block below records why that check was written, measured DEAD and
     removed rather than shipped; read it before adding that clause back.
+
+    ⛔ A CITE INTO A GROWING IMPORT BLOCK IS THE SAME SHAPE EVEN IN A FILE THIS BRANCH DOES NOT
+    EDIT, and that is not hypothetical: the /docs guard's import citation moved under this pin
+    because ANOTHER merge (#11623) appended one import line to the top of that file, so the cited
+    line started pointing at a sibling import and this pin redded on `main` with nothing in the
+    citing file touched. The one anchor this pin puts INSIDE that file is a symbol now — the
+    address of an import is a function of every branch that ever added one above it.
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
-        # the /docs guard's import of the schema types the citing paragraph names
-        ("tests/test_website_docs_consistency.py", 56):
-            r"from tortoise\.commit_schema import Point, point_content_id",
+        # ⛔ the /docs guard's import used to be anchored here, at
+        # ("tests/test_website_docs_consistency.py", 56). It is a SYMBOL citation now: the measured
+        # reason is in this test's docstring and in `symbol_citations` below, where the sentinel
+        # that replaced the number lives.
         # the reference-surface relay that drifted: the runbook sentence naming the test
         # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
         # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
@@ -4973,6 +4981,17 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             _CITING_TEST_FILE,
             "docs/ops/ci-runner-x64.md",
             r"`test \(i\)` \(\*\*the canary\*\*\) was taken by `pi-runner-vm-5` \(ARM64\) and killed at 32 m 12 s",
+        ),
+        (
+            # the /docs guard's import of the schema types the citing paragraph names (#9607).
+            # Cited by SYMBOL for the reason the capstone row above gives, measured a second time
+            # and harder: no edit by THIS branch was needed for the number to go stale — another
+            # merge (#11623) inserted ONE import line at the top of that file and the cited line
+            # started pointing at a sibling import. The sentinel is the import statement itself,
+            # so the relay reds if the guard stops importing the types its paragraph names.
+            _CITING_TEST_FILE,
+            "tests/test_website_docs_consistency.py",
+            r"from tortoise\.commit_schema import Point, point_content_id",
         ),
     ]
 
