@@ -2907,7 +2907,7 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     `Host` column), which is #11624's scope together with the per-host index.
     """
     problems: list[str] = []
-    for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
+    for sitemap in _published_sitemaps(WEBSITE):
         for loc in _xml_locs(sitemap):
             netloc = urlparse(loc).netloc
             if netloc not in SITE_HOSTS:
@@ -2942,7 +2942,7 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
     """
     advertised = {
         _document_for_loc(loc).resolve()
-        for sitemap in sorted(WEBSITE.glob("sitemap-*.xml"))
+        for sitemap in _published_sitemaps(WEBSITE)
         for loc in _xml_locs(sitemap)
         if _document_for_loc(loc) is not None
     }
