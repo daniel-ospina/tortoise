@@ -4593,28 +4593,42 @@ def test_recall_metrics_turn_evidence_semantics_pinned():
     ]
     # healthy: 5 evidence points exist, 3 marked hits in top-10 — the pair
     # is numerically identical (same formula, same denominator).
-    session, turn, ev, chunk = _recall_metrics(
+    # #2516 (C1): the return arity grew by the gold-cutoff variant's
+    # per-question fraction (``session_recall@n_gold``). Unpack it here — a
+    # stale 4-tuple unpack is a ValueError, so this line is the guard that the
+    # variant's shape stays wired to every caller of this helper.
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids=set(), evidence_point_count=5,
         chunk_evidence_point_count=0)
     assert turn["10"] == ev["10"] == 3 / 5
     assert session["10"] == 1.0
     assert chunk["10"] is None
+    # one gold session → N_gold=1 → top-1 holds h0 ("s0") → 1/1.
+    assert at_gold == 1.0
     # degraded: 0 evidence points → evidence is None; turn falls back to
     # the binary answer-turn match (h2 is in top-10, h99 is not → 1/2).
-    session, turn, ev, chunk = _recall_metrics(
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids={"h2", "h99"}, evidence_point_count=0,
         chunk_evidence_point_count=0)
     assert ev["10"] is None
     assert turn["10"] == 0.5
+    assert at_gold == 1.0
     # degraded + no answer-turn ids either → both None (never forced 0.0).
-    session, turn, ev, chunk = _recall_metrics(
+    session, turn, ev, chunk, at_gold = _recall_metrics(
         hits, ks=(10,), answer_sessions={"s0"},
         evidence_turn_ids=set(), evidence_point_count=0,
         chunk_evidence_point_count=0)
     assert ev["10"] is None
     assert turn["10"] is None
+    assert at_gold == 1.0
+    # no gold session → the variant is NOT ELIGIBLE (None), never a
+    # fabricated 1.0 — the official ``all([])`` edge is not minted here.
+    assert _recall_metrics(
+        hits, ks=(10,), answer_sessions=set(),
+        evidence_turn_ids=set(), evidence_point_count=5,
+        chunk_evidence_point_count=0)[4] is None
 
 
 def test_reader_surface_counts_context_evidence_beyond_pool_k(tmp_path, monkeypatch):
