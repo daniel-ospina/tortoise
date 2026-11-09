@@ -11485,8 +11485,11 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # loop below) and `sdk.py:16516-16530` (the count-3 range arm) — re-staling each inside §2
         # reds, measured. UNHELD, measured GREEN on a §2 re-stale: `extractor_v2.py:1154`,
         # `:8880`, `:9617`, `:11731-11732`, and the `research-brief.md`/`02-research-brief.md`
-        # cites — the same cites this file's own SCOPE paragraph names as watched by nothing
-        # (`test_the_reconcile_cites_resolve_where_the_record_says_they_do`, #11173).
+        # cites. ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's
+        # SCOPE paragraph (`:10991-10999`); the other five are recorded HERE and nowhere else,
+        # so they belong on #11173 beside it
+        # (`test_the_reconcile_cites_resolve_where_the_record_says_they_do`). Do not read the
+        # pointer as "the docstring already lists all six" — it does not.
         # The one row that reads the number holds the capstone bundle's
         # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
         # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
