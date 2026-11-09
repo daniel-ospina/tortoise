@@ -381,9 +381,9 @@ in §6.2.
 
 ⛔ **Provenance note (added while recording this artifact).** That review's verdict comment is **not on
 this PR**, so the count above is carried from the review's own reply and cannot be checked against a
-comment id. The two reviews *posted* for this cycle are `6751272015` (`23ede976d6`: 1 P1 + 3 P2) and
-`6751912996` (`5258155`: 1 P1 + 3 P2); neither reports seven findings, so this sentence is not evidence
-about either posted artifact. The count is left as the review reported it rather than re-derived from
+comment id. The two reviews *posted* around this cycle are `6751272015` (at `23ede976d6`: 1 P1 + 3 P2)
+and `6751912996` (at `5258155`, the head this cycle's fixes produced: 1 P1 + 3 P2); neither reports
+seven findings, so this sentence is not evidence about either posted artifact. The count is left as the review reported it rather than re-derived from
 the posted comments — re-attributing it would be a guess, and row 7 above exists because a finding was
 recorded here as verified before it had been reproduced.
 
@@ -530,8 +530,8 @@ append and an APPLIED record write behind each one"* — was first raised in `67
 `bdc6fc207e`, which rewrote the bullet to the FLOOR the trace actually supports, so it is **not**
 re-applied here. That commit is the record of the fix; no earlier section of this artifact describes it.
 
-**Finding 2** — §0's headline at `:22-23`, *"leg 3 covers **every** cache statement in an ahead fold's
-window, raw-handle ones included"*, while the predicate (§8.1) admits a raw-handle statement only while
+**Finding 2** — §0's headline (at `2ca845f4437f`: `:20-21`, the head named because the line numbers move),
+*"leg 3 covers **every** cache statement in an ahead fold's window, raw-handle ones included"*, while the predicate (§8.1) admits a raw-handle statement only while
 nothing has journalled between the fold and the statement — was first raised as a **new** finding in
 `6752984817` (review cycle 6, at `2ca845f4437f`: *"§0's headline still over-broad after the delta made
 §2 precise"*), and re-raised together with Finding 1 by this lane's round-10 reviewer (`6754034963`,
