@@ -165,7 +165,7 @@ this job. The first response was to raise the cap to 50 over a SUM that included
 that arm is now VOID, because #11063 removed the save from this job.** It runs
 `actions/cache/restore@v4` with no post step, so nothing is charged against its cap but its own
 steps: **12 m in-step watchdog + ~1 m setup/provision ≈ 13 m; × 1.5 = 19.5 → 20**. Its own
-`.[test,postgres]` downloads (`python-ci.yml:4664` — the `Install package + the postgres extra` step
+`.[test,postgres]` downloads (`python-ci.yml:4670` — the `Install package + the postgres extra` step
 in `test-record-postgres`; `[embeddings]`/torch deliberately absent) are a rounding error beside the
 shared archive it now only restores. The cap is
 **20** — what `main` carried before #10962 raised it, re-derived here rather than inherited — keeping the raised
@@ -181,7 +181,7 @@ stated there once, not restated here, which is how this pair drifted apart in th
 `test-d14-hosted-api` incident (#10182). The 15.9 m above was measured on this job *before* #11063
 stood its save down, on a different runner and day, and shows a 3.6 GB save can cost TWICE that.
 The rows derived from `~9 m` (`test-slow`'s 60 m, the `test-d14-hosted-api` headroom statements
-below, and `test-track-b`'s save arm — `python-ci.yml:3222`, `cache: pip`) are optimistic by ~7 m
+below, and `test-track-b`'s save arm — `python-ci.yml:3228`, `cache: pip`) are optimistic by ~7 m
 against the censored 15.9 m and by ~11 m against the completed ~20 m. ⛔ **`test` is NOT one of
 them:** #11063 re-derived its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term and
 split its payload, so it no longer writes the 3.6 GB archive at all (its row below is the
@@ -221,7 +221,7 @@ names:
   job at 10 m 15 s against a 10 m cap. **This row was missed by the audit above for a structural
   reason worth keeping: its save surface is created by a third-party action**, not by an
   `actions/cache` step of its own (`actions/setup-python` with `cache: pip`,
-  `python-ci.yml:3222`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
+  `python-ci.yml:3228`) — so a scan for `actions/cache` steps cannot see it, and a 1.18 m max looked
   like a comfortable 10 m. It is the only `cache: pip` site left in the workflow. Save arm:
   5 m in-step + ~1 + ~9 = 15 m × 1.5 = 22.5 → **30**.
 
@@ -268,13 +268,13 @@ false-killed on 2026-11-05 — which is why the job is restore-only, NOT why its
 save out of its SUM (13 m × 1.5 → 20), so it clears 20 and leaves the three. `test-slow` sits exactly AT its cap
 (10 m embedder + 40 m run + ~1 m + ~9 m = 60 m against 60 — no headroom at all; its own ungated `~/.cache/huggingface` POST is unmeasured) and
 `test-carve-out` sits at ~31.6 m against 30: 10 m embedder + 19 m shard watchdog + ~1 m, plus the 1 m 38 s
-`~/.cache/huggingface` POST (`python-ci.yml:3539-3541`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
+`~/.cache/huggingface` POST (`python-ci.yml:3545-3547`) — its `~/.cache/pip` save is NOT in that SUM (restore-only since #10182). The last has the least headroom of all:
 **`test-concurrency-falkor` keeps 15 m against an in-step `timeout … 10m` for the run plus a
 `timeout-minutes: 10` embedder provision** — ≈ 21 m of IN-STEP caps (10 + 10 + ~1 m), and it installs
-`install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2941-2946`). The ~30 m this row used to
-carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2934-2938` is
+`install-cpu-torch` + `.[test,embeddings]` (`python-ci.yml:2947-2952`). The ~30 m this row used to
+carry also counted a `~/.cache/pip` save #11063 stood down (`python-ci.yml:2940-2944` is
 `actions/cache/restore@`), and it still carries an ungated `actions/cache@v4` POST on `~/.cache/huggingface`
-(`python-ci.yml:2977-2979`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
+(`python-ci.yml:2983-2985`) that uploads on a MISS, so its SUM needs a measurement: `15 → 50` is VOID.
 
 **`ci.yml` — five of the seven required contexts had no cap at all**
 
@@ -315,7 +315,7 @@ produces no runs — and because a warn-only step added to that workflow never e
   context (`docs` 20.5 → 20; `legal-e2e` 18.5 → 20; the rest floor at 15). ⚠ That predicate is
   deliberately narrower than "no cache step": a job that mounts `~/.cache/pip` on a WRITABLE
   shared key is not an arm-1 row, because on a key change its save IS the archive.
-  `test-record-postgres` mounts that path (`python-ci.yml:4656-4658` — its `Restore pip dependency
+  `test-record-postgres` mounts that path (`python-ci.yml:4662-4664` — its `Restore pip dependency
   caches (#7612, RESTORE-ONLY — #11063)` step's `with:` block) but is **restore-only since #11063**,
   so it pays no save: 20 is the ARM-2 SUM minus that term (13 m × 1.5 → 20), not an arm-1 reading,
   and its retained `max` 15.43 m is save-era (§1 predates #11063), so arm 1 would say 30 — re-measure.
@@ -528,7 +528,7 @@ matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-le
 (row above), so its band goes ~9 m → ~18 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `9.02 m` per leg → **`18.04 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.63 m` per leg → **`17.26 m`** from the
 committed `durations` map — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m

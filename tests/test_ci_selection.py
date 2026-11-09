@@ -13215,6 +13215,74 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
 
 
+def _wall_clock_projection_claims(doc: str) -> tuple[float, float] | None:
+    """The `X m per leg → Y m` pair `docs/ops/ci-wall-clock.md` restates.
+
+    Returns `None` when the sentence is gone, so the pin can fail CLOSED and say
+    "re-anchor this pin" rather than pass on a doc it never read.
+    """
+    match = re.search(
+        r"—\s*`([\d.]+) m` per leg → \*\*`([\d.]+) m`\*\* from the\s+committed\s+`durations` map",
+        doc)
+    if match is None:
+        return None
+    return float(match.group(1)), float(match.group(2))
+
+
+def test_the_documented_slow_wall_restates_the_committed_maps_own_projection():
+    """The doc's `per leg → job wall` pair is a COPY, so it is checked as one.
+
+    `docs/ops/ci-wall-clock.md` argues the `3 / 3 / 3` cap from two numbers it
+    restates by hand, "from the committed `durations` map". They went stale on the
+    NEXT refresh — the 2026-11-09 sweep moved the map under them twice (the
+    `#11605` inflated sample, then the `#11607` re-cut) and nothing read them, the
+    same rot that put a third stale copy in `python-ci.yml:1034-1038`
+    (`#11602` review, P2) and a fourth in the map's own notes.
+
+    So the sentence is pinned to the function that produces it: the per-leg figure
+    is `slow_wall_projection()[`projected_wall_min`]` and the job wall is the same
+    call at the workflow's OWN `max-parallel` (read from `python-ci.yml`, not
+    restated), which is what makes the second number a band rather than a share.
+
+    Non-vacuity: the same resolver is run against the pair the paragraph carried
+    before this pin existed, and must report both as wrong — a checker that only
+    agrees with the file it is checking would pass on nothing.
+    """
+    path = REPO / "docs" / "ops" / "ci-wall-clock.md"
+    doc = path.read_text(encoding="utf-8")
+    claims = _wall_clock_projection_claims(doc)
+    assert claims is not None, (
+        "`docs/ops/ci-wall-clock.md` no longer carries the `X m per leg → Y m` "
+        "sentence for the slow matrix's job wall — re-anchor this pin rather than "
+        "deleting it, so the copy stays checkable")
+
+    m = load_manifest()
+    entries = slow_shard_entries(m)
+    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy") or {})
+           .get("max-parallel"))
+    assert isinstance(cap, int), (
+        f"`test-slow` declares no integer `max-parallel` (got {cap!r}), so the "
+        "job-wall half of this pin would be vacuously one wave")
+    per_leg = slow_wall_projection(m, entries)["projected_wall_min"]
+    job_wall = slow_wall_projection(
+        m, entries, max_parallel=cap)["projected_job_wall_min"]
+
+    assert claims == (round(per_leg, 2), round(job_wall, 2)), (
+        f"`docs/ops/ci-wall-clock.md` restates the slow matrix's wall as "
+        f"{claims[0]:.2f} m per leg -> {claims[1]:.2f} m, but the committed "
+        f"`durations` map projects {per_leg:.2f} m per leg -> {job_wall:.2f} m at "
+        f"`max-parallel: {cap}`. Re-derive the sentence from the map (or from a "
+        f"fresh sweep, if the map is the stale side) — do not restate it by hand")
+
+    # Executable non-vacuity: the pair this paragraph carried before the pin.
+    stale_doc = ("reports `waves x (max leg + setup)` — `9.02 m` per leg → **`18.04 m`** "
+                 "from the\ncommitted `durations` map")
+    assert _wall_clock_projection_claims(stale_doc) != (round(per_leg, 2),
+                                                      round(job_wall, 2)), (
+        "the resolver agrees with the pair it was written to reject, so it is not "
+        "reading the map at all")
+
+
 def test_the_slow_wall_remedy_names_a_remedy_that_can_fire():
     """#11605: the wall arm's advice must be a REMEDY, not an incantation.
 

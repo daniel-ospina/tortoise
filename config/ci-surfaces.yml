@@ -9315,7 +9315,7 @@ push_extra: []
 # Y is still the denominator the tool would compute. Do not assume the next
 # refresh fixes a stale Y either: a row's note is rewritten only when that row's
 # value moves or it is held, so an unchanged row keeps the figure it was given.
-durations_captured_at: "2026-11-09T04:46:24Z"
+durations_captured_at: "2026-11-09T09:15:00Z"
 # Rows that BORROW a sibling's reading instead of being re-based from their own
 # (#3400). Machine-readable because the WRITER is the only automatic re-writer of
 # this map and it re-based each row from its own measurement — which is how the
@@ -9996,7 +9996,7 @@ durations:
   test_dashboard_client_paths_resolve.py: 5.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.6
   test_dashboard_login.py: 4.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.1
   test_capture_phase_d_dedup.py: 13.9  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 2.3 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (10.5s) is a LOWER bound; kept 13.9
-  test_ci_selection.py: 545.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 389.2
+  test_ci_selection.py: 103.8  # ci-timing junit-census+top-15 2026-11-09 (run 42588485961); was 545.1
   # #6144: measured floor over 3 runs on the dev box (19.0 / 21.2 / 23.4s); the
   # spread is fleet I/O contention, not the guard (user+sys ~4s). The YAML parses
   # are memoized on (path, mtime, size) so the 2.2k-line python-ci.yml is read
