@@ -501,11 +501,13 @@ _uvicorn_flag_option() {
     # (`--no-access-log --reload --workers 4`) was refused although uvicorn
     # serves one reloader child. Same list, same pin, as the Python twin.
     #
-    # ⛔ `--http2` is AHEAD of the pin: uvicorn 0.54.0 added it as a boolean flag
-    # (`is_flag=True`), and the test job's `pip install -e .` resolves 0.54.0
-    # while `uv.lock` pins 0.52.1. Reading it as value-taking would swallow the
-    # token after it — the same fail-open as the `--no-*` half. On the pin it is
-    # inert (0.52.1 has no such option, so it cannot appear in a boot it accepts).
+    # ⛔ `--http2` is AHEAD of the pin: uvicorn 0.53.0 added it as a boolean flag
+    # (`is_flag=True`, MEASURED present in the 0.53.0 tag and absent from 0.52.4),
+    # and the test job's `pip install -e .` resolves a newer uvicorn
+    # (0.54.0 while this was measured) while `uv.lock` pins 0.52.1. Reading it as
+    # value-taking would swallow the token after it — the same fail-open as the
+    # `--no-*` half. On the pin it is inert (0.52.1 has no such option, so it
+    # cannot appear in a boot it accepts).
     case "$1" in
         --reload|--access-log|--no-access-log|--use-colors|--no-use-colors\
         |--proxy-headers|--no-proxy-headers|--server-header|--no-server-header\

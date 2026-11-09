@@ -2283,7 +2283,11 @@ def test_the_ahead_of_the_pin_declaration_is_itself_verified():
     # that tag's `uvicorn/main.py`, absent from 0.52.4), NOT a derivation from
     # `_UVICORN_NEWEST_MEASURED`: coupling them means the next legitimate horizon
     # bump silently un-verifies `--http2` in the only parser that can verify it.
-    assert _AHEAD_OF_THE_PIN == {"--http2": "0.53.0"}
+    assert _AHEAD_OF_THE_PIN == {"--http2": "0.53.0"}, (
+        "the literal is the uvicorn release that ADDED the flag, measured from "
+        "that tag's uvicorn/main.py — never _UVICORN_NEWEST_MEASURED and never "
+        "the current horizon; a NEW flag is a NEW entry with its own literal"
+    )
 
     # ⛔ …and a `since` PAST the measured horizon is a free pass, not a promise:
     # MEASURED on the pre-guard code, `--bogus` declared at `9999.0.0` was green

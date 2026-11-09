@@ -284,9 +284,11 @@ RELOAD_FLAG = "--reload"
 #: `uv.lock` pins 0.52.1, and they differ by exactly one flag (``--http2``
 #: below). An entry the installed parser does not define at all is inert.
 #:
-#: ⛔ ``--http2`` is the one entry the PIN does not have: uvicorn 0.54.0 added it
+#: ⛔ ``--http2`` is the one entry the PIN does not have: uvicorn 0.53.0 added it
 #: as a BOOLEAN flag (``@click.option("--http2", is_flag=True)``,
-#: ``uvicorn/main.py``), so a real boot can name it and this gate must read it
+#: ``uvicorn/main.py``) — MEASURED present in the 0.53.0 tag and ABSENT from
+#: 0.52.4; 0.54.0 is merely the newest release anyone has measured, not the one
+#: that introduced it — so a real boot can name it and this gate must read it
 #: as consuming NOTHING. Inert on the pin — 0.52.1 has no such option, so no
 #: boot it accepts can carry the token — which is why the pin test accepts it as
 #: a DECLARED entry ahead of the pin (`_AHEAD_OF_THE_PIN`) instead of reddening.
@@ -305,7 +307,7 @@ UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--version",
     "--reset-contextvars",
     "--factory",
-    # ⛔ ahead of the pin — uvicorn 0.54.0's boolean; see the note above.
+    # ⛔ ahead of the pin — uvicorn 0.53.0's boolean; see the note above.
     "--http2",
 })
 
