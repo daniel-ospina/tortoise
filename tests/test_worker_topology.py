@@ -1120,6 +1120,16 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
           "--lifespan=auto"), {"WEB_CONCURRENCY": "\u0661\u0662"}),
         (("uvicorn", "app:app", "--lifespan", "off", "--app-dir",
           "--lifespan=auto"), {"UVICORN_ENV_FILE": "/tmp/four.env"}),
+        # ⛔ A COUNT THAT IS ASCII-DIGITS BUT THAT BASH CANNOT EVALUATE. bash
+        # arithmetic is `intmax_t`, so a 21-digit value passes the "is an ASCII
+        # integer" regex and then makes `[ "$WORKERS" -gt 1 ]` fail with
+        # `integer expression expected`, which reads as FALSE — i.e. as "1
+        # worker" — and printed "the count is verified as ONE worker" plus a raw
+        # shell diagnostic. Not a fail-open (the pre-exec gate refuses on it), but
+        # a false verdict on a fail-closed path. Must REFUSE by the readability
+        # arm, and must not claim the count was verified.
+        (("uvicorn", "app:app"),
+         {"UVICORN_LIFESPAN": "off", "WEB_CONCURRENCY": "9" * 21}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)

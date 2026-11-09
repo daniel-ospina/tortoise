@@ -596,7 +596,19 @@ _count_is_verifiable() {
     case "$_raw" in
         +*) _raw="${_raw#+}" ;;
     esac
-    [[ "$_raw" =~ ^[0-9]+(_[0-9]+)*$ ]]
+    [[ "$_raw" =~ ^[0-9]+(_[0-9]+)*$ ]] || return 1
+    # ⛔ LENGTH, because "is an ASCII-integer spelling" is not yet "this shell can
+    # READ it": bash arithmetic is `intmax_t` (19 digits at most), so a longer
+    # digit string passes the regex and then makes every `-gt 1` comparison on
+    # it fail with `integer expression expected` — which reads as FALSE, i.e. as
+    # "1 worker", while the count is 21 digits. MEASURED on the pre-fix block:
+    # `WEB_CONCURRENCY=s/9x21/` printed "the count is verified as ONE worker, so
+    # there is nothing to gate" AND leaked a raw `integer expression expected`
+    # line into the boot log. Not a fail-open (the pre-exec gate still refuses,
+    # exit 1, because Python's `int()` is arbitrary-precision and DOES read it) —
+    # a false verdict on a fail-closed path, which is the same class of lie this
+    # block exists to remove. 18 keeps the bound strictly inside `intmax_t`.
+    [ "${#_raw}" -le 18 ]
 }
 
 _app_env_file_in_play() {
@@ -802,12 +814,19 @@ if [ "$_IS_SERVER" = "1" ]; then
         #     this measurement, so the real count is unknown here (measured: four
         #     workers served under a banner that said one);
         #   * a raw count this shell cannot parse (Unicode digits/whitespace).
-        if [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
+        # ⛔ THE COUNT'S READABILITY COMES FIRST. It is the cheapest test and the
+        # only one that must precede arithmetic: `[ "$TORTOISE_WEB_WORKERS" -gt 1 ]`
+        # on a digit string longer than `intmax_t` errors out (reads as FALSE, and
+        # leaks `integer expression expected`), so an unreadable count would fall
+        # through to "nothing to gate" — the false verdict `_count_is_verifiable`'s
+        # length guard closes. Ordered first so the comparison never runs on a
+        # value bash cannot evaluate.
+        if ! _count_is_verifiable "$@"; then
+            _refuse_why="a worker count this boot script cannot read (the value is not an ASCII integer), which uvicorn's int() may still turn into N"
+        elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
             _refuse_why="${TORTOISE_WEB_WORKERS} uvicorn workers"
         elif _app_env_file_in_play "$@"; then
             _refuse_why="a --env-file / \$UVICORN_ENV_FILE that sets the worker count AFTER this measurement"
-        elif ! _count_is_verifiable "$@"; then
-            _refuse_why="a worker count this boot script cannot read (the value is not an ASCII integer), which uvicorn's int() may still turn into N"
         else
             _refuse_why=""
         fi
