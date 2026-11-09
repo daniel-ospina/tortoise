@@ -1528,8 +1528,8 @@ def test_entitlement_refusal_is_mapped_to_the_product_402():
     # real handler, so THE HARNESS reds if the branch stops being reachable at
     # all — measured: an early `return json({error: …}, 502)` before the marker
     # branch leaves every static assertion GREEN (24 passed) and the harness
-    # exits 1. It reports that as a failed 402 response plus an assertion under
-    # the row rather than a `✗` on the row itself, because the run aborts there.
+    # exits 1 at its `code`-payload assertion for the 402 row. It prints NO row
+    # when it does: the report loop runs after that throw, so not even a `✗`.
     assert re.search(r"const\s+provisionMessage\s*=\s*String\(\s*provisionError\s*\.\s*message", src), (
         "the marker must be read from the RPC error's `message` (PostgREST puts "
         "the RAISE text there) — reading another field makes the branch dead code"

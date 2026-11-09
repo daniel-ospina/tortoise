@@ -1185,7 +1185,8 @@ class TestAtomicProvisionBackstop:
         Both assertions match the STATEMENT, not a bare token: this migration
         explains itself in comments that name `one_free_org_limit:` (the
         `IF v_blocking_org_id IS NOT NULL` block, whose comment repeats the
-        marker) and `pg_advisory_xact_lock` (``:40``), so a substring test is satisfied
+        marker) and `pg_advisory_xact_lock` (the `LOCK RESOURCE` comment block),
+        so a substring test is satisfied
         by the prose and stays GREEN when the code it claims to protect is
         deleted or renamed (agent-infra#3442 — an assertion whose value cannot
         vary under any mutation is dead weight, not a pin). Measured: with the
