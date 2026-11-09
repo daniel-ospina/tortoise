@@ -448,9 +448,21 @@ def test_gate_refuses_a_cross_space_comparison():
     assert same["verdict"] == "SHIP", \
         "same-space runs must reach the pre-registered gate, not a refusal"
 
-    # no space information at all (legacy callers) keeps the old behaviour
-    blind = run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
-    assert blind["verdict"] == "SHIP"
+    # `space`/`baseline_space` are REQUIRED: omitting them entirely must not
+    # silently reproduce the pre-fix scored SHIP. A caller reaching for the
+    # gate must state the instrument, and an EXPLICIT `None` is an absence of
+    # the fact, not a space — so it refuses.
+    with pytest.raises(TypeError):
+        run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
+    for blind_space, blind_base in ((None, None),
+                                    (None, run_module.EMBED_SPACE_MODEL),
+                                    (run_module.EMBED_SPACE_MODEL, None)):
+        blind = run_module._gate_vs_baseline(
+            per_query, baseline, random.Random(0),
+            space=blind_space, baseline_space=blind_base,
+        )
+        assert blind["verdict"] == "INCOMPARABLE", \
+            f"a None space ({blind_space} vs {blind_base}) must refuse, not score"
 
     # `unknown` on EITHER side refuses, including unknown-vs-unknown: two
     # absences of the same fact are not the same space. Without this, a
@@ -470,6 +482,45 @@ def test_gate_refuses_a_cross_space_comparison():
             f"{space} vs {base_space} must refuse, not score"
         assert "could not be established" in refusal["reason"], \
             "the refusal must name the unknown space as its reason"
+
+
+def test_summary_presents_incomparable_as_a_refusal_not_a_pass():
+    """The token alone reads as "not BLOCK", and a lane applying the loop's
+    documented rule ("ships when the gate does not block") would ship having
+    measured nothing. The summary is the channel the loop actually reads, so
+    it must carry the remedy and say the run is NOT a ship signal."""
+    report = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": {
+            "verdict": "INCOMPARABLE",
+            "reason": "re-baseline in this space before gating.",
+        },
+    }
+    out = run_module._markdown_summary(report)
+    assert "INCOMPARABLE" in out
+    assert "NOT a ship signal" in out, (
+        "the summary must say the run is not a ship signal, so the loop's "
+        "'does not block' rule cannot read the refusal as a pass"
+    )
+    assert "re-baseline in this space before gating." in out, (
+        "the remedy lives in gate['reason'] and must be printed where the "
+        "loop reads it, not only in the JSON report"
+    )
+
+
+def test_summary_still_prints_a_plain_verdict_token():
+    """SHIP/BLOCK are unchanged — no refusal prose is bolted onto them."""
+    report = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": {"verdict": "SHIP", "reason": ""},
+    }
+    out = run_module._markdown_summary(report)
+    assert "gate vs baseline: SHIP" in out
+    assert "NOT a ship signal" not in out
 
 
 def test_gate_refuses_a_different_model_in_the_model_space():
@@ -819,6 +870,14 @@ def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
     )
     assert prov["corpus_reembedded"] == 0, \
         "the no-seed path must not re-encode (it would MERGE unseeded points)"
+    # The field must read the population this run could NOT vouch for — which
+    # on this path is the WHOLE embedded index. A 0 here would tell a reader
+    # (or an automation filtering on `== 0` for "fully verified") the exact
+    # opposite of what happened.
+    assert prov["corpus_points_unverified"] > 0, (
+        "a --no-seed-corpus run verified NOTHING, so corpus_points_unverified "
+        "must count the embedded population it could not vouch for, not 0"
+    )
     assert stub.calls == [], "nothing to encode in the unknown space"
 
     # ...and gating it against the committed MODEL-space baseline must REFUSE

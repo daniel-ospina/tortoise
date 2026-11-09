@@ -139,7 +139,16 @@ Gate (pre-registered): **SHIP** iff the paired 90% CI on ΔnDCG@10 (points,
 vs baseline, paired on identical query ids) does not exclude −2; **WARN**
 −2…−4; **BLOCK** < −4 or a significant P@5 drop (paired CI below 0). The
 loop ships a change only when speed improved (the #316 arm) AND this gate
-does not block.
+returns **SHIP**.
+
+⚠️ **`INCOMPARABLE` is NOT a pass.** It is the gate declining to make a
+statement — the run and its baseline did not share one instrument (space, or
+model id inside the `model` space), so no delta was computed and **no
+quality evidence exists for this cycle**. A cycle that ends `INCOMPARABLE`
+has measured nothing: re-baseline in the run's own space and re-run before
+shipping anything. Reading it as "did not block, therefore ships" is the
+same defect this gate exists to remove, mirrored — the pre-fix gate could
+never pass, and this verdict could never fail.
 
 **A cross-space comparison is refused, not scored.** A run and its baseline in
 different embedding spaces differ by the INSTRUMENT, so `_gate_vs_baseline`
