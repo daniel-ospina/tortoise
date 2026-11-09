@@ -2847,8 +2847,9 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
     The advertised side is the TOP-LEVEL `website/sitemap-*.xml` walk, for the reason
     `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` states: that walk and
     `_in_scope_pages` describe the same population (this project's served pages). The app
-    origin's `<loc>`s are covered there — deliberately not here — and the gap is owned by
-    #11624.
+    origin's `<loc>`s are resolved by NONE of the `sitemap-*.xml` walks here — every one of
+    them globs `website/sitemap-*.xml`, which cannot reach `apps/dashboard/public/` — so that
+    gap is real and is owned by #11624, not covered elsewhere.
     """
     advertised = {
         _document_for_loc(loc).resolve()
