@@ -447,6 +447,37 @@ Deno.serve(async (req: Request) => {
         "provision_team failed for " + safeName + ":",
         provisionError
       );
+      // ── #1981: the one-free-org entitlement refusal is TERMINAL ──────────
+      // The RPC's DB-level backstop (migration 20261108000001) raises
+      // `one_free_org_limit:<org_id>` when this person ALREADY OWNS a free
+      // organization. Answering 502 + "Please try again" turns a rule the
+      // product enforces into a permanent dead end: retrying can never succeed,
+      // because the condition is the user's existing org, not a transient
+      // fault — and this function is reachable both from the
+      // `after_user_created` hook and from a direct call with the user's own
+      // JWT. Mirror the Python lanes' payload EXACTLY (#2789: the dashboard
+      // dialog is driven by `code`, never by string-matching `message`), so
+      // this lane is not the one that renders a dead end. "Exactly" includes
+      // the message: `_one_free_org_detail` builds it through
+      // `tortoise/quota.py::with_limit_contact`, so it carries the #5425
+      // contact route and that helper's punctuation. Both literals are pinned
+      // against their Python twins by
+      // `tests/test_provisioning_edge_function.py::test_entitlement_refusal_is_mapped_to_the_product_402`,
+      // which reads both sides and reddens on any drift.
+      const provisionMessage = String(provisionError.message ?? "");
+      const marker = "one_free_org_limit:";
+      const markerAt = provisionMessage.indexOf(marker);
+      if (markerAt >= 0) {
+        const blockingOrgId = provisionMessage
+          .slice(markerAt + marker.length)
+          .trim()
+          .split(/\s/)[0] || null;
+        return json({
+          code: "one_free_org_limit",
+          message: "You can only have one free organization. Need more? Contact support@premiselabs.co.",
+          org_id: blockingOrgId,
+        }, 402);
+      }
       return json({ error: "Provisioning failed. Please try again." }, 502);
     }
 
