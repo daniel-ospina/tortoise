@@ -759,8 +759,8 @@ def test_edge_function_hook_path_is_gone():
         "Deno.serve", 1
     )[0]
     # Pin the SHAPE of a header/body read, not one call spelling. The deleted
-    # hook path gathered headers with `req.headers.forEach((v, k) => …)` and the
-    # raw body with `req.clone().text()` — neither is a `req.headers.get(` call:
+    # hook path gathered headers with `req.headers.forEach((v, k) => …)` and read
+    # the raw body for the signature — neither is a `req.headers.get(` call:
     #
     #   // Headers → plain object (webhook-signature / webhook-id / ...)
     #   const headers: Record<string, string> = {};
@@ -787,7 +787,9 @@ def test_edge_function_hook_path_is_gone():
     )
     assert "req.clone" not in auth_body, (
         "authenticateCaller must not clone the request: a signature-verifying "
-        "hook path needs the RAW BODY, so a clone here is that path's fingerprint:"
+        "hook path re-reads the RAW BODY, so a clone here is the fingerprint of "
+        "one — the live code reads it ONCE, in the handler, and passes it in "
+        "(`origin/main` `:238`, `:242`):"
         f"\n{auth_body}"
     )
     # ⛔ AND THE SAME PINS FILE-WIDE, because `auth_body` is a SOURCE SLICE and a
@@ -798,7 +800,8 @@ def test_edge_function_hook_path_is_gone():
     # cannot see a function it does not contain, so the artifacts of a webhook
     # signature path are pinned across the WHOLE file (all four are 0 today):
     #   req.headers.forEach  — header enumeration
-    #   req.clone            — raw-body access for signature verification
+    #   req.clone            — a SECOND body read (the live handler reads it once,
+    #                          with `req.text()`, and passes it in as an argument)
     #   webhook-id / webhook-timestamp / webhook-signature — the protocol's own
     #                          header names, LITERALLY SPELLED
     #   createHmac           — the signature computation
@@ -809,8 +812,8 @@ def test_edge_function_hook_path_is_gone():
     #   (a) a verifier that CONSTRUCTS the header name rather than spelling it
     #       (`req.headers.get("webhook-" + suffix)`), AND
     #   (b) an HMAC computed through `crypto.subtle` — which this file uses
-    #       legitimately (3 sites, api-key and lookup hashing), so it cannot be
-    #       pinned by absence, AND
+    #       legitimately (3 sites: the org-id digest, and the API-key hash's
+    #       `importKey`/`deriveBits`), so it cannot be pinned by absence, AND
     #   (c) a NEW env var name (`SUPABASE_AUTH_HOOK_SECRET`), which no name pin
     #       predicts.
     #   MEASURED at this head, all three together in a helper above

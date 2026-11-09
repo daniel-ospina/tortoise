@@ -11481,8 +11481,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # grammar leaves open is stated in the paragraph below.
         # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
         # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
-        # of any number OTHER than `:12929` to the live/HEAD shape (`:13011` at HEAD) reds NOTHING
-        # (measured: whole file green). The §5 block is NOT that hole — its qualified cites are
+        # of a number NO ARM HOLDS (`:13011` at HEAD) reds NOTHING (measured: whole file green).
+        # `:12929` and `:12779` are the two §2 numbers the arms beside this one DO hold — by the
+        # base PAIR and by `62248db88` — so those two red; the hole is every other number §2
+        # carries. The §5 block is NOT that hole — its qualified cites are
         # classified below. Three forms were
         # measured and every one of them was wrong in a direction: a single-number deny-list
         # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
