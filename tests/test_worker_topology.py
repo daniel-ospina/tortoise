@@ -2023,7 +2023,17 @@ def test_a_spelling_click_rejects_does_not_exempt_the_shipped_gate(spelling):
 #: Now each name must really be a BOOLEAN FLAG once the installed uvicorn reaches
 #: its stated version (:func:`_ahead_violations`), so a removed, renamed or
 #: retuned flag reds instead of being excused.
-_AHEAD_OF_THE_PIN: dict[str, str] = {"--http2": "0.54.0"}
+#:
+#: ⛔ AND `since` IS BOUNDED BY WHAT HAS BEEN MEASURED. The check above only bites
+#: once the installed version REACHES `since`, so a declaration naming a version
+#: no uvicorn ever had restores the free pass: MEASURED — `--bogus` in the table
+#: declared at `9999.0.0` left `_ahead_of_the_pin` GREEN on uvicorn 0.52.1 AND
+#: 0.54.0, while the same name at the real `0.54.0` reds on 0.54.0. A version
+#: past the horizon can only silence the pin, never verify it, so it reds
+#: (:data:`_UVICORN_NEWEST_MEASURED`; bump it deliberately when a newer uvicorn
+#: has actually been measured).
+_UVICORN_NEWEST_MEASURED = "0.54.0"
+_AHEAD_OF_THE_PIN: dict[str, str] = {"--http2": _UVICORN_NEWEST_MEASURED}
 
 
 def _installed_version(distribution: str) -> str:
@@ -2043,9 +2053,11 @@ def _ahead_violations(ahead, flags, table, uvicorn_version):
 
     Pure so the check can be pinned on synthetic inputs: on an installed uvicorn
     at or above the version that introduced a name, that name must really be a
-    boolean flag in the parser; and every declaration must name something the
-    table actually carries (a declaration for a name the table dropped is either
-    a typo or dead weight, and either way it must not sit there green).
+    boolean flag in the parser; every declaration must name something the table
+    actually carries (a declaration for a name the table dropped is either a
+    typo or dead weight, and either way it must not sit there green); and a
+    `since` past :data:`_UVICORN_NEWEST_MEASURED` is a free pass, not a promise
+    (nothing above the measured horizon can be verified — see that constant).
     """
     reds = [
         f"{name} is declared ahead of the pin but is NOT in "
@@ -2053,6 +2065,13 @@ def _ahead_violations(ahead, flags, table, uvicorn_version):
         for name in sorted(set(ahead) - table)
     ]
     for name, since in sorted(ahead.items()):
+        if Version(since) > Version(_UVICORN_NEWEST_MEASURED):
+            reds.append(
+                f"{name} is declared from uvicorn {since}, but nothing above "
+                f"{_UVICORN_NEWEST_MEASURED} has been MEASURED — a `since` past "
+                f"the horizon can only silence the pin, never verify it"
+            )
+            continue
         if Version(uvicorn_version) >= Version(since) and name not in flags:
             reds.append(
                 f"{name} is declared a boolean flag from uvicorn {since}, but "
@@ -2249,6 +2268,13 @@ def test_the_ahead_of_the_pin_declaration_is_itself_verified():
     # a declaration for a name the table does not carry is dead weight -> red
     reds = _ahead_violations({"--ghost": "0.54.0"}, flags, table, "0.52.1")
     assert reds and "--ghost" in reds[0], reds
+
+    # ⛔ …and a `since` PAST the measured horizon is a free pass, not a promise:
+    # MEASURED on the pre-guard code, `--bogus` declared at `9999.0.0` was green
+    # on BOTH environments, because the version check simply never fired.
+    reds = _ahead_violations({"--bogus": "9999.0.0"},
+                             flags, {"--reload", "--bogus"}, "0.52.1")
+    assert reds and "9999.0.0" in reds[0], reds
 
 
 def test_a_reload_lookalike_value_is_not_a_reloader():
