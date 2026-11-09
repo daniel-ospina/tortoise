@@ -59,10 +59,23 @@
 // -------------------------------------------
 // Fail-open injects nothing on a healthy empty graph AND on a dead seam, so
 // the two are indistinguishable without a record. When NO reflex candidate
-// resolves, or every resolved candidate FAILS, this seam writes an
-// `install-inert` breadcrumb to the canonical
-// `capture-errors/pi-install.json` slot (the same slot the Hermes plugin and
-// the shell hooks use) and still returns `undefined`.
+// RESOLVES at all — no CLI on PATH, none in `~/.tortoise/hook-src-dir`,
+// `$VIRTUAL_ENV` empty, no hosted key — this seam writes an `install-inert`
+// breadcrumb to the canonical `capture-errors/pi-install.json` slot (the same
+// slot the Hermes plugin and the shell hooks use), latches itself off for the
+// process, and still returns `undefined`.
+//
+// ⛔ WHAT IS DELIBERATELY *NOT* BREADCRUMBED (review finding 3 — this header
+// used to claim the opposite, which sent a reader to the wrong conclusion):
+// `timeout`, `empty`, and `refused`. Their `kind` would have to say "reinstall",
+// and each of them can be TRUE OF A WORKING INSTALL — a reflex mid-upgrade, a
+// momentarily locked graph, a 402 that clears — so a breadcrumb (and worse, the
+// latch) would tell an operator to fix something that is not broken. The
+// distinction is the CAUSE, not the symptom: `inert` means nothing resolved,
+// the others mean the reflex RAN and declined. Their `detail` goes to stderr
+// under `TORTOISE_VOLUNTEER_DEBUG=1` instead (`trace`), so a persistent
+// misconfiguration — a wrong venv, a missing extra — is diagnosable without
+// being recorded as an install fault.
 //
 // W4 USER-EXPOSURE GATE
 // ----------------------
@@ -296,6 +309,32 @@ export function readVolunteerConfig(
 /** Is the read seam switched off for this process? */
 export function disabled(env: Env = typeof process === "undefined" ? {} : process.env): boolean {
   return truthy(env.TORTOISE_VOLUNTEER_DISABLE);
+}
+
+/** Is the seam's diagnostic trace on for this process? */
+export function tracing(env: Env = typeof process === "undefined" ? {} : process.env): boolean {
+  return truthy(env.TORTOISE_VOLUNTEER_DEBUG);
+}
+
+/**
+ * Emit a refused verdict's `detail` to stderr, where a developer can see it.
+ *
+ * ⛔ The canonical `capture-errors/pi-install.json` slot stays UNTOUCHED for
+ * these classes (see the header): its `kind` is `install-inert`, whose advice is
+ * "reinstall", and a 402 that clears in a minute must not send an operator to
+ * reinstall a working install. But DISCARDING the detail — the only string that
+ * names the real cause — left a persistently broken reflex (wrong venv, missing
+ * extra) with no record anywhere at all (review finding 3). So it goes to
+ * stderr, opt-in, and never to the canonical slot.
+ */
+function trace(detail: string, env: Env): void {
+  if (!tracing(env)) return;
+  try {
+    (typeof process === "undefined" ? undefined : process.stderr)
+      ?.write?.(`[tortoise-volunteer] ${detail}\n`);
+  } catch {
+    // A trace must never be the thing that breaks a turn.
+  }
 }
 
 /**
@@ -912,7 +951,12 @@ export default function tortoiseVolunteer(
     // A refusal is the same NO-VERDICT class as a timeout: the seam ran, so the
     // canonical `install-inert` slot stays untouched and the inert latch is not
     // set — a 402 that clears must not disable the seam for the whole process.
-    if (verdict.status === "refused") return null;
+    // The detail (which names the actual cause) is NOT discarded: it goes to
+    // stderr under `TORTOISE_VOLUNTEER_DEBUG=1` (review finding 3).
+    if (verdict.status === "refused") {
+      trace(`refused: ${verdict.detail}`, env);
+      return null;
+    }
     return verdict.result;
   };
 

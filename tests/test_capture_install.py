@@ -4551,14 +4551,22 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # Generation 18: the read seam ships in the wheel at the generation that
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
     # here rather than rewritten.
-    18: "f2b7c10e77abff17e82b5da8b9a921a628783a72655755678ef046a69086cb5c",
+    #
+    # ⛔ RE-PINNED IN PLACE, not bumped (review findings 1 and 3 changed these
+    # bytes).  That is legitimate ONLY because of the sentence above: generation
+    # 18 of the READ half has never shipped, so there is no installed copy whose
+    # "local edit" verdict a re-pin could falsify — the entry is still being
+    # created.  A SHIPPED generation's digest must never be rewritten; it moves
+    # to a new generation, which is a two-file change (`contract_version_for`
+    # grades the pair).
+    18: "2add1a07169901c34fb1cac3e7070cf03622da1dd116df65eb258535ea713fb1",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "f2b7c10e77abff17e82b5da8b9a921a628783a72655755678ef046a69086cb5c")
+    18, "2add1a07169901c34fb1cac3e7070cf03622da1dd116df65eb258535ea713fb1")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

@@ -651,6 +651,61 @@ test("a TIMEOUT is not an inert install: no breadcrumb, and the chain stops", as
   assert.match(verdict.status === "timeout" ? verdict.detail : "", /timed out after 300ms/);
 });
 
+test("a REFUSED verdict stays out of the canonical slot, but its detail is traceable", async () => {
+  // Review finding 3 (P2). The module header claimed a breadcrumb when "every
+  // resolved candidate FAILS"; the code deliberately writes none (that class is
+  // true of a WORKING install — a 402 that clears, a reflex mid-upgrade), so the
+  // header lied. The other half is real though: `verdict.detail` — the only
+  // string naming the actual cause — was discarded, leaving a persistent
+  // misconfiguration (wrong venv, missing extra) with no record anywhere. It now
+  // goes to stderr under `TORTOISE_VOLUNTEER_DEBUG=1` and nowhere else.
+  //
+  // Mutation: drop the `trace(...)` call → the debug assertion REDs. Move the
+  // refused branch onto `recordInstallInert` → the no-breadcrumb assertion REDs
+  // (and the operator is told to reinstall a working install).
+  const run = async (extraEnv: Record<string, string>) => {
+    const home = tmpHome();
+    const crumbs = join(home, "capture-errors");
+    const broken = fakeCli(join(home, "bin"), "exit 2");
+    const pi = mockPi();
+    tortoiseVolunteer(pi as never, {
+      env: { PATH: join(home, "bin"), TORTOISE_COMMAND: broken, ...extraEnv },
+      home,
+      configPath: join(home, "absent.json"),
+      breadcrumbDir: crumbs,
+    });
+    const chunks: string[] = [];
+    const stderr = process.stderr as unknown as { write: (s: string) => boolean };
+    const original = stderr.write;
+    stderr.write = (s: string): boolean => {
+      chunks.push(String(s));
+      return true;
+    };
+    try {
+      assert.equal(
+        await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+        undefined,
+        "a refused reflex injects nothing",
+      );
+    } finally {
+      stderr.write = original;
+    }
+    assert.equal(
+      existsSync(join(crumbs, "pi-install.json")),
+      false,
+      "a REFUSED reflex is not an inert INSTALL — the advice would be wrong",
+    );
+    return chunks.join("");
+  };
+
+  const quiet = await run({});
+  assert.equal(quiet, "", "the trace is opt-in, and silent by default");
+
+  const traced = await run({ TORTOISE_VOLUNTEER_DEBUG: "1" });
+  assert.match(traced, /refused: every resolved tortoise reflex failed/, traced);
+  assert.match(traced, /bin\/tortoise/, "the detail names WHICH candidate failed");
+});
+
 test("a REFUSED hosted request is not an inert install: no breadcrumb, no latch", async () => {
   // A 401/402/403/5xx means the endpoint ANSWERED and refused us — so the
   // install is demonstrably working. Classifying that as `inert` wrote the
