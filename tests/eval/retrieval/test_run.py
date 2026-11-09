@@ -448,9 +448,33 @@ def test_gate_refuses_a_cross_space_comparison():
     assert same["verdict"] == "SHIP", \
         "same-space runs must reach the pre-registered gate, not a refusal"
 
-    # no space information at all (legacy callers) keeps the old behaviour
-    blind = run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
-    assert blind["verdict"] == "SHIP"
+    # `space`/`baseline_space` are REQUIRED: omitting them entirely must not
+    # silently reproduce the pre-fix scored SHIP. A caller reaching for the
+    # gate must state the instrument, and an EXPLICIT `None` is an absence of
+    # the fact, not a space — so it refuses.
+    with pytest.raises(TypeError):
+        run_module._gate_vs_baseline(per_query, baseline, random.Random(0))
+    for blind_space, blind_base in ((None, None),
+                                    (None, run_module.EMBED_SPACE_MODEL),
+                                    (run_module.EMBED_SPACE_MODEL, None)):
+        blind = run_module._gate_vs_baseline(
+            per_query, baseline, random.Random(0),
+            space=blind_space, baseline_space=blind_base,
+        )
+        assert blind["verdict"] == "INCOMPARABLE", \
+            f"a None space ({blind_space} vs {blind_base}) must refuse, not score"
+
+    # Two IDENTICAL unrecognised labels are two pieces of the same garbage, not
+    # one space: a baseline's label is read from an arbitrary file, so equality
+    # alone is not evidence. Refuse on membership, not just on difference.
+    for garbage in ("weird", "", "MODEL"):
+        bogus = run_module._gate_vs_baseline(
+            per_query, baseline, random.Random(0),
+            space=garbage, baseline_space=garbage,
+        )
+        assert bogus["verdict"] == "INCOMPARABLE", (
+            f"identical unrecognised label {garbage!r} must refuse, not score"
+        )
 
     # `unknown` on EITHER side refuses, including unknown-vs-unknown: two
     # absences of the same fact are not the same space. Without this, a
@@ -470,6 +494,117 @@ def test_gate_refuses_a_cross_space_comparison():
             f"{space} vs {base_space} must refuse, not score"
         assert "could not be established" in refusal["reason"], \
             "the refusal must name the unknown space as its reason"
+
+
+def test_summary_presents_incomparable_as_a_refusal_not_a_pass():
+    """The token alone reads as "not BLOCK", and a lane applying the loop's
+    documented rule ("ships when the gate does not block") would ship having
+    measured nothing. The summary is the channel the loop actually reads, so
+    it must carry the remedy and say the run is NOT a ship signal."""
+    report = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": {
+            "verdict": "INCOMPARABLE",
+            "reason": "re-baseline in this space before gating.",
+        },
+    }
+    out = run_module._markdown_summary(report)
+    assert "INCOMPARABLE" in out
+    assert "NOT a ship signal" in out, (
+        "the summary must say the run is not a ship signal, so the loop's "
+        "'does not block' rule cannot read the refusal as a pass"
+    )
+    assert "re-baseline in this space before gating." in out, (
+        "the remedy lives in gate['reason'] and must be printed where the "
+        "loop reads it, not only in the JSON report"
+    )
+
+    # A gate dict with no/empty `reason` must still render sanely and must not
+    # raise: every INCOMPARABLE producer sets it today, but the summary is on
+    # the path of a refusal that must never be silently swallowed.
+    for no_reason in ({}, {"reason": ""}, {"reason": None}):
+        bare = run_module._markdown_summary({
+            **report,
+            "gate_vs_baseline": {"verdict": "INCOMPARABLE", **no_reason},
+        })
+        assert "NOT a ship signal" in bare, (
+            "a refusal must stay a refusal even when its reason is missing"
+        )
+        assert "None" not in bare, (
+            "a missing reason must not render as the literal 'None' (or leave a "
+            "dangling separator) on the refusal line the loop reads"
+        )
+        assert not bare.rstrip("\n").endswith(". "), (
+            "an absent reason must not leave a dangling separator"
+        )
+
+
+def test_summary_still_prints_a_plain_verdict_token():
+    """SHIP/BLOCK are unchanged — no refusal prose is bolted onto them."""
+    report = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": {"verdict": "SHIP", "reason": ""},
+    }
+    out = run_module._markdown_summary(report)
+    assert "gate vs baseline: SHIP" in out
+    assert "NOT a ship signal" not in out
+
+
+def test_summary_distinguishes_a_baseline_that_could_not_compare():
+    """`gate_vs_baseline` is None both when NO baseline was passed and when one
+    WAS passed but nothing paired (no per_query, or no overlapping query ids).
+    Reporting the second as "no --baseline" tells the reader the opposite of
+    what happened — the same defect class as the rest of this change."""
+    base = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": None,
+    }
+    absent = run_module._markdown_summary(dict(base))
+    assert "gate: none (no --baseline)" in absent
+
+    supplied = run_module._markdown_summary(
+        {**base, "baseline_supplied": "/tmp/some-baseline.json"})
+    assert "no --baseline" not in supplied, (
+        "a baseline WAS supplied; saying none was is a false statement"
+    )
+    assert "NOT a ship signal" in supplied, (
+        "nothing was compared, so the run carries no quality evidence"
+    )
+    assert "/tmp/some-baseline.json" in supplied
+
+
+def test_summary_states_the_space_and_caves_the_unknown_one():
+    """`--quiet` suppresses every console warning, so the summary is the only
+    console artifact a quiet run leaves. It must name the space, and must cave
+    the `unknown` one, or a quiet run over an unverified index prints a
+    clean-looking metrics table."""
+    base = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": None,
+    }
+    known = run_module._markdown_summary(
+        {**base, "provenance": {"corpus_embedding_space": "model"}})
+    assert "embedding space: model" in known
+    assert "NOT a quality statement" not in known
+
+    unknown = run_module._markdown_summary(
+        {**base, "provenance": {"corpus_embedding_space": "unknown"}})
+    assert "embedding space: unknown" in unknown
+    assert "NOT a quality statement" in unknown, (
+        "the metrics table under an unknown space is not a quality statement "
+        "and the summary must say so where the loop reads it"
+    )
+
+    # No provenance at all must not crash or invent a space.
+    assert "embedding space" not in run_module._markdown_summary(dict(base))
 
 
 def test_gate_refuses_a_different_model_in_the_model_space():
@@ -819,6 +954,14 @@ def test_run_reusing_existing_corpus_claims_no_space(tmp_path):
     )
     assert prov["corpus_reembedded"] == 0, \
         "the no-seed path must not re-encode (it would MERGE unseeded points)"
+    # The field must read the population this run could NOT vouch for — which
+    # on this path is the WHOLE embedded index. A 0 here would tell a reader
+    # (or an automation filtering on `== 0` for "fully verified") the exact
+    # opposite of what happened.
+    assert prov["corpus_points_unverified"] > 0, (
+        "a --no-seed-corpus run verified NOTHING, so corpus_points_unverified "
+        "must count the embedded population it could not vouch for, not 0"
+    )
     assert stub.calls == [], "nothing to encode in the unknown space"
 
     # ...and gating it against the committed MODEL-space baseline must REFUSE
