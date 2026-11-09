@@ -3648,6 +3648,86 @@ def test_a_failed_read_seam_still_reports_the_capture_half_it_wrote(
         "field's own contract is false on exactly the failure paths")
 
 
+def test_a_dry_run_reports_no_artifact_as_written(cli):
+    """`changed` keeps its would-change meaning under `--dry-run`, but
+    `changed_artifacts` answers "what did this run WRITE" — nothing
+    (#11584 review round 9).
+
+    The round-8 fix set the flags at the write sites, but `capture_written` was
+    still set OUTSIDE the non-dry-run arm and `read_seam_written` was plain
+    `v_changed`, so a virgin `HOME` reported BOTH artifacts as written while
+    the extensions directory did not exist on disk. The field's docstring, the
+    `_written()` docstring and that commit's own comment all said otherwise, and
+    a caller keying its "installed" sentence on the field would claim an
+    install over a documented no-write run — the #3808 R13 class again.
+
+    Mutation: set `capture_written` outside the `else:` arm (or drop the
+    `and not dry_run` from the read seam) — this REDs.
+    """
+    _run_cli, root, home = cli
+
+    result = capture_install.install_capture("pi", root=root, home=home,
+                                             dry_run=True)
+
+    assert result.ok, result
+    assert result.changed is True, (
+        "a dry run still reports what it WOULD change")
+    assert result.changed_artifacts == (), (
+        "a dry run writes nothing, so no artifact may be named as written")
+    assert not (home / ".pi" / "agent" / "extensions").exists(), (
+        "the dry run created the extensions directory")
+
+
+def test_cli_install_pi_uninstall_preserves_a_locally_edited_seam(cli):
+    """A locally-edited read seam is provably OURS and provably NOT what we
+    shipped — so the deleting verb must preserve it (#11584 review round 9).
+
+    `_pi_volunteer_is_provably_ours` proves authorship (bytes OR the canonical
+    marker), and a user edit keeps the marker, so `--uninstall` deleted the
+    edit with no copy while the sibling verb on the same file (`install pi`)
+    backed it up. That is the unrecoverable-delete hazard this verb's own
+    docstring names, applied to our own edited artifact.
+
+    Mutation: drop the `_pi_volunteer_local_edit_backup` call — the `.bak`
+    assert REDs and the edit is lost.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    edited = ext.read_text(encoding="utf-8") + "// my local tweak\n"
+    ext.write_text(edited, encoding="utf-8")
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists(), "the seam itself is removed"
+    backup = ext.with_suffix(ext.suffix + ".bak")
+    assert backup.is_file(), (
+        "a locally edited seam must be preserved before it is deleted:\n"
+        + r.stdout)
+    assert backup.read_text(encoding="utf-8") == edited, (
+        "the backup must hold the EDITED bytes, not the shipped ones")
+
+
+def test_cli_install_pi_uninstall_writes_no_backup_for_an_unedited_seam(cli):
+    """The backup is for LOCAL EDITS only: the ordinary uninstall must not
+    litter the extensions directory with a `.bak` of a file it can rewrite.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists()
+    assert not ext.with_suffix(ext.suffix + ".bak").exists(), (
+        "an unedited seam is a copy this installer can rewrite — no .bak")
+
+
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
     """A second `tortoise install pi` is a no-op: it must report the no-op and
     NOT claim it installed the extension.

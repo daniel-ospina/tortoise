@@ -523,13 +523,20 @@ class InstallResult:
     changed: bool = False
     actions: tuple[str, ...] = ()
     error: str = ""
-    #: Which artifact(s) THIS run changed, by INSTALL NAME (``tortoise-capture.ts``
+    #: Which artifact(s) THIS run WROTE, by INSTALL NAME (``tortoise-capture.ts``
     #: / ``tortoise-volunteer.ts``). ``changed`` stays the union, because most
     #: callers only ask "did anything happen" — but Pi installs TWO artifacts
     #: from one call, so a caller that names one of them in a user-facing
     #: sentence must ask about that artifact, not about the union (#11584
     #: review finding 1: the summary printed "Pi capture extension installed."
     #: for a run that wrote only the read seam).
+    #:
+    #: ⛔ EMPTY UNDER ``--dry-run``, by contract: `changed` keeps its
+    #: would-change meaning there (a dry run reports what it *would* do), while
+    #: this field answers only "what did this run WRITE" — nothing. A caller
+    #: that prints an "installed" sentence must therefore key on THIS field and
+    #: get silence for a dry run, rather than relying on its own `dry_run`
+    #: check (which was the only guard until #11584 review round 9).
     changed_artifacts: tuple[str, ...] = ()
 
     @property
@@ -1930,11 +1937,15 @@ def _install_pi(
             else:
                 _atomic_bytes(dst, payload, 0o644)
                 actions.append(f"installed {dst}")
-            # The ONLY place the capture artifact is actually written. A
-            # legacy-extension disable above sets `changed` but NOT this, so
-            # the user-facing "capture extension installed" sentence stays
-            # tied to a write of that file (#11584 review round 8).
-            capture_written = True
+                # ⛔ INSIDE the non-dry-run arm, and that placement IS the
+                # contract (#11584 review round 9). `changed` keeps its
+                # would-change meaning under `--dry-run` (callers render the
+                # action lines from it), but `changed_artifacts` answers "what
+                # did this run WRITE", and a dry run writes nothing — so
+                # setting it here reports two artifacts on a virgin HOME where
+                # the extensions directory does not even exist. A legacy
+                # disable above likewise sets `changed` but NOT this.
+                capture_written = True
             changed = True
     except OSError as e:
         # A write-time failure on a VIRGIN home lands NOTHING — the seam
@@ -2004,7 +2015,9 @@ def _install_pi(
         v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
             ext_dir, home, dry_run=dry_run)
         changed = changed or v_changed
-        read_seam_written = v_changed
+        # Same rule as `capture_written`: a dry run writes nothing, so the
+        # read seam half must not be reported as written (#11584 review round 9).
+        read_seam_written = v_changed and not dry_run
         actions.extend(v_actions)
         if v_error:
             return InstallResult(harness, changed=changed,

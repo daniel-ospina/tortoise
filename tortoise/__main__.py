@@ -5756,6 +5756,42 @@ def _pi_volunteer_is_provably_ours(target: Path) -> bool:
     return _hook_install.read_hook_version(target) is not None
 
 
+def _pi_volunteer_local_edit_backup(target: Path) -> Path | None:
+    """Preserve a locally-edited read seam before ``--uninstall`` deletes it.
+
+    ``None`` when the bytes on disk ARE the shipped ones (the ordinary case,
+    where deleting loses nothing but a copy this installer can rewrite) or when
+    either side cannot be read — a backup that cannot prove an edit is not
+    worth a print, and ``_pi_volunteer_is_provably_ours`` has already run.
+
+    A user edit KEEPS the ``// tortoise-hook-version: N`` marker, so it stays
+    "provably ours" while no longer being what we shipped: `hooks status` names
+    that shape ``modified-artifact`` ("local edit"), and it is the one seam a
+    delete can destroy unrecoverably (#11584 review round 9).
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    if source is None:
+        return None
+    try:
+        installed = target.read_bytes()
+        shipped = Path(source).read_bytes()
+    except OSError:
+        return None
+    if installed == shipped:
+        return None
+    from tortoise.capture_install import _atomic_bytes, _backup_path
+
+    # `_atomic_bytes` (not `write_bytes`) for the same reasons `_install_pi`
+    # uses it: it replaces the directory entry rather than writing through a
+    # planted symlink or hard link, and mode 0o600 matches the sibling backup.
+    backup = _backup_path(target)
+    _atomic_bytes(backup, installed, 0o600)
+    return backup
+
+
 def _uninstall_pi_volunteer(args) -> int:
     """`tortoise install pi --uninstall` — remove the per-turn READ seam.
 
@@ -5797,6 +5833,21 @@ def _uninstall_pi_volunteer(args) -> int:
         print(f"[dry-run] would remove {target} (per-turn read seam)")
         print(f"Note: the capture extension ({capture}) would be left in place.")
         return 0
+    # ⛔ BACK UP A LOCALLY-EDITED SEAM BEFORE DELETING IT (#11584 review round
+    # 9). `_pi_volunteer_is_provably_ours` proves AUTHORSHIP, not that the bytes
+    # on disk are still the shipped ones — a user's edit to our file keeps the
+    # `// tortoise-hook-version: N` marker, so it is provably ours AND provably
+    # not what we shipped. `hooks status` calls that shape `modified-artifact`
+    # ("local edit"); deleting it with no copy is unrecoverable, which is the
+    # exact hazard this verb's own docstring names one level up ("an UNINSTALL
+    # DELETES, so a false positive is unrecoverable"). The sibling verb on the
+    # same file — `install pi` over a differing copy — already preserves it, so
+    # the two halves of the family disagreed about the same edit. A backup is
+    # written only when the bytes DIFFER from the shipped source; the ordinary
+    # unedited case still just removes the file.
+    backup = _pi_volunteer_local_edit_backup(target)
+    if backup is not None:
+        print(f"backed up {target} → {backup} (local edits are preserved)")
     try:
         target.unlink()
     except OSError as e:
