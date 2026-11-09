@@ -677,10 +677,12 @@ def traced(armed, tmp_path_factory):
 def test_D3_order_the_record_write_follows_the_journal_append(traced):
     """D3 (journal → record): every appended record is **written** to the record.
 
-    The assertion is pairwise on the OBSERVED call order, so it fails on the
-    two directions the criterion forbids: a record write with no journal append
-    behind it (an invented write) and a journal append that never reaches the
-    record ("a write path bypasses the record").
+    The assertion is pairwise on the OBSERVED call order — identity (`event_id`)
+    AND position — so it fails on the two directions the criterion forbids: a
+    record write with no journal append behind it (an invented write, including
+    a per-event inversion that pre-writes one kind's record ahead of its own
+    append) and a journal append that never reaches the record ("a write path
+    bypasses the record").
 
     ⛔ A CALL IS NOT A WRITE (`record_writer.write_live_record` returns `None`
     when unarmed and a `RecordWrite` whose `outcome` may be `REFUSED` otherwise),
@@ -693,6 +695,10 @@ def test_D3_order_the_record_write_follows_the_journal_append(traced):
     Falsifier 2: make the seam decline instead of write (force the unarmed
     branch, or `durable=False`) → the counts still match and the `APPLIED`
     assertion is what reds.
+    Falsifier 3: move ONE event kind's record write ahead of its own append
+    (`_emit_event`, `seq=None`, skip the post-append write) → identity still
+    aligns and the global floor still holds, so the POSITION assertion is what
+    reds.
     """
     journal = [e for e in traced.entries if e.door == "journal"]
     records = [e for e in traced.entries if e.door == "record"]
@@ -719,6 +725,26 @@ def test_D3_order_the_record_write_follows_the_journal_append(traced):
             f"{appended.event_id!r} ({appended.event_type}) — the record is not the "
             "journal's own position"
         )
+    # ⛔ IDENTITY IS NOT ORDER. The `zip` above proves the k-th record write
+    # ANSWERS the k-th append; it does not prove it FOLLOWS it, and the floor
+    # below is satisfied by pair #1 alone. A door that pre-writes ONE event
+    # kind's record before appending it keeps identity alignment, keeps the
+    # counts equal, and keeps `first_journal < first_record` — so identity plus
+    # a global floor leaves a per-event inversion green, which is exactly the
+    # direction D3 forbids. Measured (review round 9): writing
+    # `TurnsRecorded`'s record ahead of its own append (`seq=None`) left all
+    # four D3_order legs passing. Compare POSITIONS, pairwise.
+    journal_pos = [i for i, e in enumerate(traced.entries) if e.door == "journal"]
+    applied_pos = [
+        i for i, e in enumerate(traced.entries)
+        if e.door == "record" and e.outcome is record_writer.RecordWriteOutcome.APPLIED
+    ]
+    assert all(j < r for j, r in zip(journal_pos, applied_pos, strict=True)), (
+        "a record write preceded its own journal append — the record was written "
+        "from something other than the journal's append (D3's cache-only shape, "
+        f"per event): journal positions {journal_pos}, record positions "
+        f"{applied_pos}"
+    )
     first_journal = next(i for i, e in enumerate(traced.entries) if e.door == "journal")
     first_record = next(i for i, e in enumerate(traced.entries) if e.door == "record")
     assert first_journal < first_record, (

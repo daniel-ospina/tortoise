@@ -75,7 +75,7 @@ record, and `refuse_same_database` correctly refuses a drill pointed at the reco
 
 | leg | assertion | observed |
 |---|---|---|
-| `test_D3_order_the_record_write_follows_the_journal_append` | every journal append gets a record write, same `event_id`, and no record write precedes the first append | **green** — 14/14 paired |
+| `test_D3_order_the_record_write_follows_the_journal_append` | every journal append gets a record write carrying the same `event_id`, **at a LATER position in the trace** (pairwise position, §10), and no record write precedes the first append | **green** — 14/14 paired, positions rising |
 | `test_D3_order_a_journal_first_door_writes_journal_record_then_cache` | `_apply_and_journal` (the sanctioned chokepoint, `tools/record_wiring_check.py`'s production call site) writes journal → record → fold, and every cache statement in that window follows the record write | **green** — `['journal', 'record', 'fold', 'cache']` (four doors: the probe's `ObjectRegistered` carries no extra props, so `_persist_extra_props` emits no second statement, and `clear_embedding` is a no-op without an embedding — see §1's note) |
 | `test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY` | every cache statement **still ahead of its own append** in an ahead fold's window declares a lane — fold-attached ones unconditionally, raw-handle ones only while nothing has journalled between the fold and the statement (§8.1) — and the `(event_type, lane)` set of ahead folds declaring a **journal-first** lane equals the tree's recorded deviation set | **green** — the `_create_entity` registration folds run ahead under `"create_entity"`, which IS a journal-first lane, and that is exactly the pinned set |
 | `test_D3_order_no_cache_write_precedes_the_captures_first_journal_append_and_record` | a **FLOOR** on the criterion's second half: no mutating cache statement precedes the capture's FIRST journal append and FIRST **APPLIED** record write. It is **not** a per-write attribution — a mid-capture cache-only write passes, measured (§4, §6.2 F6) | **green** — no cache statement precedes the first append or the first APPLIED record |
@@ -314,6 +314,26 @@ E AssertionError: a cache write ahead of its journal append ran with NO declared
   — that is the §17.1 silent cache-ahead write D3 forbids
 ```
 
+#### F9 — pre-write ONE event kind's record ahead of its own append → leg 1 (position half)
+
+`_emit_event`, for `TurnsRecorded` only: `self._write_record_projection(event, seq=None)` before
+`log.append(event)`, and the post-append write skipped. Identity still aligns (the k-th record still
+answers the k-th append) and the global floor still holds (pair #1 is intact), which is exactly why
+identity + a floor could not see it: **before §10's fix all four `D3_order` legs passed this mutation**
+(`4 passed`). After it:
+
+```console
+E AssertionError: a record write preceded its own journal append — the record was written from
+  something other than the journal's append (D3's cache-only shape, per event): journal positions
+  [0, 4, 6, 11, 16, 22, 27, 33, 39, 41, 45, 50, 55, 57], record positions
+  [1, 3, 7, 12, 17, 23, 28, 34, 40, 42, 46, 51, 56, 58]
+1 failed, 3 passed, 15 deselected
+```
+
+The pair at journal position `4` and record position `3` is the inversion (a record write one door
+EARLIER than the append it answers) — the direction D3 forbids, and the only one of the four legs'
+falsifiers a `seq=None` pre-write can produce.
+
 ### 6.3 What the fixes do not change
 
 D3 is still **not discharged**, and this PR still reorders no production write path. What changed is that
@@ -398,3 +418,30 @@ Full disposition, including the items that were NOT defects:
 - **A docstring indentation slip** in leg 3 made one paragraph start at column 0.
 
 Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped`, `ruff` clean, markdownlint 0.
+
+## 10. Review cycle 6 — leg 1 asserted IDENTITY, never ORDER
+
+A fresh-context review at `2ca845f4437f` (PR comment `IC_kwDOToroq88AAAABkoP5uQ` / `6753089977`,
+recorded `not-clean`, 1 finding) accepted the instrument — the census reproduces, the door choice and the
+non-vacuity guards hold, the pinned deviation set is accurate rather than aspirational — and raised one
+**P1**: leg 1's assertion was **identity alignment plus a global first-position floor**, which is not
+the pairwise order its name and docstring claim.
+
+| # | finding | verified against | fix |
+|---|---|---|---|
+| 1 | **P1** — `test_D3_order_the_record_write_follows_the_journal_append` asserts the k-th APPLIED record's `event_id` equals the k-th append's, then that the FIRST append precedes the FIRST record. A door that pre-writes **one event kind's** record ahead of its own append keeps both: identity pairing survives, and `first_journal < first_record` is satisfied by pair #1. The docstring claims it fails on *"a record write with no journal append behind it"*, and it did not | reproduced: `_emit_event`, `TurnsRecorded` only, `self._write_record_projection(event, seq=None)` before `log.append(event)` and the post-append write skipped → **`4 passed`** (`-k D3_order`), every leg green while a record write precedes the append it answers. Tree restored from a byte-exact copy (`git diff --exit-code` clean) | assert pairwise **position**: `journal_pos`/`applied_pos` from `traced.entries`, then `all(j < r for j, r in zip(journal_pos, applied_pos, strict=True))`. Re-measured with the mutation still applied: leg 1 **reds** (F9, §6.2); mutation reverted, clean run **`5 passed`** with the census unchanged |
+
+**Why the three prior clean verdicts at this head did not contradict it:** they measured a **total**
+inversion (the record write moved ahead of the journal for *every* event), which legs 1 and 2 both
+detect. The gap is the **per-event** shape, which only a positional assertion sees. A `clean` verdict
+and a `P1` on the same head are compatible when they measure different mutation classes — which is
+why the mutation, not the verdict, is the evidence.
+
+**This is an assertion added, never a weakened one.** Every existing assertion is kept (receipt `ok`,
+counts equal, APPLIED count equal, `event_id` pairing, the global floor); the positional check is
+strictly stronger and the clean-run census is byte-identical (`journal=14 record=14 fold=3 cache=29
+cache-with-no-declared-lane=6`), so the leg it strengthens is not perturbed by it.
+
+Gates at this head: `5 passed (-k D3, census unchanged)`, whole file `18 passed, 1 skipped` (the skip
+is `TEST_RECORD_SCRATCH_URI`, which only the CI job's second database arms — unrelated to this
+change), `ruff check` clean, worktree restored (no production file in the diff).
