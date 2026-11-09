@@ -509,6 +509,18 @@ def test_summary_presents_incomparable_as_a_refusal_not_a_pass():
         "loop reads it, not only in the JSON report"
     )
 
+    # A gate dict with no/empty `reason` must still render sanely and must not
+    # raise: every INCOMPARABLE producer sets it today, but the summary is on
+    # the path of a refusal that must never be silently swallowed.
+    for no_reason in ({}, {"reason": ""}, {"reason": None}):
+        bare = run_module._markdown_summary({
+            **report,
+            "gate_vs_baseline": {"verdict": "INCOMPARABLE", **no_reason},
+        })
+        assert "NOT a ship signal" in bare, (
+            "a refusal must stay a refusal even when its reason is missing"
+        )
+
 
 def test_summary_still_prints_a_plain_verdict_token():
     """SHIP/BLOCK are unchanged — no refusal prose is bolted onto them."""

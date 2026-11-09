@@ -812,7 +812,12 @@ def _gate_vs_baseline(
             "space": space,
             "baseline_space": baseline_space,
         }
-    if space is not None and baseline_space is not None and space != baseline_space:
+    # No `is not None` guard here: the normalization above has already made
+    # both sides concrete labels, so a `None` cannot reach this test. Guarding
+    # it anyway would read as if `None` were still reachable a few lines below
+    # the comment saying it is not — and that is exactly the invitation to
+    # "simplify" the refusal back into the fail-open this commit closes.
+    if space != baseline_space:
         return {
             "verdict": "INCOMPARABLE",
             "reason": (

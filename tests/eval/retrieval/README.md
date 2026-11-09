@@ -73,13 +73,20 @@ it was written with, so the run is `unknown` (`provenance.corpus_points_unverifi
 counts it) and the gate refuses. Use a fresh db path per smoke, or keep the
 corpus size at or above what the db already holds.
 
-## One embedding space, always
+## One embedding space — whenever the space is known
 
 The vector arm is only a measurement if the query vectors and the corpus point
 embeddings live in the SAME space. The seeded corpus ships the oracle's
 **synthetic** topic-centroid embeddings (`benchmarks/synthetic_corpus.py`,
 `ORACLE_EMBED_ALPHA`), and a `model`-space run RE-EMBEDS it (`_reembed_corpus`)
 so both sides share one space.
+
+⚠️ The claim is scoped: it holds for the two KNOWN spaces. In the third row a
+run has no trustworthy corpus space to follow, so the query side falls back to
+the oracle against whatever vectors the graph already held — the arm may
+genuinely span two spaces, which is why the space is `unknown` and the gate
+refuses to compare. "Refuses" is the honest outcome there, not a reassurance
+that the two sides matched.
 So the space is decided from the CORPUS side, once per run
 (`_corpus_embedding_space`), never from ambient model availability:
 
