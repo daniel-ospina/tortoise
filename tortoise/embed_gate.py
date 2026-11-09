@@ -82,8 +82,10 @@ step 9 merges a missing template key into an existing install's `.env`, so re-ru
 setup arms one too). The ordering `#5008` chose — *"the rate effect is measurable before it
 is trusted"* — is recorded with its outcome rather than as the intent it started as: the
 arming reached the shipped surface BEFORE the measurement was taken, so the measurement at
-`docs/evidence/11086/gate-rate.json` is **post-arming**. What it measured: over a nine-row
-corpus the gate returns no vector for exactly the four identifier-only rows and for nothing
+`docs/evidence/11086/gate-rate.json` is **post-arming**. What it measured: over a **synthetic,
+stub-scored** nine-row corpus (a fixed hand-written list, vectors from a content-addressed stub —
+not a sample of real traffic) the gate returns no vector for exactly the four identifier-only rows
+and for nothing
 else — the prose rows, the two semantic members of the declared ephemeral class and a bare
 definite description all keep theirs. (`TORTOISE_VALUE_GATE` was the third member of that
 precedent until `#10996` made it ON by default — copy this pattern, not that one.)

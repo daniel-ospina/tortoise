@@ -38,6 +38,22 @@ Both are deterministic: the embedder is stubbed with a content-addressed vector
 refusal (exit `2`) writes **no** artifact, so a file left at `--out` after a refusal is the
 previous run's.
 
+### The record binds to a tree, and each arm witnesses its own gate
+
+`gate-rate.json` carries a `provenance` block — `head_sha`, `measured_at`, `instrument`.
+`measure()` itself is deliberately **pure** (no sha, no clock) so the numbers stay reproducible; the
+write path stamps provenance on top, and the reproduction test compares everything **except** that
+block while asserting the block is present and well-formed. A quoted "5/9, −4" can therefore be
+checked out at a revision.
+
+Each arm also records **its own** arming witness, so neither reading needs an inference:
+`predicate_enabled_at_the_enforcement_point` (read from the same predicate the enforcement point
+reads, while the arm's flag value is in the environment), `predicate_fired`, and — for the EMBED
+arm — `predicate_calls`. In this record: EMBED ON `armed=true fired=4/9`, OFF `armed=false fired=0`;
+VALUE ON `enabled=true fired=4`, OFF `enabled=false fired=0`. A gate that was never armed records
+`false`/`0`, which is **not** readable as "the gate let everything through" — and an ON arm cannot
+report `rows_without_a_vector: 4` with `predicate_fired: 0`.
+
 ## What was measured — the two gates, SEPARATELY
 
 §12.2a decides **one rule set, two enforcement points**, each asking its own question:
@@ -52,7 +68,10 @@ They are **not summed**. A single combined number would answer a question neithe
 ### The corpus — both directions, on purpose
 
 Nine rows: four **identifier-only** (a UUID, a commit hash, a file path, an `#<n>` reference) and five
-prose rows. Two of the prose rows are the **semantic** members of the declared ephemeral class —
+prose rows. The corpus is **synthetic and stub-scored** — it is a fixed, hand-written list, and every
+vector comes from a content-addressed stub rather than a model — which is what makes the delta
+reproducible; it is not a sample of real traffic. Two of the prose rows are the **semantic** members
+of the declared ephemeral class —
 `"tool workarounds"` and `"sprint mechanics"` — which §12.2a requires the gate to **KEEP**; one is a
 bare definite description (`"the admin-merge rail"`), which is VET's question and not this predicate's;
 one has an issue number merely **present** inside a claim. A corpus of only identifiers would make any

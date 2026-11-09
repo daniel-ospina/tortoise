@@ -53,7 +53,10 @@ import argparse
 import hashlib
 import json
 import os
+import re
+import subprocess
 import sys
+import time
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
@@ -133,7 +136,17 @@ class _Arms:
 
 
 def _embed_arm(armed: bool) -> dict:
-    """Rows written through ``encode_for_row`` that carry a vector."""
+    """Rows written through ``encode_for_row`` that carry a vector.
+
+    ⚠️ **It records the SAME two witnesses the VALUE arm does** — whether the
+    predicate was *enabled at the enforcement point*, and how many times it
+    *fired* — instead of leaving `NO-EMBED` to be inferred from `vec is None`.
+    The count is taken from the seam's own decision function
+    (``embed_gate.embedding_verdict``), which is the call ``encode_for_row``
+    makes, so "the gate ran and refused 4 rows" is read here rather than
+    reconstructed from arithmetic on the result.
+    """
+    from tortoise import embed_gate as _gate
     from tortoise import embeddings as _emb
 
     # The seam is a module global on purpose (`encode_for_row` -> `encode_for_store`
@@ -143,8 +156,24 @@ def _embed_arm(armed: bool) -> dict:
     _emb.compute_embedding = lambda text, max_tokens=512: _stub_vector(text)  # type: ignore[assignment]
     _emb.compute_embeddings = (  # type: ignore[assignment]
         lambda texts, max_tokens=512: [_stub_vector(t) for t in texts])
+    prior_verdict = _gate.embedding_verdict
+    fired = {"calls": 0, "refusals": 0}
+
+    def counting_verdict(content):
+        """The seam's own decision, counted — a witness, not a re-derivation."""
+        fired["calls"] += 1
+        verdict = prior_verdict(content)
+        if verdict is not None:
+            fired["refusals"] += 1
+        return verdict
+
+    _gate.embedding_verdict = counting_verdict  # type: ignore[assignment]
     try:
         with _Arms(_EMBED_FLAG, "1" if armed else "0"):
+            # Read the SAME predicate `encode_for_row` reads, while this arm's
+            # flag value is in the environment: "was it armed here" is measured
+            # at the enforcement point, not assumed from the flag argument.
+            enabled = _gate.embed_gate_enabled()
             rows = []
             for row in CORPUS:
                 vec = _emb.encode_for_row(row["text"], None)
@@ -153,11 +182,18 @@ def _embed_arm(armed: bool) -> dict:
                              "carries_vector": vec is not None})
     finally:
         _emb.compute_embedding, _emb.compute_embeddings = prior_single, prior_batch
+        _gate.embedding_verdict = prior_verdict  # type: ignore[assignment]
     return {
         "rows": rows,
         "rows_written": len(rows),
         "rows_carrying_a_vector": sum(1 for r in rows if r["carries_vector"]),
         "rows_without_a_vector": sum(1 for r in rows if not r["carries_vector"]),
+        # The arming witness, symmetric with the VALUE arm's pair below. A
+        # "never armed" arm records `false`/`0`, which cannot be read as "the
+        # gate let everything through".
+        "predicate_enabled_at_the_enforcement_point": bool(enabled),
+        "predicate_fired": fired["refusals"],
+        "predicate_calls": fired["calls"],
     }
 
 
@@ -273,10 +309,13 @@ def _table(record: dict) -> str:
     eg = record["embed_gate"]
     lines.append(f"## {eg['flag']} — {eg['question']}")
     lines.append(f"   enforcement point: {eg['enforcement_point']}")
-    lines.append(f"   {'vector':<9} {'gate ON':>8} {'gate OFF':>9}   row")
-    for on, off in zip(eg["gate_on"]["rows"], eg["gate_off"]["rows"],
-                    strict=True):
-        lines.append(f"   {on['carries_vector']!s:<9} "
+    # ⛔ The first column is the ROW IDENTIFIER (`#1`, `#2`, …). It used to
+    # repeat the gate-ON answer, so a rendered row read `False False True` and
+    # the label column carried no label.
+    lines.append(f"   {'#':<4} {'gate ON':>8} {'gate OFF':>9}   row")
+    for i, (on, off) in enumerate(zip(eg["gate_on"]["rows"],
+                                      eg["gate_off"]["rows"], strict=True), 1):
+        lines.append(f"   {f'#{i}':<4} "
                      f"{on['carries_vector']!s:>8} "
                      f"{off['carries_vector']!s:>9}   "
                      f"{on['text'][:58]!r}  [{on['why']}]")
@@ -286,17 +325,29 @@ def _table(record: dict) -> str:
                  f"{eg['gate_off']['rows_carrying_a_vector']} / "
                  f"{eg['gate_off']['rows_written']}  ·  "
                  f"delta {eg['delta_rows_carrying_a_vector']}")
+    lines.append(f"   witness: ON armed="
+                 f"{eg['gate_on']['predicate_enabled_at_the_enforcement_point']}"
+                 f" fired={eg['gate_on']['predicate_fired']}"
+                 f"/{eg['gate_on']['predicate_calls']}  ·  OFF armed="
+                 f"{eg['gate_off']['predicate_enabled_at_the_enforcement_point']}"
+                 f" fired={eg['gate_off']['predicate_fired']}"
+                 f"/{eg['gate_off']['predicate_calls']}")
     lines.append("")
     vg = record["value_gate"]
     lines.append(f"## {vg['flag']} — {vg['question']}")
     lines.append(f"   enforcement point: {vg['enforcement_point']}")
-    lines.append(f"   {'exists':<9} {'gate ON':>8} {'gate OFF':>9}   row")
-    for on, off in zip(vg["gate_on"]["rows"], vg["gate_off"]["rows"],
-                    strict=True):
-        lines.append(f"   {on['still_exists']!s:<9} "
+    lines.append(f"   {'#':<4} {'gate ON':>8} {'gate OFF':>9}   row")
+    for i, (on, off) in enumerate(zip(vg["gate_on"]["rows"],
+                                      vg["gate_off"]["rows"], strict=True), 1):
+        lines.append(f"   {f'#{i}':<4} "
                      f"{on['still_exists']!s:>8} "
                      f"{off['still_exists']!s:>9}   "
                      f"{on['text'][:58]!r}  [{on['why']}]")
+    lines.append(f"   witness: ON enabled="
+                 f"{vg['gate_on']['predicate_enabled_at_the_enforcement_point']}"
+                 f" fired={vg['gate_on']['predicate_fired']}  ·  OFF enabled="
+                 f"{vg['gate_off']['predicate_enabled_at_the_enforcement_point']}"
+                 f" fired={vg['gate_off']['predicate_fired']}")
     lines.append(f"   candidates still existing: ON "
                  f"{vg['gate_on']['candidates_still_existing']} / "
                  f"{vg['gate_on']['candidates']}  ·  OFF "
@@ -304,7 +355,41 @@ def _table(record: dict) -> str:
                  f"{vg['gate_off']['candidates']}  ·  "
                  f"delta {vg['delta_candidates_still_existing']}")
     lines.append("")
+    prov = record.get("provenance") or {}
+    if prov:
+        lines.append(f"measured at {prov.get('head_sha')} on {prov.get('measured_at')}")
+        lines.append("")
     return "\n".join(lines)
+
+
+def _provenance() -> dict:
+    """The tree this record was taken on — so a quoted "5/9, −4" binds to a revision.
+
+    ⛔ **Computed only on the WRITE path, never inside :func:`measure`.** The
+    measurement stays a pure function so `tests/test_embed_decision_step_11086.py`
+    can re-run it and compare against the committed numbers; a head sha or a
+    timestamp inside `measure()` would make the record unreproducible by
+    construction and turn the reproduction pin into a snapshot of itself. The
+    test therefore compares everything EXCEPT this block, and asserts the block
+    is present and well-formed here.
+    """
+    head = ""
+    try:
+        head = subprocess.run(
+            ["git", "-C", str(REPO_ROOT), "rev-parse", "HEAD"],
+            capture_output=True, text=True, timeout=15, check=False,
+        ).stdout.strip()
+    except (OSError, subprocess.SubprocessError):
+        head = ""
+    if not re.fullmatch(r"[0-9a-f]{40}", head):
+        # No invented hash: an unresolvable tree is recorded AS unresolved, the
+        # same way an unmeasured door is never reported as zero.
+        head = "unresolved (not a git checkout, or git unavailable)"
+    return {
+        "head_sha": head,
+        "measured_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        "instrument": "tools/measure_11086_gate_rate.py",
+    }
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -325,6 +410,10 @@ def main(argv: list[str] | None = None) -> int:
         print(f"REFUSED — instrument failed: {type(exc).__name__}: {exc}",
               file=sys.stderr)
         return 2
+
+    # Provenance is added HERE, not in `measure()`, so the numbers stay a pure,
+    # reproducible function of the tree (see `_provenance`).
+    record["provenance"] = _provenance()
 
     print(_table(record))
     if args.out is not None:

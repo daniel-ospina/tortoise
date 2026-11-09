@@ -575,7 +575,9 @@ mechanisms:
       outcome and not as the intent it started as: the arming reached the shipped surface
       BEFORE the measurement was taken, so `docs/evidence/11086/gate-rate.json` is
       **post-arming**. It measured the gate returning no vector for exactly the four
-      identifier-only rows of a nine-row corpus and for nothing else. A vector, once
+      identifier-only rows of a **synthetic, stub-scored** nine-row corpus (a fixed
+      hand-written list, vectors from a content-addressed stub — not a sample of real
+      traffic) and for nothing else. A vector, once
       written, is paid for permanently — FalkorDB Cloud bills provisioned RAM,
       no eviction. NOT implemented here and named as such: §12.2a's per-kind
       override block (no pack slot; no caller at the submission step holds the

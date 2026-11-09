@@ -35,6 +35,7 @@ from __future__ import annotations
 import ast
 import importlib.util as _ilu
 import json
+import re
 import sys
 from pathlib import Path
 
@@ -75,6 +76,27 @@ def _function_source(path: Path, name: str) -> str:
     raise AssertionError(f"no function {name!r} in {path.name}")
 
 
+def _assert_S6a_precedes_S6(block: str, where: str) -> None:
+    """`S6a` must be listed BEFORE `S6 COMMIT`, not after it.
+
+    Every other sub-step in these blocks sits at its TRUE sequence position
+    (`S0a`/`S0b` before `S1`, `S2.2a` before `S2.2b`), so a reader is entitled to
+    read the block as an ORDER. Listed after `S6 COMMIT`, `S6a` reads as running
+    once the row has been written — the opposite of its own "before that row's
+    write clause is built". Presence is not position, so a presence assertion
+    could not catch it; this one did (both blocks red before the fix).
+    """
+    lines = block.splitlines()
+    idx = next((i for i, ln in enumerate(lines) if "S6a EMBED-DECISION" in ln), None)
+    assert idx is not None, f"{where}: S6a is absent from the block"
+    commit = next((i for i, ln in enumerate(lines) if ln.startswith("S6 ")), None)
+    assert commit is not None, f"{where}: the `S6 COMMIT` line is gone"
+    assert idx < commit, (
+        f"{where}: S6a is listed AFTER `S6 COMMIT` (line {idx + 1} vs {commit + 1}) "
+        "— read as an order that runs once the row is written, contradicting "
+        "\"inside S6 and before that row's write clause is built\"")
+
+
 # ── the step exists, in both step lists, and G2 records it ───────────────────
 
 
@@ -94,6 +116,11 @@ def test_the_step_list_names_the_embed_decision():
     assert "S6a EMBED-DECISION" in order, (
         "§4.2's resulting-order block does not carry S6a — §4.1 and §4.2 would "
         "then describe two different pipelines")
+
+    # ⛔ Presence is not position. Both blocks read as an ORDER, so an S6a listed
+    # after `S6 COMMIT` places the EMBED decision after the row is written.
+    _assert_S6a_precedes_S6(step_list, "§4.1's step list")
+    _assert_S6a_precedes_S6(order, "§4.2's resulting order")
 
 
 def test_the_purpose_table_states_the_step_and_the_count_is_unchanged():
@@ -149,22 +176,55 @@ def test_the_ordering_facts_are_stated_where_the_step_is_placed():
         "candidate being removed from `embed_list` is the mechanism")
     assert "before that row's write clause is built" in subsection, (
         "the subsection does not state where in S6 the decision runs")
-    assert "no write at all" in subsection, (
-        "the subsection does not record that `execute_embed` performs no write — "
-        "without it the placement reads as 'before execute_embed', which is the "
-        "order that cannot be observed")
+    assert "issues no graph write" in subsection, (
+        "the subsection does not record that `execute_embed` issues no graph "
+        "write — without it the placement reads as 'before execute_embed', "
+        "which is the order that cannot be observed")
+    # ⚠️ "a DISCARD is never offered" is only true of a discard `apply_vet`
+    # actually APPLIES: Rule 2 downgrades a `DISCARD` to `KEEP` for an entity
+    # still referenced by a surviving candidate, and a downgraded candidate is
+    # legitimately kept. The unqualified claim was false for that case.
+    assert "actually applies" in subsection, (
+        "the subsection states the discard rule without the Rule-2 qualifier — "
+        "a downgraded discard is KEPT, so the unqualified claim is false for it")
+    assert "downgrade" in subsection, (
+        "the subsection does not name `apply_vet`'s Rule-2 downgrade, which is "
+        "what makes 'applied' narrower than 'verdict'")
+
+
+def test_apply_vet_downgrades_a_still_referenced_discard_to_keep():
+    """The qualifier the document now carries, pinned in the code it describes.
+
+    `S6a`'s ordering fact 1 says a discard **that `apply_vet` applies** never
+    reaches the seam. That narrowing is load-bearing: Rule 2 DOWNGRADES a
+    `DISCARD` to `KEEP` for an entity still referenced by a surviving candidate,
+    so a verdict-level reading of the claim is false. If the downgrade ever goes
+    away, the document's qualifier describes code that no longer exists.
+    """
+    src = _function_source(_ROOT / "tortoise" / "vet_gate.py", "apply_vet")
+    assert "downgrad" in src.lower(), (
+        "`apply_vet` no longer downgrades a still-referenced DISCARD to KEEP — "
+        "the document's 'a discard that apply_vet actually applies' qualifier "
+        "would then be describing a rule that is gone")
 
 
 # ── the two corrected premises, pinned against the code ─────────────────────
 
 
 def test_execute_embed_calls_no_encoder():
-    """⛔ `execute_embed` performs no write, so it cannot be the EMBED point.
+    """⛔ `execute_embed` issues no graph write, so it cannot be the EMBED point.
 
     This is the premise the placement table had to correct. If `execute_embed`
     ever starts encoding, the step's position moves and the document's ordering
     statement ("before the COMMIT's write, and not before `execute_embed`")
     becomes false — so it reds here rather than in a reader's head.
+
+    ⚠️ **"No graph write" is deliberately narrower than "no write at all":**
+    `execute_embed(..., hold_store=…)` appends a durable identity-hold record via
+    `_hold_endpoint` → `hold_store.hold(...)`. That is not a graph row, and the
+    shipped call site (`extractor_v2.py`'s S5 block) passes no store — but the
+    blanket claim was false for the documented argument, so the document says
+    what is true instead.
     """
     src = _function_source(_ROOT / "tortoise" / "extractor_v2.py", "execute_embed")
     for seam in ("encode_for_row", "encode_for_store", "compute_embedding"):
@@ -197,6 +257,11 @@ def test_s2_3_knn_reads_a_kind_index_not_a_stored_row_vector():
     assert "def nearest(" in index, (
         "`KindIndex.nearest` is gone — the kNN fast path the placement refers to "
         "has been renamed")
+    # ⛔ Defining `nearest` is not CALLING it. The placement's second fact is
+    # about the call the classifier makes, so the call is what is pinned.
+    assert ".nearest(" in src, (
+        "`kind_classifier` no longer calls `KindIndex.nearest` — the kNN fast "
+        "path the placement describes is not the one this file takes")
 
 
 # ── the invariant: a DISCARD is never embedded ──────────────────────────────
@@ -345,6 +410,25 @@ def test_the_measurement_is_reproducible_from_its_recorded_command():
     fresh = module.measure()
     committed = json.loads(
         (_ROOT / "docs" / "evidence" / "11086" / "gate-rate.json").read_text(encoding="utf-8"))
+
+    # ⛔ The record must BIND to a tree. `measure()` is deliberately pure (no
+    # sha, no clock) so its numbers are reproducible, and the write path stamps
+    # `provenance` on top — so the comparison below drops that one block and the
+    # block is asserted directly. A quoted "5/9, −4" with no revision behind it
+    # is a number a reader cannot check out.
+    provenance = committed.pop("provenance", None)
+    assert provenance, (
+        "docs/evidence/11086/gate-rate.json carries no `provenance` block, so "
+        "the measurement cannot be bound to the tree it was taken on — re-run "
+        "`uv run python tools/measure_11086_gate_rate.py --out …`")
+    assert re.fullmatch(r"[0-9a-f]{40}", str(provenance.get("head_sha") or "")), (
+        "the record's `provenance.head_sha` is not a resolved 40-hex revision: "
+        f"{provenance.get('head_sha')!r} — an unresolved tree is not a binding")
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ",
+                        str(provenance.get("measured_at") or "")), (
+        "the record's `provenance.measured_at` is not an ISO-8601 UTC stamp: "
+        f"{provenance.get('measured_at')!r}")
+
     # JSON round-trip, because the record is what a reader parses.
     assert json.loads(json.dumps(fresh, sort_keys=True)) == committed, (
         "docs/evidence/11086/gate-rate.json no longer reproduces from "
@@ -358,6 +442,47 @@ def test_the_measurement_is_reproducible_from_its_recorded_command():
         "not before it")
     assert fresh["embed_gate"]["delta_rows_carrying_a_vector"] < 0
     assert fresh["value_gate"]["delta_candidates_still_existing"] < 0
+
+
+def test_each_arm_witnesses_its_own_gate_rather_than_implying_it():
+    """Both arms record that the predicate was ARMED and that it FIRED.
+
+    A delta of −4 implies a gate ran, but an inference is not a witness: an arm
+    measured with the flag off yields 0, and a reader cannot tell "the gate let
+    everything through" from "the gate was never armed". The VALUE arm recorded
+    this from the start; the EMBED arm now reads the SAME predicate
+    `encode_for_row` reads (`embed_gate.embed_gate_enabled`) and counts the
+    seam's own decision calls (`embedding_verdict`), so `NO-EMBED` is
+    attributable instead of arithmetic on `vec is None`.
+    """
+    spec = _ilu.spec_from_file_location(
+        "measure_11086_gate_rate", _ROOT / "tools" / "measure_11086_gate_rate.py")
+    module = _ilu.module_from_spec(spec)
+    assert spec.loader is not None
+    spec.loader.exec_module(module)
+
+    record = module.measure()
+    for gate, rows_key in (("embed_gate", "rows_without_a_vector"),
+                           ("value_gate", "candidates_removed")):
+        on, off = record[gate]["gate_on"], record[gate]["gate_off"]
+        assert on["predicate_enabled_at_the_enforcement_point"] is True, (
+            f"{gate}: the ON arm does not witness that its predicate was armed")
+        assert off["predicate_enabled_at_the_enforcement_point"] is False, (
+            f"{gate}: the OFF arm does not witness that its predicate was disarmed "
+            "— an unarmed OFF arm is indistinguishable from a gate that let "
+            "everything through")
+        assert on["predicate_fired"] > 0, (
+            f"{gate}: the ON arm's predicate never fired, so its delta is not "
+            "the gate's effect")
+        assert off["predicate_fired"] == 0, (
+            f"{gate}: the OFF arm's predicate fired {off['predicate_fired']} "
+            "time(s) — a disarmed arm cannot enforce")
+        # The witness AGREES with the count it accompanies, so neither can drift
+        # silently from the other.
+        assert on["predicate_fired"] == on[rows_key], (
+            f"{gate}: the fired count ({on['predicate_fired']}) and the "
+            f"{rows_key} count ({on[rows_key]}) disagree — one of them is no "
+            "longer measuring the same event")
 
 
 def test_the_surfaces_that_described_the_flag_as_off_state_the_arming():
