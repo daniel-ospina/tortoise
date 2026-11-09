@@ -4376,8 +4376,16 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
     # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
     # the reason an enumeration claiming to be exhaustive was wrong. The /docs
     # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
-    # (`tests/test_website_docs_consistency.py:56`) and derives an asserted
-    # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
+    # (in `tests/test_website_docs_consistency.py` — cited WITHOUT a line number on
+    # purpose, as `test_a_fold_never_moves_the_canary_producer_row`'s docstring
+    # does for its runbook row: that import lives in a block every branch appends
+    # to, so a `path:line` decays silently the moment one import is added above it.
+    # Measured 2026-11-09: #11623's sitemap contract added
+    # `from xml.etree import ElementTree` at the TOP of that file, the import moved
+    # 56 -> 57, and the harness pin redded on `main` with this paragraph unchanged.
+    # The sentinel that verifies the import still exists lives in
+    # `tests/test_ci_runner_x64_install.py`'s `symbol_citations`) and derives an
+    # asserted expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
     # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
     # a commit_schema-only diff selected `surfaces=['core']`, where that guard is
     # not registered. So relaxing `Point.source_ref` reds the contract tests, gets
