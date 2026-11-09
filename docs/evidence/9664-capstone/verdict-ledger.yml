@@ -382,12 +382,25 @@ measured_at:
 #     the finding twenty lines below.
 #     PROVENANCE, stated per number rather than as one blanket claim, because a
 #     blanket claim is what a reader cannot check:
-#       - the run below and the ledger-pin run are BOTH recorded through
-#         `tools/worktree_report.py run`, so their counts are parsed from the real log
-#         it captures. ⛔ THAT LOG DOES NOT TRAVEL: `.worktree-report/` is gitignored,
-#         so a reader of this file cannot open it. The claim is about how the numbers
-#         were PRODUCED, not about an artifact you can fetch — the command below is
-#         the check, and re-running it is the reproduction;
+#       - WHAT `.worktree-report/` ACTUALLY HOLDS AT THIS HEAD, named instead of
+#         generalised: the carve-out FOUR-file run
+#         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
+#         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
+#         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
+#         -> `1441 passed`, parsed from the log it captured (this review round re-ran
+#         the same command to the same `1441 passed`, recorded as its own row). The
+#         docker-lane SEVEN-file runs below are NOT suite rows and never were: 5 of their
+#         tests are environment-red (`TestCreateGraphWithPacks`, refused 503 `default ACL user is
+#         open (nopass)`), and a recorded environment-red row makes the lane-report gate
+#         refuse a PR whose own surface is green — the export's own `not_done` says so
+#         verbatim. ⛔ AN EARLIER CUT OF THIS BULLET CLAIMED BOTH RUNS WERE RECORDED
+#         through `tools/worktree_report.py run`, which no artifact here supports and
+#         which the export contradicts a few lines later (fresh-context review, this
+#         round): their counts are quoted from each run's OWN output, the command beside
+#         each is the check, and re-running it is the reproduction. ⛔ NO LOG UNDER
+#         `.worktree-report/` TRAVELS: the directory is gitignored, so a reader of this
+#         file cannot open any of them — the claim is about how a number was PRODUCED,
+#         not about an artifact you can fetch;
 #       - the per-file collection figures come from separate `pytest --collect-only`
 #         invocations that are NOT in `.worktree-report/` (they produce no suite run),
 #         and are quoted from those invocations' own output;
@@ -397,9 +410,11 @@ measured_at:
 #       $ env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- tests/test_9664_capstone_verdict_ledger.py tests/test_9340_graph_tool_argument.py tests/test_pack_selection_by_graph.py tests/test_cross_tenant_read_isolation.py tests/test_onboarding_auto_complete.py tests/test_oauth_consent_page_step4.py tests/test_oauth_consent_bff_routes.py -q
 #       456 passed, 5 failed                       # 461 collected AT THE HEAD OF THAT RUN,
 #                                                   # which PREDATES this branch's merge of
-#                                                   # `origin/main`. Run THROUGH
-#                                                   # `tools/worktree_report.py run`, so the counts are
-#                                                   # parsed from the real log rather than typed.
+#                                                   # `origin/main`. A DIRECT
+#                                                   # `tools/test_lane.py` invocation whose own
+#                                                   # output is quoted — NOT a
+#                                                   # `worktree_report.py` suite row (see the
+#                                                   # provenance bullet above).
 #       ⛔ THIS HEAD DOES NOT COLLECT 461, so the 456/5 split above is stale BY
 #       CONSTRUCTION - a measurement against a denominator that no longer exists - and not
 #       because anyone did the arithmetic wrong. Two independent edits moved the pin suite.
