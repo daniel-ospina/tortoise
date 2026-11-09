@@ -193,12 +193,12 @@ check against. Unvalidated, and out of this epic's scope.
 | Assumption | Confidence | Source | Validation Plan |
 |---|---|---|---|
 | **A-a** `live-v4` baseline is accurate (0 object→object edges; 62.3 % `the <X>`; 26 Subjects) | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
-| **A-b** packs declare part-whole object relations; schema + writers admit them | **high** | tree (`dev:142,148,193`; `edges.py:621-630`; ONTOLOGY §3.7) **and** the literature's declarative-ontology pattern [1][4] | C3 |
+| **A-b** packs declare part-whole object relations; schema + writers admit them | **high** | tree (`dev:142,148,193`; `edges.py:621-630`; ONTOLOGY §3.7) **and** the literature's declarative-ontology pattern [1] [4] | C3 |
 | **A-c** the gap is the declaration→consumer seam, not a missing writer | **high** | zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only | C3 |
 | **A-d** a corpus through the fleet's **transport** exists or is capturable | **medium** | registered corpus is a fixture; the committed arm drives the SDK, not `POST /v1/sessions`; **E1b's `m2` control has no committed artifact** | C1 + C2 |
 | **A-e** `TAGGED: 0` is a gap | **rejected** | no extraction path writes `tags` | none — recorded so it never becomes a target |
 | **A-f** E1–E5 needs a new instrument | **rejected** | `#9075` + `capstone_measure.py` + verdict gate, committed | C1 extends it |
-| **A-g (NEW)** the rollup can be scored without a direct-part/transitive distinction | **rejected — new risk found** | ontology literature: transitive `has_part` + separate **direct** part is the recommended model; OWL cannot detect cycles [1][4] | C3 must declare its reading and label ground truth the same way |
+| **A-g (NEW)** the rollup can be scored without a direct-part/transitive distinction | **rejected — new risk found** | ontology literature: transitive `has_part` + separate **direct** part is the recommended model; OWL cannot detect cycles [1] [4] | C3 must declare its reading and label ground truth the same way |
 
 ---
 
@@ -299,7 +299,6 @@ measure, not a volume floor).
 ## Raw Notes
 
 Append-only ledger. Entries are `[date] [axis] finding — source`.
-
 
 - `[2026-11-05] [preflight]` rung 1 `mcp_load seo-intelligence` → `Unknown MCP server 'seo-intelligence'` — the
   server is absent from this machine's `.mcp.json`; rung 2 (`web_search model="sonar"`) taken and named. The

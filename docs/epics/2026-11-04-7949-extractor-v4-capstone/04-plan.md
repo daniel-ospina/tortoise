@@ -85,17 +85,18 @@ System-level flows, not user journeys. Handoffs and failure modes named.
 
 ### W1 — PR-time contract workflow (CI tier)
 
-```
+```text
 PR diff → ci_selection (surfaces) → CI shard → contract/unit pins only
         → pass ⇒ merge allowed        → fail ⇒ the drift is named
 ```
+
 - **Handoff:** none — no human step, no budget spent.
 - **Failure modes:** a pin that needs a graph (refused by the tier rule); a `durations` row missing for a new file
   (`tools/ci_selection.py --integrity` reds); a duplicate `durations` key (pinned).
 
 ### W2a — Tier E: the A-lane (hosted door, curated corpus)
 
-```
+```text
 dispatch(evals-on-demand, corpus=a-corpus, head)
   → G0 preregistration readable            (refuse if not)   <- NEW on this lane (OWED, C2)
   → G1 posted-payload hash == the row's pin (refuse if not)   <- NEW on this lane (OWED, C2)
@@ -105,6 +106,7 @@ dispatch(evals-on-demand, corpus=a-corpus, head)
   → repeat run for the model-proposed arms  ⇒ report disagreement vs policy
   → rows → verdict gate (V1…V12) → table attached to #7949
 ```
+
 - **Handoff:** the verdict table is the deliverable. The lane is `workflow_dispatch` only *once C2 ships the
   job* (§5.2a) - until then it is a credentialed operator run with the same gates.
 - **Failure modes:** quota (402); corpus mismatch; gold sealed *after* the run (refuse); a model-proposed arm
@@ -112,12 +114,13 @@ dispatch(evals-on-demand, corpus=a-corpus, head)
 
 ### W2b — Tier E: the fixture arm (committed, deterministic where it can be)
 
-```
+```text
 dispatch → capstone_run.py --prereg preregistration.json --corpus tests/eval/write_path
   → E1/E2a/E2b on the committed arm · E1b on the deterministic m2 lane
   → E4/E5 on the UNPATCHED extractor leg (the current test monkeypatches it, so it cannot certify)
   → rows → verdict gate → #7949
 ```
+
 - **Why separate from W2a:** these rows' denominators (**14** value-bearing, **90** planted, **15** operator edges)
   exist **only** in the fixture — a curated payload corpus has no planted units. Two pins, two derivations, one
   record (§4.2).
@@ -127,11 +130,12 @@ dispatch → capstone_run.py --prereg preregistration.json --corpus tests/eval/w
 
 ### W2c — Tier E: the read-only fleet-graph census (A4)
 
-```
+```text
 dispatch → census over live-v4 at head (READ-ONLY, no capture, no spend)
   → typed / statement / NULL shares · per-writer attribution of the typed population
   → floor n > 0 (100 % of 0 is not attribution) → row → #7949
 ```
+
 - **Why its own workflow:** it captures nothing and spends nothing, so it can run when the quota is exhausted — the
   one A-row that survives `#10976`. Conflating it with W2a is what the first version did.
 - **Handoff:** none; read-only.
@@ -140,12 +144,14 @@ dispatch → census over live-v4 at head (READ-ONLY, no capture, no spend)
 
 ### W3 — Milestone workflow
 
-```
+```text
 roadmap milestone completes → dispatch full sweep (perf/cost + W2a + W2b + W2c in sequence)
   → performance/cost numbers recorded (never a merge gate — precedent: the perf file is already on_demand)
 ```
+
 ⚠️ **Corrected:** the first version described W3 as where E1/E2 and E4/E5 "happen", which left in-scope items 5, 6
 and 7 with no workflow of their own. W3 **composes** W2a–W2c; it does not replace them.
+
 - **Handoff:** **owner named - C1** (the instrument owner). **Trigger named:** a roadmap milestone completion,
   fired by **C2's dispatch job** (§5.2a) with the full phase list; recorded on `#7949` as a milestone entry.
 - Corrected: the first version's handoff was "milestone owner", a role in no component list - and it narrowed the
@@ -154,12 +160,13 @@ and 7 with no workflow of their own. W3 **composes** W2a–W2c; it does not repl
 
 ### W4 — The D3 reopen workflow (the only human-blocked flow)
 
-```
+```text
 owner answers on #1022 (a) overrides D3 | (b) it was aimed at #4432's drift
   → relay to the decision home + ONTOLOGY §5 (OVERRIDES line if (a))
   → C7 (#10988) gains its target (or re-scopes to attribution only)
   → E2E-8 unchanged (asserts attribution, never a count)
 ```
+
 - **Manual intervention trigger:** the owner's answer. **Automation:** none, deliberately.
 - **Failure mode:** a lane picking a typed-claim target before the answer — the forbidden adoption.
 
@@ -167,7 +174,7 @@ owner answers on #1022 (a) overrides D3 | (b) it was aimed at #4432's drift
 
 ## 3 · Prototype (markdown diagram — non-GUI feature)
 
-```
+```text
                       ┌──────────────── CI (merge-gating, offline, <1s/file) ────────────────┐
    PR diff ─────────► │ registration pins · verdict engine · corpus-pin map · semantics       │
                       │ derivation · anchor boundary · registry guard · gold integrity        │
@@ -251,6 +258,7 @@ precisely the risk D-S4 exists to close. So the A-floors are added **to that map
 "denominator_floors": { "a1_labelled_pairs": 30, "a2_candidates": 30, "a3_statements": 30,
                         "a4_typed_points": 1, "a5_slots": 5 }
 ```
+
 and **one spelling**: `floor_kind` (never `kind`) — the field names the KIND of floor (*sample sufficiency* /
 *non-vacuity* / *constructibility*) and carries no number.
 
@@ -292,6 +300,7 @@ it was written to protect.
                    "derived": [] }
 }
 ```
+
 Corrected after review: A4 cites `corpus_id: fleet-graph` while the map defined only two entries - a direct
 violation of I2's own breaking-change rule - and the map's file shape could not express a live graph at all. It can
 now: `pinned_by: graph_head` is the third pin **kind**, and I2 admits a non-file pin. A4 is **not** exempt from the
@@ -348,11 +357,12 @@ subtraction set is declared **literally, in one place**:
 NON_VERDICT_ROWS  = {"E1b", "E2a", "E2b"}   # ride inside E1/E2, never table rows
 SUB_ROW_PARENT    = {"E1b": "E1", "E2a": "E2", "E2b": "E2"}   # which row carries them
 ```
+
 ⛔ **P0 from the `duplication-architecture` review: the invariant as first written is FALSE.** The record's ids are
 `E1, E1b, E2a, E2b, E3, E4, E5` — **there is no plain `E2` row** — so `record ids − NON_VERDICT_ROWS` = **4**, not 5;
 and after the amendment 12 − 3 = **9**, not 10. The correct invariant adds the **parent** of every sub-row back:
 
-```
+```text
 (record ids − NON_VERDICT_ROWS) ∪ SUB_ROW_PARENT.values() == enum ids
 ```
 
@@ -467,7 +477,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 
 **Three vocabularies exist. They do not line up.**
 
-| # | vocabulary | what it holds | who reads it |
+| vocabulary | what it holds | who reads it |
 |---|---|---|---|
 | **V1 — the ontology's declared Object↔Object section** | `docs/ONTOLOGY.md` **§3.7**: exactly **two** predicates — `wasDerivedFrom` (provenance) and `hasPart` (composition, inverse traversal covers "part of") | humans; the design |
 | **V2 — the ontology's enforced write vocabulary** | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which live in `_VALID_ABOUT_EDGE_PREDICATES` and are written by a **different verb** | `create_edge` and `create_about_edge` |
@@ -646,6 +656,7 @@ schema (additive), and only a breaking change (retyping `corpus`) bumps it — q
 Each is implementable as an automated test, names its **tier**, and its assertions are behavioural.
 
 ### E2E-1 · declared hierarchy reaches the graph, and a rollup answers — **Tier E**
+
 - **Given** the A-corpus exercises dev's `Theme→Epic→Issue`, and the before-census shows 0 object→object edges
 - **When** the pipeline runs through `POST /v1/sessions` and `dev` is installed on the graph
 - **Then** edges of the **declared types** exist with endpoints of the **declared kinds**
@@ -655,6 +666,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
 - **And** a cycle in `hasPart` is refused by the guard rather than inflating the answer
 
 ### E2E-2 · attaching instead of minting, facts intact — **Tier E**
+
 - **Given** a corpus whose statements reference things by definite description
 - **When** the pipeline runs
 - **Then** every candidate is recorded **attached / minted / held**, and attached+minted+held = 100 % classified
@@ -663,6 +675,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
   `held` exists
 
 ### E2E-3 · a claim joins a chain and crosses a batch boundary — **Tier E**
+
 - **Given** two sessions where the second refers to something the first recorded
 - **When** both run against the same graph
 - **Then** the second session's statement carries an IMPL or NAND
@@ -671,6 +684,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
   (derived from `batch_id`, not persisted)
 
 ### E2E-4 · the subject layer answers, or the reason is named — **Tier E**
+
 - **Given** a corpus with agent/team activity
 - **When** the pipeline runs
 - **Then** `Subject` nodes exist and ≥1 of the four families is non-zero, and both customer readers are non-empty
@@ -685,6 +699,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
 - **And** `#4889` is confirmed or **reopened** — "neither" is not an outcome
 
 ### E2E-5 · reproducible from the door, with a control — **Tier E**
+
 - **Given** the extended registration and the A-corpus
 - **When** the census runs twice at one head
 - **Then** the **deterministic** quantities are identical across runs
@@ -693,6 +708,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
 - **And** the same payloads replayed through `TortoiseSDK.capture_session` **measurably disagree** (the control)
 
 ### E2E-6 · the volume win cannot be bought with lost facts — **Tier E**
+
 - **Given** the A1/A2/A3 mechanisms shipped by their owners and armed
 - **When** the registered volume + guard criteria are scored on the run named by D-S1's matrix
 - **Then** the `^the <X>` share falls (or E1 is honestly `BLOCKED` below its floor)
@@ -700,6 +716,7 @@ Each is implementable as an automated test, names its **tier**, and its assertio
 - **And** an E2a failure **blocks the epic** even though every other number improved
 
 ### E2E-7 · the two closed claims re-derive — **Tier E**
+
 - **Given** the planted-operator corpus and the **unpatched** extractor
 - **When** the operator measurement runs at this head
 - **Then** **`15 of 15` (GREEN)** or **`N/15` reported RED** with the gap attributed — attribution is diagnosis, never a pass
@@ -710,12 +727,14 @@ re-deriving a registered threshold; surface 11's named failure mode is exactly "
 fails".*
 
 ### E2E-8 · the typed population is attributable — **Tier E**
+
 - **Given** today's typed `pointKind` population
 - **When** attribution runs
 - **Then** **100 %** of typed points name their writer, and typed / `statement` / **`NULL`** are reported separately
 - **And** **no numeric target** is asserted (the count is the D3 reopen's)
 
 ### E2E-9 · a replayed receipt REFUSES, and a true retry is one session — **Tier E** (its contract pin is CI)
+
 - **Given** a capture response whose `meta.mode == "replayed"` and whose stored `capture_ok` is not `false`
 - **When** the run reads the receipt
 - **Then** the run is `REFUSED(replayed, no extraction)` and **no row is scored** from it
@@ -724,6 +743,7 @@ fails".*
   counts)
 
 ### E2E-10 · the door at its cap reports BLOCKED, never zero — **Tier E** (its contract pin is CI)
+
 - **Given** the graph at its point cap (the state `#10976` says will fire at acceptance)
 - **When** the A-lane captures
 - **Then** the run reports **`BLOCKED — capture refused 402`**, with the door's `used`/`limit`/`estimate`
@@ -813,7 +833,6 @@ pack content. `#11083` says so explicitly and this plan adopts that reading.
 - **IO3** — the same question `duplication-architecture` asks at scope is asked again here at coherence; the second
   run adds the *finished* plan's surfaces (data model + interfaces + detailed E2E), which the first could not see.
 
-
 ### 8.5 `duplication-architecture` review — verdicts recorded (substep 5, advisory)
 
 Ran as a **separate dispatch** after the substep-5 gate, per the skill. Result: **`ISSUES`** — 2×P0, 2×P1, 1×P2
@@ -824,7 +843,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 | # | finding | verdict | disposition — folded into |
 |---|---|---|---|
 | **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py:1184` needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
-| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row`**); and **three hardcoded literals silently drop the A-rows** (`capstone_run.py:681`, `:748`, `capstone_measure.py:242`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
+| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`capstone_run.py:681`, `:748`, `capstone_measure.py:242`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
 | **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` pointed at the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `:17288-17297` / `:17761` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
 | **F5** | **P2 — §5.2a's new job is a fourth non-gating runner joining no register**, and "Tier E" then names three unreconciled populations (`on_demand:` test files · script-driven runs · the new job) that `leg_coverage_issues()` cannot all see | `unify-contract-keep-drivers` | **§5.2a**: C2 owns the **register entry** (`config/ci-surfaces.yml` `on_demand:` + `docs/ci/affected-test-selection.md`); **`03-test-design.md` §5 must name all three populations** |
@@ -838,6 +857,7 @@ tree, not inside the plan … Coherence Review cannot find these because it neve
 already works**."*
 
 ---
+
 ### 8.4 Readiness
 
 Every in-scope item (1–9) has a §7 case or a §4/§6 contract; the tier rule is written; the four routed decisions

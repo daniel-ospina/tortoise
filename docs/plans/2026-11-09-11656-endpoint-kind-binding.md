@@ -66,7 +66,7 @@ Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN sco
 ⚠️ **Revision 1's evidence for this was wrong** (it read `semantics: hasPart` as `predicate: hasPart`). The
 claim holds, on different evidence:
 
-```
+```text
 addresses   declared 6×, 6 DISTINCT pairs   (4 of them inside product-strategy alone)
 contains    2×, 2 pairs                     (marketing, product-strategy)
 targets     2×, 2 pairs
@@ -98,7 +98,7 @@ whose fallback is `warn`. **No shipped pack declares any per-relation level** �
 `extraction.enforcement.relations` is `{}` or absent, and three packs set `default: 'warn'`. So the two rules
 mandated opposite outcomes for the same input. The precedence is:
 
-```
+```text
 severity = enforcement.relations[predicate]        # an EXPLICIT pack declaration wins
         ?? BLOCK                                   # the kind-pair default — NOT the enforcement map's 'warn'
 ```
@@ -121,7 +121,7 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 
 ## 4. The rule (one function, five call sites)
 
-```
+```python
 kind_pair_verdict(*, predicate, from_kind, to_kind, bound_ns) -> Verdict
 ```
 
@@ -152,6 +152,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 ## 5. Implementation
 
 ### 5.1 The installed-pack filter (net-new, small)
+
 `list_relations()` is whole-catalog and already called on every labelled `create_operator` (`sdk.py:22253`),
 so the rows are free; the missing piece is `relations_for_namespaces(names) -> rows`, honouring
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
@@ -162,7 +163,7 @@ recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists
 ⚠️ **Revision 1's rule ("both kinds resolve into the *declaring pack's* universe") would have silently
 disabled 7 of the 32 declarations** — never enforced, never warned about. They are:
 
-```
+```text
 dev:implements               dev:issue              -> product-strategy:feature
 dev:deploysTo                dev:code               -> core:deployment
 portfolio:constrainedBy      venture:investment     -> portfolio:mandate
@@ -178,6 +179,7 @@ alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio
 (`:396-410`) reads it.
 
 ### 5.3 Layer-valued declarations (dependency on #11000)
+
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
 core kind (`pack_registry.py:1669`), and `:2294` already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
@@ -188,6 +190,7 @@ table. Until **#11000's §6 leg** lands, a declaration whose endpoint is a `CORE
 branch — check before assuming it is still needed.)
 
 ### 5.4 Severity — reuse, and fix the seam's scope
+
 Read `enforcement.relations[predicate]` through the existing seam (§2.1). ⚠️ **Fix in the same change:**
 `resolve_enforcement` (`enforcement.py:56`) iterates `reg.packs.values()` — the **whole catalog** — and takes
 the **max** severity, so one pack's `block` would block another pack's unrelated edge on the same predicate.

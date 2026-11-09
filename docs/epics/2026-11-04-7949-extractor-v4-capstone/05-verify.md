@@ -103,7 +103,7 @@ twin **builders** for 9 and 10 are the two gaps.
 
 ## Step 5 — Final decision
 
-```
+```text
 ## Epic Verification Result
 
 Epic:          #7949 — extractor v4 CAPSTONE

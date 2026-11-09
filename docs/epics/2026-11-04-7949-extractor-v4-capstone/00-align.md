@@ -40,7 +40,7 @@ packs, and otherwise connect objects to each other — so the ontology becomes a
 
 **Measured on the fleet's hosted graph `live-v4`, 2026-11-04:**
 
-```
+```text
 object→object edges:      []              ← ZERO, of every relation type
 objects:                  5,314           (dev:code 1,030 · core:tool 646 · core:workflow 237 …)
 claims attached:          23,814 aboutObject edges
@@ -97,7 +97,7 @@ findings about **other** issues' unfixed work adds process, not product."*
 
 | issue | filed | owns |
 |---|---|---|
-| **#11001** | 00:31:11 | **A1's EDGE-PRODUCTION clause only** — *"the pack's declared relations become replayable Object→Object edges … against a before-arm of 0 Object→Object edges of any type"*. ⚠️ It does **not** own A1's second clause: a grep of its body for `query|rollup|answers` returns nothing, so the **rollup answer** stays this epic's cut in C3 |
+| **#11001** | 00:31:11 | **A1's EDGE-PRODUCTION clause only** — *"the pack's declared relations become replayable Object→Object edges … against a before-arm of 0 Object→Object edges of any type"*. ⚠️ It does **not** own A1's second clause: a grep of its body for `query\|rollup\|answers` returns nothing, so the **rollup answer** stays this epic's cut in C3 |
 | **#10997** | 00:30:40 | **A2's HOLD half** — *"S3 — an unresolved identity is HELD, never minted"* (the `failure_policy` mint half) and the run transaction. ⚠️ **Not** the attach/resolve half, which is unowned and lands as C4 (below) |
 | **#10998 / #10999** | 00:30:47 / 00:30:55 | **A3's two jobs** — S5 Job 2 (fail-closed `HOLD`) and Job 1 (the batch's own story reaches the graph) |
 | **#11000 / #11002 / #10995** | 00:31 | pack `subclassOf` widening; the eight steps + S4's gap-filling; the per-door write census |

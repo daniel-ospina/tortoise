@@ -140,7 +140,7 @@ which is why the single declaration matches none of them.
 **The multiplicity case that actually carries this argument is `addresses` — declared 6 times, 6 distinct
 pairs**, four of them inside `product-strategy` alone:
 
-```
+```text
 addresses  dev:issue→dev:incident · dev:pullRequest→dev:issue
            product-strategy:feature→product-strategy:customerSegment
            product-strategy:useCase→product-strategy:feature
@@ -204,7 +204,7 @@ required — `sh:class` *"reads `rdfs:subClassOf` straight from the data graph, 
 
 Tortoise's `expand_kind` **only widens parent → children**, one level, and **not transitively**. Measured:
 
-```
+```text
 dev:issue   -> ['dev:issue', 'pm:issue']         ← parent 'WorkItem' ABSENT (#11000)
 WorkItem    -> ['WorkItem','dev:issue','dev:pullRequest','marketing:content',
                 'product-strategy:feature','product-strategy:requirement',
@@ -362,19 +362,19 @@ path, so a `create_edge`-only pin leaves **30** of them untested.
 
 ---
 
-# PART II — viability of the INTENDED design, and the AX framing
+## PART II — viability of the INTENDED design, and the AX framing
 
 **Added 2026-11-09 after an owner calibration:** the 77 %-unkinded figure is **legacy data from the
 processes being replaced**, so it cannot carry a design conclusion. What follows re-derives the decision
 from (a) the intended extractor architecture, (b) `docs/ONTOLOGY.md`, (c) the repo's own recorded AX
 ruling (`docs/ax/ax-principles.md`, #10183), and (d) SOTA for type enforcement.
 
-## 8. Does the intended design even have the kinds at write time?
+### 8. Does the intended design even have the kinds at write time?
 
 **Yes — and it also has a legitimate "no kind" state, by decision.** Both halves matter, and both are
 recorded, so neither is an inference from legacy data.
 
-### 8.1 The design puts the whole write in ONE mechanical step, and the model never writes
+#### 8.1 The design puts the whole write in ONE mechanical step, and the model never writes
 
 `EXTRACTOR-V4-ARCHITECTURE.md` §S5/§S6:
 
@@ -387,7 +387,7 @@ S6 COMMIT is **mechanical, fail-closed, atomic**. So the intended pipeline has a
 both endpoints and their kinds at the moment of the write** — which is exactly the seam a kind-pair check
 needs, and it is the seam that does not exist in the `create_edge`/`create_operator` pair the issue names.
 
-### 8.2 "No kind" is a DESIGNED state, not only a legacy one
+#### 8.2 "No kind" is a DESIGNED state, not only a legacy one
 
 §4.4's failure policy, S2.3 CLASSIFY (verbatim):
 
@@ -402,7 +402,7 @@ correct state, not a defect. The design has already answered "what do we do when
 recorded architectural decision.** This is the design-grounded form of §3.1 — and it is much stronger,
 because it does not depend on how much legacy data exists.
 
-### 8.3 The design already has the right third disposition — `HOLD`
+#### 8.3 The design already has the right third disposition — `HOLD`
 
 §4.4 defines `HOLD` explicitly and distinguishes it from a verdict:
 
@@ -414,7 +414,7 @@ That is precisely the disposition a kind mismatch needs when the system cannot a
 wrong), but **the absence of a judgment**, carried forward. **The intended design therefore has three
 dispositions where this issue assumed two.**
 
-### 8.4 Kind-pairing already exists in the pipeline — wired to a narrower job than this issue needs
+#### 8.4 Kind-pairing already exists in the pipeline — wired to a narrower job than this issue needs
 
 `tortoise/value_extractor.py::_relation_endpoint_refs` builds a **kind → kinds** adjacency from both
 declaration sites (`ontology.relations[].fromKind/toKind` and `extraction.relationTemplates[]`), i.e.
@@ -442,7 +442,7 @@ already shaped for it.** The gap is that the check was never wired into S6's mec
 pairing closure — wired for **kind co-selection** (§8.4) — is not consulted for **relation-label** binding
 at write time.
 
-## 9. The AX framing — machines are the users here
+### 9. The AX framing — machines are the users here
 
 `docs/ax/ax-principles.md` is a **recorded owner ruling (2026-10-27, #10183)**. It is a ruling about
 *surfaces a caller can be wrong on*, and a write gate is exactly that. Two rules and one admission test:
@@ -454,7 +454,7 @@ at write time.
 - **The admission test** — *"if the third part cannot be written, the surface must not refuse."* A refusal
   whose remedy is not performable is *the system failing the caller*.
 
-### 9.1 What the test yields for a kind mismatch (the decision, re-derived)
+#### 9.1 What the test yields for a kind mismatch (the decision, re-derived)
 
 | the case | is the intent legible? | is the third part writable, **by this caller, about this write**? | outcome the AX ruling requires |
 |---|---|---|---|
@@ -472,7 +472,7 @@ measurements of legacy data:**
   demand a repair the caller cannot perform;
 - and the two are not in tension, because they are different cases rather than two policies for one case.
 
-### 9.2 Why "warn" is not the automatically-safe option (the trap the issue did not name)
+#### 9.2 Why "warn" is not the automatically-safe option (the trap the issue did not name)
 
 The AX ruling's converse bites: *"the reported state must not flatten different failures into one label."*
 A warning stream that mixes "you contradicted your own declaration" with "the classifier declined to
@@ -485,13 +485,13 @@ already holds this conclusion independently: **`pt_656aa190…` — *"Partial en
 while leaving the invariant violable."*** So a warn-only implementation is not the conservative choice; it
 is the choice that produces a permanently-degraded signal.
 
-## 10. SOTA for type enforcement (external research)
+### 10. SOTA for type enforcement (external research)
 
 Search tool: `perplexity_research` (rung 1) — **20 queries attempted / 20 returned**, plus `web_fetch` of
 W3C SHACL for primary definitions. Graph: **12 hits over 4 queries**; built on `pt_656aa190…` and
 `pt_727969bd…` (the latter: *"the closure must be over kinds, iterated to a fixpoint"*).
 
-### 10.1 The mechanism that dissolves refuse-vs-warn: severity declared, policy applied
+#### 10.1 The mechanism that dissolves refuse-vs-warn: severity declared, policy applied
 
 **SHACL 1.2 Core (W3C, primary)** — a focus node conforms *iff* its results contain **no result whose
 severity is in the set of disallowed levels**. So:
@@ -505,7 +505,7 @@ severity per relation**; the **graph's policy set** decides what blocks. It remo
 answer to D1, and it makes the transition (warn today, refuse tomorrow) a policy edit rather than a code
 change.
 
-### 10.2 A real KG store *does* refuse at write — and cannot retrofit
+#### 10.2 A real KG store *does* refuse at write — and cannot retrofit
 
 **GraphDB (Ontotext)**: `ShaclSail` *"validates the data changes on `commit()`"* and **throws** with a
 validation report. So refusal-at-write is a shipped behaviour in the leading triplestore — the careful
@@ -517,7 +517,7 @@ scratch… **You cannot modify an already existing repository by enabling the va
 The one comparable that blocks at write **cannot be switched on over existing data**. That is the
 strongest available evidence for §5 D4 (never retro-refuse; the enforceable population is new writes).
 
-### 10.3 Attribution/blame is the signal that makes a refusal useful
+#### 10.3 Attribution/blame is the signal that makes a refusal useful
 
 Gradual-typing research on blame (Wadler & Findler's blame calculus; the *Blame-Subtyping Theorem*:
 *"statically typed regions are never to blame"*; Lazarek et al.'s rational-programmer evaluation finding
@@ -529,7 +529,7 @@ Applied here, this is the same conclusion as §9.1, reached independently: an un
 **the writer** "not to blame", so blaming the write is a false accusation — the mechanical definition of a
 refusal the caller cannot act on.
 
-### 10.4 Prevention beats detection — and the SOTA does BOTH, not one
+#### 10.4 Prevention beats detection — and the SOTA does BOTH, not one
 
 | mechanism | schema-valid output | cost |
 |---|---|---|
@@ -572,7 +572,7 @@ wrong — *"dominated across all configurations, accounting for 97–100 % of de
 correctness is the dominant error class in KG extraction, which is the justification for doing this work
 at all.
 
-### 10.5 Retry economics — why the refusal's wording is a cost control
+#### 10.5 Retry economics — why the refusal's wording is a cost control
 
 - *"a retry that includes the exact validation error converges; a retry that repeats the prompt just
   re-rolls the dice."*
@@ -590,7 +590,7 @@ refusal naming the declared pair and the actual kinds converges in one round tri
 is the shape the warning/refusal payload should take: the caller must be able to branch on **retryable**
 without parsing prose.
 
-### 10.6 Grandfathering and rollout — shadow → warn → block
+#### 10.6 Grandfathering and rollout — shadow → warn → block
 
 | practice | source |
 |---|---|
@@ -604,7 +604,7 @@ without parsing prose.
 not per-write) → refuse only where §9.1 says the remedy is writable.** And the warn phase must report
 **counts per class**, never one undifferentiated stream (§9.2).
 
-## 11. Revised recommendation (supersedes §5 D1's option table)
+### 11. Revised recommendation (supersedes §5 D1's option table)
 
 **D1 — on a kind mismatch, refuse or warn? → Neither, globally. The disposition is a function of
 legibility, per the AX admission test:**
