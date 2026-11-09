@@ -45,6 +45,7 @@ from tools.longmem_eval.evidence import (  # noqa: E402, RUF100
 from tools.longmem_eval.ingest import _session_transcript, ingest_haystack  # noqa: E402, RUF100
 from tools.longmem_eval.report import build_report  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import retrieve_for_question  # noqa: E402, RUF100
+from tools.longmem_eval.w7_publish import GOLD_CUTOFF_ROW  # noqa: E402, RUF100
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
@@ -1427,7 +1428,13 @@ def test_report_retrieval_by_category_carries_the_gold_cutoff_fraction():
         "Multi-Session Reasoning"]
     assert row["session_recall@n_gold"] == {"value": 0.5, "n": 2,
                                             "n_missing": 1}
-    assert "recall_all@n_gold" not in row
+    # R12 / one-implementation: the BINARY projection stays in w7_publish.
+    # Assert against the constant the gate actually uses — the row's name is
+    # ``recall_all@N_gold`` (capital N). The previous literal spelling,
+    # ``"recall_all@n_gold"``, is the FRACTION key's spelling and can never be
+    # a key of this block, so it could not fail: emitting the binary row here
+    # would have left it green (a vacuous pin of the exact invariant it names).
+    assert GOLD_CUTOFF_ROW not in row
 
 
 def test_report_retrieval_by_category_counts_missing_denominators():

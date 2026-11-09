@@ -1254,6 +1254,19 @@ def _recall_metrics(
     # ``None`` when the question has no gold session: the official ``all([])``
     # edge is 1.0, and this module treats an empty denominator as NOT ELIGIBLE
     # rather than fabricating a perfect score (module docstring).
+    #
+    # ⚠️ BOUND (review note N1, PR #11598): this slice is capped by how many
+    # hits the CALLER fetched, not by ``len(answer_sessions)``. Observable from
+    # the two call sites: the vector arm fetches ``limit=max(ks)`` (20 by
+    # default), and the hybrid arm's list is truncated by ``top_k`` /
+    # ``--rerank-pool``. So for a question with MORE gold sessions than that
+    # depth the fraction is pinned below 1.0 at its own cutoff — the very
+    # blindness the variant exists to remove — and nothing reports it. Not
+    # reachable on the corpora measured so far (LongMemEval gold sets are
+    # small: the checked-in fixtures max at 2), but do NOT read
+    # ``recall_all@N_gold == 1.0`` as "session-complete above the fetch
+    # depth". A fetch floor of ``max(len(answer_sessions), max(ks))`` is the
+    # fix if a cohort ever exceeds it.
     session_recall_at_n_gold: float | None = None
     if answer_sessions:
         gold_top = hits[:len(answer_sessions)]
@@ -1492,6 +1505,10 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
             turn_recall[str(k)] = 0.0
 
     # ── the additive gold-cutoff variant (#2516, C1) ──
+    # ⚠️ BOUND (review note N1, PR #11598): ``annotated`` holds at most
+    # ``max(ks)`` raw vector hits, so a question with more gold sessions than
+    # that is pinned below 1.0 at its own cutoff. Not reachable on the current
+    # corpora; see the matching note in ``_recall_metrics``.
     session_recall_at_n_gold: float | None = None
     if answer_sessions:
         gold_retrieved = {h["session_id"]

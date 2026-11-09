@@ -326,7 +326,13 @@ def category_variant_rows(outcomes: list[dict], k: int | str = 5,
             "all-or-nothing binary measured at a cutoff equal to each "
             "question's own gold-session count, so a spread-evidence "
             "question is measurable at all (#10538); the official row "
-            "stays recall_all@5"),
+            "stays recall_all@5. GRANULARITY (read before comparing to a "
+            "point-level R-precision): N_gold counts SESSIONS while the "
+            "ranking is POINTS, and the deduped pool admits up to 3 points "
+            "per session — so 1.0 additionally requires the first N_gold "
+            "slots to hold N_gold DISTINCT gold sessions, and a "
+            "session-complete ranking that repeats a session inside the "
+            "window scores below 1.0"),
         "gate_categories": list(categories),
         "rows": rows,
         "coverage": {
@@ -439,7 +445,8 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
             "n": len(gold_cutoff_vals),
             "n_excluded": len(non_abs) - len(gold_cutoff_vals),
             "semantics": "all(doc in ranked[:n_gold] for doc in "
-                         "correct_docs), n_gold = len(correct_docs)",
+                         "correct_docs), n_gold = len(correct_docs); "
+                         "N_gold counts SESSIONS, the ranking is POINTS",
         },
         "turn_recall_paper@k": {
             "label": "LABELED VARIANT (D2): turn-level recall over the "

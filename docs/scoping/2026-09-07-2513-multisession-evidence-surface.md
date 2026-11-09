@@ -192,6 +192,17 @@ filtered):
    `retrieve.py::_recall_metrics` → `session_recall@n_gold` on the **same** ranking the `@5` fraction is
    measured on, and surfaced per category as a fraction in `report.py`'s `retrieval_by_category`. A
    report that predates it counts `n_missing`, never `0.0`.
+
+   **Granularity caveat (recorded 2026-11-09, PR #11598 review note 1).** `N_gold` counts **sessions**
+   while the ranking being sliced is **points**, and the deduped pool admits up to
+   `DEFAULT_MAX_CHUNKS_PER_SESSION = 3` points per session. `recall_all@N_gold == 1.0` therefore
+   additionally requires the first `N_gold` slots to hold `N_gold` **distinct** gold sessions; a
+   session-complete ranking that repeats one session inside the window scores `< 1.0`. This is not the
+   TREC passage-level convention (which defines R over the retrieval unit) — changing the cutoff's unit
+   would change the metric the #10538 relay prescribed, so it stays a documented caveat, not a change.
+   The same block also records the **fetch-depth bound**: for a question whose gold count exceeds the
+   arm's fetch depth (`max(ks)`, 20 by default) the fraction is pinned below 1.0, which is not
+   reachable on the corpora measured so far.
 3. **reader_evidence@5 / reader_surface@k** — the evidence that actually enters the reader
    context (C1 #1745 context-level measures), so a pool win cannot be eaten by the
    assembly caps.
