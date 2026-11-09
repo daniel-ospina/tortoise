@@ -3441,6 +3441,68 @@ def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     assert cline.read_text() == original, "the cline hook file was modified"
 
 
+def test_cli_install_pi_uninstall_refuses_a_lookalike_it_did_not_write(cli):
+    """`pi --uninstall` DELETES a file, so it must require PROOF of authorship.
+
+    Review finding 2 (P2). The ownership gate used to be
+    `hook_install._looks_like_our_script`, whose own docstring says it is
+    FAIL-OPEN toward "ours" and "not a security boundary" — the bare
+    identifier `TORTOISE_API_KEY` matches it. The two verbs do not carry the
+    same cost when it is wrong: `install pi` on such a file keeps a `.bak`
+    (measured: `backed up … → ….bak`, recoverable), while `--uninstall` deleted
+    it outright, rc 0, no backup (measured, irrecoverable). So the destructive
+    verb now requires byte-identity with the shipped source or the canonical
+    version marker — neither of which a hand-written lookalike has.
+
+    Mutation: revert the gate to `_looks_like_our_script` — the lookalike is
+    deleted and this REDs on the return code and the survival assert.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    mine = (
+        "// My own Pi extension, not Tortoise's.\n"
+        "import { helper } from './mine.ts';\n"
+        "const key = process.env.TORTOISE_API_KEY;\n"
+        "export default { name: 'mine', key, helper };\n"
+    )
+    ext.write_text(mine, encoding="utf-8")
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert ext.exists(), "a file this installer cannot prove it wrote is never deleted"
+    assert ext.read_text(encoding="utf-8") == mine, "the bytes are untouched"
+
+
+def test_cli_install_pi_uninstall_removes_an_older_generation_it_did_write(cli):
+    """The proof must not be OVER-broad: an artefact of OURS that is merely a
+    different generation (the canonical marker, not the shipped bytes) is
+    still removable — otherwise the fix for finding 2 strands every install
+    that predates the current source.
+
+    Mutation: require byte-identity ALONE — a marked older generation is kept
+    and this REDs on the removal assert.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    # The marker every generation of this artefact carries; the BODY is not the
+    # current shipped one, so this is the stale-generation shape.
+    ext.write_text(
+        "// tortoise-hook-version: 17\n// an older read seam\n",
+        encoding="utf-8",
+    )
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists(), "a marked artefact of ours is removable"
+
+
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
     """A second `tortoise install pi` is a no-op: it must report the no-op and
     NOT claim it installed the extension.

@@ -5709,15 +5709,50 @@ def _pi_volunteer_extension_name() -> str:
     return PI_VOLUNTEER_EXTENSION_NAME
 
 
+def _pi_volunteer_is_provably_ours(target: Path) -> bool:
+    """True only when ``target`` is provably the artifact THIS installer writes.
+
+    ⛔ NOT ``_looks_like_our_script`` (review finding 2). That sniff is the
+    *doctor*'s install signal and its own docstring says it is FAIL-OPEN toward
+    "ours" — the bare identifier ``TORTOISE_API_KEY`` matches — and that it is
+    "not a security boundary". An INSTALL may rely on it because a false
+    positive is repaired by a replace that keeps a ``.bak`` copy; an UNINSTALL
+    DELETES, so a false positive is unrecoverable (measured: a 4-line
+    hand-written ``~/.pi/agent/extensions/tortoise-volunteer.ts`` that merely
+    referenced ``process.env.TORTOISE_API_KEY`` was deleted, rc 0, no backup).
+    The destructive path therefore requires proof — either
+
+      * byte-identity with the shipped source (exactly what ``install pi``
+        copies), or
+      * the canonical ``// tortoise-hook-version: N`` marker, which every
+        generation of this artifact carries,
+
+    and refuses anything else as the user's own file.
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    try:
+        if source is not None and target.is_file():
+            if target.read_bytes() == Path(source).read_bytes():
+                return True
+    except OSError:  # pragma: no cover - an unreadable file is not provable
+        return False
+    return _hook_install.read_hook_version(target) is not None
+
+
 def _uninstall_pi_volunteer(args) -> int:
     """`tortoise install pi --uninstall` — remove the per-turn READ seam.
 
     Scoped exactly like the shell-hook harnesses' ``--uninstall``: it removes
     the READ half and says what it left behind. Pi's read half is a file
     (``tortoise-volunteer.ts``) rather than a settings.json entry, so removing
-    it is a delete of one path — and only a path this installer can prove it
-    wrote (``hook_install._looks_like_our_script``), because the extensions
-    directory is shared with every other extension the user installed.
+    it is a delete of one path — and only a path PROVABLY ours
+    (:func:`_pi_volunteer_is_provably_ours`), because the extensions directory
+    is shared with every other extension the user installed. A delete has no
+    undo, so this is the one place in the family where the weakest ownership
+    evidence is not good enough.
     """
     from tortoise import hook_install as _hook_install
     from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
@@ -5733,10 +5768,10 @@ def _uninstall_pi_volunteer(args) -> int:
               f"absent) — nothing to remove. The capture extension "
               f"({capture}) is untouched.")
         return 0
-    if not _hook_install._looks_like_our_script(target):
-        print(f"Refusing: {target} exists but does not look like a Tortoise "
-              "extension — nothing was removed. Move it aside yourself if you "
-              "are sure it is not another extension.", file=sys.stderr)
+    if not _pi_volunteer_is_provably_ours(target):
+        print(f"Refusing: {target} exists but is not a Tortoise artifact this "
+              "installer wrote — nothing was removed. Move it aside yourself "
+              "if you are sure it is not another extension.", file=sys.stderr)
         return 1
     # ⛔ `--dry-run` MEANS "without writing", and this branch is the one place
     # in the family where the read seam is a FILE: before #2119 the `pi
