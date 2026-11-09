@@ -4376,7 +4376,7 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
     # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
     # the reason an enumeration claiming to be exhaustive was wrong. The /docs
     # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
-    # (`tests/test_website_docs_consistency.py:56`) and derives an asserted
+    # (`tests/test_website_docs_consistency.py:57`) and derives an asserted
     # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
     # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
     # a commit_schema-only diff selected `surfaces=['core']`, where that guard is

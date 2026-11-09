@@ -4350,7 +4350,7 @@ def test_the_runbook_inventory_matches_the_tree_and_says_the_read_refuses(tmp_pa
         "the `ubuntu-24.04` job count moved — re-derive the runbook's table with this pin: "
         f"{counts}"
     )
-    assert counts["ubuntu-latest"] == 76, (
+    assert counts["ubuntu-latest"] == 77, (
         "the `ubuntu-latest` job count moved (the runbook states it as a dated measurement, and "
         "this arm is what makes 'dated' honest) — re-derive the table and this number together, do "
         f"not assume {counts['ubuntu-latest']} is right: {counts}"
@@ -4910,7 +4910,7 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
         # the /docs guard's import of the schema types the citing paragraph names
-        ("tests/test_website_docs_consistency.py", 56):
+        ("tests/test_website_docs_consistency.py", 57):
             r"from tortoise\.commit_schema import Point, point_content_id",
         # the reference-surface relay that drifted: the runbook sentence naming the test
         # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
