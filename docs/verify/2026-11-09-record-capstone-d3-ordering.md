@@ -17,10 +17,11 @@ Read that precisely. Two different claims are separated below and must not be me
   cache statements in this capture carried **no** declared lane. D3's own sentence is *"assert the
   capture writes journal → record → cache in that order, with no cache-only path"*, so **D3 is not met
   as written by this measurement**; what is met is the part of it that a door can be held to, plus the
-  property that no cache-ahead write is *silent* (each one declares the order it used), plus a
+  property that no cache-ahead write is *silent* — **leg 3 covers every cache statement in an ahead
+  fold's window, raw-handle ones included, and requires a declared lane** — plus a
   FLOOR on the second half — no mutating cache statement precedes the capture's first journal append
   and first APPLIED record write (§6). It does **not** establish a per-write attribution for
-  raw-handle cache writes; see §4.
+  raw-handle cache writes outside an ahead fold's window; see §4.
 
 | | |
 |---|---|
@@ -69,7 +70,7 @@ record, and `refuse_same_database` correctly refuses a drill pointed at the reco
 |---|---|---|
 | `test_D3_order_the_record_write_follows_the_journal_append` | every journal append gets a record write, same `event_id`, and no record write precedes the first append | **green** — 14/14 paired |
 | `test_D3_order_a_journal_first_door_writes_journal_record_then_cache` | `_apply_and_journal` (the sanctioned chokepoint, `tools/record_wiring_check.py`'s production call site) writes journal → record → fold → fold statements | **green** — `['journal', 'record', 'fold', 'cache', 'cache']` |
-| `test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY` | a fold that runs ahead of its append declares a lane, and the `(event_type, lane)` set of ahead folds declaring a **journal-first** lane equals the tree's recorded deviation set | **green** — the `_create_entity` registration folds run ahead under `"create_entity"`, which IS a journal-first lane, and that is exactly the pinned set |
+| `test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY` | every cache statement in an ahead fold's window (raw-handle ones **included**) declares a lane, and the `(event_type, lane)` set of ahead folds declaring a **journal-first** lane equals the tree's recorded deviation set | **green** — the `_create_entity` registration folds run ahead under `"create_entity"`, which IS a journal-first lane, and that is exactly the pinned set |
 | `test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write` | the criterion's second half — **no cache-only path**: every mutating cache statement (folded *and* raw-handle) has a journal append and an **APPLIED** record write behind it | **green** — no cache statement precedes the first append or the first APPLIED record |
 
 The static half is unchanged and still runs beside these: `test_D3_no_write_path_bypasses_the_record`
@@ -144,6 +145,16 @@ falsifier had to be expressed against the lane the door *claims* (F3) rather tha
   write. A cache write injected MID-capture (after some append and its record have landed) is green in
   every leg, **measured** (§6.2 F6), because the trace has no descriptor tying a raw `_GuardedGraph.query`
   statement to the append it skipped. D3's falsifier is therefore satisfied for the early shape only.
+
+  ⛔ **A CHEAPER STRENGTHENING EXISTS AND IS DELIBERATELY DECLINED, stated so no one thinks the floor is
+  the ceiling.** A membership rule is checkable from this trace: *every mutating cache statement is
+  fold-attached (`in_fold is not None`) OR carries a declared lane*, with the lane-less raw population
+  pinned by statement shape. It would red on §6.2 F6. It is declined because the pin it needs is ~30 raw
+  CYPHER strings (the six lane-less writers plus the `apply-first:` / `create_*` / `event-store-*`
+  statements), so it would red on any unrelated change to those statements — a signal that would be
+  silenced by editing the pin rather than by fixing a write path. Per-fold attribution is separately
+  available and already used: leg 3 pins the two `_create_entity` arms that legitimately fold first, and
+  leg 2 requires every statement in a sanctioned door's window to follow that door's own record write.
 - **It does not cover every mutating verb on the handle.** Only `_GuardedGraph.query` is wrapped.
   `ro_query` and `execute_command` are write-CAPABLE by the module's own comments
   (`projection/__init__.py:5739-5743`, `:5796-5803`), so a write through either is invisible here.
@@ -195,7 +206,7 @@ counted in the run that printed them, never asserted against a constant.)
 
 Each mutation was applied to this worktree's committed tree, the leg run, the red captured, then the
 file restored from a byte-exact copy and verified with `git diff --exit-code` (`git status
---porcelain` empty afterwards).
+--porcelain` empty afterwards). Every red below is reproducible **at this head**.
 
 #### F1 — drop the record write in `_emit_event` → leg 1 (count half)
 
@@ -211,17 +222,24 @@ E AssertionError: `_apply_and_journal` did not write journal → record → cach
   ['fold', 'cache', 'journal', 'record'] (journal at 2, record at 3, fold at 0)
 ```
 
-#### F3 — the same swap → leg 3 (the property, not a rename)
+#### F3 — re-declare a CAPTURE door's lane while it still folds first → leg 3
+
+`_live_write_scope("create_entity")` → `"create_entity_v2"`:
 
 ```console
 E AssertionError: the journal-first-ahead fold population changed: observed
-  [('EventRecorded', 'create_entity'), ('ObjectRegistered', 'chokepoint'),
-   ('ObjectRegistered', 'create_entity')],
+  [('EventRecorded', 'create_entity_v2'), ('ObjectRegistered', 'create_entity_v2')],
   pinned [('EventRecorded', 'create_entity'), ('ObjectRegistered', 'create_entity')].
+E   • NOT RECORDED anywhere: [('EventRecorded', 'create_entity_v2'), …
+    This is a fresh violation of D3's order — a door claiming journal-first while folding first.
 ```
 
-The `('ObjectRegistered', 'chokepoint')` pair is the reordered door naming ITSELF — this is the red
-the old literal comparison could not produce.
+⛔ **SUPERSEDED:** an earlier revision of this section showed a red containing
+`('ObjectRegistered', 'chokepoint')` from reordering `_apply_and_journal`. That red **is not
+reproducible at this head** and its inclusion was itself an artifact of the leak §6.1 F7 removed:
+leg 2's probe used to append into the module-scoped trace, so leg 3 saw the reordered probe fold. With
+the probe trimmed, `_apply_and_journal` is not on the capture path and a reorder there is **leg 2's**
+falsifier (F2), not leg 3's.
 
 #### F4 — make the record seam DECLINE (force the unarmed branch) → leg 1 (APPLIED half)
 
@@ -231,7 +249,7 @@ E AssertionError: the capture appended 14 journal record(s) and only 0 reached t
   `derived = replay(journal)` gap D3 measures (an unarmed/refused call is not a record write)
 ```
 
-This is the finding-3 red: the count-based assertion alone stays green here.
+This is the round-1 finding-3 red: the count-based assertion alone stays green here.
 
 #### F5 — inject `CREATE (:X {id:'cache-only'})` at the top of the measured region → leg 4
 
@@ -240,21 +258,39 @@ E AssertionError: 1 mutating cache statement(s) ran with no journal append and n
   behind them — the cache-only path D3 forbids: [0] "CREATE (:X {id:'cache-only'})" (lane=None, in_fold=None)
 ```
 
-#### F6 — ⛔ THE SAME INJECTION PLACED MID-CAPTURE DOES **NOT** RED, and that is the residue
+#### F6 — ⛔ THE SAME INJECTION PLACED MID-CAPTURE DOES **NOT** RED, and that is the disclosed residue
 
-A review of this fix measured the limit of leg 4 rather than accepting its wording: the same cache-only
-write injected after `_emit_event`'s record branch (i.e. after some append and its record have already
-landed) leaves **all five** D3 legs green — `cache=43`, `5 passed`. Leg 4 asserts a FLOOR (nothing before
-the first append/first APPLIED record), not a per-write attribution, because the trace carries no
-descriptor tying a raw-handle statement to the append it skipped. Its docstring, its name and the verdict
-line now say exactly that instead of "the whole mutating-cache population". See §4.
+The same cache-only write injected after `_emit_event`'s record branch — i.e. after some append and its
+record have already landed — leaves **all five** D3 legs green (`cache=43 … 5 passed`, measured). Leg 4
+asserts a FLOOR (nothing before the first append / first APPLIED record), not a per-write attribution,
+because the trace carries no descriptor tying an arbitrary raw-handle statement to the append it
+skipped. Its name, its docstring and the verdict line say exactly that. See §4.
 
-#### F7 — `_apply_and_journal` raw-handle cache write before its append → leg 2
+#### F7 — raw-handle cache write on the sanctioned door BEFORE its append → leg 2
 
-A `proj.g.query(...)` issued on the sanctioned door before its append used to be unexamined: leg 2's
-ordering loop filtered to `e.in_fold is not None`, and a raw statement has `in_fold is None`. The loop
-now covers **every** cache statement in the probe's window (and uses `enumerate`, not `observed.index`,
-which resolved by value on a dataclass).
+A `proj.g.query(...)` issued on `_apply_and_journal` before its append used to be unexamined: leg 2's
+ordering loop filtered to `e.in_fold is not None`, and a raw statement has `in_fold is None`. Measured
+green before the fix, red after:
+
+```console
+E AssertionError: a cache statement ran before the door's record write (0 <= 2:
+  "MERGE (x:CacheAhead {id:'cache-ahead'})", in_fold=None)
+  — the cache is ahead of the record on a door that claims journal-first
+```
+
+#### F8 — lane-less raw cache write INSIDE an ahead fold's window → leg 3
+
+A `proj.g.query("CREATE (:SilentAhead …)")` issued after `_create_entity`'s fold and before that
+event's append is exactly the silent cache-ahead shape. Leg 3's statement window used to be filtered to
+`e.in_fold == fold.event_type`, so the raw statement (`in_fold=None`) was never examined: measured
+`cache-with-no-declared-lane=9` and **5 passed**. Widened to every cache statement in the window
+(already bounded by the fold index and its own append), it reds in the clean-run-preserving direction:
+
+```console
+E AssertionError: a cache write ahead of its journal append ran with NO declared lane
+  ("CREATE (:SilentAhead {id:'silent'})", fold EventRecorded, in_fold=None)
+  — that is the §17.1 silent cache-ahead write D3 forbids
+```
 
 ### 6.3 What the fixes do not change
 
@@ -262,3 +298,21 @@ D3 is still **not discharged**, and this PR still reorders no production write p
 the instrument's three assertions can now fail for the failure each one names. §3's F3 is retained above
 with a `⛔ SUPERSEDED AND WRONG` marker rather than deleted: it recorded a real run whose *conclusion* was
 mistaken, and a reader who trusted it would re-apply the inert comparison.
+
+## 7. Review cycle 2 — seven more, all verified and fixed
+
+A second fresh-context review, on the head this section's predecessor produced, found seven more. Each
+was reproduced before it was fixed; the two substantive ones are now falsifiers F7 and F8 in §6.2.
+
+| # | finding | verified against | fix |
+|---|---|---|---|
+| 1 | **P1** — leg 3's statement window was filtered to `e.in_fold == fold.event_type`, so a **lane-less raw** cache write inside an ahead fold's window was never examined, and the "no cache-ahead write is silent" claim was measured only for fold-attached statements | reproduced: `CREATE (:SilentAhead …)` after `_create_entity`'s fold, before its append → `cache-with-no-declared-lane=9`, **5 passed** | window widened to every cache statement (it is already bounded by the fold index and its own append). Clean run still green; the injection now reds (§6.2 F8) |
+| 2 | **P2** — `_ahead_population_advice` partitioned on event TYPE only, so a brand-new **lane** on a recorded event type was reported as "RECORDED, extend the pin" instead of a fresh violation | reproduced with the lane-change mutation | partitions on the `(event_type, lane)` **pair**; `create_entity` re-exercise is the only excused shape. Verified: the lane change now prints `NOT RECORDED anywhere` |
+| 3 | **P2** — `_KNOWN_AHEAD_DEVIATIONS`'s comment named an `_apply_and_journal` reorder as a producible new pair, which this head cannot produce (that door is not on the capture path, and leg 2's probe is trimmed) | measured: reordering `_apply_and_journal` reds leg 2 only; leg 3 green | comment now names a CAPTURE door re-declaring its lane, matching leg 3's own docstring |
+| 4 | **P2** — §6.2 F3 showed the `('ObjectRegistered','chokepoint')` red, which existed only at the superseded head (it was a product of the probe leak) | re-ran the same mutation at the current head | F3 replaced with the lane-change red, and the old output retained under a `⛔ SUPERSEDED` marker naming WHY it was unreproducible |
+| 5 | **P2** — the PR body still carried the round-1 inert falsifier and pre-fix counts | artifact §3 marks it `⛔ SUPERSEDED AND WRONG` | corrected on the PR (body while no record exists, comment once one does) |
+| 6 | **P2** — leg 4's narrowing is honest about the floor, but its implied "nothing stronger is available" is broader than the measurement: a membership rule is checkable from this trace | reasoned from the `Door` fields; the reviewer reproduced F6 independently | §4 now states the membership rule, that it WOULD red on F6, and why it is declined (a ~30-shape raw-CYPHER pin would red on unrelated edits and be silenced by editing the pin) |
+| 7 | **P2** — an exception from `_apply_and_journal` would surface as `UnboundLocalError` because `observed` was bound inside the `try` | code read | `observed: list[Door] = []` before the `try` |
+
+Gates re-verified green at this head: `18 passed, 1 skipped` (whole file), `5 passed` (`-k D3`),
+`ruff check .` clean, markdownlint 0 issues.

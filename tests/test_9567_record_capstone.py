@@ -401,9 +401,12 @@ def test_D3_no_write_path_bypasses_the_record():
 #: Object/Event registration blocks fold first and are left as-is because
 #: reordering them rides the #2194/#2295/#2309 first-registration hardening).
 #: Pinned as a `(event_type, lane)` SET, never a count, so the leg reds in every
-#: direction: a pair that is new (a fresh contradiction, e.g. `_apply_and_journal`
-#: reordered — its lane is `"chokepoint"`), or a pair that has GONE (a deviation
-#: closed or re-declared apply-first — then D3 must be re-graded, #9567/#11477).
+#: direction: a pair that is new (a fresh contradiction — e.g. a CAPTURE door
+#: re-declaring its `_live_write_scope` reason while it still folds first; NOT
+#: an `_apply_and_journal` reorder, which is not on the capture path and whose
+#: leg-2 probe is trimmed out of this trace), or a pair that has GONE (a
+#: deviation closed or re-declared apply-first — then D3 must be re-graded,
+#: #9567/#11477).
 _KNOWN_AHEAD_DEVIATIONS = frozenset({
     ("EventRecorded", "create_entity"),
     ("ObjectRegistered", "create_entity"),
@@ -431,8 +434,10 @@ def _ahead_population_advice(gained: set, lost: set) -> str:
     named at `sdk.py:4836` but this capture never creates a Subject, so it is not
     in the pin).
     """
-    recorded = sorted(p for p in gained if p[0] in _RECORDED_DEVIATION_EVENT_TYPES)
-    unrecorded = sorted(p for p in gained if p[0] not in _RECORDED_DEVIATION_EVENT_TYPES)
+    recorded = sorted(
+        p for p in gained if p[1] == "create_entity" and p[0] in _RECORDED_DEVIATION_EVENT_TYPES
+    )
+    unrecorded = sorted(p for p in gained if p not in recorded)
     lines = []
     if recorded:
         lines.append(
@@ -716,6 +721,7 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
 
     object_id = f"order-probe-{uuid.uuid4().hex[:10]}"
     mark = len(traced.entries)
+    observed: list[Door] = []
     try:
         with use_record_tenant(*traced.tenant):
             traced.sdk._apply_and_journal(
@@ -847,7 +853,7 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
         stmts = [
             e
             for e in traced.entries[i:stop]
-            if e.door == "cache" and e.in_fold == fold.event_type
+            if e.door == "cache"
         ]
         assert stmts, (
             f"the {fold.event_type} fold ran ahead of its append and issued no cache "
@@ -856,8 +862,8 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
         for stmt in stmts:
             assert stmt.lane is not None, (
                 f"a cache write ahead of its journal append ran with NO declared lane "
-                f"({stmt.statement!r}, fold {fold.event_type}) — that is the §17.1 "
-                "silent cache-ahead write D3 forbids"
+                f"({stmt.statement!r}, fold {fold.event_type}, in_fold={stmt.in_fold!r}) "
+                "— that is the §17.1 silent cache-ahead write D3 forbids"
             )
             # Classified by the tree's OWN discriminator, never a literal: a lane
             # without the `_APPLY_FIRST_LANE` prefix claims the journal-first order.
@@ -885,10 +891,9 @@ def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_writ
     skips the record → D3 must red"*. Neither leg above could red for it:
 
     * leg 1 looks only at the journal/record pair, never at a cache statement;
-    * the `…_SILENTLY` leg inspects only the statements of a fold that ran ahead
-      of its OWN append (`e.in_fold == fold.event_type`), so a mutating statement
-      with `in_fold=None` — the raw-handle class that a cache-only write takes —
-      was never examined anywhere.
+    * the `…_SILENTLY` leg bounds itself to the window between ONE ahead fold and
+      its own append, so a cache-only write anywhere else in the capture is
+      outside its population.
 
     ⛔ WHAT THIS LEG MEASURES, stated as narrowly as it actually is. It asserts the
     FLOOR: no mutating cache statement precedes the capture's first journal append
