@@ -479,6 +479,21 @@ _MIGRATION_FILENAME_RE = re.compile(r"\d{14}_[a-z0-9_]+\.sql")
 #: below names). It deliberately cannot reach §A1/R7's historical `over all` EOL
 #: → `65 migrations`, because there is no space after `all` there.
 _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
+#: The FOURTH and FIFTH homes of the same denominator, and the two that went
+#: stale while the three above were corrected (#1981 review, P2):
+#: `docs/00_index.md`'s #4051 row (*"pgvector appears in **0 of 79
+#: migrations**"*) and the doc THAT row routes to,
+#: `docs/architecture/SEARCH-ARCHITECTURE.md` (*"appears in 0 of 79\nmigrations"* — wrapped, hence `\s+`). Neither was read: the patterns above
+#: are anchored to §R7/§A5 of the prerequisites doc and to the #7879 index row,
+#: so `-#4051`'s copy had no reader at all and went stale in the identical
+#: direction. A count is only pinned where a pattern reaches it.
+_MIGRATION_COUNT_OF_RE = re.compile(r"0 of (?P<count>\d+)\s+migrations")
+#: The two documents carrying the `0 of N migrations` form — scanned WHOLE,
+#: because the phrase is not confined to one row.
+_COUNT_OF_DOCS = (
+    REPO_ROOT / "docs" / "00_index.md",
+    REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md",
+)
 #: The `narrative|raw_turn|raw_text|transcript` census command's own terms —
 #: the alternation the two "N lines" claims were taken with.
 _NARRATIVE_CENSUS_TERMS = ("narrative", "raw_turn", "raw_text", "transcript")
@@ -1529,6 +1544,24 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
             f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} holds {on_disk} "
             f"({migrations[-1].name} is the newest). Update the stated number "
             "— a stale denominator is what makes the census unreproducible"
+        )
+
+    # The same denominator in its OTHER two homes (#1981 review, P2). These are
+    # scanned as whole documents rather than rows: the phrase is not confined to
+    # one row, and the one in `SEARCH-ARCHITECTURE.md` wraps across a line.
+    for path in _COUNT_OF_DOCS:
+        text = path.read_text(encoding="utf-8")
+        stated = [int(m.group("count")) for m in _MIGRATION_COUNT_OF_RE.finditer(text)]
+        assert stated, (
+            f"{path.relative_to(REPO_ROOT)} no longer states `0 of N migrations` "
+            "— restate it rather than deleting the phrase: this pin reads it"
+        )
+        assert set(stated) == {on_disk}, (
+            f"{path.relative_to(REPO_ROOT)} says `0 of {sorted(set(stated))} "
+            f"migrations`, {_MIGRATIONS_DIR.relative_to(REPO_ROOT)} holds "
+            f"{on_disk} ({migrations[-1].name} is the newest). Two sites of this "
+            "denominator already went stale while the other three were "
+            "corrected — a count is only pinned where a pattern reaches it"
         )
 
     # The same command the docs quote: `grep -riE '<terms>' supabase/migrations`

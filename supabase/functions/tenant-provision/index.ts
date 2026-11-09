@@ -447,6 +447,52 @@ Deno.serve(async (req: Request) => {
         "provision_team failed for " + safeName + ":",
         provisionError
       );
+      // ── #1981: the one-free-org entitlement refusal is TERMINAL ──────────
+      // The RPC's DB-level backstop (migration 20261108000001) raises
+      // `one_free_org_limit:<org_id>` when this person ALREADY OWNS a free
+      // organization. Answering it with 502 + "Please try again" puts a rule
+      // the product enforces behind the one status a client is entitled to
+      // retry, and retrying can never succeed: the condition is the user's
+      // EXISTING org, not a transient fault. This branch makes the refusal
+      // distinguishable on the wire — 402 plus the machine-readable payload
+      // `_one_free_org_detail` builds (#2789).
+      //
+      // ⛔ RESIDUAL, stated so this is NOT read as delivered (#11604). No client
+      // reads it yet: the live consumer is a JWT call from `POST /api/provision`
+      // (the `after_user_created` auth-hook path was DELETED by #1120, which also
+      // removed the origin allowlist — this function is server-only now), and the
+      // dashboard's `provisionInApp` retries any
+      // non-ok once and renders "Could not create your organization — try
+      // again." without parsing the body. The envelope does not match the
+      // reader either: this function's errors are FLAT (`{error: ...}` here,
+      // `{code, ...}` below) while the dashboard's coded-detail reader lifts
+      // `body.detail.code` and every Python lane wraps in `detail`. What this
+      // branch buys is that the wire no longer reports a terminal refusal as a
+      // retryable one — a prerequisite for that client fix, not a substitute
+      // for it.
+      //
+      // The payload's inner dict matches the Python lanes, contact sentence
+      // included: `_one_free_org_detail` builds the message through
+      // `tortoise/quota.py::with_limit_contact` (#5425), so the literal below
+      // is read from Python by the test rather than restated from memory —
+      // `tests/test_provisioning_edge_function.py::test_entitlement_refusal_is_mapped_to_the_product_402`
+      // reddens on drift in the marker, the code, the message or the status, and
+      // a behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives
+      // the REAL handler and would red if this branch became unreachable.
+      const provisionMessage = String(provisionError.message ?? "");
+      const marker = "one_free_org_limit:";
+      const markerAt = provisionMessage.indexOf(marker);
+      if (markerAt >= 0) {
+        const blockingOrgId = provisionMessage
+          .slice(markerAt + marker.length)
+          .trim()
+          .split(/\s/)[0] || null;
+        return json({
+          code: "one_free_org_limit",
+          message: "You can only have one free organization. Need more? Contact support@premiselabs.co.",
+          org_id: blockingOrgId,
+        }, 402);
+      }
       return json({ error: "Provisioning failed. Please try again." }, 502);
     }
 
