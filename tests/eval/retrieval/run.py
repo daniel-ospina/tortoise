@@ -1254,7 +1254,7 @@ def _run_with_sdk(args, sdk) -> dict:
             "strategies populate (population_counts self-declare authority). "
             "fused key is the k=60 alias (gate compat).",
             "#1348 fused_rerank arm: fuse -> truncate to limit -> rerank "
-            "(production order sdk.py::TortoiseSDK.tortoise_fts_query); "
+            "(production order TortoiseSDK.tortoise_fts_query); "
             "corpus-variant enhanced "
             "seeds topic-correlated EP (n.confidence + edges, no new nodes); "
             "oracle-proxy = query-conditioned positive control (stub "
