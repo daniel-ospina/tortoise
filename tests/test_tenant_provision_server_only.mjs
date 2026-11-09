@@ -326,15 +326,20 @@ try {
   );
 
   // ── #1981: the one-free-org refusal is TERMINAL, and this is the path a
-  //    client actually reaches (the auth-hook path is inert post-#832). A 502
-  //    here is the one status a client is entitled to retry, for a condition no
-  //    retry can clear — so the RPC's marker must surface as a 402 carrying the
-  //    product payload. This case is BEHAVIOURAL on purpose: the static pin in
-  //    test_provisioning_edge_function.py cannot see where the marker is read
-  //    from, and a mutant computing `markerAt` from `provisionError.details`
-  //    instead of `.message` leaves the branch unreachable while every static
-  //    assertion still passes (measured on the review of 577ed5822fe5). Here
-  //    that mutant reds, because the response goes back to 502.
+  //    client actually reaches (the `after_user_created` auth-hook path was
+  //    DELETED by #1120 — see Phase 2 above). A 502 here is the one status a
+  //    client is entitled to retry, for a condition no retry can clear — so the
+  //    RPC's marker must surface as a 402 carrying the product payload.
+  //    This case is BEHAVIOURAL on purpose, and the division of labour is the
+  //    point: the static pin in `test_provisioning_edge_function.py` grades the
+  //    SOURCE SHAPE (which field the marker is read from, and that `markerAt` is
+  //    derived from it before the branch), while this row is what proves the
+  //    branch is REACHABLE through the REAL handler — a static pin can assert
+  //    any string without the code ever running. Neither substitutes for the
+  //    other, and the static pin does discriminate on its own: the
+  //    `provisionError.details` mutant reds it (measured on the review of
+  //    `577ed5822fe5`). Here that same mutant also reds, because the stub's
+  //    error then carries no `details` and the response goes back to 502.
   __setRpcResult({
     error: { message: "Supabase control-plane RPC failed (provision_team): HTTP 402: one_free_org_limit:org-blocker" },
   });

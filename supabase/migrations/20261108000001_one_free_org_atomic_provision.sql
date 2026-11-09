@@ -47,8 +47,10 @@
 -- lanes and omits a sixth is how a caller ends up unmapped (#1981 round-4
 -- review, P2): `/v1/register`, `/v1/agent/signup`, POST /v1/organizations, the
 -- onboarding sub-org create, the paid-new-org checkout, and the
--- `tenant-provision` Edge Function (`supabase/functions/tenant-provision`, the
--- `after_user_created` Auth hook — it calls `provision_team` with a non-NULL
+-- `tenant-provision` Edge Function (`supabase/functions/tenant-provision`, a
+-- server-only function reached through the dashboard's same-origin BFF since
+-- #1120 deleted the `after_user_created` Auth hook and its origin allowlist —
+-- it calls `provision_team` with a non-NULL
 -- `p_user_id` and no `p_tier`, so THE GATE DOES ENGAGE THERE; its refusal is now
 -- mapped to the product's 402 `one_free_org_limit` payload instead of an
 -- unmapped 502 "try again", which was a dead end that could never succeed —

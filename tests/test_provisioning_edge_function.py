@@ -1512,17 +1512,21 @@ def test_entitlement_refusal_is_mapped_to_the_product_402():
     )
 
     # REACHABILITY: the marker must be searched in the error's MESSAGE, which is
-    # where PostgREST carries the RAISE text. Pinning the literals alone is not
-    # enough — reading `provisionError.details` instead leaves this branch
-    # unreachable while every assertion below still passes (measured: a review of
-    # 577ed5822fe5 built that mutant and the static pin survived it).
+    # where PostgREST carries the RAISE text. Pinning the payload literals alone
+    # was NOT enough — at `577ed5822fe5` a review built the `provisionError.details`
+    # mutant and *that* pin survived it, leaving the branch unreachable. The two
+    # assertions below are the fix for exactly that gap and they do discriminate
+    # on their own (re-measured: the mutant reds the first, a `markerAt` derived
+    # from `.details` reds the second).
     #
     # Matched with a whitespace-tolerant pattern, not an exact literal: the point
     # is which FIELD the marker is read from, and an exact string would red on a
     # semantically null reformat (`?? ""` -> `|| ""`, a prettier line break)
     # with a message claiming the branch is dead code — a false block for a real
-    # editor. The behavioural twin in `tests/test_tenant_provision_server_only.mjs` is
-    # what actually reds if the branch stops being reachable.
+    # editor. What a STATIC pin cannot have is runtime reachability: the
+    # behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives the
+    # real handler, so it is the row that reds if the branch stops being
+    # reachable at all.
     assert re.search(r"const\s+provisionMessage\s*=\s*String\(\s*provisionError\s*\.\s*message", src), (
         "the marker must be read from the RPC error's `message` (PostgREST puts "
         "the RAISE text there) — reading another field makes the branch dead code"
