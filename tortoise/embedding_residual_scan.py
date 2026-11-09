@@ -128,19 +128,30 @@ class ResidualScan:
 
     @property
     def verdict(self) -> str:
-        # ⛔ `None` IS NOT ZERO, EVEN HERE (#11660 review round 4, P3). The
-        # earlier spelling folded a missing count into zero via `or 0`, so a
-        # DIRECT caller constructing `ResidualScan(record_vectors=0,
-        # graph_vectors=None)` got CLEAN for a store nobody read — the exact
-        # invariant the module's own docstring states. `scan()` always appends a
-        # refusal for an unread store, so the shipped CLI was safe; the algebra
-        # must be safe on its own or the next caller inherits the hole.
+        # ⛔ THE ORDER IS A DECISION, AND IT IS "RESIDUE OUTRANKS UNREAD"
+        # (#11660 review rounds 4 P3 and 6). Two facts are being weighed against
+        # each other and they are not the same kind:
+        #
+        #   * a `None` count is "nobody looked" and must NEVER be folded into
+        #     zero — the earlier spelling did exactly that via `or 0`, so a
+        #     direct caller constructing `(record_vectors=0, graph_vectors=None)`
+        #     got CLEAN for a store that was never read;
+        #   * a POSITIVE count is proof that an erased scope still holds a
+        #     vector — and one store's proof does not become provisional because
+        #     the other store could not be read. Reporting UNAVAILABLE there
+        #     would bury a real finding behind an instrument failure, and the
+        #     finding is the thing someone has to act on.
+        #
+        # So: any refusal OR any unread store ⇒ UNAVAILABLE, UNLESS a measured
+        # store already proves residue. `scan()` appends a refusal for every
+        # unread store, so the shipped CLI never reaches either branch without
+        # one; the algebra has to be safe for a caller that does not.
+        if (self.record_vectors or 0) > 0 or (self.graph_vectors or 0) > 0:
+            return RESIDUE
         if self.refusals:
             return UNAVAILABLE
         if self.record_vectors is None or self.graph_vectors is None:
             return UNAVAILABLE
-        if self.record_vectors > 0 or self.graph_vectors > 0:
-            return RESIDUE
         return CLEAN
 
     @property
