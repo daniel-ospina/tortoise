@@ -550,6 +550,26 @@ def main(argv: list[str] | None = None) -> int:
             file=sys.stderr,
         )
         return 2
+    # #1779: a SESSION count is not an ENCODE-UNIT count either — the third
+    # door of the same class. A `--data` file whose `haystack_sessions` entries
+    # are present but hold NO TURNS passes both guards above (N instances,
+    # N session slots, because `_session_transcript([])` renders `""`) and
+    # still yields ZERO encode units, with a verdict that is worse than empty:
+    # it publishes `session_level_extraction_reuse reuse 2.0x — REALIZABLE`
+    # (the empty transcript hash repeats) at exit 0, i.e. it says the
+    # session-level cache pays on a population where there is NO TEXT AT ALL to
+    # extract — plus the same fabricated chunk-prompt explanation. The guard is
+    # therefore on the measured UNIT count, the quantity every published reuse
+    # factor is computed over; measuring nothing is not a measurement.
+    if census["encode_units"]["total"]["slots"] == 0:
+        print(
+            "[haystack_overlap] refusing to publish a census over 0 encode "
+            "units — the "
+            f"{census['sessions']['slots']} session slot(s) read carry no turn "
+            "or chunk text to measure (empty `haystack_sessions` entries?)",
+            file=sys.stderr,
+        )
+        return 2
     payload = json.dumps(census, indent=2, sort_keys=True) + "\n"
     if args.out:
         args.out.parent.mkdir(parents=True, exist_ok=True)

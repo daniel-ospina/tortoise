@@ -416,7 +416,12 @@ correctness benefit.
 ### Cross-question overlap — measured, and what it does NOT buy (#1779)
 
 `python -m tools.longmem_eval.haystack_overlap` re-derives the census from the
-dataset alone (no DB, no LLM, no keys) and reports the granularity verdict:
+dataset alone (no DB, no LLM, no keys) and reports the granularity verdict.
+It **refuses with exit 2 and prints no census** when the read population has
+nothing to measure — 0 instances, 0 session slots, or 0 encode units (sessions
+present but carrying no turns). A verdict computed over zero units is not a
+measurement: the empty-transcript identity repeats, so it would publish an
+avenue as `REALIZABLE` on no text at all.
 
 | avenue | reuse | realizable? |
 |---|---|---|

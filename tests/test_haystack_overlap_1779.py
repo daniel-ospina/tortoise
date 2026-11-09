@@ -463,6 +463,53 @@ def test_cli_refuses_a_zero_UNIT_population_even_when_instances_got_read(
         f"a 0-unit population must publish NO census body: {captured.out!r}")
 
 
+def test_cli_refuses_a_zero_ENCODE_UNIT_population_even_when_sessions_were_read(
+    tmp_path, capsys,
+):
+    """A SESSION count is not an ENCODE-UNIT count — the third fail-open door.
+
+    Sessions that are PRESENT but hold no turns pass both earlier guards (N
+    instances, N slots — `_session_transcript([])` renders `""`) while the
+    population carries zero turn text and zero chunk text. Measured before this
+    refusal existed, live at the head (2 questions / 2 empty sessions):
+
+      session_level_extraction_reuse   reuse 2.0x — REALIZABLE      EXIT=0
+
+    — i.e. it published the SESSION-level cache as worth building on a
+    population where there is no text at all to extract, because the empty
+    transcript hashes to one repeated identity, and it printed the same
+    fabricated chunk-prompt explanation the earlier refusals exist to retire.
+    A reuse factor computed over zero encode units is not a measurement, so the
+    refusal is keyed on that measured unit count.
+    """
+    empty_sessions = tmp_path / "empty_sessions.json"
+    empty_sessions.write_text(json.dumps([
+        {"question_id": "q1", "haystack_sessions": [[]],
+         "haystack_dates": ["2023-01-01"]},
+        {"question_id": "q2", "haystack_sessions": [[]],
+         "haystack_dates": ["2023-01-01"]},
+    ]), encoding="utf-8")
+
+    rc = main(["--data", str(empty_sessions), "--json"])
+    captured = capsys.readouterr()
+
+    assert rc == 2, (
+        f"a 0-encode-unit population must exit 2 even with sessions read, "
+        f"not {rc}")
+    assert "refusing" in captured.err, (
+        f"the refusal must say what it refused: {captured.err!r}")
+    assert "0 encode units" in captured.err, (
+        f"the refusal must name the measurable quantity: {captured.err!r}")
+    # ★ the point: the fabricated verdict must never reach stdout, and
+    # `REALIZABLE` in particular must not be published over no text at all.
+    assert captured.out.strip() == "", (
+        f"a 0-encode-unit population must publish NO census body: "
+        f"{captured.out!r}")
+    assert "REALIZABLE" not in captured.out.upper(), (
+        f"no avenue may be published as realizable over no evidence: "
+        f"{captured.out!r}")
+
+
 def test_the_research_doc_publishes_this_files_REAL_test_count():
     """§5 of the research note states this suite's size, so the size is DERIVED.
 
@@ -478,7 +525,9 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
     comment, `docs/00_index.md` and §8 — one commit, two contradictory readings
     of the same run, and a §5-only pin cannot see it. That is precisely the
     "published number with no instrument" this pin exists to prevent, so the
-    coverage is widened to every place the count is quoted.
+    coverage is widened to every place the count is quoted — including §5's own
+    `measured: N passed, 1 skipped` sentence, which the five-site version of
+    this check still left unguarded.
     """
     doc = (Path(__file__).resolve().parents[1]
            / "docs/research/2026-11-08-1779-eval-session-dedup.md")
@@ -498,6 +547,10 @@ def test_the_research_doc_publishes_this_files_REAL_test_count():
     sites = [
         (doc, f"{total} tests: {hermetic} hermetic"),
         (doc, f"{hermetic} hermetic pass"),
+        # §5's unarmed-pin sentence quotes the SAME run (`measured: N passed, 1
+        # skipped`) and was the one live site the first five-site check missed —
+        # a published count with no instrument, one line below a checked one.
+        (doc, f"measured: {hermetic} passed"),
         (root / "docs" / "00_index.md", f"{hermetic} hermetic ratchets"),
         (root / "config" / "ci-surfaces.yml",
          f"The {hermetic} hermetic tests are therefore GATED"),

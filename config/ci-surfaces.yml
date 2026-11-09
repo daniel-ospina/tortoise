@@ -7954,12 +7954,12 @@ surfaces:
   # `test_both_ingest_legs_CALL_turn_text_and_keep_no_inline_twin`, whose whole job is
   # to red a PR that re-introduces the inline `f"[{role}] {{content}}"` twin in
   # `ingest.py`; a revert renders byte-identically, so an ungated ratchet cannot fire on
-  # the edit it exists to prevent. The 19 hermetic tests are therefore GATED, on purpose.
+  # the edit it exists to prevent. The 20 hermetic tests are therefore GATED, on purpose.
   # ⛔ The `@slow` real-split PIN inside the same file stays UNARMED, and that gap is
   # recorded, not implied away: NO CI lane re-derives it (the on-demand lane
   # `eval-suite-manual.yml`, #10194, provisions the embedder and FalkorDB but never
   # `~/.cache/tortoise-longmemeval` — grep for TORTOISE_LME_CACHE_DIR/longmemeval over
-  # `.github/workflows/` returns nothing), so it SKIPS there (measured: 19 passed,
+  # `.github/workflows/` returns nothing), so it SKIPS there (measured: 20 passed,
   # 1 skipped with an empty cache dir) and the numbers are re-derived only on a box that
   # holds the cached S split (research note §8). Provisioning the dataset in CI is out of
   # scope for this measurement-only PR.
