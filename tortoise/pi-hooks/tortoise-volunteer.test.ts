@@ -318,6 +318,36 @@ test("a TIMEOUT aborts the chain rather than trying the next candidate", async (
   assert.ok(elapsed < 1500, `the chain must abort on the first timeout (took ${elapsed}ms)`);
 });
 
+test("a reflex that IGNORES SIGTERM is SIGKILLed and the turn is still bounded", async () => {
+  // Review finding 1 (P1). `execFile(..., {timeout})` sends ONE SIGTERM and
+  // settles only when the child EXITS, so a reflex that traps TERM is never
+  // bounded by it. Two measured outcomes, both wrong:
+  //   * `sleep 5` (this row): the budget is blown ~17x and the run is reported
+  //     as a SUCCESS — `{timeout: 300}` against this child returned
+  //     `elapsed: 5007, err: null`, i.e. `ok: true` with an empty block;
+  //   * `trap '' TERM; sleep 600`: the promise NEVER settles (measured: still
+  //     pending at 6 s, node itself never exited), and Pi awaits handler
+  //     promises with no hook timeout of its own — so the TURN hangs forever.
+  // Discriminating: restoring `{timeout: timeoutMs}` on the `execFile` call and
+  // disarming the watchdog reds this row on both `ok` and the elapsed bound. 
+  const home = tmpHome();
+  const stubborn = fakeCli(join(home, "bin"), "trap '' TERM; sleep 5");
+  const cfgPath = join(home, "tortoise-config.json");
+  writeFileSync(cfgPath, JSON.stringify({ volunteer: { timeoutMs: 300 } }));
+
+  const started = Date.now();
+  const result = await runReflexCommand(stubborn, "q", "", 300);
+  const elapsed = Date.now() - started;
+
+  assert.equal(result.ok, false, "a timed-out reflex is never ok");
+  assert.equal(result.timedOut, true, "and it reports the TIMEOUT class");
+  assert.ok(
+    elapsed < 2000,
+    `the turn must be bounded by OUR deadline, not the child's signal ` +
+      `disposition (took ${elapsed}ms)`,
+  );
+});
+
 test("the prompt is bounded in BYTES, not characters", async () => {
   // The reflex's validator charges `len(content.encode("utf-8"))` against a
   // 15 KiB window. A char-indexed bound passes ASCII and REFUSES the same

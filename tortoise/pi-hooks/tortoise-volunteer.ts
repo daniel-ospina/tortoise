@@ -119,8 +119,8 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  * sentence cites — the conclusion was inverted relative to its own number.
  *
  * ⛔ AND NOTHING WARMS UP (#11584 review, round 3's correction of this
- * paragraph). The reflex is bounded with `execFile(..., {timeout})`, which
- * SIGTERMs the child — the very kill this file reads as `timedOut` — and the
+ * paragraph). The reflex is bounded by this file's own deadline timer, which
+ * SIGKILLs the child — the kill this file reads as `timedOut` — and the
  * embedder load is PER PROCESS (see above). So a machine whose reflex exceeds
  * this budget gets a silent no-injection on EVERY turn, forever: each turn
  * starts a fresh process, kills it mid-load, and keeps nothing. There is no
@@ -128,6 +128,10 @@ export const DEFAULT_API_URL = "https://api.premiselabs.co";
  * this comment claimed exactly that in place of the claim it had just removed.
  * A prewarm would have to be real — spawn detached, `unref()`, abandon the wait
  * instead of killing — and measured before this comment may describe it.
+ *
+ * (Round 4: the deadline was `execFile(..., {timeout})`, which SIGTERMs once and
+ * cannot be escalated, so a reflex that ignored SIGTERM hung the turn forever.
+ * The bound is now our own timer — see `runReflexCommand`.)
  *
  * What IS true: a timeout is a clean no-injection (`status: "timeout"`), it
  * neither latches the seam nor writes the `install-inert` breadcrumb, and the
@@ -385,6 +389,18 @@ function isFile(path: string): boolean {
  * carries `surfaced` — the pointer labels the disclosure marker renders — and
  * the reflex's own `degraded_reason`. `--json` reports a failure as
  * `{status: "error"}` on STDOUT with a non-zero exit, so BOTH are checked.
+ *
+ * ⛔ THE BOUND MUST NOT DEPEND ON THE CHILD'S SIGNAL DISPOSITION (review finding
+ * 1). `execFile(..., {timeout})` sends ONE `killSignal` (default SIGTERM) and
+ * settles only in the node callback, i.e. only when the child EXITS. A reflex
+ * that ignores SIGTERM therefore never settles: measured on this box with a
+ * child whose first line is `trap '' TERM; sleep 600` and `timeoutMs: 800`, the
+ * promise was still pending at 6 s and the node process never exited (124 under
+ * `timeout 25`). Pi awaits handler promises and has no hook timeout of its own,
+ * so that hangs the TURN — the one thing this file promises can never happen
+ * (`FAIL-OPEN CONTENT, NEVER A BROKEN TURN`). The bound is therefore OUR OWN
+ * timer: it resolves the promise FIRST (so resolution can never depend on the
+ * child) and only then SIGKILLs the child, which cannot be trapped.
  */
 export function runReflexCommand(
   command: string,
@@ -395,23 +411,38 @@ export function runReflexCommand(
   return new Promise((resolve) => {
     const args = ["volunteer", "--json"];
     if (sessionId) args.push("--session-id", sessionId);
+    let settled = false;
+    let watchdog: ReturnType<typeof setTimeout> | undefined;
+    const settle = (r: {
+      ok: boolean;
+      stdout: string;
+      error: string;
+      timedOut: boolean;
+    }): void => {
+      if (settled) return;
+      settled = true;
+      if (watchdog !== undefined) clearTimeout(watchdog);
+      resolve(r);
+    };
+    // No `timeout` option: execFile's own bound would race this one and its
+    // SIGTERM cannot be trapped-out but also cannot be escalated, so it is our
+    // timer that owns the deadline (and the SIGKILL).
     const child = execFile(
       command,
       args,
-      { timeout: timeoutMs, maxBuffer: 1 << 20 },
+      { maxBuffer: 1 << 20 },
       (error, stdout, stderr) => {
         if (error) {
-          // A TIMEOUT is not a failure of the install, and node reports both
-          // through the same `error` — with an EMPTY stderr, so the existing
-          // `stderr || error.message` fell through to the useless
-          // "Command failed: …" body. `execFile` sets `killed` only when IT
-          // killed the child, and leaves `code` null for a signal death;
+          // A TIMEOUT arrives here only when the child died of a signal it was
+          // NOT sent by the watchdog (the watchdog settles first, so this is a
+          // no-op then). `execFile` leaves `code` null for a signal death;
           // `maxBuffer` overflow also sets `killed` but carries
           // `code: "ERR_CHILD_PROCESS_STDIO_MAXBUFFER"`, so excluding a non-null
           // code keeps a real overflow reportable (measured against node 24).
-          const timedOut = error.killed === true && error.code === null &&
-            error.signal === "SIGTERM";
-          resolve({
+          const timedOut = settled ||
+            (error.killed === true && error.code === null &&
+              error.signal === "SIGTERM");
+          settle({
             ok: false,
             stdout: String(stdout ?? ""),
             error: String(stderr ?? "").trim() ||
@@ -420,9 +451,28 @@ export function runReflexCommand(
           });
           return;
         }
-        resolve({ ok: true, stdout: String(stdout ?? ""), error: "", timedOut: false });
+        settle({ ok: true, stdout: String(stdout ?? ""), error: "", timedOut: false });
       },
     );
+    watchdog = setTimeout(() => {
+      // Resolve FIRST — a settled promise is what keeps the turn moving; the
+      // kill below is cleanup for a child we no longer wait on.
+      settle({
+        ok: false,
+        stdout: "",
+        error: `timed out after ${timeoutMs}ms`,
+        timedOut: true,
+      });
+      try {
+        child?.kill?.("SIGKILL");
+      } catch {
+        // A child that already exited is not an error: nothing to reap.
+      }
+    }, timeoutMs);
+    // A pending budget must never be the reason Pi's process stays alive.
+    if (typeof watchdog === "object" && typeof watchdog?.unref === "function") {
+      watchdog.unref();
+    }
     // A CLI that exits before reading stdin raises EPIPE on the write; that is
     // the failure the callback already reports, never an uncaught throw.
     child?.stdin?.on?.("error", () => {});
