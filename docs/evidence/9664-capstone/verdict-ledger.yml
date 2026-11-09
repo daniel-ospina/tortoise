@@ -371,7 +371,15 @@ measured_at:
 #     deployed sha is an ancestor of this tree (deploy lag 60 — re-measured ABOVE, in the
 #     version command block; the figure this sentence used to carry, 8, was an older
 #     DEPLOYMENT, not a different fact);
-#   * the contract layer is green at this head, MEASURED BY EXECUTION in this pass.
+#   * the contract layer is NOT fully green at this head, and the exact state is MEASURED BY
+#     EXECUTION in this pass: `611 passed / 5 failed` of 616 collected, the 5 being S2's
+#     `TestCreateGraphWithPacks` group refused `503 … default ACL user is open (nopass)` by the
+#     private lane container — an environment refusal this diff cannot reach, so no graded row
+#     moves on them, and S2's own row states it in full (`#10992`/`#10141` track the container's
+#     missing `requirepass`). ⛔ THIS BULLET USED TO READ "the contract layer is green at this
+#     head", which is the exact error S2's row was corrected for — a summary sentence must not
+#     contradict the row it summarises, and a reader taking this line alone got the opposite of
+#     the finding twenty lines below.
 #     PROVENANCE, stated per number rather than as one blanket claim, because a
 #     blanket claim is what a reader cannot check:
 #       - the run below and the ledger-pin run are BOTH recorded through

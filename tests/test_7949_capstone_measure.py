@@ -10900,6 +10900,39 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     return out
 
 
+_CITE_QUALIFIER_PATTERN = (
+    # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
+    # cite in the spelling §2 ALREADY USES three times (`extractor_v2.py:11731-11732` at
+    # `80c912244`, `:12302-12303` at `d69faaf38`, `sdk.py:16516-16530`), and without the
+    # optional `(?:-\d+)?` tail the helper reported every one of them as UNQUALIFIED — a
+    # false BLOCK of a conformant edit whose own message told the author to add the base
+    # they had already added (measured by a fresh-context review at `f885a51663`).
+    # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
+    # yields no qualifier and still reds, so the range spelling cannot become a false
+    # PASS — the qualifier is what this group captures, never the tail.
+    r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])"
+)
+
+
+def _cite_qualifier_matches(region: str) -> list[tuple[int, str, str]]:
+    """`(start_offset, number, qualifier)` for every QUALIFIED `:NNN` cite in `region`.
+
+    ⛔ THE ONE SCAN, so the classifier's list form and `_unqualified_number_cites`' offset form
+    cannot drift apart. The offset is that of the `:` the qualifier belongs to, which is what
+    lets a caller pair a base with the occurrence it QUALIFIES instead of with whichever cite
+    happens to sit beside it. `_cite_qualifiers` used to call `re.findall` directly, so the one
+    caller that needed positions had no way to get them and re-derived qualification from a
+    forward window — the defect `_unqualified_number_cites` now avoids by construction.
+    """
+    out: list[tuple[int, str, str]] = []
+    for m in re.finditer(_CITE_QUALIFIER_PATTERN, region):
+        n, at_q, paren_q = m.group(1), m.group(2), m.group(3)
+        q = (at_q or paren_q).strip("*`().,;")
+        if q:
+            out.append((m.start(), n, q))
+    return out
+
+
 def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     """`(number, qualifier)` for every `:NNN` cite in `region` that CARRIES one — both spellings.
 
@@ -10914,7 +10947,6 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     A region with no qualified cite returns `[]`, which a caller MUST read as "this arm would be
     inert here" — never as "there is nothing to check".
     """
-    out: list[tuple[str, str]] = []
     # ⛔ The `at` branch and the parenthesised branch are SEPARATE captures because they have
     # DIFFERENT terminators and DIFFERENT gaps:
     #   * an `at` cite's qualifier ends at a word boundary, and the cite may be WRAPPED — the
@@ -10933,22 +10965,9 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     # review). ⛔ And barring the newline for BOTH branches (the first fix attempt) blinded the
     # `at` branch on exactly the wrapped typography this record uses — measured, and it is the
     # state the same review caught in the second round.
-    for n, at_q, paren_q in re.findall(
-            # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
-            # cite in the spelling §2 ALREADY USES three times (`extractor_v2.py:11731-11732` at
-            # `80c912244`, `:12302-12303` at `d69faaf38`, `sdk.py:16516-16530`), and without the
-            # optional `(?:-\d+)?` tail the helper reported every one of them as UNQUALIFIED — a
-            # false BLOCK of a conformant edit whose own message told the author to add the base
-            # they had already added (measured by a fresh-context review at `f885a51663`).
-            # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
-            # yields no qualifier and still reds, so the range spelling cannot become a false
-            # PASS — the qualifier is what this group captures, never the tail.
-            r":(\d+)(?:-\d+)?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])",
-            region):
-        q = (at_q or paren_q).strip("*`().,;")
-        if q:
-            out.append((n, q))
-    return out
+    # The PATTERN and the scan both live in `_cite_qualifier_matches` — kept as ONE scan so the
+    # offset form this classifier does not need cannot drift from the one it does.
+    return [(n, q) for _pos, n, q in _cite_qualifier_matches(region)]
 
 
 def _unqualified_number_cites(region: str, number: str) -> list[int]:
@@ -10967,7 +10986,14 @@ def _unqualified_number_cites(region: str, number: str) -> list[int]:
         whenever the derived live number happens to equal the number the pair arm pins.
 
     One qualifier discharges ONE occurrence, in the two spellings `_cite_qualifiers` reads — so a
-    bare re-stale printed beside a base-qualified cite of the same number still reds. Returns `[]`
+    bare re-stale printed beside a base-qualified cite of the same number still reds. ⛔ The
+    FIRST implementation of this sentence did not honour it in the mirrored order: it ran the
+    classifier over a FORWARD WINDOW from each site and then discharged `own[:count]`, so when a
+    bare cite was printed BEFORE its base-qualified twin the bare one inherited the neighbour's
+    base (silently discharged) and the QUALIFIED one was returned as the offender — measured,
+    `` `:12944` bare, see `:12944` at `b3c2b1a` `` returned `[20]`, i.e. the diagnostic sent the
+    fixer to edit the conformant cite. Qualification is now read from the cite's OWN start
+    offset, so the pairing cannot be inherited. Returns `[]`
     when every occurrence is base-qualified, or when the region cites `number` NOWHERE (the
     inverted reading of this sentence — "or when the region cites `number` at all" — was the
     opposite of the code and is corrected here; measured by a fresh-context review at
@@ -10976,16 +11002,14 @@ def _unqualified_number_cites(region: str, number: str) -> list[int]:
     sites = [m.start() for m in re.finditer(rf":{re.escape(number)}\b", region)]
     if not sites:
         return []
-    own = [
-        pos for pos in sites
-        if (_own := _cite_qualifiers(region[pos:pos + 60]))
-        and _own[0][0] == number
-        and re.fullmatch(r"[0-9a-f]{7,40}", _own[0][1])
-    ]
-    discharged = min(len(own), sum(
-        1 for n, q in _cite_qualifiers(region)
-        if n == number and re.fullmatch(r"[0-9a-f]{7,40}", q)))
-    return [pos for pos in sites if pos not in set(own[:discharged])]
+    # ⛔ A BASE IS PAIRED WITH THE OCCURRENCE IT STARTS AT: a site is discharged only when a
+    # hex qualifier BEGINS at that exact offset. Neither a forward window nor a count/slice can
+    # express that, which is why both were removed rather than tuned.
+    own = {
+        pos for pos, n, q in _cite_qualifier_matches(region)
+        if n == number and re.fullmatch(r"[0-9a-f]{7,40}", q)
+    }
+    return [pos for pos in sites if pos not in own]
 
 
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
@@ -11148,6 +11172,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "of the same number must not ride its base (the ±window false pass)")
     assert _unqualified_number_cites("`:13011` at HEAD", "12944") == [], (
         "the arm names ITS number — a neighbour's qualifier is not this cite's")
+    assert _unqualified_number_cites("`:12944` bare, see `:12944` at `b3c2b1a`", "12944") == [1], (
+        "⛔ THE MIRROR ORDER — a BARE cite printed BEFORE its base-qualified twin. Only the "
+        "qualified-first order was asserted, so a forward window that let the bare cite inherit "
+        "the neighbour's base went unnoticed while NAMING the qualified cite as the offender "
+        "(measured: `[20]`, the conformant one). A diagnostic that sends the fixer to edit the "
+        "cite it should accept is the same defect class this helper replaced the region-wide ban "
+        "for, so both orders are pinned")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
