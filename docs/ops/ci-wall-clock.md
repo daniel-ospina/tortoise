@@ -241,9 +241,9 @@ plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed s
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
 (`tests/test_10999_batch_story_relations.py`), **27 m** until the 2026-11-09 sweep re-weighted the fast
-pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards takes it to
-**28 m**, because one more file in `fast_pool()` re-packs the worst
-shard across a whole minute, and this paragraph restates that emission rather than owning it:
+pool, and **32 m** at 9 shards on that refreshed map — one more file in `fast_pool()`
+re-packs the worst shard across a whole minute — and re-packing into 10 shards takes it to
+**28 m**, and this paragraph restates that emission rather than owning it:
 `tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
 reds the moment the two disagree again.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
@@ -254,7 +254,7 @@ not fit — but on the measured rates, not on an assumption: this run's degraded
 sustained (3,019,898,880 B in 3,412 s, cancelled at 77.8% of the payload), while the same runner
 class completed a cold 3,616,385,308 B save in 12 m 21 s four hours later (PR 11036, job 127280762096,
 `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` ≈ 4.9 MB/s end to end) — i.e. ~13 m healthy and
-~57 m+ degraded against the ~10.4 m of room the SUM leaves. Splitting the payload is what brings it
+~57 m+ degraded against the ~8.4 m of room the SUM leaves. Splitting the payload is what brings it
 inside. `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step` pins
 that shape (one bounded writer ON `~/.cache/uv`, no implicit post step — and no OTHER unbounded cache write anywhere in the job except the admitted `Save pytest last-failed state (#6142)`), and the watchdog comes from
 `uv run python tools/ci_selection.py --emit-push-matrix`, never from `WATCHDOG_FLOOR_MIN`: 19 is the
@@ -574,11 +574,11 @@ matrices, so it applies to a fold's validation run exactly as to any other PR. T
 a fold is the one run this repo deliberately gives extra capacity to:
 `docs/ops/batch-integration.md` mechanism 3 ("CI priority for the fold") gives the fold's matrix
 rows their own runner class, and `tools/ci_selection.py::fast_matrix_include` states that
-exemption's scope in its own words — "A fold gets priority on the eight legs that carry the wall",
-the fast matrix's 9 shards minus the `canary_producer` row, which stays on the hosted label for the
-streak. Those eight are legs this cap bounds, so while the class seam is engaged (it is OFF by
+exemption's scope in its own words — "A fold gets priority on the nine legs that carry the wall",
+the fast matrix's 10 shards minus the `canary_producer` row, which stays on the hosted label for the
+streak. Those nine are legs this cap bounds, so while the class seam is engaged (it is OFF by
 default: with `CI_FOLD_RUNNER_LABELS` unset every row resolves to its own runner) a fold with
-dedicated capacity for all 8 still runs them **3 at a time**, and its own validation run carries the
+dedicated capacity for all 9 still runs them **3 at a time**, and its own validation run carries the
 matrix-band delta above (+17.9 m p50 / +23.2 m max). This is recorded as a KNOWN COST of #6744, not
 as a decision that a fold run should be capped — the cap's justification ("no single PR may hold the
 pool") is a fairness bound between concurrent PRs, and a fold is not competing with them that way.

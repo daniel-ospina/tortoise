@@ -436,7 +436,7 @@ jobs:
         # the non-gating lane (each entry → its resolved file count) and the
         # shard → file-count map the run is about to expand. A reader can then
         # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
-        # nine shards instead of inferring it from a total.
+        # ten shards instead of inferring it from a total.
         #
         # Report-only on purpose: it reads the same `push_legs()` derivation the
         # matrix step above emits, and it exits 0 on every path. The gate on this
@@ -1032,16 +1032,18 @@ jobs:
       #
       # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
       # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
-      # any cache-write term is 52.6 m — 10 m last-failed pre-phase + 28 m emitted
+      # any cache-write term is 51.6 m — 10 m last-failed pre-phase + 28 m emitted
       # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
-      # uncapped pre-suite + 0.38 m last-failed save — so <= 7.4 m is available;
+      # uncapped pre-suite + 0.38 m last-failed save — so <= 8.4 m is available;
       # this shape takes 8 (1 m prune + 7 m save), SUM 59.6, x 1.5 = 89.5.
       # (The watchdog read 32 m at `fast_shards: 9` on the 2026-11-09 map; #11602
-      # raised it to 10, which re-packs the worst shard to 28 m. Two numbers, two
-      # owners: the emission is `tools/ci_selection.py --emit-push-matrix`'s, and
-      # `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
-      # is what holds this paragraph to it — it parses §2's phrase, so neither copy
-      # may be restated by hand.)
+      # raised it to 10, which re-packs the worst shard to 28 m. The emission is
+      # `tools/ci_selection.py --emit-push-matrix`'s. ⛔ §2 of the doc is the
+      # PINNED copy — `tests/test_ci_selection.py::test_the_test_job_carries_no_
+      # unbounded_cache_post_step` parses its `the emitted <N> m per-shard` phrase.
+      # THIS comment is unpinned prose: nothing reads it, which is exactly how it
+      # sat at 27 m / 58.6 / 87.9 through the 2026-11-09 sweep (recorded on #11605).
+      # Do not restate its numbers without re-deriving them.)
       #
       # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
       # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
@@ -1050,17 +1052,17 @@ jobs:
       # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
       # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
       # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
-      # against the ~10.4 m of room: over the bound either way, but by ~1.3x rather
+      # against the ~8.4 m of room: over the bound either way, but by ~1.6x rather
       # than 8x. Splitting the payload is what brings it inside — not an assumption
       # that this pool cannot write it.
       #
       # FAIL-OPEN IN EVERY BRANCH: a prune or save that aborts on its bound is a
       # MISS, never a red — both are `continue-on-error: true` — and the save is
       # gated on the restore's own `cache-hit`, so a HIT writes nothing at all.
-      # On a MISS the cost is that all nine shards tar their payload before one of
+      # On a MISS the cost is that all ten shards tar their payload before one of
       # them can win the key: `@actions/toolkit` `cache.ts` orders `createTar()`
       # before `reserveCache()`, and a lost reservation is logged and exits 0.
-      # Nothing blocks and nothing reds, but ~8 shards' work is wasted per
+      # Nothing blocks and nothing reds, but ~9 shards' work is wasted per
       # cold key (the first run after this lands, and every `uv.lock` bump) — which
       # is why the bound is 7 m and not 30.
       - name: Restore pip dependency cache (#7612, read-only — #11063)
@@ -2045,7 +2047,7 @@ jobs:
       # bigger archive for a still-bounded save, and an aborted save leaves a
       # MISS. Neither can red this leg, and neither withholds a required check —
       # which is the whole defect (#11063/#5219). 1 + 7 = 8 m is what arm 2 has
-      # room for (SUM 49.6 -> 57.6, x 1.5 = 86.5 against the 90 m cap). The cache-LOCK wait is bounded to 10 s INLINE (`UV_LOCK_TIMEOUT`), because `uv`'s default is 300 s — longer than this step may live, so the 1 m bound would be inert.
+      # room for (SUM 51.6 -> 59.6, x 1.5 = 89.5 against the 90 m cap). The cache-LOCK wait is bounded to 10 s INLINE (`UV_LOCK_TIMEOUT`), because `uv`'s default is 300 s — longer than this step may live, so the 1 m bound would be inert.
       - name: Prune the uv cache before saving it (#11063)
         if: always()
         continue-on-error: true

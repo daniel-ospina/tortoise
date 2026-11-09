@@ -14390,7 +14390,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the uv save's `timeout-minutes` is {save_bound!r}; it must be a positive "
         "integer <= 8. Arm 2 of `docs/ops/ci-wall-clock.md` §2 caps the `test` "
         "job's SUM at 60 m (x1.5 <= the 90 m cap) and the measured SUM without a "
-        "cache-write term is 49.6 m, so the prune + save terms have <= 10.4 m between "
+        "cache-write term is 51.6 m, so the prune + save terms have <= 8.4 m between "
         "them; a larger bound does not make the payload smaller, it only spends "
         "the margin a real regression needs.")
     save_paths = [ln.strip() for ln in _path_of(uv_save).splitlines() if ln.strip()]

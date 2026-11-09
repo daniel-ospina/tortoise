@@ -5292,7 +5292,7 @@ def non_gating_report(manifest: dict) -> str:
     identical from a green run. This prints, on every run, which lane entries are
     non-gating, how many files each one resolves to, and the shard → file-count
     map the run is about to expand — so a reader can SEE that the 42 files are
-    absent from all 9 shards rather than infer it from a total.
+    absent from every gating shard rather than infer it from a total.
     """
     lane = on_demand_files(manifest)
     prefixes = on_demand_subtree_prefixes(manifest)
@@ -5611,7 +5611,7 @@ def fast_matrix_include(shards: list[dict], routing: str | None = None) -> dict:
         # `40986603502` (head `5a2ae6aa1`) had `test (i)`, the canary, taken by
         # `pi-runner-vm-5` (ARM64) and killed at 32m12s of a 30m budget
         # (`docs/ops/ci-runner-x64.md:847`, `:888`).
-        # A fold gets priority on the eight legs that carry the wall; the producer
+        # A fold gets priority on the nine legs that carry the wall; the producer
         # stays where the streak expects it. `warn=(i == 0)` keeps ONE annotation for
         # the whole matrix (`::warning::` is capped at 10 per step).
         is_producer = i == len(shards) - 1
