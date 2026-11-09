@@ -596,14 +596,30 @@ _HELD_CAP_CLAUSES = (
     "the refusal is terminal",  # a stock, not a flow
     "backoff is not a remedy",  # the retry branch that must not be shared
     "a `max_points` override",  # the remedy that is forbidden
-    "no backfill of the old graph",  # survives the 2026-11-02 amendment
-    "journalled whole-graph delete",  # removal stays gated, not authorised today
+    "The field is not out of an operator's hands",  # an override is reachable
+    "permits removing that one graph",  # the 2026-11-02 amendment authorises it
+    "after a count-verified export to durable local storage",  # ...only after this
+    "and with a journalled delete",  # ...and only journalled
+    "no backfill of the old graph",  # survives the amendment
+    "no reading of its 402 as a defect",  # survives the amendment
 )
 
-#: The anchor that binds the clause to §4. It is a clause-only sentence, not the
-#: `OVERRIDES` marker: a marker alone could sit in §4 as a decoy while the clause
-#: itself was moved out, which is exactly the relocation this pin exists to catch.
-_HELD_CAP_ANCHOR = "backoff is not a remedy"
+#: The claims the ruling's 2026-11-02 amendment SUPERSEDED, and the two the first
+#: relay got wrong. Asserted ABSENT, because a presence-only pin cannot catch the
+#: superseded sentence being put back beside the corrected one: the phrases the
+#: pin looks for survive verbatim in the amended text, so the page could state
+#: both the permission and the withdrawn prohibition and stay green.
+_HELD_CAP_SUPERSEDED = (
+    "only copy",  # the pre-amendment half: an export exists, so this is false
+    "sole writer",  # false: `sdk.org_update` accepts the field
+    "never on an operator override",  # false, and the opposite of the ruling
+)
+
+#: The clause that binds the finding to §4 — its own heading, which no other
+#: section carries. Deliberately NOT one of the phrases `_HELD_CAP_CLAUSES`
+#: checks, so this pin can fail on its own rather than only in the presence
+#: pin's shadow.
+_HELD_CAP_TITLE = "### A held cap is not a defect — one tenant is refused on purpose"
 
 _SEC4_HEADING = "## 4. Graph size (hosted node cap)"
 _SEC4_NEXT_HEADING = "## 5. Retrieval latency"
@@ -666,13 +682,47 @@ def test_the_held_capture_cap_states_that_clearing_it_is_refused():
 def test_the_held_cap_clause_is_in_the_section_that_owns_the_cap():
     """Relocated into §9 or the appendix, it stops being read at the cap.
 
-    Anchored on a clause-only sentence rather than on the `OVERRIDES` marker: a
-    lone marker left in §4 would satisfy the marker test while the clause sat at
+    Anchored on the clause's own heading rather than on the `OVERRIDES` marker: a
+    lone marker left in §4 would satisfy a marker test while the clause sat at
     the end of the file.
     """
-    section = _collapsed(_section4(_read(CAPACITY)))
-    assert _HELD_CAP_ANCHOR in section, (
+    text = _read(CAPACITY)
+    assert _HELD_CAP_TITLE in text, (
+        "docs/capacity.md no longer carries the held-cap clause heading "
+        f"{_HELD_CAP_TITLE!r} — the clause is pinned to §4 by this heading, so a "
+        "retitled clause must be re-pinned here rather than silently escaping "
+        "the placement check"
+    )
+    assert _HELD_CAP_TITLE in _section4(text), (
         "the #10175 refusal clause is no longer inside §4 (Graph size, the "
         "hosted node cap) — it is the section a lane holding a 402 reads, and "
         "the clause is load-bearing only where the cap is documented"
+    )
+
+
+def test_the_held_cap_clause_does_not_restate_a_superseded_claim():
+    """The relay must not carry the claim AND its retraction side by side.
+
+    The owner's 2026-11-02 amendment superseded the no-prune prohibition for one
+    graph, and the first relay's "sole writer" claim was simply false. Presence
+    pins cannot catch either regression: they look for phrases that the corrected
+    text keeps, so a sentence restoring the superseded claim passes them. This is
+    the half that fails when the old text is put back.
+
+    It is a pin on the specific superseded WORDINGS, not a proof that no wording
+    can restate them: a rewrite that keeps the sentence asserting an override is
+    reachable and only rewords a closing clause stays green, which is why the
+    presence pin binds that sentence as well.
+    """
+    section = _collapsed(_section4(_read(CAPACITY))).lower()
+    restated = [claim for claim in _HELD_CAP_SUPERSEDED if claim in section]
+    assert not restated, (
+        "docs/capacity.md §4 restates a claim this ruling already corrected: "
+        f"{restated}. The graph is the only *sample* of the old extractor's "
+        "output, not the only copy (an export is verified by count and the "
+        "removal is journalled, #10175 amendment 2026-11-02); and an operator "
+        "override is reachable — a stored `max_points` column is honoured with "
+        "precedence over `graph_size_cap` and `sdk.org_update` accepts the "
+        "field — which is why the ruling forbids it rather than claiming it "
+        "cannot be done."
     )
