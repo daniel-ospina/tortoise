@@ -1183,6 +1183,123 @@ def declared_test_counts(keys, repo_root: Path) -> dict[str, int]:
     return counts
 
 
+#: A `pytest --collect-only -q` nodeid line (`<path>.py::<test>`). `-q` prints
+#: exactly one per collected testcase and nothing else per line, so the count is
+#: taken from the lines rather than by subtracting headers.
+_COLLECTED_NODEID_RE = re.compile(r"^\S+\.py::\S")
+#: pytest's own summary (`487 tests collected in 2.43s`), used as a CROSS-CHECK:
+#: when it disagrees with the nodeid lines this function refuses the key instead
+#: of guessing which reading counted the file.
+_COLLECTED_SUMMARY_RE = re.compile(r"^(\d+) tests? collected")
+
+
+def collected_test_counts(keys, repo_root: Path,
+                          *, timeout: int = 900) -> dict[str, int]:
+    """How many testcases PYTEST ITSELF collects for each manifest key (#11607).
+
+    THE DEFECT THIS CLOSES. `declared_test_counts` is the coverage witness's
+    denominator, and it OMITS any file carrying a `parametrize` marker (a `def`
+    count is a FLOOR of the collected count, so admitting it once licensed a 10x
+    discount — #9134). The unremarked consequence is that the row becomes
+    MONOTONIC: an absent denominator means UNKNOWN, UNKNOWN means "raisable,
+    never lowerable", so a genuinely FASTER parametrised file can never have its
+    row lowered. Measured on `tests/test_ci_selection.py` at #11602: a 4.25x
+    speedup (554.33 s -> 130.21 s) left the row at 545.1 and the wall pin still
+    red, and the note written over it ("no declared testcase count … the reading
+    is a LOWER bound; kept 545.1") was FALSE — the reading was a full census of
+    486 of the file's 486 testcases. The only fixes left to a lane were the two
+    this repo forbids: split a 20 k-line file, or move an owner-set ceiling.
+
+    WHY PYTEST AND NOT ANOTHER AST GUESS. The floor problem is inherent to
+    reading `def`s: a parametrised `def` is N collected nodeids, and the AST sees
+    1. Collection answers the question the witness actually asks ("did the
+    reading see the whole file?") from the SAME engine that produced the
+    reading's node set — so it is exact for every shape the AST scan has to
+    enumerate and refuse (`parametrize` on a method or a class-body `pytestmark`,
+    a marker bound to a name, a parametrised fixture, a `Test*` base, an alias, a
+    `setattr`-injected method, a `params=` conftest fixture) and for the residual
+    that scan DISCLOSES it cannot see (`pytest_generate_tests`, a decorator that
+    adds cases through a call). It is therefore not a second opinion about the
+    tree; it is the tree's own answer.
+
+    COST, and why the caller does not pay it for every row: one collection per
+    key. `tests/test_ci_selection.py` (20 k lines, 487 tests) collects in 2.4 s;
+    the caller (`main`, `--refresh-durations`) probes only the rows a reading
+    would DISCOUNT, which is a handful per sweep. A key whose collection fails is
+    ABSENT from the result — and absent stays UNKNOWN, i.e. exactly today's
+    raisable-never-lowerable behaviour. This function therefore cannot license a
+    discount by failing.
+
+    TWO CROSS-CHECKS keep a broken probe from becoming a denominator: the
+    subprocess must exit 0, and pytest's own `N tests collected` summary must
+    agree with the nodeid lines. A key that fails either is dropped, never
+    guessed.
+    """
+    root = Path(repo_root) / "tests"
+    counts: dict[str, int] = {}
+    for key in keys:
+        candidate = root / key
+        if not candidate.is_file():
+            continue
+        try:
+            proc = subprocess.run(
+                [sys.executable, "-m", "pytest", str(candidate),
+                 "--collect-only", "-q", "-p", "no:cacheprovider"],
+                cwd=str(repo_root), capture_output=True, text=True,
+                timeout=timeout)
+        except (OSError, subprocess.SubprocessError):
+            continue
+        if proc.returncode != 0:
+            continue
+        nodeids = sum(1 for line in proc.stdout.splitlines()
+                      if _COLLECTED_NODEID_RE.match(line))
+        summary = None
+        for line in reversed(proc.stdout.splitlines()):
+            m = _COLLECTED_SUMMARY_RE.match(line.strip())
+            if m:
+                summary = int(m.group(1))
+                break
+        if not nodeids or (summary is not None and summary != nodeids):
+            continue
+        counts[key] = nodeids
+    return counts
+
+
+def _committed_duration_rows(manifest_text: str) -> dict[str, float]:
+    """key -> the weight the map currently commits, read through the SAME
+    locator the renderer writes through (`_locate_durations_block` +
+    `_DURATION_LINE_RE`), so "would this reading discount the row?" cannot
+    disagree with the row the render will actually rewrite."""
+    lines = manifest_text.split("\n")
+    _, entries = _locate_durations_block(lines)
+    committed: dict[str, float] = {}
+    for key, index in entries.items():
+        match = _DURATION_LINE_RE.match(lines[index])
+        if match is not None:
+            committed[key] = float(match.group("value"))
+    return committed
+
+
+def discount_candidate_keys(weights: dict[str, float], manifest_text: str,
+                            declared: dict[str, int]) -> list[str]:
+    """The keys whose AST denominator is absent AND whose reading would LOWER
+    the committed row — the only rows a collection probe can change the verdict
+    for (#11607).
+
+    Scope is deliberate on both halves. A key WITH an AST denominator is decided
+    by that denominator already (the AST path is unchanged), and a key whose
+    reading would RAISE the row needs no proof at all. Probing anything else
+    would pay a subprocess for an answer the renderer cannot use.
+
+    A key with no committed row is not a candidate either: it is an ADD, and an
+    absent denominator has never blocked an add.
+    """
+    committed = _committed_duration_rows(manifest_text)
+    return sorted(k for k, seconds in weights.items()
+                  if k not in declared and k in committed
+                  and seconds < committed[k])
+
+
 def _is_fixture_decorated(node: object) -> bool:
     """True when a def carries `@pytest.fixture` (so pytest registers it as a
     fixture, never as a testcase)."""
@@ -2696,7 +2813,8 @@ def _held_equal_pins(manifest_text: str) -> dict[str, str]:
 def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                               captured_at: str, *,
                               coverage: dict[str, tuple[int, int]] | None = None,
-                              sample_label: str | None = None
+                              sample_label: str | None = None,
+                              collected: dict[str, int] | None = None
                               ) -> tuple[str, dict]:
     """Return (new manifest text, stats). Pure: callers own the write.
 
@@ -2728,6 +2846,18 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
     lowered). An absent `coverage` (`None`) is the different case — the caller
     supplied no witness at all, so the pre-#9134 adopt-always behaviour stands:
     a caller that has no witness must not be reported as having one.
+
+    `collected` IS THE SECOND DENOMINATOR (#11607). It maps a key to the count
+    PYTEST collects for it, and it is consulted ONLY for a key whose `declared`
+    (AST) denominator is absent or unprovable — i.e. the `parametrize` class the
+    AST scan deliberately omits, which today means UNKNOWN and "raisable, never
+    lowerable". With it, a parametrised file's row can be LOWERED when the
+    reading provably saw every testcase collection reports, which is the only
+    way an honest speedup can ever reach the map. It never weakens the AST
+    denominator: a key that HAS one is decided by it, exactly as before, and a
+    key absent from BOTH is still UNKNOWN. The callers supply it from
+    :func:`collected_test_counts`, fail-closed — a failed probe contributes no
+    entry, so it can never license a discount.
 
     `sample_label` names the basis written onto every row this render RE-BASES
     (`ci-timing junit-census+top-15 2026-10-19 (run 39191149586)`), in the shape
@@ -2826,6 +2956,22 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
         previous = round(previous, 1)
         measured = round(max(float(seconds), DURATIONS_VALUE_FLOOR_S), 1)
         observed, declared = coverage_by_key.get(key, (0, 0))
+        # #11607: a DENOMINATOR THAT IS NOT A FLOOR. The AST count above is
+        # omitted for a `parametrize` file because a `def` count is a floor of
+        # what pytest collects; the cost of that omission was a MONOTONIC row (an
+        # honest 4.25x speedup on `tests/test_ci_selection.py` could not lower
+        # 545.1, so the wall pin it fed could never clear). A collection count is
+        # the same quantity the reading counts, so a reading that saw every
+        # collected testcase proves full coverage exactly as an AST count does.
+        # Consulted ONLY where the AST denominator could not decide, so the
+        # `declared > 1` / `observed >= declared` rule below and the single-test
+        # guard are unchanged for every key that has one.
+        declared_by_collection = False
+        if collected and declared <= 1:
+            probe = collected.get(key, 0)
+            if probe > 1:
+                declared = probe
+                declared_by_collection = True
         # LOWER BOUND, never a discount: a reading that saw fewer testcases than
         # the file declares cannot establish that the file is CHEAPER than the
         # recorded figure, so the recorded figure stands and the reading is
@@ -2968,7 +3114,8 @@ def render_refreshed_manifest(manifest_text: str, weights: dict[str, float],
                          f"as a discount; kept {previous:.1f}")
             elif reason is None:
                 basis = (f"{sample_label}: the reading saw {observed} of {declared} "
-                         f"testcases = {measured:.1f}s in the largest single job "
+                         f"{'testcases pytest collects' if declared_by_collection else 'testcases'} "
+                         f"= {measured:.1f}s in the largest single job "
                          f"(not summed across legs), a LOWER bound; kept "
                          f"{previous:.1f}")
             else:
@@ -3438,15 +3585,18 @@ def _is_the_repo_manifest(manifest_path: Path) -> bool:
 def refresh_durations(manifest_path: Path, weights: dict[str, float],
                       captured_at: str, *, dry_run: bool = False,
                       coverage: dict[str, tuple[int, int]] | None = None,
-                      sample_label: str | None = None) -> int:
+                      sample_label: str | None = None,
+                      collected: dict[str, int] | None = None) -> int:
     """Render + validate + (unless dry-run) write the refreshed map.
 
     `coverage` / `sample_label` are passed straight through to
     :func:`render_refreshed_manifest`, which owns their meaning: a partial
     reading may raise a weight but never lower one, and a re-based row records
-    the basis it actually came from. `main`'s `--refresh-durations` supplies
-    both from the sampled logs; a caller that supplies neither gets the
-    pre-#9134 adopt-always behaviour.
+    the basis it actually came from. `collected` (#11607) is the second
+    denominator, consulted only where the AST one cannot decide, so a genuine
+    speedup on a `parametrize` file can reach the map. `main`'s
+    `--refresh-durations` supplies all three from the sampled logs; a caller that
+    supplies none gets the pre-#9134 adopt-always behaviour.
 
     Exit: 0 written/validated · 1 a manifest-side gate would fail · 2 UNKNOWN
     (no keys, key agreement, unreadable manifest) — never 0 on an unobserved
@@ -3467,7 +3617,7 @@ def refresh_durations(manifest_path: Path, weights: dict[str, float],
     try:
         new_text, stats = render_refreshed_manifest(
             manifest_text, weights, captured_at,
-            coverage=coverage, sample_label=sample_label)
+            coverage=coverage, sample_label=sample_label, collected=collected)
         # The readback runs AFTER the renderer returns, so it needs the same
         # mapping as the render itself: `_manifest_of` raises
         # DurationsBridgeError for a document it cannot parse back. This once
@@ -4150,8 +4300,39 @@ def main() -> int:
                 "(`--manifest config/ci-surfaces.yml` from the repo root).",
                 file=sys.stderr,
             )
-        coverage = {path: (m["tests"], declared[path])
-                    for path, m in measurements.items() if path in declared}
+        # ⛔ EVERY MEASURED FILE CARRIES ITS OBSERVED COUNT (#11607). This used
+        # to be filtered to `if path in declared`, so a `parametrize` file — the
+        # one class the AST scan omits — reached the renderer as `(0, 0)`, i.e.
+        # "the reading saw nothing", which is both false and the reason its row
+        # could never move down. `declared` stays 0 for those keys; the renderer
+        # decides them from `collected` below, and a key absent from BOTH is still
+        # UNKNOWN (raisable, never lowerable).
+        coverage = {path: (m["tests"], declared.get(path, 0))
+                    for path, m in measurements.items()}
+        # #11607 — THE SECOND DENOMINATOR, probed only where it can change a
+        # verdict. `declared_test_counts` cannot count a parametrised file, so a
+        # reading on one was permanently a "LOWER bound" and its row permanently
+        # monotonic, even when the file genuinely got 4.25x faster (#11602's
+        # `test_ci_selection.py`). `collected_test_counts` asks pytest itself, but
+        # only for the rows this sweep would DISCOUNT and the AST count cannot
+        # decide — so a sweep pays a collection for the handful of rows at issue
+        # and for nothing else. Fail-closed: a key whose probe fails is absent
+        # from `collected`, which leaves it UNKNOWN, i.e. today's behaviour.
+        # The probe needs the COMMITTED rows, which means reading the manifest — but
+        # an unreadable (or missing, or directory) manifest is `refresh_durations`'s
+        # own documented refusal (`2: manifest not found` / `2: manifest not
+        # readable`), and reading it here FIRST turned those into a traceback-shaped
+        # `2: FileNotFoundError: …` line. So a failed read skips the probe entirely
+        # and lets the callee diagnose it, which is the behaviour those pins assert.
+        try:
+            probe_manifest_text = manifest_path.read_text()
+        except OSError:
+            probe_manifest_text = ""
+        collected = (
+            collected_test_counts(
+                discount_candidate_keys(weights, probe_manifest_text, declared),
+                manifest_path.resolve().parent.parent)
+            if weights and probe_manifest_text else {})
         # ⛔ THE LABEL NAMES THE READING THIS SWEEP ACTUALLY TOOK (PR #9651
         # review, P2). It was hardcoded `ci-timing top-15`, which was true before
         # this tool learned to read `junit.xml` and false afterwards: the census is
@@ -4174,6 +4355,7 @@ def main() -> int:
             dry_run=args.dry_run,
             coverage=coverage,
             sample_label=sample_label,
+            collected=collected,
         )
 
     run_id = args.run_id.strip()
