@@ -1238,6 +1238,70 @@ class TestAtomicProvisionBackstop:
             "text AND the Python twin move in the same commit — a clause added "
             "on one side only is the fail-open direction this pin exists for")
 
+    def test_the_lock_key_is_the_person_and_is_transaction_scoped(self):
+        """#1981 — the lock must serialize the USER, and only for its xact.
+
+        The gate block's `PERFORM` is the whole atomicity mechanism, and it has
+        two mutants that leave every behavioural case green, because
+        `supabase/tests/0010_provisioning_rpcs.sql` §8 holds ONE connection and
+        so never races anything (#1981 review, P2):
+
+        * keyed on `p_org_id` instead of `p_user_id` — two racing creates for
+          ONE user carry different org ids by construction, so they take
+          different locks and the original TOCTOU is back intact;
+        * session-scoped `pg_advisory_lock` — held until explicit release, so
+          on a pooled connection it leaks across requests.
+
+        Ordering (lock BEFORE the gate's `SELECT`) is pinned by §8's own
+        `strpos` assertion, which sees the whole `prosrc`; here the block is
+        already sliced, so only the key and the scope are graded.
+        """
+        block = self._gate_block()
+        # the key is derived from the PERSON
+        assert re.search(r"hashtextextended\([^)]*p_user_id", block), (
+            "the advisory lock key is no longer derived from `p_user_id`; "
+            "the lock would stop serializing one user's concurrent provisions")
+        # ...and NOT from the org — the per-org mutant is the whole bug back
+        assert not re.search(r"hashtextextended\([^)]*p_org_id", block), (
+            "the advisory lock is keyed on `p_org_id`; two racing creates for "
+            "one user carry different org ids, so they never serialize and "
+            "the multi-worker TOCTOU is reopened")
+        # transaction-scoped, never session-scoped
+        assert not re.search(r"pg_advisory_lock\s*\(", block), (
+            "the gate takes the SESSION-scoped `pg_advisory_lock`; it is held "
+            "until explicit release, so on a pooled connection it leaks "
+            "across requests. Use `pg_advisory_xact_lock`")
+
+    def test_the_user_path_provisions_at_the_free_tier(self):
+        """#1981 — the SQL gate only engages for a FREE org.
+
+        The migration's condition is `COALESCE(p_tier,'free') = 'free'`: a
+        caller passing any non-`'free'` spelling (`'Free'`, an unrecognised
+        tier) skips the gate entirely and mints an unallowanced org. No caller
+        does that today, but nothing pinned it — one edited argument in the
+        user-path lane would disable the entitlement with every test green
+        (#1981 review, P2). This pins the argument at the ONE user-path call
+        site that creates a person's org.
+        Sliced to the USER-PATH lane on purpose. A bare
+        `'"p_tier": "free",' in source` would be satisfied by the other two
+        call sites that pass it (the identity and paid-checkout lanes), so the
+        assertion would stay green while THIS lane's argument was changed —
+        the vacuity class agent-infra#3442 measures.
+        """
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "hosted_api.py").read_text()
+        head = "async def _create_org_supabase_lane("
+        assert source.count(head) == 1, (
+            "the user-path org-create lane was renamed or duplicated; this pin "
+            "cannot find the call site it grades")
+        lane = source.split(head, 1)[1].split("\nasync def ", 1)[0]
+        assert '"p_tier": "free",' in lane, (
+            "the user-path org provision no longer passes `p_tier: 'free'`; "
+            "`COALESCE(p_tier,'free') = 'free'` would not engage and the "
+            "one-free-org backstop would never fire on this lane")
+
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
         monkeypatch):
