@@ -14279,10 +14279,18 @@ async def register_user(request: Request, response: Response):
                 lambda: set_dashboard_key_login(cp, org_id, True),
                 op="set_dashboard_key_login")
         except Exception as _provision_err:
-            try:  # noqa: SIM105
-                _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
-            except Exception:
-                pass
+            # #1981 (round-3 review, P2): ONLY reclaim the namespace when the
+            # failure PROVES nothing landed. This used to delete on ANY
+            # exception — the same defect this PR removed from
+            # `_create_org_supabase_lane`, and it matters more here: the
+            # control-plane read timeout is 5.0 s, so a registration that
+            # COMMITTED can still surface as a lost response, and deleting then
+            # leaves a live account with no `TeamMeta`/`OnboardingState`.
+            if _rpc_failure_proves_nothing_landed(_provision_err):
+                try:  # noqa: SIM105
+                    _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
+                except Exception:
+                    pass
             # #1765: the reg- identity UNIQUE partial index is the race/
             # retry backstop — a concurrent register with the same email hits
             # uq_member_identity_active → 409, never a 500 (plan Task 3).
@@ -24579,6 +24587,42 @@ def _one_free_org_blocker_from_rpc(exc: BaseException) -> str | None:
     return rest[0] if rest else None
 
 
+#: The WRAPPER SHAPE `supabase_control.rpc` emits when PostgREST ANSWERED with a
+#: status: `Supabase control-plane RPC failed (<fn>): HTTP 409: <detail>`. A
+#: TRANSPORT failure wears the SAME prefix but puts the client exception where
+#: the status goes: `Supabase control-plane RPC failed (<fn>): ReadTimeout('')`.
+#: Anchoring on `): HTTP <3 digits>` is therefore what separates "the server
+#: said no" from "the server may have said yes".
+_RPC_SERVER_RESPONSE_RE = re.compile(
+    r"control-plane RPC failed \([^)]*\): HTTP \d{3}\b")
+
+
+def _rpc_failure_proves_nothing_landed(exc: BaseException) -> bool:
+    """#1981 (round-3 review): did *exc* prove the provision wrote NOTHING?
+
+    The answer decides whether an eagerly-materialized graph namespace may be
+    dropped, and only ONE direction is safe to guess:
+
+    * ``True`` — PostgREST answered with a status (a RAISE EXCEPTION such as the
+      entitlement marker, a unique-violation 409, any 4xx/5xx). The transaction
+      did not commit, so ``org_{org_id}`` is unowned and reclaiming it is safe.
+    * ``False`` — a TRANSPORT failure (timeout, reset, a lost response). The RPC
+      may have COMMITTED and we only lost the reply, so the namespace may be a
+      LIVE org's. Dropping it would destroy that org's ``TeamMeta`` /
+      ``OnboardingState`` — strictly worse than the empty namespace it would
+      reclaim, and the inverse of this lane's documented ordering ("an orphaned
+      graph namespace is harmless, an orphaned orgs row is not").
+
+    ⛔ ONE definition for every lane that reclaims a namespace (round-3 review,
+    P2): `register_user` carried the same unguarded delete this PR removed from
+    `_create_org_supabase_lane`, and two copies of this judgement is how the two
+    lanes drift apart. Do not inline the test at a call site.
+    """
+    if _one_free_org_blocker_from_rpc(exc) is not None:
+        return True
+    return bool(_RPC_SERVER_RESPONSE_RE.search(str(exc or "")))
+
+
 async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
     """#2810: THE one entitlement chokepoint — raise the structured 402 unless
     *user_id* may own one more free org.
@@ -25071,11 +25115,22 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
         #     409 retry leaking a namespace per attempt — it mints a NEW org id
         #     each time.)
         #   * every OTHER failure is AMBIGUOUS and keeps the pre-#1981
-        #     behaviour: leave the namespace alone. The #3390 write-ahead
-        #     journal line is what makes a surviving namespace attributable to
-        #     a sweep — that is what the journal is for, and it is not rolled
-        #     back.
-        drop_is_safe = blocking_org_id is not None or "HTTP 409" in str(e)
+        #     behaviour: leave the namespace alone.
+        #
+        # ⛔ WHAT BOUNDS THAT LEAK, stated precisely because the first draft of
+        # this comment named the wrong mechanism (round-3 review, P2): the #3390
+        # write-ahead journal is NOT the answer here. `_journal_append_product`
+        # returns before doing anything when the process is not a test session
+        # (`tortoise/projection/__init__.py`, "production mints never reach the
+        # raise"), and the reclaimer `_sweep_team_strays` lives in
+        # `tests/_embedded.py` — so in PRODUCTION an ambiguous failure leaves an
+        # orphan that nothing attributes. The namespace is `org_{org_id}` for an
+        # org id minted per request and written by nobody, so it is inert;
+        # what bounds its ACCUMULATION is the per-user org-creation rate limit
+        # above (429), not a sweep. An empty leaked namespace is the cheaper of
+        # the two failure modes by design — the alternative deletes a live
+        # org's graph — and it is recorded as such rather than promised away.
+        drop_is_safe = _rpc_failure_proves_nothing_landed(e)
         if drop_is_safe:
             # ⛔ OFF THE LOOP (#1981 review P1): `_drop_org_graph` →
             # `_drop_org_graph_impl` opens a COLD projection for a namespace
@@ -25089,7 +25144,27 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
             # this branch exists to deliver. The drop is best-effort by
             # definition — `_drop_org_graph` already swallows its own errors —
             # so it must not be able to fail the refusal.
-            await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
+            # ⛔ SWALLOWED (round-3 review, P2): `_drop_org_graph` swallows its
+            # OWN errors, but the `to_thread` SUBMISSION can still raise (a
+            # refused executor submit, "cannot schedule new futures after
+            # shutdown", a cancelled task) — and an unguarded await here would
+            # replace the structured 402 with the generic 500 below, destroying
+            # the one thing this branch exists to deliver. That was real: the
+            # await was naked before this fix.
+            #
+            # RECORDED RESIDUAL, not fixed here: the drop is still AWAITED on the
+            # refusal path (as it has been since this PR opened), so a wedged
+            # graph lane can hold the response long enough for the 10 s transport
+            # bound to answer 504 instead of this 402. Bounding it is not free —
+            # `graph_offload_timeout_s()` is ~30 s and so does NOT help, and a
+            # short magic timeout would abandon a legitimately slow drop on the
+            # N-worker burst this path exists for. Left as-is deliberately, with
+            # the residual named so the next lane does not read the await as
+            # proof the latency is bounded.
+            try:
+                await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
+            except Exception:  # noqa: BLE001 — best-effort by contract
+                _logger.debug("refusal graph drop skipped for %s", org_id)
         if blocking_org_id is not None:
             raise HTTPException(status_code=402,  # noqa: B904
                                 detail=_one_free_org_detail(blocking_org_id))
@@ -45049,11 +45124,26 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
     )
     user_id = str(meta.get("user_id") or "")
     org_name = str(meta.get("org_name") or "").strip()
-    tier = str(meta.get("tier") or "free")
+    tier = str(meta.get("tier") or "")
     if not user_id or not org_name:
         raise RuntimeError(
             "new-org checkout metadata missing user_id/org_name — cannot "
             f"provision (org_id={org_id!r})")
+    # ⛔ #1981 (round-3 review, P2): a MISSING tier must NOT default to "free"
+    # here. `COALESCE(p_tier,'free') = 'free'` makes the entitlement gate ENGAGE
+    # for this lane, and its refusal re-raises as a webhook 500 — which Stripe
+    # redelivers forever — for a customer who has just paid and who, by design
+    # (the "buy a subscription for a NEW organization" exit), may already own a
+    # free org. The session-creation route rejects free/anon BEFORE checkout
+    # (`_billing_checkout_new_org_sync`), so a free or absent tier reaching this
+    # point means the metadata was lost or written wrong: fail loudly and name
+    # it, instead of letting the gate refuse and the retry loop hide the cause.
+    if not tier or tier in ("free", "anon"):
+        raise RuntimeError(
+            "new-org checkout carried no PAID tier "
+            f"(tier={tier!r}, org_id={org_id!r}) — this lane provisions a "
+            "purchased organization; a free tier would make the one-free-org "
+            "gate refuse a provision the customer already paid for")
     lim = tier_limits(tier)
     # #1716/#1921 keyless provisioning: no tt_ mint (its plaintext is never
     # returned — a dead credential). The org mints a session key via the normal
