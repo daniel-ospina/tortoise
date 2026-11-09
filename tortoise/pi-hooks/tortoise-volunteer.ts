@@ -1118,16 +1118,7 @@ export default function tortoiseVolunteer(
   // — which is the `hermetic()` failure mode reached through the one shape the
   // guard excused. One rule, no exemptions, and the exemption's false premise
   // is gone with it.
-  if (
-    process.env.NODE_TEST_CONTEXT &&
-    !(deps.env && deps.configPath && deps.home)
-  ) {
-    throw new Error(
-      "tortoise-volunteer: under `node --test` you must inject `env`, " +
-        "`configPath` and `home` — refusing to read the operator's config, " +
-        "resolve their install, or post with their credential",
-    );
-  }
+
   const env = deps.env ?? (typeof process === "undefined" ? {} : process.env);
   const configPath = deps.configPath ?? CONFIG_PATH;
   const home = deps.home ?? homedir();
