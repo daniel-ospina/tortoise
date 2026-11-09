@@ -387,9 +387,14 @@ measured_at:
 #         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
 #         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
 #         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
-#         -> `1441 passed` at `a913fa8ec6`, and `1442 passed` at the MERGE head
-#         `2f9a3aaf68`, each quoted from that run's OWN output — the command above is the
-#         check, and re-running it is the reproduction. ⛔ These are NOT `.worktree-report/`
+#         -> `1442 passed` at the MERGE head `2f9a3aaf68`, re-measured at the PR head
+#         `117a5f96bba5` (`1442 passed in 1115.94s`), and `1441 passed` at `a913fa8ec6` —
+#         one `def test_` less, which is main's own addition and not drift. ⛔ EACH READING
+#         IS A DIRECT INVOCATION AND NO ARTIFACT HOLDS IT: the four-file command has never
+#         been run to completion THROUGH `tools/worktree_report.py` in this lane (the
+#         export's own `not_done` says so verbatim), so `1441` must not be presented as a
+#         recorded run's output either — the command above is the check, and re-running it
+#         is the reproduction. ⛔ These are NOT `.worktree-report/`
 #         rows and must not be cited as them: no row in that export records either count (a
 #         fresh-context review measured it: the export's own first three rows are
 #         356 / 280 / 957 of different commands, written hours before this head), which is
