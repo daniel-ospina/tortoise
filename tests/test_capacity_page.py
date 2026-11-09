@@ -600,6 +600,8 @@ _HELD_CAP_CLAUSES = (
     "permits removing that one graph",  # the 2026-11-02 amendment authorises it
     "after a count-verified export to durable local storage",  # ...only after this
     "and with a journalled delete",  # ...and only journalled
+    "no journalled whole-graph delete path exists yet",  # ...and that path does not exist
+    "closed *not planned*",  # the storage limb's owner is closed, not open
     "no backfill of the old graph",  # survives the amendment
     "no reading of its 402 as a defect",  # survives the amendment
 )
@@ -613,6 +615,7 @@ _HELD_CAP_SUPERSEDED = (
     "only copy",  # the pre-amendment half: an export exists, so this is false
     "sole writer",  # false: `sdk.org_update` accepts the field
     "never on an operator override",  # false, and the opposite of the ruling
+    "deletes the measurement",  # the predicate the withdrawn sentence acted on
 )
 
 #: The clause that binds the finding to §4 — its own heading, which no other
@@ -633,6 +636,20 @@ _WHITESPACE = re.compile(r"\s+")
 
 def _collapsed(text: str) -> str:
     return _WHITESPACE.sub(" ", text)
+
+
+def _plain(text: str) -> str:
+    """Collapsed, lowercased and with markdown emphasis / code spans removed.
+
+    The absence scan needs this and the presence scan must NOT have it. A
+    superseded claim is evaded by typography alone if the matcher keeps markup:
+    this page's own house style emphasises exactly these contrast words, so
+    restoring the withdrawn sentence as ``the only *copy*`` (or ``**only**
+    copy``, or a code span) read as absent. In the other direction, a presence
+    fragment that stopped matching because someone re-emphasised it fails closed,
+    which is the safe direction and is deliberately not relaxed.
+    """
+    return re.sub(r"[*_`~]", "", _collapsed(text)).lower()
 
 
 def _section4(text: str) -> str:
@@ -714,7 +731,7 @@ def test_the_held_cap_clause_does_not_restate_a_superseded_claim():
     reachable and only rewords a closing clause stays green, which is why the
     presence pin binds that sentence as well.
     """
-    section = _collapsed(_section4(_read(CAPACITY))).lower()
+    section = _plain(_section4(_read(CAPACITY)))
     restated = [claim for claim in _HELD_CAP_SUPERSEDED if claim in section]
     assert not restated, (
         "docs/capacity.md §4 restates a claim this ruling already corrected: "
