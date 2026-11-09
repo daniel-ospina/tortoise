@@ -80,8 +80,8 @@ SOURCE_PIN = (
     "immediate-successor supersession)"
 )
 
-# Per-family topic counts (deterministic topic keys).  21 planted points:
-# 19 conflicted + 2 clean controls.
+# Per-family topic counts (deterministic topic keys).  23 planted points:
+# 21 conflicted + 2 clean controls.
 FAMILY_COUNTS: dict[str, int] = {
     "near_tie": 4,
     "multi_nand": 4,

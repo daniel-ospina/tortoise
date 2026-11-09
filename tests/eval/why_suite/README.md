@@ -171,8 +171,10 @@ assembly's own supported surface, and its planted weights are spread apart
 by design): pointer PRECEDENCE, tie handling under real posterior variance,
 PARTIAL conflict surfacing (a point with more NANDs than the ≤2 cap),
 supersede chains longer than one link, decisions with 3+ alternatives, and
-malformed-surface tolerance.  Those are exactly the adversarial corpus's
-families (below).
+malformed-surface tolerance.  All but the LAST are closed by an adversarial
+family (below); malformed-surface tolerance has no corpus family in EITHER
+lane — it is covered only by grader-unit tests (see the adversarial
+"CANNOT falsify" note).
 
 **`why_suite_adversarial` CAN falsify** (each family is a structure a naive
 assembly gets wrong — see `adversarial.degrade_to_naive`, which the
@@ -197,10 +199,16 @@ benchmark test uses to prove the corpus discriminates):
   a live dispute (`contested_classification_accuracy`).
 * `clean` — two controls, so the 0-false-positive arm keeps a denominator.
 
-**`why_suite_adversarial` CANNOT falsify:** real-memory recall semantics —
-these fixtures are still SYNTHETIC and still authored by this team, so they
-pin the assembly's documented selection rules rather than a real
-conversation's graph.  A corpus derived from a captured session is still
-open work; the comparison-systems rows in
+**`why_suite_adversarial` CANNOT falsify:** malformed-surface tolerance —
+every family here plants a structurally VALID why-block that stresses the
+SELECTION rules, so an off-shape block (a pointer or conflict field missing
+or ill-typed) is not exercised by any family in either corpus.  It is
+covered only at the grader-unit level (`test_why_suite_grading.py` asserts
+an unmeasured support-chain entry grades "not answerable"); a
+malformed-surface FAMILY is still open work.  Nor can it falsify
+real-memory recall semantics — these fixtures are still SYNTHETIC and still
+authored by this team, so they pin the assembly's documented selection
+rules rather than a real conversation's graph.  A corpus derived from a
+captured session is still open work; the comparison-systems rows in
 `docs/benchmarks/comparison-systems.md` (§5 receipts) scope what a
 real-memory comparison would need.

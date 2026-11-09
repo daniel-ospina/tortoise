@@ -134,4 +134,11 @@ def assert_prompt_pinned() -> str:
 # anti-gaming rule).
 # Regenerate with: uv run python -c \
 #   "import sys; sys.path.insert(0,'tests'); from eval.why_suite import judge; print(judge.protocol_sha256())"
-PINNED_PROTOCOL_SHA256 = "7609ac2cf15e96b9a7ccbdef8a218d7d758de11536fdbc775d7e001626c8c03d"
+# #2275 review: the literal below was re-computed ONCE more inside this same
+# PR after a COMMENT-ONLY correction to adversarial.py (a stale per-family
+# count).  The protocol name stays v3 because no grading semantic moved, and
+# no baseline had been blessed at v3 yet (both are first-run-pending:
+# ``metrics: {}`` / ``judge_pin: null``), so no published number was re-pinned.
+# Any FUTURE semantic edit to prompt/grading/schema/adversarial is still a new
+# protocol name + ``--bless-protocol``.
+PINNED_PROTOCOL_SHA256 = "975a9aeaf99b25bf5a82358006256c74d93fb38f0aba807ece2c2af4175a288f"

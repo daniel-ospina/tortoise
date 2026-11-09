@@ -413,6 +413,21 @@ def test_readme_documents_what_each_corpus_can_and_cannot_falsify():
     assert "cannot falsify" in text.lower()
     # The v1 limitations note must point at the corpus that now closes it.
     assert "is open work (issue #2275" not in text
+    # ...and it must not OVERCLAIM closure: a gap that has no family in EITHER
+    # corpus must be declared unclosed, never absorbed into the v1 note's
+    # "those are exactly the adversarial families" pointer (#2275 review).
+    # Whitespace-normalised: the sentence wraps across two lines, so a raw
+    # substring check would pass vacuously.
+    flat = " ".join(text.lower().split())
+    assert "those are exactly the adversarial corpus's families" not in flat
+    adv_limit = text.split("**`why_suite_adversarial` CANNOT falsify:**", 1)
+    assert len(adv_limit) == 2, "the adversarial corpus must declare its limits"
+    adv_cannot = adv_limit[1].split("\n\n", 1)[0].lower()
+    # malformed-surface tolerance is named by the v1 list but is NOT one of
+    # the adversarial families — claiming it closed would stop a reader from
+    # looking for the gap.
+    assert "malformed-surface" in adv_cannot
+    assert "real-memory" in adv_cannot
 
 
 def test_manifest_of_self_manifest_is_registered():
