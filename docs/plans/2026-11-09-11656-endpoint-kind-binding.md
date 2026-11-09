@@ -26,7 +26,16 @@ named in §10 so the correction is auditable.
 ## 1. Confirmed problem
 
 A pack declares `relations[]: {predicate, mechanism, fromKind, toKind}`. **Nothing checks that a written
-edge's endpoints have those kinds.** 36 declared relations across 7 packs; 32 carry `fromKind`+`toKind`.
+edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 carry `fromKind`+`toKind`.
+
+> ⚠️ **Re-measured at `3d63339d` after `main` was merged into this branch.** The merge brought three new
+> kind-bearing declarations (`pm:card→pm:card`, `pm:sprint→pm:card`, `pm:card→Subject`, all `IMPL`) plus
+> `pm:assignedTo`. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
+> 30 Object→Object, 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
+> 34 `IMPL` + 1 `NAND`, 32 Object→Object, 8 disabled by §5.2**. The argument does not move — every
+> kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
+> counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
+> they were measured on. Reproduce with the one-liner in the research brief §2.1.
 
 ### 1.1 Three doors, not one — and the direct door is the dominant one
 
@@ -46,7 +55,7 @@ not-terminal, and the claim-class override. `undeclared_relation` fires only in 
 
 **And the direct door is the *dominant* shape for Object↔Object, not a corner.** `_point_mediated_route`
 (`sdk.py:24066`) reifies only when a `:Point` is involved — *"Object↔Object keeps the direct shape"* — and
-**30 of the 32** kind-bearing declarations are Object→Object. So a declared IMPL label over a mismatched
+**32 of the 35** kind-bearing declarations are Object→Object. So a declared IMPL label over a mismatched
 Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).
 
@@ -112,7 +121,7 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 | alternative | why rejected |
 |---|---|
 | Gate `create_edge` only (the issue's own prescription) | covers 2 of 32 — 6 %. |
-| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape for the 30 Object→Object declarations. |
+| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape for the 32 Object→Object declarations. |
 | Predicate-name-global constraint | refuses most of `addresses`' six pairs (and the 17/47 live edges). The modelling error RDFS names. |
 | Refuse on unknown kind too | contradicts `EXTRACTOR-V4-ARCHITECTURE.md` §4.4 S2.3 (*"FAIL-OPEN, never raises … `unclassified` is honest"*) and the AX admission test. |
 | Warn-only everywhere | the permanently-degraded signal (brief §9.2); graph holds `pt_656aa190…` *"partial enforcement reads as fixed"*. |
@@ -158,10 +167,10 @@ so the rows are free; the missing piece is `relations_for_namespaces(names) -> r
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
 recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists for bare-graph seams.
 
-### 5.2 The binding test (D3) — 7 of 32 span namespaces, not 2
+### 5.2 The binding test (D3) — 8 of 35 span universes, not 2
 
 ⚠️ **Revision 1's rule ("both kinds resolve into the *declaring pack's* universe") would have silently
-disabled 7 of the 32 declarations** — never enforced, never warned about. They are:
+disabled 8 of the 35 declarations** — never enforced, never warned about. They are:
 
 ```text
 dev:implements               dev:issue              -> product-strategy:feature
@@ -169,6 +178,7 @@ dev:deploysTo                dev:code               -> core:deployment
 portfolio:constrainedBy      venture:investment     -> portfolio:mandate
 portfolio:marks              portfolio:valuationMark-> venture:investment
 product-strategy:manifests   dev:incident           -> product-strategy:customerProblem
+pm:assignedTo                pm:card                -> Subject          (a LAYER, §5.3)
 venture:assignedTo           venture:actionItem     -> Subject          (a LAYER, §5.3)
 venture:holds                venture:investment     -> Subject          (a LAYER, §5.3)
 ```
@@ -211,7 +221,7 @@ Resolve over the **installed** set. **This bug is live today** for the label-leg
   for a narrower job than this issue needs.
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
-`ontology.relations[]` (32 populated pairs) — **not** `extraction.relationTemplates[]` (declared but
+`ontology.relations[]` (35 populated pairs) — **not** `extraction.relationTemplates[]` (declared but
 unshipped; only `packs/_template` has it, commented out). Reuse `extractor_v2.build_master_list`, which
 already carries the per-graph tenant-narrowed kind vocabulary.
 
@@ -233,7 +243,7 @@ undeclared.
 | 7 | a pack **not installed** on the graph cannot authorise its relations | a graph-wide catalog leak (D3) |
 | 8 | **no** `enforcement.relations` entry → `mismatch` **BLOCKS** (the kind-pair default) | the D1 ruling being unreachable (the §2.1 defect) |
 | 9 | an explicit `{predicate: warn}` → warns and writes; `{predicate: block}` → refuses | the override being unreachable |
-| 10 | **each of the 7 cross-namespace declarations binds** — `portfolio:marks`, `dev:implements`, … (§5.2) | 22 % of declarations silently disabled |
+| 10 | **each of the 8 cross-universe declarations binds** — `portfolio:marks`, `dev:implements`, … (§5.2) | 22 % of declarations silently disabled |
 | 11 | `addresses` between two non-declared kind pairs → `unbound`, **not** `mismatch` | the predicate-name-global error (six pairs) |
 | 12 | a layer-valued declaration (`toKind: Subject`) is `unbound` **and** the pin names #11000 | false refusals, and a silent un-pin when §6 lands |
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
@@ -242,7 +252,7 @@ undeclared.
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
 | 17 | the prevention guidance lists the declared pairs for an endpoint pair and omits none | a silent gap between gate and guidance |
 
-**Do not** assert on `create_edge` only — it covers 2 of 32 and leaves **30** untested. **No** extractor call
+**Do not** assert on `create_edge` only — it covers 2 of 35 and leaves **33** untested. **No** extractor call
 counts as evidence for the prevention half: `extractor_v2.py` has **0** `create_edge` / **0**
 `create_operator` calls today, so pin 17 is a **unit/contract** test.
 
@@ -293,7 +303,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the four were `semantics: hasPart` on different predicates. Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |
 | "`fromKind`/`toKind` acted on in exactly one place" | **three** readers, incl. `_resolve_traversal_path` which is D5's own job | fresh review (P1) |
 | "`_relation_endpoint_refs` has no production consumer" | it is **wired**, for kind co-selection | `[VGATE]` round 1 |
-| "30 of 32 declare a mechanism" | **32 of 32** (31 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` | `[VGATE]` round 1 |
+| "30 of 32 declare a mechanism" | **35 of 35** (34 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` | `[VGATE]` round 1 |
 | "`mismatch` → refuse, unconditionally" beside "read the level through `resolve_enforcement`" | contradictory — the map's default is `warn` and no pack declares a level. Fixed by §2.1 | fresh review (P1) |
-| "both kinds in the declaring pack's vocabulary" | disables **7** of 32 cross-namespace declarations. Fixed by §5.2 | fresh review (P1) |
-| "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **30** | fresh review (P2) |
+| "both kinds in the declaring pack's vocabulary" | disables **8** of 35 cross-universe declarations. Fixed by §5.2 | fresh review (P1) |
+| "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **33** | fresh review (P2) |

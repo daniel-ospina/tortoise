@@ -40,19 +40,21 @@ that must be settled before a scope can converge.
 
 ### 2.1 The declared relations do not ride `create_edge`
 
-Measured over all 7 shipped packs (`packs/*/manifest.yaml`): **36 declared relations, 32 carrying
-`fromKind`+`toKind`.** ⚠️ **All 32 carry a CORE mechanism** — 31 `IMPL` plus 1 `NAND`
+Measured over all 7 shipped packs (`packs/*/manifest.yaml`), **re-measured at `3d63339d` after `main`
+was merged into the branch** (the merge added three kind-bearing declarations — `pm:card→pm:card`,
+`pm:sprint→pm:card`, `pm:card→Subject`, all `IMPL` — plus `pm:assignedTo`): **36 declared relations, 35
+carrying `fromKind`+`toKind`.** ⚠️ **All 35 carry a CORE mechanism** — 34 `IMPL` plus 1 `NAND`
 (`product-strategy:competesWith`) — and `relation_write_paths()` (`pack_registry.py:534`) binds the
 **operator** path on `mechanism ∈ CORE_PREDICATES`. That includes `hasPart` and `dependsOn`, which also
 declare `mechanism: IMPL`; they are the only two that **additionally** bind the structural path.
 
 | write path | what it writes | declared relations that use it |
 |---|---|---|
-| **operator** — `create_operator(op_type, source, targets, label)` | `(source)-[:INPUT]->(op:Point)-[:IMPL\|:NAND]->(target)` | **32 of 32** |
-| **structural** — `create_edge` / `create_about_edge` | a plain edge `(a)-[:pred]->(b)` | **2 of 32**, *in addition* — `hasPart`, `dependsOn` |
+| **operator** — `create_operator(op_type, source, targets, label)` | `(source)-[:INPUT]->(op:Point)-[:IMPL\|:NAND]->(target)` | **35 of 35** |
+| **structural** — `create_edge` / `create_about_edge` | a plain edge `(a)-[:pred]->(b)` | **2 of 35**, *in addition* — `hasPart`, `dependsOn` |
 
-⇒ **A gate at `create_edge` alone binds at most 2 of 32 declared relations — 6 % — while `create_operator`
-and `create_direct_edge` together reach all 32.** The issue's target ("zero declared relations writable on
+⇒ **A gate at `create_edge` alone binds at most 2 of 35 declared relations — 6 % — while `create_operator`
+and `create_direct_edge` together reach all 35.** The issue's target ("zero declared relations writable on
 mismatched endpoint kinds") would be satisfiable on paper and false in practice. The epic's
 `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` §5.3a point 3 already states this routing; this
 is its consequence for #11656.
@@ -97,7 +99,7 @@ Two callers reach it with a declared label:
 - `ingest`'s plain-operator arm (`sdk.py:27493`).
 
 **And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py:24066`) reifies only when a
-`:Point` is involved — *"Object↔Object keeps the direct shape"* — and **30 of the 32** kind-bearing
+`:Point` is involved — *"Object↔Object keeps the direct shape"* — and **32 of the 35** kind-bearing
 declarations are Object→Object. So a declared IMPL label over a mismatched Object pair is writable today with
 no gate, and a scope that excludes this door leaves the issue's own target false. It is **in scope**, gating
 the `label` only (its epistemic semantics are untouched).
@@ -352,13 +354,13 @@ review): `graph_census.kind_prop_for` (label → kind property), `StatusFoldInde
   a reason naming predicate + declared kinds + actual kinds; matched pair → accepted; unknown kind → the
   decided behaviour; subclass accepted; equivalent kind accepted; bare vs namespaced spelling accepted;
   a pack not installed cannot authorise its own relations; **deleting the check reds a test**.
-- **CI, dogfooded on the repo's own declarations:** the 7 shipped packs' 32 kind-bearing relations, so a
+- **CI, dogfooded on the repo's own declarations:** the 7 shipped packs' 35 kind-bearing relations, so a
   manifest edit that makes a declaration unsatisfiable reds rather than rots.
 - **Tier E (#11454):** on a real corpus, a declared relation reaches the graph only between the declared
   kinds — and the read-side census reports the pre-existing population.
 
-**Known false-green to avoid:** asserting on `create_edge` only. **32 of 32** declarations ride the operator
-path, so a `create_edge`-only pin leaves **30** of them untested.
+**Known false-green to avoid:** asserting on `create_edge` only. **35 of 35** declarations ride the operator
+path, so a `create_edge`-only pin leaves **33** of them untested.
 
 ---
 
