@@ -28,7 +28,6 @@ from tortoise.embedding_residual_scan import (
     ResidualScan,
 )
 
-
 # ── the served set ──────────────────────────────────────────────────────────
 
 def test_only_the_labels_whose_vector_the_record_carries_are_served():

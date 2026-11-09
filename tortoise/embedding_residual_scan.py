@@ -40,6 +40,7 @@ row: an instrument that erases while attesting cannot attest.
 """
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 from dataclasses import dataclass, field
@@ -71,9 +72,18 @@ EXIT_UNAVAILABLE = 2
 
 #: The record tables that can hold a vector. All three carry `embedding` (jsonb)
 #: and the GENERATED `embedding_vec` the #11642 index is built on, so a residual
-#: can survive in the payload OR in the indexed projection; the scan counts the
-#: PAYLOAD, because that is the one that existed before the move and the one an
-#: erasure has always had to reach.
+#: can survive in the payload OR in the indexed projection, and the scan counts
+#: EITHER (`embedding IS NOT NULL OR embedding_vec IS NOT NULL`).
+#:
+#: ⛔ The OR is the point, not a belt-and-braces (PR #11660 review F13: this
+#: comment used to say the scan counts "the PAYLOAD, because that is the one that
+#: existed before the move", which the code has never done). A GENERATED column
+#: cannot disagree with its payload TODAY — but the erasure this tool attests is
+#: not written by this tool, and a `DELETE`/`UPDATE` that reaches one column and
+#: not the other is exactly the shape a payload-only count reports CLEAN about.
+#: Counting only the payload would make the scan's verdict a statement about a
+#: column, when the customer's question is whether the vector is still readable
+#: — and it is readable through `embedding_vec`.
 _RECORD_TABLES = ("point", "source", "event")
 
 #: Graph labels that can hold an `embedding` property. `Point` carries claims AND
@@ -163,20 +173,19 @@ def _count_record(scan: ResidualScan, record_dsn: str | None) -> None:
                 row = cur.fetchone()
                 tallies[table] = int(row[0]) if row else 0
         finally:
-            try:
+            # `contextlib.suppress`, not `try/except/pass`: a close that failed
+            # would mask the read error this leg is REPORTING (a bare except
+            # swallows it, and the refusal line then names the wrong failure).
+            with contextlib.suppress(Exception):
                 cur.close()
-            except Exception:  # noqa: BLE001, RUF100
-                pass
     except Exception as e:  # noqa: BLE001, RUF100
         scan.refusals.append(
             f"record: could not be read in scope ({type(e).__name__}) — "
             "no verdict")
         return
     finally:
-        try:
+        with contextlib.suppress(Exception):
             conn.close()
-        except Exception:  # noqa: BLE001, RUF100
-            pass
     scan.record_by_table = tallies
     scan.record_vectors = sum(tallies.values())
 

@@ -40,7 +40,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from tortoise.embedding_residual_scan import (  # noqa: E402
+from tortoise.embedding_residual_scan import (
     EXIT_CLEAN,
     EXIT_RESIDUE,
     EXIT_UNAVAILABLE,

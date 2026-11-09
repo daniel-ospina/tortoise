@@ -724,6 +724,22 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #:   * record NOT ARMED — nothing serves the dense leg from Postgres, the graph
 #:     has no vector index, and every served label REALLY DOES full-scan. That
 #:     is `#4997`'s defect, unchanged, and it keeps its WARNING.
+#:
+#: ⛔ AND IT IS A ROLLBACK SWITCH, WHICH IS TWO HALVES (`#11660` review F9). The
+#: flag is read in TWO places and a rollback needs both: the log LEVEL above, and
+#: the CREATION/DROP block in `_ensure_vector_index_api` — `False` recreates the
+#: in-graph ``Point.embedding`` index on the next setup and stops dropping one it
+#: finds, which is the pre-#11642 posture. Before this the creation code was
+#: DELETED rather than branched, so flipping the flag restored a log line and
+#: nothing else: an operator who reached for it in an incident would have got no
+#: index and a warning about it, which is worse than either state alone. Both
+#: branches are run by `tests/test_11642_vector_move.py`.
+#:
+#: ⚠️ Flipping it is a CODE revert's cheap cousin, not the whole revert: the
+#: record leg stays armed and keeps answering the dense read (`record_vector`),
+#: and Postgres keeps its columns. A full rollback also reverts the call site
+#: (`sdk.py`'s `pg_vector=` resolution) and re-pays the #7846 restore cost once
+#: the index is rebuilt.
 VECTOR_INDEX_RETIRED = True
 
 
@@ -19043,13 +19059,21 @@ class FalkorProjection(
                 # once, at INFO. A permanent WARNING here would train every
                 # reader to ignore the one line that still means something on a
                 # store where the move was rolled back.
+                #
+                # ⛔ IT KEEPS THE `#4997` MARKER (#11660 review F1). The marker is
+                # what a log reader, an alert and eleven pins in
+                # `tests/test_4997_vector_index_parity.py` key on; changing the
+                # token as well as the level would make every one of them
+                # green-by-ABSENCE — the failure mode where a pin stops asserting
+                # because the line it looks for no longer exists. The subject did
+                # not change, only the level and the sentence explaining it.
                 log.info(
-                    "#11642: %s holds no in-graph vector index for %s — "
+                    "#4997/#11642: %s holds no in-graph vector index for %s — "
                     "RETIRED, not missing: the dense leg is served from the "
                     "Postgres record (pgvector), and a graph full scan is the "
                     "documented fallback for the labels the record does not "
                     "carry. Set projection.VECTOR_INDEX_RETIRED = False to "
-                    "restore the #4997 posture.",
+                    "restore the #4997 warning and the in-graph index.",
                     self._graph_name,
                     sorted(gap),
                 )
@@ -20216,6 +20240,14 @@ class FalkorProjection(
         handle ``None`` (``required_embedding_dim`` documents the three
         ``None`` lanes).
 
+        ⛔ #11642: under the default posture this method CREATES NOTHING — it
+        drops an in-graph vector index it finds and leaves ``_vector_index_api``
+        ``None`` (the move took the index to Postgres). The attempts described
+        above are still here, in :meth:`_create_vector_index_api`, reached only
+        when ``VECTOR_INDEX_RETIRED`` is flipped to ``False`` — the rollback
+        switch, and the reason it is a switch rather than a log level (#11660
+        review F9).
+
         #4997: on the way out this also MEASURES the engine catalog
         (``_record_vector_index_inventory``) so the vector-index gap is a fact
         the store holds. It lives here, at the end of the non-embedded
@@ -20270,6 +20302,15 @@ class FalkorProjection(
         # rather than rejected at the write.
         import logging
         _log = logging.getLogger(__name__)
+        # ⛔ #11660 review F9: `VECTOR_INDEX_RETIRED` is read HERE too, not only in
+        # the log-level choice below. The flag's own comment promises that
+        # flipping it to False restores the pre-#11642 posture, and the posture
+        # IS this index existing — a rollback that restored only the WARNING
+        # would leave the operator holding a log line and no index. So the
+        # retirement branch and the recreate branch are both here, and exactly
+        # one of them runs.
+        if not VECTOR_INDEX_RETIRED:
+            return self._create_vector_index_api(catalogue_rows)
         self._vector_index_api = None
         dropped = False
         # ⛔ THE DROP IS GATED ON THE CATALOGUE, not attempted blind. An
@@ -20344,6 +20385,67 @@ class FalkorProjection(
         # the "already" branch, writes nothing, and reuses — which is what keeps
         # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`
         # at exactly one catalogue probe.
+        #
+        # ⛔ #11660 review F1: the DROP sweep above may itself have READ the
+        # catalogue (when the caller supplied no rows). Reusing that response here
+        # keeps the steady state at ONE catalogue read per setup — which is what
+        # `tests/test_4997_vector_index_parity.py::test_exactly_one_inventory_read_per_setup`
+        # pins, and what the hosted PER-REQUEST path needs, since this method runs
+        # on it. The reuse is legal because nothing wrote: `_wrote_index` is true
+        # for a drop, and a drop is exactly what makes pre-write rows stale (the
+        # #5434 rule above).
+        self._record_vector_index_inventory(
+            None if _wrote_index
+            else (_rows if catalogue_rows is None else catalogue_rows))
+
+    def _create_vector_index_api(self, catalogue_rows=None) -> None:
+        """The PRE-#11642 creation path, kept for the rollback switch (F9).
+
+        This is the code `VECTOR_INDEX_RETIRED = False` restores, byte-for-byte
+        in behaviour: try the procedure API with the store's ONE declared width
+        (`#4194`/`#4280`), fall back to the Cypher-native form the modern
+        falkordb client emits, and treat an "already" answer as success. It is a
+        separate method rather than an `else:` so the retired branch stays
+        readable — a rollback path inlined beside its replacement is how one gets
+        edited into the other.
+
+        ⛔ Reached ONLY when `VECTOR_INDEX_RETIRED` is False, which is why the
+        default posture pays nothing for its existence.
+        """
+        import logging
+
+        from ..embeddings import EMBEDDING_DIM
+
+        _log = logging.getLogger(__name__)
+        _wrote_index = False
+        try:
+            self.g.query(
+                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
+                f"{EMBEDDING_DIM}, 'HNSW')"
+            )
+            self._vector_index_api = 'procedure'
+            _wrote_index = True
+        except Exception as e:
+            msg = str(e).lower()
+            if "already" in msg:
+                self._vector_index_api = 'procedure'
+            else:
+                try:
+                    self.g.query(
+                        "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
+                        f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
+                        "similarityFunction: 'cosine'}"
+                    )
+                    self._vector_index_api = 'cypher'
+                    _wrote_index = True
+                except Exception as e2:
+                    msg2 = str(e2).lower()
+                    if "already" in msg2:
+                        self._vector_index_api = 'cypher'
+                    else:
+                        _log.warning(
+                            "Failed to create vector index on Point.embedding: %s",
+                            e2)
         self._record_vector_index_inventory(
             None if _wrote_index else catalogue_rows)
 

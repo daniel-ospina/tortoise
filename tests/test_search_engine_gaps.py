@@ -14,6 +14,7 @@ import os
 import sys
 import time
 import unittest.mock as mock
+from typing import ClassVar
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
@@ -1298,7 +1299,11 @@ def test_11642_a_pgvector_failure_is_a_named_scan_fallback():
         (`_ensure_vector_index_api` retires it), so the INDEX attempt fails and
         the brute-force scan is the branch that answers."""
 
-        result_set = [("p1", 0.9)]
+        # A class attribute on a FAKE, not a mutable default anyone shares: the
+        # `_record_vector`/`run_vector_query` seam reads it off the instance and
+        # never mutates it. Annotated `ClassVar` — rather than a noqa
+        # suppression — so the exemption states what it is.
+        result_set: ClassVar[list[tuple[str, float]]] = [("p1", 0.9)]
 
         def query(self, cypher, params=None, timeout=None):
             if "CALL db.idx.vector.queryNodes" in cypher:

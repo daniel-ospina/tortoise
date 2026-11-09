@@ -2227,6 +2227,20 @@ surfaces:
   # matrix, where the same two legs still skip. Do not read the armed job as a
   # replacement for it — the DB-free legs run here.
   - test_9078_record_written_by_production_path.py
+  # #11642 / #4051 V1: the Postgres dense leg and the two-store erasure
+  # attestation. `core` because BOTH subjects are `core`-selected and neither
+  # matches a `SOURCE_PATTERN`: `tortoise/record_vector.py` and
+  # `tortoise/embedding_residual_scan.py` are new files with no entry in
+  # `SOURCE_PATTERNS`, so a diff to the ANN leg — or to the scan that has to
+  # reach both stores after an erasure — falls to the `core` fallback
+  # (`--changed-files tortoise/record_vector.py` -> `['core']`, measured).
+  # Unregistered until #11660 review F3, which `ci_selection.py --integrity`
+  # reported as MANIFEST DRIFT: the file collected nowhere, so every pin in it
+  # (the served set, the shortfall assertion, the residual verdict algebra) was
+  # green by never running — the #1349/#2938/#3154/#4367 silent-drop class.
+  # Its Postgres-armed sibling legs live in `test_11642_vector_move_live.py`
+  # (the `test-record-postgres` job, which asserts zero skips).
+  - test_11642_vector_move.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
   # SOURCE_PATTERN → the `core` fallback); the companion `api` arm above is

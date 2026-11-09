@@ -286,6 +286,17 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
     # re-apply does not skip for free, so it is a no-op only because the index
     # already exists — which is exactly the case on an already-migrated
     # container.
+    # ⛔ The other half of the failure, and the reason this is a re-apply rather
+    # than an exclusion: the READER the whole dense leg depends on
+    # (`tortoise/record_vector.py`) issues `WHERE t.embedding_vec IS NOT NULL`,
+    # so on a container without the column every read is `42703
+    # UndefinedColumn` -> `RecordVectorError` -> the named graph fallback. That
+    # revert is SAFE — which is exactly why nothing would notice it: the store
+    # would serve a graph-owned dense leg forever, with the move's cost already
+    # paid.
+    # ⚠️ What re-apply does NOT do: change a GENERATED expression that already
+    # exists (`ADD COLUMN IF NOT EXISTS` keeps the old one). That is the
+    # documented drop-and-recreate operation, never a silent rewrite.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261109000001_record_embedding_vector.sql", None),
 ]

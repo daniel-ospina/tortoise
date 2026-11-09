@@ -446,20 +446,44 @@ def test_bare_projection_without_db_does_not_raise():
     assert proj._vector_indexed_labels == set()
 
 
-# (f) one WARNING per (endpoint, graph), and the attribute is ALWAYS re-measured
+# (f) one GAP REPORT per (endpoint, graph), and the attribute is ALWAYS re-measured
+#
+# ⛔ #11642 / PR #11660 review F1: the gap report is now an INFO naming the
+# retirement, not a WARNING — the in-graph vector index is retired by design, so
+# a permanent WARNING would describe a correct store as broken. The MARKER is
+# deliberately unchanged (`#4997/#11642`), so every pin below still keys on the
+# same token and none of them went green-by-absence when the level moved; what
+# changed is the level they assert and the capture level the test sets.
+#
+# `_gap_level()` reads the posture rather than restating it: these pins must hold
+# under BOTH postures (`VECTOR_INDEX_RETIRED` True and False), because the flag is
+# the documented rollback switch (#11660 review F9) and a pin hard-coding INFO
+# would fail on a rolled-back store it is supposed to protect.
+def _gap_level() -> int:
+    from tortoise.projection import VECTOR_INDEX_RETIRED
+    return logging.INFO if VECTOR_INDEX_RETIRED else logging.WARNING
+
+
+def _gap_records(caplog, *, at_least_warning=False):
+    return [r for r in caplog.records
+            if "#4997" in r.getMessage()
+            and (not at_least_warning or r.levelno >= logging.WARNING)]
+
+
 def test_warning_is_latched_but_the_measurement_is_not(caplog):
     proj = _bare([_vector_row("Point")])
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-        first = [r for r in caplog.records if "#4997" in r.getMessage()]
+        first = _gap_records(caplog)
         assert len(first) == 1
+        assert first[0].levelno == _gap_level()
 
         # Second setup, same (endpoint, graph), DIFFERENT inventory. The
         # attribute must follow the new measurement; only the warning latches.
         proj.g = _RecordingGraph(index_rows=_rows(_vector_row("Event")))
         proj._ensure_indexes()
-        second = [r for r in caplog.records if "#4997" in r.getMessage()]
-        assert len(second) == 1, "the WARNING must latch on (endpoint, graph)"
+        second = _gap_records(caplog)
+        assert len(second) == 1, "the GAP REPORT must latch on (endpoint, graph)"
 
     # M4 falsifiability: with the same rows a cached and a re-measured
     # attribute are indistinguishable — this assertion is what separates them.
@@ -467,30 +491,74 @@ def test_warning_is_latched_but_the_measurement_is_not(caplog):
 
 
 def test_warning_names_the_gap_and_the_open_question(caplog):
+    """The gap report names the labels AND what replaced the index.
+
+    ⛔ RETARGETED (#11660 review F1), not weakened. Pre-move this pin asserted
+    the WARNING named the OPEN question (§14.3 V3 — whether the other served
+    labels should carry an index at all), because the warning's job was to
+    pressure that question. The retirement INFO has a different job: it must say
+    the gap is the DESIGN and name what serves the read instead, or an operator
+    reads "no index" as a regression. The V3 attribution is still owed — by the
+    rolled-back store, whose WARNING this test now drives explicitly below.
+    """
     proj = _bare([_vector_row("Point")])
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-    msgs = [r.getMessage() for r in caplog.records if "#4997" in r.getMessage()]
+    msgs = [r.getMessage() for r in _gap_records(caplog)]
     assert len(msgs) == 1
-    # The warning must name the question that is STILL OPEN. Until V1 was
-    # decided (2026-11-07) that question was V1 (where the index lives); it is
-    # now §14.3 V3 (whether the other served labels carry one), and V1 appears
-    # only as SETTLED. Pinning the bare token `V1` passed on that incidental
-    # mention, so the guard no longer asserted anything about the open
-    # question it is named for — retargeted at the V3 attribution itself.
-    assert "§14.3 V3" in msgs[0], (
-        "the warning must name the OPEN question (§14.3 V3); V1 is settled and "
-        "must not be presented as governing it"
+    assert "RETIRED, not missing" in msgs[0], (
+        "the retirement INFO must say the gap is the design, not a regression"
+    )
+    # What replaced it, named concretely — the whole point of not leaving it at
+    # "no index": the reader must be able to find the leg that answers.
+    assert "pgvector" in msgs[0] or "Postgres record" in msgs[0]
+    assert msgs[0].rstrip().endswith(
+        "restore the #4997 warning and the in-graph index."), (
+        "the report must name the way back (the rollback switch) — an operator "
+        "who reads a gap and no remedy is where F9 came from"
     )
     for missing in ("Event", "Object", "Source", "Subject"):
         assert missing in msgs[0]
 
 
+def test_the_rolled_back_store_still_gets_the_4997_warning_and_the_v3_question(
+        caplog, monkeypatch):
+    """F9's LOG half: `VECTOR_INDEX_RETIRED = False` restores the WARNING.
+
+    This is the assertion that makes the flag's promise true rather than
+    documented: a rollback must put the operator back in the pre-#11642 posture,
+    which includes the warning that names §14.3 V3. The fixture's catalogue
+    holds NO vector index (so the measured state is a genuine gap) while
+    the real creation block still runs — a stubbed-out creation would also skip
+    the inventory and assert nothing.
+    """
+    import tortoise.projection as projection_mod
+
+    monkeypatch.setattr(projection_mod, "VECTOR_INDEX_RETIRED", False)
+    proj = _bare([])                  # no vector index in the catalogue
+    with caplog.at_level(logging.INFO):
+        proj._ensure_indexes()
+    warnings = _gap_records(caplog, at_least_warning=True)
+    assert len(warnings) == 1, (
+        "VECTOR_INDEX_RETIRED=False must restore the #4997 WARNING")
+    assert warnings[0].levelno == logging.WARNING
+    msg = warnings[0].getMessage()
+    assert "§14.3 V3" in msg, (
+        "the restored warning must name the OPEN question (§14.3 V3); V1 is "
+        "settled and must not be presented as governing it"
+    )
+    for missing in ("Event", "Object", "Source", "Subject"):
+        assert missing in msg
+
+
 def test_a_store_with_no_gap_does_not_warn(caplog):
     proj = _bare([_vector_row(label) for label in SERVED])
-    with caplog.at_level(logging.WARNING):
+    # Capture at INFO, not WARNING: an INFO-level gap report would be invisible
+    # to a WARNING capture, and "no gap" would then hold by ABSENCE rather than
+    # by measurement (the failure #11660 review F1 found in eleven siblings).
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
-    assert not [r for r in caplog.records if "#4997" in r.getMessage()]
+    assert not _gap_records(caplog)
     assert proj._vector_indexed_labels == set(SERVED)
 
 
@@ -536,7 +604,7 @@ def test_a_store_with_no_gap_reports_the_serves_indexes_pair(caplog):
     assert proj._vector_indexed_labels == set(SERVED)
 
 
-def test_a_gap_reports_the_pair_and_still_warns(caplog):
+def test_a_gap_reports_the_pair_and_still_reports_the_gap(caplog):
     """Plan §7 D6 — the pair is TWO halves: serves is every declared label,
     indexes is the measured subset. A store with a gap gets both records."""
     proj = _bare([_vector_row("Point")])
@@ -555,9 +623,9 @@ def test_a_gap_reports_the_pair_and_still_warns(caplog):
     assert serves_seen == SERVED, serves_seen  # every declared label
     assert indexes_seen == ["Point"], indexes_seen  # the measured subset
     assert proj._vector_indexed_labels == {"Point"}
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 1, "the gap must still WARN — #11087 adds a report only"
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 1, "the gap must still be REPORTED — #11087 adds a pair only"
+    assert gaps[0].levelno == _gap_level()
 
 
 def test_the_reported_served_set_is_the_one_declaration(monkeypatch, caplog):
@@ -756,9 +824,8 @@ def test_a_wholly_unparseable_catalogue_is_reported_as_measured_and_empty(caplog
     assert proj._vector_indexed_labels == set(), (
         "documented consequence: unparseable rows read as 'nothing indexed'"
     )
-    assert [r for r in caplog.records
-            if "#4997" in r.getMessage() and r.levelno >= logging.WARNING], (
-        "the gap warning must still fire on this lane"
+    assert _gap_records(caplog), (
+        "the gap report must still fire on this lane"
     )
 
 
@@ -799,12 +866,12 @@ def test_a_changed_pair_is_reported_and_a_repaired_store_announces_it(caplog):
     assert proj._vector_indexed_labels == set(SERVED), (
         "the second report must describe the REPAIRED pair, not the old gap"
     )
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 1, (
-        "the WARNING stays latched on the key — #11087 dedups the REPORT on the "
-        "pair VALUE instead"
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 1, (
+        "the GAP REPORT stays latched on the key — #11087 dedups the pair "
+        "REPORT on the pair VALUE instead"
     )
+    assert gaps[0].levelno == _gap_level()
 
 
 def test_an_unchanged_pair_is_not_reported_twice(caplog):
@@ -942,7 +1009,7 @@ def test_two_ports_on_one_host_are_two_stores(caplog):
     WARNING is latched away, so a full-scan gap on a genuinely different store
     goes unreported: 1 record and 1 warning instead of 2 and 2.
     """
-    rows = [_vector_row("Point")]            # a GAPPED store, so both must warn
+    rows = [_vector_row("Point")]     # a GAPPED store, so both must report
     first = _bare(rows, graph="tortoise", port=6379)
     second = _bare(rows, graph="tortoise", port=16379)
     assert first._stable_endpoint() != second._stable_endpoint(), (
@@ -957,12 +1024,12 @@ def test_two_ports_on_one_host_are_two_stores(caplog):
         "each store reports its own contract; a host-only key collapses them "
         f"(got {len(pairs)} record(s))"
     )
-    warnings = [r for r in caplog.records
-                if "#4997" in r.getMessage() and r.levelno >= logging.WARNING]
-    assert len(warnings) == 2, (
+    gaps = _gap_records(caplog)
+    assert len(gaps) == 2, (
         "a full-scan gap on a DIFFERENT store must not be latched away "
-        f"(got {len(warnings)} warning(s))"
+        f"(got {len(gaps)} gap record(s))"
     )
+    assert {g.levelno for g in gaps} == {_gap_level()}
 
 
 def test_the_reused_catalogue_fast_path_still_reports_the_pair(caplog):
@@ -1024,10 +1091,10 @@ def test_an_unorderable_served_set_fails_open_instead_of_raising(caplog):
 
 
 def test_distinct_graphs_each_report_once(caplog):
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         _bare([_vector_row("Point")], graph="test_4997_g1")._ensure_indexes()
         _bare([_vector_row("Point")], graph="test_4997_g2")._ensure_indexes()
-    msgs = [r for r in caplog.records if "#4997" in r.getMessage()]
+    msgs = _gap_records(caplog)
     assert len(msgs) == 2, "a different graph is a different bucket"
 
 
@@ -1038,6 +1105,10 @@ def test_distinct_graphs_each_report_once(caplog):
 # so a raw call count is now 2. Disable that probe — monkeypatching the fast
 # path to False — rather than loosening the count, so this still pins the
 # property it owns: the #4997 inventory read adds exactly ONE round trip.
+def _indexes_reads(proj) -> int:
+    return sum("db.indexes()" in c for c in proj.g.calls)
+
+
 def test_exactly_one_inventory_read_per_setup(monkeypatch):
     """The steady state costs ONE catalogue round trip — and the sweep that
     RETIRES an in-graph vector index costs exactly one more (#11642).
@@ -1047,11 +1118,19 @@ def test_exactly_one_inventory_read_per_setup(monkeypatch):
     inventory instead of letting it probe again. After a DROP those rows
     describe a catalogue that no longer exists, so that ONE sweep re-reads — an
     extra round trip the DROP itself invalidated, not a second opinion.
+
+    ⛔ Both halves are pinned because the choice IS the pin: reuse where nothing
+    wrote, re-read where something did. An assertion that only counted "1" would
+    be satisfied by reusing stale rows after a write (the #5434 false gap), and
+    one that only counted "2" by probing twice on every steady-state setup —
+    which the hosted PER-REQUEST path pays per request (#11660 review F1).
     """
-    proj = _bare([_fulltext_row("Point")])
+    proj = _bare([_fulltext_row("Point")])   # measured: no VECTOR index at all
     monkeypatch.setattr(proj, "_schema_is_current", lambda: False)
     proj._ensure_indexes()
-    assert sum("db.indexes()" in c for c in proj.g.calls) == 1
+    assert _indexes_reads(proj) == 1, (
+        f"the steady state must read the catalogue once (got {proj.g.calls})"
+    )
 
     retiring = _bare([_vector_row("Point")])
     monkeypatch.setattr(retiring, "_schema_is_current", lambda: False)
@@ -1074,12 +1153,12 @@ def test_exactly_one_inventory_read_per_setup(monkeypatch):
 def test_fast_path_still_measures_the_catalog(caplog):
     proj = _bare([_vector_row("Point")])
     proj._schema_is_current = lambda: True  # the steady state
-    with caplog.at_level(logging.WARNING):
+    with caplog.at_level(logging.INFO):
         proj._ensure_indexes()
     assert proj._vector_indexed_labels == {"Point"}, (
         "#4465's fast path returned before the inventory was measured"
     )
-    assert [r for r in caplog.records if "#4997" in r.getMessage()], (
+    assert _gap_records(caplog), (
         "the gap must still be reported on the fast path"
     )
 
@@ -1126,6 +1205,60 @@ def test_report_never_gates_index_RETIREMENT():
         "drop is a failing DDL round trip on every setup")
 
 
+def test_the_inventory_read_sits_AFTER_the_retirement_write():
+    """The measurement is not in front of the write (#11660 review F1).
+
+    The sibling pin above proves the drop happens; this one proves WHERE the
+    measurement sits relative to it, which the read COUNT cannot: a probe placed
+    before the drop and another after it also totals two. The hazard is concrete
+    — an inventory whose read can return early, placed first, would leave a
+    deployed store's retired index in place forever, and the one-time migration
+    would never run.
+
+    Falsifiable both ways: a read placed before the drop makes `min(reads)` equal
+    the drop's own position, and a missing re-read after the write makes
+    `max(reads) < drop_at` (the #5434 stale-rows lane).
+    """
+    proj = _bare([_vector_row("Point")])     # the retired index is still there
+    proj._ensure_indexes()
+    calls = proj.g.calls
+    drop_at = next(i for i, c in enumerate(calls) if _is_vector_drop(c))
+    reads = [i for i, c in enumerate(calls) if "db.indexes()" in c]
+    assert reads, "the setup must measure the catalogue at all"
+    assert min(reads) < drop_at, (
+        "the drop is gated on a catalogue READ (never blind) — it must come first"
+    )
+    assert max(reads) > drop_at, (
+        "the inventory must re-read AFTER the write (#5434): pre-drop rows no "
+        "longer describe this store, and reusing them reports a false gap"
+    )
+
+
+def test_report_never_gates_index_creation(monkeypatch):
+    """The CREATE VECTOR INDEX fallback (the only way a Point HNSW index is
+    built on this engine) must still be attempted when the inventory is hostile.
+
+    Falsifiable: if `_record_vector_index_inventory` were placed BEFORE the
+    creation block and returned early, no write form would appear.
+
+    ⛔ Driven with `VECTOR_INDEX_RETIRED = False` because that is the only
+    posture where creation happens at all (`#11660` review F9/F1): the creation
+    block is the ROLLBACK path now, and a pin that ran it implicitly would be
+    asserting code no production lane reaches.
+    """
+    import tortoise.projection as projection_mod
+
+    monkeypatch.setattr(projection_mod, "VECTOR_INDEX_RETIRED", False)
+    for hostile in ([], None):
+        proj = _bare(hostile)
+        proj._ensure_indexes()
+        wrote = any(
+            ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+            for c in proj.g.calls
+        )
+        assert wrote, f"index creation was gated out (inventory={hostile!r})"
+
+
 # (i) concurrency: the latch holds under two threads
 def test_concurrent_setups_do_not_raise_and_latch():
     errors: list[BaseException] = []
@@ -1133,13 +1266,25 @@ def test_concurrent_setups_do_not_raise_and_latch():
     lock = threading.Lock()
 
     class _Counting(logging.Handler):
+        # The gap report's level is the posture's business (§`_gap_level()`);
+        # the LATCH is this handler's. Keying the counter on the marker alone
+        # keeps the concurrency property (one report per store) pinned under
+        # both postures, instead of silently counting nothing at INFO.
         def emit(self, record):
             if "#4997" in record.getMessage():
                 with lock:
                     warned.append(1)
 
     handler = _Counting()
-    logging.getLogger("tortoise.projection").addHandler(handler)
+    logger = logging.getLogger("tortoise.projection")
+    # The latch is pinned through a HANDLER-level count, so the LOGGER's level
+    # has to admit the record: the retirement reports at INFO, and the root
+    # default (WARNING) would drop it before any handler saw it — the counter
+    # would then read 0 and the pin would fail for a reason that has nothing to
+    # do with latching (#11660 review F1).
+    _prior_level = logger.level
+    logger.setLevel(logging.DEBUG)
+    logger.addHandler(handler)
     try:
         proj = _bare([_vector_row("Point")], graph="test_4997_thread")
 
@@ -1155,10 +1300,11 @@ def test_concurrent_setups_do_not_raise_and_latch():
         for t in threads:
             t.join()
     finally:
-        logging.getLogger("tortoise.projection").removeHandler(handler)
+        logger.removeHandler(handler)
+        logger.setLevel(_prior_level)
 
     assert not errors, errors
-    assert len(warned) == 1, f"expected exactly one warning, got {len(warned)}"
+    assert len(warned) == 1, f"expected exactly one gap report, got {len(warned)}"
 
 
 # ── Task 4: live integration against a real engine ─────────────────────────
