@@ -15,7 +15,7 @@ the corrected reading:
 
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can —
-   through ``sdk._extract_session_v2`` (``sdk.py:15076``, called at ``hosted_api.py:18828``;
+   through ``sdk._extract_session_v2`` (``sdk.py:15082``, called at ``hosted_api.py:18828``;
    the ``TortoiseSDK.capture_session`` hop that used to open this path was deleted by
    ``#4282``, and the hosted capture lane is its surviving production caller) →
    ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13192``) calls
