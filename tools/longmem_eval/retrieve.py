@@ -1201,6 +1201,48 @@ def _mark_bands(ranks: list[int]) -> dict[str, int]:
 
 
 
+def _session_recall_at_n_gold(
+    hits: list[dict], answer_sessions: set[str],
+) -> float | None:
+    """#2516 (C1) — the ADDITIVE cutoff variant ``recall_all@N_gold``'s
+    per-question FRACTION: ``|gold ∩ ranked[:len(gold)]| / len(gold)``.
+
+    ``recall_all@5`` is identically 0.0 for any question whose evidence set
+    exceeds five pieces, at ANY ranking quality: the fifth slot is a wall, so a
+    spread-evidence (multi-session) question cannot register an improvement
+    under that cutoff however well retrieval does (the arithmetic is recorded on
+    #10538, decision relay 2026-11-07T17:54Z, and that relay names #2516 as the
+    issue that seals the variant). So the SAME ranking is ALSO measured at a
+    cutoff equal to each question's own gold-session count, whose per-question
+    binary projection is ``recall_all@N_gold``. The OFFICIAL ``recall_all@5`` is
+    untouched and stays the official row; this is a DECLARED LABELLED VARIANT
+    beside it, never mixed into the official number (R12).
+
+    ONE implementation, called from BOTH arms (``_recall_metrics`` for the
+    hybrid path and ``_vector_retrieve`` for the vector path) — the two used to
+    carry the identical expression twice, so a change to one (a session-dedup,
+    a stricter guard) would have silently left the other arm measuring a
+    different quantity (#11598 review).
+
+    ``None`` when the question has no gold session: the official ``all([])``
+    edge is 1.0, and this module treats an empty denominator as NOT ELIGIBLE
+    rather than fabricating a perfect score (module docstring).
+
+    CEILING, stated because it is not obvious: ``hits`` is the arm's measured
+    surface, so the achievable value is ``min(len(gold), len(hits))/len(gold)``.
+    The vector arm fetches ``limit=max(ks)`` (20 by default) and the hybrid
+    rerank/pool-only arms truncate ``pool[:top_k]`` (20) — only the plain
+    no-rerank hybrid arm leaves the deduped pool untruncated. A question with
+    more gold sessions than its arm's depth therefore still cannot reach 1.0 at
+    its own cutoff.
+    """
+    if not answer_sessions:
+        return None
+    gold_top = hits[:len(answer_sessions)]
+    gold_retrieved = {h["session_id"] for h in gold_top if h["session_id"]}
+    return len(answer_sessions & gold_retrieved) / len(answer_sessions)
+
+
 def _recall_metrics(
     hits: list[dict],
     *,
@@ -1239,27 +1281,10 @@ def _recall_metrics(
     _evidence_recall: dict[str, float | None] = {}
     chunk_evidence_recall: dict[str, float | None] = {}
 
-    # #2516 (C1) — the ADDITIVE cutoff variant ``recall_all@N_gold``.
-    # ``recall_all@5`` is identically 0.0 for any question whose evidence set
-    # exceeds five pieces, at ANY ranking quality: the fifth slot is a wall, so
-    # a spread-evidence (multi-session) question cannot register an improvement
-    # under that cutoff however well retrieval does (the arithmetic is recorded
-    # on #10538, decision relay 2026-11-07T17:54Z, and that relay names #2516 as
-    # the issue that seals the variant). So the SAME ranking is ALSO measured at
-    # a cutoff equal to each question's own gold-session count — the fraction
-    # ``|gold ∩ top-n_gold| / n_gold``, whose per-question binary projection is
-    # ``recall_all@N_gold``. The OFFICIAL ``recall_all@5`` is untouched and
-    # stays the official row; this is a DECLARED LABELLED VARIANT beside it,
-    # never mixed into the official number (R12).
-    # ``None`` when the question has no gold session: the official ``all([])``
-    # edge is 1.0, and this module treats an empty denominator as NOT ELIGIBLE
-    # rather than fabricating a perfect score (module docstring).
-    session_recall_at_n_gold: float | None = None
-    if answer_sessions:
-        gold_top = hits[:len(answer_sessions)]
-        gold_retrieved = {h["session_id"] for h in gold_top if h["session_id"]}
-        session_recall_at_n_gold = (
-            len(answer_sessions & gold_retrieved) / len(answer_sessions))
+    # #2516 (C1): the labelled ``recall_all@N_gold`` cutoff variant's fraction —
+    # ONE implementation (``_session_recall_at_n_gold``), shared with the vector
+    # arm. See the helper for the semantics and the depth ceiling.
+    session_recall_at_n_gold = _session_recall_at_n_gold(hits, answer_sessions)
 
     for k in ks:
         top = hits[:k]
@@ -1492,13 +1517,10 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
             turn_recall[str(k)] = 0.0
 
     # ── the additive gold-cutoff variant (#2516, C1) ──
-    session_recall_at_n_gold: float | None = None
-    if answer_sessions:
-        gold_retrieved = {h["session_id"]
-                          for h in annotated[:len(answer_sessions)]
-                          if h["session_id"]}
-        session_recall_at_n_gold = (
-            len(answer_sessions & gold_retrieved) / len(answer_sessions))
+    # ONE implementation (``_session_recall_at_n_gold``), shared with the
+    # hybrid arm; see the helper for the semantics and the depth ceiling.
+    session_recall_at_n_gold = _session_recall_at_n_gold(
+        annotated, answer_sessions)
 
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]

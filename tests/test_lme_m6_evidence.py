@@ -45,6 +45,7 @@ from tools.longmem_eval.evidence import (  # noqa: E402, RUF100
 from tools.longmem_eval.ingest import _session_transcript, ingest_haystack  # noqa: E402, RUF100
 from tools.longmem_eval.report import build_report  # noqa: E402, RUF100
 from tools.longmem_eval.retrieve import retrieve_for_question  # noqa: E402, RUF100
+from tools.longmem_eval.w7_publish import GOLD_CUTOFF_ROW  # noqa: E402, RUF100
 from tortoise.sdk import TortoiseSDK  # noqa: E402, RUF100
 
 MINI = Path(__file__).parent / "fixtures" / "longmemeval_mini.json"
@@ -1427,7 +1428,15 @@ def test_report_retrieval_by_category_carries_the_gold_cutoff_fraction():
         "Multi-Session Reasoning"]
     assert row["session_recall@n_gold"] == {"value": 0.5, "n": 2,
                                             "n_missing": 1}
-    assert "recall_all@n_gold" not in row
+    # R12 / one-implementation: the BINARY row (``recall_all@N_gold``) is
+    # emitted by ``w7_publish`` alone, so it must stay out of this block. Assert
+    # it with the CONSTANT: a hand-spelled literal can be a string this block
+    # can never emit — the old one was ``recall_all@n_gold``, which the fraction
+    # key does not even share a stem with (the fraction is
+    # ``session_recall@n_gold``) — and such an assertion passes over a real
+    # violation while looking like it pins one (proven by mutation, #11598
+    # review).
+    assert GOLD_CUTOFF_ROW not in row
 
 
 def test_report_retrieval_by_category_counts_missing_denominators():

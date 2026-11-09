@@ -226,6 +226,16 @@ CATEGORY_GATE_TYPES = ("multi-session", "knowledge-update",
 #: each question's OWN evidence count instead of a fixed 5. It is a DECLARED
 #: LABELLED VARIANT riding beside the official row (R12): ``recall_all@5`` is
 #: untouched, stays comparable, and is never replaced by this number.
+#:
+#: ⚠️ CEILING — the variant is computed over the arm's MEASURED surface, so its
+#: achievable value is ``min(n_gold, depth)/n_gold``, where ``depth`` is that
+#: arm's retrieval depth: the vector arm fetches ``limit=max(ks)`` (20 by
+#: default) and the hybrid rerank/pool-only arms truncate ``pool[:top_k]``
+#: (20), while the plain no-rerank hybrid arm leaves the deduped pool
+#: untruncated. A question whose gold-session count exceeds its arm's depth
+#: therefore stays below 1.0 at its own cutoff, and the ceiling differs BY ARM —
+#: compare this row across arms only where ``n_gold <= depth``. The wall moved
+#: from 5 to ``depth``; it did not disappear (#11598 review).
 GOLD_CUTOFF_ROW = "recall_all@N_gold"
 
 
@@ -439,7 +449,9 @@ def variant_rows(outcomes: list[dict], k: int | str = 5) -> dict[str, Any]:
             "n": len(gold_cutoff_vals),
             "n_excluded": len(non_abs) - len(gold_cutoff_vals),
             "semantics": "all(doc in ranked[:n_gold] for doc in "
-                         "correct_docs), n_gold = len(correct_docs)",
+                         "correct_docs), n_gold = len(correct_docs); "
+                         "capped by the arm's retrieval depth "
+                         "(min(n_gold, depth)/n_gold)",
         },
         "turn_recall_paper@k": {
             "label": "LABELED VARIANT (D2): turn-level recall over the "

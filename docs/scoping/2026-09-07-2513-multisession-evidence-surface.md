@@ -189,9 +189,18 @@ filtered):
    It is a **declared labelled variant**, never a substitution (R12): `recall_all@5` stays the official
    row, untouched and comparable, and the variant rides beside it with its own `n`. Live in
    `w7_publish.GOLD_CUTOFF_ROW` (top-level + per gate category in `category_variant_rows`), fed by
-   `retrieve.py::_recall_metrics` → `session_recall@n_gold` on the **same** ranking the `@5` fraction is
-   measured on, and surfaced per category as a fraction in `report.py`'s `retrieval_by_category`. A
-   report that predates it counts `n_missing`, never `0.0`.
+   `retrieve.py::_session_recall_at_n_gold` (one implementation, called from both retrieval arms) →
+   `session_recall@n_gold` on the **same** ranking the `@5` fraction is measured on, and surfaced per
+   category as a fraction in `report.py`'s `retrieval_by_category`. A report that predates it counts
+   `n_missing`, never `0.0`.
+
+   ⚠️ **Ceiling — the wall moved from 5 to the arm's depth, it did not disappear.** The variant is
+   computed over the arm's *measured surface*, so the achievable value is
+   `min(n_gold, depth) / n_gold`: the vector arm fetches `limit=max(ks)` (20 by default) and the hybrid
+   rerank / pool-only arms truncate `pool[:top_k]` (20), while the plain no-rerank hybrid arm leaves the
+   deduped pool untruncated. A question whose gold-session count exceeds its arm's depth therefore still
+   cannot reach `1.0` at its own cutoff, and the ceiling differs **by arm** — compare this row across
+   arms only where `n_gold ≤ depth`.
 3. **reader_evidence@5 / reader_surface@k** — the evidence that actually enters the reader
    context (C1 #1745 context-level measures), so a pool win cannot be eaten by the
    assembly caps.
