@@ -5500,14 +5500,19 @@ def _cmd_install_hooks(args) -> int:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
       cline / devin — and, for pi, the in-repo ``tortoise-volunteer.ts``
-      EXTENSION (#2119), which is not a shell hook at all;
+      EXTENSION (#2119) and, for openclaw, the native plugin DIRECTORY
+      (``~/.openclaw/extensions/tortoise/``, #2120) — none of which is a
+      shell hook at all;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
       (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
-      sessionStart cold-context injection hook, #2122) and pi (the in-repo
+      sessionStart cold-context injection hook, #2122), pi (the in-repo
       capture extension, written in the SAME run as the per-turn read
-      extension, and the pair is graded as ONE contract number, #2119).
+      extension, and the pair is graded as ONE contract number, #2119) and
+      openclaw (the plugin DIRECTORY above plus its
+      ``plugins.entries.tortoise.enabled`` enablement — discovered is not
+      loaded, #2120).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
