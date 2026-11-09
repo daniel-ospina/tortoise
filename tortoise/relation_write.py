@@ -100,18 +100,27 @@ the deadline slip"*) would be stored as belief flowing BOTH ways unless the leg
 supplies the direction the statement already declares. It does:
 :func:`_direction_for` reads ``pack_registry.SEMANTICS_DIRECTIONS`` — ONTOLOGY
 §8's RULED table (``causes``/``supports`` → ``->``, ``mutuallySupportive`` →
-``<->``, ``related`` → ``-``) — from the MEANING in the order it is declared:
-the pack relation row's own ``semantics:`` (``declared_meanings``, the same row
-that supplies the mechanism and canonicalised through ``SEMANTICS_TRANSITION``),
-then the meaning riding the edge (``label``, which is the story's verb), then the
-verb itself, then the record's ``semantics`` gloss, and only for a meaning that
+``<->``, ``related`` → ``-``) — from the ROW first and then from the MEANING in
+the order it is declared: the pack relation row's own resolved ``direction:``
+(``pack_registry.declared_directions`` → ``effective_direction``, the ONE
+per-row resolver ``tools/pack_relation_census.py`` asks — a DIFFERENTIATING
+declared token outranks the meaning, so ``blocks``/``holds`` (both
+``direction: "<-"``) are written ``<-`` and not their meanings' ``->``), then
+the row's own ``semantics:`` (``declared_meanings``, the same row that supplies
+the mechanism and canonicalised through ``SEMANTICS_TRANSITION``), then the
+meaning riding the edge (``label``, which is the story's verb), then the verb
+itself, then the record's ``semantics`` gloss, and only for a meaning that
 declares NO direction does it fall back to ``_DIRECTION_STATED`` (the model's
-one-way token: a stated relation runs ``src → dst``). The row comes first
-because it is the DECLARATION that licensed the write — the authority
-``_mechanism_for`` already consults for the mechanism half of the same triple
-(#7852) — and because keying on the model's optional gloss made the stored
-direction non-deterministic: the same pack verb landed ``-`` when the model
-restated the gloss and ``->`` when it did not. The value rides
+one-way token: a stated relation runs ``src → dst``). The row comes first —
+its ``direction:`` AND its meaning, in that order — because it is the
+DECLARATION that licensed the write — the authority ``_mechanism_for`` already
+consults for the mechanism half of the same triple (#7852) — and because
+keying on the model's optional gloss made the stored direction
+non-deterministic: the same pack verb landed ``-`` when the model restated the
+gloss and ``->`` when it did not. ⛔ Reading the meaning but not the row's own
+token is the inversion this paragraph used to describe: it wrote ``->`` on the
+two shipped rows that declare ``<-`` and left the writer disagreeing with the
+census about a row (#11548 review, P1). The value rides
 ``link_entities(direction=…)`` onto the direct arm, and the written row records
 it, so a reader can tell a one-way stated claim from a writer default without
 re-deriving it. ``live.direction_flows`` reads it back unchanged.
@@ -879,7 +888,7 @@ def apply_relation_edges(
         # ``written`` with no drop row and no warning.
         #
         # DIRECT: ``create_direct_edge`` answers ``{"created": …, "deduped":
-        # not created}`` (``sdk.py:29283-29284``), and a MERGE dedup hit is
+        # not created}`` (``sdk.py:29278-29279``), and a MERGE dedup hit is
         # ``created: False`` on an edge the graph DOES hold — so ``created is
         # False`` must NOT be read on this arm, or every idempotent re-capture
         # would be reported as a refusal.

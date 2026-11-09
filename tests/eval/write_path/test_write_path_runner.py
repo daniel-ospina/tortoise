@@ -522,6 +522,45 @@ def test_the_aggregate_keeps_the_two_measures_apart():
         aggregate
 
 
+def test_a_census_this_run_could_not_READ_is_not_a_measured_absence():
+    """⛔ #11548 review cycle 2 (P2): three states, not two.
+
+    ``aggregate_graph_census`` folded a session whose census could not be read
+    (``{"session_id", "error": …}``, the shape ``build_graph_census`` and
+    ``census_or_error`` both emit) into ``object_edges_basis["absent"]`` — the
+    word that means *the capture never entered the leg and stated no
+    relations*. That is a measured absence reported for a session nothing
+    measured, and it is the exact fail-silent #11237 fixed one layer down ("a
+    crashed leg would read as a measured 'nothing stated' in the E6 slot"),
+    left unfixed for the census read.
+
+    The unreadable session therefore gets its OWN basis (so it can never be
+    summed — only ``write-leg-record-verified`` is), and the run note names E6
+    beside E1/E3 as unanswerable. FAILS IF the error shape defaults to
+    ``absent``, or if the note still names only E1/E3.
+    """
+    aggregate = runner.aggregate_graph_census({
+        "wp01": {"session_id": "wp01", "error": "RuntimeError: graph down"},
+        "wp02": {
+            "session_id": "wp02", "objects": {"total": 1},
+            "object_edges": {"IMPL": 2},
+            "object_edges_basis": "write-leg-record-verified",
+            "object_edges_incident": {"IMPL": 2},
+            "object_edges_missing": [],
+        },
+    })
+    assert aggregate["object_edges_basis"] == {
+        "census-error": 1, "write-leg-record-verified": 1}, aggregate
+    assert aggregate["object_edges_total"] == 2, aggregate
+    assert aggregate["sessions_errored"] == ["wp01"], aggregate
+    notes = runner.graph_census_notes({"aggregate": aggregate})
+    _note = next(n for n in notes if "graph census unavailable" in n)
+    assert "E1/E3/E6" in _note, (
+        "the unreadable-census note must name E6 as UNANSWERABLE too — the E6 "
+        "row is a per-session answerability question since #11237: "
+        f"{_note!r}")
+
+
 def test_a_row_whose_basis_is_not_the_verified_one_is_NOT_summed():
     """A superseded reading can never re-enter `object_edges_total`.
 

@@ -944,7 +944,19 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         # discarded silently: it is NAMED in `object_edges_unattributed` and in
         # `graph_census_notes`, and its numbers stay available under the
         # session's own `object_edges_incident`.
-        _basis = str(census.get("object_edges_basis") or "absent")
+        # ⛔ A census this run could not READ is its own state, not "absent".
+        # The two error shapes this file produces (`build_graph_census`'s
+        # `{"session_id", "error": "snapshot raised: …"}` and
+        # `census_or_error`'s `{"session_id", "error": …}`) carry no basis at
+        # all, so defaulting them to `absent` filed an UNREADABLE session under
+        # the word that means "the capture never entered the leg and stated no
+        # relations" — inflating the answerability count the reader is told to
+        # read `object_edges_total` WITH, and naming only E1/E3 in the run note.
+        # That is the same fail-silent #11237 fixed one layer down for the leg
+        # ("a crashed leg would read as a measured 'nothing stated'"), left
+        # unfixed for the census read (#11548 review cycle 2, P2).
+        _basis = ("census-error" if "error" in census
+                  else str(census.get("object_edges_basis") or "absent"))
         object_edges_basis[_basis] = object_edges_basis.get(_basis, 0) + 1
         _attributable = dict(census.get("object_edges") or {})
         if _basis == "write-leg-record-verified":
@@ -1130,9 +1142,9 @@ def graph_census_notes(census: dict | None) -> list[str]:
         for sid in errored)
     notes.append(
         "graph census unavailable for "
-        f"{len(errored)} of {aggregate.get('sessions')} session(s) — E1/E3 are "
-        "NOT answerable from this receipt for them (reported, never zeroed): "
-        f"{details}"
+        f"{len(errored)} of {aggregate.get('sessions')} session(s) — E1/E3/E6 "
+        "are NOT answerable from this receipt for them (reported, never "
+        f"zeroed): {details}"
     )
     return notes
 

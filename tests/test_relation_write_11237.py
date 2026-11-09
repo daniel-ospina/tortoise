@@ -907,3 +907,80 @@ def test_declared_meanings_reads_the_row_that_licenses_the_write():
     assert declared_meanings(label="splitsInto", registry=mixed) == [
         ("hasPart", "the pack relation 'splitsInto' (testpack)")], \
         declared_meanings(label="splitsInto", registry=mixed)
+
+
+def test_declared_directions_reads_the_row_that_licenses_the_write():
+    """⛔ The THIRD leg of #7852's triple, from the registry (never here).
+
+    ``declared_mechanisms`` answers the mechanism, ``declared_meanings`` the
+    meaning — and the row's own ``direction:`` is the leg that OUTRANKS both
+    (#11083 indicator (c): "the census and the writer cannot disagree about a
+    row"). ``declared_directions`` must therefore ask the ONE resolver
+    (``effective_direction``) rather than re-spell its precedence, and must
+    return NOTHING where no row declares a resolvable direction — a default
+    ``->`` here would be the same false confidence the write leg was fixed to
+    stop asserting (#11548 review cycle 2, follow-up).
+
+    Mutation: drop the ``if not direction`` arm and an unresolvable token is
+    reported as a direction; echo the raw token instead of the resolver's answer
+    and the legacy alias (``unidirectional``) re-opens the census/writer
+    divergence in the opposite direction.
+    """
+    from tortoise.pack_registry import declared_directions
+
+    def _reg(*rows):
+        return _DeclaringRegistry(rows)
+
+    # A row's OWN token, which its meaning does not imply.
+    assert declared_directions(
+        label="blocksy",
+        registry=_reg({"predicate": "blocksy", "mechanism": "IMPL",
+                       "semantics": "dependsOn", "direction": "<-",
+                       "pack": "testpack"})) == [
+        ("<-", "the pack relation 'blocksy' (testpack)")], \
+        declared_directions(label="blocksy", registry=_reg(
+            {"predicate": "blocksy", "mechanism": "IMPL",
+             "semantics": "dependsOn", "direction": "<-",
+             "pack": "testpack"}))
+    # With no token the MEANING rules, through the same resolver.
+    assert declared_directions(
+        label="splitsInto", registry=_DeclaringRegistry(DIRECTION_ROWS)) == [
+        ("<->", "the pack relation 'splitsInto' (testpack)")], \
+        declared_directions(label="splitsInto",
+                            registry=_DeclaringRegistry(DIRECTION_ROWS))
+    # A legacy alias is NORMALISED, not echoed: `unidirectional` means `->`.
+    assert declared_directions(
+        label="flowsTo",
+        registry=_reg({"predicate": "flowsTo", "mechanism": "IMPL",
+                       "direction": "unidirectional"})) == [
+        ("->", "the pack relation 'flowsTo' (pack)")], \
+        declared_directions(label="flowsTo", registry=_reg(
+            {"predicate": "flowsTo", "mechanism": "IMPL",
+             "direction": "unidirectional"}))
+    # Nothing resolvable declares NOTHING — never a default.
+    assert declared_directions(
+        label="odd", registry=_reg({"predicate": "odd",
+                                    "direction": "sideways"})) == []
+    assert declared_directions(
+        label="listy", registry=_reg({"predicate": "listy",
+                                      "direction": ["<-"]})) == []
+    assert declared_directions(label="nuances",
+                               registry=_DeclaringRegistry(DIRECTION_ROWS)) == []
+    # The three-state sentinel, as its two siblings spell it: `None` is
+    # "known absent", not "load the default".
+    assert declared_directions(label="splitsInto", registry=None) == []
+    # NEVER raises.
+    assert declared_directions(label="splitsInto", registry=object()) == []
+
+    class _BadRow(dict):
+        def get(self, key, default=None):
+            if key == "predicate":
+                raise RuntimeError("row will not read")
+            return super().get(key, default)
+
+    mixed = _DeclaringRegistry([_BadRow({"predicate": "x"}),
+                                {"predicate": "splitsInto",
+                                 "semantics": "hasPart"}])
+    assert declared_directions(label="splitsInto", registry=mixed) == [
+        ("<->", "the pack relation 'splitsInto' (pack)")], \
+        declared_directions(label="splitsInto", registry=mixed)

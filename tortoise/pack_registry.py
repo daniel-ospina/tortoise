@@ -1123,11 +1123,20 @@ def declared_meanings(
     their own resolvers (``core:`` prefixes, cross-pack references), so an exact
     ``(fromKind, toKind)`` match that misses an alias would find no declaration
     and silently fall back to the one-way default — trading a hypothetical
-    ambiguity for a real wrong direction. Measured on the shipped catalog, the
-    ambiguity it would prevent does not exist: one predicate is declared more
-    than once (``assignedTo`` — ``managedBy`` in venture, and no semantics and no
-    mechanism in project-management, so that row can never reach the direct
-    writer).
+    ambiguity for a real wrong direction. Measured on the shipped catalog
+    (``_get_registry().list_relations()``, 36 rows), FOUR predicates are declared
+    more than once — ``addresses`` ×6, ``contains`` ×2, ``targets`` ×2,
+    ``assignedTo`` ×2 — and the predicate-only lookup is exact on today's catalog
+    because all rows of each agree on their effective direction (``->``, ``<->``,
+    ``->``, ``->``). ⛔ The residual this lookup does NOT resolve is named rather
+    than denied: a predicate whose sibling rows diverge in sense or direction is
+    answered by whichever row resolves first, so giving ONE of the six
+    ``addresses`` rows a different sense applies it to all six. (An earlier
+    version of this paragraph claimed the case did not exist at all and named
+    ``assignedTo`` as a row that could never reach the direct writer; both were
+    false against the shipped manifests — it carries ``mechanism: IMPL`` and
+    ``semantics: managedBy`` and its write path is ``('operator',)`` — #11548
+    review cycle 2.)
 
     The row walk, its degradation arms and their logging are SHARED with
     :func:`declared_mechanisms` (:func:`_declared_relation_rows`), and so is the
