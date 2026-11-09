@@ -1952,9 +1952,10 @@ class TestCoreHierarchy:
         #11000's first cut argued the declaration model is depth 1, so one hop
         would equal the transitive closure. That argument is WRONG, and this
         test is the correction: `_validate` does restrict a `subclassOf` parent
-        to core kinds (true — pinned below), but 15 of the 16
-        `CANONICAL_OBJECT_KINDS` are THEMSELVES children of `Object`, so every
-        declared pair is the chain `pack kind ⊑ core child ⊑ Object`
+        to core kinds (true — pinned below), but ALL 16 of the
+        `CANONICAL_OBJECT_KINDS` are THEMSELVES children of `Object` (the row is
+        that canonical set), so every declared pair is the chain
+        `pack kind ⊑ core child ⊑ Object`
         (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
         17 declared pairs had a parent that is an Object child, and
         `expand_kind("Object")` carried none of them.

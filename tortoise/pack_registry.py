@@ -3547,9 +3547,10 @@ class PackRegistry:
         # ── THE CLOSURE (#11000 R6): DIRECTIONAL, not a bucket union ───────
         # The declaration model is depth 2, not depth 1. `_validate` restricts a
         # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`, so
-        # a pack kind is never a parent — but 15 of the 16
-        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object`, so every
-        # declared pair is the chain `pack kind ⊑ core child ⊑ Object`
+        # a pack kind is never a parent — but all 16 of the
+        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row IS
+        # that canonical set), so every declared pair is the chain
+        # `pack kind ⊑ core child ⊑ Object`
         # (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
         # 17 declared pairs have a parent that is itself an `Object` child, and
         # `expand_kind("Object")` carried NONE of them — so `query(kind="Object")`
@@ -3573,6 +3574,14 @@ class PackRegistry:
         # `expand_kind("issue")` inherits everything `dev:issue` gained because
         # the bare form is equivalent to it, not because a bare bucket copies.
         #
+        # ⚠ RECORDED, not fixed (measured 2026-11-09): the five §5 SUBJECT
+        # children (`organization`, `team`, …) only become bucket keys in the
+        # `core:`-alias pass BELOW, which runs after this walk — so unlike every
+        # Object/Point/Event child they do NOT inherit `Subject` upward
+        # (`expand_kind("team") == ["team", "core:team"]`). No writer stores
+        # `subjectKind="Subject"` (the layer root is not a stored kind), so this
+        # has no wrong answer today; seeding those keys before this walk is the
+        # fix if one ever appears.
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
         # are disjoint from its keys — both pinned), so both walks reach a
