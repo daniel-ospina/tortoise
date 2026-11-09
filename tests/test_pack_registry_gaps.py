@@ -1554,13 +1554,18 @@ class TestCoreHierarchy:
             f"invisible: {missing_core}")
 
     def test_a_child_gains_only_its_own_parent(self, shipped):
-        """…and NOT its parent's other children, nor the parent's parent.
+        """…and NOT its parent's other children.
 
         The failure this prevents: widening done by UNIONING the parent's bucket
-        instead of appending the parent's NAME. That looks green on the test
-        above while quietly turning `expand_kind('dev:issue')` into "every
-        WorkItem", so a read for issues returns pull requests, cards and
-        features — a wrong-BROAD answer, the mirror of the defect being fixed.
+        instead of naming the parent. That looks green on the test above while
+        quietly turning `expand_kind('dev:issue')` into "every WorkItem", so a
+        read for issues returns pull requests, cards and features — a
+        wrong-BROAD answer, the mirror of the defect being fixed.
+
+        ⚠ It deliberately does NOT forbid the parent's PARENT: the closure is
+        depth 2 by design (`dev:issue` gains `WorkItem` AND `Object`), and the
+        transitive UP direction is pinned by
+        `test_the_closure_is_depth_two_because_a_declared_parent_is_a_core_child`.
         """
         declared_parents = {parent for p in shipped.packs.values()
                             for parent in p.kind_subclasses.values()}
@@ -2019,14 +2024,41 @@ class TestCoreHierarchy:
                 f"expand_kind({root!r}) does not reach its declared descendants "
                 f"transitively: {missing}")
 
-        # UP: every declared child carries its parent's ancestors by NAME.
+        # UP: every declared child carries its parent's ancestors by NAME. The
+        # ancestor is derived from `CORE_SUBCLASSES` in reverse ("which root's row
+        # holds this parent"), NOT read forward — a declared parent is a core
+        # CHILD (`WorkItem`), never a root, so `CORE_SUBCLASSES.get(parent)` is
+        # always `()` and an assertion built on it is vacuous. Mutation-checked:
+        # deleting `_ancestors(peer)` from the closure leaves a forward lookup
+        # green while this one reds.
+        root_of = {child: root for root, kids in CORE_SUBCLASSES.items()
+                   for child in kids}
+        assert root_of, "no core parent rows parsed — pin is vacuous"
         for p in shipped.packs.values():
             for child, parent in p.kind_subclasses.items():
                 bucket = set(shipped.expand_kind(f"{p.namespace}:{child}"))
                 assert parent in bucket, (child, parent)
-                assert set(CORE_SUBCLASSES.get(parent, ())) <= bucket, (
-                    f"{p.namespace}:{child} missed its parent's row: "
-                    f"{sorted(set(CORE_SUBCLASSES.get(parent, ())) - bucket)}")
+                if parent in root_of:
+                    root = root_of[parent]
+                    assert root in bucket, (
+                        f"{p.namespace}:{child} misses its parent's ancestor "
+                        f"{root!r} — the UP closure is not transitive: {sorted(bucket)}")
+                    assert f"core:{root}" in bucket, (
+                        f"{p.namespace}:{child} misses `core:{root}` — the "
+                        "ancestor arrives in one spelling only")
+
+        # …and the same UP direction for the CORE rows themselves: every child in
+        # a §6/§5 row names its parent, in BOTH spellings. Measured before this
+        # pin: `expand_kind("team") == ["team", "core:team"]` — no `Subject` —
+        # because §5's Subject kinds had no bucket until the `core:` pass ran
+        # after the closure.
+        for root, kids in CORE_SUBCLASSES.items():
+            for child in kids:
+                bucket = set(shipped.expand_kind(child))
+                assert root in bucket, (
+                    f"expand_kind({child!r}) does not name its core parent "
+                    f"{root!r} — the UP direction skips a CORE row: {sorted(bucket)}")
+                assert f"core:{root}" in bucket, (child, root)
 
     def test_the_closure_does_not_walk_down_from_an_ancestor(self, shipped):
         """The closure is DIRECTIONAL — a child does not inherit its parent's subtree.

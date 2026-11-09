@@ -3461,26 +3461,25 @@ class PackRegistry:
                     full = f"{ns}:{kind}"
                     expansions[full] = [full]
 
-        # Apply subclassOf: a pack child ALSO expands to its declared parent.
+        # The declared `subclassOf` parent is supplied by the closure's UP walk
+        # below, which reads `direct_parents` straight from `kind_subclasses`.
         #
-        # #11000 (Leg A): `parent` was bound and never read — the B007
-        # (unused-loop-variable) suppression on the loop was the tell — so the
-        # comment above promised a widening the loop did not do. `expand_kind("dev:issue")` therefore carried only
-        # its `equivalentTo` peer (`pm:issue`) and never `WorkItem`, i.e. a
-        # pack's declared business vocabulary was loaded, validated, and then
-        # invisible to every read that depends on it.
+        # ⚠️ A loop used to sit here appending `parent` to the child's bucket, and
+        # it WAS the `#11000` Leg A bug: `parent` was bound and never read (a
+        # `B007` suppression on the loop was the tell), so a pack's declared
+        # business vocabulary was loaded, validated, and invisible to every read
+        # — `expand_kind("dev:issue")` carried only its `equivalentTo` peer
+        # (`pm:issue`) and never `WorkItem`. That loop is now content-redundant:
+        # the closure adds the same name PLUS the parent's ancestors, so removing
+        # it leaves every bucket's MEMBERSHIP identical (only list order shifts —
+        # verified by deleting it, suite green, because the property and not the
+        # loop is the contract). Removed rather than left as dead weight; the
+        # property is still pinned by
+        # `test_every_declared_parent_is_in_its_child_expansion`.
         #
-        # The PARENT NAME only, never the parent's bucket: a `dev:issue` is a
-        # `WorkItem`, but it is not a `dev:pullRequest`. This pass therefore adds
-        # ONE hop; the transitive closure is applied by the directional pass
-        # below (see "the closure" there for why one hop is not enough).
-        for p in self.packs.values():
-            ns = p.namespace
-            for child, parent in p.kind_subclasses.items():
-                full_child = f"{ns}:{child}"
-                bucket = expansions.setdefault(full_child, [full_child])
-                if parent not in bucket:
-                    bucket.append(parent)
+        # ⛔ The PARENT NAME only, never the parent's bucket: a `dev:issue` is a
+        # `WorkItem`, but it is not a `dev:pullRequest`. That is exactly what the
+        # closure's DIRECTIONAL split enforces (up = names, down = subtree).
 
         # Apply equivalentTo: bidirectional
         for p in self.packs.values():
@@ -3587,6 +3586,18 @@ class PackRegistry:
         # are disjoint from its keys — both pinned), so both walks reach a
         # fixpoint. A cycle guard would be inert machinery over a state no
         # manifest can construct.
+        # Every kind that appears in ANY relation must own a bucket BEFORE the
+        # closure below iterates `expansions` — it walks a snapshot, so an
+        # endpoint whose bucket is only created by a later pass is silently
+        # skipped in the UP direction. Measured before this seed:
+        # `expand_kind("team") == ["team", "core:team"]` — no `Subject`, although
+        # `CORE_SUBCLASSES["Subject"]` declares it — because §5's five Subject
+        # kinds sit in no canonical set, so their bucket was created by the
+        # `core:` spelling pass at the very END.
+        for endpoint in (list(direct_parents) + list(direct_children)
+                         + list(equivalences) + list(bare_inherits)):
+            expansions.setdefault(endpoint, [endpoint])
+
         for kind in list(expansions):
             gained: set[str] = set()
             sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
