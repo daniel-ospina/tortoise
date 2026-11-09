@@ -322,21 +322,23 @@ export function clipToBytes(text: string, maxBytes: number): string {
  * `apiKey = envKey || fileKey` meant a machine that merely exported the
  * variable `.env.example` documents had THIS seam POST
  * `window: [{role: "user", content: prompt}]` to `$TORTOISE_API_URL` or the
- * built-in default — while every other harness seam shells out to `tortoise
- * volunteer` and stays local on the same env-only key. The canonical reflex
- * this seam wraps resolves exactly that way
- * (`_cmd_volunteer` → `_resolve_config_path(include_env=False,
- * global_only=True)`, `tortoise/__main__.py`), and `platform-seams.md` records
- * it as the D1b posture: "a bare TORTOISE_API_KEY still never flips the hook to
- * hosted mode".
+ * built-in default. Every other per-turn READ seam already stays local on that
+ * same key, because the shipped READ hooks (`volunteer-turn.sh` — codex /
+ * claude / cline / devin) exec `tortoise volunteer`, which resolves with
+ * `include_env=False, global_only=True` (`tortoise/__main__.py`). This seam now
+ * MATCHES them; before this rule it was the one that did not.
  *
- * ⛔ THIS DELIBERATELY DIVERGES FROM `tortoise-capture.ts::resolveConfig` and
- * the shipped shell hooks, which still resolve `envKey || fileKey`. The
- * divergence is RECORDED, not an oversight — the capture family's
- * `include_env=True` is its own decision (see `_resolve_config_path`'s
- * docstring) — and "aligning" this seam back to its documented twin re-opens
- * the consent hole above: it would transmit prompt text for every machine that
- * merely exports a key. Do not.
+ * ⛔ IT STILL DIVERGES FROM THE **CAPTURE** FAMILY, AND THAT IS RECORDED, NOT AN
+ * OVERSIGHT. `tortoise-capture.ts::resolveConfig` and the shipped CAPTURE hooks
+ * (which call `tortoise session capture`) resolve `envKey || fileKey` under
+ * `include_env=True`, so an env-only key DOES authorize their upload — the same
+ * resolver's docstring rules on exactly this ("env alone can still make these
+ * surfaces transmit where it cannot for [context/volunteer]",
+ * `_resolve_config_path`). Two consequences, and both are load-bearing:
+ * exporting only `TORTOISE_API_KEY` gives a Pi user the CAPTURE half hosted and
+ * the READ half local, and a future lane must NOT "align" this seam back to
+ * its capture twin — that would transmit prompt text from a per-turn surface
+ * for every machine that merely exports a key. Do not.
  *
  * Never throws: an absent, unreadable or malformed config is "no config", which
  * is the ordinary state of a machine that never opted in to the hosted

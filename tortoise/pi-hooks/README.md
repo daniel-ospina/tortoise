@@ -264,7 +264,7 @@ captured conversations) to another host. The **hook lane** requires no local
 `agent-infra` is not shipped to users.
 
 ⚠️ **The per-turn READ half resolves its key differently, on purpose.** This
-page covers BOTH Pi halves (see “What ships” above), and for
+page covers BOTH Pi halves (see the file table at the top), and for
 `tortoise-volunteer.ts` an env-only `TORTOISE_API_KEY` is **not** a credential:
 the key is read from `~/.pi/agent/tortoise-config.json` only, and its `apiUrl`
 comes from that same file or the built-in default (`#2369` D1b — the posture
