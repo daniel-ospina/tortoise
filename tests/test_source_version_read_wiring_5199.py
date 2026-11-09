@@ -37,6 +37,16 @@ assertion untouched — a bare ``SearchResult`` must still carry no version clai
 unaggregated key) speaking for the Point, NOT on §4.6's aggregate. The aggregate
 and its guard live in ``tests/test_source_currency_5581.py``.
 
+⚠️ **`#4282` (2026-10-27) deleted `TortoiseSDK.get_provenance_chain`** — the
+reader this module was written to pin. The 18 `get_provenance_chain` legs that
+were this file's subject went with it (the PR body's item 5 lists this file as
+"whole files" alongside #8501/#3945/#6869/#3519; the file SURVIVES for the three
+tests below, which read `currency_status` and the search hit and never touch that
+method). Nothing here pins the per-link note/currency read any more; the §4.6
+Point-level aggregate it handed off to is pinned by
+`tests/test_source_currency_5581.py`. Do not read the paragraphs above as a
+description of the live surface.
+
 Every test below names the input that makes it FAIL.
 """
 from __future__ import annotations

@@ -20,11 +20,18 @@ They also pin the two review findings on the wiring:
   (``test-foo`` opens ``test_foo_tortoise``, not ``org_test-foo``), so
   ``test_journal_key_matches_the_graph_the_sdk_opens`` asserts the two agree,
   and ``test_no_journal_key_can_escape_the_base_dir`` pins the traversal guard.
-* **F1** — a configured journal whose append fails is not silent:
-  ``test_unwritable_journal_is_disclosed_and_counted`` pins the ERROR/counter
-  signal and the additive capture-receipt warning. The append stays fail-soft
-  by design (the graph mutation already succeeded), so ``ok`` remains True —
-  flipping it would trip the #2335 TRUE-retry gate over a persisted write.
+* **F1** — a configured journal whose append fails is not silent. ⛔ The
+  **SDK-lane** leg that pinned it (``test_unwritable_journal_is_disclosed_and_counted``)
+  was **DELETED WITH ITS DRIVER** (`#4282`, 2026-10-27: it read the deleted
+  ``capture_session``'s receipt — ``status == "partial"``, ``points``,
+  ``warnings`` — wrapper-level semantics a test cannot restate without
+  re-implementing the method). The mechanism is still pinned, on the HOSTED
+  door, by ``test_hosted_receipt_discloses_a_failed_journal_append`` below — but
+  only the RECEIPT half: the operator counter
+  (``monitoring.journal_write_failure_count``) has no test reference left, so the
+  counter half is **unwatched**. The append stays fail-soft by design (the graph
+  mutation already succeeded), so ``ok`` remains True — flipping it would trip
+  the #2335 TRUE-retry gate over a persisted write.
 * **F2 (cycle 2)** — the same disclosure must reach the HOSTED receipt, not just
   the SDK lane: ``test_hosted_receipt_discloses_a_failed_journal_append`` drives
   ``_capture_session_impl`` itself (it builds its own receipt and never calls
@@ -33,10 +40,13 @@ They also pin the two review findings on the wiring:
   receipt's success signal — independent of the ``_capture_ok_record`` written
   earlier).
 * **#5632** — the count disclosed on the receipt is THIS capture's DELTA, never
-  the SDK's LIFETIME counter: ``test_capture_after_a_failed_non_capture_write_
-  reports_no_journal_warning`` (SDK lane) and its hosted twin fail a
-  NON-capture append, then capture successfully, and assert NO journal warning.
-  A lifetime read brands every later capture live-only forever.
+  the SDK's LIFETIME counter. ⛔ The **SDK-lane** half
+  (``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``)
+  was **DELETED WITH ITS DRIVER** (`#4282`) for the same receipt reason as F1's,
+  and only its **hosted twin**
+  (``test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning``,
+  below) survives. A lifetime read brands every later capture live-only
+  forever.
 
 Class-B doctrine — every test states (1) the value/state that makes it fail and
 (2) that the state is reachable in its fixture:
@@ -49,14 +59,20 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
   ``test_…_tortoise``); reachable: the fixture namespace is hyphenated.
 * ``test_no_journal_key_can_escape_the_base_dir`` — FAILS while a ``..`` key is
   accepted; reachable: the pre-F2 guard kept ``.``.
-* ``test_capture_aboutobject_edges_survive_rebuild_all`` — FAILS while the
-  capture's edges are absent from the journal (the rebuild's edge set
-  collapses to empty); the fixture mints a resolvable WorkItem Object and
-  captures a conversation that references it, so the live edge set is
-  non-empty (reachable: pinned by the pre-rebuild assertion). **Honest RED:** at
-  the pre-#4240 base this test fails with ``AttributeError`` (no
-  ``_resolve_event_log_path``) — a wiring pin, not the drift. The drift itself
-  is exercised by ``test_live_only_capture_loses_aboutobject_edges_without_the_journal``.
+* ⛔ ``test_capture_aboutobject_edges_survive_rebuild_all`` — **DELETED WITH ITS
+  DRIVER** (`#4282`). Its subject was the **Session** pass's
+  ``(Session)-[:aboutObject]->(Object)`` edge surviving ``rebuild_all``, and that
+  edge is produced by the deleted wrapper's session-link step; the surviving
+  primitives emit the **Point** edge only (measured: replaying
+  ``_write_session_and_turns`` → mint → ``_materialize_session_source`` →
+  ``_extract_session_v2`` yields ``(('Point',), <pt>, <object>)`` and no Session
+  source) — the wrapper was the only SDK call site that invoked the linker
+  (``session_link.link_session_entities``, which SURVIVES and is still called by
+  the hosted lane at ``hosted_api.py``), so with the SDK door gone no SDK-lane
+  capture can produce that edge. The rebuild-survival of Session edges is still
+  pinned, by ``test_relink_aboutobject_edge_survives_rebuild_all`` below (which
+  asserts ``("Session",)`` in the live edge set and then
+  ``_about_edges(proj) == live`` after ``rebuild_all``).
 * ``test_relink_aboutobject_edge_survives_rebuild_all`` — FAILS while the
   re-link's ``EntityLinked`` record is not written; the fixture captures BEFORE
   the Object exists (honest no-match) then materializes it, so the re-link
@@ -66,20 +82,20 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
   ONE test whose RED is the drift itself: it mutates only the wiring (the
   pre-#4240 journal-less construction) and shows the live-only edges do NOT
   survive ``rebuild_all``.
-* ``test_unwritable_journal_is_disclosed_and_counted`` — FAILS while a failed
-  append is silent (no counter, no receipt warning); reachable: the fixture
-  chmods the journal base dir to 0500.
+* ⛔ ``test_unwritable_journal_is_disclosed_and_counted`` — **DELETED WITH ITS
+  DRIVER** (`#4282`): it read the deleted wrapper's receipt
+  (``status == "partial"``, ``points``, ``warnings``). Its hosted twin below
+  keeps the mechanism pinned; the SDK-lane receipt shape is unwatched.
 * ``test_hosted_receipt_discloses_a_failed_journal_append`` — FAILS while the
   HOSTED receipt omits the disclosure (the pre-cycle-2 state: only the SDK lane
   carried it); reachable: the hosted impl is driven directly against a mode-0500
   journal base dir, and the envelope's ``status`` is asserted unchanged
   (``"ok"`` — the hosted receipt's success signal) alongside it.
-* ``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``
-  — FAILS while the receipt reads the LIFETIME counter (the pre-#5632 state): a
-  failed ``create_object`` append precedes a fully successful capture, so the
-  warning must be absent; reachable: the journal base dir is 0500 for that
-  non-capture write and 0700 for the capture, and the counter is asserted to
-  move before the capture and NOT move during it.
+* ⛔ ``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``
+  — **DELETED WITH ITS DRIVER** (`#4282`), same receipt reason. Its hosted twin
+  below fails a non-capture append at the SDK-open seam and asserts NO journal
+  warning, so the DELTA-vs-LIFETIME distinction is still exercised — on the
+  hosted receipt, not the SDK one.
 * ``test_hosted_capture_after_a_failed_non_capture_write_reports_no_warning``
   — the hosted byte-parity twin (same mutation, same reachable fixture) — the
   capture's fresh SDK is seeded with one real failed non-capture append at the
@@ -101,10 +117,50 @@ from types import SimpleNamespace
 
 import pytest
 
+import tortoise.sdk as sdk_mod
 from tortoise import hosted_api as ha
+from tortoise.sdk import TortoiseSDK
 
 # A conversation whose turn text carries a resolvable GitHub issue URL — the
 # `session_link` trigger the capture's entity-linking pass reads.
+#: Fixed mint clock so a replayed capture and a re-run of the same test compare.
+_CAPTURE_NOW = "2026-10-25T00:00:00+00:00"
+
+
+def _drive_capture(sdk, turns, session_id: str) -> dict:
+    """A capture WITHOUT `TortoiseSDK.capture_session` (`#4282` deleted it).
+
+    The wrapper's work survives in four calls, made here in the order the HOSTED
+    production lane makes them (`hosted_api._capture_session_impl`):
+
+      1. ``sdk_mod._write_session_and_turns`` — journals ``SessionRecorded`` and
+         the turn records, which the ``session``/``point`` rows project from;
+      2. ``sdk.create_event(..., "sessionCaptured")`` — the mint the event stream
+         projects from;
+      3. ``sdk._materialize_session_source`` — the typed session ``:Source`` and
+         its ``(Source)-[:references]->(Event)`` wiring;
+      4. ``sdk._extract_session_v2`` — the v2 assembly, which is what emits the
+         ``aboutObject`` edges THIS FILE's subject is about.
+
+    Returns a receipt-shaped dict, because the legs that survive here read only
+    ``ok`` — the wrapper's richer receipt (``status``/``points``/``warnings``) is
+    NOT reconstructed: the two legs that read those are deleted and disclosed in
+    the module docstring rather than imitated here.
+    """
+    now = _CAPTURE_NOW
+    sdk_mod._write_session_and_turns(sdk._get_proj(), sdk, session_id, turns, now=now)
+    minted = sdk.create_event(
+        f"session_{session_id}", "sessionCaptured",
+        _server_id=f"sdk_{session_id}",
+        startedAt=now, endedAt=now, sessionId=session_id, is_episodic=True,
+    )
+    event_id = minted.get("id") or minted.get("eventId")
+    assert event_id, f"the sessionCaptured mint returned no id: {minted!r}"
+    sdk._materialize_session_source(session_id, event_id, now, turns)
+    sdk._extract_session_v2(turns, session_id, now)
+    return {"ok": True, "session_id": session_id, "event_id": event_id,
+            "driver": "surviving-primitives"}
+
 CONV = [
     {"role": "user",
      "content": "we must ship github.com/test/repo/issues/42 today; "
@@ -275,19 +331,111 @@ def test_journal_key_matches_the_graph_the_sdk_opens(hosted_lane):
 
 # ── the capture path: aboutObject edges survive rebuild_all ────────────────
 
-
-
 # ── the index-completion re-link path ──────────────────────────────────────
 
+def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
+    """The index-completion re-link (``_relink_sessions_after_index``) writes
+    ``aboutObject`` edges through ``_make_sdk(namespace=org_id)``; they must be
+    journaled and survive a rebuild.
+
+    What this pins: the composite re-link seam. Its sibling — the capture-path
+    leg ``test_capture_aboutobject_edges_survive_rebuild_all`` — was DELETED WITH
+    ITS DRIVER by ``#4282`` (see the module docstring), so this is now the only
+    rebuild-survival pin in the file.
+
+    Reachable: the session is captured BEFORE its Object exists (an honest
+    no-match), then the Object materializes and the re-link creates the edge —
+    asserted non-empty live before the rebuild.
+
+    MUTATION: drop the journal wiring in ``_make_sdk`` → the re-link's
+    ``EntityLinked`` record is a no-op and the rebuilt edge set is empty → RED.
+    """
+    org = hosted_lane.org
+    sdk = ha._make_sdk(namespace=org)
+    try:
+        proj = sdk._get_proj()
+        # Capture first — no Object yet, so the conversation-reference pass is
+        # an honest no-match (the extractor's own claim edges are a different
+        # source and do not count).
+        r = _drive_capture(sdk, CONV, "s-4240-relink")
+        assert r.get("ok") is True, r
+        assert not any(src == ("Session",)
+                       for src, _, _ in _about_edges(proj)), \
+            "no referenced entity yet — the Session pass must be an honest no-match"
+
+        # Index completes → the WorkItem Object materializes.
+        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        ha._relink_sessions_after_index(org)
+
+        live = _about_edges(proj)
+        assert any(src == ("Session",) for src, _, _ in live), \
+            "the re-link must resolve the now-present Object"
+
+        log_path = Path(ha._resolve_event_log_path(namespace=org, graph_name=None))
+        assert "EntityLinked" in _journal_types(log_path), (
+            "the re-link's EntityLinked record was not journaled")
+
+        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
+        assert _about_edges(proj) == live, (
+            "re-linked aboutObject edge drift across rebuild\n"
+            f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
+    finally:
+        sdk.close()
 
 
 # ── the honest RED for the drift: mutate ONLY the wiring ───────────────────
 
+def test_live_only_capture_loses_aboutobject_edges_without_the_journal(
+        hosted_lane, monkeypatch):
+    """The #4240 drift itself, reproduced with the wiring mutated (F4).
+
+    The two ``live == rebuild`` tests above cannot show the drift at the pre-fix
+    base (they fail on ``AttributeError`` first). This test removes ONLY the
+    journal wiring — exactly the pre-#4240 ``_make_sdk`` — while every other
+    piece is present, so the failure it produces IS the live-only edge loss the
+    issue describes.
+
+    Reachable: the live edge set is asserted non-empty BEFORE the rebuild, and
+    the journal file is asserted absent (nothing landed to replay).
+
+    MUTATION (inverse): wire the journal back in → the journal-less GUARD REDs
+    FIRST — ``assert not (.../events.jsonl).exists()`` fails with "the
+    journal-less SDK must not have written a journal" (the wired SDK DOES write
+    it), before ``rebuild_all`` runs. The ``not post`` assertion is not the RED
+    site (a wired journal would preserve the edges, but the guard stops the
+    test before reaching it).
+    """
+
+    def _journal_less_make_sdk(*, namespace=None, graph_name=None):
+        # The pre-#4240 construction: identical graph seam, no event_log_path.
+        return TortoiseSDK(namespace=namespace, graph_name=graph_name)
+
+    monkeypatch.setattr(ha, "_make_sdk", _journal_less_make_sdk)
+    hosted_lane.events.mkdir(parents=True, exist_ok=True)
+
+    sdk = ha._make_sdk(namespace=hosted_lane.org)
+    try:
+        proj = sdk._get_proj()
+        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        r = _drive_capture(sdk, CONV, "s-4240-liveonly")
+        assert r.get("ok") is True, r
+
+        live = _about_edges(proj)
+        assert live, "fixture must produce live aboutObject edges to lose"
+        assert not (hosted_lane.events / proj.graph_name / "events.jsonl").exists(), \
+            "the journal-less SDK must not have written a journal"
+
+        proj.rebuild_all(str(hosted_lane.events), confirm_destructive=True)
+        post = _about_edges(proj)
+        assert not post, (
+            "the live-only edges SURVIVED a rebuild_all — the mutation is inert "
+            "and the drift is not being exercised\n"
+            f" live={sorted(live)}\n post={sorted(post)}")
+    finally:
+        sdk.close()
 
 
 # ── F1: a failed append on a CONFIGURED journal is not silent ──────────────
-
-
 
 @pytest.mark.skipif(os.geteuid() == 0,
                     reason="root bypasses directory mode bits")
@@ -341,8 +489,6 @@ def test_hosted_receipt_discloses_a_failed_journal_append(tmp_path, monkeypatch)
 
 
 # ── #5632: the disclosed count is THIS capture's delta, not the lifetime one ──
-
-
 
 @pytest.mark.skipif(os.geteuid() == 0,
                     reason="root bypasses directory mode bits")
