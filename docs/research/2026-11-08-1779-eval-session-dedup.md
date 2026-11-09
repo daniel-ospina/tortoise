@@ -211,6 +211,18 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    census answers it (2.7 GB download, so it is never implicit);
 4. **A dataset refresh** changes any of the above numbers → the `@slow` pin reds and the docs get
    re-derived, which is the point of pinning them.
+5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
+   ingest renders per session (turn Points + raw chunks) because those are the only units derivable
+   from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
+   `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
+   whole-run denominator is larger and the published 23.0% is a SUBSET share.
+   **Its reuse is UNMEASURED, and it could go either way.** The embedded text is the extracted claim
+   string (`ingest_v2.py:216`), while the session date rides on separate point properties (`when` /
+   `validFrom`, `:259-261`) — so a re-dated repeat COULD emit an identical claim string and hit a
+   text-keyed cache, which would make the true share **larger** than 23.0%. Nothing in a
+   dataset-only census can settle it; a run with `--model` + `ingest_v2` and the cache's own hit
+   counters can.
+
 6. **⛔ The 23.0% is a HIT share, not a strictly cross-question rate.** The census publishes BOTH
    cells, so neither has to be derived: `encode_units.total.hit_slots` = **85,487 of 371,095**
    (23.0%) counts every repeat, including the **1,064 units that repeat *inside* a single
@@ -224,18 +236,6 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    needs and the one `encode_cache.py` acts on — but the qualifier matters for #1779's own question,
    so every live site says "cache hits in one pass" rather than "cross-question hits", and both
    cells are pinned (`within_question_hit_slots` / `cross_question_hit_slots` / `..._share`).
-5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
-   ingest renders per session (turn Points + raw chunks) because those are the only units derivable
-   from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →
-   `sdk.create_point`; `encode_cache` wraps `tortoise.embeddings` process-wide), so the true
-   whole-run denominator is larger and the published 23.0% is a SUBSET share.
-   **Its reuse is UNMEASURED, and it could go either way.** The embedded text is the extracted claim
-   string (`ingest_v2.py:216`), while the session date rides on separate point properties (`when` /
-   `validFrom`, `:259-261`) — so a re-dated repeat COULD emit an identical claim string and hit a
-   text-keyed cache, which would make the true share **larger** than 23.0%. Nothing in a
-   dataset-only census can settle it; a run with `--model` + `ingest_v2` and the cache's own hit
-   counters can.
-
 ## 7. Research provenance
 
 - **Internal (before deriving):** issue #1779 + its comment thread; `git log --all --grep` (no prior

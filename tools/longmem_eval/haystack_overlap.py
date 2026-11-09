@@ -375,6 +375,7 @@ def census_overlap(instances: list[dict],
         chunk_prompt={"slots": chunk_prompt_slots,
                       "distinct": chunk_prompt_distinct,
                       "reuse_factor": chunk_prompt_reuse},
+        chunk_text_hits=chunk_leg["hit_slots"],
         encode=total_leg,
     )
 
@@ -469,7 +470,7 @@ def _avenue(identity: str, cell: dict[str, Any], *,
 
 def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
               same_date_pairs: int, session_prompt: dict[str, Any],
-              chunk_prompt: dict[str, Any],
+              chunk_prompt: dict[str, Any], chunk_text_hits: int,
               encode: dict[str, Any]) -> dict[str, Any]:
     """The cache-granularity verdict, DERIVED from the census numbers.
 
@@ -515,13 +516,26 @@ def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
     chunk_hits = chunk_prompt["slots"] - chunk_prompt["distinct"]
     chunk_blocked = None
     if chunk_hits == 0:
-        chunk_blocked = (
-            f"{chunk_prompt['slots']} S1 chunk prompts render from the chunk "
-            f"leg and only {chunk_prompt['distinct']} distinct (chunk text, "
-            "session date) identities exist: the date is prompt-visible "
-            "(extractor_v2._date_anchor renders into run_s1's system prompt), "
-            "so a repeated chunk text carried by a differently-dated session "
-            "is a different prompt")
+        # ⛔ `chunk_hits == 0` has TWO causes and they are not interchangeable:
+        # no chunk text repeats at all, or chunk texts repeat but only across
+        # DATES. Emitting the date story for the first is a false published
+        # reason — reachable on the documented smoke path (`--limit 1` printed
+        # "… so a repeated chunk text carried by a differently-dated session is
+        # a different prompt" while the chunk leg had 0 repeated texts).
+        if chunk_text_hits == 0:
+            chunk_blocked = (
+                f"no S1 chunk text repeats: {chunk_prompt['slots']} chunk "
+                f"prompts, {chunk_prompt['distinct']} distinct (chunk text, "
+                "session date) identities — the identity never repeats, so "
+                "there is nothing for a date to defeat")
+        else:
+            chunk_blocked = (
+                f"{chunk_prompt['slots']} S1 chunk prompts render from the "
+                f"chunk leg and only {chunk_prompt['distinct']} distinct "
+                "(chunk text, session date) identities exist: the date is "
+                "prompt-visible (extractor_v2._date_anchor renders into "
+                "run_s1's system prompt), so a repeated chunk text carried by "
+                "a differently-dated session is a different prompt")
     elif (chunk_hits / max(chunk_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
         chunk_blocked = (
             "the chunk prompt identity repeats, but on only "

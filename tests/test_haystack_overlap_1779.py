@@ -589,6 +589,41 @@ def test_cli_refuses_a_zero_ENCODE_UNIT_population_even_when_sessions_were_read(
         f"{captured.out!r}")
 
 
+def test_a_chunk_leg_with_NO_repeated_text_does_not_blame_a_date():
+    """`chunk_hits == 0` has two causes and they must not be confused.
+
+    Either no chunk text repeats at all, or chunk texts repeat only across
+    DATES. Emitting the date story for the first is a false published reason,
+    and it was reachable on the documented smoke path: `--limit 1` printed
+    "... so a repeated chunk text carried by a differently-dated session is a
+    different prompt" while its own chunk leg reported 277 slots / 277 distinct
+    — there was no repeated chunk text for a date to have defeated.
+
+    The sibling `test_identical_content_different_dates_is_not_prompt_reuse`
+    pins the OTHER branch (texts DO repeat, dates differ), so without this one
+    the branch that fires on unique data was unpinned.
+    """
+    # every session is unique -> no chunk text repeats, at any date
+    instances = [
+        _instance("q1", [_session(f"unique session {n}")], ["2024-01-01"])
+        for n in range(6)
+    ]
+    census = census_overlap(instances, chunk_turns=1)
+
+    chunk = census["encode_units"]["chunk"]
+    assert chunk["hit_slots"] == 0, (
+        f"fixture must leave the chunk leg with no repeats, got "
+        f"{chunk['hit_slots']} — the assertion below would be vacuous")
+    row = census["decision"]["prompt_level_response_cache"]
+    assert row["realizable"] is False
+
+    cause = row["blocked_by"]
+    assert "differently-dated" not in cause, (
+        "no chunk text repeats, so no date can have defeated one — the date "
+        f"story is a false cause here: {cause!r}")
+    assert "never repeats" in cause, f"expected the never-repeats cause: {cause!r}"
+
+
 def test_a_one_hit_cell_past_4dp_Never_publishes_a_FALSE_cause():
     """The cause must be derived from the INTEGER witness, not the rounded ratio.
 
@@ -619,6 +654,7 @@ def test_a_one_hit_cell_past_4dp_Never_publishes_a_FALSE_cause():
         duplicate_content_slots=1, repeated_pairs=1, same_date_pairs=1,
         session_prompt=cell(100000, 99999),
         chunk_prompt=cell(100000, 99999),
+        chunk_text_hits=1,
         encode=cell(200000, 199998),
     )
 
