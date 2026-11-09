@@ -67,7 +67,8 @@ __all__ = [
 
 #: The prefix the demo/sample seeder derives its Session id with. ONE
 #: declaration: ``hosted_api._seed_demo_graph`` writes the id through
-#: :func:`demo_session_id`, and every READ surface excludes it through
+#: :func:`demo_session_id`, and every READ surface excludes it by that SAME
+#: declared prefix — the detail door and the SDK mirror through
 #: :func:`is_demo_session_id`, the list query by binding THIS constant as a
 #: ``$demo_prefix`` Cypher parameter — so the writer and the exclusion cannot
 #: drift because none of them re-spells the prefix. ⛔ It is also a RESERVED id namespace:
@@ -164,11 +165,12 @@ def demo_session_id(org_id: str) -> str:
 def is_demo_session_id(session_id: str | None) -> bool:
     """True when ``session_id`` names a demo/sample Session (#8290).
 
-    ONE predicate for all three read surfaces, derived from
-    :data:`DEMO_SESSION_ID_PREFIX`. A surface that re-spelled the prefix (or
-    compared against a literal id) would exclude a DIFFERENT set than the
-    others, which is the disagreement #8290 reported — so every caller imports
-    this rather than inlining the test.
+    The predicate the DETAIL DOOR and the SDK MIRROR share, derived from
+    :data:`DEMO_SESSION_ID_PREFIX`. The third read surface — the list query —
+    cannot call Python, so it binds that same constant as a ``$demo_prefix``
+    Cypher parameter instead. A surface that re-spelled the prefix (or compared
+    against a literal id) would exclude a DIFFERENT set than the others, which is
+    the disagreement #8290 reported.
 
     A blank/absent id is NOT a demo id: it is the caller's error to report, and
     answering ``True`` here would turn a blank id into a silent 404 on the
