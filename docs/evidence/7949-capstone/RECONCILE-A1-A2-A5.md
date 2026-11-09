@@ -683,15 +683,24 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :923
 # call, which is why it is not a second consumer). §0 above records the change; do not argue A1
 # from the retired premise (that is the "second producer the epic forbids" argument).
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
-git grep -n apply_hierarchy_edges                          # 12 lines on this merge: 9 in
+git grep -n apply_hierarchy_edges -- tortoise/ tests/   # 12 lines on this merge: 9 in
                                                           # tests/test_pack_hierarchy_11001.py, 1 in
                                                           # tests/test_7949_capstone_measure.py, plus
                                                           # `__all__` and `def` in pack_hierarchy.py
-git grep -n plan_hierarchy_edges                           # 19 lines on this merge: 9 + 2 across the
-                                                          # two test files, `:59/:78/:365/:459` in
+                                                          # (§1 above counts 11 because it says "all in"
+                                                          # the one test file and misses the 7949 hit.)
+                                                          # ⚠️ THE SCOPE IS THE CLAIM: unscoped this
+                                                          # command returns 20 across 8 files, including
+                                                          # this record's own citations,
+                                                          # its index row and tools/pack_relation_census.py
+git grep -n plan_hierarchy_edges -- tortoise/ tests/      # 19 lines on this merge: 9 + 2 across the two
+                                                          # test files, `:59/:78/:365/:459` in
                                                           # pack_hierarchy.py, and — the part this line
                                                           # used to omit — 4 in relation_write.py
                                                           # (`:53 :589 :631 :636`), `:631` being the CALL
+                                                          # ⚠️ unscoped this command returns 26, because 7
+                                                          # docs lines match too — 6 of them in THIS
+                                                          # record, the self-match trap §1 names
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on
@@ -707,13 +716,15 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `capture_session` calls it at
 # `sdk.py:17201`. Of the three hits only ONE is still prose-about-absence (the stale comment at
-# :11119); the other two are the consumer announcing itself. Read §0's amendment above, never
-# "nothing consumes it".
-# ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither side's
-# was taken in THIS tree: the branch printed 10906 / :7 / 17181 at its own tip, main printed
-# 11119 / :7 / 17188 at its own, so the merged tree's line numbers belonged to neither side until
-# re-measured. (The pre-merge text's "at this record's base: ONE hit" was itself stale — that base
-# predates #11205, whose comment is the hit.) Re-measured at the merge, not picked from either side.
+# `extractor_v2.py:11119`); the other two are the consumer announcing itself. Read §0's amendment
+# above, never "nothing consumes it".
+# ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
+# the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
+# at its own. The MERGED tree's three are exactly main's three — which is precisely why this was
+# re-measured rather than picked: the branch's two numbers no longer describe this tree, and the
+# merged ones coincide with main's instead of being derived from them. (The pre-merge text's "at
+# this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
+# hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
                                                           # :11119 (the stale "nothing consumes it"
                                                           # comment), relation_write.py:7 (the
