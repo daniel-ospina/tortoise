@@ -568,8 +568,16 @@ mechanisms:
       DISCARD predicate (`tortoise/value_gate.py`, #4899); this is the
       EMBEDDING gate (EMBED / NO-EMBED on a written row), which reuses that same
       rule set rather than deriving a second one (§12.2a). Flag-gated
-      (`TORTOISE_EMBED_GATE`), off by default — the graph is unchanged until the
-      rate effect is measured, which is what #5008 asks for. A vector, once
+      (`TORTOISE_EMBED_GATE`) — **off in the code, armed in the shipped template**: a bare
+      checkout keeps every row's vector, while `.env.example` sets the flag so a deployment
+      built from the shipped surface runs this gate with no operator action. The ordering
+      `#5008` asked for (*measure the rate effect before trusting it*) is recorded with its
+      outcome and not as the intent it started as: the arming reached the shipped surface
+      BEFORE the measurement was taken, so `docs/evidence/11086/gate-rate.json` is
+      **post-arming**. It measured the gate returning no vector for exactly the four
+      identifier-only rows of a **synthetic, stub-scored** nine-row corpus (a fixed
+      hand-written list, vectors from a content-addressed stub — not a sample of real
+      traffic) and for nothing else. A vector, once
       written, is paid for permanently — FalkorDB Cloud bills provisioned RAM,
       no eviction. NOT implemented here and named as such: §12.2a's per-kind
       override block (no pack slot; no caller at the submission step holds the
