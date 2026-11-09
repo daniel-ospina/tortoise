@@ -4,7 +4,7 @@ The LongMemEval burn re-ingests the SAME haystack text under different
 questions. The redundancy is **measured, not assumed** (#1779,
 ``haystack_overlap.py``): one pass over the 500-Q S split emits 371,095 encode
 units of which 285,608 are distinct — a **1.299x** reuse factor, i.e. **23.0%**
-of units are cross-question cache hits (turn leg 246,750/189,522 = 1.302x;
+of units are cache hits in one pass (turn leg 246,750/189,522 = 1.302x;
 chunk leg 124,345/96,086 = 1.294x). This docstring previously claimed "5-10x
 redundant encodes" — that figure was never measured, and the census refuted it,
 so no live site restates it. The plan that ORIGINATED it

@@ -21,6 +21,7 @@ from tools.longmem_eval import dataset as lme_dataset  # noqa: E402, RUF100
 from tools.longmem_eval.haystack_overlap import (  # noqa: E402, RUF100
     CENSUS,
     MATERIAL_HIT_SHARE,
+    _decision,
     _summary,
     census_overlap,
     main,
@@ -560,6 +561,56 @@ def test_cli_refuses_a_zero_ENCODE_UNIT_population_even_when_sessions_were_read(
     assert "REALIZABLE" not in captured.out.upper(), (
         f"no avenue may be published as realizable over no evidence: "
         f"{captured.out!r}")
+
+
+def test_a_one_hit_cell_past_4dp_Never_publishes_a_FALSE_cause():
+    """The cause must be derived from the INTEGER witness, not the rounded ratio.
+
+    ``round(100000/99999, 4) == 1.0``, so a ``reuse_factor <= 1.0`` test fires
+    while ``slots - distinct == 1`` and the row publishes a **self-
+    contradicting, false** reason. Measured before the fix (100,000 sessions,
+    the two repeats sharing content AND date):
+
+      session row -> "1 session slots repeat another slot's content, but 1 of 1
+        repeated pairs share a session date ... so no two repeated sessions
+        render the same prompt"                          (they DO)
+      chunk row   -> "... so a repeated chunk text carried by a
+        differently-dated session is a different prompt"  (the repeat is
+        same-dated)
+
+    The verdict polarity was right and the published REASON was not — the
+    "published claim with no producer" class this module retires. Crafting the
+    cells directly keeps the regression cheap (a real 100,000-session corpus
+    reproduces it but costs seconds); the counts below are the measured ones.
+    """
+    def cell(slots: int, distinct: int) -> dict:
+        # the loader-level shape: reuse_factor is the ROUNDED value, which is
+        # exactly why it must not be the branch key
+        return {"slots": slots, "distinct": distinct,
+                "reuse_factor": round(slots / distinct, 4)}
+
+    d = _decision(
+        duplicate_content_slots=1, repeated_pairs=1, same_date_pairs=1,
+        session_prompt=cell(100000, 99999),
+        chunk_prompt=cell(100000, 99999),
+        encode=cell(200000, 199998),
+    )
+
+    # the rounded value really does read 1.0 — the branch key the bug used
+    assert d["session_level_extraction_reuse"]["reuse_factor"] == 1.0
+    assert d["session_level_extraction_reuse"]["hit_slots"] == 1
+
+    s = d["session_level_extraction_reuse"]["blocked_by"]
+    # ★ the defect: it used to claim NO pair shares a date while `same_date_pairs=1`
+    assert "no two repeated sessions render the same prompt" not in s, (
+        f"the session cause claims the repeats are re-dated, but "
+        f"same_date_pairs=1 — a false published reason: {s!r}")
+    assert "materiality floor" in s, f"expected the floor cause: {s!r}"
+
+    c = d["prompt_level_response_cache"]["blocked_by"]
+    assert "differently-dated" not in c, (
+        f"the chunk cause blames a different date for a same-dated repeat: {c!r}")
+    assert "materiality floor" in c, f"expected the floor cause: {c!r}"
 
 
 def test_the_research_doc_publishes_this_files_REAL_test_count():

@@ -384,7 +384,7 @@ def _avenue(identity: str, cell: dict[str, Any], *,
     alone and published ``blocked_by: null``, so the default CLI output read
     `encode_cache_text_keyed reuse 1.0009x — NOT realizable` about the cache the
     repo actually ships, with no cause and no magnitude beside it (measured with
-    ``--limit 3``: 2 hits of 2,... over 0.09%). That is the "published verdict
+    ``--limit 3``: 2 hits of 2,351 units, 0.09%). That is the "published verdict
     with no producer" class this module retires, so the floor sentence is
     synthesised here whenever the caller supplied none — no row can reach a
     reader unexplained.
@@ -434,8 +434,18 @@ def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
     module exists to retire (PR #11577 review, following the earlier finding
     that the session cell had been used as a proxy for the prompt unit).
     """
+    # ⛔ Branch on the INTEGER hit count, never on the 4-dp-rounded
+    # `reuse_factor`. `round(100000/99999, 4)` is `1.0`, so a `<= 1.0` test
+    # fires while `slots - distinct == 1` and the row publishes a FALSE,
+    # self-contradicting cause — measured (100,000 sessions, two sharing content
+    # AND date): the SESSION row read "1 of 1 repeated pairs share a session
+    # date … so no two repeated sessions render the same prompt" (they do), and
+    # the CHUNK row blamed a "differently-dated session" for a same-dated
+    # repeat. Polarity stayed right, the published REASON did not — the
+    # "published claim with no producer" class this module retires.
+    session_hits = session_prompt["slots"] - session_prompt["distinct"]
     session_blocked = None
-    if session_prompt["reuse_factor"] <= 1.0:
+    if session_hits == 0:
         if duplicate_content_slots:
             session_blocked = (
                 f"{duplicate_content_slots} session slots repeat another slot's "
@@ -445,16 +455,15 @@ def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
                 "prompt), so no two repeated sessions render the same prompt")
         else:
             session_blocked = "no cross-question session repeats (nothing to reuse)"
-    elif ((session_prompt["slots"] - session_prompt["distinct"])
-          / max(session_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
+    elif (session_hits / max(session_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
         session_blocked = (
             "the session prompt identity repeats, but on "
-            f"{session_prompt['slots'] - session_prompt['distinct']} of "
-            f"{session_prompt['slots']} slots — below the "
+            f"{session_hits} of {session_prompt['slots']} slots — below the "
             f"{MATERIAL_HIT_SHARE:.0%} materiality floor")
 
+    chunk_hits = chunk_prompt["slots"] - chunk_prompt["distinct"]
     chunk_blocked = None
-    if chunk_prompt["reuse_factor"] <= 1.0:
+    if chunk_hits == 0:
         chunk_blocked = (
             f"{chunk_prompt['slots']} S1 chunk prompts render from the chunk "
             f"leg and only {chunk_prompt['distinct']} distinct (chunk text, "
@@ -462,13 +471,11 @@ def _decision(*, duplicate_content_slots: int, repeated_pairs: int,
             "(extractor_v2._date_anchor renders into run_s1's system prompt), "
             "so a repeated chunk text carried by a differently-dated session "
             "is a different prompt")
-    elif ((chunk_prompt["slots"] - chunk_prompt["distinct"])
-          / max(chunk_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
+    elif (chunk_hits / max(chunk_prompt["slots"], 1)) < MATERIAL_HIT_SHARE:
         chunk_blocked = (
             "the chunk prompt identity repeats, but on only "
-            f"{chunk_prompt['slots'] - chunk_prompt['distinct']} of "
-            f"{chunk_prompt['slots']} S1 chunk prompts "
-            f"({(chunk_prompt['slots'] - chunk_prompt['distinct']) / max(chunk_prompt['slots'], 1):.2%})"
+            f"{chunk_hits} of {chunk_prompt['slots']} S1 chunk prompts "
+            f"({chunk_hits / max(chunk_prompt['slots'], 1):.2%})"
             f" — below the {MATERIAL_HIT_SHARE:.0%} materiality floor, so a "
             "response cache would save a rounding error of the LLM work")
 

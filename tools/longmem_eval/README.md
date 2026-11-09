@@ -401,7 +401,7 @@ count surfaced (`report['dropped']`), never silently counted as recall 0.
 
 Encode cache (`encode_cache.py`): model-keyed
 (`sha256(model_id + prompt_name + text)`), disk-persisted, namespaced per
-(model, prompt) under the cache dir. The cross-question haystack redundancy is
+(model, prompt) under the cache dir. The haystack redundancy across a pass is
 **measured** (#1779, `haystack_overlap.py`): **1.299×** — 371,095 encode units
 over the 500-Q S split, 285,608 distinct, i.e. **23.0%** of units are hits in
 one pass (the dataset-derivable units — turn Points + raw chunks; a `v2` run's
