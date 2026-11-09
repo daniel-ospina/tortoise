@@ -582,20 +582,31 @@ def test_the_unmeasured_dimensions_are_still_named():
 
 # ── The held cap says so, at the cap (#10175) ───────────────────────────────
 
-#: The clause that stops a lane meeting a 402 from clearing it. Each entry is a
-#: distinct part of the ruling, not a wording of one part: the marker itself,
-#: the three prohibitions by name, and the terminal-vs-retryable distinction —
-#: a 402 from a *stock* cannot be retried, a 429 from a *flow* can, and a page
-#: that drops that sentence invites exactly the backoff loop it warns against.
+#: The clauses that stop a lane meeting a 402 from clearing it. Every entry is
+#: a phrase ONLY the added clause supplies, matched against the page as it stood
+#: before this relay — where each of them occurred **zero** times. That is the
+#: load-bearing part: loose keywords are satisfied by text that was already on the
+#: page (`402`, `429` and `max_points` all predate the relay), so a keyword pin
+#: stayed green with the clause's whole stock-vs-flow bullet deleted. Each entry
+#: names a distinct requirement of the ruling and its 2026-11-02 amendment.
 _HELD_CAP_CLAUSES = (
-    "OVERRIDES:",
-    "max_points",
-    "refill of the capped graph",
-    "unblocking",
-    "402",
-    "429",
-    "#10175",
+    "**OVERRIDES:** the default engineering reflex",  # the marker + what it overrides
+    "is **refused**",  # the ruling itself, not merely a marker
+    "not an outage to remediate",  # the 402 is the correct state
+    "the refusal is terminal",  # a stock, not a flow
+    "backoff is not a remedy",  # the retry branch that must not be shared
+    "a `max_points` override",  # the remedy that is forbidden
+    "no backfill of the old graph",  # survives the 2026-11-02 amendment
+    "journalled whole-graph delete",  # removal stays gated, not authorised today
 )
+
+#: The anchor that binds the clause to §4. It is a clause-only sentence, not the
+#: `OVERRIDES` marker: a marker alone could sit in §4 as a decoy while the clause
+#: itself was moved out, which is exactly the relocation this pin exists to catch.
+_HELD_CAP_ANCHOR = "backoff is not a remedy"
+
+_SEC4_HEADING = "## 4. Graph size (hosted node cap)"
+_SEC4_NEXT_HEADING = "## 5. Retrieval latency"
 
 #: Prose re-wraps; a clause must not depend on where a line broke. Matching is
 #: done on whitespace-collapsed text so reflowing a paragraph cannot red the
@@ -608,6 +619,23 @@ def _collapsed(text: str) -> str:
     return _WHITESPACE.sub(" ", text)
 
 
+def _section4(text: str) -> str:
+    """The §4 slice, failing (not erroring) if a heading was renamed.
+
+    `str.index` on a missing heading raises `ValueError`, which pytest reports as
+    an ERROR with no diagnostic that says what happened. The heading is part of
+    what this file binds, so its absence is an assertion, not a crash.
+    """
+    for heading in (_SEC4_HEADING, _SEC4_NEXT_HEADING):
+        assert heading in text, (
+            f"docs/capacity.md no longer carries the heading {heading!r} — the "
+            "held-cap clause is pinned to §4, the section that owns the cap, so "
+            "a renamed heading must be re-pinned here rather than silently "
+            "dropped from the check"
+        )
+    return text[text.index(_SEC4_HEADING) : text.index(_SEC4_NEXT_HEADING)]
+
+
 def test_the_held_capture_cap_states_that_clearing_it_is_refused():
     """#10175 is an owner ruling in force, and §4 is where a lane MEETS the cap.
 
@@ -616,12 +644,14 @@ def test_the_held_capture_cap_states_that_clearing_it_is_refused():
     and its enforcement — so a page that states the enforcement without stating
     the refusal hands that lane the remedy (`max_points`) and withholds the
     prohibition. That asymmetry is the failure: the reflex it triggers is a
-    `max_points` override, a refill for headroom, or a prune, and all three
-    destroy the only sample of what the old extractor produced (`#11469`).
-    Nothing about the ruling is mine to change; the clause is only relayed here
-    so the artifact that owns the cap also carries it.
+    `max_points` override, a refill for headroom, or a prune.
+
+    Scoped to §4 and matched on clause-only phrases, deliberately: whole-page
+    keyword matching would be satisfied by the enforcement text this page already
+    carried, and would stay green through a rewrite that kept the vocabulary and
+    dropped the ruling.
     """
-    text = _collapsed(_read(CAPACITY))
+    text = _collapsed(_section4(_read(CAPACITY)))
     dropped = [clause for clause in _HELD_CAP_CLAUSES if clause not in text]
     assert not dropped, (
         "docs/capacity.md §4 no longer carries the #10175 refusal clause — "
@@ -634,12 +664,14 @@ def test_the_held_capture_cap_states_that_clearing_it_is_refused():
 
 
 def test_the_held_cap_clause_is_in_the_section_that_owns_the_cap():
-    """Relocated into §9 or the appendix, it stops being read at the cap."""
-    text = _read(CAPACITY)
-    start = text.index("## 4. Graph size (hosted node cap)")
-    end = text.index("## 5. Retrieval latency")
-    section = text[start:end]
-    assert "OVERRIDES:" in section, (
+    """Relocated into §9 or the appendix, it stops being read at the cap.
+
+    Anchored on a clause-only sentence rather than on the `OVERRIDES` marker: a
+    lone marker left in §4 would satisfy the marker test while the clause sat at
+    the end of the file.
+    """
+    section = _collapsed(_section4(_read(CAPACITY)))
+    assert _HELD_CAP_ANCHOR in section, (
         "the #10175 refusal clause is no longer inside §4 (Graph size, the "
         "hosted node cap) — it is the section a lane holding a 402 reads, and "
         "the clause is load-bearing only where the cap is documented"

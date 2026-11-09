@@ -18,7 +18,7 @@ related:
   - issue: 10175
     note: "The owner ruling that one tenant is deliberately HELD at this cap: the refusal is the correct state, and clearing it is refused. §4 carries the clause so the lane holding a 402 meets it here, at the cap, not only on that issue."
   - issue: 11469
-    note: "Why the held graph is evidence rather than mess: it is the only copy of what the old extractor produced."
+    note: "The curation workstream for the held graph: select the signal out of the old extractor's output, re-file it through the packs into a clean graph, and retire the old one rather than carry it forward."
 ---
 
 # Capacity and limits
@@ -174,29 +174,41 @@ refusal:
 
 - **It is a stock, not a flow — so the refusal is terminal.** A rate limit
   answers `429` with a `Retry-After` and clears on its own (§3). This cap answers
-  `402`, and the counted set only grows, so a retry cannot succeed and backoff is
-  not a remedy. The two must not share a retry branch: a client that backs off on
-  this 402 retries forever.
-- **The capped graph is the evidence, not the mess.** It is the only sample of
-  what the old extractor actually produced, and the tenant's Postgres record
-  holds no rows for it, so the graph is the only copy. Pruning it for headroom
-  deletes the measurement that justifies the architecture replacing it
-  (`#11469`), which is why the prohibition is stronger than its cost saving.
-- **The only lever is the plan.** `tortoise/billing.py::apply_limits` is the
-  stored cap's sole writer — `max_points := tier_limits(tier)["max_graph_nodes"]`
-  — so it moves on a **tier change**, never on an operator override.
+  `402` — `count + est > max_points` in
+  `tortoise/hosted_api.py::_capture_session_impl` — and the counted set only
+  grows, so backoff is not a remedy and a retry cannot succeed. The two must not
+  share a retry branch: a client that backs off on this 402 retries forever.
+- **The capped graph stays, on the ruling's own terms.** It is the only sample of
+  what the *old* extractor produced. The owner's 2026-11-02 amendment permits
+  removing that one graph **only** after a count-verified export to durable local
+  storage, and with a journalled delete; no journalled whole-graph delete path
+  exists yet, so the graph stays. What the amendment leaves unchanged is the
+  prohibition: no `max_points` override, no backfill of the old graph, and no
+  reading of its 402 as a defect. `#11469` is the workstream that curates the
+  signal out of this graph rather than carrying it forward.
+- **An override is reachable, and that is why it is refused.** The field is not
+  out of an operator's hands: a stored `max_points` override column exists
+  (migration `20260817000001`) and is honoured *with precedence over*
+  `graph_size_cap`, and `tortoise/sdk.py::org_update` accepts the field. The
+  sanctioned lever is the **plan**: `tortoise/billing.py::apply_limits` sets the
+  cap from the tier — `max_points := tier_limits(tier)["max_graph_nodes"]`, or
+  `graph_size_cap` on the Supabase control plane. Nothing else is sanctioned,
+  however easy it is to reach.
 
 What lifts the hold is a conjunction, not a fix: the new extractor live
-(`#5087`, `#7949`), and a plan with unlimited graphs (`#9341`), after which the
-switchover runs as a **new graph** promoted to default (`#10180`, the verb that
-moves it) and is then *measured* — extractor signal-vs-noise, and hosting cost in
+(`#5087`, `#7949`), the storage half of the switchover deployed (`#10017`, the
+issue that owned it, closed *not planned* on 2026-11-06 — this limb is not owned
+by an open issue), and a plan with unlimited graphs (`#9341`), after which the
+switchover runs as a **new graph** promoted to default (`#10180`, the verb now
+exists) and is then *measured* — extractor signal-vs-noise, and hosting cost in
 **bytes**, never nodes (`#4051`). Half a conjunction is still false, so the hold
-stands until all of it is true.
+stands until all of it is true; today `#5087`, `#7949`, `#9341` and `#4051` are
+all open.
 
-`#10175` stays open **on purpose** while it holds: it is the artifact that carries
-the clause, and an `OVERRIDES:` line on a closed issue is invisible to the lane
-that meets the 402. Closing it is not bookkeeping — it is how the next 402 starts
-looking like a bug again.
+The full record, including the 2026-11-02 amendment, stays on `#10175`, which is
+currently open. An `OVERRIDES:` line on a closed issue is invisible to the lane
+that meets the 402, so this page carries the clause wherever that record's state
+goes.
 
 ## 5. Retrieval latency
 
