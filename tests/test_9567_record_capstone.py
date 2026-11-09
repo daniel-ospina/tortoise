@@ -655,10 +655,17 @@ def traced(armed, tmp_path_factory):
             f"fold={counts['fold']} cache={counts['cache']} "
             f"cache-with-no-declared-lane={undeclared}"
         )
+        # ⛔ THE DOOR WRAPPERS COME OFF HERE, BEFORE THE TESTS RUN. They are only
+        # needed for the CAPTURE; leaving them installed (the previous shape put
+        # `mp.undo()` in the `finally` below, i.e. at MODULE teardown) meant D4–D12
+        # executed with `EventLog.append` / `write_live_record` /
+        # `FalkorProjection.apply` / `_GuardedGraph.query` all wrapped. Harmless
+        # today only by accident. A leg that needs a door instrumented installs its
+        # own — leg 2 does, through this same `_instrument` helper.
+        mp.undo()
         yield Traced(entries=entries, receipt=receipt, session_id=session_id,
                      tenant=tenant, sdk=sdk)
     finally:
-        mp.undo()
         sdk.close()
 
 
@@ -747,7 +754,12 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
     object_id = f"order-probe-{uuid.uuid4().hex[:10]}"
     mark = len(traced.entries)
     observed: list[Door] = []
+    probe_mp = pytest.MonkeyPatch()
     try:
+        # The module fixture UNDOES its door wrappers before yielding (they must not
+        # stay installed while D4–D12 run), so this probe installs its own for its
+        # own window. Same helper, so the doors are byte-identical to the capture's.
+        _instrument(probe_mp, traced.entries)
         with use_record_tenant(*traced.tenant):
             traced.sdk._apply_and_journal(
                 traced.sdk._get_proj(),
@@ -766,6 +778,7 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
         # `-k "D3 and SILENTLY"`, leg 3's declared falsifier did NOT red. Trim the
         # probe back out so each leg reads the capture and nothing else.
         del traced.entries[mark:]
+        probe_mp.undo()
     doors = [e.door for e in observed]
     assert "journal" in doors and "record" in doors and "fold" in doors, (
         "`_apply_and_journal` did not reach all three doors: observed "
@@ -919,7 +932,7 @@ def test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY(traced):
     )
 
 
-def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write(
+def test_D3_order_no_cache_write_precedes_the_captures_first_journal_append_and_record(
     traced,
 ):
     """D3 (no cache-only path): no cache write precedes the capture's first record.

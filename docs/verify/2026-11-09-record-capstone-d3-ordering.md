@@ -26,7 +26,7 @@ Read that precisely. Two different claims are separated below and must not be me
 | | |
 |---|---|
 | Issue | #9567 **D3** (carrier: #11477) |
-| Head measured | §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `cbb9df838`, retained and banner-marked as superseded |
+| Head measured | §9/§9.1: `015b3dbc5e` and this commit. §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `8d3e7f13f0`, retained and banner-marked as superseded |
 | Record | `postgres:16`, throwaway container `t9567-cap-pg` on `127.0.0.1:33209`, repo record migrations applied by `_ensure_record_schema`; writer connected as `tortoise_record_app` (the RLS-scoped app role) |
 | Graph | the SDK's **embedded** backend (`TortoiseSDK(<tmp>/graph.db)`) — the same shape the armed CI job (`test-record-postgres`) runs, so this measurement is reproducible without a graph server |
 | Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the four legs |
@@ -35,8 +35,10 @@ Read that precisely. Two different claims are separated below and must not be me
 
 ## 0. The command
 
-⛔ **EVERY NUMBER IN §0–§1 IS FROM THE ORIGINAL PRE-FIX RUN AT `cbb9df838`.** That head had three legs;
-this one has four, so §0's `4 passed` and `cache=32` are NOT reproducible here. §6.1 carries the
+⛔ **EVERY NUMBER IN §0–§1 IS FROM THE ORIGINAL PRE-FIX RUN AT `8d3e7f13f0` — the commit that first adds
+the ordering legs.** (`cbb9df838`, cited here previously, has **zero** `test_D3_order` legs; it carries
+only the static `test_D3_no_write_path_bypasses_the_record`.) That head had three legs; this one has four,
+so §0's `4 passed` is NOT reproducible here. §6.1 carries the
 current head's outputs and they are the ones to quote; these are kept because deleting a measurement
 does not make the record better.
 
@@ -74,7 +76,7 @@ record, and `refuse_same_database` correctly refuses a drill pointed at the reco
 | leg | assertion | observed |
 |---|---|---|
 | `test_D3_order_the_record_write_follows_the_journal_append` | every journal append gets a record write, same `event_id`, and no record write precedes the first append | **green** — 14/14 paired |
-| `test_D3_order_a_journal_first_door_writes_journal_record_then_cache` | `_apply_and_journal` (the sanctioned chokepoint, `tools/record_wiring_check.py`'s production call site) writes journal → record → fold → fold statements | **green** — `['journal', 'record', 'fold', 'cache', 'cache']` |
+| `test_D3_order_a_journal_first_door_writes_journal_record_then_cache` | `_apply_and_journal` (the sanctioned chokepoint, `tools/record_wiring_check.py`'s production call site) writes journal → record → fold, and every cache statement in that window follows the record write | **green** — `['journal', 'record', 'fold', 'cache']` (four doors: the probe's `ObjectRegistered` carries no extra props, so `_persist_extra_props` emits no second statement, and `clear_embedding` is a no-op without an embedding — see §1's note) |
 | `test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY` | every cache statement in an ahead fold's window (raw-handle ones **included**) declares a lane, and the `(event_type, lane)` set of ahead folds declaring a **journal-first** lane equals the tree's recorded deviation set | **green** — the `_create_entity` registration folds run ahead under `"create_entity"`, which IS a journal-first lane, and that is exactly the pinned set |
 | `test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write` | a **FLOOR** on the criterion's second half: no mutating cache statement precedes the capture's FIRST journal append and FIRST **APPLIED** record write. It is **not** a per-write attribution — a mid-capture cache-only write passes, measured (§4, §6.2 F6) | **green** — no cache statement precedes the first append or the first APPLIED record |
 
@@ -204,8 +206,13 @@ The whole file, same environment:
 SKIPPED: TEST_RECORD_SCRATCH_URI not set — the drill refuses a scratch target that IS the record
 ```
 
-(`cache=29`, not the §1 run's 32: the two runs are different heads and different captures. Both are
-counted in the run that printed them, never asserted against a constant.)
+(`cache=29`, not the §1 run's 32 — and the difference is the ENVIRONMENT, not the head: `8d3e7f13f0`
+ran on a box with the `embeddings` extra, where each of the three folds emits one extra
+`MATCH … REMOVE n.embedding` statement (`tortoise/vector_write.py:192` — `clear_embedding` returns early
+when the vector is `None`, which is this venv's state: `EmbeddingModel.get() -> None`). 3 folds × 1
+statement = the 3-statement gap exactly. §2's leg-2 sequence differs for the same reason: four doors
+here, five on an embeddings-armed box. Both counts are counted in the run that printed them, never
+asserted against a constant.)
 
 ### 6.2 The replacement falsifiers, executed and observed RED
 
@@ -356,27 +363,36 @@ nested door's correct journal-first write a false one.
 Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped` (whole file), `ruff check .`
 clean, markdownlint 0 issues.
 
-## 9. Review cycle 4 — the record drifting behind its own code
+## 9. Review cycle 4 — the record behind its own code, and two carried findings closed
 
-A fourth review found **no defect in the instrument's logic** (it re-verified leg 3's new predicate
-against the live trace — ahead folds at `8, 19, 36`, windows `[8,11)`, `[19,22)`, `[36,39)` holding only
-their own fold-attached statements — plus F8 red, the nested-door case green, and §7 row 7's
-falsification). Every blocking finding was the **record** falling out of step with the code:
+Round 4 arrived as **two independent reviews** of the same head (`e15a9ead22`): one posted on the PR
+(`IC_kwDOToroq88AAAABkng8HA`), one dispatched. Neither found a defect in the instrument's logic — both
+re-verified leg 3's predicate against the live trace (ahead folds at `8, 19, 36`, windows `[8,11)`,
+`[19,22)`, `[36,39)` holding only their own fold-attached statements), F8 red, and the nested-door case
+green. Every finding was either the **record** drifting behind the code or a **carried claim** left open.
+Full disposition, including the items that were NOT defects:
 
-| # | finding | fix |
-|---|---|---|
-| 1 | §6.2 F3 still showed `NOT RECORDED anywhere` while §6.2 claimed every red was reproducible "at this head" — round 4's own advice change had made it print `LANE MOVED`, so the artifact contradicted §8 | F3 re-captured at this head with the `LANE MOVED` output, plus a note that the older wording was the pre-round-4 advice so a reproducer who sees the new message knows they ran the right mutation. §7 row 2's "Verified" note carries the same correction |
-| 2 | the provenance row pinned §8/§8.1 to `a32edfb17f`, a head where their central claim (the new window predicate) is false — §8 was authored one commit later | the row now names each section's head: §8/§8.1 `e15a9ead22`, §6.1 `629283eef`, §6/§7 `a32edfb17f` and earlier |
-| 3 | three places still said the instrument has "three legs" while the table below them listed four, and §2's leg-4 cell claimed per-write attribution that §4 and §6.2 F6 exist to deny | all three corrected to four; the leg-4 cell now says FLOOR and points at §4 / F6 |
-| 4 | the PR body's headline said "every falsifier observed RED" and named "the two" disclosed residues, while its own table's last row says **does NOT red** and §6.2 has exactly one | "Seven of the eight observed RED; the eighth is the one disclosed non-red", with the residue named |
+| # | finding | source | disposition |
+|---|---|---|---|
+| 1 | §6.2 F3 still showed `NOT RECORDED anywhere` while §6.2 claimed every red was reproducible "at this head" — the advice change made that mutation print `LANE MOVED` | dispatched | F3 re-captured with the `LANE MOVED` output + a ⛔ note naming the older wording, so a reproducer is not misled. §7 row 2 carries the same correction |
+| 2 | the provenance row pinned §8/§8.1 to `a32edfb17f`, where their central claim (the new predicate) is false — §8 landed one commit later | dispatched | each section's head is now named individually |
+| 3 | three places said "three legs" over a table of four; §2's leg-4 cell claimed per-write attribution that §4 and §6.2 F6 exist to deny | both | corrected to four; the cell now says FLOOR and points at §4/F6 |
+| 4 | **leg 4's NAME still stated the per-write property** while its body asserts a floor | PR comment | **renamed** to `test_D3_order_no_cache_write_precedes_the_captures_first_journal_append_and_record` — the id is what CI output and any downstream quote carry, so fixing only the cell left the contradiction in the most-quoted place |
+| 5 | **the door wrappers stayed installed through module teardown** (`mp.undo()` in the fixture's `finally`), so D4–D12 executed with `EventLog.append` / `write_live_record` / `FalkorProjection.apply` / `_GuardedGraph.query` wrapped | PR comment | `mp.undo()` moved **before** the `yield`; leg 2 installs its own instrumentation for its own probe window through the same `_instrument` helper. Re-verified: F2 and F7 still red with unchanged output |
+| 6 | the PR body headline said "every falsifier observed RED" and named "the two" residues, while its own last row says **does NOT red** and §6.2 has exactly one | dispatched | "Seven of the eight observed RED; the eighth is the one disclosed non-red" |
+| 7 | §6.1's wall-clock duration was read as a defect | PR comment | **NOT A DEFECT**: `19.60s` reproduces at `19.16s`; the cited `142.10s` was box load. Recorded rather than "fixed" |
+| 8 | §6.1 explained the `32 → 29` census delta as "different heads and different captures" | dispatched (round 5) | **WRONG EXPLANATION, corrected**: the delta is the `embeddings` extra. Each of the three folds emits one extra `MATCH … REMOVE n.embedding` (`vector_write.py:192` returns early when the vector is `None`, this venv's state) — 3 folds × 1 = the 3-statement gap exactly. §2's leg-2 sequence likewise measured `['journal','record','fold','cache']` here, not the five doors recorded in §2 previously |
+| 9 | §0/§1's provenance named `cbb9df838`, which has **zero** `test_D3_order` legs | dispatched (round 5) | repointed to `8d3e7f13f0`, the commit that introduces them |
 
-**And one follow-up fixed rather than deferred:** `_ahead_population_advice` subtracted
-`pin_recorded_types` from `lost` unconditionally, which for this pin emptied `lost` every time — so the
-`Pinned pair(s) GONE … Re-grade D3` branch was **dead code**, and a genuinely-closed deviation would have
-printed no advice at all. It now subtracts only the types that actually MOVED, and the unreachable
-"or it really was re-declared apply-first" clause is gone from the `moved` text (an apply-first
-re-declaration leaves the observed population entirely and therefore arrives in `lost`). All four
-branches verified: rename → LANE MOVED only; both pinned gone → GONE; a Subject arm → RECORDED-newly-
-exercised; an unrecorded new arm → NOT RECORDED.
+### 9.1 Follow-ups fixed rather than deferred
+
+- **`_ahead_population_advice`'s GONE branch was dead code.** It subtracted `pin_recorded_types` from
+  `lost` unconditionally, which for this pin emptied `lost` on every call, so a genuinely-closed deviation
+  would have printed no advice. It now subtracts only the types that actually MOVED, and the unreachable
+  "or it really was re-declared apply-first" clause is gone from the `moved` text (an apply-first
+  re-declaration leaves the observed population entirely, so it arrives in `lost`). All four branches
+  executed: rename → LANE MOVED only; both pinned gone → GONE; a Subject arm → RECORDED-newly-exercised;
+  an unrecorded new arm → NOT RECORDED.
+- **A docstring indentation slip** in leg 3 made one paragraph start at column 0.
 
 Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped`, `ruff` clean, markdownlint 0.
