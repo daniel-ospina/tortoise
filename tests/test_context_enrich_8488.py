@@ -640,21 +640,31 @@ def test_turn_discrimination_survives_enrichment():
 
 # ── Section 9's surviving-door arm ────────────────────────────────────────
 #
-# ⛔ Every test in the CAPTURE-door half of this file (the flag-OFF/ON write, the
-# journal attestation, the dense leg, the ON→OFF re-capture, the rebuild
-# preserve, the keyword-searchable leg and the mismatched-pair replay) drove
-# `TortoiseSDK.capture_session`, one of the 26 dead public methods `#4282`
-# deleted; they went with the door they tested. That loss — including this
-# file's only ON→OFF storage/vector pins — is recorded on `#10227` and in the
-# PR's "Coverage removed" section, NOT absorbed here.
+# ⛔ TWELVE tests in this file drove `TortoiseSDK.capture_session` — one of the 26
+# dead public methods `#4282` deleted — as their SEED, and they are gone. What is
+# genuinely lost is the ON→OFF storage/vector half of the `#4194` rule (the
+# flag-OFF/ON write, the journal attestation, the dense leg's on/off ranking, the
+# ON→OFF re-capture, the rebuild-preserve, the keyword-searchable leg and the
+# mismatched-pair replay). Recorded on `#10227` and in the PR's "Coverage removed"
+# section, NOT absorbed here.
 #
-# The UPDATE doors they seeded (``update_point(content=…)``,
-# ``update_point(embedding=…)`` / ``embedding=None``, and the sibling
-# ``update_entity``) all SURVIVE, so their tests are restored below with the row
-# SEEDED rather than captured — the same idiom `test_the_guard_reports_a_
-# lower_casing_writer` already uses. The seed mints exactly the triple the
-# writer mints (raw ``content``, the enriched ``embeddingText``, and a vector
-# computed FROM that text), which is what the doors' clear arm is keyed on.
+# The seed was a capture, but the SUBJECT of six companions was an UPDATE/READ
+# door that SURVIVES. Three are restored below by SEEDING the row instead — the
+# same idiom `test_the_guard_reports_a_lower_casing_writer` uses — because
+# ``update_point(content=…)``, ``update_point(embedding=…)`` / ``embedding=None``
+# and the sibling ``update_entity`` are what they police. The seed mints exactly
+# the triple the writer mints (raw ``content``, the enriched ``embeddingText``,
+# and a vector computed FROM that text), which is what the clear arm is keyed on.
+#
+# ⚠️ THREE are NOT restored, and the reason is the JOURNAL, not the subject:
+# `test_a_caller_vector_does_not_resurrect_the_enriched_text_on_rebuild`,
+# `test_check_consistency_does_not_red_a_faithful_enriched_graph` and
+# `test_an_unwritable_content_edit_keeps_the_text_in_BOTH_folds` all replay a
+# capture's own records (rebuild / `check_consistency` over an EventLog). A seeded
+# row has no records to replay, and hand-writing them would fabricate the capture
+# the test is about, so a "restored" version would be vacuous. They need a
+# JOURNAL-PRODUCING seed — the hosted `POST /v1/sessions` lane is the surviving
+# one — which is recorded as the re-home route on `#10227`.
 
 def _seed_enriched_turn(sdk, session_id: str, *, raw: str, enriched: str,
                         turn: int = 0) -> list:

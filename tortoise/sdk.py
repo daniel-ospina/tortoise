@@ -8386,6 +8386,13 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "story_arc_chars": len(out.get("story_arc") or "")},
         # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
         # is S2's own output; ``embed_list`` is what S4 left of it).
+        # ⛔ ON THE ``TORTOISE_PARTIAL_GAP_FILL`` ARM THIS COUNT IS NOT S2.1's
+        # OWN OUTPUT (#11534 review, P2): S2.2b-ADD rebinds ``embed_list`` to the
+        # union of S2.1's candidates and the spans it filled BEFORE ``s2_embed``
+        # is assigned, so the count includes that stage's additions. "Pre-S4"
+        # still holds — no S4 item is in it — but a reader attributing the whole
+        # number to S2.1 over-counts on that arm; ``stats["partial_gap_fill"]``
+        # (``added_items`` / ``added_by_section``) is what separates them.
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},
@@ -9410,9 +9417,13 @@ def _holds_role_available(graph) -> bool:
 
     ``get_org_structure`` (DELETED by #4282) returned ``roles`` from a
     ``holdsRole`` traversal whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``.
-    The reason string this probe produces outlived its reader — it is still
-    returned by the traversal helpers below — so the explanation is kept, in the
-    past tense. That predicate has
+    ⛔ The probe outlived its READER: after #4282 nothing in the tree CALLS
+    ``_holds_role_available`` — the deletion orphaned this trio (the probe, its
+    ``_HOLDS_ROLE_SCOPED_PROBE`` Cypher and ``HOLDS_ROLE_UNAVAILABLE``), and
+    ``#10227`` records it. Do not read the past-tense explanation below as "a
+    caller still produces this"; the reason string is kept because a lane that
+    rebuilds a ``roles`` reader should inherit the finding, not because anything
+    returns it today. That predicate has
     **no producer anywhere in the tree** — every reference is an edge
     allow-list, the read query itself, or an explicit
     ``create_edge``/``create_entity`` caller. On a graph where it is absent the
@@ -9465,8 +9476,10 @@ _HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
 
 
 #: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returned
-#: when the ``holdsRole`` leg has no producer on this graph. (#4282 deleted that
-#: method; the string is still produced by the traversal helpers, so it stays.)
+#: when the ``holdsRole`` leg has no producer on this graph. ⛔ #4282 deleted that
+#: method AND orphaned the probe that produced this string: ``_holds_role_available``
+#: now has no caller anywhere in the tree (``#10227``), so nothing returns it today.
+#: Kept — with its explanation — for the lane that rebuilds a ``roles`` reader.
 HOLDS_ROLE_UNAVAILABLE = (
     "holdsRole has no producer anywhere in the tree — only an explicit "
     "create_edge/create_entity caller — so 'roles' is structurally empty "

@@ -760,12 +760,31 @@ def test_install_devin_refuses_malformed_config(tmp_path):
 
 
 def test_install_devin_rejects_non_devin_intent(tmp_path):
-    """`install pi` (no read seam) must NOT fall into the devin target — and
-    `install devin` must not touch a codex/claude/cline registration."""
-    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    """`install pi` (capture + per-turn read seam) must NOT fall into the devin
+    target — and `install devin` must not touch a codex/claude/cline registration.
+
+    HOME is isolated (#11584 review): `--dir` does NOT constrain a Pi install —
+    the extension root is `~/.pi/agent/extensions` — so an inherited HOME made
+    this row write the capture artifact, and (since the read seam landed) also
+    opt the runner's own machine into per-turn prompt search, defeating the W4
+    "installing the extension IS the opt-in" posture from a test invocation.
+    Asserting the artifact landed under the isolated HOME is what makes the
+    isolation load-bearing rather than cosmetic.
+    """
+    home = tmp_path / "home"
+    env = {
+        **os.environ,
+        "HOME": str(home),
+        "TORTOISE_SECRET_PEPPER": "test-static-pepper",
+    }
     r = _run(["install", "pi", "--dir", str(tmp_path)], env)
     assert not (tmp_path / ".devin" / "hooks.v1.json").exists()
     assert r.returncode == 0  # pi installs its capture extension
+    ext = home / ".pi" / "agent" / "extensions"
+    assert (ext / "tortoise-capture.ts").is_file(), (
+        "the install must write under the isolated HOME — an inherited HOME "
+        f"writes into the operator's real ~/.pi instead (stdout: {r.stdout})"
+    )
     # A devin install leaves a codex registration alone.
     assert _run(["install", "codex", "--dir", str(tmp_path)],
                 env).returncode == 0

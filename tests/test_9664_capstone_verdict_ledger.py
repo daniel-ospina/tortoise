@@ -70,9 +70,53 @@ EXPECTED_IDS = [
 #: The rows this pass measured as NOT satisfied, by id. Pinned so that a later
 #: pass cannot make the uncovered list shorter without saying which row it
 #: decided was covered.
+#:
+#: 2026-11-08: `U1` ALMOST left this list and must not. Its old reason named TWO
+#: missing things — "a hosted-org credential usable from the SDK/HTTP surface"
+#: **plus a second graph to target**. A pass minted the credential
+#: (`uv run tortoise signup`) and delivered the write over `/mcp`, and graded the
+#: row `verified` off the refusal that came back. That was a FALSE PASS: `#9664`'s
+#: own "ugly cases" line (taken from `#9340`) lists the four with NO labels, and it
+#: is `#9340`'s scope-restatement comment (refusing only ambiguous / unknown /
+#: deleted / other-workspace) that makes an explicit non-default graph the case
+#: that must be ACCEPTED — the resolver itself lives in `tortoise/mcp_auth.py`.
+#: A refusal is only the legitimate outcome for the other three ugly cases (U3's
+#: row). The half that is still missing
+#: is the second graph, refused `402 "Custom graphs require the Builder plan"` —
+#: the same missing thing U2/U4 record, so moving this row would have graded one
+#: blocker two ways. The
+#: measurement was kept, in U1's `reason`, where a decidable half belongs.
+#:
+#: 2026-11-08: `C2` moved OUT of this list and into `verified`. That is the edit
+#: this pin is designed to force into the open — it is not a silent shrink. C2
+#: asks for (a) a verdict on every step, (b) an EXPLICIT uncovered list and (c)
+#: that an empty list be the only clean exit; it does NOT ask for that list to be
+#: empty. All three are mechanically enforced, and each is already pinned by a
+#: test that existed before this pass — `EXPECTED_IDS` (with
+#: `test_committed_ledger_*`) for (a), `test_one_uncovered_row_exits_two_and_names_the_row`
+#: and `test_uncovered_row_without_a_reason_is_invalid` for (b),
+#: `test_all_verified_is_the_only_clean_exit` for (c). So the regrade needs no new
+#: assertion of its own; the row is argued on `verdict-ledger.yml`'s own C2
+#: comment.
+#:
+#: ⛔ THIS COMMENT ONCE CLAIMED `E3` "states a strict SUBSET" of C2 and that a
+#: `test_c2_and_e3_cannot_be_graded_differently` pinned the pair. Both were wrong
+#: and both are gone (2026-11-08 review). The texts do not stand in a containment
+#: relation: C2's clause (a) is E3's first clause, but E3 alone requires "never an
+#: aggregate" and "with the reason", and C2 alone requires the explicit uncovered
+#: list and the empty-only clean exit — so neither implies the other. An equality
+#: pin therefore FORBADE a legitimate future state (C2 downgraded alone because the
+#: uncovered list stopped being explicit, E3 untouched), and because the premise
+#: was false the assertion could only ever fail for the reason it was told about.
+#: Deleted rather than reworded, for two reasons that are different in kind. The pin
+#: ENCODED A FALSE PREMISE, so it false-failed a legitimate state — an OVER-CONSTRAINT,
+#: not an inert assertion. (agent-infra#3442 rule 3 is about an assertion whose value
+#: CANNOT vary under any mutation; this one varied on a legitimate regrade, which is a
+#: different defect, and citing rule 3 for it would hand the next lane the wrong lesson.)
+#: And the shrink did not depend on it: it is forced open by
+#: `test_committed_ledger_uncovered_set_is_pinned` on `EXPECTED_UNCOVERED` below.
 EXPECTED_UNCOVERED = [
     "C1",
-    "C2",
     "C4",
     "S1",
     "S2",

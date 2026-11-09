@@ -1,16 +1,19 @@
-# tortoise/pi-hooks — the Pi capture-install seam
+# tortoise/pi-hooks — the Pi seam (capture + per-turn read)
 
-This directory is the **Pi leg of the capture-install seam** (#3575). Pi's only
-hook surface is an extension (it has no `settings.json` shell-hook mechanism
-like Claude Code), so the Pi seam is an in-repo extension instead of shell
-scripts.
-
-## Artifact
+This directory is the **Pi leg of the harness seams** — two independent
+extensions, both written by `tortoise install pi`. Pi's only hook surface is an
+extension (it has no `settings.json` shell-hook mechanism like Claude Code), so
+the Pi seam is in-repo extensions instead of shell scripts. Pi loads **every**
+top-level file under `~/.pi/agent/extensions/` as an extension, with no
+basename dedupe, so the two halves are deliberately two files: folding them
+together would make a capture-only install silently start injecting context.
 
 | File | Role |
 |---|---|
-| `tortoise-capture.ts` | the extension — install-probe on `session_start`, session filing on `session_shutdown` |
+| `tortoise-capture.ts` | the CAPTURE extension (#3575) — install-probe on `session_start`, session filing on `session_shutdown` |
 | `tortoise-capture.test.ts` | behavioral tests (`node --test tortoise/pi-hooks/tortoise-capture.test.ts`) |
+| `tortoise-volunteer.ts` | the per-turn READ extension (**#2119**) — `before_agent_start` → the shared `tortoise volunteer` reflex → an injected `message` (silent by default, `display: true` renders the `surfaced` disclosure marker). The re-measurement that made it possible is in `docs/research/2026-09-01-gbrain-learnings/platform-seams.md` |
+| `tortoise-volunteer.test.ts` | its behavioral suite (`node --test tortoise/pi-hooks/tortoise-volunteer.test.ts`), including the CLI contract run for real against a fake `tortoise` on PATH |
 | `store-sync.ts` | **#3515 — the store-sync BACKSTOP.** Reads Pi's own session `.jsonl` with a per-file cursor and ships it as `capture_lane: "store_sync"` through the SAME payload builder as the hook. Covers the death modes the in-process hook cannot see (SIGKILL, crash, closed terminal). Run by `tortoise store-sync`; also spawned detached on `session_start`, excluding the live session |
 | `cursor-store.ts` | the per-file cursor: `tmp`+`fsync`+`rename`, a last-good `.bak`, and a **fail-closed** load. Advance-on-2xx ONLY, never on read |
 | `store-sync.test.mjs` | the backstop's unit rows (`node --test tortoise/pi-hooks/store-sync.test.mjs`) — cursor math, partial tail, truncation/replacement, the shared branch contract, backoff classification |
@@ -34,13 +37,23 @@ elif [ -d ~/.pi/agent/extensions/tortoise-capture ]; then
 fi
 cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-capture.ts \
    ~/.pi/agent/extensions/tortoise-capture.ts
+cp <path-to-tortoise>/tortoise/pi-hooks/tortoise-volunteer.ts \
+   ~/.pi/agent/extensions/tortoise-volunteer.ts
 ```
 
 Pi auto-discovers `~/.pi/agent/extensions/*.ts` on the next start. Installing
-the extension *is* the opt-in — there is deliberately no `autoCapture`-style
+the extensions *is* the opt-in — there is deliberately no `autoCapture`-style
 default-false flag — and it is the one IN-REPO capture seam that reads no
 `TORTOISE_CAPTURE`, unlike the in-repo Claude Code, Codex and Cursor hooks,
-which file nothing until the machine sets `TORTOISE_CAPTURE=1` (#3615). (The
+which file nothing until the machine sets `TORTOISE_CAPTURE=1` (#3615). The
+READ half's opt-in is the same install (the W4 user-exposure posture recorded
+in `platform-seams.md`: "per-turn injection ships behind the `install`
+command"); `TORTOISE_VOLUNTEER_DISABLE=1` is its runtime kill switch and
+`tortoise install pi --uninstall` removes only that file. Its own settings live
+under a `volunteer` key in `~/.pi/agent/tortoise-config.json`
+(`{"volunteer": {"display": true}}` renders the disclosure marker; the default
+injects silently because a bubble per turn is a worse experience than the
+whole seam being off). (The
 agent-infra `reflect-hook` is a **second producer** and lives outside this repo:
 until agent-infra `7e77470e4` (2026-10-16, #803) it uploaded on key presence
 alone, and it now shares `extensions/shared/capture-gate.ts` — an explicit
@@ -249,6 +262,17 @@ poisoned `TORTOISE_API_URL` can never redirect a stored credential (and the
 captured conversations) to another host. The **hook lane** requires no local
 `tortoise` CLI or Python install, and there is **no `agent-infra` dependency** —
 `agent-infra` is not shipped to users.
+
+⚠️ **The per-turn READ half resolves its key differently, on purpose.** This
+page covers BOTH Pi halves (see the file table at the top), and for
+`tortoise-volunteer.ts` an env-only `TORTOISE_API_KEY` is **not** a credential:
+the key is read from `~/.pi/agent/tortoise-config.json` only, and its `apiUrl`
+comes from that same file or the built-in default (`#2369` D1b — the posture
+`tortoise volunteer` itself takes via `include_env=False`). So exporting only
+`TORTOISE_API_KEY` gives you the **capture** seam hosted and the **read** seam
+local. To run the read seam hosted, put `apiKey` in that JSON file. This
+divergence from `tortoise-capture.ts` is recorded, not an oversight: a bare env
+key must never authorize transmitting prompt text from a per-turn seam.
 
 The **store-sync backstop** is different: it is run by `tortoise store-sync`, so it
 needs the `tortoise` CLI on `PATH`. On a machine with the Pi extension but no Python

@@ -8,10 +8,16 @@ value that is indistinguishable from "there is nothing here":
 * ``search_engine.subject_binding_available`` — the exact, fail-OPEN probe
   behind ``SearchResult.subject_unavailable``.
 * ``SearchResult.to_dict`` — the additive marker, emitted ONLY when set.
-* ``TortoiseSDK.get_org_structure`` — the additive ``unavailable`` map for the
-  producer-less ``holdsRole`` leg. ``memberOf`` is deliberately NOT marked: it
-  has a real producer (``onboarding/seed.py::seed_onboarding_anchors``), so an
-  empty ``members`` list is a finding, not a gap.
+* the ``holdsRole`` availability probe — ``_holds_role_available`` and its
+  scoped Cypher, which produced the additive ``unavailable`` map
+  ``TortoiseSDK.get_org_structure`` returned. ⛔ **`#4282` DELETED that method, and
+  it orphaned the probe with it** — nothing in the tree calls
+  ``_holds_role_available`` now (``#10227`` records the trio). `TestHoldsRoleProbe`
+  is kept as the CONTRACT a future ``roles`` reader inherits: fail-OPEN on a probe
+  error, bounded, and scoped to the ``:Subject``-to-``:Subject`` read shape.
+  ``memberOf`` was deliberately NOT marked on that map: it has a real producer
+  (``onboarding/seed.py::seed_onboarding_anchors``), so an empty ``members`` list
+  is a finding, not a gap.
 
 The load-bearing property is the FAIL-OPEN direction: a probe error must
 withhold the marker, because a broken probe inventing "this surface is
@@ -255,7 +261,8 @@ class TestSearchPathFailsLoud:
             assert h.get("subject", {}).get("name") == "W3A lane"
 
 
-# ── get_org_structure: roles marked, members NOT marked ──────────────────
+# ── the holdsRole probe: the contract `get_org_structure` inherited ───────
+# (the method is gone with #4282; the probe it used is orphaned and pinned here)
 
 
 class TestHoldsRoleProbe:
