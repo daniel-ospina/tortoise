@@ -1,7 +1,7 @@
-"""Pinned why-layer judge — ``judge_why_suite_v2`` (issue #2100, epic #2080).
+"""Pinned why-layer judge — ``judge_why_suite_v4`` (issue #2100, epic #2080).
 
 The zero-dependency first increment of the why-suite (issue Indicator 2):
-the pinned judge prompt is a STATIC FILE (``judge_why_suite_v2.txt``) whose
+the pinned judge prompt is a STATIC FILE (``judge_why_suite_v4.txt``) whose
 sha256 is folded into the protocol pin.  Nothing in this module depends on
 W4-a's assembly — E2E-1's grading arm consumes the pin as a FILE ARTIFACT,
 so the dependency graph stays acyclic (W3-b → judge prompt; W4-a E2E-1 →
@@ -14,7 +14,7 @@ The judge protocol:
   DETERMINISTIC graders in ``grading.py`` — the pinned rubric implemented
   mechanically (that is what makes rates deterministic across runs).
 * ``judge_pin`` (recorded in every published baseline + receipt) =
-  ``judge_why_suite_v2:<sha256>`` where the hash covers the ENTIRE protocol
+  ``judge_why_suite_v4:<sha256>`` where the hash covers the ENTIRE protocol
   SURFACE: the static prompt file + the mechanical rubric code
   (``grading.py``) + the metrics/verdict semantics (``schema.py`` — the
   denominators, floors, and verdict comparisons a grader edit would
@@ -36,7 +36,7 @@ from pathlib import Path
 
 # The static prompt file is the canonical protocol artifact (module-relative
 # — never a hardcoded absolute path).
-JUDGE_PROMPT_PATH = Path(__file__).resolve().parent / "judge_why_suite_v2.txt"
+JUDGE_PROMPT_PATH = Path(__file__).resolve().parent / "judge_why_suite_v4.txt"
 # The rubric that implements the prompt is CODE — a grader edit would change
 # grading semantics under an unchanged prompt, so the code is folded into the
 # same protocol digest (review P1, #2100).
@@ -44,10 +44,15 @@ _GRADER_PATH = Path(__file__).resolve().parent / "grading.py"
 # aggregate_metrics (denominators/rates) + the floors/bars + compare_run
 # verdict comparisons live in schema.py — same silent-drift hole, same fold.
 _SCHEMA_PATH = Path(__file__).resolve().parent / "schema.py"
+# #2275 (v3): the ADVERSARIAL corpus's grading arms (NAND recovery, severity
+# priority, contested classification) and its naive-assembly probe implement
+# grading semantics too — an unpinned grader in a second file is exactly the
+# hole this digest exists to close, so it folds in here.
+_ADVERSARIAL_PATH = Path(__file__).resolve().parent / "adversarial.py"
 
 # Protocol name (shared with E2E-1's grading arm — the single source of
 # truth for the pinned judge version).
-JUDGE_PROTOCOL = "judge_why_suite_v2"
+JUDGE_PROTOCOL = "judge_why_suite_v4"
 
 
 def _sha256_hex(payload: bytes) -> str:
@@ -66,9 +71,15 @@ def prompt_sha256() -> str:
 
 def _protocol_bytes() -> bytes:
     """The bytes the protocol digest covers: prompt + rubric code + metrics
-    semantics (null-separated — a same-byte boundary can never alias)."""
+    semantics (+ the adversarial corpus's grading arms) — null-separated, so
+    a same-byte boundary can never alias."""
     return b"\x00".join(
-        [JUDGE_PROMPT_PATH.read_bytes(), _GRADER_PATH.read_bytes(), _SCHEMA_PATH.read_bytes()]
+        [
+            JUDGE_PROMPT_PATH.read_bytes(),
+            _GRADER_PATH.read_bytes(),
+            _SCHEMA_PATH.read_bytes(),
+            _ADVERSARIAL_PATH.read_bytes(),
+        ]
     )
 
 
@@ -80,7 +91,7 @@ def protocol_sha256() -> str:
 
 def judge_pin() -> str:
     """The run/baseline pin:
-    ``judge_why_suite_v2:<sha256-over-(prompt+grading+schema)>``."""
+    ``judge_why_suite_v4:<sha256-over-(prompt+grading+schema+adversarial)>``."""
     return f"{JUDGE_PROTOCOL}:{protocol_sha256()}"
 
 
@@ -88,23 +99,23 @@ def assert_prompt_pinned() -> str:
     """Grading pre-step: assert the on-disk protocol surface is PINNED.
 
     The committed pin constant below is the protocol anchor — if the prompt
-    file OR the rubric/metrics code (grading.py / schema.py) was edited
-    without re-pinning, this raises and every run stops (fail-closed: a
-    drifted judge must never grade silently).  Returns the current pin on
-    success.
+    file OR the rubric/metrics code (grading.py / schema.py /
+    adversarial.py) was edited without re-pinning, this raises and every run
+    stops (fail-closed: a drifted judge must never grade silently).  Returns
+    the current pin on success.
 
     NOTE: when the protocol is deliberately revised, bump the protocol name
-    to ``judge_why_suite_v3`` (never silently re-pin v2) and re-bless with
-    ``--bless-protocol``.
+    (``judge_why_suite_v5``…) and re-bless with ``--bless-protocol`` — never
+    silently re-pin the current name.
     """
     expected = protocol_sha256()
     if expected != PINNED_PROTOCOL_SHA256:
         raise AssertionError(
             f"judge protocol drifted: on-disk digest {expected[:16]}… != "
             f"pinned {PINNED_PROTOCOL_SHA256[:16]}… (prompt/grading.py/"
-            "schema.py edit?) — a judge-protocol change requires a NEW "
-            "protocol name + --bless-protocol, never a silent edit of "
-            "judge_why_suite_v2"
+            "schema.py/adversarial.py edit?) — a judge-protocol change "
+            "requires a NEW protocol name + --bless-protocol, never a "
+            f"silent edit of {JUDGE_PROTOCOL}"
         )
     return judge_pin()
 
@@ -112,6 +123,58 @@ def assert_prompt_pinned() -> str:
 # ── The pinned digest (protocol anchor — do not edit without re-pinning) ───
 # v2 (issue #2490): superseded family graded as RESOLVED — re-pinned via
 # the --bless-protocol ritual with a written justification.
+# v3 (issue #2275): the ADVERSARIAL corpus's grading arms + metric vocabulary
+# fold into the same digest (``adversarial.py`` joins prompt + grading.py +
+# schema.py), and the pinned prompt FILE is renamed v2 → v3 with IDENTICAL
+# content (the four why-questions are unchanged — only the covered code
+# surface grew).  Both committed baselines were FIRST-RUN-PENDING at the
+# time of the bump (``metrics: {}``, ``judge_pin: null``), so no published
+# number was re-pinned; the publish (bless) of the adversarial lane is
+# deliberately left for a run at a clean committed head (see the issue's
+# anti-gaming rule).
 # Regenerate with: uv run python -c \
 #   "import sys; sys.path.insert(0,'tests'); from eval.why_suite import judge; print(judge.protocol_sha256())"
-PINNED_PROTOCOL_SHA256 = "71a47aa6ca3c2b3157547331e779d5473ef7ff6fbddb6e9c994960242c4f44e1"
+# #2275 review: the literal below was re-computed ONCE more inside this same
+# PR after a COMMENT-ONLY correction to adversarial.py (a stale per-family
+# count).  The protocol name stayed v3 for that one because no grading semantic
+# moved, and no baseline had been blessed at v3 yet (both first-run-pending:
+# ``metrics: {}`` / ``judge_pin: null``), so no published number was re-pinned.
+# Any FUTURE semantic edit to prompt/grading/schema/adversarial is still a new
+# protocol name + ``--bless-protocol``.
+#
+# v4 (#2275 review, finding 3): a SEMANTIC edit to ``schema.tripped_bars`` — an
+# absent/non-numeric metric is now a TRIPPED bar instead of a silently met one
+# (fail-closed, matching ``aggregate_metrics``' "empty denominator collapses to
+# the worst value" convention).  ``tripped_bars`` is verdict semantics —
+# ``compare_run`` consults it through ``_standing_bars_tripped`` — so this is a
+# PROTOCOL change, taken through the documented ritual rather than a silent
+# re-pin: the name bumps v3 → v4 and the prompt FILE is renamed with IDENTICAL
+# content (the four why-questions did not change — the file's own internal
+# version label was still ``judge_why_suite_v2`` at this bump, corrected in the
+# explicitly recorded v4 re-pin below).  Both committed baselines are
+# still FIRST-RUN-PENDING (``metrics: {}`` / ``judge_pin: null``), so no
+# published number is re-pinned and no ``--bless-protocol`` re-publish is owed;
+# the publish of both lanes stays deliberately deferred to a run at a clean
+# committed head (the issue's anti-gaming rule).
+PINNED_PROTOCOL_SHA256 = "9fb9f7cdafe0786fe7f74e71e01a18ddadec4e9795b35991b8aa490f1d016d18"
+#
+# v4 RE-PIN (#2275 review, finding 1) — SAME name, explicitly recorded, never a
+# silent re-pin: the pinned prompt ARTIFACT still declared
+# ``JUDGE: judge_why_suite_v2`` on line 1 and published a
+# ``("judge_why_suite_v2:<hex>")`` pin prefix — two versions behind
+# ``judge.JUDGE_PROTOCOL``, both baselines and every receipt, which all say v4.
+# The artifact is what an auditor reads to answer "which protocol did this
+# number come from?", and the prefix it advertised is one that no baseline or
+# receipt in this design can ever carry (``bless_baseline`` requires the code's
+# pin; ``compare_run`` treats a differing pin as inconclusive).  The two label
+# strings are corrected to v4; the four why-questions and every grading rule
+# are UNCHANGED, so no grading semantic moved.  The name does not bump for this,
+# matching the recorded precedent above (a literal was re-computed once before
+# with "the protocol name stayed v3 for that one because no grading semantic
+# moved, and no baseline had been blessed at v3 yet"): a version LABEL inside
+# the artifact is not grading semantics, and no run, baseline or published
+# number exists under v4 — all four committed baselines are still
+# FIRST-RUN-PENDING (``metrics: {}`` / ``judge_pin: null``) — so there is no
+# comparability to preserve and nothing for ``--bless-protocol`` to re-bless.
+# Any FUTURE semantic edit to prompt/grading/schema/adversarial is still a new
+# protocol name + ``--bless-protocol``.

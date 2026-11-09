@@ -132,8 +132,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (re-running it after this record lands also matches this file and its
    index row — the count here is the pre-diff one, which is the one that decides the claim).
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
-   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:353` the definition,
-   `:447` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
+   `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
+   `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).
@@ -155,9 +155,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17581`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:17637`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
-   insertion then moved both; both now read `17581`.) What is missing is the *declared part-whole* edge, not every structural
+   insertion then moved both; both now read `17637`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2736-2738`
@@ -293,7 +293,7 @@ def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extrac
 def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
 the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
-(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16523-16537`. Nothing
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16536-16550`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
 *"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
@@ -372,7 +372,7 @@ named a Subject and the spine relabelled it an Object.
 mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
 remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
 this record is measured on,
-the write seam routes by kind (`tortoise/sdk.py:16523-16537`): `_ekind = _payload_entity_kind(e)` →
+the write seam routes by kind (`tortoise/sdk.py:16536-16550`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
@@ -645,7 +645,7 @@ git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :923
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
-git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
+git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:365/:459
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on
@@ -674,7 +674,7 @@ uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17581p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '17637p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
@@ -703,7 +703,7 @@ grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-915
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 14 reproduces sdk.py:16523-16537
+                                                          # line — the -A 14 reproduces sdk.py:16536-16550
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'

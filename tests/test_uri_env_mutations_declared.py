@@ -898,6 +898,21 @@ DELIBERATE_URI_MUTATIONS: dict[str, list[str]] = {
     # teardown, so no lane flip reaches a later test.
     "test_10017_turn_parity_census.py": [
         r'monkeypatch\.delenv\(\s*"TORTOISE_DB_URI"'],
+    # #1677 `test_worker_topology.py`: the ONE site in this module, and the
+    # mutation is the TEST'S INPUT, not a lane it claims coverage on. The gate
+    # (`tortoise/worker_topology.py`) exists to classify the DB source, so
+    # `assert_multi_worker_admissible()` with NO arguments — the production call
+    # site — can only be driven by setting the environment: the URI is set to the
+    # shared shape so the arm exercises the UNLANDED-GUARDS refusal (and the
+    # monkeypatched supervisor probe) instead of the embedded one. DELIBERATE_URI,
+    # and it claims no docker-half green: this file is DB-free and network-free by
+    # design (no SDK, no FalkorDB, no Postgres — the same class as
+    # `test_boot_regressions.py`), and NOTHING dials the value. Function-scoped
+    # `monkeypatch`, auto-undone at teardown, so no lane flip reaches a later
+    # test. The file was added without this row (#11575 review, P1): the census
+    # redded on `core` while the PR's own evidence ran only its two suites.
+    "test_worker_topology.py": [
+        r'monkeypatch\.setenv\(\s*"TORTOISE_DB_URI"'],
 }
 
 # Carve-out TEST-MODULE stems (Task 5 wires these into TEST_NO_REDIRECT_STEMS;

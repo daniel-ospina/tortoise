@@ -106,7 +106,7 @@ import re
 import sys
 import tempfile
 import uuid
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Module root helpers — this file doubles as the CLI entry
@@ -208,6 +208,18 @@ def preflight(root: Path = corpus.WRITE_PATH_DIR, *, posture: str = "llm") -> di
 # ── Store-file render + parser round-trip (S1 real parser seam) ─────────────
 
 
+def _monotonic_ts(turn_index: int) -> str:
+    """A deterministic, lexicographically MONOTONIC ISO-8601 stamp.
+
+    ``parse_openclaw`` sorts a session's records by the raw ``ts`` STRING, so
+    the stamp must sort with the turn index for every index, not just the
+    first hundred: interpolating the index into a seconds field emits invalid
+    times at 60+ and stops sorting at 100 (``00:00:100Z`` < ``00:00:11Z``).
+    """
+    return (datetime(2026, 1, 1, tzinfo=UTC) +
+            timedelta(seconds=turn_index)).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
 def render_store_lines(session_id: str, conversation: list[dict], harness: str) -> str:
     """Deterministic store-format render of the fixture conversation.
 
@@ -219,7 +231,7 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
     asserts).
     """
     lines: list[str] = []
-    for turn in conversation:
+    for i, turn in enumerate(conversation):
         role = turn.get("role", "user")
         content = turn.get("content", "")
         if harness == "codex":
@@ -250,6 +262,27 @@ def render_store_lines(session_id: str, conversation: list[dict], harness: str) 
                     "role": role,
                     "content": [{"type": "text", "text": content}],
                 }
+            }
+        elif harness == "openclaw":
+            # #2120: OpenClaw's replay seam is the plugin's OWN spool — one
+            # JSONL record per turn, written by
+            # `tortoise/openclaw-plugin/index.mjs::captureRecords` and filed by
+            # `session_import.parsers.parse_openclaw`.  It is NOT a harness
+            # session-store render (OpenClaw keeps its runtime transcript in
+            # SQLite with no documented file contract): the plugin owns the
+            # format, so the matrix row must render the plugin's shape or it
+            # grades a format nothing writes.
+            # `ts` is the parser's within-session SORT KEY
+            # (`parse_openclaw` does `sorted(..., key=lambda row: row[0])`), so
+            # it is rendered from a REAL advancing timestamp: length-padded
+            # fields stay lexicographically monotonic past turn 59/99, which a
+            # seconds-only interpolation does not (``00:00:60Z`` is not a time,
+            # and ``00:00:100Z`` sorts before ``00:00:11Z``).
+            record = {
+                "session_key": session_id,
+                "role": role,
+                "text": content,
+                "ts": _monotonic_ts(i),
             }
         else:
             raise RunError(f"no store render for harness {harness!r}")
@@ -599,6 +632,32 @@ OBJECT_DERIVATION_LINK_QUERY = (
     "MATCH (o)-[:extractedFrom|references]->() "
     "RETURN count(DISTINCT ID(o))"
 )
+#: #11237: the Object→Object edges the session's Objects are the SOURCE of,
+#: grouped by type. ⚠️ CONTEXT, NOT ATTRIBUTION: ``:Object`` is MERGEd by
+#: ``(name, label)``, so two sessions that name the same object share ONE node —
+#: an edge another session wrote through a shared Object is counted here too
+#: (measured: this read reported ``related: 1`` for a session whose own leg
+#: wrote zero), and an edge into an Object no session Point links via
+#: ``aboutObject`` is missed. The E6 number is ``object_edges`` below, which is
+#: attributable by construction; this row is kept as context and is never the
+#: number a receipt reports as the channel's own work (#11548 review, P2).
+SESSION_OBJECT_EDGES_QUERY = (
+    "MATCH (a:Object) WHERE ID(a) IN $nids "
+    "MATCH (a)-[r]->(b:Object) "
+    "RETURN type(r), count(*)"
+)
+#: #11237: does the graph hold the ONE edge the session's write leg recorded?
+#: Verified by (src id, dst id, relationship type) — never by name, never by
+#: "an edge exists somewhere", and never through a Point→Object link the edge
+#: does not actually need. This is what makes the E6 row attributable to the
+#: session that wrote it (#11548 review, P2): the leg's own record is the
+#: CLAIM and this read is the graph TRUTH, so a claim the graph does not hold
+#: is reported as a miss instead of being counted.
+WRITTEN_EDGE_VERIFY_QUERY = (
+    "MATCH (a {id: $src})-[r]->(b {id: $dst}) "
+    "WHERE type(r) = $rel "
+    "RETURN count(*)"
+)
 #: Anchored/total for one derivation predicate out of this session's nodes.
 #: The anchored predicate is the writer's own (`_anchor_on_create`).
 DERIVATION_ANCHOR_QUERY = (
@@ -674,7 +733,9 @@ SESSION_REFERENCES_ANCHOR_QUERY = (
 )
 
 
-def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
+def graph_census(sdk, session_id: str, point_ids: list[str],
+                 relation_write: dict | None = None,
+                 relation_leg_error: str | None = None) -> dict:
     """The report-only graph census for ONE session (#8444, for `#7949`).
 
     ``point_ids`` is the session's memory layer (claims AND reified operator
@@ -735,6 +796,53 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
                 "identity_excluded": identity}
                if rel == "references" else {}),
         }
+    # #11237: the E6 row, in TWO measures, because one cannot answer the
+    # question the epic asks.
+    #
+    # ``object_edges`` is the ATTRIBUTABLE one: every edge this session's write
+    # leg RECORDED (``relation_write['edges']``) whose ``(src_id, dst_id, type)``
+    # the graph actually holds. It cannot call another session's write its own
+    # (only this capture's record is read), it sees Subject-targeted edges
+    # (``ownedBy``/``managedBy``) as well as Object→Object ones, and it does not
+    # depend on any Point→Object link. ⚠️ It is a per-session count of WRITE
+    # CLAIMS, not a count of DISTINCT graph edges: ``:Object`` is MERGEd by
+    # ``(name, label)``, so when two sessions state the same pair the one graph
+    # edge is counted once per session (measured: five ids in
+    # ``w2b-relations-2026-11-08-11237.json`` belong to more than one session).
+    # ``object_edges_missing`` names every claim the graph does NOT hold — a
+    # write reported and not found is a failure, never a zero (#11548 review,
+    # P2).
+    #
+    # ``object_edges_incident`` keeps the older source-bounded read as CONTEXT
+    # only (see ``SESSION_OBJECT_EDGES_QUERY`` for why it is not the number).
+    object_edges: dict[str, int] = {}
+    object_edges_missing: list[dict] = []
+    block = relation_write if isinstance(relation_write, dict) else None
+    written_rows = (block or {}).get("edges") or []
+    for row in written_rows:
+        if not isinstance(row, dict):
+            continue
+        src, dst = row.get("src_id"), row.get("dst_id")
+        rel = row.get("predicate")
+        if not (src and dst and rel):
+            continue
+        found = g.query(
+            WRITTEN_EDGE_VERIFY_QUERY,
+            params={"src": src, "dst": dst, "rel": str(rel)}).result_set
+        if found and int(found[0][0] or 0):
+            object_edges[str(rel)] = object_edges.get(str(rel), 0) + 1
+        else:
+            object_edges_missing.append({
+                "session_id": session_id, "src_id": src, "dst_id": dst,
+                "predicate": str(rel),
+                "stated_predicate": row.get("stated_predicate"),
+            })
+    object_edges_incident: dict[str, int] = {}
+    if node_ids:
+        for rel, count in g.query(
+                SESSION_OBJECT_EDGES_QUERY,
+                params={"nids": node_ids}).result_set:
+            object_edges_incident[str(rel)] = int(count or 0)
     return {
         "session_id": session_id,
         "objects": {
@@ -746,10 +854,37 @@ def graph_census(sdk, session_id: str, point_ids: list[str]) -> dict:
             "with_derivation_link": with_derivation_link,
         },
         "derivation_edges": derivation_edges,
+        "object_edges": object_edges,
+        "object_edges_missing": object_edges_missing,
+        # Which fact the row IS. Three states, because collapsing any two would
+        # make a failure look like a measurement:
+        #   * `write-leg-record-verified` — the leg ran and its record was
+        #     checked against the graph (an empty `object_edges` here means it
+        #     wrote nothing: a MEASURED zero);
+        #   * `leg-raised` — the leg itself threw, so nothing could be checked
+        #     (`object_edges_error` carries the reason);
+        #   * `absent` — the capture never entered the leg and stated no
+        #     relations, so the E6 row is not answerable from it.
+        # ⚠️ A receipt may also carry `incident-source-bounded`, which THIS
+        # function never emits: it marks a census block written before the
+        # attributable read existed, whose `object_edges` is therefore the
+        # source-bounded incident read rather than the measure. The aggregate
+        # accepts it as a basis name and REFUSES to sum such a row
+        # (`object_edges_unattributed`), so a superseded reading can never
+        # re-enter the E6 number through a historical artifact.
+        "object_edges_basis": (
+            "leg-raised" if relation_leg_error is not None
+            else "write-leg-record-verified" if block is not None
+            else "absent"),
+        **({"object_edges_error": str(relation_leg_error)}
+           if relation_leg_error is not None else {}),
+        "object_edges_incident": object_edges_incident,
     }
 
 
-def census_or_error(sdk, session_id: str, point_ids: list[str]) -> dict:
+def census_or_error(sdk, session_id: str, point_ids: list[str],
+                    relation_write: dict | None = None,
+                    relation_leg_error: str | None = None) -> dict:
     """``graph_census`` with the graph error REPORTED instead of raised.
 
     Fail-closed in the direction that matters: an unreadable graph yields
@@ -757,7 +892,9 @@ def census_or_error(sdk, session_id: str, point_ids: list[str]) -> dict:
     zeros, which would be indistinguishable from a measured empty session.
     """
     try:
-        return graph_census(sdk, session_id, point_ids)
+        return graph_census(sdk, session_id, point_ids,
+                            relation_write=relation_write,
+                            relation_leg_error=relation_leg_error)
     except Exception as exc:  # reported, never swallowed
         return {"session_id": session_id,
                 "error": f"{type(exc).__name__}: {exc}"}
@@ -774,6 +911,12 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
     objects_total = objects_the = objects_linked = 0
     edges = {rel: {"total": 0, "anchored": 0}
              for rel in ("extractedFrom", "references")}
+    object_edges: dict[str, int] = {}
+    object_edges_incident: dict[str, int] = {}
+    object_edges_missing: list[dict] = []
+    object_edges_basis: dict[str, int] = {}
+    object_edges_unattributed: list[dict] = []
+    sessions_with_object_edges: list[str] = []
     errored = sorted(
         sid for sid, census in per_session.items() if "error" in census)
     sessions_with_objects = 0
@@ -784,6 +927,55 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
         objects_linked += int(obj.get("with_derivation_link") or 0)
         if obj.get("total"):
             sessions_with_objects += 1
+        # #11237: summed per edge type, exactly like the derivation counters.
+        # The two measures are summed SEPARATELY and never mixed: `object_edges`
+        # is the attributable one (the write leg's own record, verified in the
+        # graph) and `object_edges_incident` is context that over-counts across
+        # sessions sharing an Object node.
+        #
+        # ⛔ ONLY a `write-leg-record-verified` row is the E6 number. A receipt
+        # whose basis says the row came from ANY other read is not the measure
+        # `graph_census` defines, so summing it would let a superseded reading
+        # back into the single number the E6 pre-registration is read against —
+        # and the superseded one is the SOURCE-BOUNDED read, which counts
+        # another session's edge through a shared `:Object` node (measured on
+        # the committed `w2b-relations-2026-11-08-11237.json`: `wp05` reported
+        # `related: 1` while its own leg wrote ZERO). Such a row is not
+        # discarded silently: it is NAMED in `object_edges_unattributed` and in
+        # `graph_census_notes`, and its numbers stay available under the
+        # session's own `object_edges_incident`.
+        # ⛔ A census this run could not READ is its own state, not "absent".
+        # The two error shapes this file produces (`build_graph_census`'s
+        # `{"session_id", "error": "snapshot raised: …"}` and
+        # `census_or_error`'s `{"session_id", "error": …}`) carry no basis at
+        # all, so defaulting them to `absent` filed an UNREADABLE session under
+        # the word that means "the capture never entered the leg and stated no
+        # relations" — inflating the answerability count the reader is told to
+        # read `object_edges_total` WITH, and naming only E1/E3 in the run note.
+        # That is the same fail-silent #11237 fixed one layer down for the leg
+        # ("a crashed leg would read as a measured 'nothing stated'"), left
+        # unfixed for the census read (#11548 review cycle 2, P2).
+        _basis = ("census-error" if "error" in census
+                  else str(census.get("object_edges_basis") or "absent"))
+        object_edges_basis[_basis] = object_edges_basis.get(_basis, 0) + 1
+        _attributable = dict(census.get("object_edges") or {})
+        if _basis == "write-leg-record-verified":
+            for rel, count in _attributable.items():
+                object_edges[str(rel)] = object_edges.get(str(rel), 0) + int(
+                    count or 0)
+        elif _attributable:
+            object_edges_unattributed.append({
+                "session_id": census.get("session_id") or "",
+                "basis": _basis,
+                "object_edges": {str(k): int(v or 0)
+                                 for k, v in _attributable.items()},
+            })
+        for rel, count in (census.get("object_edges_incident") or {}).items():
+            object_edges_incident[str(rel)] = object_edges_incident.get(
+                str(rel), 0) + int(count or 0)
+        object_edges_missing.extend(census.get("object_edges_missing") or [])
+        if _basis == "write-leg-record-verified" and _attributable:
+            sessions_with_object_edges.append(census.get("session_id") or "")
         for rel, counts in (census.get("derivation_edges") or {}).items():
             if rel not in edges:
                 continue
@@ -807,11 +999,51 @@ def aggregate_graph_census(per_session: dict[str, dict]) -> dict:
             "with_derivation_link": objects_linked,
         },
         "derivation_edges": edges,
+        # #11237: the write leg's own row, summed over sessions.
+        # `object_edges_total` is the single number the E6 pre-registration
+        # reads against its before-arm of 0, and it is the ATTRIBUTABLE count
+        # (write-leg record, verified in the graph) — not the incident read.
+        # ⚠️ THREE caveats a reader must carry, none of which is a defect:
+        #
+        # 1. It counts WRITE CLAIMS per session, so a pair two sessions both
+        #    stated adds 2 for the one graph edge: read it with
+        #    `object_edges_basis` (how many sessions could answer at all) and
+        #    `object_edges_missing` (claims the graph did not hold), never on
+        #    its own.
+        # 2. ⛔ It is NOT "Object→Object ONLY", which is how the E6
+        #    pre-registration words its row
+        #    (`docs/plans/2026-11-04-5087-epic-decomposition.md` §E6: *written
+        #    Object→Object edges*, before-arm 0). The attributable read verifies
+        #    every edge the leg RECORDED, and the structural arm writes
+        #    `ownedBy`/`managedBy` to SUBJECTS as well — on the committed
+        #    `w2b-relations-2026-11-08-11237.json` that split is 24
+        #    Object→Object vs 11 Subject-targeted. **The widening is
+        #    deliberate**: those are edges this leg wrote, and excluding them
+        #    was the `#10000` pin's own blind spot. So the E6 after-arm must
+        #    compare a POST-DIFF `object_edges_total` against the before-arm
+        #    with that difference STATED, never treating the two as the same
+        #    population (#11548 review, context note).
+        # 3. The split needs no new write: each per-edge row of
+        #    `relation_write['edges']` carries its `predicate` and both ids.
+        "object_edges": object_edges,
+        "object_edges_total": sum(object_edges.values()),
+        "object_edges_basis": object_edges_basis,
+        "object_edges_missing": object_edges_missing,
+        # Rows this aggregate REFUSED to sum into the E6 number, with the basis
+        # that disqualified each one. Empty on a run the leg measured.
+        "object_edges_unattributed": object_edges_unattributed,
+        "object_edges_sessions": sorted(s for s in sessions_with_object_edges),
+        "object_edges_incident": object_edges_incident,
+        "object_edges_incident_total": sum(object_edges_incident.values()),
     }
 
 
 def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
-                       snapshot_errors: dict[str, str] | None = None) -> dict:
+                       snapshot_errors: dict[str, str] | None = None,
+                       relation_write_by_session: dict[str, dict]
+                       | None = None,
+                       relation_leg_failures: dict[str, str]
+                       | None = None) -> dict:
     """The report-level census: per session plus one aggregate (#8444).
 
     ``surfaces_by_session`` is the runner's ``snapshot_session`` output per
@@ -830,6 +1062,8 @@ def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
     like any other unreadable one.
     """
     snapshot_errors = dict(snapshot_errors or {})
+    relation_write_by_session = dict(relation_write_by_session or {})
+    relation_leg_failures = dict(relation_leg_failures or {})
     per_session: dict[str, dict] = {}
     for sid, snap in surfaces_by_session.items():
         if sid in snapshot_errors:
@@ -842,6 +1076,8 @@ def build_graph_census(sdk, surfaces_by_session: dict[str, dict],
             sdk, sid,
             [p["point_id"]
              for p in snap.get("points", []) + snap.get("operator_nodes", [])],
+            relation_write=relation_write_by_session.get(sid),
+            relation_leg_error=relation_leg_failures.get(sid),
         )
     return {
         "sessions": per_session,
@@ -861,18 +1097,56 @@ def graph_census_notes(census: dict | None) -> list[str]:
     if not census:
         return []
     aggregate = census.get("aggregate") or {}
+    notes: list[str] = []
+    # #11237: the E6 row has its own answerability, separate from the graph
+    # read. A session whose relation-write leg RAISED, or whose capture never
+    # entered it, contributes nothing to `object_edges_total` — so a reader who
+    # saw only the total would read an unmeasured row as the pre-registration's
+    # before-arm of 0 (#11548 review round 4, P2).
+    raised = sorted(
+        sid for sid, entry in (census.get("sessions") or {}).items()
+        if (entry or {}).get("object_edges_basis") == "leg-raised")
+    if raised:
+        notes.append(
+            "relation write leg RAISED for "
+            f"{len(raised)} of {aggregate.get('sessions')} session(s) — the E6 "
+            "row is NOT answerable for them: " + "; ".join(
+                f"{sid}: {(census.get('sessions') or {}).get(sid, {}).get('object_edges_error')}"
+                for sid in raised))
+    # A capture that never entered the leg (`absent`) is NOT a note: the
+    # aggregate's `object_edges_basis` counts it, and most runs of most corpora
+    # state no relations at all, so a note per such run would be noise that
+    # trains a reader to skip the channel. A RAISED leg is different — that is
+    # a failure, and it is named above.
+    #
+    # A row that exists but whose basis the E6 number REFUSES is a note, because
+    # the reader would otherwise see a non-empty `object_edges` on the session
+    # and a smaller total on the aggregate with no explanation. `absent` and
+    # `leg-raised` never reach here (they carry no `object_edges`).
+    unattributed = list(aggregate.get("object_edges_unattributed") or [])
+    if unattributed:
+        notes.append(
+            "E6 row NOT summed for "
+            f"{len(unattributed)} of {aggregate.get('sessions')} session(s) — "
+            "its basis is not `write-leg-record-verified`, so the numbers are "
+            "NOT the attributable measure and `object_edges_total` EXCLUDES "
+            "them (they remain on the session as `object_edges_incident`): "
+            + "; ".join(
+                f"{row.get('session_id')}: basis={row.get('basis')!r} "
+                f"{row.get('object_edges')}" for row in unattributed))
     errored = list(aggregate.get("sessions_errored") or [])
     if not errored:
-        return []
+        return notes
     details = "; ".join(
         f"{sid}: {(census.get('sessions') or {}).get(sid, {}).get('error')}"
         for sid in errored)
-    return [
+    notes.append(
         "graph census unavailable for "
-        f"{len(errored)} of {aggregate.get('sessions')} session(s) — E1/E3 are "
-        "NOT answerable from this receipt for them (reported, never zeroed): "
-        f"{details}"
-    ]
+        f"{len(errored)} of {aggregate.get('sessions')} session(s) — E1/E3/E6 "
+        "are NOT answerable from this receipt for them (reported, never "
+        f"zeroed): {details}"
+    )
+    return notes
 
 
 # ── Per-session grading ─────────────────────────────────────────────────────
@@ -1368,6 +1642,16 @@ def run_benchmark(
     if owned_sdk:
         sdk = _open_hermetic_sdk(run_id)
     session_results: list[dict] = []
+    #: #11237: {session_id: the capture receipt's `relation_write` block} — the
+    #: S5 Job 1 relation write path's own result, per session that stated one.
+    relation_runs: dict[str, dict] = {}
+    #: #11237: {session_id: the leg's own failure warning}. A relation-write leg
+    #: that RAISES leaves `relation_write` absent exactly like a capture that
+    #: stated no relations — so without this, a crashed leg would read as a
+    #: measured "nothing stated" in the E6 slot (#11548 review round 4, P2).
+    #: `sdk._extract_session_v2` names the failure on the capture's `warnings`
+    #: channel; this is that fact carried to the census instead of dropped.
+    relation_leg_failures: dict[str, str] = {}
     runner_errors: list[str] = []
     semantic_block: dict | None = None
     total_cost: float = 0.0
@@ -1425,6 +1709,19 @@ def run_benchmark(
             # attributed between "the edge was never formed" and "the seam
             # dropped it" (the two mechanisms #8503 refuses to conflate).
             result["extraction_warnings"] = list(capture.get("warnings") or [])
+            # #11237: what the S5 Job 1 relation WRITE leg did on THIS session's
+            # capture — the per-edge record and the counts, taken from the
+            # capture receipt (absent when the extractor stated no relations, so
+            # "nothing was stated" stays distinguishable from "nothing was
+            # written"). Accumulated below into the run-level block.
+            if isinstance(capture.get("relation_write"), dict):
+                relation_runs[session_id] = capture["relation_write"]
+            else:
+                _leg_errors = [
+                    w for w in (capture.get("warnings") or [])
+                    if "relation write leg failed" in str(w)]
+                if _leg_errors:
+                    relation_leg_failures[session_id] = str(_leg_errors[0])
             session_results.append(result)
         if ep_pass:
             try:
@@ -1500,7 +1797,9 @@ def run_benchmark(
             # dimensions cannot describe different graphs. Additive and NOT a
             # `METRIC_VALUES` member — see the block comment on `graph_census`.
             graph_census_report = build_graph_census(
-                sdk, surfaces_by_session, snapshot_errors=snapshot_errors)
+                sdk, surfaces_by_session, snapshot_errors=snapshot_errors,
+                relation_write_by_session=relation_runs,
+                relation_leg_failures=relation_leg_failures)
             notes.extend(graph_census_notes(graph_census_report))
             for result in session_results:
                 result["graph_census"] = graph_census_report["sessions"].get(
@@ -1674,6 +1973,12 @@ def run_benchmark(
         "metrics": metrics,
         "quote_spans_total": quote_spans_total,
         "operator_audit": operator_audit,
+        # #11237: the relationship channel's WRITE half. Present only when at
+        # least one session's extraction stated a relation; the receipt then
+        # carries both the graph-truth count (``graph_census.aggregate``
+        # ``object_edges_total``) and the leg's own per-edge record.
+        **({"relation_write": _aggregate_relation_write(relation_runs)}
+           if relation_runs else {}),
         "graph_census": graph_census_report,
         "extractor_identity": extractor_identity(),
         "semantic_judge": semantic_block,
@@ -1938,6 +2243,68 @@ _SUPERSEDE_REFUSAL_MARKERS = (
     # zero; without this marker the warning exists and the count does not see it.
     "with no surviving point id",
 )
+
+
+def _aggregate_relation_write(runs: dict[str, dict]) -> dict:
+    """Sum the per-session `relation_write` receipts into one run-level block.
+
+    ``#11237``: the S5 Job 1 channel's WRITE half. Three outcomes are kept apart
+    on purpose, because collapsing any two would let one hide a loss:
+
+    * ``written`` / ``dropped`` — what the leg DID, summed over sessions;
+    * ``drops`` — every individual refusal WITH its session and reason, so a
+      verb that binds no declared path is visible rather than counted;
+    * ``collapsed`` / ``folded`` — a stated MEANING absorbed onto an edge that
+      did land (``create_direct_edge`` is one edge per (src, tgt, type), so two
+      verbs binding one mechanism cannot be two edges). ``folded`` counts
+      meanings, so it is the third term that makes
+      ``written + dropped + folded`` reconcile with the stated population. A
+      fold is recorded only for an edge that was actually WRITTEN.
+
+    ``edges`` keeps the per-edge record (ids, predicate written, the story's own
+    verb, the write path, and the declaring pack when one fixed the predicate).
+    Pure: same receipts → same block, so a receipt is comparable across runs.
+    """
+    written = dropped = 0
+    write_paths: dict[str, int] = {}
+    edges: list[dict] = []
+    drops: list[dict] = []
+    collapsed: list[dict] = []
+    for session_id in sorted(runs):
+        block = runs[session_id] or {}
+        written += int(block.get("written") or 0)
+        dropped += int(block.get("dropped") or 0)
+        # #11548 review P2: a FOLDED meaning is its own outcome — neither
+        # written as its own edge nor dropped — so it is summed and carried
+        # with its session like a drop, or the run-level accounting
+        # (written + dropped + folded == stated) would not reconcile.
+        collapsed.extend({**fold, "session_id": session_id}
+                         for fold in (block.get("collapsed") or []))
+        for path, count in (block.get("write_paths") or {}).items():
+            write_paths[str(path)] = write_paths.get(str(path), 0) + int(
+                count or 0)
+        edges.extend({**edge, "session_id": session_id}
+                     for edge in (block.get("edges") or []))
+        drops.extend({**drop, "session_id": session_id}
+                     for drop in (block.get("drops") or []))
+    return {
+        "sessions": sorted(runs),
+        "written": written,
+        "dropped": dropped,
+        # ⛔ An EXPLICIT marker, and the reason is a review finding (#11548, P2):
+        # `validate_receipt` accepts a receipt with no `folded` key (receipts
+        # written before the accounting existed), so a receipt that PREDATES the
+        # accounting was indistinguishable from one that measured no folds —
+        # `written + dropped + folded == stated` could not be demonstrated and
+        # nothing said so. A receipt now STATES which shape it has, and
+        # `validate_receipt` requires the statement whenever the count is absent.
+        "fold_accounting": "recorded",
+        "folded": sum(len(fold.get("folded") or []) for fold in collapsed),
+        "write_paths": write_paths,
+        "edges": edges,
+        "drops": drops,
+        "collapsed": collapsed,
+    }
 
 
 def operator_drop_warnings(session_results: list[dict]) -> dict:
@@ -2274,6 +2641,11 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
     # the identity is what lets the receipt check reject a wire-only number.
     if report.get("extractor_identity") is not None:
         receipt["extractor"] = report["extractor_identity"]
+    # #11237 additive relation-write block: the S5 Job 1 channel's WRITE half,
+    # added ONLY when the run stated one, so a receipt from a run whose
+    # extraction produced no relations is byte-identical to the pre-#11237 one.
+    if report.get("relation_write") is not None:
+        receipt["relation_write"] = report["relation_write"]
     # #5085 additive banded semantic judge block.  Added ONLY when the arm ran
     # (``--judge semantic``), so a mechanical-lane receipt is byte-identical to
     # the pre-#5085 runner's — the gated ``metrics``/``judge_pin`` surface is
@@ -2351,6 +2723,42 @@ def validate_receipt(receipt: dict) -> list[str]:
                 "receipt.extractor.real: expected a bool, got "
                 f"{extractor.get('real')!r}"
             )
+    # #11237 additive relation-write block — SHAPE only, and only when present.
+    # Whether the number is GOOD belongs to the write-path lane
+    # (``test_write_path_relation_lane``) and to the census, not to a receipt
+    # shape check.
+    relation_write = receipt.get("relation_write")
+    if relation_write is not None:
+        if not isinstance(relation_write, dict):
+            issues.append("receipt.relation_write: expected an object")
+        else:
+            for key in ("written", "dropped"):
+                value = relation_write.get(key)
+                if isinstance(value, bool) or not isinstance(value, int):
+                    issues.append(
+                        f"receipt.relation_write.{key}: expected an int, got "
+                        f"{value!r}")
+            folded = relation_write.get("folded")
+            if folded is None:
+                # An ABSENT count is allowed only when the receipt SAYS it is
+                # absent. Accepting the bare absence made a pre-accounting
+                # receipt indistinguishable from one that folded nothing, so
+                # `written + dropped + folded == stated` could not be checked
+                # and the staleness was invisible by design (#11548 review,
+                # P2). A receipt written before the accounting carries
+                # `fold_accounting: "absent"` — added deliberately, not
+                # inferred from a missing key.
+                if relation_write.get("fold_accounting") != "absent":
+                    issues.append(
+                        "receipt.relation_write.fold_accounting: `folded` is "
+                        "absent, so the receipt must declare "
+                        "fold_accounting: \"absent\" (a receipt written before "
+                        "the fold accounting existed) rather than leave the "
+                        "gap silent")
+            elif isinstance(folded, bool) or not isinstance(folded, int):
+                issues.append(
+                    "receipt.relation_write.folded: expected an int, got "
+                    f"{folded!r}")
     return issues
 
 

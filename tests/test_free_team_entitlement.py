@@ -12,8 +12,11 @@ file (the dashboard gate-on-click UX is covered by the e2e suite).
 """
 from __future__ import annotations
 
+import asyncio
 import os
+import re
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -480,7 +483,7 @@ class TestCrossLaneFreeOrgInvariant:
     invariant-preserving in #2789 and are pinned here rather than merely
     believed: `POST /v1/register` (idempotent on email — this file) and
     `supabase/functions/tenant-provision` (deterministic per-user org id —
-    pinned at runtime in `tests/test_tenant_provision_cors.mjs`).
+    pinned at runtime in `tests/test_tenant_provision_server_only.mjs`).
     """
 
     def test_register_twice_with_the_same_email_mints_one_org(self, client,
@@ -909,6 +912,669 @@ class TestConcurrentTeamCreationTOCTOU:
         order = asyncio.run(_run())
         assert order == ["a-enter", "a-exit", "b-enter"], \
             f"critical sections did not serialize: {order}"
+
+
+class TestAtomicProvisionBackstop:
+    """#1981 — the DB-level backstop for the multi-worker lane.
+
+    `_org_create_lock` is PER PROCESS: every control-plane statement is its own
+    PostgREST transaction, so no application lock can span the read and the
+    write, and a second uvicorn worker / machine has its own lock dict. The
+    check therefore moved INSIDE `provision_team` (migration
+    20261108000001): a cross-process advisory lock, then the SAME predicate
+    re-evaluated in the write's own transaction. Its refusal is the same rule
+    the Python gate enforces, so this file pins that the refusal reaches the
+    client as the SAME structured 402 — a 500 here would be a regression in the
+    one case the backstop exists to handle (the race the Python gate lost).
+
+    What is NOT asserted here: the SQL decision matrix's BEHAVIOUR (which orgs
+    count, which tiers/statuses gate, what is written on a refusal). That is
+    `supabase/tests/0010_provisioning_rpcs.sql` §8, run by the PGlite harness —
+    a Python fake would only restate the predicate a third time. The predicate's
+    DECLARATION is a different question and IS pinned here, by
+    `test_the_sql_predicate_is_the_python_predicate`: the SQL literal set against
+    `_BILLING_ACTIVE_STATUSES`/`_PENDING_PAYMENT_STATUS`, the ownership clauses,
+    and the negative space (no clause beyond the declared predicate).
+    """
+
+    _BLOCKING = "team-free-racer"
+
+    def _rpc_refusal(self) -> RuntimeError:
+        """The error `supabase_control.rpc` raises for the SQL refusal.
+
+        Shape taken from the TRANSPORT, not invented: `rpc` wraps a >=300
+        response as ``"Supabase control-plane RPC failed (<fn>): HTTP <code>:
+        <body message>"``, and the body message of a RAISE EXCEPTION is its
+        text.
+        """
+        from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER
+        return RuntimeError(
+            "Supabase control-plane RPC failed (provision_team): "
+            f"HTTP 402: {_ONE_FREE_ORG_RPC_MARKER}{self._BLOCKING}")
+
+    def test_rpc_refusal_surfaces_the_structured_402(self, user_client,
+                                                     monkeypatch):
+        import tortoise.supabase_control as sc
+        tc, fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        r = tc.post("/v1/organizations", json={"name": "racer-two"})
+        assert r.status_code == 402, r.text
+        # THE #2789 CONTRACT: the dialog is driven by `code`, and `org_id` names
+        # the org the "Upgrade current organization" action targets.
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+        # the refusal is atomic end-to-end: no org row was minted
+        minted = [o for o in fake.query("organizations")
+                  if o.get("name") == "racer-two"]
+        assert minted == [], minted
+
+    def test_rpc_refusal_drops_the_eagerly_materialized_graph(self, user_client,
+                                                              monkeypatch):
+        """The eager default-graph init runs BEFORE the RPC, so a DB refusal
+        would otherwise strand a namespace for an org that never existed."""
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-three"})
+        assert r.status_code == 402, r.text
+        assert len(dropped) == 1, dropped
+        assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
+
+    def test_an_ambiguous_rpc_failure_does_not_drop_the_graph(
+            self, user_client, monkeypatch):
+        """#1981 round-2 review P1 — NOT every failure may reclaim the graph.
+
+        `provision_org` raises the SAME `RuntimeError` for a server error
+        RESPONSE and for a TRANSPORT failure (`supabase_control.rpc`), and the
+        control-plane client's read timeout is 5.0 s — short enough that an RPC
+        which COMMITTED can still surface here as a lost response. An
+        unconditional drop would then `GRAPH.DELETE` the namespace of a LIVE
+        org (rows committed, `TeamMeta`/`OnboardingState` destroyed): strictly
+        worse than the orphan it reclaims, and the inverse of the ordering the
+        lane documents ("an orphaned graph namespace is harmless, an orphaned
+        orgs row is not").
+
+        So the drop is gated on ATTRIBUTION: a 402 (this PR's marker, raised
+        before any write) or a 4xx (PostgREST's unique-violation / bad-request
+        response) are server REJECTIONS that prove nothing landed. Anything else
+        — a 5xx, a transport failure — is ambiguous and keeps the pre-#1981
+        behaviour: the namespace survives. Nothing sweeps it in production
+        (`_journal_append_product` no-ops outside a test session and
+        `_sweep_team_strays` lives in `tests/_embedded.py`); what bounds the
+        accumulation is the per-user org-create rate limit, and an empty leaked
+        namespace is the deliberately cheaper failure mode (round-3 review, P2 —
+        the first draft of this docstring named the write-ahead journal as the
+        sweeper, which was fiction).
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_org): "
+                "ReadTimeout('')")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-ambiguous"})
+        assert r.status_code == 500, r.text
+        assert dropped == [], (
+            "an AMBIGUOUS RPC failure dropped the eagerly-materialized graph "
+            "— the RPC may have committed, so this destroys a LIVE org's "
+            "namespace (round-2 review P1)")
+
+    def test_a_duplicate_name_409_drops_the_graph(self, user_client,
+                                                  monkeypatch):
+        """The 409 IS attributable (PostgREST rejected the insert), so the
+        namespace is genuinely unowned and must be reclaimed — otherwise a
+        duplicate-name retry mints a NEW org id each attempt and leaks one
+        namespace per try (#1981 round-2 review, P2)."""
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_org): "
+                "HTTP 409: duplicate key value violates unique constraint")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-dup"})
+        assert r.status_code == 409, r.text
+        assert len(dropped) == 1, dropped
+
+    def test_a_failing_drop_submission_cannot_swallow_the_402(
+            self, user_client, monkeypatch):
+        """#1981 round-3 review P2 — the drop must not be able to fail the
+        refusal.
+
+        `_drop_org_graph` swallows its OWN errors, but the `to_thread`
+        SUBMISSION is outside that (a refused executor submit, "cannot schedule
+        new futures after shutdown", a cancelled task). The await used to be
+        naked, so that raise replaced the structured 402 with the generic 500 —
+        losing exactly the `code`-bearing refusal the dashboard dialog reads
+        (#2789).
+        """
+        import asyncio as _asyncio
+
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        real_to_thread = _asyncio.to_thread
+
+        def _to_thread(fn, *a, **kw):
+            if fn is ha._drop_org_graph:
+                raise RuntimeError(
+                    "cannot schedule new futures after shutdown")
+            return real_to_thread(fn, *a, **kw)
+
+        monkeypatch.setattr(_asyncio, "to_thread", _to_thread)
+        r = tc.post("/v1/organizations", json={"name": "racer-submit"})
+        assert r.status_code == 402, (
+            f"a failing drop SUBMISSION turned the structured refusal into "
+            f"{r.status_code}: {r.text}")
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+
+    def test_the_refusal_drops_the_graph_off_the_event_loop(
+            self, user_client, monkeypatch):
+        """#1981 review P1: the compensating drop is SYNCHRONOUS socket I/O
+        (`_make_sdk` cold projection + `GRAPH.DELETE`), and the refusal is a
+        BURST path — it only fires when workers raced the create, so every
+        worker enters it at once. Called inline it holds the whole event loop
+        for the round trip (#2988 froze every route this way for 15 minutes;
+        #3773 is the removal of this class from request paths).
+
+        The discriminator is BEHAVIOURAL, not a source grep for
+        `to_thread`/`_graph_offload` (a grep passes even if the call moves
+        back onto the loop): the probe records whether a loop was RUNNING in
+        the frame that ran the drop, and every call is recorded so a later
+        off-loop call cannot erase an earlier on-loop one.
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        seen: list[tuple[bool, str]] = []
+
+        def _observe(org_id, graph_name=None):
+            try:
+                asyncio.get_running_loop()
+                on_loop = True
+            except RuntimeError:
+                on_loop = False
+            seen.append((on_loop, threading.current_thread().name))
+
+        monkeypatch.setattr(ha, "_drop_org_graph", _observe)
+        r = tc.post("/v1/organizations", json={"name": "racer-four"})
+        assert r.status_code == 402, r.text
+        assert seen, "the compensating graph drop never ran"
+        assert [on_loop for on_loop, _name in seen] == [False], (
+            "the graph drop ran ON the event loop "
+            f"(thread={seen[0][1]!r}) — a cold projection open plus "
+            "GRAPH.DELETE holds the loop for the whole round trip, on the "
+            "one path every racing worker enters")
+
+    def test_onboarding_lane_maps_the_refusal_to_the_same_402(
+            self, team_client_factory, monkeypatch):
+        """#1981: the onboarding sub-org lane is the same create-org rule, so a
+        cross-worker refusal there must not degrade to its generic 400
+        ("Team create failed: …") — the wizard renders the dialog from `code`.
+        """
+        import tortoise.supabase_control as sc
+        from tortoise.hosted_api import get_current_org_session
+        tc, _fake = team_client_factory
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        app.dependency_overrides[get_current_org_session] = lambda: dict(
+            FREE_TEAM, org_id="team-parent-001", tier="free",
+            session_user_id=_USER1)
+        r = tc.post("/v1/onboarding/team", json={"name": "racer-sub"})
+        assert r.status_code == 402, r.text
+        _assert_capped(r.json()["detail"], org_id=self._BLOCKING)
+
+    def test_unrelated_rpc_failure_is_not_laundered_into_a_402(
+            self, user_client, monkeypatch):
+        """Non-vacuity: only the marker becomes a 402. A transport/500 failure
+        must stay a 500 — a shape-only match on "HTTP 4xx" would tell a user at
+        no ceiling that they are capped."""
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                                "Supabase control-plane RPC failed "
+                                "(provision_team): HTTP 500")))
+        r = tc.post("/v1/organizations", json={"name": "doomed"})
+        assert r.status_code == 500, r.text
+
+    def test_marker_absent_yields_no_blocker(self):
+        from tortoise.hosted_api import _one_free_org_blocker_from_rpc
+        assert _one_free_org_blocker_from_rpc(RuntimeError("HTTP 500")) is None
+        # marker with no id: not a 402 naming nothing
+        assert _one_free_org_blocker_from_rpc(
+            RuntimeError("HTTP 402: one_free_org_limit:")) is None
+        # trailing prose after the id is tolerated (PostgREST detail suffixes)
+        assert _one_free_org_blocker_from_rpc(
+            RuntimeError("HTTP 402: one_free_org_limit:org-x\ncontext")) == "org-x"
+
+    def test_the_marker_is_the_one_the_migration_raises(self):
+        """The RAISE text IS the SQL<->Python contract, so pin the two
+        declarations against each other (#1981). The SQL suite
+        (`supabase/tests/0010_provisioning_rpcs.sql` §8) pins the BEHAVIOUR; this
+        pins that the migration carrying it still carries exactly this marker —
+        a rename on either side would otherwise silently degrade the refusal to
+        a 500.
+
+        Both assertions match the STATEMENT, not a bare token: this migration
+        explains itself in comments that name `one_free_org_limit:` (the
+        `IF v_blocking_org_id IS NOT NULL` block, whose comment repeats the
+        marker) and `pg_advisory_xact_lock` (the `LOCK RESOURCE` comment block),
+        so a substring test is satisfied
+        by the prose and stays GREEN when the code it claims to protect is
+        deleted or renamed (agent-infra#3442 — an assertion whose value cannot
+        vary under any mutation is dead weight, not a pin). Measured: with the
+        bare `in sql` form, renaming the marker and deleting the `PERFORM` both
+        left this test passing.
+        """
+        from pathlib import Path
+
+        from tortoise.hosted_api import _ONE_FREE_ORG_RPC_MARKER
+        migration = (Path(__file__).resolve().parent.parent
+                     / "supabase/migrations"
+                     / "20261108000001_one_free_org_atomic_provision.sql")
+        sql = migration.read_text()
+        assert re.search(
+            r"RAISE\s+EXCEPTION\s+'" + re.escape(_ONE_FREE_ORG_RPC_MARKER) + r"%'",
+            sql), (
+            f"{migration.name} no longer RAISES {_ONE_FREE_ORG_RPC_MARKER!r}; "
+            "hosted_api would map its refusal to a 500")
+        # the atomicity mechanism, not just the message
+        assert re.search(r"PERFORM\s+pg_advisory_xact_lock\s*\(", sql), (
+            f"{migration.name} no longer PERFORMs the cross-process advisory "
+            "lock; the entitlement would be a read-then-write again")
+
+    def _gate_block(self) -> str:
+        """The migration's #1981 gate region — code only, from its own banner
+        comment to the first write it guards.
+
+        Sliced rather than grepped over the whole file on purpose: the header
+        DISCUSSES the predicate (it names the statuses, and the parity rule),
+        so a match anywhere in the file could be satisfied by that prose and
+        stay green under a change to the SQL — the vacuity class
+        `agent-infra#3442` measures. The banner and the `organizations` insert
+        are unique to their two sites.
+        """
+        from pathlib import Path
+
+        sql = (Path(__file__).resolve().parent.parent
+               / "supabase/migrations"
+               / "20261108000001_one_free_org_atomic_provision.sql").read_text()
+        head = "-- \u2500\u2500 #1981: the one-free-org entitlement, ATOMIC"
+        assert sql.count(head) == 1, (
+            "the migration's #1981 banner moved or was duplicated; this pin "
+            "cannot find the gate it grades")
+        block = sql.split(head, 1)[1]
+        tail = "-- \u2500\u2500 organizations row"
+        assert tail in block, (
+            "the write that follows the gate is gone; the gate block cannot be "
+            "delimited, so this pin would grade the rest of the file")
+        return block.split(tail, 1)[0]
+
+    def test_the_sql_predicate_is_the_python_predicate(self):
+        """#1981 — the SQL gate and `owned_free_org_ids` must not drift.
+
+        The backstop REPLACES the Python gate in the multi-worker lane, so the
+        duplicated predicate is load-bearing in both directions:
+
+        * a status ADDED to `_BILLING_ACTIVE_STATUSES` (Python stricter) leaves
+          SQL counting that org as free → the DB stops refusing what the gate
+          refuses, and in the racing lane it is the only guard;
+        * a status REMOVED (Python looser) makes the backstop STRICTER than the
+          gate it backs — the failure the migration header calls "worse than
+          the race it closes".
+
+        Neither drift reddens the behaviour matrix in
+        `supabase/tests/0010_provisioning_rpcs.sql` §8: that suite pins today's
+        statuses, not the Python constants. The expected set is therefore built
+        FROM THE CONSTANTS, which is what makes a change on either side red
+        here. The clauses are matched as SQL STATEMENTS (never as bare tokens),
+        so this cannot be satisfied by the migration's own prose.
+        """
+        from tortoise.supabase_control import (
+            _BILLING_ACTIVE_STATUSES,
+            _PENDING_PAYMENT_STATUS,
+        )
+
+        block = self._gate_block()
+        # the exclusion set, read from the gate's own SQL, compared to Python's
+        excluded = set(re.findall(
+            r"o\.subscription_status\s*<>\s*'([^']*)'", block))
+        assert excluded == (set(_BILLING_ACTIVE_STATUSES)
+                            | {_PENDING_PAYMENT_STATUS}), (
+            "the SQL gate excludes " + repr(sorted(excluded)) + " but the "
+            "Python twin excludes " + repr(sorted(set(_BILLING_ACTIVE_STATUSES)
+                                                   | {_PENDING_PAYMENT_STATUS}))
+            + " — move both declarations together")
+        # NULL counts as free on BOTH sides (a property-less org is not paying)
+        assert re.search(r"o\.subscription_status\s+IS\s+NULL", block), (
+            "the SQL gate lost its IS NULL arm; a NULL subscription_status "
+            "would stop counting as free (Python's `not in _BILLING_ACTIVE_"
+            "STATUSES` still does), silently making the backstop stricter")
+        # ...and the three ownership clauses the Python twin applies
+        for pattern, why in (
+            (r"m\.status\s*=\s*'active'", "active"),
+            (r"m\.role\s*=\s*'owner'", "owner"),
+            (r"m\.org_id\s*<>\s*''", "org_id<>''"),
+            (r"ORDER\s+BY\s+m\.created_at", "oldest-first"),
+        ):
+            assert re.search(pattern, block), (
+                f"the SQL gate stopped applying the {why} clause its Python "
+                "twin (`owned_free_org_ids`) applies")
+        # The identity-path guard (round-2 review, P2). It is BEHAVIOURALLY
+        # redundant — the predicate is `m.user_id = p_user_id`, and with a NULL
+        # right-hand side no membership row can ever match, so §8d stays green
+        # with this clause DELETED. But §8d READS as a pin on "the identity path
+        # is not gated", so the guard is pinned here rather than left to a case
+        # that cannot falsify it.
+        assert re.search(r"IF\s+p_user_id\s+IS\s+NOT\s+NULL", block), (
+            "the gate lost its `IF p_user_id IS NOT NULL` arm. It is not what "
+            "makes §8d pass (a NULL `m.user_id = p_user_id` never matches), "
+            "but it is the declared reason the identity path skips the lock "
+            "and the predicate — restore it or restate §8d")
+
+        # ...and the exemption that keeps a self-replay allowed (deliberately
+        # ABSENT from the Python twin, so it is pinned here as the known delta)
+        assert re.search(r"m\.org_id\s*<>\s*p_org_id", block), (
+            "the SQL gate lost `m.org_id <> p_org_id`: a retry of an org's own "
+            "provision would be refused")
+
+        # ── THE NEGATIVE SPACE — nothing but the declared predicate ─────────
+        # Presence-only pins cannot see an ADDED condition, and the header's own
+        # "NO `tier` / NO `deleted_at`" sentence is precisely about absence.
+        # Measured mutant: inserting `AND o.tier = 'free'` before the status arm
+        # left every assertion above GREEN and left §8's outcome matrix
+        # unmoved (every blocking fixture there is a default-`p_tier='free'`
+        # org) — while the backstop stopped blocking an org the Python gate
+        # blocks, i.e. fail-open in the only lane this PR protects. The mirror
+        # (`AND o.tier <> 'free'`) is the R1 failure, equally invisible.
+
+        # (1) the gate may reference ONLY the columns its Python twin reads.
+        columns = set(re.findall(r"\b[mo]\.([a-z_]+)\b", block))
+        assert columns == {"user_id", "org_id", "status", "role",
+                           "created_at", "id", "subscription_status"}, (
+            "the SQL gate references " + repr(sorted(columns)) + "; the "
+            "declared predicate reads only m.{user_id,org_id,status,role,"
+            "created_at} and o.{id,subscription_status}. An ADDED column "
+            "(o.tier, o.deleted_at) silently changes what counts as free "
+            "without reddening anything else")
+        # (2) the statement itself is a GOLDEN pin: an added clause over an
+        # already-referenced column (e.g. `AND m.status <> 'deleted'`) is
+        # invisible to (1), and is exactly the class the header promises cannot
+        # happen. Whitespace is normalised, so only the predicate's CONTENT
+        # reddens this.
+        select = re.search(
+            r"SELECT m\.org_id INTO v_blocking_org_id(.*?)LIMIT 1;",
+            block, re.S)
+        assert select, (
+            "the gate's SELECT ... LIMIT 1 statement is gone; the golden pin "
+            "below cannot grade a predicate it cannot find")
+        assert re.sub(r"\s+", " ", select.group(1)).strip() == (
+            "FROM public.org_memberships m "
+            "JOIN public.organizations o ON o.id = m.org_id "
+            "WHERE m.user_id = p_user_id "
+            "AND m.status = 'active' "
+            "AND m.role = 'owner' "
+            "AND m.org_id <> '' "
+            "AND m.org_id <> p_org_id "
+            "AND (o.subscription_status IS NULL "
+            "OR (o.subscription_status <> 'active' "
+            "AND o.subscription_status <> 'past_due' "
+            "AND o.subscription_status <> 'trialing' "
+            "AND o.subscription_status <> 'pending_payment')) "
+            "ORDER BY m.created_at"), (
+            "the SQL gate's WHERE clause is no longer the declared predicate "
+            "(`owned_free_org_ids`). If you changed it on purpose, this golden "
+            "text AND the Python twin move in the same commit — a clause added "
+            "on one side only is the fail-open direction this pin exists for")
+
+    def test_the_lock_key_is_the_person_and_is_transaction_scoped(self):
+        """#1981 — the lock must serialize the USER, and only for its xact.
+
+        The gate block's `PERFORM` is the whole atomicity mechanism, and it has
+        two mutants that leave every behavioural case green, because
+        `supabase/tests/0010_provisioning_rpcs.sql` §8 holds ONE connection and
+        so never races anything (#1981 review, P2):
+
+        * keyed on `p_org_id` instead of `p_user_id` — two racing creates for
+          ONE user carry different org ids by construction, so they take
+          different locks and the original TOCTOU is back intact;
+        * session-scoped `pg_advisory_lock` — held until explicit release, so
+          on a pooled connection it leaks across requests.
+
+        Ordering (lock BEFORE the gate's `SELECT`) is pinned by §8's own
+        `strpos` assertion, which sees the whole `prosrc`; here the block is
+        already sliced, so only the key and the scope are graded.
+        """
+        block = self._gate_block()
+        # the key is derived from the PERSON
+        assert re.search(r"hashtextextended\([^)]*p_user_id", block), (
+            "the advisory lock key is no longer derived from `p_user_id`; "
+            "the lock would stop serializing one user's concurrent provisions")
+        # ...and NOT from the org — the per-org mutant is the whole bug back
+        assert not re.search(r"hashtextextended\([^)]*p_org_id", block), (
+            "the advisory lock is keyed on `p_org_id`; two racing creates for "
+            "one user carry different org ids, so they never serialize and "
+            "the multi-worker TOCTOU is reopened")
+        # transaction-scoped, never session-scoped
+        assert not re.search(r"pg_advisory_lock\s*\(", block), (
+            "the gate takes the SESSION-scoped `pg_advisory_lock`; it is held "
+            "until explicit release, so on a pooled connection it leaks "
+            "across requests. Use `pg_advisory_xact_lock`")
+
+    def test_the_user_path_provisions_at_the_free_tier(self):
+        """#1981 — the SQL gate only engages for a FREE org.
+
+        The migration's condition is `COALESCE(p_tier,'free') = 'free'`: a
+        caller passing any non-`'free'` spelling (`'Free'`, an unrecognised
+        tier) skips the gate entirely and mints an unallowanced org. No caller
+        does that today, but nothing pinned it — one edited argument in the
+        user-path lane would disable the entitlement with every test green
+        (#1981 review, P2). This pins the argument at the ONE user-path call
+        site that creates a person's org.
+        Sliced per FUNCTION on purpose. A bare
+        `'"p_tier": "free",' in source` would be satisfied by the OTHER lane's
+        literal, so the assertion would stay green while this one's argument was
+        changed — the vacuity class agent-infra#3442 measures.
+
+        BOTH user-path lanes are covered (round-2 review, P2):
+        `_create_onboarding_org_lane` passes `p_user_id=owner_user_id` and is
+        just as much a person's org as the /v1/organizations lane, so pinning
+        only the second left the same unguarded argument on the wizard path.
+        """
+        from pathlib import Path
+
+        source = (Path(__file__).resolve().parent.parent
+                  / "tortoise" / "hosted_api.py").read_text()
+        for name in ("_create_org_supabase_lane",
+                     "_create_onboarding_org_lane"):
+            head = f"async def {name}("
+            assert source.count(head) == 1, (
+                f"the user-path org-create lane `{name}` was renamed or "
+                "duplicated; this pin cannot find the call site it grades")
+            lane = source.split(head, 1)[1].split("\nasync def ", 1)[0]
+            assert '"p_tier": "free",' in lane, (
+                f"`{name}` no longer passes `p_tier: 'free'`; "
+                "`COALESCE(p_tier,'free') = 'free'` would not engage and the "
+                "one-free-org backstop would never fire on this lane")
+
+
+class TestNamespaceReclaimAttribution:
+    """#1981 (round-3 review): a reclaim may only fire on PROOF nothing landed.
+
+    The eager default-graph init runs BEFORE the RPC, so a failed provision
+    leaves a namespace behind. Reclaiming it is only safe when the failure
+    PROVES the write did not commit: `provision_org` raises the SAME
+    `RuntimeError` for a PostgREST error RESPONSE and for a TRANSPORT failure,
+    and the control-plane read timeout is 5.0 s — short enough that a
+    provision which COMMITTED can surface as a lost response. Deleting then
+    destroys a LIVE org's `TeamMeta`/`OnboardingState`.
+
+    Both lanes (`_create_org_supabase_lane`, `register_user`) now share ONE
+    predicate, so this class grades the predicate itself rather than two
+    drifting copies of the judgement.
+    """
+
+    def test_only_a_server_REJECTION_proves_nothing_landed(self):
+        """A 5xx is NOT proof — it is the ambiguous case (round-4 review).
+
+        A 5xx reaching the caller may be PostgREST's own (its raise rolls the
+        transaction back, so reclaiming would be safe) **or a gateway's** 502/504
+        for an upstream timeout, which can be generated AFTER the transaction
+        COMMITTED. The two are indistinguishable from the message, so the
+        predicate must answer only for the class where the answer is certain.
+        """
+        from tortoise.hosted_api import _rpc_failure_proves_nothing_landed
+
+        # The server REJECTED it inside the transaction → nothing landed.
+        for msg in (
+            "Supabase control-plane RPC failed (provision_team): HTTP 402: "
+            "one_free_org_limit:org-a",
+            "Supabase control-plane RPC failed (provision_team): HTTP 409: "
+            "duplicate key value violates unique constraint",
+            "Supabase control-plane RPC failed (provision_team): HTTP 400: "
+            "bad request",
+        ):
+            assert _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
+
+        # AMBIGUOUS: a 5xx (PostgREST's own vs a gateway answering after a
+        # COMMIT) or a TRANSPORT failure — the RPC may have committed.
+        for msg in (
+            "Supabase control-plane RPC failed (provision_team): HTTP 500: "
+            "boom",
+            "Supabase control-plane RPC failed (provision_team): HTTP 502: "
+            "An invalid response was received from the upstream server",
+            "Supabase control-plane RPC failed (provision_team): HTTP 504",
+            "Supabase control-plane RPC failed (provision_team): "
+            "ReadTimeout('')",
+            "Supabase control-plane RPC failed (provision_team): "
+            "ConnectError('connection reset')",
+            "Supabase control-plane RPC failed (provision_team): ",
+            "",
+        ):
+            assert not _rpc_failure_proves_nothing_landed(RuntimeError(msg)), msg
+
+    def test_a_provision_refusal_still_reclaims_in_the_register_lane(
+            self, client, monkeypatch):
+        """NON-VACUITY for the pin below: the register lane must STILL reclaim
+        when the PROVISION itself is refused.
+
+        Without this leg, "never drop on the register lane" would pass the
+        attribution pin while silently re-opening the namespace leak the drop
+        exists to prevent (a 402 marker from `provision_team` is raised before
+        any write and rolls the transaction back, so nothing landed).
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, _fake = client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_team): "
+                "HTTP 402: one_free_org_limit:org-blocker")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/register", json={"email": "refused@example.com",
+                                          "password": "password123"})
+        assert r.status_code == 500, r.text
+        assert len(dropped) == 1, (
+            "a PROVABLY-refused provision left its eagerly-materialized "
+            "namespace behind — the reclaim is the reason the drop exists")
+        assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
+
+    def test_a_post_provision_failure_does_not_reclaim_the_committed_org(
+            self, client, monkeypatch):
+        """#1981 (round-4 review, P1): the reclaim must answer for the
+        PROVISION, not for whatever raised last.
+
+        `register_user` ran `provision_org` AND `set_dashboard_key_login` inside
+        ONE `try`, so the gated reclaim was evaluated against the SECOND call's
+        exception. A PostgREST answer on `set_dashboard_key_login` (e.g. HTTP
+        500) therefore read as "nothing landed" — while the provision had
+        already COMMITTED — and `GRAPH.DELETE`d the namespace of a LIVE
+        account, destroying its `TeamMeta`/`OnboardingState`.
+
+        The predicate answers "did THIS call prove nothing landed", so it may
+        only ever grade the call whose effects it compensates. The saga framing
+        confirms the scope: a compensation restores consistency for a step whose
+        effects are reversible, and there is no deprovision RPC — the orgs row
+        survives, so deleting the graph leaves a live-but-graphless account
+        rather than a compensated one (the lane's own ordering: "an orphaned
+        graph namespace is harmless, an orphaned orgs row is not").
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        monkeypatch.setenv("RATE_LIMIT_DISABLED", "1")
+        tc, _fake = client
+        provisioned: list[dict] = []
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda cp, **kw: provisioned.append(kw))
+        monkeypatch.setattr(
+            sc, "set_dashboard_key_login",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (set_dashboard_key_login): "
+                "HTTP 500: rpc set_dashboard_key_login failed")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/register", json={"email": "postcommit@example.com",
+                                          "password": "password123"})
+        assert provisioned, (
+            "the provision step never ran — this pin would be vacuous")
+        assert r.status_code == 500, r.text
+        assert dropped == [], (
+            "a failure AFTER a committed provision reclaimed the org's "
+            "namespace — that `GRAPH.DELETE`s a LIVE account's "
+            "TeamMeta/OnboardingState (round-4 review, P1)")
+
+    def test_a_free_or_absent_tier_cannot_reach_the_paid_provision(self):
+        """The paid-new-org lane must never carry a free tier into
+        `provision_team`: the gate would engage and refuse a provision the
+        customer already paid for, which the webhook re-raises as a 500 that
+        Stripe redelivers forever (round-3 review, P2)."""
+        import pytest as _pytest
+
+        from tortoise.hosted_api import _provision_new_org_from_checkout
+
+        for meta in (
+            {"user_id": "u", "org_name": "n"},                     # absent
+            {"user_id": "u", "org_name": "n", "tier": "free"},
+            {"user_id": "u", "org_name": "n", "tier": "anon"},
+            {"user_id": "u", "org_name": "n", "tier": ""},
+        ):
+            with _pytest.raises(RuntimeError) as excinfo:
+                _provision_new_org_from_checkout(None, "org-x", meta)
+            assert "PAID tier" in str(excinfo.value), (meta, excinfo.value)
 
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(

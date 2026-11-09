@@ -203,6 +203,8 @@ Three fresh-context rounds, and what was done with each finding. **A finding is 
 
 **Baseline for the row: 0 written Object→Object edges** — the same before-arm `#11001` names. The row starts red by construction rather than by accident.
 
+⚠️ **The row's population is `Object→Object`, and the instrument that reports it counts one wider** (#11548 review, context note): `graph_census.aggregate.object_edges_total` sums every edge the write leg RECORDED and the graph verified, which includes the Subject-targeted `ownedBy`/`managedBy` edges (measured on `w2b-relations-2026-11-08-11237.json`: 35 recorded = 24 Object→Object + 11 Subject-targeted). The row is NOT moved by saying so — the after-arm must be compared like-for-like against this baseline, and the split needs no new write: each per-edge row of `relation_write.edges[]` carries its `predicate` and both ids.
+
 **What this decision did *not* authorise, stated so it is not inferred later:** `ONTOLOGY §5` is untouched; `E1`/`E1b`/`E2–E5` keep their definitions, populations and bars; and the `wp02` (E4) and E5 population questions below stay open.
 
 ⚠️ **The sequencing cost the recommendation warned about is now live and is `#11083`'s to manage:** the row cannot register a delta until `#11001` exists, so the census ships its *declared vs writable* half first and its *written* half when the mechanism lands. That is a two-step row, and it is recorded rather than discovered at the capstone.

@@ -15,6 +15,7 @@ migration destination rejects duplicate emails → 409. Skips in remote mode
 """
 from __future__ import annotations  # noqa: I001
 
+import json
 import os
 import shutil
 import signal
@@ -46,6 +47,13 @@ pytestmark = pytest.mark.skipif(
 
 SELFHOST_KEY = "e2e-selfhost-static-key-303"
 
+#: How many times the boot may re-attempt the warm-up write. Two is a bound, not
+#: a budget: a fast-failing write path (401/500) would otherwise be retried at
+#: the liveness poll's 0.25s cadence — ~240 failed writes per 60s window — and a
+#: daemon whose `/health` is live but whose writes fail is a BROKEN WRITE PATH,
+#: not a slow boot, so it must be reported as such rather than churned.
+_WARM_ATTEMPTS = 2
+
 
 def _free_port() -> int:
     s = socket.socket()
@@ -53,6 +61,37 @@ def _free_port() -> int:
     port = s.getsockname()[1]
     s.close()
     return port
+
+
+def _warm_write_path(base: str, deadline: float) -> tuple[bool, str]:
+    """Pay the one-time cold WRITE cost here, not in a client request.
+
+    Creates ONE disposable Point on the selfhost daemon's throwaway DB (the
+    tmpdir is removed in the fixture's teardown). The module's assertions ABOUT
+    THIS SERVER are subset-based (`set(knowledge) <= on_selfhost`), and
+    `list_points` is `ORDER BY createdAt DESC LIMIT 50`, so the warm-up Point
+    cannot crowd out the knowledge Points (`test_parity_export_import` seeds its
+    own DB and never requests this fixture). Returns (ok, why-for-the-failure
+    message).
+
+    One attempt per call, bounded by the caller's boot deadline: the bound is
+    generous because this call IS the cost being absorbed, while a retry storm
+    against a stalled embedded server would stack work on a single connection.
+    The CALLER bounds how many times it calls this (see `_WARM_ATTEMPTS`) — the
+    "one attempt" promise above is per call, not per boot.
+    """
+    body = json.dumps({"content": f"selfhost boot warm-up {uuid.uuid4().hex}",
+                       "kind": "statement"}).encode()
+    req = urllib.request.Request(
+        f"{base}/v1/points", data=body,
+        headers={"Authorization": f"Bearer {SELFHOST_KEY}",
+                 "Content-Type": "application/json"})
+    try:
+        with urllib.request.urlopen(
+                req, timeout=max(1.0, min(deadline - time.time(), 45.0))) as r:
+            return r.status == 200, f"warm POST /v1/points -> {r.status}"
+    except Exception as e:  # noqa: BLE001, RUF100
+        return False, f"warm POST /v1/points -> {e}"
 
 
 def _boot_selfhost(tmpdir: str):
@@ -87,18 +126,76 @@ def _boot_selfhost(tmpdir: str):
         start_new_session=True)
     base = f"http://127.0.0.1:{port}"
     deadline = time.time() + 60
+    last_err = "no attempt"
     try:
+        # ── Phase 1: LIVENESS — the process answers at all.
         while time.time() < deadline:
             if proc.poll() is not None:
                 tail = log_path.read_text(errors="replace")[-2000:]
                 raise RuntimeError(f"selfhost died during boot:\n{tail}")
             try:
                 with urllib.request.urlopen(f"{base}/health", timeout=2) as r:
-                    if r.status == 200:
-                        return base, proc
-            except Exception:  # noqa: BLE001, RUF100
-                time.sleep(0.25)
-        raise RuntimeError("selfhost not ready in 60s")
+                    live = r.status == 200
+            except Exception as e:  # noqa: BLE001, RUF100
+                live, last_err = False, f"/health -> {e}"
+            if live:
+                break
+            time.sleep(0.25)
+        else:
+            raise RuntimeError(f"selfhost /health not live in 60s ({last_err})")
+
+        # ── Phase 2: the WRITE PATH — liveness is not readiness for a write.
+        # `/health` is IN-MEMORY by design (`selfhost.py` §2988): it says the
+        # process answers, not that a write succeeds. `/health/ready` does not
+        # stand in for it either — it answered in 0.09s against the still-cold
+        # server this was measured on. What the measurement shows is a ONE-TIME
+        # cost on the first data-plane write: `POST /v1/points` #1 took 7.41s,
+        # #2 and #3 took 0.06s each, and a `GET` first cost 0.46s and warmed
+        # nothing. The measurement does NOT isolate the cause, so none is
+        # claimed here: `_get_proj()` runs `_ensure_indexes()` per request
+        # (`sdk.py`), so this is not simply the DDL sweep, and a local
+        # `--extra embeddings` run plausibly pays a model load that CI's
+        # `.[test]` lane never installs. The shape that matters is the same
+        # either way — one cold write priced inside playwright's 30s client
+        # budget, which is what reddened `hosted-e2e` at 0a0b7338
+        # (`POST /v1/points` timeout, run 42580159548 — on a head whose delta
+        # was comment-only, with a runner ~1.8x slower than the green run where
+        # this module's whole body cost 5.31s). So the boot pays it, inside the
+        # 60s x 3 boot budget that already exists for exactly this class of
+        # contention-sensitivity: the client then only ever sees warm requests,
+        # and the 30s fail-fast is left intact rather than raised (raising it
+        # would hide a genuinely wedged server instead).
+        #
+        # Phase 2 gets its OWN floor rather than sharing phase 1's clock. Liveness
+        # may legally consume the whole 60s window, and before this change the
+        # write was then priced against playwright's SEPARATE 30s client budget —
+        # so one shared clock would make a slow-but-healthy boot fail where the
+        # old code passed, and would blame the write path for a clock that ran
+        # out during liveness. The outer 3-attempt boot retry still bounds this.
+        warm_deadline = max(deadline, time.time() + 30.0)
+        for _attempt in range(_WARM_ATTEMPTS):
+            # Re-checked here, not only in phase 1: the expensive first write is
+            # now a BOOT step, so a daemon that dies inside it (OOM/segfault, the
+            # window this commit moved into boot) must surface as "died" with its
+            # log tail — `_warm_write_path` swallows every exception into a
+            # write-path string, and the log in the tmpdir is unreachable from CI.
+            if proc.poll() is not None:
+                tail = log_path.read_text(errors="replace")[-2000:]
+                raise RuntimeError(f"selfhost died during boot:\n{tail}")
+            warmed, last_err = _warm_write_path(base, warm_deadline)
+            if warmed:
+                return base, proc
+            if time.time() < warm_deadline:
+                time.sleep(1.0)
+        # The loop's poll only covers a death BEFORE an attempt — the LAST attempt
+        # has no successor iteration, so a daemon that dies inside it would land in
+        # the write-path bucket below, with its log never read.
+        if proc.poll() is not None:
+            tail = log_path.read_text(errors="replace")[-2000:]
+            raise RuntimeError(f"selfhost died during boot:\n{tail}")
+        raise RuntimeError(
+            "selfhost /health is live but its WRITE path is not usable "
+            f"({_WARM_ATTEMPTS} warm-up attempts within the boot budget): {last_err}")
     except Exception:
         if proc.poll() is None:
             proc.kill()

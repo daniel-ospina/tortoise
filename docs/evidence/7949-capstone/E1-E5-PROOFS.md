@@ -183,9 +183,9 @@ quote behind. Stated here so "swept" is never read into a number nothing re-chec
 
 The only entry point the capstone may drive is `TortoiseSDK.capture_session`. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
-`tortoise/sdk.py:17195` is the meta fold — while the extractor builds
-`result["classify_later"]` (`tortoise/extractor_v2.py:13978`) and `result["vet"]`
-(`tortoise/extractor_v2.py:13988`) on the extractor's OWN return.
+`tortoise/sdk.py:17243` is the meta fold — while the extractor builds
+`result["classify_later"]` (`tortoise/extractor_v2.py:14048`) and `result["vet"]`
+(`tortoise/extractor_v2.py:14058`) on the extractor's OWN return.
 
 ⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
 it was written in.** The fold no longer forwards `stats` alone — it calls
@@ -246,16 +246,22 @@ Until 2026-11-02 the E4 row cited `tests/eval/write_path/receipts/w2b-operator-2
 (`edge_correct` **2** of 15), whose own `corpus_hash` is `sha256:943a99ec…` — **not**
 the frozen pin. **Three** later receipts landed with `#9873` (`2cba48d3c`) on the **frozen**
 corpus (`sha256:dd7e8520…cb035dc`, re-derived from this tree and matched against
-`preregistration.json`), and all three agree:
+`preregistration.json`), and all three agree — and a FOURTH, added by `#11237`, agrees too.
+That fourth one is now the artifact `select_e4_receipt` returns, because it filters to the
+frozen corpus and takes the newest by `(date, run_id)`:
 
 | receipt | date | planted | `edge_correct` | corpus |
 |---|---|---|---|---|
 | `w2b-operator-2026-10-24-8503-preleg.json` | 2026-10-24T05:46:51Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-a.json` | 2026-10-24T06:03:47Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-24-8503-b.json` | 2026-10-24T06:10:47Z | 15 | **5** | frozen pin |
+| `w2b-relations-2026-11-08-11237.json` (added by `#11237` — the **SELECTED** artifact since 2026-11-08) | 2026-11-08T09:56:01Z | 15 | **5** | frozen pin |
 | `w2b-operator-2026-10-19.json` (cited by the row until 2026-11-02) | 2026-10-19T01:39:26Z | 15 | 2 | `943a99ec…` |
 
-The figure does not depend on which frozen receipt is read.
+The figure does not depend on which frozen receipt is read. ⚠️ The `#11237` receipt is
+named here rather than left implicit because WHICH on-pin receipt is read is exactly what
+`select_e4_receipt` decides, and a row whose evidence file changes without the docs saying
+so is the class that selector exists to end (`#9873`).
 
 E4 is therefore **5 of 15**, not 2 of 15, and the fresher figure is measured on the
 pre-registered corpus. The verdict does not move — the bar is 15 of 15 — and the

@@ -1434,7 +1434,15 @@ _ORG_WIDE_OPENER_ALLOWLIST = {
     #   CONSTRUCTION the closure still performs there — the org-being-created
     #   mint already recorded above (tortoise#7500).
     "provision_tenant": 1,
-    "register_user": 3,
+    # ⛔ 3 → 2 (#1981). The THIRD site was `register_user`'s reclaim, which built
+    # an inline `_make_sdk(namespace=org_id)` purely to `.delete()` a namespace —
+    # a second copy of `_drop_org_graph_impl` WITHOUT its absent-graph tolerance,
+    # and it ran the blocking `GRAPH.DELETE` ON the event loop. It now calls the
+    # shared `_drop_org_graph` off-loop (`await asyncio.to_thread(_drop_org_graph,
+    # org_id, graph_name)`), so the opener is GONE rather than moved. This
+    # allowlist is the fail-on pin for exactly this class and it caught the
+    # change: the count records that the site was converted, not deleted.
+    "register_user": 2,
     "_eager_provision_org_graph": 1,
 }
 
