@@ -11684,7 +11684,10 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
-        # (`:10991-10999`); the rest are recorded HERE and nowhere else, so they belong on #11173
+        # (the `⛔ SCOPE` block at the top of this docstring; cited by SYMBOL, not by a line
+        # number, because the number this comment first carried went stale in the very merge
+        # that wrote it — #11555's policy, applied to our own comment); the rest are recorded
+        # HERE and nowhere else, so they belong on #11173
         # beside the neighbouring arms. Do not read the pointer as "the docstring already lists
         # all six" — it does not.
         for _m in re.finditer(r":12929", _region):
