@@ -6852,9 +6852,13 @@ def test_any_ci_surfaces_line_citation_here_resolves_to_a_durations_row() -> Non
     `origin/main` into the branch and the 22 added rows pushed it down — so the
     citation landed on unrelated `durations:` PREAMBLE prose, while the sentence it
     was the evidence for stayed put. No pin read citations inside a test docstring, so
-    it would have shipped silently; the map pins its OWN §5 citations for exactly this
-    reason (`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes`)
-    and `tests/test_deploy_workflow.py` pins its own the same way.
+    it would have shipped silently. ⚠️ NOT "the map pins its own citations, for the same
+    reason" — a first draft said that and named a pin that reads a DIFFERENT artifact:
+    `tests/test_substrate_map.py::test_every_cited_line_in_this_section_still_carries_the_prose_it_describes`
+    resolves the SUBSTRATE map's `cache_eviction.py:<n>` pointers, and
+    `tests/test_deploy_workflow.py` pins its own workflow citations. Neither reads
+    `config/ci-surfaces.yml`, which had no citation pin at all — that absence is exactly
+    why the pin below exists instead of an existing one being pointed at.
 
     The fix is the manifest's own rule — *named by mechanism, not by line number* —
     plus this pin, so a re-introduced `:<n>` citation is CHECKED rather than banned.
