@@ -1763,6 +1763,19 @@ surfaces:
   # CLI-wiring regression still runs the install guard. See the core entry for
   # the mechanism half.
   - test_capture_install.py
+  # #2119: the Pi per-turn READ seam is that same #3808/#3575/#3795 shape — the
+  # artifact (`tortoise/pi-hooks/tortoise-volunteer.ts`) classifies `core`, but
+  # the two behaviours this suite is the ONLY guard for live in
+  # `tortoise/__main__.py`, an exact `api` SOURCE_PATTERNS entry (so a
+  # `__main__.py`-only diff selects `api`, and nothing re-adds `core`):
+  # `_uninstall_pi_volunteer`'s `--dry-run` branch and
+  # `_upgrade_artifact_seam(..., introduce_read_seam=False)`, the W4 opt-in gate
+  # that keeps `hooks upgrade` from re-arming per-turn prompt search after
+  # `install pi --uninstall`. Without this leg a CLI-only change runs no guard
+  # for the very change it guards. Dual-registered with `core` (the mechanism
+  # half + the real-seam/node check) and `onboarding` (the install path a
+  # user's machine takes).
+  - test_pi_volunteer_seam.py
   # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
@@ -6330,6 +6343,17 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
+  # #2119: the Pi READ seam — `tortoise/pi-hooks/tortoise-volunteer.ts` (the
+  # artifact `tortoise install pi` writes beside the capture extension) and the
+  # `_install_pi` / `--uninstall` wiring in `tortoise/capture_install.py` +
+  # `tortoise/__main__.py`. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
+  # entry, so a pi-hooks-only diff selects `core` via the `tortoise/` fallback
+  # — and this is the arm that runs the real-seam check (the INSTALLED
+  # extension executed by node against the real reflex over a seeded graph) as
+  # well as the extension's own `node --test` suite. Dual-registered with
+  # `onboarding` (the install path a user's machine takes), the same #2938
+  # silent-drop class as its siblings above.
+  - test_pi_volunteer_seam.py
   # #3515: the store-sync BACKSTOP — `tortoise/pi-hooks/store-sync.ts` +
   # `cursor-store.ts`, driven through `tortoise store-sync` (a `__main__.py`
   # subcommand) as a PROCESS. Same selection reasoning as the sibling directly
@@ -7351,6 +7375,7 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core` + `api`; the `api` arm is the `tortoise/__main__.py` half)
   # #1120 review (P1, inert enforcer): DUAL-REGISTERED with `api` (see the entry
   # there). `website/apps/dashboard/functions/` is a SOURCE_PATTERN of THIS
   # surface, and a named-surface match REPLACES the `core` fallback — so an
@@ -10920,6 +10945,7 @@ durations:
   test_metering_unmetered.py: 60.0  # carried forward (not a full-file CI measurement) — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.9s) is a LOWER bound; kept 60.0
   test_operator_annotator_rebuild.py: 6.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.2
   test_pi_capture_hooks.py: 16.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 16.1
+  test_pi_volunteer_seam.py: 2.0  # unmeasured — new in #2119 (PR #11584) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api`/`onboarding` registrations above put the file in `fast_pool()` (measured with the shipped selector: 'test_pi_volunteer_seam.py' in fast_pool(load_manifest()) is True, and `_durations_map(...).get(...)` was None — so it packed at the flat 2.0 with no record of why). 2.0 is exactly the weight it already packed at, so this row moves no shard and its absence reds no gate (`duration_coverage_issues()` is a ratio against the pool's own size with headroom; `--integrity` exits 0 both ways) — what it buys is the RECORD, not a pass. What the weight covers: NO DB and no network of its own, but it is NOT cheap — two node end-to-end runs each drive two real `tortoise volunteer` invocations (the per-process embedder load the file documents) plus a `node --test` run whose own rows carry `sleep 1.2`/`sleep 5`/a 3 s worker-exit wait; measured 158.9 s on the lane that added it. That reading is deliberately NOT the weight (it is local, not CI, and this map forbids local readings as shard-layout inputs), but it is why the next `tools/ci_timing.py --refresh-durations` sweep should pick this file up rather than leave it at the default.
   test_store_sync_worker.py: 106.3  # new in #3515; The row is REQUIRED, not cosmetic: the file is ADDED to the fast pool by the PR that introduces it, and the coverage floor is measured against the pool's own size (`--integrity`'s `duration_coverage_issues`) — at the parent commit the map sat at 905/1005 = 90.0498 % against the 0.90 floor, so one more unweighted fast file (906/1006 = 89.96 %) reds it with no headroom. What the weight covers: 22 DB-free cases — a real local HTTP collector, in-process `run_sweep` rows over a tmp spool, and ONE `node --test` subprocess that dominates the file but belongs to the harness it pins. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 106.9
   # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
   # artifact + installer + parser, one node --test subprocess, and one real
