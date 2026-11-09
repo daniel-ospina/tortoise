@@ -17,8 +17,10 @@ Read that precisely. Two different claims are separated below and must not be me
   cache statements in this capture carried **no** declared lane. D3's own sentence is *"assert the
   capture writes journal → record → cache in that order, with no cache-only path"*, so **D3 is not met
   as written by this measurement**; what is met is the part of it that a door can be held to, plus the
-  property that no cache-ahead write is *silent* — **leg 3 covers every cache statement in an ahead
-  fold's window, raw-handle ones included, and requires a declared lane** — plus a
+  property that no cache-ahead write is *silent* — **leg 3 examines every cache statement in an ahead
+  fold's window that is still ahead of its own append — fold-attached statements unconditionally,
+  raw-handle ones only while nothing has journalled between the fold and the statement (§8.1) — and
+  requires a declared lane** — plus a
   FLOOR on the second half — no mutating cache statement precedes the capture's first journal append
   and first APPLIED record write (§6). It does **not** establish a per-write attribution for
   raw-handle cache writes outside an ahead fold's window; see §4.
@@ -26,7 +28,7 @@ Read that precisely. Two different claims are separated below and must not be me
 | | |
 |---|---|
 | Issue | #9567 **D3** (carrier: #11477) |
-| Head measured | §9/§9.1: `30068eabb0` and the commit after it, each row stating its own head where they differ. §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `8d3e7f13f0`, retained and banner-marked as superseded |
+| Head measured | §9/§9.1: `30068eabb0` and the commit after it, each row stating its own head where they differ. §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §10: the `2ca845f443` review (`6753089977`, `not-clean`) and the fix it produced; its gates and §6.2's F9 were re-measured at `26fc32e379`. §0/§1: the ORIGINAL pre-fix run at `8d3e7f13f0`, retained and banner-marked as superseded |
 | Record | `postgres:16`, throwaway container `t9567-cap-pg` on `127.0.0.1:33209`, repo record migrations applied by `_ensure_record_schema`; writer connected as `tortoise_record_app` (the RLS-scoped app role) |
 | Graph | the SDK's **embedded** backend (`TortoiseSDK(<tmp>/graph.db)`) — the same shape the armed CI job (`test-record-postgres`) runs, so this measurement is reproducible without a graph server |
 | Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the four legs |
@@ -377,6 +379,14 @@ recording it as a verified fix is exactly the defect `AGENTS.md` → *Finding Ve
 a false correction changes nothing yet reads as an improvement. The two substantive reds are F7 and F8
 in §6.2.
 
+⛔ **Provenance note (added while recording this artifact).** That review's verdict comment is **not on
+this PR**, so the count above is carried from the review's own reply and cannot be checked against a
+comment id. The two reviews *posted* for this cycle are `6751272015` (`23ede976d6`: 1 P1 + 3 P2) and
+`6751912996` (`5258155`: 1 P1 + 3 P2); neither reports seven findings, so this sentence is not evidence
+about either posted artifact. The count is left as the review reported it rather than re-derived from
+the posted comments — re-attributing it would be a guess, and row 7 above exists because a finding was
+recorded here as verified before it had been reproduced.
+
 | # | finding | verified against | fix |
 |---|---|---|---|
 | 1 | **P1** — leg 3's statement window was filtered to `e.in_fold == fold.event_type`, so a **lane-less raw** cache write inside an ahead fold's window was never examined, and the "no cache-ahead write is silent" claim was measured only for fold-attached statements | reproduced: `CREATE (:SilentAhead …)` after `_create_entity`'s fold, before its append → `cache-with-no-declared-lane=9`, **5 passed** | window widened to every cache statement (it is already bounded by the fold index and its own append). Clean run still green; the injection now reds (§6.2 F8) |
@@ -510,3 +520,38 @@ Gates at this head: `6 passed (-k D3, census above)`, whole file `19 passed, 1 s
 `TEST_RECORD_SCRATCH_URI`, armed only by the CI job's second database), `ruff check` clean,
 `markdownlint-cli2` 0 issues on this artifact, `tools/ci_selection.py --integrity` ✅ (no test file
 added — the leg is in a file already classified). No production file is in the diff.
+
+## 12. Two prose overstatements, corrected — and a correction to this section's own first draft
+
+**Finding 1** — the test module's leg-4 summary (`tests/test_9567_record_capstone.py:392-394`) claiming
+that leg 4 *"takes the whole mutating-cache population (folded AND raw-handle) and requires a journal
+append and an APPLIED record write behind each one"* — was first raised in `6751912996` (round 3, at
+`5258155`, its Finding 2, quoting those exact lines). It is **already fixed at this head** by
+`bdc6fc207e`, which rewrote the bullet to the FLOOR the trace actually supports, so it is **not**
+re-applied here. That commit is the record of the fix; no earlier section of this artifact describes it.
+
+**Finding 2** — §0's headline at `:22-23`, *"leg 3 covers **every** cache statement in an ahead fold's
+window, raw-handle ones included"*, while the predicate (§8.1) admits a raw-handle statement only while
+nothing has journalled between the fold and the statement — was first raised as a **new** finding in
+`6752984817` (review cycle 6, at `2ca845f4437f`: *"§0's headline still over-broad after the delta made
+§2 precise"*), and re-raised together with Finding 1 by this lane's round-10 reviewer (`6754034963`,
+reviewing `26fc32e379`). Both also appear in `6753057201` (posted at `2ca845f4437f`: 1 P1 + 2 P2); that
+review is **not** their origin and no round number is claimed for it here.
+
+| # | finding | verified against | fix |
+|---|---|---|---|
+| 2 | **P2** — §0's summary said leg 3 covers *"every cache statement in an ahead fold's window, raw-handle ones included, and requires a declared lane"*, while the predicate (§8.1) admits a raw-handle statement only while nothing has journalled between the fold and it | leg 3's window predicate (`stop` + the fold-attached/raw split); §2's leg-3 row and §8.1, which state the narrowing | the headline now states the predicate's real shape and points at §8.1, so the file no longer contradicts itself two paragraphs after *"Read that precisely."* |
+
+**And a correction to this section's own first draft**, recorded because it is the same defect class the
+section exists to fix. That draft said round 10 "raised two P2 prose claims" and that a different posted
+round-10 review (`6753976759`) had "examined the same two prose items and closed them as not findings".
+The first statement was **true** — round 10 (`6754034963`) does raise two P2 prose claims, as this
+section's own body says; what the draft got wrong about it was the **origin**, claiming both had been
+"carried since round 3" when each has its own first raiser (above). The second statement was **false**:
+`6753976759`'s three not-findings are the PR body's stale evidence block, the reachability of
+`except Exception: mutating = False`, and a redundant `strict=True` — none is a coverage sentence — and
+its head is `bdc6fc207e72`, not the `26fc32e379` this lane's reviewer read. The draft also transposed
+those two heads. A verification gate caught all three before the commit, and they are corrected here
+rather than silently rewritten.
+
+This section changes prose only — no assertion, no count, no production path — so §11's gates stand.
