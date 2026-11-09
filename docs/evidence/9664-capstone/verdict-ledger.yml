@@ -428,7 +428,7 @@ measured_at:
 #       from the collection count: the 5 are docker-lane-only (S2's ACL group) and do not
 #       reproduce on a carve-out host, so the inference is unsound even when it happens to
 #       land. MEASURED at this head on the private docker lane:
-#           uv run python tools/test_lane.py run -- <the seven files> -q
+#           env -u TORTOISE_API_KEY uv run python tools/test_lane.py run -- <the seven files> -q
 #                                       ->  611 passed, 5 failed   (616 collected)
 #       The two readings an earlier revision recorded were taken at the head where the
 #       collection was **592** (i.e. BEFORE landing (d) added its 24 tests), so they are
