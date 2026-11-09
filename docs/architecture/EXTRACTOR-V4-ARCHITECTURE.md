@@ -479,7 +479,7 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 | **Onyx** — ~60 connectors, including Gong, Fireflies and Zoom | the normalised path's prompts carry **zero** `DocumentSource` references; per-source prompts exist **only** on the federated path, where no canonical unit is ever produced | CODE-VERIFIED |
 | **mem0** | one extraction prompt, and the output schema has **no type field at all** | CODE-VERIFIED |
 | **Hindsight** | computes a shape (`fact_kind: "event" \| "conversation"`) and **deliberately does not store it** — its only consumer is the decision whether to set `occurred_start`/`occurred_end` | CODE-VERIFIED |
-| **Supermemory** | the discriminator is the **file format**, at parse/chunk (*"OCR for images, transcription for audio"*) — a parser selector rather than a prompt dispatcher | DOCS-STATED for the format half; **INFERRED** for "no per-type prompt" (backend closed-source) |
+| **Supermemory** | the discriminator is the **file format**, at parse/chunk (*"OCR for images, transcription for audio"*) — a parser selector rather than a prompt dispatcher | DOCS-STATED for the format half; **INFERRED** for "no per-type prompt" (the hosted **ingestion** half is not open source — Company Brain *is*, and its own docs say *"the ingestion side isn't part of it"*) |
 
 **⇒ Three constraints on any source-type profile (first applied to meetings, `#2696`). ⚠️ Both mechanism-bearing constraints are PROPOSALS `← NEW (proposal)` — the same marker §4.1 uses — not shipped behaviour:**
 
