@@ -619,10 +619,37 @@ _HELD_CAP_CLAUSES = (
 #: pin looks for survive verbatim in the amended text, so the page could state
 #: both the permission and the withdrawn prohibition and stay green.
 _HELD_CAP_SUPERSEDED = (
-    "only copy",  # the pre-amendment half: an export exists, so this is false
+    # The pre-amendment half: an export exists, so this is false. Bound as the
+    # CLAIM ("is the only copy"), never as the bare substring "only copy": a
+    # future editor's *correct* clarification — "the only sample, not the only
+    # copy" — contains the substring and would red on right text, which is the
+    # false alarm this file's doctrine says gets a guard deleted.
+    "is the only copy",
     "sole writer",  # false: `sdk.org_update` accepts the field
     "never on an operator override",  # false, and the opposite of the ruling
     "deletes the measurement",  # the predicate the withdrawn sentence acted on
+)
+
+#: The ONE permission §4 grants — the sanctioned route — and the scope the ruling
+#: puts on it. The prohibition alone is not enough: a lane holding the 402 reads
+#: the *permission*, so a pin set that carried only the prohibitions stayed green
+#: while the page licensed the exact move the ruling refuses. Each entry is a
+#: claim-shaped phrase, so rewording or deleting that sentence reds here.
+_HELD_CAP_LEVER = (
+    "the sanctioned lever is the plan",  # the lever is named at all
+    "max_points := tier_limits(tier)",  # ...and the code path that moves it
+    "never on the held one",  # ...scoped OFF this org
+    "in place is refused",  # ...the in-place raise above all
+)
+
+#: The lift-condition's storage limb, pinned as a TRUTH VALUE. Written as an
+#: ownership fact ("#10017 is closed, so no open issue owns this limb") it is
+#: neither satisfied nor outstanding, so "is the conjunction false?" becomes
+#: unanswerable from the page and a reader waits for a prerequisite that is
+#: already deployed.
+_HELD_CAP_STORAGE_LIMB = (
+    "is satisfied today",  # the limb's truth value, stated
+    "record.armed=true",  # ...and the measurement it rests on
 )
 
 #: The clause that binds the finding to §4 — its own heading, which no other
@@ -727,6 +754,58 @@ def test_the_held_cap_clause_is_in_the_section_that_owns_the_cap():
         "the #10175 refusal clause is no longer inside §4 (Graph size, the "
         "hosted node cap) — it is the section a lane holding a 402 reads, and "
         "the clause is load-bearing only where the cap is documented"
+    )
+
+
+def test_the_sanctioned_lever_is_scoped_off_the_held_org():
+    """The page names a lever; the ruling scopes it, and both halves must survive.
+
+    `tortoise/billing.py::apply_limits` raises **this** org's cap, and the owner's
+    2026-11-07 answer on `#10175` refuses exactly that: raising this org's tier in
+    place is "the exact move the prohibition names". So the sentence naming the
+    lever is the sentence that can re-open the prohibition, and a pin set holding
+    only the prohibitions cannot see it — the licence is the permission, not a
+    restatement of the refusal.
+
+    Scoped to §4 and matched through `_plain()`, like its siblings: the clause is
+    load-bearing where the cap is documented, and re-emphasis is not a regression.
+    """
+    text = _plain(_section4(_read(CAPACITY)))
+    dropped = [phrase for phrase in _HELD_CAP_LEVER if phrase not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer carries the sanctioned lever with the "
+        f"ruling's scope on it — missing: {dropped}. The lever is "
+        "`tortoise/billing.py::apply_limits`, and it is sanctioned on a new org "
+        "or the switchover's new graph, never on the held one: a tier change on "
+        "this org in place is refused for the same reason an override is "
+        "(owner answer 2026-11-07 on #10175). Naming the lever unscoped hands a "
+        "lane holding the 402 the remedy the ruling refuses — restore the scope "
+        "rather than deleting either half."
+    )
+
+
+def test_the_lift_condition_states_the_storage_limbs_truth_value():
+    """A limb is either satisfied or outstanding, and the page must say which.
+
+    The storage half of the switchover was recorded as an ownership fact —
+    `#10017` closed *not planned*, "this limb is not owned by an open issue" —
+    inside a conjunction the page says the hold stands until it is all true. That
+    leaves the reader unable to evaluate the limb at all. It is in fact deployed:
+    the hosted record is armed and writing, so the limb is satisfied and does not
+    hold the conjunction false. Asserting the truth value keeps a later edit from
+    reverting it to a prerequisite nobody owns.
+    """
+    text = _plain(_section4(_read(CAPACITY)))
+    dropped = [phrase for phrase in _HELD_CAP_STORAGE_LIMB if phrase not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer states the storage limb of the lift "
+        f"condition as satisfied — missing: {dropped}. `#10017` closed *not "
+        "planned* because the local half was a no-op; the hosted record it "
+        "deferred to is armed (`/health` `record.armed=true`, "
+        "`record.ok=true`, `record_writes_applied` non-zero). State that it is "
+        "satisfied, or name the issue that owns it if it stops being true — an "
+        "unowned prerequisite inside the conjunction makes the hold "
+        "unevaluable."
     )
 
 

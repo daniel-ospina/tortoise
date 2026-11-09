@@ -190,20 +190,34 @@ refusal:
   out of an operator's hands: a stored `max_points` override column exists
   (migration `20260817000001`) and is honoured *with precedence over*
   `graph_size_cap`, and `tortoise/sdk.py::org_update` accepts the field. The
-  sanctioned lever is the **plan**: `tortoise/billing.py::apply_limits` sets the
-  cap from the tier — `max_points := tier_limits(tier)["max_graph_nodes"]`, or
-  `graph_size_cap` on the Supabase control plane. Nothing else is sanctioned,
-  however easy it is to reach.
+  sanctioned lever is the **plan** — `tortoise/billing.py::apply_limits` sets
+  the cap from the tier, `max_points := tier_limits(tier)["max_graph_nodes"]`,
+  or `graph_size_cap` on the Supabase control plane — and it is sanctioned only
+  on a **new org** (or the switchover's **new** graph), **never** on the held
+  one: a tier change on this org *in place* is refused for the same reason an
+  override is, because it puts the new headroom on the graph that must stay the
+  old extractor's sample (owner answer 2026-11-07 on `#10175`: raising *this*
+  org's tier in place is "the exact move the prohibition names", and a new org
+  on Pro is the recommended shape). Nothing else is sanctioned, however easy it
+  is to reach.
 
 What lifts the hold is a conjunction, not a fix: the new extractor live
-(`#5087`, `#7949`), the storage half of the switchover deployed (`#10017`, the
-issue that owned it, closed *not planned* on 2026-11-06 — this limb is not owned
-by an open issue), and a plan with unlimited graphs (`#9341`), after which the
-switchover runs as a **new graph** promoted to default (`#10180`, the verb now
-exists) and is then *measured* — extractor signal-vs-noise, and hosting cost in
-**bytes**, never nodes (`#4051`). Half a conjunction is still false, so the hold
-stands until all of it is true; today `#5087`, `#7949`, `#9341` and `#4051` are
-all open.
+(`#5087`, `#7949`), the storage half of the switchover deployed, and a plan with
+unlimited graphs (`#9341`), after which the switchover runs as a **new graph**
+promoted to default (`#10180`, the verb now exists) and is then *measured* —
+extractor signal-vs-noise, and hosting cost in **bytes**, never nodes (`#4051`).
+
+The storage limb is the one limb that **is** satisfied today, and it is written
+that way on purpose: a limb stated as an unowned prerequisite makes "is the
+conjunction false?" unanswerable from this page. Its owner, `#10017`, closed
+*not planned* on 2026-11-06 because the local half was "a no-op on the local
+deployment"; the hosted record it deferred to is armed and writing — `GET
+/health` reports `record.armed=true`, `record.ok=true`, `degraded=false` on
+2026-11-07, and `record_writes_applied=3` on 2026-11-09 (up from `0`). No open
+issue owns it because none is needed: it is not a missing prerequisite.
+
+The hold stands because the **other** limbs are false — today `#5087`, `#7949`,
+`#9341` and `#4051` are all open.
 
 The full record, including the 2026-11-02 amendment, stays on `#10175`, which is
 currently open. An `OVERRIDES:` line on a closed issue is invisible to the lane
