@@ -26,10 +26,10 @@ Read that precisely. Two different claims are separated below and must not be me
 | | |
 |---|---|
 | Issue | #9567 **D3** (carrier: #11477) |
-| Head measured | `a32edfb17f` (§6.1, §7 and §8) — §0/§1 below are the ORIGINAL pre-fix run at `cbb9df838`, retained as the first measurement and marked as superseded where its numbers differ |
+| Head measured | §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `cbb9df838`, retained and banner-marked as superseded |
 | Record | `postgres:16`, throwaway container `t9567-cap-pg` on `127.0.0.1:33209`, repo record migrations applied by `_ensure_record_schema`; writer connected as `tortoise_record_app` (the RLS-scoped app role) |
 | Graph | the SDK's **embedded** backend (`TortoiseSDK(<tmp>/graph.db)`) — the same shape the armed CI job (`test-record-postgres`) runs, so this measurement is reproducible without a graph server |
-| Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the three legs |
+| Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the four legs |
 | Door wrapped | journal `tortoise.log.EventLog.append` · record `record_writer.write_live_record` · cache `FalkorProjection.apply` + every MUTATING `_GuardedGraph.query`, classified by the §17.1 guard's OWN classifier (`_statement_writes`) |
 | "Declared lane" | read from the ContextVar the guard itself reads (`_CACHE_WRITE_AUTHORIZED`), so "declared" here means exactly what it means at the door |
 
@@ -69,14 +69,14 @@ record, and `refuse_same_database` correctly refuses a drill pointed at the reco
 | mutating cache statements | **32** | every CREATE/MERGE/SET issued through `proj.g` |
 | …of those, **no declared lane** | **6** | `aboutObject` edge, `CONTAINS` edge, `status='live'`, two `ep_dirty` sweeps, `lastDreamedAt`. This is the §17.1 census class (#9124 part 1 measures, does not yet refuse; the writers are owed a record/#9350) |
 
-## 2. The three legs, and what each one measures
+## 2. The four legs, and what each one measures
 
 | leg | assertion | observed |
 |---|---|---|
 | `test_D3_order_the_record_write_follows_the_journal_append` | every journal append gets a record write, same `event_id`, and no record write precedes the first append | **green** — 14/14 paired |
 | `test_D3_order_a_journal_first_door_writes_journal_record_then_cache` | `_apply_and_journal` (the sanctioned chokepoint, `tools/record_wiring_check.py`'s production call site) writes journal → record → fold → fold statements | **green** — `['journal', 'record', 'fold', 'cache', 'cache']` |
 | `test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY` | every cache statement in an ahead fold's window (raw-handle ones **included**) declares a lane, and the `(event_type, lane)` set of ahead folds declaring a **journal-first** lane equals the tree's recorded deviation set | **green** — the `_create_entity` registration folds run ahead under `"create_entity"`, which IS a journal-first lane, and that is exactly the pinned set |
-| `test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write` | the criterion's second half — **no cache-only path**: every mutating cache statement (folded *and* raw-handle) has a journal append and an **APPLIED** record write behind it | **green** — no cache statement precedes the first append or the first APPLIED record |
+| `test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write` | a **FLOOR** on the criterion's second half: no mutating cache statement precedes the capture's FIRST journal append and FIRST **APPLIED** record write. It is **not** a per-write attribution — a mid-capture cache-only write passes, measured (§4, §6.2 F6) | **green** — no cache statement precedes the first append or the first APPLIED record |
 
 The static half is unchanged and still runs beside these: `test_D3_no_write_path_bypasses_the_record`
 executes `tools/record_wiring_check.py` → `WIRED`, exit 0.
@@ -235,9 +235,17 @@ E AssertionError: `_apply_and_journal` did not write journal → record → cach
 E AssertionError: the journal-first-ahead fold population changed: observed
   [('EventRecorded', 'create_entity_v2'), ('ObjectRegistered', 'create_entity_v2')],
   pinned [('EventRecorded', 'create_entity'), ('ObjectRegistered', 'create_entity')].
-E   • NOT RECORDED anywhere: [('EventRecorded', 'create_entity_v2'), …
-    This is a fresh violation of D3's order — a door claiming journal-first while folding first.
+E   • LANE MOVED on a recorded event type: [('EventRecorded', 'create_entity_v2'),
+    ('ObjectRegistered', 'create_entity_v2')]. The KNOWN DEVIATIONS block at
+    `tortoise/sdk.py:4835` records this arm as apply-first under `create_entity`, and the
+    pin no longer carries that lane. The deviation's lane was RENAMED: update the KNOWN
+    DEVIATIONS block at `sdk.py:4835` and extend the pin.
 ```
+
+⛔ **This output is the round-4 `LANE MOVED` message.** An earlier revision of this block showed
+`NOT RECORDED anywhere`, which was the pre-round-4 advice for the same mutation — the artifact asserted
+reproducibility of an output the head no longer produced. Recorded here so a reproducer who sees
+`LANE MOVED` knows they ran the right mutation.
 
 ⛔ **SUPERSEDED:** an earlier revision of this section showed a red containing
 `('ObjectRegistered', 'chokepoint')` from reordering `_apply_and_journal`. That red **is not
@@ -300,7 +308,7 @@ E AssertionError: a cache write ahead of its journal append ran with NO declared
 ### 6.3 What the fixes do not change
 
 D3 is still **not discharged**, and this PR still reorders no production write path. What changed is that
-the instrument's three assertions can now fail for the failure each one names. §3's F3 is retained above
+the instrument's four ordering assertions can now fail for the failure each one names. §3's F3 is retained above
 with a `⛔ SUPERSEDED AND WRONG` marker rather than deleted: it recorded a real run whose *conclusion* was
 mistaken, and a reader who trusted it would re-apply the inert comparison.
 
@@ -315,7 +323,7 @@ in §6.2.
 | # | finding | verified against | fix |
 |---|---|---|---|
 | 1 | **P1** — leg 3's statement window was filtered to `e.in_fold == fold.event_type`, so a **lane-less raw** cache write inside an ahead fold's window was never examined, and the "no cache-ahead write is silent" claim was measured only for fold-attached statements | reproduced: `CREATE (:SilentAhead …)` after `_create_entity`'s fold, before its append → `cache-with-no-declared-lane=9`, **5 passed** | window widened to every cache statement (it is already bounded by the fold index and its own append). Clean run still green; the injection now reds (§6.2 F8) |
-| 2 | **P2** — `_ahead_population_advice` partitioned on event TYPE only, so a brand-new **lane** on a recorded event type was reported as "RECORDED, extend the pin" instead of a fresh violation | reproduced with the lane-change mutation | partitions on the `(event_type, lane)` **pair**; `create_entity` re-exercise is the only excused shape. Verified: the lane change now prints `NOT RECORDED anywhere` |
+| 2 | **P2** — `_ahead_population_advice` partitioned on event TYPE only, so a brand-new **lane** on a recorded event type was reported as "RECORDED, extend the pin" instead of a fresh violation | reproduced with the lane-change mutation | partitions on the `(event_type, lane)` **pair**; `create_entity` re-exercise is the only excused shape. Verified at the time: the lane change printed `NOT RECORDED anywhere`; from round 4 it prints `LANE MOVED on a recorded event type` instead (§6.2 F3), which is the more precise advice for a rename |
 | 3 | **P2** — `_KNOWN_AHEAD_DEVIATIONS`'s comment named an `_apply_and_journal` reorder as a producible new pair, which this head cannot produce (that door is not on the capture path, and leg 2's probe is trimmed) | measured: reordering `_apply_and_journal` reds leg 2 only; leg 3 green | comment now names a CAPTURE door re-declaring its lane, matching leg 3's own docstring |
 | 4 | **P2** — §6.2 F3 showed the `('ObjectRegistered','chokepoint')` red, which existed only at the superseded head (it was a product of the probe leak) | re-ran the same mutation at the current head | F3 replaced with the lane-change red, and the old output retained under a `⛔ SUPERSEDED` marker naming WHY it was unreproducible |
 | 5 | **P2** — the PR body still carried the round-1 inert falsifier and pre-fix counts | artifact §3 marks it `⛔ SUPERSEDED AND WRONG` | corrected on the PR (body while no record exists, comment once one does) |
@@ -347,3 +355,28 @@ nested door's correct journal-first write a false one.
 
 Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped` (whole file), `ruff check .`
 clean, markdownlint 0 issues.
+
+## 9. Review cycle 4 — the record drifting behind its own code
+
+A fourth review found **no defect in the instrument's logic** (it re-verified leg 3's new predicate
+against the live trace — ahead folds at `8, 19, 36`, windows `[8,11)`, `[19,22)`, `[36,39)` holding only
+their own fold-attached statements — plus F8 red, the nested-door case green, and §7 row 7's
+falsification). Every blocking finding was the **record** falling out of step with the code:
+
+| # | finding | fix |
+|---|---|---|
+| 1 | §6.2 F3 still showed `NOT RECORDED anywhere` while §6.2 claimed every red was reproducible "at this head" — round 4's own advice change had made it print `LANE MOVED`, so the artifact contradicted §8 | F3 re-captured at this head with the `LANE MOVED` output, plus a note that the older wording was the pre-round-4 advice so a reproducer who sees the new message knows they ran the right mutation. §7 row 2's "Verified" note carries the same correction |
+| 2 | the provenance row pinned §8/§8.1 to `a32edfb17f`, a head where their central claim (the new window predicate) is false — §8 was authored one commit later | the row now names each section's head: §8/§8.1 `e15a9ead22`, §6.1 `629283eef`, §6/§7 `a32edfb17f` and earlier |
+| 3 | three places still said the instrument has "three legs" while the table below them listed four, and §2's leg-4 cell claimed per-write attribution that §4 and §6.2 F6 exist to deny | all three corrected to four; the leg-4 cell now says FLOOR and points at §4 / F6 |
+| 4 | the PR body's headline said "every falsifier observed RED" and named "the two" disclosed residues, while its own table's last row says **does NOT red** and §6.2 has exactly one | "Seven of the eight observed RED; the eighth is the one disclosed non-red", with the residue named |
+
+**And one follow-up fixed rather than deferred:** `_ahead_population_advice` subtracted
+`pin_recorded_types` from `lost` unconditionally, which for this pin emptied `lost` every time — so the
+`Pinned pair(s) GONE … Re-grade D3` branch was **dead code**, and a genuinely-closed deviation would have
+printed no advice at all. It now subtracts only the types that actually MOVED, and the unreachable
+"or it really was re-declared apply-first" clause is gone from the `moved` text (an apply-first
+re-declaration leaves the observed population entirely and therefore arrives in `lost`). All four
+branches verified: rename → LANE MOVED only; both pinned gone → GONE; a Subject arm → RECORDED-newly-
+exercised; an unrecorded new arm → NOT RECORDED.
+
+Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped`, `ruff` clean, markdownlint 0.

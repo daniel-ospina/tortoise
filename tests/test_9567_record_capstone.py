@@ -450,16 +450,19 @@ def _ahead_population_advice(gained: set, lost: set) -> str:
     }
     moved = sorted(p for p in gained if p[0] in pin_recorded_types)
     unrecorded = sorted(p for p in gained if p not in recorded and p not in moved)
-    lost = {p for p in lost if p[0] not in pin_recorded_types}
+    # Subtract only the types that actually MOVED. Subtracting `pin_recorded_types`
+    # unconditionally emptied `lost` for this pin, making the GONE branch dead code
+    # and leaving a genuinely-closed deviation with no advice at all (review cycle 4).
+    moved_types = {p[0] for p in moved}
+    lost = {p for p in lost if p[0] not in moved_types}
     lines = []
     if moved:
         lines.append(
             f"  \u2022 LANE MOVED on a recorded event type: {moved}. The "
             "KNOWN DEVIATIONS block at `tortoise/sdk.py:4835` records this arm as "
             "apply-first under `create_entity`, and the pin no longer carries that "
-            "lane. Either the deviation's lane was RENAMED (update the KNOWN "
-            "DEVIATIONS block and extend the pin) or it really was re-declared "
-            "apply-first (re-grade D3, #9567/#11477)."
+            "lane. The deviation's lane was RENAMED: update the KNOWN DEVIATIONS "
+            "block at `sdk.py:4835` and extend the pin."
         )
     if recorded:
         lines.append(
@@ -815,7 +818,7 @@ def test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY(traced):
     So: a fold that runs ahead of its append must be inside a DECLARED lane, and
     the set of such folds that declare a JOURNAL-FIRST lane is the tree's
     recorded deviation population — pinned as a measurement, so the leg reds when
-a pair appears (a fresh contradiction) or when a pinned pair is gone (a
+    a pair appears (a fresh contradiction) or when a pinned pair is gone (a
     deviation closed, and D3 must be re-graded).
 
     ⛔ THE PREVIOUS FORM OF THIS LEG WAS INERT. It compared `stmt.lane` against
