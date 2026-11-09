@@ -419,8 +419,7 @@ def summarize_belief_activation(
     # exists to "degrade a failure to UNKNOWN" — it returns ``None`` and logs
     # "census query failed, reporting UNKNOWN" — so an ARMED pass publishes
     # ``points_with_ep: None``. (2) ``run.py``'s fail-open manifest for a question
-    # whose activation RAISED is ``{"ep_ran": False, "error": ...}``, the shape
-    # ``ep_activation`` itself calls "the common failure shape". Both land in
+    # whose activation RAISED is ``{"ep_ran": False, "error": ...}``. Both land in
     # ``_classify_question``'s ``INERT_UNMEASURED`` / ``INERT_ACTIVATION_FAILED``
     # arms (``measured=False``), so they count in ``questions`` and never in
     # ``questions_with_ep``: measured at this head, either one alone publishes
@@ -429,9 +428,10 @@ def summarize_belief_activation(
     # ``test_an_unread_census_is_the_live_11650_boundary``.
     #
     # And it is not repaired by borrowing the sibling's clause: the per-question
-    # read/unread split it needs does not exist (``_classify_question``'s last arm
-    # returns ``INERT_UNMEASURED`` for both "census unread" and "read, zero,
-    # unexplained"), so the honest fix is a companion cell with its own review.
+    # read/unread split it needs does not exist (``_classify_question`` returns
+    # ``INERT_UNMEASURED`` both from its ``with_ep is None`` arm and from the
+    # "read, zero, unexplained" residual at the end), so the honest fix is a
+    # companion cell with its own review.
     # Filed as #11650.
     summary["questions_with_ep_ratio"] = (
         summary["questions_with_ep"] / summary["questions"]
