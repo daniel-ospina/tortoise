@@ -1525,8 +1525,11 @@ def test_entitlement_refusal_is_mapped_to_the_product_402():
     # with a message claiming the branch is dead code — a false block for a real
     # editor. What a STATIC pin cannot have is runtime reachability: the
     # behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives the
-    # real handler, so it is the row that reds if the branch stops being
-    # reachable at all.
+    # real handler, so THE HARNESS reds if the branch stops being reachable at
+    # all — measured: an early `return json({error: …}, 502)` before the marker
+    # branch leaves every static assertion GREEN (24 passed) and the harness
+    # exits 1. It reports that as a failed 402 response plus an assertion under
+    # the row rather than a `✗` on the row itself, because the run aborts there.
     assert re.search(r"const\s+provisionMessage\s*=\s*String\(\s*provisionError\s*\.\s*message", src), (
         "the marker must be read from the RPC error's `message` (PostgREST puts "
         "the RAISE text there) — reading another field makes the branch dead code"
