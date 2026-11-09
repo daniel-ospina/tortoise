@@ -1721,3 +1721,15 @@ the removal rather than this file's own input; asserts the `VET`-wins direction 
 gates armed; pins that
 `execute_embed` calls no encoder; pins that `kind_classifier` reads a kind index rather than a stored
 row vector; and re-runs the rate measurement against its committed record.
+
+## 2026-11-10 — §3 gains the one clause the MAPPING rule was missing: a source type may not vary the PROMPT
+
+**What changed.** §3 stated, before this subsection, *"a source type declares a MAPPING, and that mapping configures steps S0, S1, S2 and S5"*. Read on its own that licenses a **source-branded prompt set**, and that is how `#2696` was justified (`"a 'meeting variant' that is a prompt-and-vocabulary variant costs little"`). A new subsection states the missing clause: **the mapping configures S0; S1 and S2 receive the STRUCTURE that mapping emitted, not the identity of the product the text came from.**
+
+**The evidence, and why it moved from "a claim" to "a recorded decision".** Eight products were read on 2026-11-10 (~40 primary sources; two repos cloned) for a related question — whether connector-heavy systems fork per source. Four bear directly on this passage: Onyx's normalised prompts carry **zero** source references (per-source prompts appear only on the federated path, where no canonical unit exists); mem0 has one prompt and no type field in its output schema; Hindsight computes `fact_kind` and **deliberately does not store it**; Supermemory's discriminator is the file format at parse/chunk. **Three rules follow and are now on the page** — key on the shape the reader found; label a shape only if something downstream consumes it; `speaker` is a field plus a context declaration, never a prompt.
+
+**Why it is not a fork and does not reopen D10.** One extractor, one set of stage contracts, one commit path. The connector contract is the one the code already states in `_connector_content_hash` (`projection/entities.py`) — *"each connector emits its own payload shape … with no registry to keep in sync"* — and the new clause says a meeting mapper conforms to it rather than adding a branch.
+
+**Scope, stated in the passage itself.** It governs the document/transcript path only and does **not** arm the pack-level `extraction.sourceTypes` predicate, which still has no production caller (`#11628`).
+
+**Provenance.** Owner decision 2026-11-10 on `#11081` (`6752174448`, corrected by `6752335134`), recorded on `#2696` (`6752567775`) and now in the body of that epic. The open prerequisite it names — we cannot yet say which already-ingested meetings need re-extraction after a profile change — is `#11661`, and it is deliberately **not** a private-beta item.

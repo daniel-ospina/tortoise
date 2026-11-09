@@ -468,6 +468,29 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 
 **Consequence to make explicit:** structured sources are **cheap and exact**; unstructured sources are **expensive and approximate**. That should be a declared property, not a surprise.
 
+### ⭐ What a source type may NOT vary — the extraction PROMPT (owner decision, 2026-11-10)
+
+**This amends the rule above by one clause, and the clause is the load-bearing one.** *"A source type declares a MAPPING"* reads, on its own, as licence for a **source-branded prompt set** — and that is exactly how the meeting epic (`#2696`) was justified: *"a 'meeting variant' that is a prompt-and-vocabulary variant costs little"*. **The mapping carries the structure — not the product identity — into S1 and S2. What they receive is the structure that mapping emitted, plus the text it emitted; what they must never receive is the identity of the product that text came from.** S5's typed edges remain the mapping's, per §3 above.
+
+**Measured 2026-11-10 across eight products; the four with a bearing on this sentence** (the Onyx rows' evidence and its CODE-VERIFIED grade: `#11081` `6750569282` item 3 and `6751381819` item 3; the decision itself: `6752174448`, corrected by `6752335134`):
+
+| system | what selects per-source behaviour | grade |
+|---|---|---|
+| **Onyx** — ~60 connectors, including Gong, Fireflies and Zoom | the normalised path's prompts carry **zero** `DocumentSource` references; per-source prompts exist **only** on the federated path, where no canonical unit is ever produced | CODE-VERIFIED |
+| **mem0** | one extraction prompt, and the output schema has **no type field at all** | CODE-VERIFIED |
+| **Hindsight** | computes a shape (`fact_kind: "event" \| "conversation"`) and **deliberately does not store it** — its only consumer is the decision whether to set `occurred_start`/`occurred_end` | CODE-VERIFIED |
+| **Supermemory** | the discriminator is the **file format**, at parse/chunk (*"OCR for images, transcription for audio"*) — a parser selector rather than a prompt dispatcher | DOCS-STATED for the format half; **INFERRED** for "no per-type prompt" (backend closed-source) |
+
+**⇒ Three constraints on any source-type profile (first applied to meetings, `#2696`):**
+
+1. **Key on the shape the reader found, not on the product.** A meeting profile emits `speaker turn · section · action item · decision · status update · blocker · open question`, and the shared prompt is steered by those labels — so the same minutes arriving as a `.docx` export, a pasted body or a vendor API produce the same treatment.
+2. **Label a shape only when something downstream consumes it.** Hindsight discards `fact_kind` once it has done its one job; a label nothing reads is write-path noise, and at S2.3 it is a name the resolver has to disambiguate for nothing.
+3. **`speaker` is a field on the unit plus a declaration in the extraction context** — never a new prompt. Hindsight's retain guidance does precisely this (*"Describe the speaker in each item's `context` … 'Customer Maria is speaking'"*), and it is the cheap fix for the fabricated-attendee class (`#8491`): attribute by declared speaker, never by guess.
+
+**What this does NOT change.** One extractor, one set of stage contracts, one commit path. No per-source branch, no registry, no forked stage — the connector contract is the registry-free one this codebase already states in `_connector_content_hash` (`projection/entities.py`): *"each connector emits its own payload shape … so keying the digest to the payload scopes it per kind by construction, with no registry to keep in sync."*
+
+⚠️ **Scope — this passage governs the DOCUMENT/TRANSCRIPT path only.** It says nothing about the pack-level `extraction.sourceTypes` activation predicate, which is declared and validated but has **no production caller** (tracked separately); do not read this as arming it.
+
 ---
 
 ## 4. The steps
