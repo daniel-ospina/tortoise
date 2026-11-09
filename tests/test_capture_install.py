@@ -3711,6 +3711,57 @@ def test_cli_install_pi_uninstall_preserves_a_locally_edited_seam(cli):
         "the backup must hold the EDITED bytes, not the shipped ones")
 
 
+def test_cli_install_pi_uninstall_refuses_to_delete_when_the_edit_cannot_be_preserved(
+        cli):
+    """The backup is what makes this delete recoverable, so a backup that cannot
+    be WRITTEN must abort the delete with a message (#11584 review round 10).
+
+    The round-9 fix put the backup call in `_uninstall_pi_volunteer` OUTSIDE any
+    `try`, while every sibling failure path in the same verb catches `OSError`
+    and prints a sentence. On an unwritable extensions directory (a read-only
+    mount, a root-owned dir) the user got a raw `PermissionError` traceback out
+    of `python -m tortoise`, on the verb whose own docstring says a delete has
+    no undo — and no message saying the edit could not be preserved.
+
+    The polarity matters as much as the message: this must FAIL CLOSED. A
+    helper that reported "nothing to preserve" would send the caller on to
+    `unlink()`, destroying exactly the edit the backup exists for.
+
+    Mutation: drop the `except OSError` guard around the backup call — the
+    stderr assertion REDs with a traceback (verified), and the seam survives
+    only because the raise happens to precede the unlink.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores directory permissions, so the backup lands")
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    edited = ext.read_text(encoding="utf-8") + "// my local tweak\n"
+    ext.write_text(edited, encoding="utf-8")
+    os.chmod(ext.parent, 0o500)
+    try:
+        r = run("install", "pi", "--uninstall")
+    finally:
+        os.chmod(ext.parent, 0o755)
+
+    assert r.returncode != 0, (
+        "an un-preservable local edit must not report success:\n" + r.stdout)
+    assert "Traceback" not in r.stderr, (
+        "a documented refusal, not a crash:\n" + r.stderr)
+    assert "Cannot preserve" in r.stderr, (
+        "the refusal must say the backup could not be written:\n" + r.stderr)
+    assert str(ext) in r.stderr, (
+        "the refusal must name the seam:\n" + r.stderr)
+    assert "Nothing was removed" in r.stderr, (
+        "the user must be told the delete did not happen:\n" + r.stderr)
+    assert ext.is_file(), "the edited seam was deleted without a backup"
+    assert ext.read_text(encoding="utf-8") == edited, "the edit is gone"
+    assert not ext.with_suffix(ext.suffix + ".bak").exists(), (
+        "no partial backup may be left behind")
+
+
 def test_cli_install_pi_uninstall_writes_no_backup_for_an_unedited_seam(cli):
     """The backup is for LOCAL EDITS only: the ordinary uninstall must not
     litter the extensions directory with a `.bak` of a file it can rewrite.

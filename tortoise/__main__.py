@@ -5845,7 +5845,22 @@ def _uninstall_pi_volunteer(args) -> int:
     # the two halves of the family disagreed about the same edit. A backup is
     # written only when the bytes DIFFER from the shipped source; the ordinary
     # unedited case still just removes the file.
-    backup = _pi_volunteer_local_edit_backup(target)
+    try:
+        backup = _pi_volunteer_local_edit_backup(target)
+    except OSError as e:
+        # ⛔ FAIL CLOSED, AND FAIL WITH A SENTENCE (#11584 review round 10). The
+        # backup exists to make this delete recoverable, so a backup that cannot
+        # be WRITTEN must abort the delete rather than proceed without one — and
+        # it must not escape as a traceback. Before this guard the write was the
+        # one statement in this verb outside a `try`, so an unwritable extensions
+        # directory (a read-only mount, a root-owned dir) cost the user a raw
+        # `PermissionError` stack with no message, on the same verb whose sibling
+        # failure paths all name the path and say what happened.
+        print(f"Cannot preserve the local edits in {target} before removing "
+              f"it: {e.__class__.__name__}: {e}", file=sys.stderr)
+        print(f"Nothing was removed. Move {target} aside yourself, or re-run "
+              f"once {target.parent} is writable.", file=sys.stderr)
+        return 1
     if backup is not None:
         print(f"backed up {target} → {backup} (local edits are preserved)")
     try:
