@@ -655,6 +655,57 @@ def test_a_spawned_child_has_a_supervisor_parent():
     assert child.exitcode == 0
 
 
+def _report_spawn_child_argv(queue) -> None:  # module-level: pickleable by spawn
+    queue.put(list(sys.argv))
+
+
+def test_a_spawned_worker_child_sees_the_parents_command_line(monkeypatch):
+    """The argv claim the count AND reload arms rest on — EXECUTED, not assumed.
+
+    `observe()`/`workers_from_argv()`/`reload_is_requested()` all default to
+    `sys.argv`, and the module's whole discriminator story depends on ONE fact
+    stated in its docstring: under spawn, `multiprocessing` RESTORES the
+    parent's `sys.argv` in the worker, so a worker resolves the count and the
+    reload token from the command line its supervisor was started with. A
+    reviewer flagged that fact as UNVERIFIED (it was reasoning from CPython's
+    `spawn.get_preparation_data`, not from a run), and if it were false the
+    count arm would silently read the wrong process's argv.
+
+    MEASURED here: the child is a real `spawn` process (the start method
+    uvicorn's supervisor uses) started while this process's `sys.argv` is a
+    uvicorn command line, and it reports the argv IT sees. Discrimination is
+    real, not incidental: without the restoration the child reports pytest's
+    argv (or spawn's own `-c` line), which contains neither `--reload` nor
+    `--workers`.
+    """
+    command = ["uvicorn", "tortoise.hosted_api:app", "--host", "0.0.0.0",
+               "--reload", "--workers", "2"]
+    monkeypatch.setattr(sys, "argv", list(command))
+
+    ctx = multiprocessing.get_context("spawn")
+    queue = ctx.Queue()
+    child = ctx.Process(target=_report_spawn_child_argv, args=(queue,))
+    child.start()
+    try:
+        child_argv = queue.get(timeout=120)
+    finally:
+        child.join(timeout=120)
+        if child.is_alive():            # pragma: no cover - a wedged child
+            child.terminate()
+            child.join(timeout=30)
+    assert child.exitcode == 0
+    assert child_argv == command, (
+        f"the spawned child saw {child_argv!r}, not the parent's command line — "
+        f"`observe()` reads `sys.argv`, so a worker would resolve the wrong "
+        f"count and the wrong reload state from argv"
+    )
+
+    # …and the two readers that consume argv resolve THAT command line, so the
+    # claim above is load-bearing for the policy and not just for multiprocessing.
+    assert wt.reload_is_requested(child_argv) is True
+    assert wt.workers_from_argv(child_argv) == 2
+
+
 def test_the_production_entrypoint_reads_the_live_probe(monkeypatch):
     """`assert_multi_worker_admissible()` with NO arguments is the real call site.
 
