@@ -12,9 +12,11 @@ file (the dashboard gate-on-click UX is covered by the e2e suite).
 """
 from __future__ import annotations
 
+import asyncio
 import os
 import re
 import tempfile
+import threading
 from datetime import UTC, datetime, timedelta
 
 import pytest
@@ -985,6 +987,47 @@ class TestAtomicProvisionBackstop:
         assert r.status_code == 402, r.text
         assert len(dropped) == 1, dropped
         assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
+
+    def test_the_refusal_drops_the_graph_off_the_event_loop(
+            self, user_client, monkeypatch):
+        """#1981 review P1: the compensating drop is SYNCHRONOUS socket I/O
+        (`_make_sdk` cold projection + `GRAPH.DELETE`), and the refusal is a
+        BURST path — it only fires when workers raced the create, so every
+        worker enters it at once. Called inline it holds the whole event loop
+        for the round trip (#2988 froze every route this way for 15 minutes;
+        #3773 is the removal of this class from request paths).
+
+        The discriminator is BEHAVIOURAL, not a source grep for
+        `to_thread`/`_graph_offload` (a grep passes even if the call moves
+        back onto the loop): the probe records whether a loop was RUNNING in
+        the frame that ran the drop, and every call is recorded so a later
+        off-loop call cannot erase an earlier on-loop one.
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(sc, "provision_org",
+                            lambda *a, **kw: (_ for _ in ()).throw(
+                                self._rpc_refusal()))
+        seen: list[tuple[bool, str]] = []
+
+        def _observe(org_id, graph_name=None):
+            try:
+                asyncio.get_running_loop()
+                on_loop = True
+            except RuntimeError:
+                on_loop = False
+            seen.append((on_loop, threading.current_thread().name))
+
+        monkeypatch.setattr(ha, "_drop_org_graph", _observe)
+        r = tc.post("/v1/organizations", json={"name": "racer-four"})
+        assert r.status_code == 402, r.text
+        assert seen, "the compensating graph drop never ran"
+        assert [on_loop for on_loop, _name in seen] == [False], (
+            "the graph drop ran ON the event loop "
+            f"(thread={seen[0][1]!r}) — a cold projection open plus "
+            "GRAPH.DELETE holds the loop for the whole round trip, on the "
+            "one path every racing worker enters")
 
     def test_onboarding_lane_maps_the_refusal_to_the_same_402(
             self, team_client_factory, monkeypatch):
