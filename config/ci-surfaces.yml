@@ -7299,6 +7299,7 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
+  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core` + `api`; the `api` arm is the `tortoise/__main__.py` half)
   # #1120 review (P1, inert enforcer): DUAL-REGISTERED with `api` (see the entry
   # there). `website/apps/dashboard/functions/` is a SOURCE_PATTERN of THIS
   # surface, and a named-surface match REPLACES the `core` fallback — so an
@@ -7313,8 +7314,6 @@ surfaces:
   # (`startswith("supabase/")`) runs `.github/scripts/verify-cutover`, which
   # names this file.
   - test_provisioning_edge_function.py
-  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core`)
-  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core` + `api`; the `api` arm is the `tortoise/__main__.py` half)
   - test_store_sync_worker.py  # #3515: the store-sync backstop (spool + Pi log) and its per-file cursor
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
