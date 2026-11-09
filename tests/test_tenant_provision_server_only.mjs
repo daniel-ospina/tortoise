@@ -222,7 +222,12 @@ try {
   //
   // ⛔ THERE ARE TWO SUCH SIGNATURES, because there are two key semantics. The
   // handler's ARGUMENT is the same either way
-  // (origin/main:supabase/functions/tenant-provision/index.ts:183:
+  // ⛔ THE SHA IS PART OF THE CITATION. These two pointers named `origin/main`,
+  // a moving ref: #1120's squash (`2484e1d47e5a`) then deleted the old path AND
+  // the hook code they cited, so both became unfollowable — the reader could
+  // not check the measurements the file rests on. An immutable sha is the only
+  // form a citation can keep.
+  // (2484e1d47e5a^:supabase/functions/tenant-provision/index.ts:183:
   //   new Webhook(hookSecret.replace(/^v1,whsec_/, ""))  → the base64 text),
   // but the two verifiers hash that argument DIFFERENTLY:
   //   - the deleted TEST STUB used it as ASCII
@@ -325,6 +330,47 @@ try {
     502
   );
 
+  // ── #1981: the one-free-org refusal is TERMINAL, and this is the path a
+  //    client actually reaches (the `after_user_created` auth-hook path was
+  //    DELETED by #1120 — see Phase 2 above). A 502 here is the one status a
+  //    client is entitled to retry, for a condition no retry can clear — so the
+  //    RPC's marker must surface as a 402 carrying the product payload.
+  //    This case is BEHAVIOURAL on purpose, and the division of labour is the
+  //    point: the static pin in `test_provisioning_edge_function.py` grades the
+  //    SOURCE SHAPE (which field the marker is read from, and that `markerAt` is
+  //    derived from it before the branch), while this row is what proves the
+  //    branch is REACHABLE through the REAL handler — a static pin can assert
+  //    any string without the code ever running. Neither substitutes for the
+  //    other, and the static pin does discriminate on its own: the
+  //    `provisionError.details` mutant reds it (measured on the review of
+  //    `577ed5822fe5`). Here that same mutant also reds, because the stub's
+  //    error then carries no `details` and the response goes back to 502.
+  __setRpcResult({
+    error: { message: "Supabase control-plane RPC failed (provision_team): HTTP 402: one_free_org_limit:org-blocker" },
+  });
+  const limitedRes = await check(
+    "POST authenticated, provision_team one-free-org refusal → 402 (terminal, not a retryable 502) (#1981)",
+    call("POST", jwtHeaders, BODY),
+    402
+  );
+  const limitedBody = JSON.parse(await limitedRes.text());
+  assert.equal(limitedBody.code, "one_free_org_limit",
+    "the refusal must carry the product's machine-readable code (#2789)");
+  assert.equal(limitedBody.org_id, "org-blocker",
+    "org_id must name the blocking org the dialog's upgrade action targets");
+  assert.ok(
+    String(limitedBody.message).startsWith("You can only have one free organization"),
+    "message must be the product sentence, got: " + limitedBody.message);
+
+  // The generic lane must SURVIVE: only the marker is a 402. A bare error is
+  // still a 502 — otherwise every failure is laundered into a refusal.
+  __setRpcResult({ error: { message: "permission denied for table organizations" } });
+  await check(
+    "POST authenticated, non-marker provision_team error → 502 (not laundered into a 402) (#1981)",
+    call("POST", jwtHeaders, BODY),
+    502
+  );
+
   __setRpcResult({ error: null });
   const okRes = await check(
     "POST authenticated, target matches → 201",
@@ -338,7 +384,7 @@ try {
   );
   assert.ok(okBody.org_id, "201 body must include org_id");
   // ⛔ KEEP THE ORG-NAME ASSERTION. The deleted harness pinned it
-  // (`origin/main:tests/test_tenant_provision_cors.mjs:202` —
+  // (`2484e1d47e5a^:tests/test_tenant_provision_cors.mjs:202` —
   // `jwtBody.org_name === "test"`, "team name derives from display_name") and
   // this replacement dropped it, so neutering the provider-display-name lookup
   // left the harness fully green while the org name, the starter-seed
