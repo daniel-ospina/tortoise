@@ -312,15 +312,35 @@ export function clipToBytes(text: string, maxBytes: number): string {
 /**
  * Resolve the seam's configuration.
  *
- * CO-SOURCE (#2369 D1, mirrored from `tortoise-capture.ts::resolveConfig` and
- * the shipped shell hooks): one identity = one source chain. When the KEY came
- * from the environment, the env `TORTOISE_API_URL` may apply. When the key came
- * from the FILE, its URL resolves from the SAME file or the built-in default
- * ONLY — a poisoned env must never redirect a stored `tt_…` credential, and
- * every prompt searched with it, to a host it chose.
+ * CO-SOURCE (#2369 D1.1): one identity = one source chain. A FILE-sourced key
+ * resolves its URL from the SAME file or the built-in default ONLY — a poisoned
+ * env must never redirect a stored `tt_…` credential, and every prompt searched
+ * with it, to a host it chose.
+ *
+ * ⛔ THE KEY COMES FROM THE CONFIG FILE AND NOWHERE ELSE (#2369 D1b). An
+ * env-only `TORTOISE_API_KEY` is NOT a credential for this seam: the previous
+ * `apiKey = envKey || fileKey` meant a machine that merely exported the
+ * variable `.env.example` documents had THIS seam POST
+ * `window: [{role: "user", content: prompt}]` to `$TORTOISE_API_URL` or the
+ * built-in default — while every other harness seam shells out to `tortoise
+ * volunteer` and stays local on the same env-only key. The canonical reflex
+ * this seam wraps resolves exactly that way
+ * (`_cmd_volunteer` → `_resolve_config_path(include_env=False,
+ * global_only=True)`, `tortoise/__main__.py`), and `platform-seams.md` records
+ * it as the D1b posture: "a bare TORTOISE_API_KEY still never flips the hook to
+ * hosted mode".
+ *
+ * ⛔ THIS DELIBERATELY DIVERGES FROM `tortoise-capture.ts::resolveConfig` and
+ * the shipped shell hooks, which still resolve `envKey || fileKey`. The
+ * divergence is RECORDED, not an oversight — the capture family's
+ * `include_env=True` is its own decision (see `_resolve_config_path`'s
+ * docstring) — and "aligning" this seam back to its documented twin re-opens
+ * the consent hole above: it would transmit prompt text for every machine that
+ * merely exports a key. Do not.
  *
  * Never throws: an absent, unreadable or malformed config is "no config", which
- * is the ordinary state of a machine whose credentials live in the environment.
+ * is the ordinary state of a machine that never opted in to the hosted
+ * transport.
  */
 export function readVolunteerConfig(
   env: Env = typeof process === "undefined" ? {} : process.env,
@@ -1086,8 +1106,9 @@ export type ReflexVerdict =
  * candidate was REACHED and answered nothing usable (an HTTP status, an
  * unparseable body) — also no evidence about the install. `inert` is reserved
  * for the one thing an install actually fixes: NOTHING COULD RUN AT ALL (no
- * candidate resolved AND no hosted key), which is the only class the caller may
- * latch on and breadcrumb.
+ * candidate resolved AND no hosted key IN THE CONFIG FILE — an env-only
+ * `TORTOISE_API_KEY` is not a credential here, #2369 D1b), which is the only
+ * class the caller may latch on and breadcrumb.
  *
  * ⛔ A resolved CLI candidate that FAILED is `refused`, NOT `inert` (#11584
  * review finding 1, second half). "Every candidate failed" is what a
@@ -1162,7 +1183,9 @@ export async function resolveBlock(
       detail:
         "no tortoise reflex resolved (checked PATH, the installer's " +
         "~/.tortoise/hook-src-dir record and $VIRTUAL_ENV) and no hosted " +
-        "API key is configured",
+        "key is configured in ~/.pi/agent/tortoise-config.json — " +
+        "TORTOISE_API_KEY in the environment is not a credential for this " +
+        "seam (#2369 D1b)",
     };
   }
   const hosted = await runReflexHosted(
@@ -1214,7 +1237,9 @@ export default function tortoiseVolunteer(
   // `apiKey`, and whose `display` decides whether this seam is silent),
   // `home` resolves the installer's `~/.tortoise/hook-src-dir` record to the
   // real CLI, and `env` is `process.env` (PATH, kill switch,
-  // `TORTOISE_API_KEY`, `TORTOISE_API_URL`). A row written as
+  // `TORTOISE_VOLUNTEER_DISPLAY`, `TORTOISE_COMMAND`). It is NOT a source of
+  // `TORTOISE_API_KEY`/`TORTOISE_API_URL` — those are read from the config file
+  // only (#2369 D1b). A row written as
   // `tortoiseVolunteer(mockPi())` under `node --test` therefore asserts the
   // machine it runs on instead of the code — and on a box with a configured
   // key it takes the HOSTED transport and POSTs the test prompt to the

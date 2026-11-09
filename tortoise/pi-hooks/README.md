@@ -263,6 +263,17 @@ captured conversations) to another host. The **hook lane** requires no local
 `tortoise` CLI or Python install, and there is **no `agent-infra` dependency** —
 `agent-infra` is not shipped to users.
 
+⚠️ **The per-turn READ half resolves its key differently, on purpose.** This
+page covers BOTH Pi halves (see “What ships” above), and for
+`tortoise-volunteer.ts` an env-only `TORTOISE_API_KEY` is **not** a credential:
+the key is read from `~/.pi/agent/tortoise-config.json` only, and its `apiUrl`
+comes from that same file or the built-in default (`#2369` D1b — the posture
+`tortoise volunteer` itself takes via `include_env=False`). So exporting only
+`TORTOISE_API_KEY` gives you the **capture** seam hosted and the **read** seam
+local. To run the read seam hosted, put `apiKey` in that JSON file. This
+divergence from `tortoise-capture.ts` is recorded, not an oversight: a bare env
+key must never authorize transmitting prompt text from a per-turn seam.
+
 The **store-sync backstop** is different: it is run by `tortoise store-sync`, so it
 needs the `tortoise` CLI on `PATH`. On a machine with the Pi extension but no Python
 install the hook lane works and the backstop is **inert** — the SIGKILL/crash recovery
