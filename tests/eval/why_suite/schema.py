@@ -51,6 +51,25 @@ VERDICT_VALUES = ws.VERDICT_VALUES
 SCHEMA_VERSION = 1
 SUITE_VALUES = frozenset({"why_suite"})
 
+# ── Corpora (#2275) ────────────────────────────────────────────────────────
+# The why-suite grades MORE THAN ONE jointly-pinned corpus: the v1 A11 pilot
+# (``why_suite``) and the adversarial fixture set (``why_suite_adversarial``).
+# Everything below that is corpus-specific is keyed by these names — never by
+# a positional default — so adding a corpus cannot silently change what the
+# v1 lane asserts.  ``corpus.PROFILES`` owns the file/baseline scoping.
+CORPUS_VALUES = frozenset({"why_suite", "why_suite_adversarial"})
+DEFAULT_CORPUS = "why_suite"
+ADVERSARIAL_CORPUS = "why_suite_adversarial"
+
+# Assembly contracts the fixtures are built ON.  Pinned here (the eval side
+# owns its own copy) and asserted equal to the real assembly's constants by
+# the hermetic corpus tests — a fixture set that assumes a cap/threshold the
+# assembly no longer applies would silently stop testing anything.
+CONTESTED_VARIANCE_THRESHOLD = 0.04  # tortoise/search_engine.py
+W4_MAX_CONFLICTS = 2  # tortoise/why.py:W4_MAX_CONFLICTS
+W4_MAX_DIG_DEEPER = 3  # tortoise/why.py:W4_MAX_DIG_DEEPER
+HIGH_SEVERITY_EP_MEAN = 0.6  # tortoise/why.py::_severity
+
 # ── Why-suite metric vocabulary (the E2E-7 graded surface) ────────────────
 # Directions follow the W2/W3 convention: maximize = higher-better,
 # minimize = lower-better.
@@ -76,8 +95,47 @@ METRIC_DIRECTIONS: dict[str, str] = {
     # false-positive arm: clean points whose surfaced context invents a
     # contradiction (conflicts present / contested / nand pointer) — 0 bar.
     "false_positive_rate": "minimize",
+    # ── adversarial corpus only (#2275) ───────────────────────────────────
+    # NAND recovery: of the NANDers the adversarial plant puts on LIVE
+    # conflicted points, the fraction the surfaced context names.  The
+    # multi_nand family plants 3 per point against the ≤2 surfacing cap, so
+    # this rate is NOT structurally 1.0 — it is the honest partial-conflict
+    # measurement the v1 corpus cannot express.
+    "nand_recovery_rate": "maximize",
+    # Severity-priority recovery: over clusters that plant MORE NANDers than
+    # the cap, the fraction whose high-severity counterargument is still in
+    # the surfaced set.  The assembly sorts by severity; an insertion-order
+    # assembly surfaces the two mediums and scores 0.0.  This is the
+    # discriminating standing bar — 1.0 is reachable, never guaranteed.
+    "high_severity_nand_recovery": "maximize",
+    # Contested classification: does the surfaced context read the point as a
+    # live dispute IFF the plant's persisted posterior says it is?  The
+    # boundary family sits at variance EXACTLY == the threshold, so a `>=`
+    # comparison flips it (tie-handling arm).
+    "contested_classification_accuracy": "maximize",
 }
-METRIC_VALUES = frozenset(METRIC_DIRECTIONS)
+
+# The v1 five (unchanged — committed v1 baselines snapshot exactly these).
+METRIC_VALUES = frozenset(
+    {
+        "conflict_surfacing_rate",
+        "dig_deeper_navigation_accuracy",
+        "support_chain_sufficiency",
+        "tradeoff_sufficiency",
+        "false_positive_rate",
+    }
+)
+ADVERSARIAL_METRIC_VALUES = frozenset(METRIC_DIRECTIONS)  # v1 five + 3
+METRIC_VALUES_BY_CORPUS: dict[str, frozenset[str]] = {
+    DEFAULT_CORPUS: METRIC_VALUES,
+    ADVERSARIAL_CORPUS: ADVERSARIAL_METRIC_VALUES,
+}
+
+
+def metric_values(corpus: str = DEFAULT_CORPUS) -> frozenset[str]:
+    """The graded metric vocabulary a corpus's baseline must snapshot."""
+    return METRIC_VALUES_BY_CORPUS.get(corpus, METRIC_VALUES)
+
 
 # Standing quality bars (issue #2100 Targets + epic E2E-1/E2E-7).  Armed
 # from day one — the graded artifact (W4 assembly) is delivered; the suite
@@ -85,10 +143,96 @@ METRIC_VALUES = frozenset(METRIC_DIRECTIONS)
 CONFLICT_SURFACING_FLOOR = 0.95
 DIG_DEEPER_NAV_FLOOR = 0.95
 FALSE_POSITIVE_TOLERANCE = 0.0
+# Adversarial floors (#2275).  The measured 2-of-3 cap recovery on the
+# planted live NANDers is 19/23 = 0.8261; the floor is 0.82 (the cap bound is
+# the bar, so ANY loss beyond the documented budget fails).  The other two
+# are strict arms whose fixtures are non-trivial (see adversarial.py).
+NAND_RECOVERY_FLOOR = 0.82
+HIGH_SEVERITY_RECOVERY_FLOOR = 0.95
+CONTESTED_CLASSIFICATION_FLOOR = 0.95
+
+# (metric, direction, floor/tolerance, failure-class label).  The label is
+# the vocabulary a blessed baseline's history records, so it is table-driven
+# rather than derived from the metric name (a rename must not silently rename
+# a failure class).
+Bars = list[tuple[str, str, float, str]]
+
+
+def standing_bars(corpus: str = DEFAULT_CORPUS) -> Bars:
+    """The standing bars armed for a corpus (direction-tagged so one table
+    drives both the compare gate and the bless failure classes)."""
+    bars: Bars = [
+        ("conflict_surfacing_rate", "min", CONFLICT_SURFACING_FLOOR,
+         "conflict-surfacing-below-floor"),
+        ("dig_deeper_navigation_accuracy", "min", DIG_DEEPER_NAV_FLOOR,
+         "dig-deeper-navigation-below-floor"),
+        ("false_positive_rate", "max", FALSE_POSITIVE_TOLERANCE,
+         "clean-false-positives"),
+    ]
+    if corpus == ADVERSARIAL_CORPUS:
+        bars += [
+            ("nand_recovery_rate", "min", NAND_RECOVERY_FLOOR,
+             "nand-recovery-below-cap-bound"),
+            ("high_severity_nand_recovery", "min", HIGH_SEVERITY_RECOVERY_FLOOR,
+             "high-severity-nand-recovery-below-floor"),
+            ("contested_classification_accuracy", "min", CONTESTED_CLASSIFICATION_FLOOR,
+             "contested-classification-below-floor"),
+        ]
+    return bars
+
+
+def tripped_bars(metrics: dict, corpus: str = DEFAULT_CORPUS) -> list[str]:
+    """The failure-class labels of the standing bars a metric snapshot sits
+    outside of (empty ⇒ every bar met)."""
+    tripped: list[str] = []
+    for metric, direction, bound, label in standing_bars(corpus):
+        value = metrics.get(metric)
+        if not isinstance(value, (int, float)) or isinstance(value, bool):
+            continue
+        if (direction == "min" and value < bound) or (direction == "max" and value > bound):
+            tripped.append(label)
+    return tripped
+
+
+def corpus_of(doc: dict) -> str:
+    """Corpus a baseline/receipt/config declares (default = the v1 corpus,
+    so pre-#2275 documents keep their meaning)."""
+    config = doc.get("config") if isinstance(doc.get("config"), dict) else doc
+    name = (config or {}).get("corpus")
+    return name if name in CORPUS_VALUES else DEFAULT_CORPUS
 
 # Controlled vocabulary (ONTOLOGY §5 — the why-block response vocabulary).
 DIG_DEEPER_KINDS = frozenset({"supports", "nand", "superseded", "tradeoff"})
-FAMILY_VALUES = frozenset({"p9", "decision", "superseded", "plain", "clean"})
+# v1 families (issue #2100) + the adversarial families (#2275).
+FAMILY_VALUES = frozenset(
+    {
+        "p9",
+        "decision",
+        "superseded",
+        "plain",
+        "clean",
+        "near_tie",
+        "multi_nand",
+        "chain",
+        "wide_decision",
+        "precedence",
+        "boundary",
+    }
+)
+FAMILY_VALUES_BY_CORPUS: dict[str, frozenset[str]] = {
+    "why_suite": frozenset({"p9", "decision", "superseded", "plain", "clean"}),
+    "why_suite_adversarial": frozenset(
+        {
+            "near_tie",
+            "multi_nand",
+            "chain",
+            "wide_decision",
+            "precedence",
+            "boundary",
+            "clean",
+        }
+    ),
+}
 
 # Family → pointer kinds the plant structure CAN legitimately surface
 # (clean points carry ONLY a supports pointer — no contradiction surface;
@@ -99,6 +243,16 @@ FAMILY_CONFLICTED: dict[str, bool] = {
     "decision": True,
     "superseded": True,
     "clean": False,
+    # #2275 adversarial families.  ``boundary`` carries a real NAND (the
+    # conflicts dimension is computed) but its posterior sits AT the
+    # contested threshold, so it is conflicted structure that must NOT read
+    # as a live dispute.
+    "near_tie": True,
+    "multi_nand": True,
+    "chain": True,
+    "wide_decision": True,
+    "precedence": True,
+    "boundary": True,
 }
 # #2490 (terminal-posterior freeze): the gold's conflict-surfacing
 # expectation is NOT identical to the planted-conflict set.  A superseded
@@ -113,10 +267,48 @@ FAMILY_EXPECTED_CONTESTED: dict[str, bool] = {
     "decision": True,
     "superseded": False,
     "clean": False,
+    # #2275: ``chain`` is the #2490 resolved contract stacked on a conflict;
+    # ``boundary`` is live but AT the variance threshold (not contested).
+    "near_tie": True,
+    "multi_nand": True,
+    "chain": False,
+    "wide_decision": True,
+    "precedence": False,
+    "boundary": False,
 }
-FAMILY_DECISION = frozenset({"decision"})
-FAMILY_SUPERSEDED = frozenset({"superseded"})
-FAMILY_RESOLVED = frozenset({"superseded"})  # #2490: resolved-family contract
+FAMILY_DECISION = frozenset({"decision", "wide_decision", "precedence"})
+FAMILY_SUPERSEDED = frozenset({"superseded", "chain"})
+# ``precedence`` is planted superseded too, but its gold must NOT expect the
+# superseded pointer: that pointer is the one the ≤3 dig-deeper cap DROPS
+# when a decision also carries supports + nand + tradeoffs (the precedence
+# arm — the absence is asserted by the benchmark test, not by gold).
+# #2490: resolved-family contract (a superseded/terminal claim is RESOLVED).
+FAMILY_RESOLVED = frozenset({"superseded", "chain", "precedence"})
+
+# The jointly-pinned composition per corpus (every count is a denominator).
+# v1's is unchanged from issue #2100 (40 = 30 conflicted + 10 clean).
+PINNED_COMPOSITION: dict[str, dict[str, int]] = {
+    "why_suite": {
+        "p9": 10,
+        "decision": 5,
+        "superseded": 5,
+        "plain": 10,
+        "clean": 10,
+        "conflicted": 30,
+        "total": 40,
+    },
+    "why_suite_adversarial": {
+        "near_tie": 4,
+        "multi_nand": 4,
+        "chain": 4,
+        "wide_decision": 4,
+        "precedence": 2,
+        "boundary": 3,
+        "clean": 2,
+        "conflicted": 21,
+        "total": 23,
+    },
+}
 
 
 def _require_mapping(doc: object, where: str, issues: list[str]) -> None:
@@ -188,9 +380,18 @@ def _validate_topics(manifest: dict, issues: list[str]) -> None:
     _require_mapping(topics, "manifest.topics", issues)
     if not isinstance(topics, dict):
         return
+    # Families are corpus-scoped (#2275): a v1 family in the adversarial
+    # manifest (or the reverse) would plant a structure no grader/denominator
+    # in that lane knows about.
+    allowed_families = FAMILY_VALUES_BY_CORPUS.get(
+        manifest.get("corpus") or "", FAMILY_VALUES
+    )
     for key in topics:
-        if key not in FAMILY_VALUES:
-            issues.append(f"manifest.topics: unknown family {key!r}")
+        if key not in allowed_families or key not in FAMILY_VALUES:
+            issues.append(
+                f"manifest.topics: unknown family {key!r} for corpus "
+                f"{manifest.get('corpus')!r}"
+            )
             continue
         lst = topics[key]
         if (
@@ -205,15 +406,14 @@ def _validate_topics(manifest: dict, issues: list[str]) -> None:
     _require_mapping(composition, "manifest.composition", issues)
     if not isinstance(composition, dict):
         return
-    expected_composition = {
-        "p9": 10,
-        "decision": 5,
-        "superseded": 5,
-        "plain": 10,
-        "clean": 10,
-        "conflicted": 30,
-        "total": 40,
-    }
+    corpus_name = manifest.get("corpus")
+    expected_composition = PINNED_COMPOSITION.get(corpus_name)
+    if expected_composition is None:
+        issues.append(
+            f"manifest.corpus: unknown corpus {corpus_name!r} "
+            f"(known: {sorted(PINNED_COMPOSITION)})"
+        )
+        return
     for key, want in expected_composition.items():
         got = len(topics[key]) if isinstance(topics.get(key), list) else None
         if composition.get(key) != want:
@@ -265,6 +465,28 @@ def _validate_plant_roles(manifest: dict, issues: list[str]) -> None:
         "decision": {"decision", "support", "option_a", "option_b", "counter"},
         "superseded": {"old", "support", "counter", "successor"},
         "clean": {"claim", "support_a", "support_b"},
+        # #2275 adversarial families.
+        "near_tie": {"claim", "support_a", "support_b", "support_c", "counter"},
+        "multi_nand": {"claim", "support", "counter_a", "counter_b", "counter_c"},
+        "chain": {"old", "support", "counter", "successor", "grand_successor"},
+        "wide_decision": {
+            "decision",
+            "support",
+            "option_a",
+            "option_b",
+            "option_c",
+            "option_d",
+            "counter",
+        },
+        "precedence": {
+            "decision",
+            "support",
+            "option_a",
+            "option_b",
+            "counter",
+            "successor",
+        },
+        "boundary": {"claim", "support", "counter"},
     }
     for family, roles in (plant or {}).items():
         if family not in required:
@@ -324,6 +546,13 @@ _LEGAL_KIND_FAMILY: dict[str, frozenset[str]] = {
     "decision": frozenset({"supports", "nand", "tradeoff"}),
     "superseded": frozenset({"supports", "nand", "superseded"}),
     "clean": frozenset({"supports"}),
+    # #2275 adversarial families.
+    "near_tie": frozenset({"supports", "nand"}),
+    "multi_nand": frozenset({"supports", "nand"}),
+    "chain": frozenset({"supports", "nand", "superseded"}),
+    "wide_decision": frozenset({"supports", "nand", "tradeoff"}),
+    "precedence": frozenset({"supports", "nand", "tradeoff", "superseded"}),
+    "boundary": frozenset({"supports", "nand"}),
 }
 
 # kind → roles that pointer kind may target, per family (a nand pointer
@@ -336,15 +565,41 @@ _KIND_ROLE_TARGETS: dict[str, dict[str, frozenset[str]]] = {
         "decision": frozenset({"support"}),
         "superseded": frozenset({"support"}),
         "clean": frozenset({"support_a", "support_b"}),
+        # The near-tie arm is about WHICH record, so any planted support
+        # role is legal gold — the fixture pins the strongest one.
+        "near_tie": frozenset({"support_a", "support_b", "support_c"}),
+        "multi_nand": frozenset({"support"}),
+        "chain": frozenset({"support"}),
+        "wide_decision": frozenset({"support"}),
+        "precedence": frozenset({"support"}),
+        "boundary": frozenset({"support"}),
     },
     "nand": {
         "p9": frozenset({"counter"}),
         "plain": frozenset({"counter"}),
         "decision": frozenset({"counter"}),
         "superseded": frozenset({"counter"}),
+        "near_tie": frozenset({"counter"}),
+        "multi_nand": frozenset({"counter_a", "counter_b", "counter_c"}),
+        "chain": frozenset({"counter"}),
+        "wide_decision": frozenset({"counter"}),
+        "precedence": frozenset({"counter"}),
+        "boundary": frozenset({"counter"}),
     },
-    "tradeoff": {"decision": frozenset({"option_a", "option_b"})},
-    "superseded": {"superseded": frozenset({"successor"})},
+    "tradeoff": {
+        "decision": frozenset({"option_a", "option_b"}),
+        "wide_decision": frozenset(
+            {"option_a", "option_b", "option_c", "option_d"}
+        ),
+        "precedence": frozenset({"option_a", "option_b"}),
+    },
+    "superseded": {
+        "superseded": frozenset({"successor"}),
+        # The chain arm is about WHICH successor, so either link is legal
+        # gold — the fixture pins the IMMEDIATE one.
+        "chain": frozenset({"successor", "grand_successor"}),
+        "precedence": frozenset({"successor"}),
+    },
 }
 
 
@@ -371,6 +626,9 @@ def _validate_gold_entry(entry: dict, manifest: dict, index: int, issues: list[s
                 "support_chain_sufficient",
                 "resolved",
                 "tradeoff_sufficient",
+                # #2275 adversarial extensions (optional; v1 gold omits them).
+                "nand_roles",
+                "favored_option_role",
             }
         ),
         f"{where}.expected",
@@ -482,16 +740,83 @@ def _validate_gold_entry(entry: dict, manifest: dict, index: int, issues: list[s
                 )
     # Decision points must expect the tradeoff target (the EP-favored
     # alternative); superseded points the successor.
-    if family == "decision" and "tradeoff" not in seen_kinds:
+    if family in FAMILY_DECISION and "tradeoff" not in seen_kinds:
         issues.append(
             f"{where}: decision-family gold must expect a tradeoff pointer "
             "(E2E-1 decision-point trade-offs)"
         )
-    if family == "superseded" and "superseded" not in seen_kinds:
+    if family in FAMILY_SUPERSEDED and "superseded" not in seen_kinds:
         issues.append(
             f"{where}: superseded-family gold must expect the superseded "
             "(successor) pointer (E2E-7 dig-deeper navigation)"
         )
+    _validate_adversarial_expected(expected, manifest, family, where, issues)
+
+
+_ADVERSARIAL_SEVERITIES = frozenset({"high", "medium"})
+
+
+def _validate_adversarial_expected(
+    expected: dict, manifest: dict, family: str | None, where: str, issues: list[str]
+) -> None:
+    """#2275: the two additive adversarial gold fields.
+
+    ``nand_roles`` (planted NANDers in PLANT order, ``{role, severity}``)
+    must resolve to roles the family actually plants — the recovery metrics
+    resolve ids through it, so a typo would silently shrink a denominator.
+    ``favored_option_role`` must be an option role the family plants (an
+    unresolvable favorite would mass-fail tradeoff sufficiency with no
+    explanation).
+    """
+    plant_roles = (manifest.get("plant_roles") or {}).get(family or "") or {}
+    nand_roles = expected.get("nand_roles")
+    if nand_roles is not None:
+        if family not in FAMILY_CONFLICTED or not FAMILY_CONFLICTED[family]:
+            issues.append(
+                f"{where}.expected.nand_roles: family {family!r} plants no "
+                "conflict structure — a NAND expectation there is a corpus error"
+            )
+        if not isinstance(nand_roles, list) or not nand_roles:
+            issues.append(f"{where}.expected.nand_roles: expected a non-empty list")
+        else:
+            seen: set[str] = set()
+            for index, spec in enumerate(nand_roles):
+                swhere = f"{where}.expected.nand_roles[{index}]"
+                _require_mapping(spec, swhere, issues)
+                if not isinstance(spec, dict):
+                    continue
+                _reject_unknown_keys(spec, frozenset({"role", "severity"}), swhere, issues)
+                role = _expect_str(spec, "role", swhere, issues)
+                _expect_enum(spec, "severity", _ADVERSARIAL_SEVERITIES, swhere, issues)
+                if role is not None and role not in plant_roles:
+                    issues.append(
+                        f"{swhere}.role: {role!r} is not a role the manifest "
+                        f"plants for family {family!r} (roles: {sorted(plant_roles)})"
+                    )
+                if role is not None:
+                    if role in seen:
+                        issues.append(f"{swhere}.role: duplicate planted NAND role {role!r}")
+                    seen.add(role)
+    favored = expected.get("favored_option_role")
+    if favored is not None:
+        if not isinstance(favored, str) or not favored.strip():
+            issues.append(
+                f"{where}.expected.favored_option_role: expected a role name, got {favored!r}"
+            )
+        elif family not in FAMILY_DECISION:
+            issues.append(
+                f"{where}.expected.favored_option_role: family {family!r} is not a "
+                "decision family — there is no EP-favored alternative to name"
+            )
+        elif not favored.startswith("option_"):
+            issues.append(
+                f"{where}.expected.favored_option_role: expected an option role, got {favored!r}"
+            )
+        elif favored not in plant_roles:
+            issues.append(
+                f"{where}.expected.favored_option_role: role {favored!r} is not "
+                f"planted for family {family!r} (roles: {sorted(plant_roles)})"
+            )
 
 
 def validate_gold(gold: dict, manifest: dict | None = None) -> list[str]:
@@ -545,7 +870,7 @@ def validate_gold(gold: dict, manifest: dict | None = None) -> list[str]:
 # ═══ Metric aggregation → baseline metrics ═════════════════════════════════
 
 
-def aggregate_metrics(point_results: list[dict]) -> dict:
+def aggregate_metrics(point_results: list[dict], corpus: str = DEFAULT_CORPUS) -> dict:
     """Fold per-point why-grades into the canonical metric snapshot.
 
     ``point_results`` is one dict per graded point (see
@@ -578,7 +903,7 @@ def aggregate_metrics(point_results: list[dict]) -> dict:
     tradeoff_ok = sum(1 for r in decisions if r.get("tradeoff_sufficient") is True)
     clean = [r for r in point_results if r.get("clean")]
     fp = sum(1 for r in clean if r.get("false_positive"))
-    return {
+    metrics = {
         "conflict_surfacing_rate": (
             conflicted_ok / len(expected_conflict) if expected_conflict else 0.0
         ),
@@ -587,15 +912,52 @@ def aggregate_metrics(point_results: list[dict]) -> dict:
         "tradeoff_sufficiency": (tradeoff_ok / len(decisions) if decisions else 0.0),
         "false_positive_rate": (fp / len(clean) if clean else 1.0),
     }
+    if corpus == ADVERSARIAL_CORPUS:
+        metrics.update(_adversarial_metrics(point_results))
+    return metrics
+
+
+def _adversarial_metrics(point_results: list[dict]) -> dict:
+    """The three adversarial arms (#2275).  Each denominator collapses to
+    the WORST value when empty (same convention as the five above) — a
+    corpus that stops planting an edge case must read as a failure, never as
+    a clean pass."""
+    # NAND recovery over the LIVE conflicted plant (resolved points plant
+    # NANDs too, but the #2490 contract grades those by navigation only).
+    planted = sum(int(r.get("nand_planted") or 0) for r in point_results)
+    recovered = sum(int(r.get("nand_recovered") or 0) for r in point_results)
+    over_cap = [r for r in point_results if r.get("over_cap_cluster")]
+    high_ok = sum(1 for r in over_cap if r.get("high_severity_recovered") is True)
+    classified = [r for r in point_results if r.get("expected_contested") is not None]
+    correct = sum(
+        1 for r in classified if bool(r.get("reads_contested")) == bool(r.get("expected_contested"))
+    )
+    return {
+        "nand_recovery_rate": (recovered / planted if planted else 0.0),
+        "high_severity_nand_recovery": (high_ok / len(over_cap) if over_cap else 0.0),
+        "contested_classification_accuracy": (
+            correct / len(classified) if classified else 0.0
+        ),
+    }
 
 
 # ═══ Baseline machinery (why-suite vocabulary; discipline mirrors W2-b) ════
 
 
-def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> None:
+def _validate_metric_values(
+    metrics: dict,
+    where: str,
+    issues: list[str],
+    *,
+    corpus: str = DEFAULT_CORPUS,
+) -> None:
+    vocabulary = metric_values(corpus)
     for key, value in metrics.items():
-        if key not in METRIC_VALUES:
-            issues.append(f"{where}: unknown metric {key!r} (vocabulary: {sorted(METRIC_VALUES)})")
+        if key not in vocabulary:
+            issues.append(
+                f"{where}: unknown metric {key!r} "
+                f"(corpus {corpus!r} vocabulary: {sorted(vocabulary)})"
+            )
             continue
         if isinstance(value, bool) or not isinstance(value, (int, float)):
             issues.append(f"{where}.{key}: expected a number, got {value!r}")
@@ -604,20 +966,16 @@ def _validate_metric_values(metrics: dict, where: str, issues: list[str]) -> Non
 
 
 def _standing_bars_tripped(metrics: dict, baseline: dict) -> bool:
-    """The why-suite standing bars (E2E-7 / issue targets): conflict
-    surfacing >= 0.95, dig-deeper navigation >= 0.95, 0 clean false
-    positives.  Armed when the committed baseline's config.reflex ==
-    "graded" (the graded artifact is delivered — this suite is the A11
-    pilot gate from day one; a null-reflex baseline would record honestly
-    pre-gate without gating, mirroring the W3-a harness semantics)."""
+    """The corpus's standing bars (E2E-7 / issue targets for v1; the
+    adversarial arms for #2275's corpus).  Armed when the committed
+    baseline's config.reflex == "graded" (the graded artifact is delivered —
+    this suite is the A11 pilot gate from day one; a null-reflex baseline
+    would record honestly pre-gate without gating, mirroring the W3-a
+    harness semantics)."""
     committed_reflex = (baseline.get("config") or {}).get("reflex")
     if committed_reflex != "graded":
         return False
-    return (
-        metrics.get("conflict_surfacing_rate", 0.0) < CONFLICT_SURFACING_FLOOR
-        or metrics.get("dig_deeper_navigation_accuracy", 0.0) < DIG_DEEPER_NAV_FLOOR
-        or metrics.get("false_positive_rate", 1.0) > FALSE_POSITIVE_TOLERANCE
-    )
+    return bool(tripped_bars(metrics, corpus_of(baseline)))
 
 
 def compare_run(
@@ -683,7 +1041,8 @@ def bless_baseline(
             "publishing a baseline requires a non-null judge_pin (the pinned judge prompt version)"
         )
     run_metric_issues: list[str] = []
-    _validate_metric_values(run["metrics"], "run.metrics", run_metric_issues)
+    run_corpus = corpus_of(run.get("config") or {})
+    _validate_metric_values(run["metrics"], "run.metrics", run_metric_issues, corpus=run_corpus)
     if run_metric_issues:
         raise ValueError(
             "cannot bless: run metrics are not valid published values — "
@@ -740,12 +1099,13 @@ def bless_baseline(
                 f"cannot bless: compare verdict is {VERDICT_INCONCLUSIVE} "
                 f"(config, fixtures_hash, or judge_pin mismatch)"
             )
-    missing_metrics = sorted(METRIC_VALUES - set(run["metrics"]))
+    missing_metrics = sorted(metric_values(run_corpus) - set(run["metrics"]))
     if missing_metrics:
         raise ValueError(
             "cannot bless: run metrics are missing graded dimensions "
             f"{missing_metrics} — a published baseline must snapshot the full "
-            f"{len(METRIC_VALUES)}-metric vocabulary"
+            f"{len(metric_values(run_corpus))}-metric vocabulary for corpus "
+            f"{run_corpus!r}"
         )
     history_entry = {
         "date": run["date"],
@@ -770,7 +1130,9 @@ def bless_baseline(
     }
 
 
-def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
+def _validate_history_entry(
+    entry: dict, index: int, issues: list[str], *, corpus: str = DEFAULT_CORPUS
+) -> None:
     where = f"baseline.history[{index}]"
     _reject_unknown_keys(
         entry,
@@ -799,7 +1161,7 @@ def _validate_history_entry(entry: dict, index: int, issues: list[str]) -> None:
     if not isinstance(values, dict):
         issues.append(f"{where}.values: expected an object (the run's metrics)")
     else:
-        _validate_metric_values(values, f"{where}.values", issues)
+        _validate_metric_values(values, f"{where}.values", issues, corpus=corpus)
     failure_classes = entry.get("failure_classes", [])
     if not isinstance(failure_classes, list) or not all(
         isinstance(f, str) for f in failure_classes
@@ -845,11 +1207,23 @@ def validate_baseline(baseline: dict) -> list[str]:
             _reject_unknown_keys(
                 config,
                 frozenset(
-                    {"suites", "mode", "reflex", "holdout_excluded", "seed", "extractor_posture"}
+                    {
+                        "suites",
+                        "mode",
+                        "reflex",
+                        "holdout_excluded",
+                        "seed",
+                        "extractor_posture",
+                        # #2275: the corpus a baseline scores (a run of the
+                        # other corpus is a config mismatch ⇒ inconclusive).
+                        "corpus",
+                    }
                 ),
                 "baseline.config",
                 issues,
             )
+            if config.get("corpus") is not None:
+                _expect_enum(config, "corpus", CORPUS_VALUES, "baseline.config", issues)
             suites = config.get("suites")
             if not isinstance(suites, list) or not suites or not set(suites) <= SUITE_VALUES:
                 issues.append(
@@ -879,13 +1253,15 @@ def validate_baseline(baseline: dict) -> list[str]:
         if not isinstance(metrics, dict):
             issues.append("baseline.metrics: expected an object")
         elif metrics:
-            _validate_metric_values(metrics, "baseline.metrics", issues)
-            missing_metrics = sorted(METRIC_VALUES - set(metrics))
+            corpus = corpus_of(baseline)
+            _validate_metric_values(metrics, "baseline.metrics", issues, corpus=corpus)
+            missing_metrics = sorted(metric_values(corpus) - set(metrics))
             if missing_metrics:
                 issues.append(
                     "baseline.metrics: published baseline is missing graded "
                     f"dimensions {missing_metrics} — must snapshot the full "
-                    f"{len(METRIC_VALUES)}-metric vocabulary"
+                    f"{len(metric_values(corpus))}-metric vocabulary for corpus "
+                    f"{corpus!r}"
                 )
         # Cross-invariants (parity with the harness): a PUBLISHED baseline
         # (non-empty metrics) must carry a judge_pin AND a justification; a
@@ -920,5 +1296,5 @@ def validate_baseline(baseline: dict) -> list[str]:
             for index, entry in enumerate(history):
                 _require_mapping(entry, f"baseline.history[{index}]", issues)
                 if isinstance(entry, dict):
-                    _validate_history_entry(entry, index, issues)
+                    _validate_history_entry(entry, index, issues, corpus=corpus_of(baseline))
     return issues

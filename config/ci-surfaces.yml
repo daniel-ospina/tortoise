@@ -1634,6 +1634,18 @@ surfaces:
   - eval/why_suite/test_why_suite_schema.py
   - eval/why_suite/test_why_suite_grading.py
   - eval/why_suite/test_why_suite_ab.py
+  # #2275: the adversarial why-suite corpus — the SECOND jointly-pinned fixture
+  # set (near-tie supports, multi-NAND clusters wider than the surfacing cap,
+  # two-link supersede chains, 3+-alternative decisions, mixed-stack pointer
+  # precedence, and a posterior sitting exactly ON the contested threshold).
+  # The hermetic half lives here (corpus drift/validation for BOTH corpora, the
+  # v1 hash pin, corpus-scoped metric vocabularies, and the naive-assembly
+  # discrimination probe); the REAL seeded gate over this corpus is the
+  # `--corpus why_suite_adversarial` lane asserted in
+  # `test_why_suite_benchmark.py` above. Registered under `eval` for the same
+  # reason as its siblings: an unregistered file is never selected on an eval
+  # diff and the manifest-integrity leg fails.
+  - eval/why_suite/test_why_suite_adversarial_corpus.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
   # replay gate against the write-path corpus. The deterministic M2 echo

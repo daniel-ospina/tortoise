@@ -8,7 +8,7 @@ Runs the why-layer suite on ONE hermetic throwaway graph:
 2. **assemble** — the W4 why-block assembly (``tortoise.why.
    assemble_why_blocks``) produces the canonical §3.1.4 surfaced context for
    every planted point (A11: this block is ALL the grader sees);
-3. **grade** — the deterministic graders (the ``judge_why_suite_v2`` pinned
+3. **grade** — the deterministic graders (the ``judge_why_suite_v3`` pinned
    rubric) answer the four why-questions from each block ALONE — conflict
    surfacing / dig-deeper navigation (pointer targets resolved against the
    planted role map the harness owns) / support-chain + trade-off
@@ -47,7 +47,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))  # why_suite pkg
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))  # tests/
 
-from eval.why_suite import a4_ab, corpus, grading, judge, schema, seeding
+from eval.why_suite import a4_ab, adversarial, corpus, grading, judge, schema, seeding
 
 REPO_ROOT = corpus.WHY_DIR.parent.parent.parent
 WHY_DIR = corpus.WHY_DIR
@@ -133,16 +133,21 @@ def _teardown_graph(sdk) -> None:
 # ── Pre-flight (mirrors the harness; why-suite corpus + judge pin) ────────
 
 
-def preflight(root: Path = WHY_DIR, *, posture: str = "llm") -> dict:
+def preflight(
+    root: Path = WHY_DIR, *, posture: str = "llm", corpus_name: str = corpus.DEFAULT_CORPUS
+) -> dict:
     """Corpus integrity + baseline readiness + the JUDGE-PIN PRE-STEP.
 
     Returns {"ok", "issues", "fixtures_hash", "judge_pin", "baseline"}.
     The pinned judge is asserted HERE (issue Indicator 2): the on-disk
     prompt hash must equal the committed protocol anchor; a drift fails the
     run before any grading (never a silent compare under a different
-    protocol)."""
+    protocol).  ``corpus_name`` scopes every fixture/baseline read to ONE
+    corpus (#2275) — the two corpora never share a hash, a gold file, or a
+    baseline lane."""
     issues: list[str] = []
-    verification = corpus.verify_manifest(root)
+    corpus.profile(corpus_name)  # unknown corpus name → LOUD error
+    verification = corpus.verify_manifest(root, corpus=corpus_name)
     if not verification["ok"]:
         if verification["malformed"]:
             issues.append(f"manifest verification failed: {verification['malformed']}")
@@ -152,9 +157,9 @@ def preflight(root: Path = WHY_DIR, *, posture: str = "llm") -> dict:
             issues.append(f"manifest verification failed: extra {rel}")
         for rel in verification["mismatched"]:
             issues.append(f"manifest verification failed: mismatched {rel}")
-    manifest = corpus.load_manifest(root)
+    manifest = corpus.load_manifest(root, corpus=corpus_name)
     issues.extend(f"manifest: {i}" for i in schema.validate_manifest(manifest))
-    gold = corpus.gold_doc(root)
+    gold = corpus.gold_doc(root, corpus=corpus_name)
     issues.extend(f"gold: {i}" for i in schema.validate_gold(gold, manifest))
     # Judge-pin pre-step (fail-closed protocol drift).
     try:
@@ -162,8 +167,8 @@ def preflight(root: Path = WHY_DIR, *, posture: str = "llm") -> dict:
     except AssertionError as exc:
         issues.append(f"judge pin: {exc}")
         pin = None
-    fixtures_hash = corpus.compute_fixtures_hash(root)
-    baseline = corpus.load_baseline(root, posture=posture)
+    fixtures_hash = corpus.compute_fixtures_hash(root, corpus=corpus_name)
+    baseline = corpus.load_baseline(root, posture=posture, corpus=corpus_name)
     baseline_issues = schema.validate_baseline(baseline)
     if baseline_issues:
         issues.extend(f"baseline ({posture}): {i}" for i in baseline_issues)
@@ -171,6 +176,11 @@ def preflight(root: Path = WHY_DIR, *, posture: str = "llm") -> dict:
         issues.append(
             "baseline.fixtures_hash != on-disk corpus hash "
             f"({baseline.get('fixtures_hash')} vs {fixtures_hash}) — corpus drift"
+        )
+    baseline_corpus = (baseline.get("config") or {}).get("corpus")
+    if baseline_corpus is not None and baseline_corpus != corpus_name:
+        issues.append(
+            f"baseline config corpus {baseline_corpus!r} != run corpus {corpus_name!r}"
         )
     cfg_posture = (baseline.get("config") or {}).get("extractor_posture")
     if cfg_posture != posture:
@@ -216,11 +226,27 @@ GRADED_ROLE: dict[str, str] = {
     "decision": "decision",
     "superseded": "old",
     "clean": "claim",
+    **adversarial.GRADED_ROLE,  # #2275 adversarial families
 }
 
 
+def _impl(corpus_name: str):
+    """The (seed, resolve_expected, grade_point) triple for a corpus.
+
+    The adversarial corpus (#2275) shares the v1 graders and adds its own
+    arms; keeping the dispatch in ONE place means the runner has no
+    corpus-conditional grading logic of its own."""
+    if corpus_name == corpus.ADVERSARIAL_CORPUS:
+        return adversarial.seed_corpus, adversarial.resolve_expected, adversarial.grade_point
+    return seeding.seed_why_corpus, grading.resolve_expected, grading.grade_point
+
+
 def grade_all_points(
-    sdk, seed_result: dict, gold: dict, log: list[str] | None = None
+    sdk,
+    seed_result: dict,
+    gold: dict,
+    log: list[str] | None = None,
+    corpus_name: str = corpus.DEFAULT_CORPUS,
 ) -> list[dict]:
     """Assemble + grade every planted point from the SURFACED CONTEXT ALONE.
 
@@ -234,6 +260,7 @@ def grade_all_points(
     log = log if log is not None else []
     from tortoise.why import assemble_why_blocks
 
+    _, resolve_expected, grade_point = _impl(corpus_name)
     proj = sdk._get_proj()
     roles = seed_result["roles"]
     entries = gold.get("entries") or []
@@ -268,11 +295,11 @@ def grade_all_points(
     for entry in entries:
         topic = entry.get("point_id")
         role_map_entry = roles.get(topic) or {}
-        expected = grading.resolve_expected(entry, role_map_entry)
+        expected = resolve_expected(entry, role_map_entry)
         point_id = graded_by_topic.get(topic, topic)
         block = dict(blocks.get(point_id) or {})
         block.setdefault("point_id", point_id)
-        row = grading.grade_point(block, expected)
+        row = grade_point(block, expected)
         row["topic"] = topic
         row["point_id"] = point_id
         rows.append(row)
@@ -288,12 +315,20 @@ def run_benchmark(
     config: dict | None = None,
     progress=None,
     a4: bool = True,
+    corpus_name: str = corpus.DEFAULT_CORPUS,
 ) -> dict:
     """Full why-suite run: preflight → seed → assemble → grade → aggregate →
-    A4 arm → compare.  Returns the run report (receipt-ready)."""
+    A4 arm → compare.  Returns the run report (receipt-ready).
+
+    ``corpus_name`` selects the jointly-pinned corpus (#2275): its fixtures,
+    its gold, and its OWN committed baseline lane.  The A4 arm is a v1-corpus
+    eval-phase measurement (its twin pairs are planted by ``seeding``), so the
+    adversarial lane records ``a4_result=None`` rather than mixing lanes."""
     log = log if log is not None else []
     run_id = run_id or f"w3b-{uuid.uuid4().hex[:12]}"
     notes = list(notes or [])
+    profile = corpus.profile(corpus_name)
+    seed_corpus, _, _ = _impl(corpus_name)
     env_posture = _env_posture()
     resolved_config = dict(corpus.BASELINE_CONFIG)
     resolved_config.pop("extractor_posture", None)  # env owns the posture
@@ -308,10 +343,12 @@ def run_benchmark(
         resolved_config.update(config)
     resolved_config["extractor_posture"] = env_posture
     resolved_config["holdout_excluded"] = False  # no holdout split in this corpus
+    resolved_config["corpus"] = corpus_name
+    resolved_config["seed"] = profile.seed
     date = _now_iso()
     commit = _git_head()
 
-    pf = preflight(root, posture=env_posture)
+    pf = preflight(root, posture=env_posture, corpus_name=corpus_name)
     if not pf["ok"]:
         return _failed_report(
             run_id,
@@ -350,18 +387,20 @@ def run_benchmark(
     try:
         sdk = _open_graph(run_id, log=log)
         log.append(
-            "seeding the shared E2E-1 planted-conflict corpus (40 points: 30 conflicted + 10 clean)"
+            f"seeding the {corpus_name} corpus ({profile.points} planted points)"
         )
-        seed_result = seeding.seed_why_corpus(sdk)
-        gold = corpus.gold_doc(root)
-        point_results = grade_all_points(sdk, seed_result, gold, log=log)
+        seed_result = seed_corpus(sdk)
+        gold = corpus.gold_doc(root, corpus=corpus_name)
+        point_results = grade_all_points(
+            sdk, seed_result, gold, log=log, corpus_name=corpus_name
+        )
         if len(point_results) != len(gold.get("entries") or []):
             runner_errors.append(
                 f"graded {len(point_results)} points but gold has "
                 f"{len(gold.get('entries') or [])} entries — a planted point "
                 "was silently skipped"
             )
-        if a4:
+        if a4 and corpus_name == corpus.DEFAULT_CORPUS:
             log.append(
                 "A4 arm: contested-boost vs confidence-only over the "
                 "planted twin pairs (eval-phase, never gating)"
@@ -392,11 +431,11 @@ def run_benchmark(
             log=log,
             point_results=point_results,
         )
-        report["metrics"] = schema.aggregate_metrics(point_results)
+        report["metrics"] = schema.aggregate_metrics(point_results, corpus=corpus_name)
         report["judge_pin"] = run_pin
         return report
 
-    metrics = schema.aggregate_metrics(point_results)
+    metrics = schema.aggregate_metrics(point_results, corpus=corpus_name)
     log.append(
         "metrics: "
         + json.dumps({k: round(v, 4) if isinstance(v, float) else v for k, v in metrics.items()})
@@ -520,6 +559,13 @@ def build_receipt(report: dict, *, justification: str | None = None) -> dict:
                 "tradeoff_sufficient": r.get("tradeoff_sufficient"),
                 "fabricated_tradeoffs": r.get("fabricated_tradeoffs"),
                 "false_positive": r.get("false_positive"),
+                # #2275 adversarial arms (None/absent on v1 rows).
+                "nand_planted": r.get("nand_planted"),
+                "nand_recovered": r.get("nand_recovered"),
+                "high_severity_recovered": r.get("high_severity_recovered"),
+                "expected_contested": r.get("expected_contested"),
+                "reads_contested": r.get("reads_contested"),
+                "pointer_kinds": r.get("pointer_kinds"),
             }
             for r in report.get("point_results", [])
         ],
@@ -596,29 +642,25 @@ def _bless_main(
     corpus_bless: bool,
     protocol_bless: bool,
     notes: list[str],
+    corpus_name: str = corpus.DEFAULT_CORPUS,
 ) -> int:
     """--bless: run then bless the run's metrics into the posture's
     committed baseline (guards authoritative — drift / config-mismatch /
     inconclusive raise; a regression re-publish records its verdict in
     history per the fix-wave protocol)."""
-    baseline_path = corpus.baseline_path(root, posture=posture)
-    pending = corpus.load_baseline(root, posture=posture)
-    report = run_benchmark(root=root, run_id=run_id, notes=notes, progress=sys.stderr)
+    baseline_path = corpus.baseline_path(root, posture=posture, corpus=corpus_name)
+    pending = corpus.load_baseline(root, posture=posture, corpus=corpus_name)
+    report = run_benchmark(
+        root=root, run_id=run_id, notes=notes, progress=sys.stderr, corpus_name=corpus_name
+    )
     if report["run_status"] != "completed":
         print(f"run failed ({report['failure_origin']}): " + "; ".join(report.get("log", [])[-4:]))
         return 2
     try:
-        failure_classes = []
-        if report["metrics"].get("conflict_surfacing_rate", 0.0) < schema.CONFLICT_SURFACING_FLOOR:
-            failure_classes.append("conflict-surfacing-below-floor")
-        if (
-            report["metrics"].get("dig_deeper_navigation_accuracy", 0.0)
-            < schema.DIG_DEEPER_NAV_FLOOR
+        failure_classes = schema.tripped_bars(report["metrics"], corpus_name)
+        if corpus_name == corpus.DEFAULT_CORPUS and not (
+            report["a4_result"] and report["a4_result"].get("measured")
         ):
-            failure_classes.append("dig-deeper-navigation-below-floor")
-        if report["metrics"].get("false_positive_rate", 0.0) > schema.FALSE_POSITIVE_TOLERANCE:
-            failure_classes.append("clean-false-positives")
-        if not report["a4_result"] or not report["a4_result"].get("measured"):
             failure_classes.append("a4-not-measured")
         blessed = schema.bless_baseline(
             pending,
@@ -669,6 +711,12 @@ def _arg_value(args: list[str], flag: str) -> str | None:
 
 def _main(argv: list[str] | None = None) -> int:
     args = list(sys.argv[1:] if argv is None else argv)
+    corpus_name = _arg_value(args, "--corpus") or corpus.DEFAULT_CORPUS
+    try:
+        corpus.profile(corpus_name)
+    except ValueError as exc:
+        print(str(exc))
+        return 3
     run_only = not any(
         flag in args for flag in ("--bless", "--compare", "--bless-corpus", "--bless-protocol")
     )
@@ -679,9 +727,10 @@ def _main(argv: list[str] | None = None) -> int:
         run_config = None
         if "--full" in args:
             run_config = {"mode": "full"}
-        report = run_benchmark(progress=progress, config=run_config)
+        report = run_benchmark(progress=progress, config=run_config, corpus_name=corpus_name)
         print(
-            f"run {report['run_id']}: status={report['run_status']} "
+            f"run {report['run_id']}: corpus={corpus_name} "
+            f"status={report['run_status']} "
             f"verdict={report['verdict']} origin={report['failure_origin']}"
         )
         print(
@@ -720,6 +769,7 @@ def _main(argv: list[str] | None = None) -> int:
             corpus_bless="--bless-corpus" in args,
             protocol_bless="--bless-protocol" in args,
             notes=["blessed via CLI"],
+            corpus_name=corpus_name,
         )
     print(__doc__)
     return 0

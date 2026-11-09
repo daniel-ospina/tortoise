@@ -107,7 +107,7 @@ def test_committed_gold_valid_and_resolves_against_manifest():
 
 def test_judge_pin_format_and_prestep():
     pin = judge.judge_pin()
-    assert pin.startswith("judge_why_suite_v2:")
+    assert pin.startswith("judge_why_suite_v3:")
     assert len(pin.split(":")[1]) == 64
     assert judge.assert_prompt_pinned() == pin
     # The pre-step fails closed on a drifted prompt (protocol change must be
@@ -545,7 +545,7 @@ def test_compare_hash_config_pin_mismatches_are_inconclusive():
             baseline,
             resolved_config=base_config(baseline),
             run_fixtures_hash=HASH_A,
-            run_judge_pin="judge_why_suite_v2:" + "0" * 64,
+            run_judge_pin="judge_why_suite_v3:" + "0" * 64,
         )
         == VERDICT_INCONCLUSIVE
     )
@@ -612,7 +612,7 @@ def test_bless_rejects_pin_change_without_protocol_bless():
     run = {
         "date": "2026-09-06T00:00:00Z",
         "fixtures_hash": HASH_A,
-        "judge_pin": "judge_why_suite_v2:" + "0" * 64,
+        "judge_pin": "judge_why_suite_v3:" + "0" * 64,
         "config": BASE_CONFIG,
         "metrics": {
             "conflict_surfacing_rate": 1.0,

@@ -13,7 +13,7 @@ Assertions cover the properties the issue owns:
   arm is 0 (clean points never invent contradictions);
 * A11: graded from the canonical why-block only (the grader row never
   touches the graph);
-* judge pin: the run's pin is the pinned ``judge_why_suite_v2`` (prompt
+* judge pin: the run's pin is the pinned ``judge_why_suite_v3`` (prompt
   hash asserted in the pre-step) and the receipt validates with per-point
   rows;
 * determinism: two full runs produce byte-identical metrics;
@@ -37,7 +37,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parent.parent.parent.parent
 
-from eval.why_suite import corpus, judge, runner, schema, seeding  # noqa: E402
+from eval.why_suite import adversarial, corpus, judge, runner, schema, seeding  # noqa: E402
 
 pytestmark = pytest.mark.timeout(900)
 
@@ -117,7 +117,7 @@ def test_full_corpus_grades_e2e7_bars_from_surfaced_context(m2_env):
     assert all(r["support_sufficient"] is True for r in report["point_results"] if not r["expected_resolved"])
     # Judge pin: the pinned protocol + the pre-step hash assertion.
     assert report["judge_pin"] == judge.judge_pin()
-    assert "judge_why_suite_v2:" in report["judge_pin"]
+    assert "judge_why_suite_v3:" in report["judge_pin"]
     # A11 note present (graded from surfaced context only).
     assert any("surfaced context ONLY (A11)" in n for n in report["notes"])
     # Receipt validates with per-point rows (evidentiality).
@@ -208,8 +208,8 @@ def test_judge_pin_drift_fails_preflight(m2_env, tmp_path, monkeypatch):
     root = _tmp_corpus(tmp_path)
     # Point the judge module at the corpus copy's prompt (the pre-step must
     # guard the artifact the RUN would grade under, not the installed one).
-    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v2.txt")
-    judge_path = Path(root) / "judge_why_suite_v2.txt"
+    monkeypatch.setattr(judge, "JUDGE_PROMPT_PATH", Path(root) / "judge_why_suite_v3.txt")
+    judge_path = Path(root) / "judge_why_suite_v3.txt"
     judge_path.write_text("DRIFTED PROTOCOL\n", encoding="utf-8")
     report = runner.run_benchmark(root=root)
     assert report["run_status"] == "failed"
@@ -306,3 +306,169 @@ def test_manifest_topics_cover_w4a_families(m2_env):
         assert len(manifest["topics"][family]) == count
         for topic in manifest["topics"][family]:
             assert topic.startswith(f"{family}-topic-")
+
+
+# ── The ADVERSARIAL corpus lane (#2275) ──────────────────────────────────
+# A SECOND jointly-pinned corpus graded by the same runner at its own
+# posture/lane.  The v1 lane above is untouched by these tests: they run
+# `run_benchmark(corpus_name=...)`, which scopes the fixtures, the gold AND
+# the committed baseline file.
+
+ADV = adversarial.ADVERSARIAL_CORPUS
+
+
+@pytest.fixture(scope="module")
+def adv_report() -> dict:
+    """ONE adversarial run shared by the lane + per-family tests (each run
+    seeds a fresh hermetic graph; two runs would double the module's cost for
+    the same numbers)."""
+    saved = os.environ.get("TORTOISE_SESSION_EXTRACTOR")
+    os.environ["TORTOISE_SESSION_EXTRACTOR"] = "m2"
+    try:
+        yield runner.run_benchmark(corpus_name=ADV)
+    finally:
+        if saved is None:
+            os.environ.pop("TORTOISE_SESSION_EXTRACTOR", None)
+        else:
+            os.environ["TORTOISE_SESSION_EXTRACTOR"] = saved
+
+
+def test_adversarial_corpus_lane_meets_its_standing_bars(adv_report):
+    """The adversarial lane runs end to end at its own posture: every planted
+    point grades, the three E2E-7 floors hold, and the adversarial arms hold
+    — including the bar that is NOT structurally 1.0 (the ≤2 NAND cap makes
+    full recovery impossible on the multi_nand family)."""
+    report = adv_report
+    assert report["run_status"] == "completed", report.get("log")
+    assert report["verdict"] == schema.VERDICT_INCONCLUSIVE  # first-run pending
+    assert report["failure_origin"] is None
+    assert (report["resolved_config"] or {}).get("corpus") == ADV
+    assert (report["resolved_config"] or {}).get("extractor_posture") == "m2"
+    metrics = report["metrics"]
+    assert set(metrics) == schema.ADVERSARIAL_METRIC_VALUES
+    assert schema.tripped_bars(metrics, ADV) == []
+    # The v1 floors still hold on the adversarial plant.
+    assert metrics["conflict_surfacing_rate"] >= schema.CONFLICT_SURFACING_FLOOR
+    assert metrics["dig_deeper_navigation_accuracy"] >= schema.DIG_DEEPER_NAV_FLOOR
+    assert metrics["false_positive_rate"] <= schema.FALSE_POSITIVE_TOLERANCE
+    assert metrics["support_chain_sufficiency"] == 1.0
+    assert metrics["tradeoff_sufficiency"] == 1.0
+    # THE acceptance-criterion bar: the cap bounds recovery BELOW 1.0, so this
+    # bar can never be met by construction — it is a real measurement.
+    assert metrics["nand_recovery_rate"] < 1.0
+    assert metrics["nand_recovery_rate"] == pytest.approx(19 / 23)
+    assert metrics["nand_recovery_rate"] >= schema.NAND_RECOVERY_FLOOR
+    assert metrics["high_severity_nand_recovery"] >= schema.HIGH_SEVERITY_RECOVERY_FLOOR
+    assert metrics["contested_classification_accuracy"] >= (
+        schema.CONTESTED_CLASSIFICATION_FLOOR
+    )
+    # Every gold entry has a graded row (no planted point silently skipped).
+    assert len(report["point_results"]) == len(
+        corpus.gold_doc(corpus=ADV).get("entries") or []
+    )
+    # Receipt: per-point rows tie the aggregate to the graded points, and the
+    # run is pinned to the SAME protocol as v1 (one judge, two corpora).
+    receipt = runner.build_receipt(report)
+    assert runner.validate_receipt(receipt) == []
+    assert receipt["corpus_hash"] == corpus.compute_fixtures_hash(corpus=ADV)
+    assert receipt["judge_pin"] == judge.judge_pin()
+    assert len(receipt["point_results"]) == 23
+    # The A4 eval-phase arm is a v1-corpus measurement (its twin pairs are
+    # planted by the v1 seeding) — the adversarial lane records None rather
+    # than mixing lanes.
+    assert report["a4_result"] is None
+
+
+def test_adversarial_corpus_per_family_contracts(adv_report):
+    """The per-family edge-case contracts, read off the real run's rows.
+
+    Each of these is the property its family exists to falsify — a sub-
+    assembly regression that keeps the aggregate rates high can still break
+    one of them."""
+    report = adv_report
+    rows = report["point_results"]
+    by_family: dict[str, list[dict]] = {}
+    for row in rows:
+        by_family.setdefault(row["family"], []).append(row)
+
+    # near_tie: the supports pointer must be the HIGHEST-weight record (the
+    # one planted last), and the claim is contested.
+    for row in by_family["near_tie"]:
+        assert row["nav_correct"] == row["nav_total"] == 2
+        assert row["conflict_surfaced"] is True
+        assert row["reads_contested"] is True
+
+    # multi_nand: 3 planted against the ≤2 cap — 2 surfaced, and the HIGH
+    # severity one is among them (severity ordering, not insertion order).
+    for row in by_family["multi_nand"]:
+        assert (row["nand_planted"], row["nand_recovered"]) == (3, 2)
+        assert row["high_severity_recovered"] is True
+        assert row["nav_correct"] == row["nav_total"] == 2
+
+    # chain: the superseded pointer lands on the IMMEDIATE successor and the
+    # #2490 resolved presentation holds (never a live dispute).
+    for row in by_family["chain"]:
+        assert row["expected_resolved"] is True and row["resolved_ok"] is True
+        assert row["reads_contested"] is False
+        assert row["nav_correct"] == row["nav_total"] == 3
+        assert row["support_sufficient"] is None  # terminal: not a live belief
+
+    # precedence: FOUR candidate pointers vs the ≤3 cap — the tradeoff
+    # pointer survives, the superseded one is dropped (pointer precedence).
+    for row in by_family["precedence"]:
+        assert row["pointer_kinds"] == ["supports", "nand", "tradeoff"]
+        assert row["tradeoff_sufficient"] is True
+        assert row["nav_correct"] == row["nav_total"] == 3
+        assert row["resolved_ok"] is True
+
+    # wide_decision: four mitigated alternatives, EP favorite planted THIRD.
+    for row in by_family["wide_decision"]:
+        assert row["tradeoff_sufficient"] is True
+        assert row["nav_correct"] == row["nav_total"] == 3
+
+    # boundary: variance EXACTLY at the threshold — live, conflicted
+    # structure, NOT contested (the `>` contract).
+    for row in by_family["boundary"]:
+        assert row["expected_contested"] is False
+        assert row["reads_contested"] is False
+        assert row["conflict_surfaced"] is None  # not in the live denominator
+        assert row["nand_recovered"] == 1  # the NAND is still surfaced
+        assert row["nav_correct"] == row["nav_total"] == 2
+
+    # clean: no invented contradiction (the arm keeps a real denominator).
+    for row in by_family["clean"]:
+        assert row["false_positive"] is False
+
+
+def test_adversarial_corpus_discriminates_against_a_naive_assembly(m2_env):
+    """THE anti-tautology proof: the same planted graph graded through a
+    NAIVE assembly (insertion-order NAND selection, `>=` threshold, deepest
+    successor, first-planted alternative) falls BELOW the bars the real
+    assembly meets.
+
+    Without this, a bar of 1.0 could be 1.0 because nothing in the corpus can
+    move it.  With it, the corpus is proven to bite."""
+    sdk = _fresh_sdk()
+    try:
+        seed_result = adversarial.seed_corpus(sdk)
+        gold = corpus.gold_doc(corpus=ADV)
+        real_rows = adversarial.grade_corpus(sdk, seed_result, gold)
+        naive_rows = adversarial.grade_corpus(sdk, seed_result, gold, naive=True)
+    finally:
+        sdk.close()
+    real = schema.aggregate_metrics(real_rows, corpus=ADV)
+    naive = schema.aggregate_metrics(naive_rows, corpus=ADV)
+    assert schema.tripped_bars(real, ADV) == []
+    assert schema.tripped_bars(naive, ADV), "the naive assembly must FAIL the lane"
+    # Each degradation is caught by the arm it targets, and the real assembly
+    # wins on all three.
+    assert naive["high_severity_nand_recovery"] < real["high_severity_nand_recovery"]
+    assert naive["high_severity_nand_recovery"] == 0.0
+    assert naive["contested_classification_accuracy"] < real[
+        "contested_classification_accuracy"
+    ]
+    assert naive["dig_deeper_navigation_accuracy"] < real["dig_deeper_navigation_accuracy"]
+    # The cap-bound recovery is IDENTICAL (the naive error is WHICH NANDs, not
+    # how many) — which is exactly why the severity arm exists as a separate
+    # bar rather than being folded into recovery.
+    assert naive["nand_recovery_rate"] == real["nand_recovery_rate"]
