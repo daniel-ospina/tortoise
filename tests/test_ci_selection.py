@@ -9483,7 +9483,16 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     r"\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\s+"
     r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+"
-    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)",
+    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
+    # The DEMONSTRATIVE copula form, with no determiner and no `flat`:
+    # "This is `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+    # — `test_required_set.py: 0.4` shipped exactly that beside an adopted census
+    # reading, and BOTH arms above were blind to it: the first wants a claim verb,
+    # the second wants a determiner after `is`. Scoped to `this` on purpose, so a
+    # note that explains the convention without claiming it for this row ("what a
+    # new file gets is `DEFAULT_FAST_WEIGHT`", "its absence packs it at the flat
+    # `DEFAULT_FAST_WEIGHT`") stays silent (#11602 review P3).
+    r"|\bthis\s+is\s+`?DEFAULT_FAST_WEIGHT`?",
     re.IGNORECASE)
 
 
@@ -9528,6 +9537,39 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
         tail = m.group("tail")
         if _UNMEASURED_ON_CI_RE.search(tail) and _MEASURED_BASIS_RE.search(tail):
             out.append((m.group("key"), tail))
+    return out
+
+
+# The FORWARD-LOOKING form of the same falsified claim: "so the flat 2.0
+# UNDERSTATES it until a sweep replaces this row" (and its `overstates` twin). It
+# names no claim verb and no `is`, so `_FLAT_DEFAULT_CLAIM_RE` cannot see it; and
+# it says `unmeasured` nowhere, so `_UNMEASURED_ON_CI_RE` cannot either. Once the
+# sweep HAS replaced the row, the tail carries its own `ci-timing …; was N` basis
+# and the sentence describes a state the row has left — 6 rows shipped that way in
+# the 2026-11-09 refresh (`test_9664_capstone_verdict_ledger.py` was the one the
+# review named; the guard found the other five). The PAST tense is a true history
+# and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
+# row" is what the fix says.
+_FLAT_DEFAULT_STILL_OWED_RE = re.compile(
+    r"\bflat\s+2\.0s?(?:\s+default)?\s+(?:UNDERSTATES|overstates)\b",
+    re.IGNORECASE)
+
+
+def _durations_rows_still_owing_the_flat_default_to_a_sweep(text: str,
+                                                            durations: dict):
+    """Rows that claim a FUTURE sweep still owes them the flat default."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        if abs(float(m.group("value")) - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        tail = m.group("tail")
+        if (_FLAT_DEFAULT_STILL_OWED_RE.search(tail)
+                and _MEASURED_BASIS_RE.search(tail)):
+            out.append((m.group("key"), float(m.group("value"))))
     return out
 
 
@@ -9691,6 +9733,13 @@ def test_flat_default_claim_check_is_not_vacuous():
         " declaration a file a PR ADDS takes.\n"
         "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
         " and NOT a local reading.")
+    # …and the DEMONSTRATIVE copula spelling, which has no claim verb and no
+    # determiner, and so went unread on `test_required_set.py: 0.4` (#11602 review
+    # P3 finding 1: CI was green on a falsified claim).
+    demonstrative = (
+        "  test_j.py: 0.4  # #10991: pre-merge estimate for a NEW file; This is"
+        " `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+        " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0")
     durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
         ("test_a.py", 2.2), ("test_b.py", 3.7),
@@ -9698,6 +9747,60 @@ def test_flat_default_claim_check_is_not_vacuous():
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
     assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
         ("test_h.py", 2.3), ("test_i.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(demonstrative, durations) == [
+        ("test_j.py", 0.4)], (
+        "the demonstrative copula form must bite — it is the shape that shipped "
+        "past this guard at the 2026-11-09 refresh")
+
+
+def test_no_durations_row_still_owes_its_basis_to_a_sweep_that_has_landed():
+    """#11602 review P3 finding 2, as a CLASS: six rows stated the claim.
+
+    The reviewer named `test_9664_capstone_verdict_ledger.py`; re-deriving the
+    shape against the committed map found five siblings carrying the identical
+    sentence (`test_embed_writer_register`, `test_10997_identity_hold`,
+    `test_wait_bound_write_ack`, `test_9664_premise_census`,
+    `test_capstone_a_rows_10982`). Each said a sweep still OWED it the flat
+    default while its own tail cited the sweep's `was N` basis — the map's own
+    rule (`config/ci-surfaces.yml` above the `durations:` block) is that a row's
+    comment is kept only while the value AND its stated basis are unchanged.
+    """
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row says the flat default still describes it while its own "
+        "tail cites the sweep that replaced it — re-word to the past tense (the "
+        f"flat default UNDERSTATED it until this sweep replaced the row): {offenders}")
+
+
+def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
+    """Non-vacuity for the pin above, on the shipped (pre-fix) wording."""
+    durations = {"test_a.py": 1.0, "test_b.py": 1.0, "test_c.py": 1.0}
+    basis = " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0"
+    stale = (
+        # the reviewer-named row, verbatim from the head before the fix
+        "  test_a.py: 39.0  # No DB, no network, no graph fixture; #2818/#3419/#4348:"
+        " ~6s wall for the file. The flat 2.0 UNDERSTATES it until a junction sweep"
+        " replaces this row." + basis + "\n"
+        # the `overstates` twin, verbatim from `test_capstone_a_rows_10982.py`
+        "  test_b.py: 0.9  # measured locally as context, NOT as the weight, so the"
+        " flat 2.0 overstates it until a sweep replaces this from junit" + basis)
+    legitimate = (
+        # the PAST tense the fix uses — a true history, not a claim
+        "  test_a.py: 39.0  # The flat 2.0 UNDERSTATED it; this row's 39.0 is the"
+        " sweep that replaced it." + basis + "\n"
+        # an UNMEASURED row (still the flat default) may state it
+        "  test_b.py: 2.0  # the flat 2.0 UNDERSTATES it until a sweep replaces"
+        " this row.\n"
+        # the same sentence with NO landed basis is not falsified by its tail
+        "  test_c.py: 0.4  # the flat 2.0 UNDERSTATED it until this sweep; nothing"
+        " in the tail cites a sweep.")
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        legitimate, durations) == []
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
