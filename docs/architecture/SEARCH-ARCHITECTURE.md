@@ -173,7 +173,7 @@ behind them. Everything else in the search path is unchanged.
 
 **What the move costs, stated so it is not discovered late:**
 
-- `public.point/source/event.embedding` is **`jsonb`** today, and **`pgvector` appears in 0 of 79
+- `public.point/source/event.embedding` is **`jsonb`** today, and **`pgvector` appears in 0 of 80
   migrations** — so this is a **column-type migration plus a full index build and a backfill** of existing
   rows, not a query edit.
 - **A walk starts from seeds.** Under a bounded window (§7) a seed may not be resident, so the walk must
