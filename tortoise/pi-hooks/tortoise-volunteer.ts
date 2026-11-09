@@ -110,7 +110,7 @@ import { spawn } from "node:child_process";
 import { mkdirSync, readFileSync, statSync, writeFileSync } from "node:fs";
 import { createHash } from "node:crypto";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { delimiter, join } from "node:path";
 
 export const HARNESS = "pi";
 /** Install name under `~/.pi/agent/extensions/`.
@@ -228,8 +228,6 @@ export const MAX_PROMPT_BYTES = 15 * 1024 - 64;
  *  silently re-opening the gap. */
 export const MAX_INJECT_CHARS = 8 * 1024;
 export const CONFIG_PATH = join(homedir(), ".pi", "agent", "tortoise-config.json");
-/** The reflex CLI's source-dir record, written by the shell-hook installs. */
-export const SRC_DIR_RECORD = join(homedir(), ".tortoise", "hook-src-dir");
 
 /** The kill switch — same variable, same truthiness as the Hermes seam. */
 const TRUTHY = new Set(["1", "true", "yes", "on"]);
@@ -460,10 +458,23 @@ function venvOwnerOf(moduleDir: string): string | null {
 /** `which` without a dependency, honouring the env a test injects. */
 function pathLookup(name: string, env: Env): string {
   const path = String(env.PATH ?? "");
-  for (const dir of path.split(":")) {
+  // ⛔ `delimiter`, never a literal `":"`: on win32 the separator is `;`, and a
+  // literal colon shreds `C:\\Python312\\Scripts` into `C` + `\\Python312\\Scripts`
+  // — EVERY candidate misses, `reflexCandidates` returns `[]`, and a machine
+  // with a working `tortoise` falls to the static `inert` verdict, which LATCHES
+  // for the process and writes the "reinstall" breadcrumb onto a healthy
+  // install (the exact confusion the inert slot exists to prevent). On win32 an
+  // executable also carries a `PATHEXT` suffix, so the bare name is not the
+  // file that exists there.
+  const suffixes = process.platform === "win32"
+    ? String(env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean)
+    : [""];
+  for (const dir of path.split(delimiter)) {
     if (!dir) continue;
-    const candidate = join(dir, name);
-    if (isFile(candidate)) return candidate;
+    for (const suffix of suffixes) {
+      const candidate = join(dir, name + suffix);
+      if (isFile(candidate)) return candidate;
+    }
   }
   return "";
 }

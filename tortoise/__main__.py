@@ -5499,13 +5499,16 @@ def _cmd_install_hooks(args) -> int:
     Two independent halves:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
-      cline / devin;
+      cline / devin — and, for pi, the in-repo ``tortoise-volunteer.ts``
+      EXTENSION (#2119), which is not a shell hook at all;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
       (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
       sessionStart cold-context injection hook, #2122) and pi (the in-repo
-      capture extension).
+      capture extension, written in the SAME run as the per-turn read
+      extension — ``pi`` is the one harness whose install writes both, and the
+      pair is graded as one contract number, #2119).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
