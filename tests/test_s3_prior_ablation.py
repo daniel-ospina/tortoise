@@ -1017,6 +1017,42 @@ def test_the_architecture_doc_no_longer_calls_the_question_unmeasured(probe):
         "the half that really IS still unmeasured must survive the edit")
 
 
+def test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole():
+    """`#10557`: the doc published run 1 as settled after the ruling withdrew that log.
+
+    Run 1's log went to `withdrawn/` (the `#10463` ruling, part 3) and the ruling's re-measurement
+    landed with the registration already on the base branch (`#10554`). The design doc is the surface
+    a reader actually opens, so it must carry THREE things and may not drop any of them later: the
+    run-2 figure (derived here from the landed log, never hardcoded), the pointer that leads to the
+    note explaining the withdrawal, and the drift sentence that stops `0.988` being read as "priors
+    cut creates by 1 %". A qualifier that survives only in `withdrawn/WITHDRAWN.md` is a qualifier
+    nothing links to — which is the defect this pins.
+
+    The qualitative verdict must keep reading as the same verdict, so the check also refuses a
+    reversion to the unqualified "MEASURED … and the answer is NO by the margin the design assumed".
+    """
+    import re as _re
+
+    log = (ROOT / "docs/evidence/5087-hypothesis/s3-ablation-a83c23a8.log").read_text()
+    counts = _re.search(r"COUNTS: created extraction nodes OFF=(\d+) ON=(\d+)", log)
+    ratio = _re.search(r"^RATIO: ([0-9.]+)", log, _re.MULTILINE)
+    assert counts and ratio, "the run-2 log must still print its counts and ratio"
+    off, on = counts.group(1), counts.group(2)
+    # the log prints four decimals (0.9881); the doc quotes three (0.988) — the prefix is the pin
+    assert ratio.group(1).startswith("0.988"), ratio.group(1)
+
+    doc = (ROOT / "docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md").read_text()
+    assert "0.988" in doc, "§10 must quote the run whose ordering provenance is whole"
+    assert off in doc and on in doc, f"run 2's counts ({off}/{on}) must live beside the claim"
+    assert "1.0" in doc or "ratio near 1.0" in doc, "the falsifier rule must survive"
+    assert "docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md" in doc, (
+        "the withdrawal pointer must lead to the note that says what is and is not retracted")
+    assert "10.9" in doc and "drift" in doc.lower(), (
+        "`0.988` without the untreated-arm drift reads as an effect the run cannot support")
+    assert "by the margin the design assumed" not in doc, (
+        "the unqualified run-1 reading must not come back")
+
+
 # ── the pin must see the WORKING TREE, and the log must name the bytes that ran (r5 P1) ──
 #
 # `assert_source_sha` compares two COMMITS, so an uncommitted edit to production code, to a metric

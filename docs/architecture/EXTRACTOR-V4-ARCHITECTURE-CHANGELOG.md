@@ -1635,3 +1635,34 @@ control-plane read, and a **fault** in that read is a `QuotaCheckError` → HTTP
 allowance configured** (`tortoise/allowance_gate.py`'s "INERT IS ABOUT WHAT IT REFUSES, NOT ABOUT
 WHAT IT READS"). The same line is recorded where a lane actually reads it — on `#4051` (comment
 `6613755225`) and in `docs/architecture/CONSUMPTION-MODEL.md` §6 — and the reopen is argued there.
+
+## `#10557` — §10 published a WITHDRAWN run as settled, and the base-registered re-measurement is `0.988`
+
+**Where this came from.** The review gate on `#10544` held `#10557` (P2): the `#10463` ruling moved
+the S3 hypothesis's measured log out of the checked directory, so the only in-repo PROVISIONAL note
+sat in `docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md` — a file nothing linked to — while the
+three surfaces that *publish* the result (§10, §4.2's note, and §14's "Not established" bullet) went
+on reading as settled. This changelog entry is the correction's record; the qualifiers themselves are
+in the design document, because the design document is what a reader opens.
+
+**What the surfaces did not yet know.** `#10554` (`45120abbd`) landed *after* `#10557` was filed: the
+ruling's re-measurement, run with the registration already published on the base branch, reports
+`253 → 250` — ratio **`0.988`**, not the withdrawn log's `0.870` — with both guards **met** (real
+facts 41 → 44, operator edges 141 → 166) rather than fallen, and a **`10.9 %`** drift on the
+**untreated** arm between the two runs (284 → 253). So `#10557`'s prescribed remedy (point at
+`WITHDRAWN.md` and stop) had gone stale in one direction: the ordering provenance is now whole, while
+the *magnitude* the doc published is the one the instrument cannot support. The correction therefore
+does both — the withdrawal pointer **and** the run-2 figure with its drift caveat.
+
+**Why the number did not simply replace the old one.** Both runs stay in §10. Run 1's table is what
+the withdrawn log says, its contents are untouched, and `tests/test_s3_prior_ablation.py:1002` pins
+its figures to the doc; deleting them would make the document quietly disagree with an artefact it
+still ships. What changes is which run is *quoted*: `0.988`, with the pair (`253 / 250`) and the drift
+beside it, because `0.870` reads as "priors cut creates by about a seventh" and this instrument cannot
+resolve anything below roughly 11 % between runs.
+
+**Behavioral pin.** `tests/test_s3_prior_ablation.py` gains
+`test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole`, which DERIVES run 2's
+counts and ratio from `s3-ablation-a83c23a8.log` (nothing hardcoded) and reds if the doc drops the
+figure, the `withdrawn/WITHDRAWN.md` pointer or the drift sentence — or if the unqualified
+"by the margin the design assumed" reading returns. Measured with the qualifier removed: it fails.
