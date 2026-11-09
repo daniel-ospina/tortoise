@@ -1216,6 +1216,14 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
         (("bash", "-euc", "./serve.sh --lifespan off"), {}),
         (("sh", "-cl", "./serve.sh --lifespan  off"), {}),
         (("bash", "-xc", "./serve.sh --lifespan=off"), {}),
+        # ⛔ AN EXPANSION THIS BLOCK CANNOT RESOLVE. The value is only known at run
+        # time, so neither the count nor the lifespan is readable here, and with
+        # the lifespan off no gate is installed on either side. An earlier cut
+        # required the `$` to come BEFORE the flag, so this shape matched nothing
+        # and PERMITTED — with `V=off` that is N ungated workers. MEASURED on the
+        # shipped block (2026-11-09): `permit`.
+        (("sh", "-c", "uvicorn app:app --lifespan $V --workers 4"), {}),
+        (("sh", "-c", "$UVICORN_LIFESPAN uvicorn app:app --workers 4"), {}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)
