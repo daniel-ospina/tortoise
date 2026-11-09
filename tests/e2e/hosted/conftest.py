@@ -449,13 +449,33 @@ def bare_hosted_server(hosted_env):
         shutil.rmtree(d, ignore_errors=True)
 
 
+# ⛔ PER-REQUEST BUDGET, SIZED FROM A MEASUREMENT (#11576). The point of the
+# budget is to red a DEGRADED server without redding a SLOW RUNNER, so its floor
+# is the slowest measured healthy request, not a round number.
+#
+# Measured on the SAME tree (only docs/tests differed between the two runs):
+#   green run 42704270992 @ 10638ca7 — `test_register_provisions_team_key_and_
+#     first_point`'s whole 4-request chain (register -> /v1/team -> POST
+#     /v1/points -> GET /v1/points) took 21.06s, and the suite 357.46s.
+#   red run 42711667194 @ 9c64675 — the same suite took 532.67s (1.49x), and
+#     POST /v1/points alone blew the old 30s budget: a 1.49x factor over 21.06s
+#     is ~31.4s, i.e. the 30s budget sat INSIDE the observed variance band of a
+#     healthy run. That is a false red on a required-shaped check, not a
+#     degraded server.
+# 60s is ~2x the observed red point. It is deliberately NOT unbounded: a real
+# hang must still FAIL the job before its 15-minute cap — a job killed by its own
+# timeout reports `cancelled`, which the merge rail treats as non-red, so an
+# over-generous budget would convert a hang into a silent pass.
+REQUEST_TIMEOUT_MS = 60_000
+
+
 @pytest.fixture(scope="module")
 def api(playwright, hosted_env):
     """Playwright APIRequestContext bound to the hosted base URL."""
-    # 30s default per request: fail fast when the server degrades instead
-    # of hanging the suite (local machine load / cold CI runner headroom).
+    # See REQUEST_TIMEOUT_MS: fail fast when the server degrades instead of
+    # hanging the suite, but above the measured headroom of a slow runner.
     ctx = playwright.request.new_context(base_url=hosted_env["base_url"],
-                                         timeout=30_000)
+                                         timeout=REQUEST_TIMEOUT_MS)
     yield ctx
     ctx.dispose()
 
