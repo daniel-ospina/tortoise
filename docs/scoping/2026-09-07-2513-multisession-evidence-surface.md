@@ -36,13 +36,16 @@ one is not**:
   reporting surface (below), not the run — *"none of them needs an eval to close: their deliverable is
   the fix, each with its own mechanism-level test"*. The run happens when the named set is empty, under
   the unchanged `HARD_STOP_USD = 10.00`.
-  **Two blockers this bullet used to name are RETIRED** (re-measured 2026-11-08 at `53d2ab7854`):
-  **#10540** is CLOSED (merge `5f033b6d221`, `git merge-base --is-ancestor` → true) and **#11070** is
-  CLOSED (merge `98df3bd4c`, ancestor → true). They were current at this doc's own pin (`de72cfd455a`,
-  2026-11-06 18:05), which is why the rows below still listed them — stale-by-pin, not wrong when
-  written. Do not read a retired blocker as an unblock: **budget and ingest cost are properties of the
-  run, not of the issues** that quoted them, and #10538 (the ingest-cost blocker in its own right) is
-  still OPEN.
+  **One blocker this bullet used to name is RETIRED** (re-measured 2026-11-08 at `53d2ab7854`):
+  **#10540** is CLOSED (merge `5f033b6d221`, `git merge-base --is-ancestor` → true). It was current at
+  this doc's own pin (`de72cfd455a`, 2026-11-06 18:05), which is why the rows below still listed it —
+  stale-by-pin, not wrong when written. **#11070 is NEWLY IDENTIFIED by this revision, not retired by
+  this bullet**: it is named in no earlier revision of this doc (`grep 11070` at `de72cfd455a` and at
+  `origin/main` → 0), so it is added here because it is one of the ruling's eight eval-affecting items,
+  and recorded as **closed-on-arrival** (merge `98df3bd4c`, ancestor → true) rather than as evidence
+  that this bullet tracked its own blockers. Do not read a retired blocker as an unblock: **budget and
+  ingest cost are properties of the run, not of the issues** that quoted them, and #10538 (the
+  ingest-cost blocker in its own right) is still OPEN.
   The third constraint is unchanged and is **not** an issue: the eval lane's embedder preflight fails
   **under load** — the blocker receipt
   (`docs/scoping/receipts/2026-09-22-2513-embedder-preflight-blocker.json`, PR #4679) records three
@@ -190,8 +193,25 @@ filtered):
    row, untouched and comparable, and the variant rides beside it with its own `n`. Live in
    `w7_publish.GOLD_CUTOFF_ROW` (top-level + per gate category in `category_variant_rows`), fed by
    `retrieve.py::_recall_metrics` → `session_recall@n_gold` on the **same** ranking the `@5` fraction is
-   measured on, and surfaced per category as a fraction in `report.py`'s `retrieval_by_category`. A
-   report that predates it counts `n_missing`, never `0.0`.
+   measured on, and surfaced per category as a fraction in `report.py`'s `retrieval_by_category`. When
+   **some** outcomes in a category carry the fraction, the rest are counted as `n_missing` — never
+   `0.0`. A category in which **no** outcome carries it (every pre-feature report, and a retriever arm
+   that does not emit the key) has **no `session_recall@n_gold` key at all** in that block: the block's
+   own wholly-N/A discipline, which keeps a wholly absent metric ABSENT rather than reading `0.0`
+   (`test_report_retrieval_by_category_counts_missing_denominators`). The sealed receipt is not
+   affected — `w7_publish`'s rows always carry `n_gold`/`n_excluded_gold`, so the variant stays
+   visible-as-unmeasured on the artifact that matters.
+
+   **Granularity caveat (recorded 2026-11-09, PR #11598 review note 1).** `N_gold` counts **sessions**
+   while the ranking being sliced is **points**, and the deduped pool admits up to
+   `DEFAULT_MAX_CHUNKS_PER_SESSION = 3` points per session. `recall_all@N_gold == 1.0` therefore
+   additionally requires the first `N_gold` slots to hold `N_gold` **distinct** gold sessions; a
+   session-complete ranking that repeats one session inside the window scores `< 1.0`. This is not the
+   TREC passage-level convention (which defines R over the retrieval unit) — changing the cutoff's unit
+   would change the metric the #10538 relay prescribed, so it stays a documented caveat, not a change.
+   The same block also records the **fetch-depth bound**: for a question whose gold count exceeds the
+   arm's fetch depth (`max(ks)`, 20 by default) the fraction is pinned below 1.0, which is not
+   reachable on the corpora measured so far.
 3. **reader_evidence@5 / reader_surface@k** — the evidence that actually enters the reader
    context (C1 #1745 context-level measures), so a pool win cannot be eaten by the
    assembly caps.
@@ -370,7 +390,7 @@ cohort run, which is blocked (§10.4).
 
 | Remaining | Why it is open, stated as a testable condition |
 |---|---|
-| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. The gate is the owner's 2026-11-07 finite-gate ruling (§0): #2516 is one of the eight **named** items, and its deliverable is the reporting surface plus a mechanism-level test — *not* the run (*"none of them needs an eval to close"*). **Retired as blockers (re-measured 2026-11-08 at `53d2ab7854`):** #10540 (CLOSED, merge `5f033b6d221`) and #11070 (CLOSED, merge `98df3bd4c`) — both were current at this doc's pin `de72cfd455a`. Remaining: the **run**, gated on the other named items (#10538, #10360, #2683, #2684, #2518, #8775, all OPEN) **and** the load-dependent embedder preflight (§0). |
+| **#2516 (C1)** | Its indicator 1 — a sealed Phase-0 baseline receipt — has not run. The gate is the owner's 2026-11-07 finite-gate ruling (§0): #2516 is one of the eight **named** items, and its deliverable is the reporting surface plus a mechanism-level test — *not* the run (*"none of them needs an eval to close"*). **Retired as blockers (re-measured 2026-11-08 at `53d2ab7854`):** #10540 (CLOSED, merge `5f033b6d221`) — current at this doc's pin `de72cfd455a`, stale-by-pin. **#11070** (CLOSED, merge `98df3bd4c`) is *newly identified by this revision*, not retired by it — it is named in no earlier version of this doc, and is recorded as closed-on-arrival. Remaining: the **run**, gated on the other named items (#10538, #10360, #2683, #2684, #2518, #8775, all OPEN) **and** the load-dependent embedder preflight (§0). |
 | **#10538 (C6 tail)** | The DATE-RANGE half landed (#10549); the unit's Target is not evidenced — same gated run. **Sealed here, 2026-11-08:** the metric re-cut this issue's decision relay assigns to #2516 — `recall_all@N_gold`, the official all-or-nothing binary at a cutoff equal to the question's own gold count — now rides the publication surface as a **declared labelled variant** (`w7_publish.GOLD_CUTOFF_ROW`, per category in `category_variant_rows`, fraction per category in `report.py`). `recall_all@5` is untouched. |
 | **#2518 (C2)** | Measured and **not adopted**; its plan's fail-safe OFF stands. Open as a decision, not as work. |
 | **#10540 (C4 survivor)** | **CLOSED 2026-11-07T17:28:40Z** — merge `5f033b6d221`, an ancestor of `main` at `53d2ab7854` (`git merge-base --is-ancestor` → true). The row read *"its instrument landed (#10632) but not the fix"* because this doc's pin (`de72cfd455a`, 2026-11-06 18:05) **preceded the merge by 66 minutes** — stale-by-pin, not a live blocker. Its constraint (reader-window crowding) still rides any run's budget; closing the *issue* did not make the run cheaper. |
