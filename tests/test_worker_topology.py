@@ -1156,18 +1156,29 @@ def test_a_convertible_count_at_or_above_maxsize_is_NAMED_not_called_unreadable(
     for text in (str(sys.maxsize), str(sys.maxsize + 1), "9" * 19):
         count = wt._positive_int(text)
         assert count == int(text), (text, count)
-        assert not isinstance(count, wt._UnreadableCount), (
-            f"a CONVERTED count ({text}) was classified as unreadable — the "
-            "sentinel is being detected by magnitude"
-        )
         topology = wt.observe({"WEB_CONCURRENCY": text})
-        assert f"N>={int(text)} uvicorn workers" in wt.refusal_reason(topology), text
-        assert wt._count_text(topology) == str(int(text)), text
+        # ⛔ THE DISCRIMINATING ASSERTION IS BEHAVIOURAL, and it runs first: a red
+        # must be "the refusal describes a number it read as one it could not",
+        # not "a symbol is missing". Reverting only the consumers' `isinstance`
+        # tests (leaving `_UnreadableCount` defined) must still red here, which is
+        # what the pre-fix sources do — see the review comment's measurement.
+        assert f"N>={int(text)} uvicorn workers" in wt.refusal_reason(topology), (
+            f"a CONVERTED count ({text}) was described as unreadable — the "
+            f"sentinel is being detected by MAGNITUDE: {wt.refusal_reason(topology)!r}"
+        )
+        assert wt._count_text(topology) == str(int(text)), (
+            text, wt._count_text(topology)
+        )
+        assert not isinstance(count, getattr(wt, "_UnreadableCount", int)), (
+            f"a CONVERTED count ({text}) was classified as unreadable"
+        )
 
     # …while the conversion-limit sentinel is still recognised AS ONE.
+    _sentinel = getattr(wt, "_UnreadableCount", int)
     if sys.get_int_max_str_digits():
         huge = "9" * (sys.get_int_max_str_digits() + 1)
-        assert isinstance(wt._positive_int(huge), wt._UnreadableCount)
+        assert isinstance(wt._positive_int(huge), _sentinel)
+        assert wt._positive_int(huge) == wt.UNREADABLE_COUNT
 
 
 def test_the_shipped_block_reports_one_worker_while_reloading():
@@ -1471,6 +1482,30 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     assert proc.returncode == 0, proc.stderr
     assert "UNVERIFIED" in proc.stdout, proc.stdout
     assert "uvicorn workers = 4" not in proc.stdout, proc.stdout
+
+    # ⛔ THE TWO NAMESPACES. The arity skip consults `_uvicorn_flag_option`, which
+    # knows uvicorn's `--flag` names and nothing else. Applied to a SHELL's argv it
+    # reads `--login` / `--noprofile` — value-LESS bash flags — as value-taking and
+    # SWALLOWS the `-c` that follows, hiding the launch the predicate exists to
+    # find: `CMD ["bash","--noprofile","-c","./entrypoint.sh"]`, the ordinary
+    # "shell entrypoint" shape. MEASURED: with the arity walk ahead of the
+    # shell-flag arm these three exited 0 under `--lifespan off` and printed "the
+    # count is verified as ONE worker" — a FAIL-OPEN on a fail-closed path, while
+    # the same boot was REFUSED before arity existed and is REFUSED again now that
+    # the `-c` arm runs in the shell's namespace AHEAD of the skip. (The wrapped
+    # command is whitespace-free here on purpose: that removes the `/*`-first-word
+    # arm as an alternative catch, so the `-c` arm is the ONLY thing that can see
+    # it — which is what makes this row discriminating.)
+    for _shell in (("bash", "--noprofile"), ("bash", "--login"),
+                   ("sh", "--login")):
+        proc = _run_worker_block(_shell + ("-c", "./serve.sh", "--lifespan", "off"), {})
+        assert proc.returncode == 1, (
+            f"{_shell + ('-c',)} was NOT refused: a shell long option swallowed "
+            f"its `-c`, so a shell-string launch read as a direct argv: "
+            f"{(proc.stdout, proc.stderr)!r}"
+        )
+        assert "launched through a shell string" in proc.stderr, proc.stderr
+        assert "verified as ONE worker" not in proc.stdout, proc.stdout
 
 
 def test_the_lifespan_off_refusal_holds_under_a_COLLATING_locale():

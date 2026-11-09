@@ -661,12 +661,12 @@ _argv_is_shell_wrapped() {
     # launched through a shell string", while `--root-path /srv/my-app` rc=0.
     # The walk therefore CONSUMES the token a long option takes as its value, so a
     # value is never tested as a command. The shapes this predicate exists for are
-    # unaffected: `sh -c "…"` is still caught by the `-c` bundle arm at index 1,
-    # and a whole-command token is at an index no option consumed.
+    # unaffected: `sh -c "…"` is still caught by the `-c` bundle arm, which runs in
+    # the SHELL's own namespace ahead of the skip, and a whole-command token is at
+    # an index no option consumed.
     local _args=("$@") _i=0 _arg="" _skip=0
     while [ "$_i" -lt "${#_args[@]}" ]; do
         _arg="${_args[$_i]}"
-        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
         # ⛔ "IS THIS A SHELL FLAG BUNDLE CARRYING `c`" — expressed as two arms,
         # not one glob. A first cut used `-[[:alpha:]]*c`, which matches only a
         # bundle that ENDS in `c`, so `-cl` (i.e. `sh -cl "..."`) stopped
@@ -677,18 +677,37 @@ _argv_is_shell_wrapped() {
         # `[[:alpha:]]` needs a character before it.
         # Globs cannot say "contains"; so: a LONG option is never a bundle (the
         # `--*` arm), and any single-dash token that CONTAINS `c` is one.
+        #
+        # ⛔ THIS ARM RUNS BEFORE THE ARITY SKIP, because it belongs to a
+        # DIFFERENT NAMESPACE: a SHELL's own flags. The skip below consults
+        # `_uvicorn_flag_option`, which knows uvicorn's `--flag` names and nothing
+        # else — so applied to a SHELL's argv it reads `--login` / `--noprofile`
+        # (value-LESS bash flags) as value-taking and CONSUMES the `-c` after
+        # them, hiding the very launch this predicate exists to find:
+        #   CMD ["bash","--noprofile","-c","./entrypoint.sh"]
+        # MEASURED: pre-arity this REFUSED (--lifespan off, exit 1, "launched
+        # through a shell string"); a first cut of the arity walk PERMITTED it
+        # with "the count is verified as ONE worker" — a FAIL-OPEN on a
+        # fail-closed path, the exact defect class this PR removes. A `-c`
+        # bundle is therefore never treated as some uvicorn option's value, and
+        # this arm keeps its pre-arity semantics unchanged.
         case "$_arg" in
-            --*=*) : ;;
-            --*)
-                # A long option consumes the NEXT token as its VALUE — even when
-                # that token looks like a flag — unless it is one of uvicorn's own
-                # FLAGS (the one list, `_uvicorn_flag_option`).
-                _uvicorn_flag_option "$_arg" || _skip=1
-                ;;
+            --*) ;;
             -*)
                 case "$_arg" in
                     *c*) return 0 ;;
                 esac
+                ;;
+        esac
+        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
+        # ⛔ ARITY — `--*` NAMESPACE ONLY, so that "spaced VALUE" includes a
+        # spaced PATH. A long option consumes the NEXT token as its VALUE — even
+        # when that token looks like a flag — unless it is one of uvicorn's own
+        # FLAGS (the one list, `_uvicorn_flag_option`).
+        case "$_arg" in
+            --*=*) : ;;
+            --*)
+                _uvicorn_flag_option "$_arg" || _skip=1
                 ;;
         esac
         case "$_arg" in
