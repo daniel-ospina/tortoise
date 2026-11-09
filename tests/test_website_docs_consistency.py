@@ -2614,10 +2614,23 @@ SITEMAP_ROOT_ELEMENTS = frozenset({"urlset", "sitemapindex"})
 
 
 def _is_sitemap_document(path: Path) -> bool:
-    """True when `path` is a sitemap by CONTENT, whatever it is called."""
+    """True when `path` is a sitemap by CONTENT, whatever it is called.
+
+    ⛔ AN UNREADABLE FILE IS NOT AN ABSENT SITEMAP. `ParseError` is swallowed only for a
+    name that does not claim to be a sitemap: a corrupt `feed.xml` is simply not a sitemap,
+    but a corrupt `sitemap-*.xml` (or anything else with `sitemap` in its name) is
+    re-raised. Dropping it instead would remove it from the walk population, so a
+    truncated/half-merged sitemap that `robots.txt` and the index both advertise would be
+    served to crawlers as unreadable XML with this module green — the "a sitemap that does
+    not work" class #11615 exists to close. Measured before this guard: a truncated
+    `website/sitemap-extra.xml` gave `2 failed` under the old filename glob and `72 passed`
+    once discovery moved to root elements.
+    """
     try:
         root_element = _sitemap_root_tag(path).rsplit("}", 1)[-1]
     except ElementTree.ParseError:
+        if "sitemap" in path.name.lower():
+            raise
         return False
     return root_element in SITEMAP_ROOT_ELEMENTS
 
@@ -2874,7 +2887,7 @@ def test_sitemap_discovery_reads_the_root_element_not_the_filename(tmp_path: Pat
 
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
-    """Every page URL in a TOP-LEVEL `website/sitemap-*.xml` must resolve — not be noindex.
+    """Every page URL in a TOP-LEVEL sitemap under `website/` must resolve — not be noindex.
 
     Two failures in one: a `<loc>` for a page that has been deleted sends a crawler to a
     404, and a `<loc>` for a `noindex` page tells a crawler the page exists while the page
@@ -2883,8 +2896,12 @@ def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     checked that until now.
 
     SCOPE, stated so it cannot be mistaken for "every sitemap": the walk is
-    `website/sitemap-*.xml`, so `website/apps/dashboard/public/sitemap.xml` is NOT walked.
-    That file belongs to the app origin, a SEPARATE Pages project. Its root document IS in
+    `_published_sitemaps(WEBSITE)` — every top-level `*.xml` under `website/` whose ROOT
+    ELEMENT makes it a sitemap, so a sitemap with a non-standard name (`blog-sitemap.xml`)
+    is walked too, and an unreadable sitemap-shaped file is RE-RAISED rather than dropped
+    (see `_is_sitemap_document`). What it cannot reach is
+    `website/apps/dashboard/public/sitemap.xml`: that file belongs to the app origin, a
+    SEPARATE Pages project, and its root document IS in
     this tree (`website/apps/dashboard/index.html`, served by that project's own build), so
     `_document_for_loc` could resolve its `<loc>` — it does not, because `HOST_ROOT_PAGE`
     deliberately carries no app entry: the mapping describes THIS project's middleware, and
@@ -2933,12 +2950,13 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
     away), so a page added later is held to this without editing a list — the same
     derivation the blog-link guard uses.
 
-    The advertised side is the TOP-LEVEL `website/sitemap-*.xml` walk, for the reason
+    The advertised side is the TOP-LEVEL `_published_sitemaps(WEBSITE)` walk, for the reason
     `test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex` states: that walk and
     `_in_scope_pages` describe the same population (this project's served pages). The app
-    origin's `<loc>`s are resolved by NONE of the `sitemap-*.xml` walks here — every one of
-    them globs `website/sitemap-*.xml`, which cannot reach `apps/dashboard/public/` — so that
-    gap is real and is owned by #11624, not covered elsewhere.
+    origin's `<loc>`s are resolved by NONE of the sitemap walks here — every one of them
+    covers `website/` at its TOP LEVEL (`_published_sitemaps` globs `*.xml`, non-recursive),
+    which cannot reach `apps/dashboard/public/` — so that gap is real and is owned by #11624,
+    not covered elsewhere.
     """
     advertised = {
         _document_for_loc(loc).resolve()
