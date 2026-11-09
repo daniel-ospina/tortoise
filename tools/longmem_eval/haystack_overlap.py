@@ -68,7 +68,10 @@ identities — 1.0002×, i.e. **27 repeats, 0.02% of the leg**. A prompt-level
 response cache is therefore arithmetically reachable and worth nothing: below
 ``MATERIAL_HIT_SHARE``, which is the verdict the issue asked for, computed on
 the unit the harness actually renders. The text→embedding cache (already
-built) is the one realizable lever, at 1.299× / 23.0% of encode units.
+built) is the one realizable lever, at 1.299× / 23.0% of encode units — a HIT
+share, and the census publishes the stricter cell beside it: 1,064 of those
+85,487 repeat units repeat **inside a single question's haystack** (965 turn +
+99 chunk), so the *strict* cross-question reuse is **84,423 units = 22.75%**.
 
 **What this module is NOT.** Not a run instrument and not a gate: it reads the
 dataset only (no DB, no LLM, no keys) and writes nothing unless ``--out`` is
@@ -172,14 +175,23 @@ CENSUS: dict[str, Any] = {
     "dates": {"slots": 23867, "distinct": 18360, "reuse_factor": 1.2999},
     "encode_units": {
         "turn": {"slots": 246750, "distinct": 189522, "hit_slots": 57228,
-                 "reuse_factor": 1.302, "hit_share": 0.2319},
+                 "reuse_factor": 1.302, "hit_share": 0.2319,
+                 "within_question_hit_slots": 965,
+                 "cross_question_hit_slots": 56263,
+                 "cross_question_hit_share": 0.228},
         "chunk": {"slots": 124345, "distinct": 96086, "hit_slots": 28259,
                   "reuse_factor": 1.2941, "hit_share": 0.2273,
                   "distinct_content_date": 124318,
-                  "prompt_reuse_factor": 1.0002},
+                  "prompt_reuse_factor": 1.0002,
+                  "within_question_hit_slots": 99,
+                  "cross_question_hit_slots": 28160,
+                  "cross_question_hit_share": 0.2265},
         "total": {"slots": 371095, "distinct": 285608, "hit_slots": 85487,
                   "reuse_factor": 1.2993, "hit_share": 0.2304,
-                  "chunk_share_of_units": 0.3351},
+                  "chunk_share_of_units": 0.3351,
+                  "within_question_hit_slots": 1064,
+                  "cross_question_hit_slots": 84423,
+                  "cross_question_hit_share": 0.2275},
     },
 }
 
@@ -188,13 +200,25 @@ def _sha(text: str) -> str:
     return hashlib.sha256(text.encode("utf-8")).hexdigest()
 
 
-def _leg(counter: Counter[str], **extra: Any) -> dict[str, Any]:
+def _leg(counter: Counter[str], *, within_question_hit_slots: int | None = None,
+         **extra: Any) -> dict[str, Any]:
     """The slots/distinct/hit/reuse shape every leg reports (one definition, so
-    the turn and chunk legs cannot disagree about what a hit is)."""
+    the turn and chunk legs cannot disagree about what a hit is).
+
+    When the caller measured how many of those hits repeat **inside a single
+    question's haystack**, the strictly cross-question split is published here
+    too. It has to be MEASURED, not inferred: #1779's own question is about
+    CROSS-question reuse, and an earlier revision derived the strict figure by
+    subtracting only the TURN leg's within-question count from the TOTAL's hits
+    — which published 22.78% where this population yields 22.75%, because the
+    chunk leg contributes within-question repeats as well (measured: 99 of
+    them). A figure derived from one leg and applied to both is the "published
+    number with no producer" class this module exists to retire.
+    """
     slots = sum(counter.values())
     distinct = len(counter)
     hits = slots - distinct
-    return {
+    leg = {
         "slots": slots,
         "distinct": distinct,
         "hit_slots": hits,
@@ -202,6 +226,13 @@ def _leg(counter: Counter[str], **extra: Any) -> dict[str, Any]:
         "hit_share": round(hits / slots, 4) if slots else 0.0,
         **extra,
     }
+    if within_question_hit_slots is not None:
+        cross = hits - within_question_hit_slots
+        leg["within_question_hit_slots"] = within_question_hit_slots
+        leg["cross_question_hit_slots"] = cross
+        leg["cross_question_hit_share"] = (
+            round(cross / slots, 4) if slots else 0.0)
+    return leg
 
 
 def _histogram(counts) -> dict[int, int]:
@@ -242,12 +273,21 @@ def census_overlap(instances: list[dict],
 
     per_question: list[set[str]] = []
     within_question_dups = 0
+    # The encode-unit half of the same split, per leg: a repeat of a turn or
+    # chunk text INSIDE one question's haystack is a cache hit a "cross-question"
+    # rate must not claim (#1779's question is cross-question reuse). Both legs
+    # need their own count — one leg's within-question total cannot be applied
+    # to the other's hits.
+    within_q_turn = 0
+    within_q_chunk = 0
 
     for q in instances:
         sessions = list(q.get("haystack_sessions") or [])
         ids = list(q.get("haystack_session_ids") or [])
         dates = list(q.get("haystack_dates") or [])
         seen_here: set[str] = set()
+        seen_turn_here: set[str] = set()
+        seen_chunk_here: set[str] = set()
         q_contents: set[str] = set()
 
         for i, session in enumerate(sessions):
@@ -267,9 +307,18 @@ def census_overlap(instances: list[dict],
             seen_here.add(digest)
 
             for turn in session:
-                turn_units[_turn_text(str(turn.get("role") or "unknown"),
-                                      str(turn.get("content") or ""))] += 1
+                text = _turn_text(str(turn.get("role") or "unknown"),
+                                  str(turn.get("content") or ""))
+                if text in seen_turn_here:
+                    within_q_turn += 1
+                else:
+                    seen_turn_here.add(text)
+                turn_units[text] += 1
             for _ci, text, _idxs in _session_chunks(session, chunk_turns):
+                if text in seen_chunk_here:
+                    within_q_chunk += 1
+                else:
+                    seen_chunk_here.add(text)
                 chunk_units[text] += 1
                 chunk_prompts[(_sha(text), date)] += 1
 
@@ -298,15 +347,17 @@ def census_overlap(instances: list[dict],
             if date_n > 1:
                 same_date_pairs += date_n * (date_n - 1) // 2
 
-    turn_leg = _leg(turn_units)
+    turn_leg = _leg(turn_units, within_question_hit_slots=within_q_turn)
     chunk_prompt_slots = sum(chunk_prompts.values())
     chunk_prompt_distinct = len(chunk_prompts)
     chunk_prompt_reuse = (round(chunk_prompt_slots / chunk_prompt_distinct, 4)
                           if chunk_prompt_distinct else 0.0)
     chunk_leg = _leg(chunk_units,
+                     within_question_hit_slots=within_q_chunk,
                      distinct_content_date=chunk_prompt_distinct,
                      prompt_reuse_factor=chunk_prompt_reuse)
-    total_leg = _leg(turn_units + chunk_units)
+    total_leg = _leg(turn_units + chunk_units,
+                     within_question_hit_slots=within_q_turn + within_q_chunk)
     total_leg["chunk_share_of_units"] = (
         round(chunk_leg["slots"] / total_leg["slots"], 4)
         if total_leg["slots"] else 0.0)
@@ -514,6 +565,14 @@ def _summary(census: dict[str, Any]) -> str:
         f"  distinct {e['total']['distinct']}"
         f"  reuse {e['total']['reuse_factor']}x"
         f"  hits {e['total']['hit_share']:.1%}",
+        # Both cells, because they answer different questions: the hit share is
+        # what a `(model, prompt, text)` cache serves in one pass, the strict
+        # cross-question share is what #1779 actually asked about.
+        f"  of which cross-question       : "
+        f"{e['total']['cross_question_hit_slots']} units = "
+        f"{e['total']['cross_question_hit_share']:.2%}"
+        f"  ({e['total']['within_question_hit_slots']} repeat inside one "
+        f"question's own haystack)",
         f"  chunk leg share of units      : {e['total']['chunk_share_of_units']:.1%}",
         "",
         "granularity verdict:",

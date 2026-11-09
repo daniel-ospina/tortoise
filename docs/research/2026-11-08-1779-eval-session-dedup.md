@@ -211,16 +211,19 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
    census answers it (2.7 GB download, so it is never implicit);
 4. **A dataset refresh** changes any of the above numbers → the `@slow` pin reds and the docs get
    re-derived, which is the point of pinning them.
-6. **⛔ The 23.0% is a HIT share, not a strictly cross-question rate.** The census does NOT publish a
-   per-question split of the encode-unit hits, and it must not be described as if it did: measured
-   over the cached S split with the product renderers, **965 turn units** repeat *inside* a single
-   question's haystack (a repeated filler turn), so the strict cross-question share is **22.78%**
-   (84,522 of 371,095), not 23.0%. The 23.0% figure answers "what fraction of encode units would a
-   `(model, prompt, text)` cache serve in one pass", which is the number the decision needs and the
-   one `encode_cache.py` acts on — but the qualifier matters for #1779's own question, so every live
-   site now says "cache hits in one pass" rather than "cross-question hits". Publishing the exact
-   within-question count as a pinned census cell is the follow-up that would let the stricter number
-   be quoted.
+6. **⛔ The 23.0% is a HIT share, not a strictly cross-question rate.** The census publishes BOTH
+   cells, so neither has to be derived: `encode_units.total.hit_slots` = **85,487 of 371,095**
+   (23.0%) counts every repeat, including the **1,064 units that repeat *inside* a single
+   question's own haystack** (965 turn + 99 chunk — a repeated filler turn, and chunk texts two of
+   that question's sessions share). Subtracting those leaves the strict cross-question reuse,
+   **84,423 of 371,095 = 22.75%**. ⛔ An earlier revision of this note said 22.78% / 84,522: it
+   subtracted only the TURN leg's 965 from the TOTAL's hits, so the chunk leg's 99 within-question
+   repeats were still counted as cross-question — the derived-figure-without-its-own-producer class
+   this note exists to retire, inside the note. The 23.0% figure answers "what fraction of encode
+   units would a `(model, prompt, text)` cache serve in one pass", which is the number the decision
+   needs and the one `encode_cache.py` acts on — but the qualifier matters for #1779's own question,
+   so every live site says "cache hits in one pass" rather than "cross-question hits", and both
+   cells are pinned (`within_question_hit_slots` / `cross_question_hit_slots` / `..._share`).
 5. **The `v2` extraction leg is outside every share quoted here.** The census counts the texts the
    ingest renders per session (turn Points + raw chunks) because those are the only units derivable
    from the dataset. A `v2` run ALSO embeds LLM-derived extraction Point texts (`ingest_v2` →

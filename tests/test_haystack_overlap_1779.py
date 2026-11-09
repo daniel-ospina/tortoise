@@ -375,10 +375,25 @@ def test_hits_are_counted_across_questions_not_within_one():
     assert e["distinct"] == 2
     assert e["hit_slots"] == 1
     assert e["reuse_factor"] == 1.5
+    # …and the split is published, not left to a reader to derive: the one hit
+    # here is CROSS-question, so it counts on the strict side too.
+    assert e["within_question_hit_slots"] == 0
+    assert e["cross_question_hit_slots"] == 1
+    assert e["cross_question_hit_share"] == round(1 / 3, 4)
+    assert census["encode_units"]["total"]["cross_question_hit_slots"] == 2
     assert census["sessions"]["questions_with_repeated_content"] == 2
 
 
 def test_within_question_duplicate_is_not_a_cross_question_hit():
+    """Both legs are counted — a within-question repeat is not a cross-question hit.
+
+    ⛔ The per-leg assertion is the load-bearing one. An earlier revision derived
+    the strict cross-question figure by subtracting only the TURN leg's
+    within-question count from the TOTAL's hits, which under-counts by every
+    within-question repeat in the CHUNK leg (measured on the S split: 99 of
+    them) and published 22.78% where the population yields 22.75%. One leg's
+    count cannot stand in for the other's.
+    """
     instances = [_instance("q1", [_session("ditto"), _session("ditto")],
                            ["d1", "d2"])]
     census = census_overlap(instances)
@@ -388,6 +403,17 @@ def test_within_question_duplicate_is_not_a_cross_question_hit():
     assert census["sessions"]["questions_with_repeated_content"] == 1
     # a same-content pair with different dates still renders two prompts
     assert census["sessions"]["same_date_pairs"] == 0
+    # …and on the encode-unit legs the repeat is WITHIN-question on BOTH legs:
+    # two identical 1-turn sessions give one repeated turn text and one repeated
+    # chunk text, so neither is a cross-question hit.
+    e = census["encode_units"]
+    for leg in ("turn", "chunk"):
+        assert e[leg]["hit_slots"] == 1, leg
+        assert e[leg]["within_question_hit_slots"] == 1, leg
+        assert e[leg]["cross_question_hit_slots"] == 0, leg
+    assert e["total"]["within_question_hit_slots"] == 2
+    assert e["total"]["cross_question_hit_slots"] == 0
+    assert e["total"]["cross_question_hit_share"] == 0.0
 
 
 def test_misaligned_ids_and_dates_are_data_not_errors():
@@ -750,3 +776,17 @@ def test_census_on_real_s_split():
     # number a doc could drift from
     assert (census["decision"]["encode_cache_text_keyed"]["reuse_factor"]
             == census["encode_units"]["total"]["reuse_factor"])
+    # ⛔ The strict CROSS-question cell, restated so a re-measurement reads as
+    # itself: 1,064 of the 85,487 repeat units repeat INSIDE one question's own
+    # haystack (965 turn + 99 chunk), so 84,423 are strictly cross-question.
+    # The chunk leg's 99 is why deriving this from the turn leg's count alone
+    # published 22.78% instead of 22.75%.
+    eu = census["encode_units"]
+    assert eu["turn"]["within_question_hit_slots"] == 965
+    assert eu["chunk"]["within_question_hit_slots"] == 99
+    assert eu["total"]["within_question_hit_slots"] == 1064
+    assert eu["total"]["cross_question_hit_slots"] == 84423
+    assert eu["total"]["cross_question_hit_share"] == 0.2275
+    assert (eu["turn"]["cross_question_hit_slots"]
+            + eu["chunk"]["cross_question_hit_slots"]
+            == eu["total"]["cross_question_hit_slots"])

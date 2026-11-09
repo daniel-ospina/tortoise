@@ -429,6 +429,13 @@ avenue as `REALIZABLE` on no text at all.
 | session-level extraction reuse | **1.000×** | **no** |
 | prompt-level response cache | **1.0002×** (27 of 124,345 S1 chunk prompts = 0.02%) | **no** |
 
+The **23.0% is a HIT share, not a strictly cross-question rate** — both cells are published. Of the
+85,487 repeat units, **1,064 repeat inside a single question's own haystack** (965 turn + 99 chunk),
+so the strict cross-question reuse is **84,423 units = 22.75%**. Deriving that from the turn leg's
+count alone would publish 22.78% and quietly count 99 chunk repeats as cross-question (#1779's own
+question), so the split is a measured, pinned cell (`within_question_hit_slots` /
+`cross_question_hit_slots`) rather than prose.
+
 Cross-question *sessions* do repeat — 5,403 of 23,867 slots repeat another
 slot's content (1.293×, and all 500 questions hold at least one repeat) — but
 **0 of the 6,660 repeated pairs share a session date**. The date is
