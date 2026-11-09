@@ -993,13 +993,22 @@ def test_check_batch_gained_no_actionable_key():
 
     `vet_gate`'s allow-list is the boundary the successor must not cross — a new
     key here would make the coverage detector a gap-filler.
+
+    ⛔ `partial_gaps` (#11534) is the ONE admitted addition, and it is admitted
+    because it is a REPORT, not a remedy: it names WHICH clause span no candidate
+    accounts for (with a char span into the narrative) and nothing in this module
+    acts on it. The consumer is the `S2.2b-ADD` stage behind
+    `TORTOISE_PARTIAL_GAP_FILL`, which is DEFAULT OFF — so the gate itself still
+    selects and never fills, which is the property this arm pins. A key that a
+    SELECTOR could act on (e.g. a pre-computed candidate to append) would not
+    belong in this set.
     """
     from tortoise import vet_gate
 
     keys = set(vet_gate.check_batch({}, "one. two."))
     assert keys == {
         "narrative_statements", "candidates", "by_section",
-        "coverage_ratio", "coverage_suspect",
+        "coverage_ratio", "coverage_suspect", "partial_gaps",
     }
 
 
