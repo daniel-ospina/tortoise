@@ -11029,6 +11029,69 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
     return out
 
 
+_CITE_QUALIFIER_PATTERN = (
+    # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
+    # cite in the spelling §2 ALREADY USES twice (`extractor_v2.py:11731-11732` at
+    # `80c912244`, `:12302-12303` at `d69faaf38`), and without the
+    # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
+    # false BLOCK of a conformant edit whose own message told the author to add the base
+    # they had already added (measured by a fresh-context review at `f885a51663`).
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:16529-16543`
+    # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
+    # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
+    # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
+    # by a base. §2's range cites are not uniform: two carry a base, this one carries a pin
+    # of a different shape.
+    # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
+    # yields no qualifier and still reds, so the range spelling cannot become a false
+    # PASS — the qualifier is what this group captures, never the tail. ⛔ AND BOTH
+    # ENDPOINTS ARE SITES: `_unqualified_number_cites` reads its sites from the same range
+    # grammar, so a bare `:12943-12944` reds for 12944 too — a range whose TRAILING member
+    # is the live line rots exactly like a bare cite of it, and matching only `:<n>` left
+    # that half uncovered (measured by a fresh-context review at `35a53c4ccc`).
+    # The bound is 40, not 24, because the base predicate both call sites use is
+    # `[0-9a-f]{7,40}`: at `{0,24}` a full 40-char sha in the PARENTHESISED spelling never
+    # matched `\s*[,)]` and was reported UNQUALIFIED — a false block that told the author to
+    # add the base they had already written in the other spelling (measured, same review).
+    r":(\d+)(?:-(\d+))?`?(?:\s*\bat\b\s*([^\s,;)\]]{0,40})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,40})\s*[,)])"
+)
+
+
+def _cite_qualifier_matches(region: str) -> list[tuple[int, str, str]]:
+    """`(start_offset, number, qualifier)` for every QUALIFIED `:NNN` cite in `region`.
+
+    ⛔ THE ONE SCAN, so the classifier's list form and `_unqualified_number_cites`' offset form
+    cannot drift apart. The offset is that of the `:` the qualifier belongs to, which is what
+    lets a caller pair a base with the occurrence it QUALIFIES instead of with whichever cite
+    happens to sit beside it. `_cite_qualifiers` used to call `re.findall` directly, so the one
+    caller that needed positions had no way to get them and re-derived qualification from a
+    forward window — the defect `_unqualified_number_cites` now avoids by construction.
+    """
+    out: list[tuple[int, str, str]] = []
+    for m in re.finditer(_CITE_QUALIFIER_PATTERN, region):
+        lead, trail, at_q, paren_q = m.group(1), m.group(2), m.group(3), m.group(4)
+        # ⛔ `or ""`, because `finditer` yields `None` for a NON-PARTICIPATING group where the
+        # `findall` this replaced yielded `""`. Without it, a degenerate qualifier that leaves
+        # the `at` group empty and the parenthesis group absent (`:12944 at )`) raised
+        # `AttributeError` out of BOTH readers instead of classifying as "no qualifier" — a
+        # regression introduced by the offset split, measured by a fresh-context review at
+        # `35a53c4ccc`, and fail-closed only by accident.
+        q = (at_q or paren_q or "").strip("*`().,;")
+        if q:
+            # ⛔ BOTH ENDPOINTS OF A QUALIFIED RANGE ARE QUALIFIED, and both are emitted at the
+            # SAME offset the SITES reader uses (`m.start()`, the `:`) — because that reader
+            # already counts `:M-N` as a site for M AND for N. Reporting only `lead` here made
+            # the two readers DISAGREE: `:12943-12944` at `<sha>` was counted as a site for 12944
+            # by one and as unqualified by the other, so a conformant base-qualified range whose
+            # live line is the TRAILING endpoint was reported UNQUALIFIED — the same false BLOCK
+            # the range tail removed, with a diagnostic telling the author to add a base they had
+            # already written (measured by a fresh-context review at `615bb14b31`).
+            out.append((m.start(), lead, q))
+            if trail:
+                out.append((m.start(), trail, q))
+    return out
+
+
 def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     """`(number, qualifier)` for every `:NNN` cite in `region` that CARRIES one — both spellings.
 
@@ -11043,7 +11106,6 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     A region with no qualified cite returns `[]`, which a caller MUST read as "this arm would be
     inert here" — never as "there is nothing to check".
     """
-    out: list[tuple[str, str]] = []
     # ⛔ The `at` branch and the parenthesised branch are SEPARATE captures because they have
     # DIFFERENT terminators and DIFFERENT gaps:
     #   * an `at` cite's qualifier ends at a word boundary, and the cite may be WRAPPED — the
@@ -11062,13 +11124,60 @@ def _cite_qualifiers(region: str) -> list[tuple[str, str]]:
     # review). ⛔ And barring the newline for BOTH branches (the first fix attempt) blinded the
     # `at` branch on exactly the wrapped typography this record uses — measured, and it is the
     # state the same review caught in the second round.
-    for n, at_q, paren_q in re.findall(
-            r":(\d+)`?(?:\s*\bat\b\s*([^\s,;)\]]{0,24})|[^\S\n]*\([^\S\n]*([^\s,;)\]]{0,24})\s*[,)])",
-            region):
-        q = (at_q or paren_q).strip("*`().,;")
-        if q:
-            out.append((n, q))
-    return out
+    # The PATTERN and the scan both live in `_cite_qualifier_matches` — kept as ONE scan so the
+    # offset form this classifier does not need cannot drift from the one it does.
+    return [(n, q) for _pos, n, q in _cite_qualifier_matches(region)]
+
+
+def _unqualified_number_cites(region: str, number: str) -> list[int]:
+    """Offsets of `:number` cites in `region` that carry NO base qualifier of their OWN.
+
+    ⛔ THE BASE IS PAIRED WITH THE OCCURRENCE IT QUALIFIES, because both cheaper forms were
+    measured wrong in a direction and neither is an acceptable trade:
+
+      * a ±window ("a sha appears within 60 chars of the cite") is satisfied by a NEIGHBOURING
+        cite's base — the exact false pass the `:12929` arm in this test documents (main moved
+        `vet_enabled = (` and the window-shaped arms stayed green);
+      * a region-wide deny-list (`f":{number}" not in region`) FORBIDS the repair the record's
+        own landed policy prescribes — `:<number>` at `<sha>` (`#11555`) — so a CONFORMANT edit
+        reds a required check, and the diagnostic sends the fixer to make the edit it blocks
+        (`#11523` review). It also let two arms in one loop require and forbid the SAME string
+        whenever the derived live number happens to equal the number the pair arm pins.
+
+    One qualifier discharges ONE occurrence, in the two spellings `_cite_qualifiers` reads — so a
+    bare re-stale printed beside a base-qualified cite of the same number still reds. ⛔ The
+    FIRST implementation of this sentence did not honour it in the mirrored order: it ran the
+    classifier over a FORWARD WINDOW from each site and then discharged `own[:count]`, so when a
+    bare cite was printed BEFORE its base-qualified twin the bare one inherited the neighbour's
+    base (silently discharged) and the QUALIFIED one was returned as the offender — measured,
+    `` `:12944` bare, see `:12944` at `b3c2b1a` `` returned `[20]`, i.e. the diagnostic sent the
+    fixer to edit the conformant cite. Qualification is now read from the cite's OWN start
+    offset, so the pairing cannot be inherited. Returns `[]`
+    when every occurrence is base-qualified, or when the region cites `number` NOWHERE (the
+    inverted reading of this sentence — "or when the region cites `number` at all" — was the
+    opposite of the code and is corrected here; measured by a fresh-context review at
+    `f885a51663`).
+    """
+    # ⛔ SITES COME FROM THE SAME RANGE GRAMMAR the qualifier scan uses, so BOTH endpoints of
+    # `:M-N` are sites. Matching only `:number` made a bare `:12943-12944` return `[]` for
+    # 12944 — the trailing endpoint of a range is exactly as HEAD-relative as a bare cite of
+    # it, so the arm was blind to half the spelling it exists to catch (measured by a
+    # fresh-context review at `35a53c4ccc`).
+    sites = [
+        m.start()
+        for m in re.finditer(r":(\d+)(?:-(\d+))?", region)
+        if number in (m.group(1), m.group(2))
+    ]
+    if not sites:
+        return []
+    # ⛔ A BASE IS PAIRED WITH THE OCCURRENCE IT STARTS AT: a site is discharged only when a
+    # hex qualifier BEGINS at that exact offset. Neither a forward window nor a count/slice can
+    # express that, which is why both were removed rather than tuned.
+    own = {
+        pos for pos, n, q in _cite_qualifier_matches(region)
+        if n == number and re.fullmatch(r"[0-9a-f]{7,40}", q)
+    }
+    return [pos for pos in sites if pos not in own]
 
 
 def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
@@ -11076,8 +11185,17 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
     #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17637`,
-    `sdk.py:16414-16428`->`:16536-16550` x3, `probes/capstone_measure.py:2238-2243`
-    ->`:2724-2726`), `extractor_v2.py:1720` unchanged, the `create_operator`
+    `sdk.py:16414-16428`->`:16536-16550` x3 — `#11548` moved this seam +13 after that
+    re-point. ⛔ The number printed here is a CONVENIENCE COPY, not a pin: the arm below
+    reads this range OUT OF THE RECORD and asserts both of its endpoints against
+    `tortoise/sdk.py`, so the value above is what a reader is spared from grepping for,
+    and a later drift reds the arm while leaving this sentence stale — which is the
+    #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
+    `probes/capstone_measure.py:2238-2243`
+    ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it;
+    `extractor_v2.py:1764` unchanged — the relations schema that spells the predicate
+    allowlist, which `#11002`'s rebase moved `:1720` → `:1764` in THIS tree, so the
+    pre-#11002 number is not a reading of this one — the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9021 :9039 :9046 :9426` after the `f5c69f7478` base merge (+68 at #11449, then +15
     from this branch's own insertions), drifted unnoticed — the neighbouring
@@ -11226,6 +11344,71 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "live shape passing green (#11517 review)")
     assert _cite_qualifiers(":9343 (62248db88, see #11555)") == [("9343", "62248db88")], (
         "and a base annotated the same way stays classified")
+    # ⛔ `_unqualified_number_cites`' own cases — the arm §2 uses to forbid a HEAD-relative LIVE
+    # number, asserted here for the same reason as the classifier above: it was a region-wide
+    # `not in` until `#11523`'s review found it reds the ONE repair its own diagnostic prescribes.
+    # Each case is a state that review named, so "a base-qualified cite passes" is a measurement.
+    assert _unqualified_number_cites("`:12944` at `b3c2b1a`", "12944") == [], (
+        "a cite pinned to a sha is the `#11555` repair — the region-wide ban redded it, i.e. a "
+        "conformant edit failed a required check")
+    assert _unqualified_number_cites("`:12944` (`b3c2b1a`)", "12944") == [], (
+        "the parenthesised spelling of a base is the same repair, and it must pass too")
+    assert len(_unqualified_number_cites("`:12944` (HEAD)", "12944")) == 1, (
+        "a LIVE qualifier is not a base — `#11555` retired this shape, so it must still red")
+    assert len(_unqualified_number_cites(
+        "`:12944` at `a1dff7cec8` then `:12944` (HEAD)", "12944")) == 1, (
+        "a base discharges ONE occurrence: a bare re-stale printed beside a base-qualified cite "
+        "of the same number must not ride its base (the ±window false pass)")
+    # ⛔ This case used to be `` _unqualified_number_cites("`:13011` at HEAD", "12944") == [] ``
+    # — which returns at the `if not sites: return []` early return because the region cites
+    # `number` NOWHERE, so it asserted the early return while its message claimed the PAIRING
+    # property ("a neighbour's qualifier is not this cite's"). A case that cannot vary under a
+    # mutation of the pairing logic is the dead weight this file deletes an arm for under its own
+    # "an assertion that can never be the row that reds is not attribution" rule (fresh-context
+    # review at `35a53c4ccc`). It now carries BOTH numbers, so a neighbour's base discharging this
+    # cite's occurrence reds it — measured: shipped `[28]`, ±window mutant `[]`.
+    _neighbour_base = "`:13011` at `b3c2b1a`, and `:12944` here"
+    assert _unqualified_number_cites(_neighbour_base, "12944") == [
+        _neighbour_base.index(":12944")], (
+        "the arm names ITS number — a neighbour's qualifier is not this cite's: `:13011`'s base "
+        "must not discharge `:12944`")
+    assert _unqualified_number_cites("`:12943-12944`", "12944") == [1], (
+        "⛔ THE TRAILING ENDPOINT OF A RANGE is as HEAD-relative as a bare cite, and reading "
+        "sites from `:number` alone made it invisible — a bare `:12943-12944` returned `[]` "
+        "for 12944 while `:12944-12945` redded, i.e. the arm covered half the spelling it "
+        "exists to catch (measured at `35a53c4ccc`)")
+    # ⛔ AND A QUALIFIED RANGE QUALIFIES BOTH OF ITS ENDPOINTS. The SITES reader counts both;
+    # the DISCHARGE reader reported only the leading number, so a base-qualified range whose
+    # live line is the TRAILING endpoint was reported UNQUALIFIED — a false BLOCK of an edit
+    # that already wrote the base, in the spelling §2 uses (measured at `615bb14b31`).
+    assert _unqualified_number_cites("`:12943-12944` at `b3c2b1a`", "12944") == [], (
+        "a range's base covers its TRAILING endpoint — reporting it unqualified tells the "
+        "author to add the base they already wrote")
+    assert _unqualified_number_cites("`:12943-12944` at `b3c2b1a`", "12943") == [], (
+        "and the LEADING endpoint of the same qualified range stays discharged")
+    assert _unqualified_number_cites("`:12943-12944` (`b3c2b1a`)", "12944") == [], (
+        "the parenthesised spelling of a range's base covers the trailing endpoint too")
+    assert _unqualified_number_cites("`:12944-12945`", "12944") == [1], (
+        "and the LEADING endpoint still reds when the range carries no base")
+    assert _unqualified_number_cites(
+        "`:12944` (5ef5805f0953c2cf0eb2338ca0ad0af4594ee70d)", "12944") == [], (
+        "a FULL 40-CHAR base in the PARENTHESISED spelling is the same repair as the `at` "
+        "spelling: the qualifier bound was 24 while the base predicate is `{7,40}`, so a "
+        "40-char sha was reported UNQUALIFIED — the exact false block the range tail removed, "
+        "in the other spelling")
+    assert _cite_qualifiers(":12944 at )") == [], (
+        "⛔ a DEGENERATE `at` (empty qualifier, no parenthetical) must classify as 'no "
+        "qualifier', not raise: `finditer` yields `None` where `findall` yielded `""`, so the "
+        "offset split briefly raised `AttributeError` out of both readers")
+    assert _cite_qualifiers(":12944 at") == [], (
+        "the same degenerate shape at end-of-region")
+    assert _unqualified_number_cites("`:12944` bare, see `:12944` at `b3c2b1a`", "12944") == [1], (
+        "⛔ THE MIRROR ORDER — a BARE cite printed BEFORE its base-qualified twin. Only the "
+        "qualified-first order was asserted, so a forward window that let the bare cite inherit "
+        "the neighbour's base went unnoticed while NAMING the qualified cite as the offender "
+        "(measured: `[20]`, the conformant one). A diagnostic that sends the fixer to edit the "
+        "cite it should accept is the same defect class this helper replaced the region-wide ban "
+        "for, so both orders are pinned")
 
     # A1: #11205's channel is TRANSPORT ONLY — the schema line that spells the
     # predicate allowlist, and the comment saying nothing in `tortoise/` consumes it.
@@ -11559,9 +11742,16 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # this shared artifact produce a false red):
     #   `:12929` at `HEAD` REPLACING the base-qualified cite -> RED  (the PAIR is what is gone)
     #   `:12929` at `62248db88`, one-sided                   -> RED
-    #   `:12929` at `HEAD` ADDED beside the base-qualified   -> GREEN in §2 — NOT an acceptance:
-    #       cite                                                §2 has no live-number arm by design
-    #                                                           (below), and the §5 block REDS.
+    #   `:12929` at `HEAD` ADDED beside the base-qualified   -> GREEN in §2, and that half ALONE
+    #       cite                                                accepts it: §2's live-number arm
+    #                                                           binds the LIVE number it DERIVES
+    #                                                           from the tree (`12944` at this
+    #                                                           head), so `:12929` is not its
+    #                                                           subject at all (measured suite-wide:
+    #                                                           280 passed). The SAME qualifier
+    #                                                           inside the §5 block does RED — that
+    #                                                           arm reads its own region only — so
+    #                                                           the §2-side gap is #11173's.
     # ⚠️ WHAT THE PAIR DOES NOT DO: `a1dff7cec8` is a CONSTANT in this file, so the arm proves the
     # record agrees with that constant — never that the constant is where `vet_enabled` actually
     # sat. Re-reading `extractor_v2.py` AT that base needs history a `fetch-depth: 1` checkout does
@@ -11606,56 +11796,90 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
             f"{_label} must quote the vet_enabled line as a BASE-QUALIFIED pair "
             f"(`:12929` at `a1dff7cec8`) — it reads {_found}; re-derive it with "
             "`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py`")
-        # ⛔ THE SHIPPING PAIR ARM IS NOT "WORDING-INDEPENDENT" — it is bound to the literal `at`
+        # ⛔ THE PAIR ARM ABOVE IS NOT "WORDING-INDEPENDENT" — it is bound to the literal `at`
         # connector and to a 7–40 lowercase-hex base, so a citation written any other way
-        # (`` `:12929` (a1dff7cec8) ``) reds it. What it DOES assert is the one claim a reword
-        # cannot fake: every `:12929` in the region carries the base it was true at within 60
-        # characters — the same idiom the neighbouring `:12779` arm uses for its own number.
-        # ⛔ And it is NOT a live-number deny-list. "the LIVE number never appears in these regions
-        # at all" was asserted here and is FALSE: no rule here refuses the number `:12944` itself,
-        # and nothing in §2 refuses a BARE `:N` cite outside the two the arms beside this one hold —
-        # the `:12929` base PAIR and `:12779` at `62248db88` (measured — injecting `:12944` at
-        # `HEAD` into §2 leaves the whole leg GREEN; re-staling §2's `:12779` to `HEAD` reds, at
-        # the `:12779` arm). ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — do not read the
-        # previous clause as "file-qualified §2 cites are watched": §2 carries NINE of those and
-        # only THREE red. Held: `identity_hold.py:125` and `tortoise/value_gate.py:81` (`_cite`
-        # loop below) and `sdk.py:16516-16530` (the count-3 range arm) — re-staling each inside §2
-        # reds, measured. UNHELD, measured GREEN on a §2 re-stale: `extractor_v2.py:1154`,
-        # `:8880`, `:9617`, `:11731-11732`, and the `research-brief.md`/`02-research-brief.md`
-        # cites. ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's
-        # SCOPE paragraph (`:10991-10999`); the other five are recorded HERE and nowhere else,
-        # so they belong on #11173 beside it
-        # (`test_the_reconcile_cites_resolve_where_the_record_says_they_do`). Do not read the
-        # pointer as "the docstring already lists all six" — it does not.
-        # The one row that reads the number holds the capstone bundle's
-        # `README.md` cite to `vet_enabled = (`, and reads THAT document — never this record
-        # (`test_the_bare_continuation_cites_name_what_they_say`). The hole the record's citation
-        # grammar leaves open is stated in the paragraph below.
-        # ⛔ THE LIVE-NUMBER ARM IS DELIBERATELY ABSENT FROM THE *§2* HALF OF THIS LOOP — and the
-        # hole is stated here because nothing else in this file catches it: in §2 (A2), a re-stale
-        # of a number NO ARM HOLDS (`:13011` at HEAD) reds NOTHING (measured: whole file green).
-        # `:12929` and `:12779` are the two §2 BARE numbers the arms beside this one DO hold — by
-        # the base PAIR and by `62248db88` — so those two red; the hole is every OTHER §2 number
-        # that no arm holds — bare (`:10052`→`:10053`) AND file-qualified
-        # (`extractor_v2.py:8880`→`:8881`), both measured GREEN — with the three held
-        # file-qualified cites named above as the exceptions.
-        # The §5 block is NOT that hole — its qualified cites are
-        # classified below. Three forms were
-        # measured and every one of them was wrong in a direction: a single-number deny-list
-        # (`":12944" not in`) under-blocked every other HEAD-relative number and over-blocked a
-        # sha-qualified read; a qualifier regex under-blocked a BARE `:12944` and over-blocked
-        # ordinary prose (`HEAD` unanchored matches "ahead"/"header", and "in this tree" read as a
-        # citation); a finite number list is a word list by another name. What DOES hold, and is
-        # asserted: the cited number itself must carry its base (the loop below), so re-staling
-        # `:12929` reds, and the §5 block classifies every qualifier it carries (below, by
-        # identity). What does NOT exist is a general "no live number" rule for §2 (A2) — that
-        # region's mixture of base-qualified, file-qualified and git-grep-output cites needs a
-        # citation grammar the record does not have yet, which is a separate piece of work.
+        # (`` `:12929` (a1dff7cec8) ``) reds it. (Adopted from main's #11553 correction at this
+        # merge: this branch's earlier opening sentence claimed wording-independence, and that
+        # claim was about the LIVE-number arm below, never about this pair.)
+        # ⛔ THE LIVE-NUMBER ARM BELOW DOES NOT BAN THE STRING — it binds each occurrence to a base
+        # of its OWN. A deny-list of qualifiers is not a pin (#11519 review): binding the check to
+        # the literal word `at` meant a re-stale written ANY other way shipped green — measured,
+        # `` `:12944` (HEAD) `` in §2 passed. So the arms assert two things a wording cannot dodge:
+        # every `:12929` in these regions carries the base it was true at within 60 characters (the
+        # same idiom the neighbouring `:12779` arm uses for its own number), and the LIVE number —
+        # derived from the tree below, never typed — is not cited without a base of its own in §2
+        # (the §5 block classifies every qualifier it carries, also below).
+        # ⛔ THE LIVE-NUMBER ARM'S FIRST FORM WAS ITSELF A MEASURED DEFECT (#11523 review), kept
+        # here rather than deleted because the wrong form reads correct: it was a region-wide
+        # deny-list (`f":{live}" not in region`), wrong in BOTH directions. It over-blocked a
+        # sha-qualified read — the very repair its own diagnostic prescribes (`:<n>` at `<sha>`,
+        # `#11555`'s landed policy) — so a CONFORMANT edit redded a required check while the
+        # message told the fixer to make that edit; and it made this arm able to require and
+        # forbid the SAME string as the base-qualified pair arm above (were a merge to leave
+        # `vet_enabled = (` on `:12929`, the pair arm demands a base-qualified `:12929` and the
+        # deny-list demands its absence — each reds the other, and the message blames a cite that
+        # is correct). Two earlier forms were measured wrong as well: a qualifier regex
+        # under-blocked a BARE `:12944` and over-blocked ordinary prose (`HEAD` unanchored matches
+        # "ahead"/"header", and "in this tree" read as a citation), and a finite number list is a
+        # word list by another name. So the arm is neither a ban on the string nor a window: it
+        # pairs each occurrence with ITS OWN base qualifier (`_unqualified_number_cites`, whose
+        # cases are asserted with the classifier's above) — which reds exactly the shape `#11555`
+        # retired, a `:NNNN` standing alone, and never the base-qualified form that policy
+        # prescribes.
+        # ⚠️ WHAT THIS ARM STILL DOES **NOT** SEE, restored because an earlier rewrite of this
+        # comment deleted it (#11523 review at `f885a51663`): it covers the LIVE number —
+        # `vet_enabled = (`'s own line, derived below — and `:12929`, and NOTHING ELSE. A
+        # re-stale of any OTHER number in §2 to the live/HEAD shape (`:13011` at HEAD) still reds
+        # nothing (measured: whole file green). That was a true statement when `#11517` added it
+        # and it is still true, so it stays: closing it needs a citation grammar §2 does not have
+        # yet — its cites are base-qualified, file-qualified AND git-grep output, and a blanket
+        # "every `:NNNN` carries a base" rule would false-block the symbol-only cites the record's
+        # policy explicitly prefers — which is a separate piece of work, not a wording change
+        # here.
+        # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
+        # cites and only THREE are held (main's enumeration, re-measured on this tree at this
+        # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
+        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:16529-16543` (the count-3
+        # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
+        # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
+        # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
+        # (the `⛔ SCOPE` block at the top of this docstring; cited by SYMBOL, not by a line
+        # number, because the number this comment first carried went stale in the very merge
+        # that wrote it — #11555's policy, applied to our own comment); the rest are recorded
+        # HERE and nowhere else, so they belong on #11173
+        # beside the neighbouring arms. Do not read the pointer as "the docstring already lists
+        # all six" — it does not.
         for _m in re.finditer(r":12929", _region):
             _near = _region[max(0, _m.start() - 60):_m.end() + 60]
             assert "a1dff7cec8" in _near, (
                 f"{_label}: `:12929` at offset {_m.start()} does not name the base it was true at "
                 "— an unqualified occurrence is a re-stale presented as live")
+        # ⛔ A BARE HEAD-RELATIVE LIVE NUMBER IS FORBIDDEN HERE, and the number is DERIVED from the
+        # tree rather than typed, because the arm above cannot see one: §2 used to carry
+        # `:NNNN at the tree you are reading` immediately followed by a base-qualified
+        # `:12929 at a1dff7cec8`, and the ±60 window around the LIVE occurrence reached that
+        # neighbour's base, so the PAIR was satisfied by the NEIGHBOURING cite (measured: main
+        # moved `vet_enabled = (` from `:12929` to `:12944` under the merge and this whole file
+        # stayed green). ⛔ WHICH IS WHY THE ARM BINDS A BASE TO THE OCCURRENCE INSTEAD OF BANNING
+        # THE NUMBER (#11523 review): the record's landed policy (#11555) is "cite the symbol and
+        # let the line number be a convenience printed beside it", pinned to a SHA — so
+        # `` `:12944` at `<sha>` `` is the CORRECT repair and passes, while a bare `:12944`, a
+        # `:12944` (HEAD) and a re-staled `:12944 at the tree you are reading` all red. What is
+        # read from the tree is the NUMBER; nothing is copied from the prose that cites it.
+        if not _is_repro_block:
+            _v2 = (_REPO / "tortoise/extractor_v2.py").read_text(encoding="utf-8").splitlines()
+            _vet = [i + 1 for i, _ln in enumerate(_v2) if "vet_enabled = (" in _ln]
+            assert len(_vet) == 1, (
+                f"{_label}: expected exactly one `vet_enabled = (` in tortoise/extractor_v2.py, "
+                f"found {_vet} — re-derive this region's cites")
+            _unbased = _unqualified_number_cites(_region, str(_vet[0]))
+            assert not _unbased, (
+                f"{_label}: `:{_vet[0]}` — the line `vet_enabled = (` is on in the tree this pin "
+                f"just read — appears {len(_unbased)} time(s), at offset(s) {_unbased}, with no "
+                "base of its own. A HEAD-relative number rots on the next merge, and a base "
+                "printed on a NEIGHBOURING cite does not discharge it (measured). Cite the "
+                f"symbol, or pin the number to the sha it was true at — `` `:{_vet[0]}` at "
+                "`<sha>` `` — which this arm accepts.")
         # ⛔ The §5 watch, kept where main's WORKS and widened to the spellings main's cannot see
         # (#11519 review). Main's arm was `_found == ["12929"]` over an `at`-WORD shape: green on
         # the §5 block and RED on §2 (main's record re-cut §2's cite, so arm and text disagreed
@@ -11795,7 +12019,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # window is the proven-rotten one: the record says this very cite was stale-corrected
     # once and moved again by `#11459`'s +102 insertion.
     #
-    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2724-2726 arm above pins its three lines:
+    # ⛔ Pinned at BOTH ENDPOINTS, exactly as the 2738-2740 arm below pins its three lines:
     # a substring test over the 9-line slice was GREEN against a 1-2 line insertion above the
     # window (measured) — the content simply slid along inside the shifted slice, so the arm
     # added BECAUSE this cite rots by insertion did not detect an insertion. The two content
@@ -11964,3 +12188,105 @@ def test_the_records_zero_is_rederived_at_the_bases_it_names():
         f"the record states `{_stated_zero.group(0)}` while the bases measure 0 hit(s), exit 1 "
         "each — correct the RECORD, not the measurement")
 
+
+#: `capstone_measure.py:N` cites that live in files this bundle does NOT sweep, with the
+#: SYMBOL each one claims is at `:N`. The NUMBER is never typed here — it is read out of the
+#: citing file by the pattern below — so this table cannot itself go stale in the direction
+#: that matters (a typed number is the defect it exists to catch).
+_CROSS_FILE_PROBE_CITES = (
+    (
+        "docs/evidence/7949-capstone/probes/e1_e2_scores.py",
+        re.compile(r"`share_floor`'s `float\(value\)` \(`capstone_measure\.py:(\d+)`\)"),
+        ("return float(value)",),
+        "the `OverflowError` arm names the floor's own `float(value)` conversion",
+    ),
+    (
+        "tools/capstone_verdict_check.py",
+        re.compile(
+            r"written INTO the run block by the emitter\s*\n"
+            r"\s*# \(`capstone_measure\.py:(\d+)`\)"),
+        ('"a_row_census": a_census,',),
+        "#10982's key-set entry names where the emitter writes `a_row_census`",
+    ),
+    (
+        "tools/capstone_verdict_check.py",
+        re.compile(
+            r"``require_door_entered\(runs\)`` BEFORE it reaches ``render_log``\s*\n"
+            r"#: \(``capstone_measure\.py:(\d+)`` vs ``:(\d+)``\)"),
+        ("require_door_entered(runs)", "text = render_log("),
+        "#11298/#11331's `door` entry names the two CALLS whose ORDER it argues from",
+    ),
+)
+
+
+def test_the_probes_cross_file_cites_resolve_to_the_symbols_they_name():
+    """Three `capstone_measure.py:N` cites sit in files no sweep here reads — so they rotted.
+
+    This PR's own `DOOR_PINNED_ON` entry grew by two comment lines — moving the
+    `TORTOISE_STATE_VALUE_VERBATIM` tuple `:504` → `:506` on this branch (`:518` in the
+    merged tree, after main's own insert) — and every line below it by
+    **+2**, so three cites naming the probe from OUTSIDE this bundle moved with it. Two
+    were already stale before this PR moved anything, measured against the base it
+    merged (`f5c69f74781`): `:519` sat 480 lines above the `float(value)` it means
+    (`:999`, and `:1001` at this branch's pre-fix head) and `:4019` 25 lines above the
+    census key (`:4044`, `:4046` there), so the +2 was the smaller half of each defect —
+    the rot was structural, not this PR's: nothing re-checks a `file:line` string that no
+    suite reads, and `grep` for each number finds only the cite itself, so the wrong
+    number is silent in BOTH directions. That is this bundle's own thesis, found inside
+    its own citations.
+
+    ⛔ What is pinned is the PAIR (which line, which symbol), and the line is read OUT of
+    the citing file — never typed here. Typing the number would repeat the defect: the
+    table would go stale exactly as the prose it watches does, and a fixer would be
+    re-pointing two copies of the same fact. The SYMBOL is the durable half, which is
+    why the repair re-points numbers at symbols that did not move.
+
+    Non-vacuity, measured at the pre-fix head: every arm reds there — `:519` is a
+    `TORTOISE_VALUE_GATE` comment (the value is at `:1001`), `:4019` is the
+    `"probe": "docs/…/capstone_measure.py",` key (the census key is at `:4046`), and
+    the `door` entry's `:4164`/`:4299` name NEITHER half of any pair — and the numbers in
+    this paragraph are deliberately SYMBOLS, not tree positions: the merge that landed
+    main's #11502 moved every one of them (measured after it: the frozen-sessions GUARD,
+    the `REFUSED` f-string, `"verdict": verdict_word(e5_result),` and
+    `"denominator": e5["raw_n"],` all sit on new lines). What the arm asserts is the
+    PAIRING at the head it runs on, which it reads out of the citing file, so no number
+    here is a claim about a tree. Re-staling any cite reds it again.
+
+    ⛔ The pair is TWO CALL SITES on purpose. An earlier cut of this pin bound ``:3782`` —
+    ``def render_log(``, a DEFINITION — against the ``require_door_entered(runs)`` call,
+    which cannot evidence an execution ORDER at all: a function body is not a call, and
+    the pair read ascending (``3782 < 4191``), so a checking reader concluded the
+    OPPOSITE of the sentence's "BEFORE". The shape assertion below (``def`` on neither
+    side, and matching) is what keeps a definition from silently returning.
+    """
+    probe = PROBE.read_text(encoding="utf-8").splitlines()
+    for rel, pattern, symbols, claim in _CROSS_FILE_PROBE_CITES:
+        source = (_REPO / rel).read_text(encoding="utf-8")
+        hits = pattern.findall(source)
+        assert len(hits) == 1, (
+            f"{rel} must state this cite exactly ONCE — found {len(hits)} matches of "
+            f"{pattern.pattern!r}. A second copy is a second thing to re-point, and one of "
+            "the two will be missed")
+        nums = hits[0] if isinstance(hits[0], tuple) else (hits[0],)
+        assert len(nums) == len(symbols), (
+            f"the pattern reads {len(nums)} line number(s) but {len(symbols)} symbol(s) are "
+            "pinned — an unpaired number is a cite nothing checks")
+        for num, symbol in zip(nums, symbols, strict=True):
+            line = probe[int(num) - 1].strip()
+            assert symbol in line, (
+                f"{rel} cites capstone_measure.py:{num} — {claim} — but that line reads "
+                f"{line!r}, which does not contain {symbol!r}. Re-derive the number from the "
+                "tree (grep the symbol); do NOT move the symbol to fit the cite")
+            # A cite that lands on the DEFINITION would satisfy `symbol in line` too —
+            # `def require_door_entered(runs) -> dict:` and `def render_log(` are both
+            # definitions, but neither proves ORDER: the `door` entry argues that `main`
+            # reaches the gate BEFORE the renderer, so what it must name is the two CALLS
+            # in `main` (`require_door_entered(runs)` and `text = render_log(`). The shape
+            # is asserted alongside the token so the pair cannot silently slide onto a
+            # definition and lose the argument. ⛔ No line numbers here: the merge that
+            # landed main moved all four of them, and a number in a comment is a claim no
+            # arm reads (this pin's thesis, turned on its own prose).
+            assert line.startswith("def ") == symbol.startswith("def "), (
+                f"capstone_measure.py:{num} is cited for {symbol!r}, but that line is "
+                f"{'a definition' if line.startswith('def ') else 'not a definition'} — the "
+                "entry names the two CALLS whose order it argues from, never a definition")

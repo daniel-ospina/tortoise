@@ -248,14 +248,15 @@ through `referentiality.ENV_FLAG`), `TORTOISE_CHANGE_FEED` (an ambient `=1` adds
 to the graph the run writes), and the two confidence gates `TORTOISE_SUBJECT_TAU_HI` /
 `TORTOISE_SUBJECT_TAU_LO` (read through a parameter by `subject_binding`, and they decide whether
 the `:aboutSubject`/`:aboutObject` edge is written at all), plus `TORTOISE_LABEL_ORDER_SEED` (inert while
-`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured. The last five are the cycle-7 to
-cycle-10 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
-then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`): each sits on the acceptance
-path and was in no pin, no ledger row and no closure. Cycle 11 added
-`TORTOISE_STATE_VALUE_VERBATIM` (the `#10360` carve-out's write-path off-switch,
-`extractor_v2._state_value_verbatim_enforced`), pinned to **`1`**, because it is default-ON and with
-it off the emit site takes no judgment at all — a rewritten value is WRITTEN, which grows the measured
-population under a door that still claims the pin held. The authoritative list is
+`TORTOISE_LABEL_ORDER` is off, pinned so the pair cannot be split), `TORTOISE_CONTEXT_ENRICH` (the per-turn REWRITE of the text each turn embeds, gated in `context_enrich.enrich_enabled` and reached from `sdk.capture_session` as `enrich_fn=_capture_enriched_texts`; fail-safe OFF) — all pinned **unset** — and `TORTOISE_JSON_MODE`, pinned to **`1`** because its absent state is already ON and it is read PER CALL to flip the request's `response_format` (`model_adapters`), and `TORTOISE_IDENTIFIER_TOKENS`, pinned to **`1`** because its absent state is already ON (`sparse.py:226`, `env_flag(IDENTIFIER_ENV, True)`) and it rewrites `search_keys` on every `:Point` the run writes (`projection/entities.py:1208`, reached from `create_point`); the registered corpus yields no aliases either way, measured — and
+`TORTOISE_STATE_VALUE_VERBATIM`, pinned to **`1`** because its absent state is already ON
+(`extractor_v2._state_value_verbatim_enforced`, `env_flag(…, True)`) and it is read PER POINT at
+the emit site, where it decides whether a REWRITTEN value is WITHHELD (`=0` writes what the shipped
+default withholds). The cycle-7 to
+cycle-11 review findings (`TORTOISE_CONTEXT_ENRICH`/`TORTOISE_JSON_MODE`, then `TORTOISE_CHANGE_FEED`,
+then `TORTOISE_IDENTIFIER_TOKENS`, then `TORTOISE_SUBJECT_TAU_HI`/`_LO`, then
+`TORTOISE_STATE_VALUE_VERBATIM`) each sits on the acceptance
+path and was in no pin, no ledger row and no closure. The authoritative list is
 `capstone_measure.DOOR_PINNED_OFF` / `DOOR_PINNED_ON`, which `tests/test_7949_c2_door.py` resolves
 against the tree — this sentence is the reader's map, not the control. The set
 is CLOSED over the **measurement modules the path renders with**, and what
@@ -1904,6 +1905,29 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `test_the_newest_change_control_entry_describes_the_shipped_tree`).
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+### 10.20 — the merge of `#11523`, and the door-read pin re-pointed for THIS tree (2026-11-09, `#11534`)
+
+- **Baseline — measured at `origin/main`'s head when it merged `#11523` (`8212c41eff`):** the
+  switch's read-back that the door's acceptance arm quotes, `_state_value_verbatim_enforced`
+  assigned to `_value_fidelity_judged`, at `extractor_v2.py:9944`.
+- **New value — measured at this head (the `#11523` merge):** the same assignment at `:10157`.
+- **Why the delta is NOT main's.** `#11523` moved no line of `extractor_v2.py`; the +213 is this
+  branch's own inserts above that line (the `#11002` G5 record at the module head and the
+  `run_s1` emphasis seam — the same inserts §10.15 records as **+15** for the collector, which
+  sits below them and therefore moves by the smaller delta). The number is re-derived HERE rather
+  than inherited from main's record, which is correct on main and wrong on this branch.
+- **Also fixed in this same merge, because the merge re-created it.** `config/ci-surfaces.yml`
+  is merged with `merge=union` (`.gitattributes`), so the `#11523` merge produced TWO
+  `durations` rows for `tests/test_7949_capstone_measure.py` — the same silent-duplicate shape
+  `#11523` had just fixed on main. Collapsed to ONE row: main's CI-measured weight `4.1` with its
+  `2026-11-09` attribution, carrying this tree's case count, **231** — the merge base's 229 plus
+  `#11523`'s cross-file cite pin plus this branch's change-control pin — which is what
+  `grep -c '^def test_'` reads here. Both `tools/ci_selection.py --integrity` and
+  `tools/registry_integrity.py` refuse a duplicate key, and both are required CI steps.
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched; `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this
+  file.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
