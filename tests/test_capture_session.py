@@ -2280,6 +2280,46 @@ def test_capture_session_deepseek_direct_route_recorded(
     assert all("api.deepseek.com" in u for u in requests_log)
 
 
+def test_capture_session_venice_only_receipt_reports_extraction(
+        sdk, monkeypatch, no_provider_keys):
+    """#8133 Targets: a venice-only capture RECEIPT reports extraction, not
+    ``no-provider``.
+
+    The gate-level pin
+    (``test_session_extraction_modes.test_a_venice_only_deployment_extracts``)
+    proves the three readings agree — resolver, lane gate, session extractor.
+    It does NOT prove the receipt the caller actually sees, and the receipt is
+    the shape #8133 reported: on the pre-fix tree a venice-only capture stored
+    its turns and answered ``extraction_mode: "no-provider"``. Those are two
+    different surfaces: the door reads ``hosted_api._llm_provider_available()``
+    while ``sdk.capture_session`` keys on ``extractor is None``, so a fix that
+    opened one and not the other would pass the gate pin and still return the
+    reported receipt.
+
+    Hermetic provider env (``no_provider_keys`` — #3695/#5477): VENICE is the
+    ONLY key present, which is the deployment shape #8133 is about. The fake
+    provider records every request URL, so the receipt's route is confirmed on
+    the wire, not just in the response dict.
+    """
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "vz-key")
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extraction_mode"] == "llm:venice", (
+        "a venice-only capture reported "
+        f"{res['extraction_mode']!r} — the #8133 receipt, blamed on a key the "
+        "operator DID configure")
+    assert res["extraction_provider"] == "venice"
+    assert res["extracted"] >= 1
+    # every LLM call went to venice (no fallback hop on a single-key box)
+    assert requests_log
+    assert all("api.venice.ai" in u for u in requests_log), requests_log
+
+
 def test_capture_session_failover_records_fallback_route(
         sdk, monkeypatch, no_provider_keys):
     """E2E-8 failover variant: the primary (deepseek-direct) fails its first
