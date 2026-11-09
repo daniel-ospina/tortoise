@@ -41,3 +41,29 @@ jobs:
     with:
       main_health: true
     secrets: inherit
+
+  census-drift:
+    # #8290 / #11576 review (P2): two prose notes in `tortoise/activation_scorecard.py`
+    # and `tortoise/hosted_api.py` state a MEASUREMENT of the tracked tree (449
+    # distinct `hosted_api.py:<N>` cite targets, 434 below the pivot, 14 above, from
+    # 179 citing files), and `tools/hosted_api_cite_census.py --check` is the command
+    # that answers whether they are still true. It is wired HERE — nightly, on main,
+    # REPORT-ONLY — and deliberately NOT as a per-PR check: the population belongs to
+    # EVERY tracked file, so a per-PR assertion reds PRs that touch neither note and
+    # whose only remedy is prose in a module they never opened. That false block is
+    # exactly what #11576 removed; this job keeps the guarantee without it, in the
+    # same report-never-gate shape as `main-health` above. A red run means "run
+    # `--refresh`", and the remedy is one command.
+    name: census-drift
+    runs-on: ubuntu-latest
+    # One `git grep` over the tracked tree plus two file reads. 5m is the
+    # runner-stall floor (see docs/ops/ci-wall-clock.md); measured locally at ~0.4s.
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+      # tools/hosted_api_cite_census.py carries the inline >=3.12 guard (#5128).
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: The two cite-count notes still state the measured figures
+        run: python3 tools/hosted_api_cite_census.py --check

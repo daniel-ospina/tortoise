@@ -2525,6 +2525,24 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # #1349/#3332/#3616 silent-drop class. Pinned by
              # tests/test_ci_selection.py::test_lane_wip_guard_runs_on_a_tools_only_change.
              "tools/lane_wip.py",
+             # #8290 / #11576 review (P3): `tools/hosted_api_cite_census.py` owns the
+             # census two prose notes state, and its pins are `core`-registered —
+             # `tests/test_demo_session_read_exclusion_8290.py` (the note's invariants)
+             # and `tests/test_entry_point_python_guard.py` (`core`, the #5128 guard
+             # every `tools/**` entry point must carry). `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry and the tool matches no SOURCE_PATTERNS row,
+             # so a tools-only diff was filtered out BEFORE the "not matched -> core"
+             # fallback: measured, `select(['tools/hosted_api_cite_census.py'])` ->
+             # surfaces=[], full=False, and NEITHER pin selected — while a later edit
+             # to `CITE_RE` or `DEFAULT_PIVOT` is exactly what those pins hold. Missing
+             # the guard once already made this head red (#11576, P1), so the file that
+             # must carry it is now the file that selects its guard. Same
+             # #1349/#3332/#3616 silent-drop class and same remedy as
+             # `tools/lane_wip.py` above. `CORE_ALSO`, not a SOURCE_PATTERNS row: the
+             # pins are hermetic (source reads + one `git grep`), so cost is not a
+             # reason to place them anywhere else. Pinned by
+             # tests/test_ci_selection.py::test_the_census_tool_change_selects_core.
+             "tools/hosted_api_cite_census.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)

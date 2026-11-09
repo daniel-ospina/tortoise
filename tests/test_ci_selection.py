@@ -20326,6 +20326,24 @@ def test_lane_wip_guard_runs_on_a_tools_only_change():
     assert "test_lane_wip.py" in r["test_files"], r
 
 
+def test_the_census_tool_change_selects_core():
+    # #8290 / #11576 review (P3): `tools/hosted_api_cite_census.py` owns the citation
+    # census that two prose notes state, and TWO `core`-registered pins hold it —
+    # `test_demo_session_read_exclusion_8290.py` (the notes' invariants) and
+    # `test_entry_point_python_guard.py` (the #5128 guard EVERY `tools/**` entry point
+    # must carry; missing it already made this head red). `tools/` is a flat
+    # NON_PYTHON_PREFIXES entry and the tool matches no SOURCE_PATTERNS row, so before
+    # the CORE_ALSO entry a tools-only diff came back `surfaces=[]`, `full=False` and
+    # selected NEITHER pin — a later edit to `CITE_RE` or `DEFAULT_PIVOT` would ship
+    # unverified (the #1349/#3332/#3616 silent-drop class). Mutation check: removing the
+    # CORE_ALSO entry fails all three arms below.
+    r = _sel(["tools/hosted_api_cite_census.py"])
+    assert r["full"] is False, r
+    assert r["surfaces"] == ["core"], r
+    assert "test_demo_session_read_exclusion_8290.py" in r["test_files"], r
+    assert "test_entry_point_python_guard.py" in r["test_files"], r
+
+
 def test_rail_pin_runs_on_a_tools_only_change():
     # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
     # rail's DURABILITY — the detached session that lets `admin-merge.sh`

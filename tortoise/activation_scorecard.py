@@ -363,15 +363,21 @@ FUNNEL_QUERY = (
 # targets have a line number LARGER than 23128 (23284 … 99999) and those are the
 # ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
 # move. (449 distinct targets in all — the remainder is 23128 itself, which this
-# very comment names. Re-take every figure with
-# `uv run python tools/hosted_api_cite_census.py` whenever ``hosted_api.py`` gains
-# or loses a line above the pivot. ⛔ These figures are NOT pinned by a tree-wide
+# very comment names. NEVER re-take these by hand — that is how they went wrong
+# twice. `uv run python tools/hosted_api_cite_census.py --refresh` re-states every
+# figure in this note AND the list-helper's in one command whenever
+# ``hosted_api.py`` gains or loses a line above the pivot, and ``--check`` (run
+# nightly on main by `.github/workflows/main-health-nightly.yml`) reds when one is
+# stale. ⛔ These figures are NOT pinned by a tree-wide
 # test: that population belongs to every citing file (measured: ~1 commit in 30
 # adds a cite), so asserting it would red PRs that touch neither this note nor
 # ``hosted_api.py``. What the fast suite pins is what this change OWNS — the two
 # notes state one number, the three figures are arithmetic, and the pivot cite is
 # the query's production execution site. A "re-measurement" round flipped these to
-# 450/435 by counting with a `*` regex, so the census is a command, not a hand count.)
+# 450/435 by counting with a `*` regex, so the census is a command, not a hand
+# count — and the command, not a per-PR assertion, is what carries the figures: a
+# per-PR `--check` would red PRs whose only remedy is prose in a module they never
+# opened, which is the false block this note's neighbour paragraph removed.)
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
 # EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
 # literal — so escaping is not what it needs. The one value interpolated INSIDE a

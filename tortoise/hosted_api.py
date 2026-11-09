@@ -47967,7 +47967,10 @@ app.mount("/mcp", mcp_http_app)
 # ``hosted_api.py:<line>`` targets), so a definition inserted next to its only
 # caller would shift every cite below it. Python resolves the name at CALL time,
 # so `list_sessions` can call a function defined after it — the same reason
-# `extractor_v2` keeps its late helpers at the bottom.
+# `extractor_v2` keeps its late helpers at the bottom. Both figures above are
+# MEASURED, not hand-counted: `tools/hosted_api_cite_census.py --check` verifies
+# them (nightly on main, via `.github/workflows/main-health-nightly.yml`) and
+# `--refresh` re-states them, so do not edit them by hand.
 def _session_list_conds(actor_filter: str | None) -> tuple[list[str], dict]:
     """The MATCH-level `WHERE` for `list_sessions`, as ``(conditions, params)``.
 

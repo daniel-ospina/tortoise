@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Measure the `hosted_api.py:<line>` citation population — the two notes' census.
+"""Measure, CHECK, and re-state the two notes' `hosted_api.py:<line>` citation census.
 
 `tortoise/activation_scorecard.py` and `tortoise/hosted_api.py` each carry a note
 stating how many places cite `hosted_api.py` by absolute line number, because that
@@ -11,14 +11,26 @@ census has one command:
     uv run python tools/hosted_api_cite_census.py            # human-readable
     uv run python tools/hosted_api_cite_census.py --json     # for a script
     uv run python tools/hosted_api_cite_census.py --pivot 23128
+    uv run python tools/hosted_api_cite_census.py --check    # exit 1 when a note is stale
+    uv run python tools/hosted_api_cite_census.py --refresh  # re-state every figure in place
 
-Print the values and paste them into the two notes. Do NOT assert these numbers in
-a fast-suite test: the population belongs to EVERY tracked file, so a test that
-compared it to prose would red unrelated PRs (measured: ~1 commit in 30 adds a
-`hosted_api.py:<N>` citation). The test in
-`tests/test_demo_session_read_exclusion_8290.py` pins only what this PR own: that
-the two notes agree with each other and with the arithmetic, and that the pivot
-cite really is the `LIFETIME_MEMORY_QUERY` execution site.
+⛔ `--refresh`, never a hand-paste: copying four figures out of a printout into two
+prose notes by hand is the operation that produced the wrong count twice. One
+command rewrites all of them, through the SAME narrow sentence patterns `--check`
+reads, and the run REFUSES (exit 2, writing nothing) when a note's sentence was
+re-worded — so a re-pointed note is reported, never silently skipped. Both verbs
+converge as a FIXPOINT: re-writing a note's own pivot cite retires one cite target
+and adds another, which changes the population the figures describe, so the command
+re-measures until the tree and the notes agree.
+
+Do NOT assert the population in a fast-suite test: it belongs to EVERY tracked file,
+so a test that compared it to prose would red unrelated PRs (measured: ~1 commit in
+30 adds a `hosted_api.py:<N>` citation). The test in
+`tests/test_demo_session_read_exclusion_8290.py` pins only what this PR owns: that
+the two notes agree with each other and with the arithmetic, and that the pivot cite
+really is the `LIFETIME_MEMORY_QUERY` execution site. `--check` is therefore wired
+into the NIGHTLY main-health report and not into a per-PR check —
+`.github/workflows/main-health-nightly.yml` says why in its own comment.
 
 ⛔ The pattern requires DIGITS (`[0-9]+`, not `[0-9]*`). The `*` form also matches a
 bare `hosted_api.py:` and `sort -u` then counts that empty run as one more target —
@@ -51,6 +63,44 @@ CITE_RE = r"hosted_api\.py:[0-9]+"
 #: `LIFETIME_MEMORY_QUERY`.
 DEFAULT_PIVOT = 23128
 
+_SCORECARD = "tortoise/activation_scorecard.py"
+_HOSTED = "tortoise/hosted_api.py"
+_TEST = "tests/test_demo_session_read_exclusion_8290.py"
+
+#: `(label, path, pattern, figure keys)` — the sentence each figure lives in, and
+#: the figure it must state. Both `--check` and `--refresh` read exactly these: a
+#: re-worded note is a REFUSAL, and a new figure means a new row here.
+_NOTES: tuple[tuple[str, str, str, tuple[str, ...]], ...] = (
+    ("scorecard PIVOT cite", _SCORECARD,
+     r"PRODUCTION execution is ``hosted_api\.py:(\d+)``", ("pivot",)),
+    ("scorecard ABOVE count", _SCORECARD,
+     r"\*\*(\d+)\*\* distinct cite", ("above_pivot",)),
+    ("scorecard ABOVE range", _SCORECARD,
+     r"LARGER than \d+ \((\d+) … (\d+)\)", ("above_min", "max_above")),
+    ("scorecard BELOW count", _SCORECARD,
+     r"\*\*(\d+)\*\* have a number smaller", ("below_pivot",)),
+    ("scorecard BELOW range", _SCORECARD,
+     r"number smaller than it \((\d+) … (\d+)\)", ("min_target", "max_below")),
+    ("scorecard TOTAL count", _SCORECARD,
+     r"\((\d+) distinct targets in all", ("distinct_targets",)),
+    ("scorecard pivot remainder", _SCORECARD,
+     r"the remainder is (\d+) itself", ("pivot",)),
+    ("hosted_api CITING-FILE count", _HOSTED,
+     r"from (\d+) tracked files", ("citing_files",)),
+    ("hosted_api TOTAL count", _HOSTED,
+     r"tracked files \((\d+) distinct", ("distinct_targets",)),
+    ("test contract pin _PIVOT", _TEST,
+     r"(?m)^_PIVOT = (\d+)$", ("pivot",)),
+)
+
+
+def lifetime_query_sites(repo: Path = REPO) -> list[int]:
+    """Every line of ``hosted_api.py`` that EXECUTES ``LIFETIME_MEMORY_QUERY``."""
+    lines = (repo / "tortoise" / "hosted_api.py").read_text(
+        encoding="utf-8").splitlines()
+    return [n for n, line in enumerate(lines, 1)
+            if "query(LIFETIME_MEMORY_QUERY)" in line]
+
 
 def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
     """The four figures the notes state, plus the pivot split.
@@ -76,15 +126,20 @@ def census(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) -> dict:
         raise SystemExit(
             f"hosted_api_cite_census: `git grep -l` failed: {files.stderr!r}")
 
+    below = [n for n in targets if n < pivot]
+    above = [n for n in targets if n > pivot]
     return {
         "pivot": pivot,
         "distinct_targets": len(targets),
-        "below_pivot": sum(1 for n in targets if n < pivot),
-        "above_pivot": sum(1 for n in targets if n > pivot),
+        "below_pivot": len(below),
+        "above_pivot": len(above),
         "at_pivot": sum(1 for n in targets if n == pivot),
         "citing_files": len([ln for ln in files.stdout.splitlines() if ln.strip()]),
-        "min_target": targets[0] if targets else None,
-        "max_above": max((n for n in targets if n > pivot), default=None),
+        "min_target": below[0] if below else None,
+        "max_below": below[-1] if below else None,
+        "above_min": above[0] if above else None,
+        "max_above": above[-1] if above else None,
+        "lifetime_sites": lifetime_query_sites(repo),
     }
 
 
@@ -105,14 +160,130 @@ def pivot_is_the_lifetime_site(pivot: int = DEFAULT_PIVOT, repo: Path = REPO) ->
     return "query(LIFETIME_MEMORY_QUERY)" in lines[pivot - 1]
 
 
+def _stated(src: str, pattern: str) -> list[int] | None:
+    """The numbers a note states in that sentence, or `None` when it is gone."""
+    found = re.search(pattern, src)
+    return None if not found else [int(g) for g in found.groups()]
+
+
+def _restate(src: str, pattern: str, want: list[int]) -> tuple[str, int]:
+    """Rewrite one sentence's figures in place; returns `(text, substitutions)`."""
+    def _repl(found: re.Match[str]) -> str:
+        out, cursor = found.group(0), 0
+        for i, value in enumerate(want, start=1):
+            token = found.group(i)
+            at = out.find(token, cursor)
+            if at < 0:  # pragma: no cover — a group always sits inside the match
+                return found.group(0)
+            out = out[:at] + str(value) + out[at + len(token):]
+            cursor = at + len(str(value))
+        return out
+
+    return re.subn(pattern, _repl, src, count=1)
+
+
+def _sweep(measured: dict, refresh: bool) -> int:
+    """Compare (and optionally rewrite) every figure the notes state.
+
+    Returns 0 = the notes agree with `measured` (and nothing was written),
+    1 = stale rows (reported, or just rewritten — the caller re-measures),
+    2 = a note's sentence is gone, so nothing was written at all.
+    """
+    sources = {_SCORECARD: (REPO / _SCORECARD).read_text(encoding="utf-8"),
+               _HOSTED: (REPO / _HOSTED).read_text(encoding="utf-8"),
+               _TEST: (REPO / _TEST).read_text(encoding="utf-8")}
+    rewritten = dict(sources)
+    stale: list[str] = []
+    refused: list[str] = []
+
+    for label, path, pattern, keys in _NOTES:
+        stated = _stated(rewritten[path], pattern)
+        if stated is None:
+            refused.append(
+                f"{label}: its sentence is gone from {path} — re-point the pattern "
+                f"in tools/hosted_api_cite_census.py at the new wording")
+            continue
+        want = [measured[k] for k in keys]
+        if stated == want:
+            if not refresh:
+                print(f"  ok    {label}: {stated} == measured")
+            continue
+        stale.append(f"{label}: {path} states {stated}, the tree measures {want}")
+        if refresh:
+            rewritten[path], n = _restate(rewritten[path], pattern, want)
+            if n != 1:  # pragma: no cover — re.subn after a successful search
+                refused.append(f"{label}: could not rewrite ({n} substitutions)")
+
+    if refused:
+        for line in refused:
+            print(f"REFUSED  {line}", file=sys.stderr)
+        print("hosted_api_cite_census: nothing was written", file=sys.stderr)
+        return 2
+    if not stale:
+        print("hosted_api_cite_census: every stated figure is the measured one")
+        return 0
+    if not refresh:
+        for line in stale:
+            print(f"STALE  {line}", file=sys.stderr)
+        print("hosted_api_cite_census: re-state them with "
+              "`uv run python tools/hosted_api_cite_census.py --refresh`",
+              file=sys.stderr)
+        return 1
+
+    changed = 0
+    for line in stale:
+        print(f"  REFRESHED  {line}")
+    for path, text in rewritten.items():
+        if text != sources[path]:
+            (REPO / path).write_text(text, encoding="utf-8")
+            changed += 1
+    # 1, not 0: the rewrite CHANGED THE POPULATION it just measured (see the module
+    # docstring), so a correct pass can still leave figures describing the old tree.
+    print(f"hosted_api_cite_census: rewrote {changed} file(s); re-measuring")
+    return 1
+
+
 def main(argv: list[str] | None = None) -> int:
-    ap = argparse.ArgumentParser(description=__doc__)
-    ap.add_argument("--pivot", type=int, default=DEFAULT_PIVOT)
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--pivot", type=int, default=None,
+                    help="pivot line for the printed split (default: the derived "
+                         "LIFETIME_MEMORY_QUERY execution site)")
     ap.add_argument("--json", action="store_true", help="machine-readable output")
+    mode = ap.add_mutually_exclusive_group()
+    mode.add_argument("--check", action="store_true",
+                      help="exit 1 when a note's stated figure is not the measured one")
+    mode.add_argument("--refresh", action="store_true",
+                      help="rewrite every stale figure in place (one pass, narrow)")
     args = ap.parse_args(argv)
 
-    data = census(args.pivot)
-    data["pivot_is_lifetime_site"] = pivot_is_the_lifetime_site(args.pivot)
+    sites = lifetime_query_sites()
+    if args.pivot is None and len(sites) != 1:
+        raise SystemExit(
+            f"hosted_api_cite_census: {len(sites)} "
+            f"`query(LIFETIME_MEMORY_QUERY)` sites in {_HOSTED} ({sites}) — the "
+            f"notes are written around exactly ONE; pass --pivot explicitly")
+    pivot = args.pivot if args.pivot is not None else sites[0]
+
+    if args.check or args.refresh:
+        # The notes' figures describe the DERIVED site, so re-derive on every pass
+        # and iterate to a fixpoint (bounded — 3 passes converge after a pivot move).
+        for _ in range(4):
+            sites = lifetime_query_sites()
+            if len(sites) != 1:
+                raise SystemExit(
+                    f"hosted_api_cite_census: {len(sites)} "
+                    f"`query(LIFETIME_MEMORY_QUERY)` sites in {_HOSTED} ({sites})")
+            rc = _sweep(census(sites[0]), refresh=args.refresh)
+            if rc != 1 or not args.refresh:
+                return rc
+            print("  ... re-measuring: a rewritten pivot cite is itself a cite target")
+        print("hosted_api_cite_census: the notes did not converge in 4 passes — a "
+              "rewrite is feeding a pattern it re-measures", file=sys.stderr)
+        return 1
+
+    data = census(pivot)
+    data["pivot"] = pivot
+    data["pivot_is_lifetime_site"] = pivot_is_the_lifetime_site(pivot)
 
     if args.json:
         print(json.dumps(data, indent=2, sort_keys=True))
@@ -120,8 +291,10 @@ def main(argv: list[str] | None = None) -> int:
 
     print(f"hosted_api.py cite census (pivot {data['pivot']}):")
     print(f"  distinct targets   {data['distinct_targets']}")
-    print(f"  below the pivot    {data['below_pivot']}  ({data['min_target']} … )")
-    print(f"  above the pivot    {data['above_pivot']}  ( … {data['max_above']})")
+    print(f"  below the pivot    {data['below_pivot']}  "
+          f"({data['min_target']} … {data['max_below']})")
+    print(f"  above the pivot    {data['above_pivot']}  "
+          f"({data['above_min']} … {data['max_above']})")
     print(f"  at the pivot       {data['at_pivot']}")
     print(f"  citing files       {data['citing_files']}")
     print(f"  pivot is the LIFETIME_MEMORY_QUERY site: "
