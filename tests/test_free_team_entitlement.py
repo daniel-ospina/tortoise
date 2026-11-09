@@ -988,6 +988,67 @@ class TestAtomicProvisionBackstop:
         assert len(dropped) == 1, dropped
         assert dropped[0][1] == f"org_{dropped[0][0]}", dropped
 
+    def test_an_ambiguous_rpc_failure_does_not_drop_the_graph(
+            self, user_client, monkeypatch):
+        """#1981 round-2 review P1 — NOT every failure may reclaim the graph.
+
+        `provision_org` raises the SAME `RuntimeError` for a server error
+        RESPONSE and for a TRANSPORT failure (`supabase_control.rpc`), and the
+        control-plane client's read timeout is 5.0 s — short enough that an RPC
+        which COMMITTED can still surface here as a lost response. An
+        unconditional drop would then `GRAPH.DELETE` the namespace of a LIVE
+        org (rows committed, `TeamMeta`/`OnboardingState` destroyed): strictly
+        worse than the orphan it reclaims, and the inverse of the ordering the
+        lane documents ("an orphaned graph namespace is harmless, an orphaned
+        orgs row is not").
+
+        So the drop is gated on ATTRIBUTION: a 402 (this PR's marker, raised
+        before any write) or a 409 (PostgREST's unique-violation response) are
+        server answers that prove nothing landed. Anything else is ambiguous
+        and keeps the pre-#1981 behaviour — the namespace survives, and the
+        #3390 write-ahead journal is what makes it attributable to a sweep.
+        """
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_org): "
+                "ReadTimeout('')")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-ambiguous"})
+        assert r.status_code == 500, r.text
+        assert dropped == [], (
+            "an AMBIGUOUS RPC failure dropped the eagerly-materialized graph "
+            "— the RPC may have committed, so this destroys a LIVE org's "
+            "namespace (round-2 review P1)")
+
+    def test_a_duplicate_name_409_drops_the_graph(self, user_client,
+                                                  monkeypatch):
+        """The 409 IS attributable (PostgREST rejected the insert), so the
+        namespace is genuinely unowned and must be reclaimed — otherwise a
+        duplicate-name retry mints a NEW org id each attempt and leaks one
+        namespace per try (#1981 round-2 review, P2)."""
+        import tortoise.hosted_api as ha
+        import tortoise.supabase_control as sc
+        tc, _fake = user_client
+        monkeypatch.setattr(
+            sc, "provision_org",
+            lambda *a, **kw: (_ for _ in ()).throw(RuntimeError(
+                "Supabase control-plane RPC failed (provision_org): "
+                "HTTP 409: duplicate key value violates unique constraint")))
+        dropped: list[tuple] = []
+        monkeypatch.setattr(ha, "_drop_org_graph",
+                            lambda org_id, graph_name=None: dropped.append(
+                                (org_id, graph_name)))
+        r = tc.post("/v1/organizations", json={"name": "racer-dup"})
+        assert r.status_code == 409, r.text
+        assert len(dropped) == 1, dropped
+
     def test_the_refusal_drops_the_graph_off_the_event_loop(
             self, user_client, monkeypatch):
         """#1981 review P1: the compensating drop is SYNCHRONOUS socket I/O
@@ -1183,6 +1244,18 @@ class TestAtomicProvisionBackstop:
             assert re.search(pattern, block), (
                 f"the SQL gate stopped applying the {why} clause its Python "
                 "twin (`owned_free_org_ids`) applies")
+        # The identity-path guard (round-2 review, P2). It is BEHAVIOURALLY
+        # redundant — the predicate is `m.user_id = p_user_id`, and with a NULL
+        # right-hand side no membership row can ever match, so §8d stays green
+        # with this clause DELETED. But §8d READS as a pin on "the identity path
+        # is not gated", so the guard is pinned here rather than left to a case
+        # that cannot falsify it.
+        assert re.search(r"IF\s+p_user_id\s+IS\s+NOT\s+NULL", block), (
+            "the gate lost its `IF p_user_id IS NOT NULL` arm. It is not what "
+            "makes §8d pass (a NULL `m.user_id = p_user_id` never matches), "
+            "but it is the declared reason the identity path skips the lock "
+            "and the predicate — restore it or restate §8d")
+
         # ...and the exemption that keeps a self-replay allowed (deliberately
         # ABSENT from the Python twin, so it is pinned here as the known delta)
         assert re.search(r"m\.org_id\s*<>\s*p_org_id", block), (
@@ -1282,25 +1355,31 @@ class TestAtomicProvisionBackstop:
         user-path lane would disable the entitlement with every test green
         (#1981 review, P2). This pins the argument at the ONE user-path call
         site that creates a person's org.
-        Sliced to the USER-PATH lane on purpose. A bare
-        `'"p_tier": "free",' in source` would be satisfied by the other two
-        call sites that pass it (the identity and paid-checkout lanes), so the
-        assertion would stay green while THIS lane's argument was changed —
-        the vacuity class agent-infra#3442 measures.
+        Sliced per FUNCTION on purpose. A bare
+        `'"p_tier": "free",' in source` would be satisfied by the OTHER lane's
+        literal, so the assertion would stay green while this one's argument was
+        changed — the vacuity class agent-infra#3442 measures.
+
+        BOTH user-path lanes are covered (round-2 review, P2):
+        `_create_onboarding_org_lane` passes `p_user_id=owner_user_id` and is
+        just as much a person's org as the /v1/organizations lane, so pinning
+        only the second left the same unguarded argument on the wizard path.
         """
         from pathlib import Path
 
         source = (Path(__file__).resolve().parent.parent
                   / "tortoise" / "hosted_api.py").read_text()
-        head = "async def _create_org_supabase_lane("
-        assert source.count(head) == 1, (
-            "the user-path org-create lane was renamed or duplicated; this pin "
-            "cannot find the call site it grades")
-        lane = source.split(head, 1)[1].split("\nasync def ", 1)[0]
-        assert '"p_tier": "free",' in lane, (
-            "the user-path org provision no longer passes `p_tier: 'free'`; "
-            "`COALESCE(p_tier,'free') = 'free'` would not engage and the "
-            "one-free-org backstop would never fire on this lane")
+        for name in ("_create_org_supabase_lane",
+                     "_create_onboarding_org_lane"):
+            head = f"async def {name}("
+            assert source.count(head) == 1, (
+                f"the user-path org-create lane `{name}` was renamed or "
+                "duplicated; this pin cannot find the call site it grades")
+            lane = source.split(head, 1)[1].split("\nasync def ", 1)[0]
+            assert '"p_tier": "free",' in lane, (
+                f"`{name}` no longer passes `p_tier: 'free'`; "
+                "`COALESCE(p_tier,'free') = 'free'` would not engage and the "
+                "one-free-org backstop would never fire on this lane")
 
 
 def test_the_client_seam_turns_a_wait_bound_refusal_into_an_inconclusive_skip(
