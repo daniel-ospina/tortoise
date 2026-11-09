@@ -572,6 +572,16 @@ def test_unlanded_guards_refuse_n_workers_and_the_message_names_every_one():
     assert reason is not None
     for row in wt.UNLANDED_GUARDS:
         assert row in reason, f"the refusal no longer names this unlanded guard: {row!r}"
+        # ⛔ A row assembled by implicit string concatenation can silently paste
+        # two identifiers into one that exists NOWHERE (`_RECOVER_` + `_INVITE_*`
+        # -> `_RECOVER__INVITE_*`). That shipped once. Because the ledger's own
+        # rule is "delete the row when the guard lands", a row naming a phantom
+        # symbol is not a usable deletion artifact — and every surface here is
+        # pinned by looping this tuple, so nothing else could catch it.
+        assert "__" not in row, (
+            "a ledger row contains a double underscore — implicit line-join has "
+            f"pasted two identifiers into one that does not exist: {row!r}"
+        )
     assert wt.ACK_ENV in reason, "the refusal must name the switch that accepts the residual"
     # And it must name the count it is refusing, not a generic "N".
     assert "N>=2 uvicorn workers" in reason

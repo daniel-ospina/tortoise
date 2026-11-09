@@ -338,10 +338,12 @@ UNLANDED_GUARDS: tuple[str, ...] = (
     "_LAST_DRILL_AT (P1-C): the drill-receipt timestamp is per-process, so each "
     "worker holds its own view of when the last drill ran and the staleness "
     "decision forks.",
-    "rate-limit buckets (P1-C): _SENSITIVE_/_SIGNUP_/_SESSION_/_CLAIM_/_RECOVER_"
-    "_INVITE_*(_TOKEN/_IP/_GLOBAL)/_INVITE_RESEND/_DREAM_FULL buckets are "
-    "per-process, so every anti-abuse budget multiplies by N and a caller gets "
-    "N times its intended allowance by spreading requests across workers.",
+    "rate-limit buckets (P1-C): every anti-abuse budget is per-process — "
+    "_SENSITIVE_, _SIGNUP_, _SESSION_, _CLAIM_, _RECOVER_ and _RECOVER_TOKEN_, "
+    "_INVITE_ACCEPT_ and _INVITE_OTP_ TOKEN/IP/GLOBAL, _INVITE_RESEND_, "
+    "_OAUTH_DCR_ and _DREAM_FULL_ buckets — so each budget multiplies by N and "
+    "a caller gets N times its intended allowance by spreading requests across "
+    "workers.",
     "memory envelope (P1-1): under spawn, each worker re-runs the ~85 s model "
     "pre-warm and holds its own copy, so RSS is ~N x, not 1x + copy-on-write "
     "pages. A sizing decision, not a bankable guard: recorded here so an "
