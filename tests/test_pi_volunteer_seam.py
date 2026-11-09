@@ -519,6 +519,118 @@ def test_uninstall_honours_dry_run(home, capsys):
     assert (_ext_dir(home) / CAPTURE_EXTENSION.name).is_file()
 
 
+def test_uninstall_preserves_an_edit_it_cannot_prove_is_one(tmp_path, monkeypatch,
+                                                           capsys):
+    """An UNREADABLE shipped source is not evidence of equality (#11584 review
+    finding 1) — the locally-edited seam must still be preserved.
+
+    ``_pi_volunteer_local_edit_backup`` read both sides inside one ``try`` and
+    returned ``None`` on ``OSError``; the caller reads ``None`` as "nothing to
+    preserve" and goes straight to ``unlink()``. So on a partially-extracted
+    wheel (or a downgrade) — precisely the shape
+    ``_pi_volunteer_is_provably_ours`` documents and deliberately accepts — a
+    locally edited seam was deleted with **no backup, no message, rc 0**: the
+    round-9 unrecoverable-delete hazard re-opened through the source side.
+
+    Hermetic: the seam lives under a temp ``HOME``, so an invocation can never
+    delete the runner's own ``~/.pi``. No graph seed is needed, so this row does
+    not pay for one.
+
+    Mutation: put both reads back in one ``try`` (or return ``None`` from the
+    source-side ``OSError``) — the ``.bak`` assertions RED and the edit is lost.
+    """
+    from dataclasses import replace
+
+    from tortoise import capture_install, hook_install
+    from tortoise.__main__ import _uninstall_pi_volunteer
+
+    # ⛔ IMPORT `capture_install` BEFORE PATCHING THE CONTRACT, and assert the
+    # premise. The verb derives the installed NAME from
+    # `capture_install.PI_VOLUNTEER_EXTENSION_NAME`, which is computed at that
+    # module's import time off the contract; a first import AFTER this patch
+    # would derive the name from the patched contract, point the verb at a
+    # missing path, take the "nothing to remove" branch and let this row pass
+    # without exercising the backup at all (measured while proving the
+    # mutation).
+    assert capture_install.PI_VOLUNTEER_EXTENSION_NAME == VOLUNTEER_EXTENSION.name
+
+    fake_home = tmp_path / "home"
+    ext_dir = fake_home / ".pi" / "agent" / "extensions"
+    ext_dir.mkdir(parents=True)
+    seam = ext_dir / VOLUNTEER_EXTENSION.name
+    edited = ("// tortoise-hook-version: 18\n"
+              "// my local tweak\n")
+    seam.write_text(edited, encoding="utf-8")
+
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))  # Path.home() on Windows
+    # The shipped source is gone: a partial wheel / a downgrade.
+    contracts = dict(hook_install.ARTIFACT_CONTRACTS)
+    contracts["pi"] = replace(contracts["pi"],
+                              volunteer_source=tmp_path / "no-such-source.ts")
+    monkeypatch.setattr(hook_install, "ARTIFACT_CONTRACTS", contracts)
+
+    rc = _uninstall_pi_volunteer(None)
+    captured = capsys.readouterr()
+
+    assert rc == 0, captured.err
+    assert not seam.exists(), "the verb still completes: the seam is removed"
+    backup = seam.with_suffix(seam.suffix + ".bak")
+    assert backup.is_file(), (
+        "an edit that cannot be PROVEN unedited must be preserved before the "
+        "delete — unrecoverable otherwise:\n" + captured.out)
+    assert backup.read_text(encoding="utf-8") == edited, (
+        "the backup must hold the bytes that were on disk")
+    assert "backed up" in captured.out, captured.out
+    assert "could not be read" in captured.out, (
+        "the sentence must say WHY a copy was kept — the seam could not prove "
+        "the bytes were the shipped ones:\n" + captured.out)
+
+
+def test_the_read_seam_export_names_the_file_the_contract_installs():
+    """The Pi read seam's name is declared TWICE — and the pair is pinned
+    (#11584 review finding 2).
+
+    ``hook_install.PI_VOLUNTEER_EXTENSION_NAME`` is the source of truth every
+    Python consumer derives from (``capture_install`` re-derives it off
+    ``ARTIFACT_CONTRACTS["pi"].volunteer_source``);
+    ``tortoise-volunteer.ts``'s ``EXTENSION_NAME`` is an INDEPENDENT literal
+    naming the source file the contract points at. No Python code can read a TS
+    export, so the TS docstring's old claim ("hook_install derives it") was
+    false in both directions — and nothing coupled the two values, which is the
+    #4680 class the rest of this seam polices.
+
+    Mutation: change the TS literal to any other name — this REDs, naming both
+    values, instead of ``install pi`` copying a path that is not there.
+    """
+    from tortoise.hook_install import (ARTIFACT_CONTRACTS,
+                                       PI_VOLUNTEER_EXTENSION_NAME)
+
+    exported = _ts_string_constant("EXTENSION_NAME")
+    assert exported == PI_VOLUNTEER_EXTENSION_NAME, (
+        "the read seam's TS export and its contract declaration disagree: "
+        f"TS says {exported!r}, hook_install declares "
+        f"{PI_VOLUNTEER_EXTENSION_NAME!r}")
+    assert ARTIFACT_CONTRACTS["pi"].volunteer_source.name == exported, (
+        "the contract must point at the file the seam's own export names — "
+        "otherwise the installer copies a path that does not exist")
+
+
+def _ts_string_constant(name: str) -> str:
+    """Read a plain string constant out of the shipped read seam.
+
+    A mirror that is not read is not a pin: the value is parsed from the TS the
+    installer ships, never restated here (the same reason
+    ``tests/test_openclaw_seam.py::_plugin_int_constant`` exists for the
+    OpenClaw seam).
+    """
+    src = VOLUNTEER_EXTENSION.read_text(encoding="utf-8")
+    match = re.search(
+        rf'^export const {re.escape(name)}\s*=\s*"([^"\\\n]*)";$', src, re.M)
+    assert match, f"{name} is not a plain string export in {VOLUNTEER_EXTENSION}"
+    return match.group(1)
+
+
 # ── 2. the real seam, end to end ─────────────────────────────────────────
 
 

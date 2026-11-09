@@ -5756,31 +5756,52 @@ def _pi_volunteer_is_provably_ours(target: Path) -> bool:
     return _hook_install.read_hook_version(target) is not None
 
 
-def _pi_volunteer_local_edit_backup(target: Path) -> Path | None:
+def _pi_volunteer_local_edit_backup(target: Path) -> tuple[Path, str] | None:
     """Preserve a locally-edited read seam before ``--uninstall`` deletes it.
 
-    ``None`` when the bytes on disk ARE the shipped ones (the ordinary case,
-    where deleting loses nothing but a copy this installer can rewrite) or when
-    either side cannot be read — a backup that cannot prove an edit is not
-    worth a print, and ``_pi_volunteer_is_provably_ours`` has already run.
+    Returns ``(backup_path, why)`` — the copy written and the sentence telling
+    the operator why it was kept — or ``None`` when the bytes on disk are
+    PROVABLY the shipped ones (the ordinary case, where deleting loses nothing
+    but a copy this installer can rewrite).
 
     A user edit KEEPS the ``// tortoise-hook-version: N`` marker, so it stays
     "provably ours" while no longer being what we shipped: `hooks status` names
     that shape ``modified-artifact`` ("local edit"), and it is the one seam a
     delete can destroy unrecoverably (#11584 review round 9).
+
+    ⛔ THE COMPARISON IS ONLY SKIPPED WHEN IT PROVES EQUALITY — never when it
+    merely fails to run (#11584 review finding 1). One `try` around BOTH reads
+    made an unreadable SHIPPED SOURCE return ``None`` here, which the caller
+    reads as "nothing to preserve", so a partially-extracted wheel (or a
+    downgrade) silently deleted a locally-edited seam with no backup and rc 0 —
+    the same unrecoverable-delete hazard as round 9, re-opened through the
+    source side instead of the write side. It is reachable precisely because
+    :func:`_pi_volunteer_is_provably_ours` is DELIBERATELY built to pass when the
+    shipped source is missing (its marker fallback): on that path "provably
+    ours" no longer implies "we can read what we shipped", so the round-9
+    docstring's justification ("the ownership check has already run") does not
+    hold. An unavailable source makes equality UNPROVABLE, which is not the same
+    as PROVEN EQUAL, so the target is preserved.
     """
     from tortoise import hook_install as _hook_install
 
     contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
     source = getattr(contract, "volunteer_source", None)
-    if source is None:
-        return None
+    # The two reads are SEPARATE (as in `_pi_volunteer_is_provably_ours`) so an
+    # unreadable TARGET cannot be confused with an unreadable SOURCE.
     try:
         installed = target.read_bytes()
-        shipped = Path(source).read_bytes()
-    except OSError:
+    except OSError:  # pragma: no cover - `_pi_volunteer_is_provably_ours` refuses this
+        # Nothing to copy, so nothing can be preserved: defence in depth only —
+        # the ownership check already returned False for an unreadable target.
         return None
-    if installed == shipped:
+    shipped: bytes | None = None
+    if source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+    if shipped is not None and installed == shipped:
         return None
     from tortoise.capture_install import _atomic_bytes, _backup_path
 
@@ -5789,7 +5810,10 @@ def _pi_volunteer_local_edit_backup(target: Path) -> Path | None:
     # planted symlink or hard link, and mode 0o600 matches the sibling backup.
     backup = _backup_path(target)
     _atomic_bytes(backup, installed, 0o600)
-    return backup
+    why = ("local edits are preserved" if shipped is not None else
+           "the shipped source could not be read, so local edits cannot be "
+           "ruled out — the copy is kept")
+    return backup, why
 
 
 def _uninstall_pi_volunteer(args) -> int:
@@ -5862,7 +5886,8 @@ def _uninstall_pi_volunteer(args) -> int:
               f"once {target.parent} is writable.", file=sys.stderr)
         return 1
     if backup is not None:
-        print(f"backed up {target} → {backup} (local edits are preserved)")
+        kept, why = backup
+        print(f"backed up {target} → {kept} ({why})")
     try:
         target.unlink()
     except OSError as e:
