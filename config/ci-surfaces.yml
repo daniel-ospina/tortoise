@@ -1634,6 +1634,33 @@ surfaces:
   - eval/why_suite/test_why_suite_schema.py
   - eval/why_suite/test_why_suite_grading.py
   - eval/why_suite/test_why_suite_ab.py
+  # #2275: the adversarial why-suite corpus — the SECOND jointly-pinned fixture
+  # set (near-tie supports, multi-NAND clusters wider than the surfacing cap,
+  # two-link supersede chains, 3+-alternative decisions, mixed-stack pointer
+  # precedence, and a posterior sitting exactly ON the contested threshold).
+  # The hermetic half lives here (corpus drift/validation for BOTH corpora, the
+  # v1 hash pin, corpus-scoped metric vocabularies, and the naive-assembly
+  # discrimination probe); the REAL seeded gate over this corpus is the
+  # `--corpus why_suite_adversarial` lane asserted in
+  # `test_why_suite_benchmark.py` above.
+  #
+  # ⚠️ WHAT THIS REGISTRATION DOES *NOT* DO — corrected (#2275 review, F1).
+  # It is the same treatment #2100/#2099 gave the W3-a/W3-b siblings (a
+  # manifest CLASSIFICATION entry, `api`-listed like them), and this suite does
+  # not gate a merge: #10194 (owner decision A, 2026-10-27) put BOTH eval
+  # subtrees in the `on_demand:` lane (`eval/**`, below), so every file here is
+  # subtracted from every pre-merge leg by `on_demand_files()` and the corpus
+  # runs in `.github/workflows/eval-suite-manual.yml`. Two consequences a reader
+  # must not mis-take: (1) no diff — `tortoise/why.py` included — selects these
+  # files onto a merge gate, so a W4 sub-assembly regression is graded by this
+  # corpus on the on-demand lane, and pre-merge only by the `core` W4 guards
+  # (`test_why_operator_mediation.py`, `test_why_layer_rate.py`,
+  # `test_w4_why_enrichment.py`); (2) the previous wording here ("an
+  # unregistered file is never selected on an eval diff and the
+  # manifest-integrity leg fails") described an effect this entry does not have.
+  # Whether the why-suite SHOULD gate a merge is a reopen of #10194 in its own
+  # home — it is deliberately not decided by this row.
+  - eval/why_suite/test_why_suite_adversarial_corpus.py
   # W2-b (#2098): the BPRE gate lane — a provenance-stamping / capture-
   # boundary PR (hosted capture code changes) must run the real-pipeline
   # replay gate against the write-path corpus. The deterministic M2 echo

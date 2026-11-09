@@ -1,0 +1,11 @@
+{
+  "corpus": "why_suite_adversarial",
+  "files": {
+    "corpus_manifest_adversarial.json": "sha256:d309254475e1be5974174c09431c1a413ef8979c40dee3653648f99988b91f12",
+    "gold/why_suite_adversarial.gold.json": "sha256:5601ade2dfdfe2546e93aab064b253ebb9789d071793e54a60782a47e18bf1eb"
+  },
+  "fixtures_hash": "sha256:84d6ca705ef05b689febe401f6880a39b2c486a6350e6830b05931a2d6129238",
+  "generator": "tests/eval/why_suite/generate_corpus.py",
+  "schema_version": 1,
+  "seed": 4275
+}
