@@ -241,6 +241,9 @@ def test_the_carried_tenant_arms_the_leg_without_a_contextvar(monkeypatch):
     import tortoise.record_writer as rw
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    # The CUTOVER must be armed for the tenant half to be observable at all —
+    # it is OFF by default and has its own pin (`test_the_cutover_is_OFF_by_default`).
+    monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
 
     assert record_vector.searcher() is None, (
@@ -261,6 +264,7 @@ def test_the_sdk_searcher_passes_its_carried_tenant(monkeypatch):
     from tortoise import sdk as sdk_mod
 
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     import tortoise.record_writer as rw
 
     monkeypatch.setattr(rw, "record_tenant", lambda: None, raising=False)
@@ -276,6 +280,64 @@ def test_the_sdk_searcher_passes_its_carried_tenant(monkeypatch):
 def test_an_unarmed_box_reports_unarmed_rather_than_raising():
     """`armed()` is a fact, not an exception — the SDK calls it per read."""
     assert record_vector.armed("") is False
+
+
+# ── the width is ONE declaration, and the migration is the second copy ─────
+
+def test_the_migration_declares_the_one_embedding_width():
+    """`EMBEDDING_DIM` and the migration's `vector(384)` must be the same number.
+
+    ⛔ THIS IS THE TRAP `#4194`/`#4280` ALREADY PAID FOR, one store over. The code
+    this change deletes read `embeddings.EMBEDDING_DIM` explicitly so that a
+    fresh index and the write path could not disagree — "a bare literal here plus
+    a rotated `EMBEDDING_DIM` would bless vectors the index cannot hold". The
+    Postgres column and the converter's `jsonb_array_length(doc) = 384` are
+    HAND-TYPED literals, and on a width rotation they would go on answering for
+    the old width: the converter would return NULL for every row (stored, not
+    indexed) and every record dense read would silently degrade to the
+    brute-force graph leg — with the move's cost already paid. Nothing else in
+    the suite connects the two, so this pin is the connection.
+    """
+    import re
+
+    from tortoise.embeddings import EMBEDDING_DIM
+
+    sql = (record_vector.__file__.rsplit("/tortoise/", 1)[0]
+           + "/supabase/migrations/20261109000001_record_embedding_vector.sql")
+    text = open(sql, encoding="utf-8").read()
+    declared = {int(m) for m in re.findall(r"public\.vector\((\d+)\)", text)}
+    declared |= {int(m) for m in re.findall(r"jsonb_array_length\(doc\) <> (\d+)",
+                                            text)}
+    declared |= {int(m) for m in re.findall(r"[^_\w]vector\((\d+)\)", text)}
+    assert declared, "the migration declares no vector width at all"
+    assert declared == {EMBEDDING_DIM}, (
+        f"the migration declares width(s) {sorted(declared)} but "
+        f"`embeddings.EMBEDDING_DIM` is {EMBEDDING_DIM} — rotating the width "
+        "would leave the Postgres column and the converter answering for the "
+        "old one, and every record dense read would degrade to the graph "
+        "silently")
+
+
+# ── the arming surface ─────────────────────────────────────────────────────
+
+def test_the_cutover_is_OFF_by_default(monkeypatch):
+    """The record is a fold with NO backfill, so it cannot be the only source.
+
+    Until the existing vectors are in the record, making it the dense leg's sole
+    source would drop every pre-existing point out of the pool — silently, since
+    the shortfall assertion counts `available` with the record's own predicate
+    and so cannot see material only the graph holds (`#5090` Q2). So arming is a
+    deliberate act, on the same posture as `TORTOISE_EMBED_GATE` and
+    `record_serve.SERVE_MODE`.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    assert record_vector.searcher(carried=("o", "g")) is None, (
+        "the cutover armed itself — a default-on move would silently drop every "
+        "vector the record does not yet hold")
+
+    monkeypatch.setenv(record_vector.ARMING_ENV, "1")
+    assert record_vector.searcher(carried=("o", "g")) is not None
 
 
 # ── the residual scan's verdict algebra ────────────────────────────────────
@@ -335,7 +397,12 @@ def test_the_outcome_names_the_scope_it_measured():
                            graph_vectors=0).as_dict()
     assert payload["org_id"] == "o" and payload["graph_id"] == "g"
     assert "org_id+graph_id" in payload["scope"]
-    assert "graph name" in payload["scope"]
+    assert "graph NAME" in payload["scope"]
+    # ⛔ TWO namespaces, never one (#11660 review round 3, P1): the record's
+    # `graph_id` is a `public.graphs.id`, the graph's name is that row's
+    # `namespace`. A reader quoting this CLEAN must be able to see that the two
+    # halves were scoped by DIFFERENT identifiers.
+    assert "public.graphs.id" in payload["scope"] or "record" in payload["scope"]
 
 
 def test_the_record_half_counts_both_the_payload_and_the_indexed_projection():

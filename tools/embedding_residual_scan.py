@@ -21,10 +21,12 @@ Usage:
 
     # the whole scope, both stores
     uv run python tools/embedding_residual_scan.py \
-        --org o_123 --graph g_abc --graph-uri "$TORTOISE_DB_URI"
+        --org o_123 --graph-id g_abc --graph-name org_acme \
+        --graph-uri "$TORTOISE_DB_URI"
 
     # machine-readable
-    uv run python tools/embedding_residual_scan.py --org ... --graph ... --json
+    uv run python tools/embedding_residual_scan.py --org ... --graph-id ... \
+        --graph-name ... --json
 
 ⚠️ The GRAPH half needs a live FalkorDB. When `--graph-uri` is absent the graph
 half is REFUSED (exit 2) rather than silently reported clean — "I did not look"
@@ -73,9 +75,22 @@ def main(argv: list[str] | None = None) -> int:
         description="Residual-scan BOTH vector stores for one scope after an "
                     "erasure (#11642). Exit 0 CLEAN / 3 RESIDUE / 2 no verdict.")
     ap.add_argument("--org", required=True, help="Record org_id (the scope)")
-    ap.add_argument("--graph", required=True,
-                    help="Graph id: the record scope's graph_id AND the graph "
-                         "name the graph half is read from")
+    # ⛔ TWO DIFFERENT IDENTIFIERS, NEVER ONE (#11660 review round 3, P1).
+    # The record's `graph_id` is a `public.graphs.id` (`g_<hex>`, FK-enforced);
+    # the FalkorDB graph NAME is that row's `namespace` (`org_<ns>` /
+    # `org_<tid>_<gid>`). An earlier draft took ONE value for both, so whichever
+    # was supplied, one store was read under a wrong scope — and worse, a graph
+    # name the engine does not hold answers `MATCH … RETURN count(n)` with **0**
+    # rather than raising, so `_count_graph` recorded NO refusal and the tool
+    # printed CLEAN. That is a false erasure attestation from the one instrument
+    # whose contract says a false CLEAN is impossible.
+    ap.add_argument("--graph-id", required=True,
+                    help="The RECORD scope's graph_id (public.graphs.id, "
+                         "`g_<hex>`) — never the FalkorDB graph name")
+    ap.add_argument("--graph-name", required=True,
+                    help="The FalkorDB graph NAME to scan (public.graphs."
+                         "namespace, `org_<ns>` / `org_<tid>_<gid>`) — never "
+                         "the record's graph_id")
     ap.add_argument("--record-dsn", default=None,
                     help="Postgres record DSN (default: $TORTOISE_RECORD_DSN)")
     ap.add_argument("--graph-uri", default=None,
@@ -86,11 +101,11 @@ def main(argv: list[str] | None = None) -> int:
     args = ap.parse_args(argv)
 
     graph_uri = args.graph_uri or os.environ.get("TORTOISE_DB_URI")
-    graph = _graph_handle(graph_uri, args.graph)
+    graph = _graph_handle(graph_uri, args.graph_name)
 
     outcome = scan(
         org_id=args.org,
-        graph_id=args.graph,
+        graph_id=args.graph_id,
         record_dsn=args.record_dsn,
         graph=graph,
     )
@@ -100,7 +115,8 @@ def main(argv: list[str] | None = None) -> int:
                          default=str))
         return outcome.exit_code
 
-    print(f"scope: org={outcome.org_id} graph={outcome.graph_id}")
+    print(f"scope: org={outcome.org_id} record graph_id={outcome.graph_id} "
+          f"falkor graph name={args.graph_name}")
     print(f"  record: {outcome.record_vectors!r}"
           + ("" if outcome.record_vectors is None
              else f"  {outcome.record_by_table}"))

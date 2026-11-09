@@ -138,7 +138,11 @@ class ResidualScan:
             # Stated on every outcome, not only the failure ones: a reader who
             # quotes a CLEAN must be able to see that it is a claim about ONE
             # scope in TWO stores.
-            "scope": "org_id+graph_id on the record, graph name on the graph",
+            # ⛔ TWO SCOPES, TWO IDENTIFIERS: the record's `graph_id` is a
+            # `public.graphs.id`; the graph's name is that row's `namespace`.
+            # They are NOT interchangeable, and the CLI takes them separately
+            # (#11660 review round 3, P1).
+            "scope": "org_id+graph_id on the record, graph NAME on the graph",
         }
 
 

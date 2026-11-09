@@ -733,7 +733,13 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: DELETED rather than branched, so flipping the flag restored a log line and
 #: nothing else: an operator who reached for it in an incident would have got no
 #: index and a warning about it, which is worse than either state alone. Both
-#: branches are run by `tests/test_11642_vector_move.py`.
+#: branches are run by `tests/test_4997_vector_index_parity.py`:
+#: `test_report_never_gates_index_creation` drives the ROLLBACK creation path
+#: (flag False — the only posture that reaches it) and its siblings drive the
+#: retirement (drop-when-present, no-drop-blind, no-drop-clean).
+#: ⛔ Not `tests/test_11642_vector_move.py`: that file is DB-free and never
+#: touches this flag (#11660 review round 3, P3 — an earlier draft pointed a
+#: reader at a file with no such pin).
 #:
 #: ⚠️ Flipping it is a CODE revert's cheap cousin, not the whole revert: the
 #: record leg stays armed and keeps answering the dense read (`record_vector`),

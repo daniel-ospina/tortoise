@@ -2238,8 +2238,20 @@ surfaces:
   # reported as MANIFEST DRIFT: the file collected nowhere, so every pin in it
   # (the served set, the shortfall assertion, the residual verdict algebra) was
   # green by never running — the #1349/#2938/#3154/#4367 silent-drop class.
-  # Its Postgres-armed sibling legs live in `test_11642_vector_move_live.py`
-  # (the `test-record-postgres` job, which asserts zero skips).
+  # ⛔ THERE IS NO `test_11642_vector_move_live.py` AT THIS HEAD, and an earlier
+  # draft of this comment said there was (#11660 review round 3, P2). Nothing in
+  # the tree therefore EXECUTES `record_vector.vector_search` — the one SQL
+  # statement that would carry production dense traffic (`embedding_vec <=> %s`,
+  # the status predicates, `_recency_sql`, the shortfall `count(*)`). Its failure
+  # mode is `RecordVectorError` -> the NAMED graph fallback, so a broken query
+  # would ship green and look like a correctly-degrading store — this PR's own
+  # argument about migrations, applied to the reader. That gap is why the CUTOVER
+  # is OFF by default (`record_vector.ARMING_ENV`): the leg cannot be armed on a
+  # statement no leg has run. WHAT WOULD CLOSE IT, named so it is not re-derived:
+  # a live file that applies the migrations to `TEST_RECORD_DB_URI` (the
+  # `pgvector/pgvector:pg16` provisioner), writes a few vectors through the
+  # production projection, and asserts `vector_search` returns them in
+  # distance order with a terminal row excluded.
   - test_11642_vector_move.py
   # The LIVE half: it executes `record_vector.vector_search` against a real
   # pgvector server (the SQL, the shortfall count, the status predicate, the

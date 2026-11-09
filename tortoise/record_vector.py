@@ -56,11 +56,13 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
 
 __all__ = [
+    "ARMING_ENV",
     "HNSW_ITERATIVE_SCAN",
     "LABEL_SERVED",
     "LOG_NAME",
@@ -148,6 +150,35 @@ LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
                  ("updated_at", "created_at")),
     "event": ("event", "event_id", "", ("updated_at", None)),
 }
+
+
+#: The arming surface for the CUTOVER, default OFF.
+#:
+#: ⛔ WHY THIS EXISTS, and it is a measured gap rather than caution (#11660
+#: review round 3, P1). The record is a journal fold with NO backfill, so it
+#: holds a vector only for content written AFTER the move is deployed. A
+#: cutover that made the record the dense leg's only source would therefore DROP
+#: every pre-existing point out of the dense pool — silently, with the trace
+#: reporting `mechanism=pgvector, reason=ok, degraded=False`, because the
+#: shortfall assertion counts `available` with the record's own predicate and so
+#: cannot see material that only the graph holds. That is `#5090` Q2 ("nothing is
+#: silently invisible") on the branch that would carry production traffic.
+#:
+#: The infrastructure this module is — the column, the index, the reader, the
+#: residual scan — is complete and measured. What is NOT done is getting the
+#: existing vectors INTO the record, and until that exists the graph is the only
+#: source that holds the whole corpus, so it stays the source. Arming this is a
+#: deliberate act, taken when the record's coverage is known — the same posture
+#: `TORTOISE_EMBED_GATE` and `record_serve.SERVE_MODE` take, and for the same
+#: reason: a correctness change to the read path is measured before it is trusted.
+#:
+#: ⚠️ Left off, NOTHING regresses: the graph branches answer exactly as they did
+#: before this change (they are the fallback they always were), and the only
+#: difference is that the in-graph vector index is retired — so those reads are
+#: brute-force scans. That cost is the thing to price before arming, and it is
+#: the second reason this is a switch rather than a default: a store that arms it
+#: needs the record backfilled FIRST, not after.
+ARMING_ENV = "TORTOISE_RECORD_VECTOR_LEG"
 
 
 class RecordVectorError(RuntimeError):
@@ -305,6 +336,13 @@ def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> st
     )
 
 
+def _cutover_armed() -> bool:
+    """Is the dense leg's CUTOVER armed? Default NO — see :data:`ARMING_ENV`."""
+    from .env_truthy import is_truthy
+
+    return is_truthy(os.environ.get(ARMING_ENV))
+
+
 def searcher(
     record_dsn: str | None = None,
     carried: tuple[str, str] | None = None,
@@ -345,6 +383,11 @@ def searcher(
             "record DSN unusable — the dense leg stays on the graph")
         return None
     if not dsn:
+        return None
+    if not _cutover_armed():
+        # See ARMING_ENV: the record is a fold with no backfill, so it does not
+        # yet hold the whole corpus and must not become the dense leg's only
+        # source. Unarmed is the DEFAULT and it is not a degraded state.
         return None
     scope = _resolve_scope(carried)
     if scope is None:
