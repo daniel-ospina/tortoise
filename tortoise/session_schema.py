@@ -165,8 +165,11 @@ def demo_session_id(org_id: str) -> str:
 def is_demo_session_id(session_id: str | None) -> bool:
     """True when ``session_id`` names a demo/sample Session (#8290).
 
-    The predicate the DETAIL DOOR and the SDK MIRROR share, derived from
-    :data:`DEMO_SESSION_ID_PREFIX`. The third read surface — the list query —
+    The predicate the THREE production callers share, derived from
+    :data:`DEMO_SESSION_ID_PREFIX`: the DETAIL DOOR (``hosted_api``) and the SDK
+    MIRROR (``sdk.get_session``), plus ``activation_scorecard.stage_counts``,
+    which filters the scorecard's rows through it rather than writing a second
+    Cypher spelling of the prefix. The third read surface — the list query —
     cannot call Python, so it binds that same constant as a ``$demo_prefix``
     Cypher parameter instead. A surface that re-spelled the prefix (or compared
     against a literal id) would exclude a DIFFERENT set than the others, which is

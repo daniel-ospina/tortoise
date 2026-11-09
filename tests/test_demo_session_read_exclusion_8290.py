@@ -45,6 +45,7 @@ the P1 regression pin (`STARTS WITH` on a non-string id).
 from __future__ import annotations
 
 import re
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -652,3 +653,116 @@ def test_the_lifetime_baseline_excludes_the_sample_at_the_query(tmp_path):
         assert pre == [["2026-01-01T00:00:00Z", 2]], pre
     finally:
         client.close()
+
+
+# ── the cite-count notes, MEASURED (a hand count has been wrong at this head) ─
+
+#: The pivot both notes are written around: the ONE production execution site of
+#: ``LIFETIME_MEMORY_QUERY``. Spelled here rather than imported — the NUMBER is
+#: the claim's subject, and importing the API module for it would pull the whole
+#: stack into a fast suite.
+_PIVOT = 23128
+
+#: The one pattern that defines a "cite target". Written with regex escapes so
+#: this file cannot match itself: an unescaped form here would add a target to
+#: the very population it measures.
+_CITE_RE = r"hosted_api\.py:[0-9]+"
+
+
+def _tracked_cite_targets() -> list[int]:
+    """Every distinct cited line number, over the TRACKED tree."""
+    proc = subprocess.run(
+        ["git", "grep", "-o", "-h", "-E", _CITE_RE],
+        cwd=str(_REPO), capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, (
+        f"the measurement needs `git grep` in a checkout: {proc.stderr!r}")
+    return sorted({int(tok.rsplit(":", 1)[1]) for tok in proc.stdout.split()})
+
+
+def _tracked_citing_file_count() -> int:
+    proc = subprocess.run(
+        ["git", "grep", "-l", "-E", _CITE_RE],
+        cwd=str(_REPO), capture_output=True, text=True, check=False)
+    assert proc.returncode == 0, proc.stderr
+    return len([ln for ln in proc.stdout.splitlines() if ln.strip()])
+
+
+def _stated(pattern: str, src: str) -> int:
+    found = re.search(pattern, src)
+    assert found, (
+        "the note's sentence is gone or re-worded; re-point this pin at it: "
+        f"{pattern!r}")
+    return int(found.group(1))
+
+
+def test_the_hosted_api_cite_counts_are_the_measured_ones():
+    """The two notes state a MEASUREMENT, so a test does the measuring.
+
+    Why this exists (review of #11576, P2): the scorecard note says its counts
+    are "re-measured whenever ``hosted_api.py`` gains or loses a line", and a
+    review round then "re-measured" **449 / 434 / 14** into **450 / 435 / 14** —
+    a false correction, marked as a re-measurement, that no test could see. The
+    count is cheap to take and it has now been wrong once in each direction, so
+    it is taken here instead of in a commit message.
+
+    REDS IF: either note's stated numbers drift from the tree (a new cite above
+    the pivot, or a hand-edited figure that does not match). The numbers are NOT
+    restated in this file's source on purpose — the test measures, it does not
+    copy.
+    """
+    targets = _tracked_cite_targets()
+    below = sum(1 for n in targets if n < _PIVOT)
+    above = sum(1 for n in targets if n > _PIVOT)
+    distinct = len(targets)
+    citing_files = _tracked_citing_file_count()
+    # the counted population must be big enough for the claim to mean anything
+    assert distinct > 100 and above > 0 and below > 0, (
+        f"the measurement collapsed: distinct={distinct} below={below} "
+        f"above={above}")
+
+    scorecard = _src("tortoise/activation_scorecard.py")
+    assert _stated(r"\*\*(\d+)\*\* distinct cite", scorecard) == above, (
+        "the scorecard note's ABOVE-pivot count is not the measured one")
+    assert _stated(r"\*\*(\d+)\*\* have a number smaller", scorecard) == below, (
+        "the scorecard note's BELOW-pivot count is not the measured one")
+    assert _stated(r"\((\d+) distinct targets in all", scorecard) == distinct, (
+        "the scorecard note's total is not the measured one")
+
+    hosted = _src("tortoise/hosted_api.py")
+    assert _stated(r"from (\d+) tracked files", hosted) == citing_files, (
+        "the list-helper note's citing-FILE count is not the measured one")
+    assert _stated(r"tracked files \((\d+) distinct", hosted) == distinct, (
+        "the list-helper note's distinct-target count is not the measured one")
+
+
+def test_the_predicate_docstring_names_every_production_caller():
+    """``is_demo_session_id`` is shared by THREE production callers, not two.
+
+    Review of #11576 (P2): the docstring was narrowed to "the DETAIL DOOR and
+    the SDK MIRROR", which is true of the two GUARD sites but omits the third
+    production caller — ``activation_scorecard.stage_counts``, which imports and
+    calls the predicate to filter the scorecard's rows (that file says so in its
+    own note: it uses the shared predicate rather than a second Cypher spelling).
+    A docstring that under-counts its callers is the same drift class it exists
+    to prevent, one surface over.
+    """
+    doc = session_schema.is_demo_session_id.__doc__ or ""
+    assert "activation_scorecard.stage_counts" in doc, (
+        "the predicate's docstring must name the scorecard caller — it is the "
+        "third production call site, and omitting it is how the claim stayed "
+        "false in a commit message")
+    assert "THREE production callers" in doc or "three production callers" in doc, doc
+
+    # non-vacuity: each named caller really does call it at this head
+    assert "if is_demo_session_id(session_id):" in _src("tortoise/hosted_api.py")
+    assert "if is_demo_session_id(session_id):" in _src("tortoise/sdk.py")
+    scorecard = _src("tortoise/activation_scorecard.py")
+    assert "from tortoise.session_schema import is_demo_session_id" in scorecard
+    assert re.search(r"if is_demo_session_id\(", scorecard), (
+        "the scorecard caller the docstring now names must still be a CALL")
+    # and the FOURTH `mint_session_id()` site is recorded where the mint's own
+    # docstring counts its create sites — not left to a commit message, which is
+    # where the review found the false version of this claim (P3, #11576)
+    assert "extract_session_v2" in _src("tortoise/ids.py"), (
+        "ids.py must still name ``extractor_v2.extract_session_v2`` among the "
+        "four create sites the mint replaced")
