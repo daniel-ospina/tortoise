@@ -647,10 +647,26 @@ _argv_is_shell_wrapped() {
     # refused silently: an unmeasurable command line is treated exactly like
     # `--env-file`, which is the same "I cannot see the count" shape.
     # The signature is deliberately narrow (a token carrying BOTH whitespace and
-    # `uvicorn`, or a bare `-c`-style shell flag) so a legitimate spaced VALUE
-    # such as `--header "X: Y"` does not trip it.
-    local _arg=""
-    for _arg in "$@"; do
+    # a command word, or a bare `-c`-style shell flag) so a legitimate spaced
+    # VALUE does not trip it.
+    #
+    # ⛔ ARITY, so that "spaced VALUE" includes a spaced PATH. The first-word list
+    # below carries `/*`, `./*` and `../*` because a shell string's command word
+    # is usually a path (`/usr/local/bin/uvicorn app:app --workers 4`). A path
+    # VALUE hit the same arm: `--root-path "/srv/my app"` has the first word
+    # `/srv/my`, so an exec-form CMD (the shape `Dockerfile.hosted` ships) was read
+    # as "launched through a shell string" — a FALSE refusal under `--lifespan off`
+    # and a degraded banner otherwise, with a cause that is not true. MEASURED
+    # through the shipped block: `--root-path "/srv/my app"` rc=1 "the server is
+    # launched through a shell string", while `--root-path /srv/my-app` rc=0.
+    # The walk therefore CONSUMES the token a long option takes as its value, so a
+    # value is never tested as a command. The shapes this predicate exists for are
+    # unaffected: `sh -c "…"` is still caught by the `-c` bundle arm at index 1,
+    # and a whole-command token is at an index no option consumed.
+    local _args=("$@") _i=0 _arg="" _skip=0
+    while [ "$_i" -lt "${#_args[@]}" ]; do
+        _arg="${_args[$_i]}"
+        if [ "$_skip" = "1" ]; then _skip=0; _i=$((_i + 1)); continue; fi
         # ⛔ "IS THIS A SHELL FLAG BUNDLE CARRYING `c`" — expressed as two arms,
         # not one glob. A first cut used `-[[:alpha:]]*c`, which matches only a
         # bundle that ENDS in `c`, so `-cl` (i.e. `sh -cl "..."`) stopped
@@ -662,7 +678,13 @@ _argv_is_shell_wrapped() {
         # Globs cannot say "contains"; so: a LONG option is never a bundle (the
         # `--*` arm), and any single-dash token that CONTAINS `c` is one.
         case "$_arg" in
-            --*) ;;
+            --*=*) : ;;
+            --*)
+                # A long option consumes the NEXT token as its VALUE — even when
+                # that token looks like a flag — unless it is one of uvicorn's own
+                # FLAGS (the one list, `_uvicorn_flag_option`).
+                _uvicorn_flag_option "$_arg" || _skip=1
+                ;;
             -*)
                 case "$_arg" in
                     *c*) return 0 ;;
@@ -684,6 +706,7 @@ _argv_is_shell_wrapped() {
                 esac
                 ;;
         esac
+        _i=$((_i + 1))
     done
     return 1
 }

@@ -1138,6 +1138,38 @@ def test_the_shipped_block_refuses_an_unconvertible_count_without_a_traceback():
     assert "digit string longer than this build can convert" in proc.stderr, proc.stderr
 
 
+def test_a_convertible_count_at_or_above_maxsize_is_NAMED_not_called_unreadable():
+    """⛔ The sentinel must be a TYPE, not a MAGNITUDE.
+
+    ``int()`` converts any digit string up to ``sys.int_max_str_digits``, so
+    ``_positive_int("9223372036854775808")`` — 19 digits, far below the conversion
+    limit — legitimately returns ``sys.maxsize + 1``. A ``>= UNREADABLE_COUNT``
+    test classified that as "a count this build never read", which is FALSE about
+    a value it had just converted exactly, and it made :func:`_observed_count`'s
+    own docstring ("never a number this build never read") a lie. Identity is no
+    contract for ``int`` either, so the sentinel is a distinct ``int`` SUBCLASS and
+    the consumers ask ``isinstance``.
+
+    Polarity was never at risk (both shapes still refuse), so this is an accuracy
+    pin: the refusal must not describe a number it read as one it could not.
+    """
+    for text in (str(sys.maxsize), str(sys.maxsize + 1), "9" * 19):
+        count = wt._positive_int(text)
+        assert count == int(text), (text, count)
+        assert not isinstance(count, wt._UnreadableCount), (
+            f"a CONVERTED count ({text}) was classified as unreadable — the "
+            "sentinel is being detected by magnitude"
+        )
+        topology = wt.observe({"WEB_CONCURRENCY": text})
+        assert f"N>={int(text)} uvicorn workers" in wt.refusal_reason(topology), text
+        assert wt._count_text(topology) == str(int(text)), text
+
+    # …while the conversion-limit sentinel is still recognised AS ONE.
+    if sys.get_int_max_str_digits():
+        huge = "9" * (sys.get_int_max_str_digits() + 1)
+        assert isinstance(wt._positive_int(huge), wt._UnreadableCount)
+
+
 def test_the_shipped_block_reports_one_worker_while_reloading():
     """`--reload --workers 4` serves ONE child; the banner must say so.
 
@@ -1413,6 +1445,32 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
     assert proc.returncode == 0, (proc.stderr, proc.stdout)
     assert "REFUSING" not in proc.stderr, proc.stderr
     assert "MULTI-WORKER" in proc.stdout, proc.stdout
+
+    # ⛔ THE SAME ARITY RULE, FOR A SPACED PATH. The first-word list includes
+    # `/*` / `./*` / `../*` because a shell string's command word is usually a
+    # PATH (`/usr/local/bin/uvicorn app:app --workers 4`). A path VALUE collided
+    # with it: `--root-path "/srv/my app"` has the first word `/srv/my`, so an
+    # exec-form CMD — the shape `Dockerfile.hosted` ships — was read as "launched
+    # through a shell string". MEASURED at the pre-fix head: `--root-path
+    # "/srv/my app"` with `--lifespan off` exited 1 with that false cause, while
+    # `--root-path /srv/my-app` exited 0. A spaced mount path is a legitimate
+    # deployment, and the refusal it produced named a cause that was not true.
+    for _flag in ("--root-path", "--app-dir", "--log-config"):
+        proc = _run_worker_block(
+            ("uvicorn", "app:app", "--lifespan", "off", _flag, "/srv/my app"), {})
+        assert proc.returncode == 0, (
+            f"a spaced PATH VALUE for {_flag} was refused as a shell string: "
+            f"{proc.stderr!r}"
+        )
+        assert "verified as ONE worker" in proc.stdout, proc.stdout
+
+    # …and the CONTROL that the path arm still catches what it is for: a whole
+    # command line in ONE argv token, whose first word is a command path. It is
+    # at an index no option consumed, so arity does not hide it.
+    proc = _run_worker_block(("/usr/local/bin/uvicorn app:app --workers 4",), {})
+    assert proc.returncode == 0, proc.stderr
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+    assert "uvicorn workers = 4" not in proc.stdout, proc.stdout
 
 
 def test_the_lifespan_off_refusal_holds_under_a_COLLATING_locale():

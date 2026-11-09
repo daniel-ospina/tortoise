@@ -363,6 +363,21 @@ class MultiWorkerRefused(RuntimeError):
     """Raised at startup when this process may not be one of N>1 workers."""
 
 
+class _UnreadableCount(int):
+    """A count a consumer can tell from one that was actually CONVERTED.
+
+    ⛔ The TYPE is the sentinel, not the VALUE, and that is load-bearing. No int
+    value is safe: ``int()`` converts any digit string up to
+    ``sys.int_max_str_digits`` digits, so ``_positive_int("9223372036854775808")``
+    legitimately returns ``sys.maxsize + 1`` — a magnitude test (``>=``) called
+    that "a count this build never read", which is false about a 19-digit value
+    it had just converted exactly. Identity is no better (two equal ``int``s are
+    not required to be one object). A converted count can never be an instance of
+    this type, and ``isinstance`` still lets every consumer treat the value as the
+    number it is (``> 1``, printable).
+    """
+
+
 #: The saturation value :func:`_positive_int` reports for a digit string its own
 #: interpreter refuses to CONVERT (the ``except ValueError`` arm). No real worker
 #: count can reach it — it is ``sys.maxsize`` — and every consumer reads it as
@@ -370,7 +385,7 @@ class MultiWorkerRefused(RuntimeError):
 #: about a count it cannot name. Named here, not inlined, so the refusal text can
 #: RECOGNISE it and describe the input instead of printing a number this build
 #: never read.
-UNREADABLE_COUNT = sys.maxsize
+UNREADABLE_COUNT = _UnreadableCount(sys.maxsize)
 
 
 def _positive_int(raw: object) -> int | None:
@@ -787,7 +802,7 @@ def _guard_list() -> str:
 
 def _observed_count(topology: Topology) -> str:
     """The count phrase a refusal uses — never a number this build never read."""
-    if topology.workers >= UNREADABLE_COUNT:
+    if isinstance(topology.workers, _UnreadableCount):
         return (
             "more than one uvicorn worker (the configured count is a digit "
             "string longer than this build can convert to an integer)"
@@ -797,7 +812,7 @@ def _observed_count(topology: Topology) -> str:
 
 def _count_text(topology: Topology) -> str:
     """The measured count for a log line, or a truthful word for an unreadable one."""
-    if topology.workers >= UNREADABLE_COUNT:
+    if isinstance(topology.workers, _UnreadableCount):
         return "an unreadable digit string (definitely >1)"
     return str(topology.workers)
 
