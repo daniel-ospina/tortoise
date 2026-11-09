@@ -354,21 +354,26 @@ FUNNEL_QUERY = (
 #
 # The prefix is INTERPOLATED from its one owner (``session_schema``), not bound
 # as a ``$`` parameter, and what that buys is LINE COST, stated at its real size:
-# the one PRODUCTION execution is ``hosted_api.py:23128`` (the module's own test
-# is the only other one), and a ``params=…`` argument there does not fit in 100
-# columns, so it wraps and pushes later lines down. Measured over every
+# the one PRODUCTION execution is ``hosted_api.py:23128`` (the two TEST sites are
+# ``tests/test_activation_scorecard.py`` — a stubbed ``_G``, through the hosted
+# route — and ``tests/test_demo_session_read_exclusion_8290.py``, which queries it
+# directly on a real embedded engine), and a ``params=…`` argument there does not
+# fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **14** distinct cite
 # targets have a line number LARGER than 23128 (23284 … 99999) and those are the
 # ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
 # move. (449 distinct targets in all — the remainder is 23128 itself, which this
 # very comment names, and which is why these counts are re-measured whenever
 # ``hosted_api.py`` gains or loses a line above it.)
-# ``STAGE3_PREDICATE`` is interpolated for the same reason. The
-# value is a module constant with no quote, backslash, ``$`` or backtick in it,
-# so it cannot break out of the single-quoted Cypher literal. ``toString`` is
-# what keeps a legacy non-string id from ABORTING the query (``STARTS WITH``
-# raises ``Type mismatch`` on an integer id), and the explicit NULL arm keeps a
-# NULL-id Session counted: the demo set is exactly the prefixed ids.
+# ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
+# EXPRESSION (``WHERE ({STAGE3_PREDICATE}) AND …``), never inside a quoted
+# literal — so escaping is not what it needs. The one value interpolated INSIDE a
+# single-quoted Cypher literal is the PREFIX, and it is a module constant with no
+# quote, backslash, ``$`` or backtick in it, so it cannot break out of that
+# literal. ``toString`` is what keeps a legacy non-string id from ABORTING the
+# query (``STARTS WITH`` raises ``Type mismatch`` on an integer id), and the
+# explicit NULL arm keeps a NULL-id Session counted: the demo set is exactly the
+# prefixed ids.
 _SESSION_NOT_DEMO = (
     "(s.id IS NULL OR NOT toString(s.id) STARTS WITH "
     f"'{DEMO_SESSION_ID_PREFIX}')"

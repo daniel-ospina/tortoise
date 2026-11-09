@@ -4183,8 +4183,11 @@ surfaces:
   # named-surface match REPLACES the `core` fallback, so an ids.py-only diff
   # would silently skip this guard without the `sdk` arm (`#8290` review P3,
   # measured: `--changed-files tortoise/ids.py` → `['sdk']`, and this file is
-  # absent from that run's `test_files`). `sdk.py`/`hosted_api.py` are
-  # SHARED_MODULEs, so those diffs already run the full matrix.
+  # absent from that run's `test_files`). `sdk.py` IS a SHARED_MODULE, so an
+  # sdk.py-only diff already runs the full matrix. `hosted_api.py` is NOT one:
+  # that diff selects `['api','onboarding']` with `full` false and this file is
+  # ABSENT from its `test_files`, so the suite is still asleep on the hosted
+  # boundary it pins — the `api` arm is the fix, and that gap is #11648.
   - test_9599_blank_session_id.py
   # #3945: the primary capture create site must map the extractor's validated
   # `when` onto `validFrom` (one slot, two spellings — docs/ONTOLOGY.md §4.7).

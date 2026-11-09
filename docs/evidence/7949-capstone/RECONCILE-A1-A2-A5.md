@@ -94,7 +94,7 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK.capture_session` at `tortoise/sdk.py:17201` (`relation_write = apply_relation_edges(` —
+`TortoiseSDK._extract_session_v2` at `tortoise/sdk.py:17201` (`relation_write = apply_relation_edges(` —
 the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17200`, and the
 binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
@@ -714,8 +714,8 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # extractor_v2.py:11119 (the stale comment), relation_write.py:7, sdk.py:17188.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
-# and nothing consumed it. … This module is that consumer"), and `capture_session` calls it at
-# `sdk.py:17201`. Of the three hits only ONE is still prose-about-absence (the stale comment at
+# and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
+# `sdk.py:17201` (`capture_session` reaches it at `sdk.py:15404`). Of the three hits only ONE is still prose-about-absence (the stale comment at
 # `extractor_v2.py:11119`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
