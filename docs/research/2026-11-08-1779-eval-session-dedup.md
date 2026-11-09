@@ -185,7 +185,7 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
 - **Corrected:** the unmeasured "5-10×" in `encode_cache.py` (docstring), `README.md` (encode-cache
   section + a new measured-overlap table) and `run.py:7383` (comment) now cite the measured 1.299× /
   23.0% and name the census that produced it. Its ORIGIN —
-  `docs/plans/2026-08-17-1349-embedder-selection.md:63` and its restatement at `:101` (`:96` before
+  `docs/plans/2026-08-17-1349-embedder-selection.md:63` and its restatement at `:102` (`:96` before
   this PR's note) — keeps its
   original text (a plan is the dated record of what was believed) and gains a dated correction note
   at each site, so the next reader cannot take it as a current premise.
@@ -243,12 +243,20 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   attempt at #1779; the only `#1779` hits in the log are another repo's numbering); the #1746 plan
   (`docs/plans/2026-08-26-1746-parse-error-robustness.md:22,228,314` — which sets the scope guard
   and names this issue as the follow-up) and `docs/plans/2026-08-17-1349-embedder-selection.md:63,96`
-  (both `main`-era line numbers: `:96` moved to `:101` when this PR added its note at `:64-68`)
+  (both `main`-era line numbers: `:96` moved to `:102` when this PR added its note at `:64-69`)
   (the origin of the "5-10×" claim); `tools/longmem_eval/{ingest,ingest_v2,encode_cache,run}.py`;
   `tests/test_dataset_audit.py` (the pinned-census + `@slow` pattern reused here).
-  **Tortoise graph: NOT consulted — no graph was reachable on this cell**
-  (`ConnectionError: 127.0.0.1:16379 refused`), so the graph-first step could not run; recorded here
-  rather than skipped silently.
+  **Tortoise graph: the LOCAL MCP server's DB refused** (`ConnectionError: 127.0.0.1:16379 refused`).
+  That refusal says nothing about the graph — it is the local server's known dead binding
+  (agent-infra#3253), and an earlier revision of this note generalised it into "no graph was
+  reachable on this cell", which was wrong: the fleet route is the HOSTED endpoint and it answers.
+  Read at correction time (2026-11-09) from this same cell: `GET`
+  <https://api.premiselabs.co/v1/search> on three queries ("longmemeval haystack overlap
+  cross-question session dedup", "1779 eval session dedup cache granularity", "5-10x redundant
+  encodes embedder selection") → **HTTP 200** on all three, top similarity **0.024–0.036**, and no
+  returned point concerns cross-question overlap, eval caching or the "5-10×" claim. So the
+  graph was READ and holds no prior conclusion for this issue — nothing was re-derived, and nothing
+  was skipped.
 - **External — rung 1 unavailable:** `mcp_load seo-intelligence` failed (`Unknown MCP server`; the
   Perplexity MCP is not installed on this cell, and `exa` is forbidden by owner ruling 2026-10-31),
   so rung 2 was taken.
