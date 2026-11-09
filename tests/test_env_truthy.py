@@ -510,6 +510,21 @@ _LEDGER_LITERAL_OWNERS: dict[str, tuple[int, str]] = {
            "`\"t\"` as a non-preview and over-blocks a real preview). The two "
            "vocabularies are deliberately distinct, and neither may be derived from the "
            "other"),
+    "tortoise/worker_topology.py": (
+        1, "OVERRIDES: the ONE env-truthiness vocabulary (`TRUTHY`/`FALSY` from "
+           "`tortoise.env_truthy`) — `_CLICK_TRUE` is not an env read of OURS: "
+           "`$UVICORN_RELOAD` is a THIRD-PARTY flag, `--reload` is "
+           "`is_flag=True` (`uvicorn/main.py:79`), so click's `BoolParamType` "
+           "converts it and click's own table (`bool_states`, click 8.4.2) accepts "
+           "`t`/`y` as TRUE. Reading it through `TRUTHY` classified a ONE-worker "
+           "reloader as a supervised multi-worker and REFUSED it — unescapably on "
+           "an embedded DB, where `TORTOISE_MULTI_WORKER` does not lift the refusal "
+           "(measured on the pinned uvicorn 0.52.1: `UVICORN_RELOAD=y` prints "
+           "`Started reloader process`). The two vocabularies are deliberately "
+           "distinct and neither may be derived from the other — widening `TRUTHY` "
+           "to cover a vendor flag would silently relax every guard that reads it. "
+           "`tests/test_worker_topology.py::test_the_reload_grammar_is_clicks_own` "
+           "pins this set against click's real `bool_states`"),
 }
 
 #: Narrow `== "1"` reads that REMAIN after #4097, with their site COUNT as an UPPER

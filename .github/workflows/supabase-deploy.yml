@@ -253,7 +253,8 @@ jobs:
         # path reads is missing, every signup 500s/502s at runtime with no
         # deploy-time signal (post-#1110 hardening — CORS was masking
         # missing-secret failures). AUTH_HOOK_SECRET is deliberately NOT
-        # required (hook path inert since #832); SUPABASE_SERVICE_ROLE_KEY is
+        # required and is no longer read at all (#1120 deleted the hook path);
+        # SUPABASE_SERVICE_ROLE_KEY is
         # a platform-reserved secret auto-injected into edge functions, so it
         # is WARN-only here (secrets list may omit reserved names).
         # NOTE: current CLI (v2.x) prints `secrets list --output json` as a
@@ -311,10 +312,16 @@ jobs:
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes
       - name: Deploy tenant-provision edge function
         if: github.event_name == 'workflow_dispatch' && env.SUPABASE_ACCESS_TOKEN != ''
-        # --no-verify-jwt is REQUIRED: the after_user_created auth hook sends
-        # no user JWT. Caller auth is enforced inside the function (#802) via
-        # the hook's Standard-Webhooks signature (AUTH_HOOK_SECRET secret)
-        # or a matching user JWT; anon-key calls get 401.
+        # --no-verify-jwt stays, but NOT for the reason it used to give: the
+        # caller is verified INSIDE the function (#802) against a real user JWT,
+        # because the dashboard's same-origin BFF route (#3501/#4054) mints the
+        # signed-in user's access token from the `__Host-session` cookie and
+        # forwards it. So `verify_jwt=false` is not a JWT-less caller — bare
+        # anon-key calls get 401.
+        # The `after_user_created` auth hook path (and its AUTH_HOOK_SECRET /
+        # Standard-Webhooks signature) was DELETED by #1120: it is not a
+        # supported Supabase auth hook, so it was a platform-capability gap, not
+        # a configuration gap. Do not re-enable it here.
         run: |
           supabase functions deploy tenant-provision \
             --project-ref "$SUPABASE_PROJECT_REF" --no-verify-jwt --yes

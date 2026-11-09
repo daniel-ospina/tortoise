@@ -271,6 +271,12 @@ from tortoise.session_schema import (  # #3554 / #8290: ONE demo-session derivat
 )
 from tortoise.supabase_control import _service_key  # #3677
 
+# #1677: the multi-worker admission gate. Imported at module scope (not inside
+# ``_lifespan``) so the refusal cannot be shadowed by a function-local import,
+# and so `tests/test_boot_regressions.py`'s "no redundant local module imports"
+# guard sees the one binding. See ``tortoise/worker_topology.py``.
+from tortoise.worker_topology import assert_multi_worker_admissible
+
 # #4179: the team-account and user-account restore windows derive from the ONE
 # authority (tortoise/retention.py). Do not hard-code a window here — see
 # docs/retention-and-deletion.md. USER_ACCOUNT_DELETE_GRACE_HOURS is the env
@@ -2579,6 +2585,25 @@ async def _lifespan(app):
     ``TORTOISE_EMBEDDER_WARMUP=0`` skips the thread entirely, so the test
     suite's opt-out is not silently bypassed by the hosted lifespan.
     """
+    # ── #1677: MULTI-WORKER ADMISSION — FIRST, before anything in this lifespan
+    # touches a shared resource. `Dockerfile.hosted` passes no `--workers`, so
+    # this deployment runs one worker; but uvicorn also takes the count from
+    # `$WEB_CONCURRENCY`, so an ambient env var silently moves the machine to N
+    # workers where the daemons duplicate (GitHub issues, Telegram), the OAuth
+    # CSRF register (``_GITHUB_STATES``) splits per process, the golden signals
+    # become per-process, and an embedded DB diverges into N copies. This call
+    # is the ONE gate: it measures the topology (the count the entrypoint
+    # resolved plus a direct probe for uvicorn's supervisor parent, so a bypass
+    # that never ran `entrypoint.sh` is caught too) and refuses a topology this
+    # deployment has not been proved in.
+    #
+    # Raising HERE is deliberate, not incidental: uvicorn's supervisor treats a
+    # worker's ``STARTUP_FAILURE`` as fatal for the whole parent, so a
+    # misconfiguration is a loud, deploy-blocking refusal instead of a machine
+    # that half-works. That matches `entrypoint.sh`'s existing "Refusing to start
+    # with no durable DB" posture.
+    assert_multi_worker_admissible()
+
     # ── #2850: every app instance starts from a clean health-probe state.
     # A probe worker wedged during a previous app instance (TestClient reuse
     # in-process, or an in-process reload) must not survive into this one.
@@ -4020,6 +4045,66 @@ async def _webhook_retry_sweep_loop(interval: float) -> None:
         await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
 
 
+def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
+    """#8099: assemble + persist the why-blocks this dream pass made true.
+
+    Called from BOTH dream entry points, INSIDE the per-graph dream lock and
+    inside the dream pool item, AFTER the EP pass — `_dream_worker`'s `_drain`
+    (the write-triggered drain) and `POST /v1/dream`'s three branches (the
+    manual / scheduled `stale-first` / whole-graph passes). Both are needed and
+    neither subsumes the other: the drain sees the points THIS write moved, the
+    endpoint sees the points a scheduled or full pass moved, and an EP move
+    emits no `:GraphEvent` (its record is the journal), so the pending half of
+    the id set cannot pick up what a `/v1/dream` pass touched. Skipping either
+    leaves the push serving a pre-pass number with nothing to correct it
+    (#8099 review F2). This is the precompute half of #2081's indicator 2
+    ("precomputed why-blocks are served from cache, no per-push EP recompute").
+    The push that follows READS them (`webhook_delivery.dispatch_pending`);
+    nothing assembles on the push path.
+
+    Best-effort BY CONSTRUCTION: a graph hiccup here must never fail a dream
+    (the roots are already drained and a raise would be read as a dream bug),
+    and it must never break delivery (a push without `why` is the pre-#8099
+    envelope, which is valid). The precompute is also skipped wholesale for a
+    graph with no live subscription — `why_snapshot.precompute_for_dream`
+    probes that FIRST and writes nothing, so a tenant that never subscribed
+    pays one read and no graph writes.
+
+    Returns the precompute summary (for logging/tests), or None when the pass
+    was skipped or failed.
+
+    ⛔ SECTION 17.1 REFUSALS ARE NOT A "BEST-EFFORT MISS". A
+    `DirectCacheWriteRefused` from `why_snapshot` means its statement never
+    reached the store, so it is logged at ERROR with a greppable marker (the
+    same posture `DreamNoOpError` gets in `_dream_worker`, and the rule
+    `webhook_delivery` states at its own `_run`). It is NOT re-raised: unlike
+    the webhook cursor (whose lost write re-delivers forever), the roots are
+    already drained by the time this runs and raising would trade a cache miss
+    for a whole discarded dream pass. The push degrades to the #8099 envelope
+    and the next enabled pass rewrites the snapshots.
+    """
+    import logging
+
+    from tortoise import why_snapshot
+    from tortoise.projection import DirectCacheWriteRefused
+    from tortoise.security import redact_error
+
+    _log = logging.getLogger("tortoise.api")
+    try:
+        if not why_snapshot.enabled():
+            return None
+        return why_snapshot.precompute_for_dream(sdk._get_proj(), dream_result)
+    except DirectCacheWriteRefused as e:
+        _log.error(
+            "why-block precompute REFUSED by §17.1 (the snapshot write did not "
+            "land; pushes fall back to the no-why envelope): %s",
+            redact_error(e))
+        return None
+    except Exception as e:  # noqa: BLE001, RUF100 — a dream must never fail here
+        _log.warning("why-block precompute failed: %s", redact_error(e))
+        return None
+
+
 @_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
@@ -4078,7 +4163,14 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                sdk.dream(dirty_only=True, mode="local")
+                result = sdk.dream(dirty_only=True, mode="local")
+                # #8099: precompute the why-blocks this pass made true, so the
+                # push below READS them instead of assembling per event. Runs
+                # INSIDE the lock and INSIDE the pool item on purpose: it is a
+                # graph writer, so it must be serialized with every other dream
+                # on this graph (the dream is the snapshot cache's only writer),
+                # and it must never extend the capture path.
+                _precompute_why_blocks(sdk, result)
 
         await _run_dream_on_pool(_drain, _open_sdk)
         # #2081: push the events this tenant's subscribers are behind on. Runs
@@ -10462,6 +10554,19 @@ _REGISTER_MAX_PER_HOUR = 3
 # hosted_backup.encrypt_backup layout).
 _IMPORT_FORMAT = "tortoise-export-v1"
 _IMPORT_ARTIFACT_VERSION = 1
+# #1936: the ``pack_config`` entry ``status`` vocabulary — the exporter's
+# ``:PackInstall`` statuses (``pack_state.PACK_STATUS_*``). Only ``removed``
+# means "skip this entry"; the other two are written verbatim on import. Kept
+# as a literal set rather than derived at import time so the shape gate has no
+# module-level dependency on the pack machinery; the drift is locked by
+# tests/test_export_pack_config.py, which derives the expected set from
+# ``pack_state``'s own ``PACK_STATUS_*`` constants — so ADDING a status there
+# fails that test. What such a drift WOULD cost changed with the exporter's
+# clamp (``export._importable_pack_status``): an artifact can no longer be
+# 422'd by an out-of-vocabulary status — it is NARROWED to ``disabled`` on
+# export. The lock is what makes that narrowing a decision instead of an
+# accident.
+_PACK_CONFIG_STATUSES = frozenset({"active", "disabled", "removed"})
 # 64 MiB streaming cap — enforced WHILE reading the body, never via
 # Content-Length alone (a spoofed short Content-Length would otherwise let
 # an unbounded body through to buffering/decrypt; #1230 plan S4).
@@ -12925,12 +13030,25 @@ async def dream(
         # SDK's close.
         with _dream_lock(_dk):
             if mode is not None:
-                return sdk.dream(mode=mode, budget=budget)
-            if full:
-                return sdk.dream(full=True)
-            if queued_roots:
-                sdk._mark_dirty(queued_roots)
-            return sdk.dream(dirty_only=True)
+                result = sdk.dream(mode=mode, budget=budget)
+            elif full:
+                result = sdk.dream(full=True)
+            else:
+                if queued_roots:
+                    sdk._mark_dirty(queued_roots)
+                result = sdk.dream(dirty_only=True)
+            # #8099 (review F2): EVERY belief-moving dream pass refreshes the
+            # why-block cache, not only the write-triggered drain. Indicator 3's
+            # "a point whose belief moved in a dream is pushed with the
+            # post-dream numbers" is a property of the DREAM, and this endpoint
+            # is the pass the scheduler runs (`mode="stale-first"`, manual and
+            # whole-graph passes) — a pass that skipped the refresh would leave
+            # the push serving a pre-pass number with nothing to correct it (an
+            # EP move writes the JOURNAL, not a `:GraphEvent`, so the pending
+            # half cannot see it either). Same posture as the drain: inside the
+            # lock, inside the pool, after the pass, best-effort.
+            _precompute_why_blocks(sdk, result)
+            return result
 
     return await _run_dream_on_pool(_run_dream, lambda: sdk)
 
@@ -14276,17 +14394,37 @@ async def register_user(request: Request, response: Response):
                     "p_key_prefix": org_id[:8],
                 }),
                 op="provision_org")
-            # #2668: agent-created orgs need API-key dashboard login enabled
-            # by default — the agent has no session to log in with.
-            from tortoise.supabase_control import set_dashboard_key_login
-            await _cp_offload(
-                lambda: set_dashboard_key_login(cp, org_id, True),
-                op="set_dashboard_key_login")
         except Exception as _provision_err:
-            try:  # noqa: SIM105
-                _make_sdk(namespace=org_id)._get_proj().db.select_graph(graph_name).delete()
-            except Exception:
-                pass
+            # #1981 (round-3 review, P2): ONLY reclaim the namespace when the
+            # failure PROVES nothing landed. This used to delete on ANY
+            # exception — the same defect this PR removed from
+            # `_create_org_supabase_lane`, and it matters more here: the
+            # control-plane read timeout is 5.0 s, so a registration that
+            # COMMITTED can still surface as a lost response, and deleting then
+            # leaves a live account with no `TeamMeta`/`OnboardingState`.
+            #
+            # ⛔ SCOPED TO THE PROVISION STEP (round-4 review, P1): this `try`
+            # used to ALSO span `set_dashboard_key_login`. The predicate answers
+            # "did THIS call prove nothing landed", so grading it against the
+            # SECOND call's exception reclaimed the namespace of an org whose
+            # provision had already COMMITTED — a PostgREST answer on the login
+            # flag (e.g. HTTP 500) reads as proof, and a `GRAPH.DELETE` of a
+            # live account is exactly the failure this gate exists to prevent.
+            # There is no deprovision RPC, so a compensation here cannot restore
+            # consistency — the orgs row survives either way and only the graph
+            # would be destroyed. Every post-provision step lives OUTSIDE this
+            # block, pinned by
+            # `test_a_post_provision_failure_does_not_reclaim_the_committed_org`.
+            if _rpc_failure_proves_nothing_landed(_provision_err):
+                # The SHARED drop (round-4 review): one implementation for every
+                # reclaiming lane — the inline SDK delete this replaces was a
+                # second copy of `_drop_org_graph_impl` WITHOUT its absent-graph
+                # tolerance, and it ran the blocking `GRAPH.DELETE` ON the event
+                # loop (the same P1 the create lane already fixed).
+                try:
+                    await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
+                except Exception:
+                    _logger.debug("registration reclaim skipped for %s", org_id)
             # #1765: the reg- identity UNIQUE partial index is the race/
             # retry backstop — a concurrent register with the same email hits
             # uq_member_identity_active → 409, never a 500 (plan Task 3).
@@ -14296,6 +14434,25 @@ async def register_user(request: Request, response: Response):
                     status_code=409,
                     detail={"message": "already_registered", "email": email},
                 ) from None
+            raise HTTPException(status_code=500, detail="Registration failed") from None
+        # #2668: agent-created orgs need API-key dashboard login enabled by
+        # default — the agent has no session to log in with.
+        # ⛔ NOT part of the provisioning transaction, so a failure here must
+        # never reach the reclaim above (round-4 review, P1 — it USED to, and
+        # deleted the graph of the account `provision_org` had just committed).
+        # RECORDED RESIDUAL, not fixed here: the 500 below is pre-existing
+        # behaviour for a POST-commit failure, so a live account still learns
+        # "Registration failed" and a retry answers `409 already_registered`.
+        # Only the destructive half is in scope for this change.
+        try:
+            from tortoise.supabase_control import set_dashboard_key_login
+            await _cp_offload(
+                lambda: set_dashboard_key_login(cp, org_id, True),
+                op="set_dashboard_key_login")
+        except Exception as _login_err:
+            _logger.warning(
+                "dashboard key login not enabled for %s (account already "
+                "provisioned): %s", org_id, _login_err)
             raise HTTPException(status_code=500, detail="Registration failed") from None
     else:
         sdk = _make_sdk(namespace="registry")
@@ -24598,6 +24755,86 @@ def _one_free_org_detail(org_id: str | None) -> dict:
     }
 
 
+#: #1981: the marker `provision_team` raises when its DB-level one-free-org
+#: backstop refuses (migration 20261108000001). Declared ONCE, here, because the
+#: RAISE text IS the wire contract between SQL and this lane — PostgREST carries
+#: a RAISE EXCEPTION's message in the RPC error body, which is exactly why
+#: `supabase_control.rpc` surfaces it (#1709). The pair is pinned in lockstep
+#: by `tests/test_free_team_entitlement.py::TestAtomicProvisionBackstop`.
+_ONE_FREE_ORG_RPC_MARKER = "one_free_org_limit:"
+
+
+def _one_free_org_blocker_from_rpc(exc: BaseException) -> str | None:
+    """#1981: the blocking org id if *exc* is the RPC's entitlement refusal,
+    else ``None`` (the caller then treats it as a generic failure).
+
+    Matched on the marker SUBSTRING, not on an exact message: the RPC error is
+    wrapped by `supabase_control.rpc` as ``"Supabase control-plane RPC failed
+    (provision_team): HTTP 402: <RAISE text>"``, and a non-JSON body degrades
+    to a bare ``"HTTP 402"`` with no text at all. "Marker absent" therefore
+    means "not the entitlement refusal" — never "an unknown org".
+    """
+    text = str(exc or "")
+    index = text.find(_ONE_FREE_ORG_RPC_MARKER)
+    if index < 0:
+        return None
+    rest = text[index + len(_ONE_FREE_ORG_RPC_MARKER):].split()
+    # RAISE text ends at the org id; take the first token rather than inventing
+    # a value (an empty tail degrades to a 500, not to a 402 naming nothing).
+    return rest[0] if rest else None
+
+
+#: The WRAPPER SHAPE `supabase_control.rpc` emits when PostgREST ANSWERED with a
+#: status: `Supabase control-plane RPC failed (<fn>): HTTP 409: <detail>`. A
+#: TRANSPORT failure wears the SAME prefix but puts the client exception where
+#: the status goes: `Supabase control-plane RPC failed (<fn>): ReadTimeout('')`.
+#: Anchoring on `): HTTP 4xx` is therefore what separates "the server RECEIVED
+#: and REJECTED the request" from "the server may have said yes".
+#:
+#: ⛔ 4xx ONLY — a **5xx is deliberately NOT proof** (round-4 review). A 5xx that
+#: reaches here was produced by SOMETHING in front of Postgres: PostgREST itself
+#: (its own raise rolls the transaction back, safe to reclaim) **or a gateway**
+#: answering 502/504 because the upstream timed out — and a gateway 5xx can be
+#: generated AFTER the transaction COMMITTED. The two are indistinguishable from
+#: the message (Kong's error bodies also carry a JSON `message`), so a 5xx is the
+#: ambiguous case the round-2 P1 was about. This PR's own recorded ordering
+#: decides the tie: "an orphaned graph namespace is harmless, an orphaned orgs
+#: row is not" — an empty leaked namespace is the cheaper failure mode, and the
+#: per-user org-create rate limit is what bounds its accumulation.
+_RPC_CLIENT_ERROR_RE = re.compile(
+    r"control-plane RPC failed \([^)]*\): HTTP 4\d\d\b")
+
+
+def _rpc_failure_proves_nothing_landed(exc: BaseException) -> bool:
+    """#1981 (round-3 review): did *exc* prove the provision wrote NOTHING?
+
+    The answer decides whether an eagerly-materialized graph namespace may be
+    dropped, and only ONE direction is safe to guess:
+
+    * ``True`` — the server REJECTED the request: the entitlement marker (a
+      ``RAISE EXCEPTION`` such as the one this PR adds, raised before any write)
+      or a **4xx** status (unique violation 409, bad request 400 …). A client
+      error is decided inside PostgREST's transaction, which aborts — nothing
+      landed, so ``org_{org_id}`` is unowned and reclaiming it is safe.
+    * ``False`` — a **5xx** (see ``_RPC_CLIENT_ERROR_RE``: PostgREST's own
+      failure and a gateway timeout are indistinguishable, and the latter can
+      follow a COMMIT), or a TRANSPORT failure (timeout, reset, lost reply). The
+      RPC may have COMMITTED and we only lost the reply, so the namespace may be
+      a LIVE org's. Dropping it would destroy that org's ``TeamMeta`` /
+      ``OnboardingState`` — strictly worse than the empty namespace it would
+      reclaim, and the inverse of this lane's documented ordering ("an orphaned
+      graph namespace is harmless, an orphaned orgs row is not").
+
+    ⛔ ONE definition for every lane that reclaims a namespace (round-3 review,
+    P2): `register_user` carried the same unguarded delete this PR removed from
+    `_create_org_supabase_lane`, and two copies of this judgement is how the two
+    lanes drift apart. Do not inline the test at a call site.
+    """
+    if _one_free_org_blocker_from_rpc(exc) is not None:
+        return True
+    return bool(_RPC_CLIENT_ERROR_RE.search(str(exc or "")))
+
+
 async def _assert_free_org_allowance(user_id: str, *, pool: str = "auth") -> None:
     """#2810: THE one entitlement chokepoint — raise the structured 402 unless
     *user_id* may own one more free org.
@@ -25061,7 +25298,89 @@ async def _create_org_supabase_lane(cp, name: str, user: dict) -> dict:
     except HTTPException:
         raise
     except Exception as e:
-        # 0011 unique index: a concurrent duplicate name surfaces as a
+        # #1981: the DB-level backstop inside `provision_team` refused — a
+        # concurrent worker (uvicorn `--workers N`, or a second machine on the
+        # same project) provisioned this user's free org in the window the
+        # in-process `_org_create_lock` cannot span. It is the SAME rule as the
+        # `_assert_free_org_allowance` gate above, so it must surface as the
+        # SAME structured 402 — never a 500 and never a bare string (#2789: the
+        # dashboard dialog reads `code`).
+        blocking_org_id = _one_free_org_blocker_from_rpc(e)
+        # The eager default-graph init ran BEFORE the RPC, so a failure leaves a
+        # materialized namespace. Whether it is safe to DROP depends on whether
+        # this provision could have COMMITTED — and the exception alone does not
+        # say that. `provision_org` raises the SAME RuntimeError for a server
+        # error RESPONSE and for a TRANSPORT failure (`supabase_control.rpc`),
+        # and the control-plane client's read timeout (5.0 s) is short enough
+        # that an RPC which COMMITTED can still surface here as a lost
+        # response. Dropping on that branch would `GRAPH.DELETE` a LIVE org's
+        # namespace — the inverse of the ordering this lane documents two
+        # functions above ("an orphaned graph namespace is harmless, an
+        # orphaned orgs row is not"), and it would leave a live org with no
+        # TeamMeta/OnboardingState. (#1981 round-2 review, P1.)
+        #
+        # So the drop is gated on ATTRIBUTION:
+        #   * the 402 carries THIS PR's own marker, raised by the gate before
+        #     any write, and a 409 is PostgREST's unique-violation response —
+        #     both are SERVER responses, so the provision did not land and the
+        #     namespace is genuinely unowned: reclaim it. (This is what stops a
+        #     409 retry leaking a namespace per attempt — it mints a NEW org id
+        #     each time.)
+        #   * every OTHER failure is AMBIGUOUS and keeps the pre-#1981
+        #     behaviour: leave the namespace alone.
+        #
+        # ⛔ WHAT BOUNDS THAT LEAK, stated precisely because the first draft of
+        # this comment named the wrong mechanism (round-3 review, P2): the #3390
+        # write-ahead journal is NOT the answer here. `_journal_append_product`
+        # returns before doing anything when the process is not a test session
+        # (`tortoise/projection/__init__.py`, "production mints never reach the
+        # raise"), and the reclaimer `_sweep_team_strays` lives in
+        # `tests/_embedded.py` — so in PRODUCTION an ambiguous failure leaves an
+        # orphan that nothing attributes. The namespace is `org_{org_id}` for an
+        # org id minted per request and written by nobody, so it is inert;
+        # what bounds its ACCUMULATION is the per-user org-creation rate limit
+        # above (429), not a sweep. An empty leaked namespace is the cheaper of
+        # the two failure modes by design — the alternative deletes a live
+        # org's graph — and it is recorded as such rather than promised away.
+        drop_is_safe = _rpc_failure_proves_nothing_landed(e)
+        if drop_is_safe:
+            # ⛔ OFF THE LOOP (#1981 review P1): `_drop_org_graph` →
+            # `_drop_org_graph_impl` opens a COLD projection for a namespace
+            # that was never provisioned (connect + version probe +
+            # `_ensure_indexes()`) and then `GRAPH.DELETE`s it — synchronous
+            # socket I/O, and a 402 here is a BURST path: it only fires when
+            # workers raced this create, i.e. when N workers each enter here.
+            # `asyncio.to_thread`, NOT `_graph_offload`: that seam is
+            # fail-CLOSED (#3498/#3773), and a pool-miss refusal
+            # (`_graph_unavailable`, a 503) would replace the entitlement 402
+            # this branch exists to deliver. The drop is best-effort by
+            # definition — `_drop_org_graph` already swallows its own errors —
+            # so it must not be able to fail the refusal.
+            # ⛔ SWALLOWED (round-3 review, P2): `_drop_org_graph` swallows its
+            # OWN errors, but the `to_thread` SUBMISSION can still raise (a
+            # refused executor submit, "cannot schedule new futures after
+            # shutdown", a cancelled task) — and an unguarded await here would
+            # replace the structured 402 with the generic 500 below, destroying
+            # the one thing this branch exists to deliver. That was real: the
+            # await was naked before this fix.
+            #
+            # RECORDED RESIDUAL, not fixed here: the drop is still AWAITED on the
+            # refusal path (as it has been since this PR opened), so a wedged
+            # graph lane can hold the response long enough for the 10 s transport
+            # bound to answer 504 instead of this 402. Bounding it is not free —
+            # `graph_offload_timeout_s()` is ~30 s and so does NOT help, and a
+            # short magic timeout would abandon a legitimately slow drop on the
+            # N-worker burst this path exists for. Left as-is deliberately, with
+            # the residual named so the next lane does not read the await as
+            # proof the latency is bounded.
+            try:
+                await asyncio.to_thread(_drop_org_graph, org_id, graph_name)
+            except Exception:
+                _logger.debug("refusal graph drop skipped for %s", org_id)
+        if blocking_org_id is not None:
+            raise HTTPException(status_code=402,  # noqa: B904
+                                detail=_one_free_org_detail(blocking_org_id))
+        # 0011 unique index: a concurrent duplicate name surfaces as
         # PostgREST 409 → 409 (the ControlPlaneError mapping below is for
         # the registry path).
         if "HTTP 409" in str(e):
@@ -30338,7 +30657,8 @@ def _split_import_artifact(blob: bytes) -> tuple[dict, bytes]:
 def _pack_config_shape_error(pc) -> str | None:
     """#2040: shared ``pack_config`` legality matrix — single source of truth.
 
-    Check order pinned: dict → schema_version → packs → entry → ns → yaml.
+    Check order pinned: dict → schema_version → packs → entry → ns → yaml
+    → status.
     Returns a human-readable error string for the FIRST violation (the check
     order matters — an operator must get the earliest broken contract), or
     ``None`` when the shape is legal. Used by BOTH the import envelope gate
@@ -30352,6 +30672,14 @@ def _pack_config_shape_error(pc) -> str | None:
     ``version``, ``activated: "anything"``, unknown keys, and yaml
     absent/``None``. ``version``/``activated``/unknown keys are unconstrained;
     entry-level messages interpolate the concrete index + offending type.
+
+    #1936: ``status`` IS constrained — it is written to ``:PackInstall.status``
+    by the import path, so an out-of-vocabulary value is a crafted artifact and
+    must be refused here (pre-restore, live graph untouched) rather than
+    landing as a status no read path understands. Absent/``None`` stays legal:
+    the entry predates the field and the apply path falls back to
+    ``activated``. The legal set is exactly the exporter's vocabulary
+    (``active`` | ``disabled`` | ``removed``).
     """
     if pc is None:
         return None  # absent/None pack_config is LEGAL (pre-v1.1 artifacts)
@@ -30381,6 +30709,21 @@ def _pack_config_shape_error(pc) -> str | None:
                         "string or null")
             return (f"pack_config packs[{i}] yaml must be a non-empty string "
                     f"or null (got {type(yaml_text).__name__})")
+        # #1936: status legality — the apply path writes it verbatim onto
+        # :PackInstall, so an unknown value must fail here, pre-restore.
+        # ⛔ isinstance FIRST: `x not in frozenset` HASHES the operand, so a
+        # JSON object/array (`{"status": {}}`) raises TypeError instead of
+        # returning an error string — and the route catches only
+        # _ImportVerifyError, so that TypeError escapes as a 500 with no
+        # quarantine audit and no ledger stamp, the exact outcome this gate
+        # exists to prevent. Every sibling check in this loop is type-first
+        # for the same reason.
+        status = pack.get("status")
+        if status is not None and (not isinstance(status, str)
+                                   or status not in _PACK_CONFIG_STATUSES):
+            return (f"pack_config packs[{i}] status must be one of "
+                    f"{sorted(_PACK_CONFIG_STATUSES)} or absent "
+                    f"(got {status!r})")
     return None
 
 
@@ -30564,13 +30907,89 @@ async def _quarantine_import(
         _logger.warning("quarantine stamp failed for team %s", org_id)
 
 
+def _pack_entry_activation(pack: dict, ns: str) -> str | None:
+    """#1936: resolve one ``pack_config`` entry's target activation state.
+
+    Returns the ``:PackInstall`` status to write, or ``None`` when the entry
+    must be SKIPPED because the pack was removed on the source graph.
+
+    Precedence: an explicit ``status`` (v1.1 export, above) wins; otherwise
+    fall back to the ``activated`` boolean the v1.1 contract has always
+    carried, so an artifact written before ``status`` existed still honours
+    its own activation. ``activated`` is deliberately compared with ``is
+    False`` rather than truthiness — the shape gate leaves it unconstrained
+    (``activated: "anything"`` is legal), and a non-empty string or ``0`` must
+    not be read as "the tenant switched this pack off".
+    """
+    status = pack.get("status")
+    if status is not None:
+        # Legality is the shared shape gate's job (_pack_config_shape_error);
+        # a direct caller that bypassed it fails closed here too. isinstance
+        # FIRST — frozenset membership hashes the operand, so a dict/list
+        # status would raise TypeError rather than this ValueError.
+        if (not isinstance(status, str)
+                or status not in _PACK_CONFIG_STATUSES):
+            raise ValueError(
+                f"pack_config pack {ns!r} has invalid status {status!r} "
+                f"(expected one of {sorted(_PACK_CONFIG_STATUSES)})")
+        if status == "removed":
+            return None
+        return status
+    return "disabled" if pack.get("activated") is False else "active"
+
+
 def _apply_import_pack_config(sdk, payload: dict) -> None:
     """#1936: apply the payload's pack config after a successful restore.
 
     - ``pack_config`` present: for each pack with a custom manifest ``yaml``,
       upsert the tenant manifest (validated — a failure raises ValueError,
-      quarantining the import: fail-loudly, never silent partial). Starter
-      packs (yaml null) get their activation record ensured.
+      quarantining the import: fail-loudly, never silent partial) WITH the
+      artifact's own activation state. Starter packs (yaml null) get their
+      activation record written at the artifact's state, not force-activated.
+    - A pack the source graph had REMOVED (``status: removed``) is SKIPPED —
+      no activation, no overwrite. This is the #1936 indicator-3 fix.
+
+      ⛔ THERE ARE TWO SHAPES and the one a live graph exports is NOT the one
+      that used to abort. ``set_graph_packs`` (``pack_state.py:1156-1165``)
+      marks removal by setting ``:PackInstall.status='removed'`` and KEEPS the
+      ``:PackManifest``, so a real export carries ``removed`` WITH its ``yaml``
+      — and pre-fix THAT shape took the ``yaml_text`` branch and re-installed
+      the pack ``active``, erasing the tombstone (the #8648 widening class).
+      The ``yaml: null`` shape comes from ``delete_tenant_manifest``, which
+      deletes the manifest but has NO caller and no route — the legacy /
+      out-of-band shape, and the one whose pre-fix symptom was the abort: it
+      fell through to the starter branch and raised ``unknown starter pack``,
+      so ONE uninstalled custom pack failed the whole IMPORT.
+
+      Both skip because the resolver returns ``None`` before ``yaml`` is ever
+      read; that ORDERING is the fix, and both shapes are pinned by tests.
+
+      ⛔ THE SWAP HAS ALREADY LANDED WHEN THIS RUNS
+      (``_restore_into_temp_verify_swap``), so "aborted the restore" is NOT
+      what happened and the distinction is the one an operator cares about:
+      the dump's data is on the graph, then this pass raises, the route
+      answers 422, ``last_import_sha256`` is cleared and
+      ``last_import_pack_failed_sha256`` stamped — a restored graph whose
+      pack config was never applied, re-failing on every retry. Pinned by
+      ``tests/test_import_endpoint.py`` ("swap LANDED (pack failure is
+      post-swap)").
+
+      ⛔ WHAT THE SKIP DOES *NOT* CLAIM (corrected in review; the earlier
+      rationale on this PR was wrong): the ``removed`` ``:PackInstall``
+      tombstone is NOT absent from a real restore. ``:PackInstall``,
+      ``:PackManifest`` and ``:PackSelection`` are content nodes —
+      ``_EXPORT_SKIP_LABELS`` excludes only ``GraphEventMeta``/``TeamMeta``/
+      ``EpMeta`` — so the dump carries the record and ``restore_graph``
+      CREATEs it with its props, on the temp graph, BEFORE this function runs
+      against the swapped one. The end state after a real import therefore
+      still holds ``status='removed'`` (correct: it matches the source graph,
+      i.e. parity), and on the no-marker-with-records arm of
+      ``pack_state.resolved_pack_set`` that record counts like any other. What
+      the skip actually buys, and all it claims, is that this pass neither
+      overwrites the restored state nor turns a removed pack into a restore
+      failure. It also covers the shape a real restore does NOT produce — a
+      ``removed`` entry declared in ``pack_config`` whose node is absent from
+      the dump.
     - ``pack_config`` ABSENT (pre-v1.1 artifact): loud-mismatch guard — if
       the dump references namespaced kinds NOT in the shared catalog or
       starter set, the vocabulary would be silently dropped → raise. This
@@ -30609,6 +31028,17 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     # set the restore will leave behind rather than against install order.
     # (Before #2781 the validator's temp registry held one manifest and no
     # cross-pack reference could validate at all.)
+    # ⛔ EVERY entry with a yaml feeds the validator, INCLUDING one this pass
+    # will SKIP as ``removed`` — this set is what the ARTIFACT DECLARES, not
+    # what this pass will install. Filtering it to "what gets applied" is a
+    # regression, and it was tried: ``set_graph_packs`` removal only flips
+    # ``p.status`` and leaves the ``:PackManifest`` in place (pack_state.py:
+    # 1153), so a real artifact carries ``{"status": "removed", "yaml":
+    # <manifest>}``. Excluding that entry from the validator makes any custom
+    # pack declaring ``depends_on`` the removed namespace fail validation and
+    # raise — aborting the WHOLE import post-swap, which is indicator 3 of
+    # #1936 one shape over. A dangling edge is resolved where edges are
+    # resolved (#2781), never by aborting a restore.
     sibling_yamls = {
         p.get("namespace"): p.get("yaml") for p in packs
         if isinstance(p, dict) and isinstance(p.get("namespace"), str)
@@ -30617,6 +31047,18 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
     for pack in packs:
         ns = pack.get("namespace")
         if not ns:
+            continue
+        want_status = _pack_entry_activation(pack, ns)
+        if want_status is None:
+            # Removed on the source graph: no activation, no overwrite. The
+            # restored :PackInstall record (if the dump carried one) is left
+            # exactly as the swap wrote it — see the docstring: this pass
+            # neither creates nor erases the tombstone. Logged so an operator
+            # can see the entry was carried and deliberately skipped at pack
+            # granularity instead of aborting the restore.
+            _logger.info(
+                "import pack_config: pack %r was removed on the source graph "
+                "— skipped (no activation, restored record left untouched)", ns)
             continue
         yaml_text = pack.get("yaml")
         if yaml_text:
@@ -30635,13 +31077,71 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             # #2781: pass the restore's sibling set so a cross-referencing
             # pack_config validates as the SET it will become, not in install
             # order (the sibling may appear later in this same list).
+            # #1936: carry the artifact's activation state — hard-coding
+            # 'active' here is what resurrected every disabled custom pack.
             upsert_tenant_manifest(
-                sdk, yaml_text, extra_manifests=sibling_yamls)
+                sdk, yaml_text, extra_manifests=sibling_yamls,
+                status=want_status)
         else:
-            # Starter-pack activation record (idempotent MERGE).
+            # Starter-pack (or manifest-less) activation record, written at
+            # the artifact's own state (idempotent MERGE).
             reg = _get_registry()
             meta = reg.pack_summaries().get(ns) if reg is not None else None
             if meta is None and ns not in DEFAULT_STARTER_PACKS:
+                # #1936: a pre-``status`` artifact records a pack that the
+                # tenant had REMOVED as ``activated: False`` + ``yaml: null``
+                # — ``delete_tenant_manifest`` drops the :PackManifest from the
+                # source graph, so an export taken before the status field
+                # existed carries no way to tell the two apart. ``activated:
+                # False`` is the only signal it has, and ``_pack_entry_activation``
+                # has already mapped it to ``disabled``. Aborting the WHOLE
+                # restore on that shape is exactly indicator 3 of #1936 — so
+                # skip it per entry, like the explicit ``status='removed'``
+                # path above, instead of raising.
+                #
+                # The fail-loud guard is NOT widened: a namespace the artifact
+                # wanted ACTIVE (``activated`` truthy or absent — the shape the
+                # existing pins use) still raises, so a genuinely unknown
+                # namespace is still a loud 422. Only an entry the artifact
+                # itself marks as switched-off is skipped.
+                if want_status == "disabled":
+                    # Keyed on the RESOLVED state, not on the spelling that
+                    # produced it. ``want_status`` is ``disabled`` for BOTH
+                    # ``{"activated": False}`` and ``{"activated": False,
+                    # "status": "disabled"}`` and ``{"activated": False,
+                    # "status": null}`` — the three spellings of one artifact.
+                    # Keying on ``status is None`` (a previous attempt) fixed only
+                    # the first two and left ``status: "disabled"`` aborting the
+                    # whole import, which is the #1936 indicator-3 defect this
+                    # branch exists to remove: one entry must not fail the
+                    # import at artifact granularity.
+                    #
+                    # ⛔ ``status: null`` ALONE is NOT one of these. With
+                    # ``activated`` absent or truthy it resolves to ``active``
+                    # and falls through to the raise below — only
+                    # ``{"activated": False, "status": null}`` is the third
+                    # disabled spelling.
+                    #
+                    # The fail-loud guard is NOT widened: ``want_status`` is
+                    # ``active`` for every entry the artifact wanted
+                    # installed, including the truthy/absent ``activated``
+                    # shapes every existing pin uses, so an unknown namespace
+                    # the artifact wanted ACTIVE still raises. ``removed``
+                    # never reaches here (the resolver returns None above).
+                    #
+                    # ``warning``, not ``info``: this branch cannot tell a
+                    # REMOVED pack from a DISABLED one from a typo'd
+                    # namespace, and it replaces what used to be a loud
+                    # ValueError — so this line is the only surviving record
+                    # that the namespace's vocabulary was dropped. Same level
+                    # the house convention uses for exactly this event
+                    # (``pack_state``: "unknown in shared catalog — skipped",
+                    # "activation of %r failed — skipped").
+                    _logger.warning(
+                        "import pack_config: pack %r resolves to %r on the "
+                        "source graph — skipped (not installed)", ns,
+                        want_status)
+                    continue
                 raise ValueError(f"pack_config references unknown starter pack '{ns}'")
             from tortoise.pack_state import _pack_install_lock, _resolved_graph_name, _target_graph
             g = _target_graph(sdk, None)
@@ -30650,10 +31150,10 @@ def _apply_import_pack_config(sdk, payload: dict) -> None:
             with _pack_install_lock(lock_graph, ns):
                 g.query(
                     "MERGE (p:PackInstall {namespace: $ns}) "
-                    "SET p.version = $version, p.status = 'active', "
+                    "SET p.version = $version, p.status = $status, "
                     "    p.installed_at = coalesce(p.installed_at, $now)",
                     params={"ns": ns, "version": str(pack.get("version", "0.1.0")),
-                            "now": now},
+                            "status": want_status, "now": now},
                 )
 
 
@@ -37877,6 +38377,16 @@ async def _create_onboarding_org_lane(org: dict, name: str,
         except HTTPException:
             raise
         except Exception as e:
+            # #1981: the DB-level backstop inside `provision_team` refused —
+            # the SAME rule as the `_assert_free_org_allowance` gate this lane
+            # already runs under the per-user lock, so it answers with the SAME
+            # structured 402 the wizard renders its dialog from (#2789).
+            # Without this branch a cross-worker refusal would surface as a 400
+            # "Team create failed: …" and the wizard would show a dead end.
+            blocking_org_id = _one_free_org_blocker_from_rpc(e)
+            if blocking_org_id is not None:
+                raise HTTPException(status_code=402,  # noqa: B904
+                                    detail=_one_free_org_detail(blocking_org_id))
             # 0011 unique index: a duplicate org name surfaces as a
             # PostgREST 409 → 409 (registry sdk.org_create raises
             # ControlPlaneError → 400; 409 is the closer contract — review
@@ -45007,11 +45517,26 @@ def _provision_new_org_from_checkout(sdk, org_id: str, meta: dict) -> str:
     )
     user_id = str(meta.get("user_id") or "")
     org_name = str(meta.get("org_name") or "").strip()
-    tier = str(meta.get("tier") or "free")
+    tier = str(meta.get("tier") or "")
     if not user_id or not org_name:
         raise RuntimeError(
             "new-org checkout metadata missing user_id/org_name — cannot "
             f"provision (org_id={org_id!r})")
+    # ⛔ #1981 (round-3 review, P2): a MISSING tier must NOT default to "free"
+    # here. `COALESCE(p_tier,'free') = 'free'` makes the entitlement gate ENGAGE
+    # for this lane, and its refusal re-raises as a webhook 500 — which Stripe
+    # redelivers forever — for a customer who has just paid and who, by design
+    # (the "buy a subscription for a NEW organization" exit), may already own a
+    # free org. The session-creation route rejects free/anon BEFORE checkout
+    # (`_billing_checkout_new_org_sync`), so a free or absent tier reaching this
+    # point means the metadata was lost or written wrong: fail loudly and name
+    # it, instead of letting the gate refuse and the retry loop hide the cause.
+    if not tier or tier in ("free", "anon"):
+        raise RuntimeError(
+            "new-org checkout carried no PAID tier "
+            f"(tier={tier!r}, org_id={org_id!r}) — this lane provisions a "
+            "purchased organization; a free tier would make the one-free-org "
+            "gate refuse a provision the customer already paid for")
     lim = tier_limits(tier)
     # #1716/#1921 keyless provisioning: no tt_ mint (its plaintext is never
     # returned — a dead credential). The org mints a session key via the normal

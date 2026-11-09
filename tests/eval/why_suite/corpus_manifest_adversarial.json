@@ -1,0 +1,107 @@
+{
+  "composition": {
+    "boundary": 3,
+    "chain": 4,
+    "clean": 2,
+    "conflicted": 21,
+    "multi_nand": 4,
+    "near_tie": 4,
+    "precedence": 2,
+    "total": 23,
+    "wide_decision": 4
+  },
+  "corpus": "why_suite_adversarial",
+  "plant_roles": {
+    "boundary": {
+      "claim": "{topic} boundary belief statement",
+      "counter": "{topic} counterargument gamma",
+      "support": "{topic} supporting record alpha"
+    },
+    "chain": {
+      "counter": "{topic} counterargument gamma",
+      "grand_successor": "{topic} terminal successor belief",
+      "old": "{topic} belief statement",
+      "successor": "{topic} successor belief",
+      "support": "{topic} supporting record alpha"
+    },
+    "clean": {
+      "claim": "{topic} clean belief statement",
+      "support_a": "{topic} clean record one",
+      "support_b": "{topic} clean record two"
+    },
+    "multi_nand": {
+      "claim": "{topic} belief statement",
+      "counter_a": "{topic} counterargument one",
+      "counter_b": "{topic} counterargument two",
+      "counter_c": "{topic} counterargument three",
+      "support": "{topic} supporting record alpha"
+    },
+    "near_tie": {
+      "claim": "{topic} belief statement",
+      "counter": "{topic} counterargument gamma",
+      "support_a": "{topic} supporting record alpha",
+      "support_b": "{topic} supporting record beta",
+      "support_c": "{topic} supporting record gamma"
+    },
+    "precedence": {
+      "counter": "{topic} decision counterargument",
+      "decision": "{topic} decision point",
+      "option_a": "{topic} alternative one",
+      "option_b": "{topic} alternative two",
+      "successor": "{topic} successor belief",
+      "support": "{topic} decision support record"
+    },
+    "wide_decision": {
+      "counter": "{topic} decision counterargument",
+      "decision": "{topic} decision point",
+      "option_a": "{topic} alternative one",
+      "option_b": "{topic} alternative two",
+      "option_c": "{topic} alternative three",
+      "option_d": "{topic} alternative four",
+      "support": "{topic} decision support record"
+    }
+  },
+  "protocol": "why_suite_corpus_v2_adversarial",
+  "schema_version": 1,
+  "seed": 4275,
+  "source": "tests/eval/why_suite/adversarial.py (#2275) \u2014 the adversarial why-suite corpus: edge-case structures derived from the W4 assembly's own documented contracts (budgets, severity ordering, threshold direction, immediate-successor supersession)",
+  "topics": {
+    "boundary": [
+      "boundary-topic-0",
+      "boundary-topic-1",
+      "boundary-topic-2"
+    ],
+    "chain": [
+      "chain-topic-0",
+      "chain-topic-1",
+      "chain-topic-2",
+      "chain-topic-3"
+    ],
+    "clean": [
+      "clean-topic-0",
+      "clean-topic-1"
+    ],
+    "multi_nand": [
+      "multi_nand-topic-0",
+      "multi_nand-topic-1",
+      "multi_nand-topic-2",
+      "multi_nand-topic-3"
+    ],
+    "near_tie": [
+      "near_tie-topic-0",
+      "near_tie-topic-1",
+      "near_tie-topic-2",
+      "near_tie-topic-3"
+    ],
+    "precedence": [
+      "precedence-topic-0",
+      "precedence-topic-1"
+    ],
+    "wide_decision": [
+      "wide_decision-topic-0",
+      "wide_decision-topic-1",
+      "wide_decision-topic-2",
+      "wide_decision-topic-3"
+    ]
+  }
+}

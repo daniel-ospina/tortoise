@@ -1856,14 +1856,38 @@ class TestProbeSetupBudget:
         assert baseline["graph_size_error"] is None
         assert result["graph_size_error"] is not None
 
+    #: The two "reachable graph reports ok" rows below assert that a cold
+    #: start LONGER than the reachability budget still reports `ok`. They are a
+    #: DISCRIMINATOR PAIR: what the assertion depends on is
+    #: ``_COLD_START_S > _REACHABILITY_BUDGET_S`` (a tool that failed to opt into
+    #: the setup allowance is bounded by the bare reachability budget —
+    #: ``total_budget = PROBE_TIMEOUT`` when ``setup_timeout`` is None/0 — and
+    #: times out on the cold start), never the absolute values. Measured, not
+    #: assumed, for the pair below: the same 3.0 s cold start reports
+    #: ``unknown``/``graph_size 0`` at ``setup_timeout=0`` and ``ok``/``9019`` at
+    #: ``PROBE_SETUP_TIMEOUT``. The ABSOLUTE values are therefore
+    #: sized by the SCHEDULING noise of the runner, not by the code's cost: this
+    #: SDK's reachability query returns immediately, so a budget it cannot meet
+    #: is measuring the machine. At 0.05 s the MCP row went RED on a CORRECT
+    #: build in `test-slow (b)` (run 42531585230), and the job log is the
+    #: evidence: ``{'db': {'ok': False, 'observed': True, 'latency_ms': 850.9,
+    #: 'error': 'probe timeout after 0.05s'}, 'graph_size': 0}`` — ~800 ms of
+    #: scheduling/slot stall inside the measured span against a 50 ms budget,
+    #: so the reachability query never got its window (#3143's probe worker is a
+    #: single process-lifetime thread, so it competes with the shard's other
+    #: threads).
+    _REACHABILITY_BUDGET_S = 1.0
+    _COLD_START_S = 3.0
+
     def test_deep_setup_budget_reports_a_reachable_large_graph_ok(
             self, monkeypatch):
         """#3143 regression: with the MCP tool's setup allowance, a graph
         whose projection cold-start exceeds PROBE_TIMEOUT is reported
         reachable with its REAL graph_size — not degraded/0."""
-        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT",
+                            self._REACHABILITY_BUDGET_S)
         result = monitoring.metrics(
-            sdk=SlowColdStartSDK(delay=0.2, graph_size=9019),
+            sdk=SlowColdStartSDK(delay=self._COLD_START_S, graph_size=9019),
             setup_timeout=monitoring.PROBE_SETUP_TIMEOUT,
         )
         assert result["status"] == "ok", result
@@ -1875,17 +1899,19 @@ class TestProbeSetupBudget:
         into the setup allowance — assert it at the MCP tool boundary.
 
         Hermetic: pin the knob (the tool resolves it at CALL time, so an
-        ambient `.env`/shell value below the 0.2s cold-start would fail this
-        on correct code).
+        ambient `.env`/shell value below the cold-start would fail this on
+        correct code).
         """
         from tortoise import mcp_server
         from tortoise.mcp_auth import _transport_mode
 
-        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT", 0.05)
+        monkeypatch.setattr(monitoring, "PROBE_TIMEOUT",
+                            self._REACHABILITY_BUDGET_S)
         monkeypatch.setenv("TORTOISE_PROBE_SETUP_TIMEOUT", "20")
         monkeypatch.setattr(
             mcp_server, "_get_org_sdk",
-            lambda: SlowColdStartSDK(delay=0.2, graph_size=9019))
+            lambda: SlowColdStartSDK(delay=self._COLD_START_S,
+                                     graph_size=9019))
         token = _transport_mode.set("http")
         try:
             result = mcp_server.tortoise_health()

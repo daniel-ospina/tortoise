@@ -32,7 +32,7 @@ only half cleared, which is the finding worth reading (§2).**
 
 | Child | Assertion | Verdict | Decisive evidence |
 |---|---|---|---|
-| `#10984` | A1 — declared part-whole relations become graph edges, **answering a rollup** | **STILL-MISSING** (its *blocker* is closed) | the declaration now reads and a writer exists, but nothing production calls it and no rollup query exists anywhere (§1) |
+| `#10984` | A1 — declared part-whole relations become graph edges, **answering a rollup** | **STILL-MISSING** (its *blocker* is closed) | as measured, the declaration read and a writer existed with no production caller; ⛔ **the caller landed after this record's base (`#11548`, `relation_write.py`)**, so the basis is now "the writer landed, the corpus was not re-measured" — see the fifth-landing amendment in §0, and no rollup query exists anywhere (§1) |
 | `#10985` | A2 — S3 attaches instead of minting; E1 `after_share <= 0.50 × before_share` | **STILL-MISSING** | the HOLD seam it names **landed** (`#11212`, 21:33:54Z) and the share still moves `0.600000 → 0.600000` — but that HOLD covers **operator endpoints**, not the Object mint A2's population needs (§2) |
 | `#10987` | A5 — `Subject` count above 26, four edge families non-zero | **STILL-MISSING** | the census reads `Subject: 19` and three of the four families are absent from a **complete** edge-type enumeration (§3) |
 
@@ -67,10 +67,12 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 ⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
-`hasPart` (`tortoise/extractor_v2.py:1720`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10891`, and
+`hasPart` (`tortoise/extractor_v2.py:1735`). It does **not** discharge A1: it is **transport only** —
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10906`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
-materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
+materialising them as Object→Object edges is **`#11237`** (OPEN). ⛔ **FALSE in this record's merged
+tree — see the fifth-landing amendment below:** the consumer landed as **`#11548`**, and that grep now
+prints three lines. The paragraph is kept as what was measured at this record's base. ⚠️ **The scope is `tortoise/`, and it is
 load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
 `result["relations"]` on **56 lines** (**59 occurrences**, three lines naming it twice) at `origin/main`
 (`62248db88`), pinning the contract
@@ -87,6 +89,33 @@ same grep prints **0** at this record's base `80c912244`, and four at `:8892`, `
 mention count and its line numbers do not, which is this section's own lesson. §1's second reason therefore
 stands unchanged, and both §1 and §5 carry the call-shaped command, which a comment cannot satisfy. That
 is §7's lesson one merge later: **a count is only as good as the base it was taken at.**
+
+⚠️ **A fifth landing arrived between the base and this record's merge, and it reaches the seam this
+record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
+S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
+`tortoise/relation_write.py` is the consumer `#10999` did not have, called from
+`TortoiseSDK.capture_session` at `tortoise/sdk.py:17193` (`apply_relation_edges`, and by `:17194` the
+result), fed **only** by
+the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
+taken on this merge:
+
+- `git grep -n 'result\["relations"\]' -- tortoise/` → **3** lines (`extractor_v2.py:10906`,
+  `relation_write.py:7`, `sdk.py:17181`), against the *"that comment and no consumer at all"* this
+  record was written with.
+- `git grep -n 'plan_hierarchy_edges' -- tortoise/` → **8** lines, four of them in `relation_write.py`
+  and one of them the **call** (`:631`): a declared hierarchy over a pair the story *states* is routed
+  through `plan_hierarchy_edges` and written as the **declared** structural predicate through
+  `sdk.link_entities` → `create_edge` — the seam `#11001` documented and nothing called, now called.
+  (`tests/` gains two hits as well, `test_relation_write_11237.py`, so *"all in the same test file"* is
+  no longer true either.)
+
+⛔ **This does NOT move A1.** The leg fires only when a loaded pack DECLARES a hierarchy over the two
+kinds AND the story STATES that pair, and only its `structural` arm writes: the `operator` arm is refused
+here because these endpoints are **Objects, not Points** (`relation_write.py`'s own docstring). Whether
+the capstone's corpus produces such a pair is **unmeasured** — no probe was re-run for this merge, and a
+row moves only by re-running one. What changed is narrower and still material: **A1 can no longer be
+argued from "nothing production calls the planner."** The row keeps the value it was measured at, and its
+basis is now *the writer landed, the corpus was not re-measured* — `#11237` stays OPEN for the remainder.
 
 ⚠️ **`#11211` did not close `#11021`** — `gh pr view 11211 --json closingIssuesReferences` is empty
 and its own body says `Part of #11021 — not Closes`, routing the remaining row to `#11239` (OPEN).
@@ -134,6 +163,8 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `plan_hierarchy_edges` → **9 hits, all in the same test file**, plus four references in
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
    `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
+   ⛔ **superseded in the merged tree: `#11548` added the production caller**, `relation_write.py:631`
+   — see the fifth-landing amendment in §0)
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner). The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).
@@ -155,12 +186,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17574`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:17630`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
-   insertion then moved both; both now read `17574`.) What is missing is the *declared part-whole* edge, not every structural
+   insertion then moved both; both now read `17630`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2724-2726`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2736-2738`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -293,7 +324,7 @@ def is `:3104` at `d69faaf38`; `git grep -n '_hold_endpoint(' -- tortoise/extrac
 def and the one call), which fabricates a `statement` **Point** from an operator ref. A2's population is
 the **Object** mint: every emitted entity is appended unfiltered at the
 `payload_entities.append({` site (`extractor_v2.py:8880` at `80c912244`; **`:9433` at `d69faaf38`**)
-(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16516-16530`. Nothing
+(`payload_entities.append({"name": name, "kind": kind, …})`) and minted at `sdk.py:16529-16543`. Nothing
 filters it, and the tree's own registry says so in `#10997`'s own words —
 `config/v4-mechanisms.yml`'s `failure_policy` row is still **`state: not-implemented`**, its note reads
 *"the gate covers the MINTED candidate only"*, and it still carries the pin built to red the day a create
@@ -318,16 +349,12 @@ symbol and let the line number be a convenience printed beside it** (`git grep -
 -- tortoise/extractor_v2.py`, `git grep -n 'payload_entities.append' -- tortoise/extractor_v2.py` —
 the path matters: unscoped, both patterns also match THIS record and its quoted lines, which is the
 count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is
-re-derived at that sha by the `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live
-grep cannot do it (scoped, `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-`:12929` at the head and `:12779` at `62248db88` — the head's number being the one `a1dff7cec8`
-already carried — and the sweep covers **neither** of those two bases), which is the whole point. ⚠️ The live number is the ONE `HEAD`-relative
-cite this record keeps, deliberately: it is the operand a reader re-derives the rest FROM, so it has to
-be today's — and stating it is safe only because it is WATCHED, by
-`tests/test_7949_capstone_measure.py::test_the_reconcile_cites_resolve_where_the_record_says_they_do`,
-which reds the moment it drifts. Pinning a HISTORICAL number to `HEAD` is the different, unsafe thing
-(that is the same rot in a new coat), which is why every other cite here names the sha it was true at.
-That is the class of defect §0 exists to catch: a number true at
+re-derived at that sha by the
+`for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
+`git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
+`:12929` at `a1dff7cec8` and `:12779` at `62248db88`, and the sweep covers **neither** of those two
+bases — pinned to the two shas, never to `HEAD`, because a `HEAD`-relative number is the same rot in a
+new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
@@ -377,7 +404,7 @@ named a Subject and the spine relabelled it an Object.
 mints SUBJECT-kind entities as Objects"*) is the **report** whose own closure says **"No code change
 remains"** and names `#5230` as the landing, so cite it for the diagnosis, not for the code. At the head
 this record is measured on,
-the write seam routes by kind (`tortoise/sdk.py:16516-16530`): `_ekind = _payload_entity_kind(e)` →
+the write seam routes by kind (`tortoise/sdk.py:16529-16543`): `_ekind = _payload_entity_kind(e)` →
 `_is_subject = is_subject_kind(_ekind or "")` → `create_entity("subject", …)` **or**
 `create_entity("object", …)`. `#4938` (CLOSED 2026-09-28T15:02:50Z), `#1370` (CLOSED
 2026-09-26T12:35:33Z) and `#1509` (CLOSED 2026-10-10T12:36:56Z) are closed too. So the relabelling is
@@ -634,8 +661,7 @@ gh issue view 10997 --json state,closedAt                 # CLOSED 21:33:55Z
 gh issue view 11021 --json state,closedAt                 # CLOSED, one second after its merge
 
 # §0/§2 — the sha-pinned cites, each re-derived AT THE SHA IT NAMES (the one read that decides them;
-# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at the head
-# (the number a1dff7cec8 already carried) and :12779 at 62248db88, neither of which is one of these numbers)
+# a live grep cannot: `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints :12929 at a1dff7cec8, :12779 at 62248db88, neither of which is one of these numbers)
 for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
   git show "$s":tortoise/extractor_v2.py | grep -n 'vet_enabled = (\|os.environ.get("TORTOISE_VET")\|def _hold_endpoint\|_hold_endpoint(hold_store\|def _mint_endpoint\|payload_entities.append({'; done
 # aa414b4d5 → 1153, 8784, 9401, 11351 · 8e49ae909 → 1153, 8785, 9402, 11358
@@ -646,12 +672,12 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9006 :9024 :9031 :9411
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9021 :9039 :9046 :9426
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
 git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
-git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:353/:447
+git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:365/:459
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on
@@ -661,10 +687,12 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
-git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10891 — no production
-                                                          # consumer of #11205's channel (⚠️ the `-- tortoise/`
-                                                          # scope is the claim: unscoped it also matches the
-                                                          # reader below)
+# ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
+# extractor_v2.py:10906 (the stale comment), relation_write.py:7, sdk.py:17181.
+git grep -n 'result\["relations"\]' -- tortoise/        # at this record's base: ONE hit, the comment at
+                                                          # :10906 — no production consumer of #11205's
+                                                          # channel (⚠️ the `-- tortoise/` scope is the
+                                                          # claim: unscoped it also matches the reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide reader: tests/test_10999_batch_story_
                                                           # relations.py — 56 LINES (`-c` counts lines), a
                                                           # contract pin, not a producer
@@ -680,7 +708,7 @@ uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17574p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '17630p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),
@@ -709,7 +737,7 @@ grep -n -A 12 '"label_counts"' docs/evidence/7949-capstone/capstone-measured-915
 grep -n -A 12 '"relationship_counts"' docs/evidence/7949-capstone/capstone-measured-9152448d.log
 git grep -n -A 14 '_ekind = _payload_entity_kind(e)' -- tortoise/sdk.py   # the kind→label routing at the
                                                           # write seam (#5230/#1370's fix); symbol, not a
-                                                          # line — the -A 14 reproduces sdk.py:16516-16530
+                                                          # line — the -A 14 reproduces sdk.py:16529-16543
 for n in 4934 4938 1370 1509; do gh issue view $n --json state,closedAt -q '.state+" "+(.closedAt//"-")'; done
 # #4889's 13-type hosted census is QUOTED from its scoping comment, not re-derived here:
 gh issue view 4889 --json comments -q '.comments[].body' | grep -n -A 3 'CONTAINS` 35,046'

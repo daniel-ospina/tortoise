@@ -1,4 +1,4 @@
-// tortoise-hook-version: 1
+// tortoise-hook-version: 2
 // Tortoise volunteering-memory seam for OpenClaw (epic #2080, issue #2120).
 //
 // The `tortoise-hook-version` marker above is the install-contract generation
@@ -42,7 +42,59 @@ import { dirname, join } from "node:path";
 export const PLUGIN_ID = "tortoise";
 export const DEFAULT_TIMEOUT_MS = 800;
 export const DEFAULT_API_URL = "https://api.premiselabs.co";
-export const MAX_PROMPT_CHARS = 15000;
+
+// The reflex's WINDOW bound, mirrored from the service it talks to (the plugin is
+// JS, the reflex is Python — and `test_openclaw_seam.py` pins these numbers
+// against `tortoise/volunteer.py` so a drift cannot pass silently).
+//
+// A CHARACTER count is not a byte bound, and the difference is not academic:
+// `validate_request` charges the UTF-8 BYTES of each turn's content plus
+// `PER_TURN_OVERHEAD_BYTES` against `MAX_WINDOW_BYTES`, so a 15,000-CHARACTER
+// slice sends ~30 KB for accented text and ~45 KB for CJK — over the cap — and
+// the refusal lands in the fail-open boundary as an empty injection. The symptom
+// is a silent no-op in exactly the long prompt the bound exists for.
+// `tortoise/framework.py::_bounded_window` states the same rule on the Python
+// side of the same contract.
+export const REFLEX_MAX_WINDOW_BYTES = 15 * 1024;
+export const REFLEX_PER_TURN_OVERHEAD_BYTES = 64;
+/** Content budget for the ONE turn this plugin sends. */
+export const REFLEX_PROMPT_MAX_BYTES =
+  REFLEX_MAX_WINDOW_BYTES - REFLEX_PER_TURN_OVERHEAD_BYTES;
+
+/**
+ * The hosted body's `session_id` is `str | None = Field(None, max_length=256)`
+ * (`tortoise/hosted_api.py`), so an OpenClaw session key longer than 256
+ * characters — a gateway is free to mint one — makes EVERY hosted turn a 422,
+ * which `!response.ok` turns into an empty injection for that whole session:
+ * the same silent fail-open the hosted-body fix removed. The id is carried, not
+ * consulted (the reflex validates it and never keys suppression on it), so
+ * truncation costs no correctness and keeps the turn inside the contract.
+ */
+export const MAX_SESSION_ID_CHARS = 256;
+export function boundedSessionId(sessionId) {
+  if (!sessionId) return null;
+  return String(sessionId).slice(0, MAX_SESSION_ID_CHARS);
+}
+
+/**
+ * Bound a prompt to the reflex's BYTE budget, keeping the TAIL.
+ *
+ * Tail, not head, for the same reason `framework.py` keeps it: the ask being
+ * answered is at the END of the turn, and that is what the reflex resolves
+ * against. Slicing BYTES (not characters) is what keeps a multibyte prompt
+ * inside the bound it was truncated to; the continuation-byte walk stops the
+ * slice from splitting a codepoint into a U+FFFD, which would corrupt the
+ * window the reflex tokenizes.
+ */
+export function boundedPrompt(text) {
+  const encoded = Buffer.from(String(text ?? ""), "utf8");
+  if (encoded.length <= REFLEX_PROMPT_MAX_BYTES) return encoded.toString("utf8");
+  let start = encoded.length - REFLEX_PROMPT_MAX_BYTES;
+  // UTF-8 continuation bytes are 10xxxxxx — step over them so the first byte
+  // kept is a sequence START.
+  while (start < encoded.length && (encoded[start] & 0xc0) === 0x80) start += 1;
+  return encoded.subarray(start).toString("utf8");
+}
 
 /** OpenClaw's state dir: `$OPENCLAW_STATE_DIR`, else `~/.openclaw`. */
 export function stateDir(env = process.env, home = homedir()) {
@@ -104,8 +156,33 @@ export function readConfig(apiConfig, env = process.env) {
   };
 }
 
-/** Run the ONE canonical reflex: `tortoise volunteer < prompt`. */
-export function runCommand(command, prompt, timeoutMs) {
+/**
+ * The reflex stdin payload for one turn — the JSON contract `tortoise
+ * volunteer` documents (a `{window, …}` dict), NOT a flag set.
+ *
+ * ``prior_context`` is the CONTINUITY input (#2120 scope "Cross-turn
+ * dedupe"): the block
+ * this seam injected on an earlier turn, which the reflex's own stage-5
+ * re-mention suppression reads. ``session_id`` is carried (validated, sent)
+ * but is NOT consulted by the decision — the suppression set comes from
+ * ``prior_context`` alone, so a seam that passes only a session id suppresses
+ * nothing.
+ *
+ * A dict on stdin (rather than `--prior-context` argv flags) is deliberate:
+ * a `tortoise` older than this seam ignores an unknown payload key and still
+ * runs, while an unknown FLAG is an argparse error — which `runCommand`'s
+ * fail-open turns into no injection at all, silently, on every turn.
+ */
+export function reflexPayload(prompt, { sessionId, priorContext } = {}) {
+  return JSON.stringify({
+    window: [{ role: "user", content: prompt }],
+    session_id: boundedSessionId(sessionId),
+    prior_context: priorContext ? String(priorContext) : null,
+  });
+}
+
+/** Run the ONE canonical reflex: `tortoise volunteer` over one turn's window. */
+export function runCommand(command, prompt, timeoutMs, continuity = {}) {
   return new Promise((resolve) => {
     const child = execFile(
       command,
@@ -118,12 +195,20 @@ export function runCommand(command, prompt, timeoutMs) {
       return;
     }
     child.stdin.on("error", () => {});
-    child.stdin.end(prompt);
+    child.stdin.end(reflexPayload(prompt, continuity));
   });
 }
 
-/** Run the reflex over the hosted pipeline: `POST /v1/context`. */
-export async function runHosted(apiUrl, apiKey, prompt, timeoutMs) {
+/**
+ * Run the reflex over the hosted pipeline: `POST /v1/context`.
+ *
+ * The body is the DOCUMENTED request contract
+ * (``VolunteerContextRequest`` in ``tortoise/hosted_api.py``): a ``window`` of
+ * ``{role, content}`` turns (required — a bare ``{prompt}`` is a 422 and the
+ * fail-open catch would silently inject nothing) plus the optional
+ * ``session_id`` / ``prior_context`` continuity fields.
+ */
+export async function runHosted(apiUrl, apiKey, prompt, timeoutMs, continuity = {}) {
   if (!apiKey) return "";
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
@@ -134,7 +219,13 @@ export async function runHosted(apiUrl, apiKey, prompt, timeoutMs) {
         "Content-Type": "application/json",
         Authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify({ prompt }),
+      body: JSON.stringify({
+        window: [{ role: "user", content: prompt }],
+        session_id: boundedSessionId(continuity.sessionId),
+        prior_context: continuity.priorContext
+          ? String(continuity.priorContext)
+          : null,
+      }),
       signal: controller.signal,
     });
     if (!response.ok) return "";
@@ -148,7 +239,7 @@ export async function runHosted(apiUrl, apiKey, prompt, timeoutMs) {
   }
 }
 
-/** Cross-turn dedupe (#2120 indicator 4): never re-inject the same block twice. */
+/** Cross-turn dedupe (#2120 scope "Cross-turn dedupe"): never re-inject the same block twice. */
 export function createDedupe() {
   const seen = new Map();
   return (sessionKey, block) => {
@@ -156,6 +247,25 @@ export function createDedupe() {
     if (seen.get(sessionKey) === digest) return false;
     seen.set(sessionKey, digest);
     return true;
+  };
+}
+
+/**
+ * Cross-turn CONTINUITY (#2120 scope "Cross-turn dedupe").
+ *
+ * The digest dedupe above only catches an IDENTICAL block. A turn whose block
+ * changes by one pointer (a second pointer clears the gate, or one drops out)
+ * re-surfaces the pointers this session already saw — the false fire the reflex
+ * itself suppresses, but only when it is handed `prior_context`. So remember
+ * the last block per session key and pass it back as that input.
+ */
+export function createContinuity() {
+  const last = new Map();
+  return {
+    prior: (sessionKey) => last.get(sessionKey) ?? "",
+    remember: (sessionKey, block) => {
+      last.set(sessionKey, block);
+    },
   };
 }
 
@@ -205,18 +315,25 @@ export function captureRecords(event, ctx, now = Date.now()) {
 export default function register(api) {
   const config = readConfig(api?.config);
   const dedupe = createDedupe();
+  const continuity = createContinuity();
 
   api.on("before_prompt_build", async (event, ctx) => {
     try {
       if (ctx?.trigger && ctx.trigger !== "user") return undefined;
-      const prompt = textOf(event?.prompt).slice(0, MAX_PROMPT_CHARS);
+      const prompt = boundedPrompt(textOf(event?.prompt));
       if (!prompt.trim()) return undefined;
+      const sessionKey = textOf(ctx?.sessionKey) || "openclaw";
+      const session = {
+        sessionId: sessionKey,
+        priorContext: continuity.prior(sessionKey),
+      };
       const block = config.command
-        ? await runCommand(config.command, prompt, config.timeoutMs)
-        : await runHosted(config.apiUrl, config.apiKey, prompt, config.timeoutMs);
+        ? await runCommand(config.command, prompt, config.timeoutMs, session)
+        : await runHosted(config.apiUrl, config.apiKey, prompt, config.timeoutMs, session);
       const text = textOf(block).trim();
       if (!text) return undefined;
-      if (!dedupe(textOf(ctx?.sessionKey) || "openclaw", text)) return undefined;
+      if (!dedupe(sessionKey, text)) return undefined;
+      continuity.remember(sessionKey, text);
       return { prependContext: text };
     } catch {
       return undefined;

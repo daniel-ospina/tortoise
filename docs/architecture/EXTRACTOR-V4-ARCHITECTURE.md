@@ -621,7 +621,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:13000-13003`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:15558-15561`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -701,20 +701,40 @@ unfirable (block at the top of §10).
 > default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
 > 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
 > sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
-> only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
+> only **detects** (`check_batch`'s `coverage_suspect` — reported by the gate, **acted on by the
+> PIPELINE** since `#11002` (which is what `in v1` used to defer), and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
 > discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE; `MERGE` is a verdict VET records and S3 applies —
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So **no stage the design folds S4's purpose into — and no successor stage — can emit a
-> candidate a coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) —
-> removing `run_s4` today DELETES gap-filling instead of relocating it. The universal is scoped to the
+> item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
+> missing** — the fold's **remedy** half is unimplemented in both. ✅ **The successor is the bounded
+> S2.2 re-narrate (§4.4, `#11002`)** — `_renarrate_trigger` → `_arm_extract`, the `emphasis` seam in
+> `run_s1`: it fires **once**, re-extracts, and **unions both arms** with `merge_embed_lists` under
+> E4's identity-key rules, so it CAN add a candidate the coverage check found missing and it preserves
+> both arms' items (merges-not-replaces — the owner's ruling on `#11002`). The universal is scoped to the
 > FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
 > says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
-> that can ADD; building it is the migration deliverable.
-> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
+> that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
+> and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
+> `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
+> False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
+> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions on the
+> **`legacy` arm** (`TORTOISE_S4_DELTA=0`) in `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`,
+> 3/7 on that arm in the re-run, 5/7 across their union — **and 2/7 on either run of the
+> `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
+> `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
+> moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
+> two artifacts are one replay holding both arms, and the arms are different CONTRACTS (`legacy`
+> re-emits, `delta` emits only what is missing), so their `added_by_s4` counts are not the same
+> quantity. `docs/evidence/1789-s4-reeemit-tax/README.md` compares them as evidence about the gap
+> channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to
+> the real geometry is measured, so the token-saving RATIO — which is the saving — is undetermined
+> in both signs**. A count without its arm is therefore a claim about neither.
+> Not satisfiable by reasoning about the code: the artifacts are the instrument.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
@@ -1007,6 +1027,7 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 | **S1 NARRATE** *(model)* | **FAIL-OPEN onto the RAW** — retry once, then proceed `narrative_absent` with the raw as the coverage reference, recorded `degraded`. | D3-Option 4: the narrative is the **focus**, the raw is the **source** (§S2.1: the live call already passes `edus`). The narrative is not the transport of record, so its failure must not become the run's failure (I2). | One retry. A run NEVER proceeds with neither a narrative nor the raw; S2.2's coverage check reads whichever artifact was actually available. |
 | **S2.1 EXTRACT** *(model, per chunk)* | **FAIL-CLOSED per chunk, HOLD at the run level** — a chunk failing after its retry contributes no items and joins the run's `HOLD` set. | A failed chunk must never read as *"that chunk had nothing"* (I2). It is a **coverage gap**, and S2.2 Level 2 — not silence — is what makes it visible. | One re-prompt (the `_PARSE_RETRIES = 1` shape). Nothing is written for a held chunk. |
 | **S2.2 VET** *(Jev)* | **FAIL-OPEN** — a failed Level-1 question returns `KEEP`; a failed Level-2 verdict triggers **no** re-narrate and the batch proceeds. | *"a wrong keep is noise; a wrong drop is memory loss"* (§S2.2). | A VET failure may NEVER produce `DISCARD`. The missing verdict is recorded, so the gate's coverage is inspectable. |
+| **S2.2b RE-NARRATE** *(model, at most once)* | **FAIL-OPEN onto the FIRST ARM** — a retry that raises after the second arm has already re-bound the pipeline's state restores **every** binding it set and the first arm's capture ships unchanged. | A partial restore is worse than the raise: it would carry the second arm's list beside the first arm's narrative — a run that reports success and is internally inconsistent. The first arm's capture is complete by construction (it returned), so it is the only state safe to leave behind. | No retry of the retry (§S2.2: *once, then accept*). The failure is recorded on `stats["renarrate"]` (`fired: False`, `trigger`, `retry_failed`, both arms' metrics), on `errors`, and in `error_census` — never only in `warnings`, or the run reads clean. ⛔ **The union does NOT happen on this path**: the second arm's items are dropped rather than merged (`items`/`merged`/`decisions` are absent from the record), which is why F3's population is selected by `retry_failed` and not by `fired` alone. |
 | **S2.3 CLASSIFY** *(Jev + kNN)* | **FAIL-OPEN, never raises** — the candidate keeps `unclassified`; the run records it in its census. | A wrong kind is worse than no kind: `_find_existing_entity` uses `kind` as its exact-match discriminator, and `_select_pack_kinds` plus the chain enforcer key on kinds — so a guessed kind corrupts BOTH resolution and enforcement silently, while `unclassified` is honest. | Classification is OFF the write path: an `unclassified` candidate still resolves (on the bare-form path, §4.2 constraint 4) and still commits; the degraded exact-match coverage is recorded, because §4.2 warns that an unmatched kind is where duplicates are manufactured. |
 | **S3 RESOLVE** — the lookup *(mechanical)* | **FAIL-CLOSED on the identity assertion.** A degraded lookup returns *no priors* and must NEVER be read as *"these are new"*; the affected candidates are `HOLD`. | ⛔ **This is the whole of G3.** The natural fail-open marks every candidate `new` and **MANUFACTURES DUPLICATES** — the exact failure S3 exists to prevent. ✅ **The renderer half is closed (`#5095`): it no longer invites `new`** — it states that the lookup did not run (or did not complete), that identity is UNRESOLVED rather than absent, and that no `link_before_create` entry may report a search that did not happen. ⛔ **The MINT half is open, and the blanket create gate is still not enforced**: a Point or Entity the MODEL itself asserted is still created on an unresolved lookup (the S5-Job-2 half, `#10998`), so §4.4's `HOLD` is a disposition for the mint-before-wire path below, not a blanket create gate — I2's blanket suppression is deliberately NOT this mechanism's shape. That path is `#10997`'s: `_mint_endpoint` is licensed by a lookup that RESOLVED, and on `unresolved`/`partial` the ref is held with its edge and drained exactly once, so no `new` is asserted about a check that did not happen. | Bounded reconnect, then `HOLD`. A later pass re-runs the lookup; the candidates are neither minted nor discarded. |
 | **S3 RESOLVE** — the disambiguation *(Jev `Choice`)* | **FAIL-CLOSED on `new`.** A failed disambiguation `HOLD`s the candidate — unless the lookup returned exactly ONE exact-key match, which attaches mechanically with no model. | An unvalidated attach fuses two distinct entities' evidence, violating §4.2's union-merge rule (*"never lose either side's evidence"*). Neither direction is safe without a decision, so the candidate waits. | The `Choice` is re-raisable. `HOLD`, never `new`. |
@@ -1023,7 +1044,84 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 > **Keep the FIRST narrative unless the second is STRICTLY better on the SAME metric that triggered the retry** — the keep-rate, computed the same way. **A tie keeps the FIRST.** Both rates are recorded, so the choice is inspectable.
 
-**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate. The losing arm's extraction is discarded **with** its narrative — the re-extraction supersedes it **inside the same run and the same transaction** (I3), so no run ever commits a mixture of the two narratives' items.
+**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate.
+
+**The trigger, and the ONE knob that arms it.** `extractor_v2._renarrate_trigger` reads three signals, in order: `coverage_suspect` on the S2 batch (*prose in, zero candidates out* — armed by construction and, **crucially, refused when S2 raised**, because a failed call's empty list is byte-identical to a genuinely empty one and is a transport failure the stage already retried); a batch-level `RENARRATE` from an injected arbiter (the token `vet_gate.BATCH_OUTCOMES` has always carried); and a keep-rate below a hand-set threshold. That third arm is armed **only** by **`TORTOISE_RENARRATE_KEEP_RATE`** — accepted when `0.0 < v <= 1.0`, and any other spelling (unset, empty, `0`, `-1`, `1.5`, `banana`) leaves it **DISARMED**. The knob is named here because §4.2 makes that threshold a HUMAN calibration over tens of real sessions, and a switch no document declares cannot be set by the operator it is written for. What a retried run decided rides `stats["renarrate"]`: `trigger`, the pick (`items` / `narrative`), `merged` (the union's accounting — `kept_from_first` / `added_by_second` / `corrected_by_second`), `decisions` (each arm's per-item verdicts, which have no other home — see the DISCARD half of §4.4's union rule below), `emphasis`, both arms' `chunks`, and each arm's `candidates` / `discarded` / `kept` / `keep_rate` / `coverage_suspect` / `s2_failed` — ⛔ where `coverage_suspect` is **three-state**: `True`/`False` are `check_batch`'s verdict on a call that answered, and **`None` means there is no verdict because S2 raised**. A reader counting `coverage_suspect is False` (F3, below) therefore cannot count a batch that never existed — the fail-closed direction for a count whose `0` is a deletion's green light.
+
+**What the run COMMITS is the union of both arms' items — the tie-break decides the NARRATIVE only.** The shipped list is `merge_embed_lists` over the two arms (the second wins an identity-key collision, the first arm's items are preserved), so both arms' extractions reach the graph. ⛔ **This holds on a retry that COMPLETES; a FAIL-OPEN retry ships the first arm's capture alone** — the pick is discarded rather than published, so no `items`/`merged`/`decisions` ride the record and the second arm's extractions do **not** reach the graph (see the `S2.2b` row of the per-step policy above). Only ONE narrative is recorded, because exactly one `story`/`story_arc` reaches S4's prompt and `execute_embed`; which one is what the tie-break above settles. The union is re-vetted wholesale before it ships, so a first-arm **MERGE** flag on an item that SHIPS is re-derived rather than dropped — but a first-arm **DISCARD** is not: the item it removed is absent from the union, so the re-vet pass never judges it, and its verdict rides `stats["renarrate"]["decisions"]`. ⛔ Do not read the re-vet as a substitute for those verdicts; that is the `#5005` silent-discard reopened on the retried path. On the arm armed by construction (`coverage_suspect`) the first list is empty and the union IS the second arm's list; the merge is what keeps the disarmed keep-rate arm from silently dropping the losing narrative's items.
+
+> **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is gated on a successor that **preserves** that property — **a code change, tracked at `#11534`, NOT a measurement**: F3 was run on 2026-11-08 and it FIRES, so the measurement half is discharged and `run_s4` stays (see the F3 paragraph immediately below for the numbers and the two clauses that remain inferred).
+
+**The removal's falsifier — F3, defined here because two places cite it by that name.**
+`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
+measurement — an eval-lane run, not a code change. **WHAT THAT INSTRUMENT ACTUALLY MEASURES, and
+what it does not** — stated because the gap matters for an irreversible deletion. The two committed
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) record, per arm and per
+session, `s2_items` / `s4_items` / `merged_items` / `added_by_s4` / `corrected_by_s4` and the
+added/corrected item lists. They record **no `check_batch` block and no `stats["renarrate"]`**, and
+that is structural rather than an omission: the instrument (`tools/s4_reeemit_tax.py`) replays
+`run_s4` directly over each session's recorded S2 list and never calls `extract_session_v2`, so the
+pipeline's coverage flag and its retry counter do not exist on those rows. So of F3's three clauses
+**one is measured and two are not:** `added_by_s4 > 0` is measured — **4/7 primary, 3/7 re-run,
+5/7 across the union on the `legacy` arm** (`TORTOISE_S4_DELTA=0`), and **2/7 on either run of the
+`delta` arm**, which is DEFAULT-ON — while the flag clause is an INFERENCE from the artifacts'
+own S2 item counts (29–49 in every one of the 28 session-runs) and the retry clause is a property
+of the instrument's construction (no pipeline run ⇒ no retry). ⚠️ The inference is not free: the
+artifact stores COUNTS, and `check_batch`'s `candidates` applies a stricter predicate (a `Mapping`
+item with non-empty `name or content`), so the counts do not by themselves pin the flag. Both
+readings being above zero is what the decision rests on, so `run_s4` **stays** and the removal
+moved to **#11534** — where the pipeline-level half (`stats["renarrate"]["first"]
+["coverage_suspect"]` and `fired` over a real `extract_session_v2` run) is recorded as the
+measurement a successor owes. ⛔ **Name the arm whenever this number is quoted:** the two arms are
+DIFFERENT CONTRACTS (`legacy` re-emits, `delta` emits only what is missing), so their `added_by_s4`
+counts are not the same quantity — the evidence README compares them as evidence about the gap
+channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to the
+real geometry is measured, so the token-saving RATIO is undetermined in both signs**.
+
+On the frozen corpus, count the sessions
+where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
+False** — **restricted to sessions where the retry did not fire**
+(`stats["renarrate"]["fired"]` is `False`). ⛔ **`fired: False` describes what shipped, not how
+many arms ran.** A retry whose tail raised publishes `fired: False` as well, with the arm-choosing
+`trigger` and a `retry_failed` string beside it, and its first arm's capture restored binding by
+binding — so such a run belongs in this population, but must be selected deliberately, by
+`retry_failed`, rather than by the flag alone. ⛔ **Whose flag, spelled out, because a retry makes it
+two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
+run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
+on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
+SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
+unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
+arm's flag. ⛔ **But the record does NOT carry it on MOST of this population — which is why this clause is
+still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` ALONE when the retry never
+started (`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_step.py`), so a
+no-trigger row has no `first` block and no `coverage_suspect` to read. The first arm's own
+`coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists whenever the retry
+STARTED: on a fired run, and equally on a fail-open run, whose `fired: False` the flag alone cannot
+separate from a no-trigger row. Measured on that path, the record is
+`{"fired": False, "trigger": "coverage_suspect", "retry_failed": …, "first": {…, "coverage_suspect":
+true}}`. F3's restriction therefore removes the FIRED rows but not the fail-open ones; those carry
+`first` and are selected by `retry_failed`, as above. The nearest substitute
+is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
+the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
+PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
+held a mention can read `False` on the arm and `True` on the substitute. Since F3 counts only
+`coverage_suspect is False` sessions, reading the substitute can only REMOVE episodes from a count
+whose `0` is the green light to delete `run_s4`. Recording the first arm's flag on the NON-FIRED
+return, so F3 reads one surface on every run, is therefore part of what **#11534** owes — and until
+it exists, this clause is quoted as an inference and never as a measurement. ⛔ **And whose BASE, which is the second half of the same trap.**
+`added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
+S4's contribution would be measured against a bigger base and understated — on precisely the
+population where a retry fired for a reason other than coverage (an injected arbiter). Restricting
+the count to non-retried sessions makes both halves unambiguous: one arm, one flag, one base. The
+population is therefore "S4 added items, the coverage check did not flag the batch, and no retry ran".
+That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
+re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
+`coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the
+total-loss case only, and the removal's pre-condition is a stage that can ADD in the cases S4
+currently rescues. `0` over the corpus is the removal's green light. ⛔ It is not satisfiable by
+reasoning about the code — the count comes from a run — so no lane may delete `run_s4` on the
+strength of this section alone. (The label **F3** is the one the `#11002` issue's risk table and the
+drift marker over the step list already use; this paragraph is its definition of record.)
 
 **⚠️ This section is a SPEC, not a description of what runs — and `#5095` closed HALF of the gap.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), and its renderer used to tell the model *"no existing items available; assume everything is new"* (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351` — the revision this citation has always been pinned to) — the inverse of I1, and the duplication-manufacturing direction G3 names.
 

@@ -1,9 +1,41 @@
 """tools/longmem_eval/encode_cache.py — model-keyed disk-persisted encode cache.
 
-The LongMemEval burn re-ingests overlapping haystack content per question
-(5-10× redundant encodes). This cache makes the burn feasible by memoizing
-``content → embedding`` on disk — a mid-burn crash must not lose the
-cross-question reuse the cache exists for.
+The LongMemEval burn re-ingests the SAME haystack text under different
+questions. The redundancy is **measured, not assumed** (#1779,
+``haystack_overlap.py``): one pass over the 500-Q S split emits 371,095 encode
+units of which 285,608 are distinct — a **1.299x** reuse factor, i.e. **23.0%**
+of units are cache hits in one pass (turn leg 246,750/189,522 = 1.302x;
+chunk leg 124,345/96,086 = 1.294x). This docstring previously claimed "5-10x
+redundant encodes" — that figure was never measured, and the census refuted it,
+so no live site restates it. The plan that ORIGINATED it
+(`docs/plans/2026-08-17-1349-embedder-selection.md:63`, and its restatement at
+`:102` — `:96` before this PR inserted its note) is left standing as the
+historical record it is, and this PR adds a dated correction note at that line;
+the research write-up names the origin in §0, finding 1, and both lines in §5.
+
+The unit counts above are the DATASET-DERIVABLE encode units — turn Points
+plus raw chunks. A `v2` run additionally embeds LLM-derived extraction Point
+texts (`ingest_v2` → `sdk.create_point`, and this module wraps
+`tortoise.embeddings` process-wide), which cannot be counted from the dataset
+and are therefore outside the census; `haystack_overlap.py`'s docstring says
+the same in its own words.
+
+What the cache actually buys, in the measured order of magnitude: (a) ~23% of
+encode units *within one pass*; (b) the much larger share across REPEAT passes
+— the disk persistence is keyed per ``(model, prompt)``, so a second pass with
+the same config is ~all hits, and a crashed burn resumes off the same file.
+⛔ The HNSW spot-check is NOT a demonstration of this: its two passes are the
+WINNER and the CONTROL, each built with its own ``cache_path_for`` namespace,
+so neither can hit the other's entries; (c) nothing at the LLM level worth
+having: cross-question *sessions* do repeat (5,403 of 23,867 slots) but every
+repeated pair carries a different session date, and the date is prompt-visible
+(``extractor_v2._date_anchor``), so the SESSION prompt identity is exactly
+1.000x. The prompt unit the harness actually renders is the **S1 chunk**
+prompt (``extract_session_v2`` → ``chunk_transcript`` → ``run_s1``, once per
+EDU chunk), and that cell is measured at **1.0002x — 27 of 124,345** chunk
+prompts repeat, below the 1% ``MATERIAL_HIT_SHARE`` floor. So a prompt-level
+response cache has nothing **worth** hitting, which is a stronger and more
+honest statement than "nothing to hit" (see ``haystack_overlap.CENSUS``);
 
 Keying: ``sha256(model_id + prompt_name + text)`` — the model component
 prevents cross-model contamination (a content-hash-only cache would let
