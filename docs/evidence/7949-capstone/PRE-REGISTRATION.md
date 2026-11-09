@@ -1820,11 +1820,16 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   by exactly **+70** lines, so every cite BELOW it moves +70 and every cite
   ABOVE it (`_collect_classify_items` at `:11189`, its extent `:11189-11211`) is untouched — so
   §10.15's and §10.16's readings of the collector still stand.
-- **The delta is a property of the final diff, not a constant.** The first cut of this guard was
-  39 lines shorter and the review that followed added a pre-bound `emphasis`, a
-  `vet_warnings` truncation mark, a per-arm `chunks` block and an `errors`/census record — which is
-  31 more lines. Every cite re-derived against the shorter guard was stale by exactly
-  that difference, which is why this entry states the delta it was measured at rather than a rule.
+- **The delta is a property of the final diff, not a constant.** An earlier cut of this guard was
+  shorter, and the review that followed added a pre-bound `emphasis`, a `vet_warnings` truncation
+  mark, a per-arm `chunks` block and an `errors`/census record — so the band this entry measures is
+  the FINAL one, at **+70** (`16878 → 16948` lines of `extractor_v2.py`; `+132/−62` in the extractor
+  hunk, of which 62 are the re-indented band). Every cite re-derived against an earlier cut was
+  therefore stale by the difference between that cut and this one, which is why this entry states
+  the delta it was MEASURED at rather than a rule. ⛔ The earlier cut's exact size is **not**
+  recoverable from this branch's history — the earliest surviving cut (`d1e9a856a0`) is already at
+  the final `+132/−62` — so no pair of intermediate counts is asserted here; an earlier draft of
+  this entry did assert one and its arithmetic did not close against the measured +70 (round 6).
 - **Verified by content, not by arithmetic.** Each re-pointed number was read out of the tree and
   compared with the symbol the document names: `:13177`/`:13326` are the two `if items:` classify
   gates, `:13190`/`:13337` the two fail-open `except` arms, `:13515` `result["classify_later"] = {`,
