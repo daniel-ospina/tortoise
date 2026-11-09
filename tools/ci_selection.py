@@ -467,6 +467,20 @@ SOURCE_PATTERNS = {
                    # billing its author for a file they never touched, exactly the
                    # failure the `logo.png` entry above describes.
                    "website/assets/premiselabs-logo.png",
+                   # #11407: the APP origin's copy of the same three icon files.
+                   # `app.premiselabs.co` is a SEPARATE Pages project whose root is
+                   # `website/apps/dashboard/public`, so no marketing glob reaches them —
+                   # and the guard that holds the two deployments to ONE mark opens these
+                   # bytes (`test_every_surface_declares_the_same_versioned_icon_set`
+                   # compares them byte-for-byte with `website/{favicon.ico,favicon.png,
+                   # apple-touch-icon.png}`). MEASURED before these entries:
+                   # `select(["website/apps/dashboard/public/favicon.ico"])` ->
+                   # `surfaces: []`, so re-exporting the app's icon merged green with the
+                   # comparison absent, and every app-origin tab then drew a different
+                   # mark from every marketing one.
+                   "website/apps/dashboard/public/favicon.ico",
+                   "website/apps/dashboard/public/favicon.png",
+                   "website/apps/dashboard/public/apple-touch-icon.png",
                    # #11615: the CRAWLER SURFACE — `robots.txt` and the sitemaps.
                    # `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` drops every
                    # non-Python path no pattern names; measured before these entries:

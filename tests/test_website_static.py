@@ -66,6 +66,7 @@ Run:  TORTOISE_TEST_CARVE_OUT=1 python -m pytest tests/test_website_static.py -v
 from __future__ import annotations
 
 import ast
+import hashlib
 import json
 import os
 import re
@@ -5863,3 +5864,108 @@ class TestSiteIconAndSocialPreviewContract:
             assert self._og(head, "image").startswith(expected_origin), (
                 f"{name} serves {expected_origin} but points its preview at "
                 f"{self._og(head, 'image')} — the card must come from the host it is on")
+
+    # --- the icon, on EVERY surface ------------------------------------
+
+    DASHBOARD_ROOT = WEB / "apps" / "dashboard" / "public"
+    ICON_FILES = ("favicon.ico", "favicon.png", "apple-touch-icon.png")
+
+    @classmethod
+    def _icon_hrefs(cls, html: str) -> list[str]:
+        """The `href` of every icon link in a page's head, in source order."""
+        out = []
+        for link in cls._links(cls._head(html)):
+            rel = link.get("rel", "").lower().split()
+            if any("icon" in token for token in rel):
+                out.append(link.get("href", ""))
+        return out
+
+    @staticmethod
+    def _href_version(href: str) -> str | None:
+        query = href.split("?", 1)[1] if "?" in href else ""
+        for part in query.split("&"):
+            if part.startswith("v="):
+                return part[2:]
+        return None
+
+    def test_every_surface_declares_the_same_versioned_icon_set(self):
+        """ONE mark on every origin — and a URL that changes when the bytes do.
+
+        Two defects, both reported visibly as "this page has a different tab icon":
+
+        1. **Two deployments, three marks.** `app.premiselabs.co` is a SEPARATE Pages
+           project (root `website/apps/dashboard/public`), and its entry points declared
+           `data:,` (a blank icon, so the browser drew its generic glyph) or `/logo.png`
+           (a 400x244 wordmark, squashed into the square slot). The marketing pages had
+           the real trio, so the same brand showed three different tabs (#11407).
+        2. **The URL never moved when the artwork did.** `/favicon.ico` carries
+           `max-age=14400` and a browser keeps a favicon far longer than any response
+           header, so re-exporting the mark left old tabs — and old pages whose HTML was
+           cached — drawing the superseded slab indefinitely. Measured on this repo: a
+           DELETED `/blog/og-image.png` still answered 200 from the edge four hours later.
+           Every href therefore carries `?v=<sha256[:12]>`, and the version is asserted
+           against the file's OWN bytes below, so a re-export without a bump reds here.
+
+        The `sizes` attributes are already asserted by `test_every_page_declares_the_icon
+        _trio` for the marketing tree; this test is about the SET being identical across
+        trees and self-invalidating, which is what harmonising means.
+        """
+        expected = {}
+        for name in self.ICON_FILES:
+            expected[f"/{name}"] = hashlib.sha256((self.WEB / name).read_bytes()).hexdigest()[:12]
+        assert len(set(expected.values())) == len(expected), (
+            f"two icon files are byte-identical, so one version no longer identifies one "
+            f"asset: {expected}")
+
+        # The dashboard project serves the SAME bytes: that is what stops the two
+        # deployments drifting into two marks, and a re-export that forgets one tree reds.
+        for name in self.ICON_FILES:
+            local = self.DASHBOARD_ROOT / name
+            assert local.is_file(), (
+                f"the dashboard project has no {name} — app.premiselabs.co would fall back to "
+                "a generic tab icon (or 404) while the marketing host shows the real one")
+            assert local.read_bytes() == (self.WEB / name).read_bytes(), (
+                f"website/apps/dashboard/public/{name} differs from website/{name} — the app "
+                "origin and the marketing origin would show different marks")
+
+        surfaces = {
+            "marketing": (self._pages(), self.WEB),
+            "app": ([self.WEB / "apps" / "dashboard" / "index.html",
+                     *sorted(self.DASHBOARD_ROOT.glob("*.html"))], self.DASHBOARD_ROOT),
+        }
+        for label, (pages, root) in surfaces.items():
+            assert pages, f"no {label} pages found — the guard would pass vacuously"
+            for page in pages:
+                hrefs = self._icon_hrefs(page.read_text())
+                assert len(hrefs) == 3, (
+                    f"{label}: {page.name} declares {len(hrefs)} icon link(s) — every surface "
+                    "must declare the ICO, the PNG and the apple-touch icon, or the tab "
+                    "falls back to whatever the platform guesses")
+                for href in hrefs:
+                    assert not href.startswith("data:"), (
+                        f"{label}: {page.name} blanks its icon with {href!r} — a blank icon "
+                        "is not a harmonised icon, it is the browser's generic glyph")
+                    path = href.split("?", 1)[0]
+                    assert "/logo.png" not in path, (
+                        f"{label}: {page.name} uses the wordmark as a tab icon ({href!r}) — "
+                        "400x244 squashed into a square slot (#11407)")
+                    assert path in expected, (
+                        f"{label}: {page.name} links {href!r}, which is not one of the three "
+                        f"icon files {sorted(expected)}")
+                    assert (root / path.lstrip("/")).is_file(), (
+                        f"{label}: {page.name} links {href!r}, which does not exist under "
+                        f"{root.name}/ — the tab request 404s")
+                    got = self._href_version(href)
+                    assert got == expected[path], (
+                        f"{label}: {page.name} links {href!r} but the file's sha256 starts "
+                        f"{expected[path]!r} — bump the `?v=` with the bytes, or a browser "
+                        "holding the old icon keeps drawing it (that is the stale-icon bug)")
+
+        # The blog's head is a STRING in the SSR function, not a page on disk, so no glob
+        # reaches it — and it is the surface a shared link opens.
+        blog = (self.WEB / "functions" / "blog" / "_lib.ts").read_text()
+        for path, version in expected.items():
+            href = f'href="{path}?v={version}"'
+            assert href in blog, (
+                f"the blog SSR head does not declare {href} — a post's tab icon would differ "
+                "from the page that links it")

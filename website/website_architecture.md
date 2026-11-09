@@ -364,6 +364,22 @@ Rules:
 - **Content:** Supabase `blog_posts`/`blog_agent_keys`/`blog_admins` (migration `20260827000001_blog_cms.sql`); admin SPA (ElDato editor port, #1798) served by the admin gate at `/admin` on the app origin — hash-routed (`#/`, `#/new`, `#/edit/:id`, `#/audit`), and for any `/admin/*` CLIENT route the gate falls through to `/admin/index.html` (real assets under `/admin/assets/…` pass through the asset router first); images in `blog-images` bucket.
 - **Epic:** docs/epics/2026-08-27-tortoise-blog-cms/.
 
+## 6.7 Icon surface (2026-11-09)
+
+One mark, on every origin, at a URL that moves when the bytes do (#11407).
+
+| Asset | Where | Served as |
+| --- | --- | --- |
+| `favicon.ico` | `website/` **and** `website/apps/dashboard/public/` | `/favicon.ico` on both origins — 32 + 48 px PNG payloads |
+| `favicon.png` | same two places | `/favicon.png` — 256 px, rounded tile, alpha |
+| `apple-touch-icon.png` | same two places | `/apple-touch-icon.png` — 180 px, OPAQUE and square (iOS applies its own mask; pre-rounding double-rounds) |
+
+- **Both copies are the same bytes, and that is asserted.** `app.premiselabs.co` is the separate `tortoise-dashboard` Pages project, so it needs its own copy at `public/` (vite copies `public/` → `dist/`); `tests/test_website_static.py::test_every_surface_declares_the_same_versioned_icon_set` fails if the two ever differ, which is the only thing stopping the two deployments drifting into two different tab icons.
+- **No page may blank its icon** (`<link rel="icon" href="data:,">`, the old dashboard SPA trick) **or use the wordmark** (`/logo.png` is 400×244 and renders as a squashed bar).
+- **Every href carries `?v=<sha256[:12]>`** of the file's own bytes. Cloudflare serves these with `max-age=14400` and browsers keep a favicon far longer than any header, so without a version the *old* artwork keeps drawing after a re-export — measured on this repo, a deleted `/blog/og-image.png` still answered 200 from the edge four hours later. Re-exporting an icon without bumping the version fails the guard above.
+- The blog's head is a STRING in `website/functions/blog/_lib.ts` (no page on disk for a glob to reach), so it is asserted separately, in both `tests/test_website_static.py` and `tests/test_blog_seo_meta.mjs`.
+- Regenerate the raster with `tools/build_site_icons.py --source <owner artwork>`; the source PNG is owner-side and deliberately NOT committed.
+
 ## 7. Key paths
 
 | What | Where |

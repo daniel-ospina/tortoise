@@ -699,7 +699,8 @@ _LEGITIMATE_CONSTRUCTS = (
     'fetch("/auth/update-password", { credentials: "same-origin" })',
     '<button type="submit" class="btn-submit" id="btn-reset">Update</button>',
     'form.addEventListener("submit", function (e) { e.preventDefault(); })',
-    '<link rel="icon" type="image/png" href="/logo.png">',
+    '<link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">',
+    # #11407: was the wordmark (`/logo.png`), which the page no longer uses as an icon.
     '<script src="/consent.js" defer></script>',
     'var u = "https://app.premiselabs.co/x";',
     '// a trailing comment mentioning location must not fire',
