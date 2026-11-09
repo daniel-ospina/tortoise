@@ -17,7 +17,7 @@ the corrected reading:
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
    (``sdk.py:16262``; the in-``sdk.py`` call died with ``capture_session`` in #4282, so the surviving call site is ``hosted_api.py:18823``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:12829``) calls
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13192``) calls
    ``_edus_from_conversation`` (S0, ``:12947``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
    retry — and that one function drives ``run_s1`` (S1, ``:15526``), ``run_s2``

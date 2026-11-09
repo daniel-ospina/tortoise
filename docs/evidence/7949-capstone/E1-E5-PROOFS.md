@@ -186,8 +186,8 @@ until `#4282` retired that public name, and `TortoiseSDK._capture_session` (the 
 at this head. Its
 receipt folds the extractor's `stats` and `error_census` and nothing else —
 `tortoise/sdk.py:17129` is the meta fold — while the extractor builds
-`result["classify_later"]` (`tortoise/extractor_v2.py:13515`) and `result["vet"]`
-(`tortoise/extractor_v2.py:13525`) on the extractor's OWN return.
+`result["classify_later"]` (`tortoise/extractor_v2.py:14105`) and `result["vet"]`
+(`tortoise/extractor_v2.py:14115`) on the extractor's OWN return.
 
 ⛔ **`#9116`'s seam has since LANDED, and this paragraph is the pre-seam state
 it was written in.** The fold no longer forwards `stats` alone — it calls
