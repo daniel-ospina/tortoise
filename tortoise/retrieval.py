@@ -691,13 +691,14 @@ TURN_POINT_KIND = "event"
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
     pool's bucket key (C4 #2517). ``session_id`` when present, else the
-    synthetic ``idx:{lme_session_index}`` bucket, else — for a hit carrying
+    synthetic ``idx:{lme_session_index}`` bucket, else the WIRE identity
+    ``sessionId`` the point fetch emits (#10540), else — for a hit carrying
     no session identity at all — a PER-HIT bucket ``idx:point:{id}``
     (#3591). :func:`dedup_pool` and :func:`guard_and_recap_pool` default to
     it, and ``coverage_loop._session_of`` delegates to it (function-local
     import — the module stays a stdlib-only leaf at import time).
 
-    Identity semantics, in precedence order (#3591):
+    Identity semantics, in precedence order (#3591, #10540):
 
     * ``session_id`` present and truthy ⇒ that id;
     * else ``lme_session_index`` PRESENT (an explicit ``-1`` included) ⇒
@@ -706,35 +707,141 @@ def session_key_of(hit: dict) -> str:
       falsy but not identity-less), and an explicit ``-1`` is an explicit
       sentinel rather than indistinguishability — which is why it keeps the
       historical key and is NOT rerouted to the per-hit bucket below;
+    * else ``sessionId`` (the CAMEL wire spelling) when a non-blank ``str`` ⇒
+      that id (**#10540**). This is the spelling the product's own point fetch
+      emits: ``tortoise_fts_query`` resolves a Point's session from
+      ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
+      and then POPs the snake key — for EVERY point hit it returns, turn and
+      extracted alike — so a product pool hit carries the CAMEL key ALONE
+      (:func:`hit_session_id` names the same two sources). Before this the
+      authority read the snake ``session_id`` only, so every product point
+      hit keyed as a phantom and ``seeded_sessions`` dropped it: nothing on
+      the raw product search pool could seed a session — and with no seed
+      there was no group to place. What this fixes is the SEED's blindness
+      on the product grain,
+      NOT the arm's measured effect: #8713's own receipt
+      records the arm FIRING on the EVAL grain (``seeded_sessions: 354``,
+      ``injected_total_merged: 617/617 at cap10``), so the arm was never
+      globally inert — on a product pool it could not seed at all.
+      ⛔ That receipt is cited THREE WAYS or not at all — the same
+      discipline ``tests/test_window_arm_baseline_10538.py`` PINS on
+      ``window_arm_baseline``'s ``why`` field (it does not read this
+      docstring; no test does, which is exactly why this line has to carry
+      the rule rather than a pointer): its ``recall_all@5
+      0.6761 → 0.8592`` is the session-diverse GUARD's net gain, while the
+      INJECTION's own eviction costs ``reader_surface@5 0.9436 → 0.9289``
+      and the guard COSTS ``evidence_recall@5 0.527 → 0.4706``. Quoting the
+      gain alone — as an earlier draft of this docstring did — inverts the
+      attribution this fix exists to keep straight and re-arms the arm
+      #8713 refuted. Pre-change the RAW product search pool had no seed, and
+      an ASK-lane pool only via ``annotate_ask_hits``'s re-attached snake id
+      (the eval grain DID fire: 354 seeds above); a group whose key the merge
+      does not expect is DROPPED, not tailed
+      (see ``session_reinjection.source_session_chunk_pass``). The identity
+      the READER already renders (``hit_session_id``) was dropped one layer
+      below it;
     * else the hit's OWN ``id`` ⇒ ``idx:point:{id}``: two identity-less hits
-      are two DISTINCT entities and must not share a bucket. Before #3591
+      are two DISTINCT entities and must not share a bucket — ⚠️ except when
+      they share an ``id``, in which case they DO share one (the bucket is
+      per-ID, not per-hit; see :func:`_session_admission_key`'s divergence
+      list, which keeps them apart by object identity). Before #3591
       both read ``idx:-1``, so the C5 per-session cap
       (``max_chunks_per_session``) was applied across ALL of them at once
       and unrelated content was dropped collectively — measured 5-in/3-out
       at ``cap=3`` and 2-in/1-out at ``cap=1``, on chunks whose content had
       nothing to do with each other;
-    * a hit carrying none of the three (no ``id`` either) still maps to
+    * a hit carrying none of the four (no ``id`` either) still maps to
       ``idx:-1``. That is the only bucket for which there is genuinely
       nothing to key on, and it is not reachable from a real pool hit
       (``seeded_sessions`` documents that pool hits always carry their id).
 
-    Every ``idx:*`` key is a PHANTOM with respect to a graph session: it
-    names no ``p.session_id``, so
+    Almost every ``idx:*`` key is a PHANTOM with respect to a graph
+    session: it names no stored ``p.session_id``, so
     :func:`tortoise.session_reinjection.seeded_sessions` drops it and
     ``coverage_loop.coverage_gap`` excludes it from the window census — a
-    hit with no session identity cannot seed a session fetch. #3591 made
-    the phantom bucket PER-HIT; it did not make it fetchable.
+    hit with no session identity cannot seed a session fetch. ⛔ "Almost
+    every" is load-bearing, not hedging: a stored session whose id is
+    ITSELF spelled ``idx:N`` is writer-producible (``_SAFE_SESSION_TAG_RE``
+    permits ``:``, and ``ids.session_id_refusal`` refuses only blank /
+    non-``str`` ids), so its real session key can COLLIDE with an unrelated
+    hit's ``lme_session_index`` bucket. That is the one shape
+    ``_is_real_session_id`` exists to keep out of the splice
+    (``tools/longmem_eval/retrieve.py``) and that
+    :func:`_session_admission_key`'s divergence list names. #3591 made
+    the phantom bucket PER-HIT; #10540 keeps the phantom property and stops
+    hits from falling into it when they carry the wire identity — the key a
+    hit used to get IS the defect, not the bucket it names.
+
+    Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
+    every key an identified hit already had stays BYTE-IDENTICAL — a hit
+    carrying ``session_id`` keeps that id, and a hit carrying
+    ``lme_session_index`` keeps its index bucket (the eval's pool hits carry
+    BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured before
+    this change — #8713's, which this arm must not disturb — cannot move).
+    The keys that DO change are exactly the PHANTOM ones — ``idx:point:{id}``,
+    and the ``idx:-1`` bucket that a hit carrying no ``id`` falls to — which
+    is the defect: a hit that reaches that branch today falls back only
+    because it carries no identity in a spelling this function reads.
+
+    ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
+    different questions. ⚠️ On a REAL product hit this ``strip()`` is a
+    no-op, because the wire value was already sanitised at its PRODUCER:
+    ``sdk.tortoise_fts_query`` runs the resolved id through
+    ``_safe_session_tag`` (strip + allowlist) before it lands on the hit,
+    so an id outside the allowlist arrives as ``""`` and falls through to
+    the per-hit bucket on the reader's and the pool's read alike. So the
+    strip binds the HAND-BUILT shapes only: NEITHER annotator writes
+    ``sessionId`` (``annotate_ask_hits`` and ``_annotate_hits`` both stamp
+    the SNAKE key), so an annotated hit carrying the camel key got it from
+    the sanitising fetch, where the strip is already a no-op.
+
+    What the strip actually closes is therefore narrow and worth stating
+    exactly: a whitespace-only camel value would otherwise key a session
+    the reader calls UNKNOWN (``hit_session_id`` → ``""``) while the pool
+    seeded it — it now falls through to the per-hit bucket, i.e. it fails
+    CLOSED. It moves NO existing key (a padded or whitespace-only camel
+    value was a PHANTOM before this leg existed) and refuses nothing the
+    reader can name. The ALLOWLIST half is deliberately NOT applied here:
+    folding the render sanitizer into the pool identity would silently
+    move the key of every odd-shaped id on every lane at once — a backlog
+    item, not a rider on this fix. There is no injection surface to close
+    either way: this key is a DICT KEY and a comparison operand, never
+    interpolated into Cypher and never rendered (the render and the wire go
+    through ``hit_session_id``).
+
+    ⛔ And it does NOT close the reverse case — do not read it as doing so.
+    The fetch groups by ``coalesce(p.session_id, s.id)``: the RAW stored
+    spelling. A stored session id carrying surrounding whitespace would
+    therefore have a group key this stripped key can never equal, so the
+    seed would be spent and its group DROPPED (groups are built over
+    ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
+    strip would CAUSE that, not prevent it. What makes it unreachable is the
+    WRITER'S SPELLING, not the index: #9599 indexes the TRIMMED term, so a
+    padded ``:Session`` IS findable by its trimmed spelling — the engine's
+    own record says a padded row had no findability by its own spelling and
+    gains it by the trimmed one. So every writer that names the id TRIMMED
+    wires the ``CONTAINS`` edge onto a padded node, and the fetch then
+    returns the RAW padded key. It is unreachable only while every writer
+    spells the id exactly as stored. #9599's normalise-both-sides decision
+    is therefore not moot, and this strip is no substitute for it.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
-    unchanged) and ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
-    (the #3591 case)."""
+    unchanged), ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
+    (the #3591 case) and
+    ``::test_wire_session_identity_keys_the_pool_and_seeds_the_session``
+    (the #10540 case)."""
     session_id = hit.get("session_id")
     if session_id:
         return session_id
     index = hit.get("lme_session_index")
     if index is not None:
         return f"idx:{index}"
+    wire_id = hit.get("sessionId")
+    if isinstance(wire_id, str):
+        wire_id = wire_id.strip()
+        if wire_id:
+            return wire_id
     point_id = hit.get("id")
     if point_id:
         return f"idx:point:{point_id}"
@@ -793,18 +900,32 @@ def dedup_pool(annotated: list[dict], *,
                session_key: Callable[[dict], str] | None = None) -> list[dict]:
     """Per-session chunk cap (rank order): at most ``max_chunks_per_session``
     raw chunks per session survive in the pool (E2E-1 #1540). Bucket key =
-    :func:`session_key_of` (session_id, else the ``lme_session_index``
-    bucket, else — #3591 — a PER-HIT bucket for a hit with no session
-    identity) —
+    :func:`session_key_of` (``session_id``, else the ``lme_session_index``
+    bucket, else the camel ``sessionId`` the product's point fetch emits —
+    #10540 — else — #3591 — a PER-HIT bucket for a hit with no session
+    identity at all) —
     distinct sessions never share a bucket, and neither do two distinct
-    identity-less hits. The only shared bucket left is ``idx:-1``, for a hit
-    with nothing at all to key on (see :func:`session_key_of`).
-    ``idx:point:`` keys are per-hit, so the cap does NOT bind across the
-    identity-less population: the pool-wide budget is what bounds it.
+    identity-less hits — ⚠️ unless they share an ``id``: the ``idx:point:{id}``
+    bucket is per-ID, so equal ids DO collide there and the cap binds across
+    them (see :func:`session_key_of`). The other shared bucket is ``idx:-1``,
+    for a hit with nothing at all to key on (see :func:`session_key_of`).
+    ``idx:point:`` keys are per-ID, so the cap does NOT bind across the
+    identity-less population that has distinct ids: the pool-wide budget is
+    what bounds it.
+    ⚠️ #10540: a raw chunk carrying ONLY the camel ``sessionId`` would now be
+    grouped by its real session instead of getting a per-hit phantom bucket,
+    so this cap would BIND there. No in-repo producer reaches that shape —
+    ``is_raw_chunk`` requires ``point_kind == "session-transcript"``, which
+    only the eval ingest writes, and it stamps ``session_id`` AND
+    ``lme_session_index`` (both outrank the camel leg) — so this is the shape
+    of the delta, not a live drop today. It is stated because a hand-built or
+    third-party chunk pool could reach it, and a future reader of this cap
+    should not have to re-derive it.
     Points/turn points are never capped (compact epistemic surface, D3).
 
     ``session_key`` (#1987 Task 4, P2-20): optional per-hit key extractor.
-    Default None = the historical bucket key (session_id / lme index). The
+    Default None = the pool's own bucket key (:func:`session_key_of`:
+    ``session_id`` / ``lme`` index / camel ``sessionId`` / per-hit). The
     ASK lane passes :func:`ask_session_key` — the UNIQUE session identifier
     (``session_id``, else the camel ``sessionId`` the point fetch populates,
     else the annotated ``session_date``) — so distinct IDENTIFIED sessions
@@ -1172,6 +1293,18 @@ def _validity_marker(h: dict) -> str:
       - live hit with ``valid_from`` → ``[valid since <from>]``
       - superseded hit → ``[valid <from> → <to>]``; with ``expired_at`` →
         ``[valid <from> → <to>; expired <tx-date>]``
+      - an END-ONLY window — an end and NO start, which is exactly what
+        ``invalidate_point`` writes on a claim created without a window — →
+        ``[valid → <to>]``; with ``expired_at`` →
+        ``[valid → <to>; expired <tx-date>]`` (#8067). This is NOT new
+        vocabulary: it is the window a PRESENT-but-unorderable start already
+        renders (``[valid → 2026-06-12]``, #9730), because an ABSENT start and
+        an unnameable one are the same reader-facing fact — no start to state.
+        Nothing is fabricated: no start clause, and in particular no ``since``,
+        is asserted. Before #8067 the whole window block was gated on a STORED
+        start, so this shape rendered the supersession marker and NO window at
+        all — the reader was told the claim was superseded but not WHEN it
+        stopped being true, though the graph records the instant.
       - an ENDED-but-un-datable window (``end_state == 'unknown'``) →
         ``[valid since <from>; end unknown]`` (with ``expired_at`` →
         ``…; expired <tx-date>; end unknown``). #2350: the marker is
@@ -1370,14 +1503,39 @@ def _validity_marker(h: dict) -> str:
     # expiry half has to be read from the bound itself.
     end_unreadable = (_bound_present(raw_vt) and not vt) or (
         not vt and _bound_present(raw_ex) and not ex)
-    # #9741 review P2: the arm is gated on whether a start was STORED, not on
-    # whether it produced display text. Gating on the display string made an
-    # unreadable start indistinguishable from an absent one, so it discarded a
-    # READABLE end beside it (``{valid_from: nan, valid_to: "2025-01-01"}``
-    # rendered NOTHING while ``valid_from: "TBD"`` on the same hit rendered
-    # ``[valid → 2025-01-01]``). Both name no instant, so both render the
-    # no-start forms below — one stored fact, one answer.
-    if _bound_present(raw_vf):
+    # #8067: the gate opens on a STORED START **or an end the reader is owed an
+    # answer for**. Gating on the start alone was the defect: ``invalidate_point``
+    # stamps ONLY the end (``validTo`` + ``expiredAt``, and deliberately no
+    # ``validFrom`` — the invalidated claim's start is its create-time fact, so a
+    # ``now`` start would be a fabricated instant), which is precisely the shape
+    # a start-only gate drops. The single most common terminal transition
+    # therefore rendered the supersession marker and no window, while the graph
+    # held the instant it ended.
+    #
+    # An end is OWED when the marker can state one (``vt``), when a stored end is
+    # UNREADABLE and so owes the ``end unknown`` reading rather than silence, or
+    # when the validity layer already resolved the end as un-datable
+    # (``END_UNKNOWN`` — the #9202 vocabulary, which a start-less
+    # ``valid_to_precision='unknown'`` close takes; without it that close would
+    # stay silent while a dated one speaks, an asymmetry with no reader meaning).
+    # ⚠️ Deliberately NOT widened to the #9741 residual: a READABLE
+    # ``expired_at`` arriving with no statable ``valid_to`` stays out, and the
+    # pin in ``tests/test_2350_validity_precision.py`` keeps it out — the gate
+    # widens to what the reader is owed an answer for, never to every end column.
+    #
+    # #9741 review P2: the START half of the gate is ``_bound_present`` (was a
+    # start STORED?), not the display string (did it produce text?). Gating on
+    # the display string made an unreadable start indistinguishable from an
+    # absent one, so it discarded a READABLE end beside it
+    # (``{valid_from: nan, valid_to: "2025-01-01"}`` rendered NOTHING while
+    # ``valid_from: "TBD"`` on the same hit rendered ``[valid → 2025-01-01]``).
+    # Both name no instant, so both take the no-start forms below — one stored
+    # fact, one answer. #8067 inherits exactly that reading and adds the third
+    # spelling of the same fact (no start at all), so all three now state one
+    # window instead of two of them stating nothing.
+    end_state_unknown = _end_state_is_unknown(h)
+    if (_bound_present(raw_vf) or vt or end_unreadable
+            or end_state_unknown):
         # ISO date strings only — truncate full timestamps to YYYY-MM-DD.
         # #9730: a START that names no instant renders NO start clause. The
         # gate is the read gate's OWN predicate (``_bounds_an_instant`` ⇒
@@ -1400,7 +1558,7 @@ def _validity_marker(h: dict) -> str:
         # paragraph and the note below it (#9741 review P3).
         vfd = vf if _bounds_an_instant(raw_vf) else ""
         since = f" since {vfd}" if vfd else ""
-        if _end_state_is_unknown(h) or end_unreadable:
+        if end_state_unknown or end_unreadable:
             # #2350/#9202/#9741: ENDED but un-datable. Both spellings of that
             # one state land here — the declared marker AND a stored end that
             # names no instant — so the stored text is never interpolated as a
@@ -2168,13 +2326,74 @@ def _session_admission_key(
         h: dict, *, session_key: str = DEFAULT_SESSION_ADMISSION_KEY,
         index_key: str = DEFAULT_SESSION_ADMISSION_INDEX,
 ) -> tuple[str, object]:
-    """The session identity a hit is admitted under (#2976).
+    """The session identity a hit is admitted under (#2976, #10540).
 
     Precedence: the string session id → the ``[session N]`` integer index →
-    the hit's OWN id (a singleton). The last case is the honest fallback, not
-    a merge: two hits with no session identity must never be grouped as one
-    "session" (that would fabricate a block whose material belongs to
-    different conversations).
+    the camel wire ``sessionId`` (#10540, the spelling the product's point
+    fetch emits) → the hit's OWN id (a singleton). The last case is the
+    honest fallback, not a merge: two hits with no session identity must
+    never be grouped as one "session" (that would fabricate a block whose
+    material belongs to different conversations).
+
+    ⛔ The camel leg is here so this grain AGREES with the pool authority
+    (:func:`session_key_of`) on every hit whose identity BOTH grains read in
+    the SAME spelling AND the same normalisation (neither padded nor
+    whitespace-only; the divergences below are where they part) — before
+    it, a camel-only pool was N per-hit phantom buckets whose cap never bound
+    and which ``seeded_sessions`` read as NO session, while ``session_blocks``
+    built N singleton blocks, so ``assemble_session_context`` degraded to the
+    fragment admission #2976 exists to replace. Measured: three ``{"id": …, "sessionId": "sessA"}``
+    hits → ``session_blocks`` → 3 blocks of 1; with this leg → 1 block of 3.
+    It moves no key the eval grain already had (that pool carries the snake
+    ``session_id``, which still wins) and it fails CLOSED in the same
+    direction as the authority: a whitespace-only or non-``str`` camel value
+    falls through to the per-hit singleton.
+
+    ⚠️ Scoped to IDENTIFIED hits — do NOT read the line above as "cannot
+    disagree". Measured, the two shapes a real pool REACHES still diverge: a
+    hit carrying ``lme_session_index: -1`` keys ``idx:-1`` in the pool (the
+    sentinel keeps its historical bucket) but a per-hit block here —
+    ``idx >= 0`` skips the sentinel, and with a wire id present this leg now
+    groups those hits into one block that is still not the pool's ``idx:-1``
+    — and a padded snake id is raw in the pool, stripped here. Neither is a
+    defect in either grain: a BUCKET and a BLOCK answer different questions,
+    and fusing identity-less hits is exactly what #3591 and the rule above
+    refuse. No module under ``tortoise/`` imports ``session_reinjection``
+    (measured: ``grep -rn 'import session_reinjection' tortoise/`` → none),
+    so the ``-1`` shape arrives only through the EVAL annotator
+    (``session_id: ""`` plus ``lme_session_index`` defaulted to ``-1``,
+    ``tools/longmem_eval/retrieve.py``).
+
+    ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
+    exhaustiveness — five further seams diverge too, and none of them FUSES
+    in an in-repo pool (measured: item 4's id IS writer-producible, its
+    bucket partner is not): a non-``int`` ``lme_session_index``
+    (the pool keys ``idx:{value}``, this grain skips the index leg — and a
+    ``bool`` IS an ``int`` in Python, which is why this grain excludes it
+    explicitly while the pool does not); a TRUTHY non-``str`` snake id
+    (``session_id: 5`` keys the int ``5`` — the pool leg is untyped and can
+    return a non-``str``, and THREE callers then raise ``AttributeError`` on
+    ``.startswith``: ``seeded_sessions``, ``coverage_loop.coverage_gap``
+    (``coverage_loop.py``:497) and ``reader_window_displacement``
+    (``session_reinjection.py``:750-753) — while ``dedup_pool`` /
+    ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
+    and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
+    ``True``): a TRUTHY unhashable (``[1]``/``{1: 2}``) raises ``TypeError``
+    there too, measured; a whitespace-only snake id (the
+    pool keys it RAW because it is truthy, while this grain DISCARDS it
+    rather than stripping); a WIRE id that
+    spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
+    so a session literally named ``idx:3`` keys ``idx:3`` and FUSES, in the
+    pool, with another hit's ``lme_session_index: 3`` bucket while this
+    grain keeps them apart; and — the reverse direction — a SHARED ``id``,
+    where two DISTINCT hit dicts carry equal ``id`` values and so share the
+    pool's ``idx:point:{id}`` bucket and the C5 cap, while this grain's
+    object identity keeps them apart. That last one is the one shape the
+    ``idx:point:`` "PER-HIT" wording elsewhere cannot cover: the bucket is
+    per-ID, not per-hit. The ``idx:3`` fusion belongs to the POOL's
+    namespace, not to this leg — a snake ``session_id: "idx:3"`` reaches the
+    same bucket — and tightening it, like reconciling the sentinel, is its
+    own decision rather than a rider here.
     """
     sid = h.get(session_key)
     if isinstance(sid, str) and sid.strip():
@@ -2182,6 +2401,9 @@ def _session_admission_key(
     idx = h.get(index_key)
     if isinstance(idx, int) and not isinstance(idx, bool) and idx >= 0:
         return ("index", idx)
+    wire = h.get("sessionId")
+    if isinstance(wire, str) and wire.strip():
+        return ("session", wire.strip())
     # Object identity, NOT ``h.get("id")``: a hit with no id would otherwise
     # share the key ``("hit", None)`` with every other id-less hit, fusing
     # unrelated conversations into one "session" — exactly what this function's

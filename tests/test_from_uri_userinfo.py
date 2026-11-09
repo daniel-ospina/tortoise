@@ -40,6 +40,7 @@ from __future__ import annotations
 
 import ast
 import contextlib
+import threading
 from pathlib import Path
 from urllib.parse import quote
 
@@ -270,6 +271,23 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
     the argument). ``_capture_init`` stubs ``__init__``, so the ``from_uri``
     round-trip tests cannot reach it — this constructs for real and captures
     the redirect's ``FalkorDB(...)`` kwargs.
+
+    ⛔ THE ASSERTION IS SCOPED TO THIS THREAD, and that is deliberate — do not
+    narrow it back to ``calls[0]`` (#10851). ``monkeypatch.setattr`` replaces
+    ``falkordb.FalkorDB`` PROCESS-WIDE, so a background worker leaked by an
+    earlier test in the same xdist worker can construct through the fake while
+    this test runs, with credentials it captured at its own start (the
+    docker-lane default `falkordb`, never this test's `p%40ss`). Measured THREE
+    times now, each at a head that does not touch this file and each with the
+    file passing in isolation (66 passed): `test (c)` of run 41757554840, again
+    `test (c)` of run 41892654743, and `test (f)` of run 42111964813 (this
+    branch). The traceback is identical every time —
+    ``AssertionError: [{'username': None, 'password': 'falkordb'}, {'username':
+    None, 'password': 'p@ss'}]`` — which is what a FOREIGN construction looks
+    like. A foreign construction is not
+    evidence about the redirect seam; the seam's own construction is the one on
+    this thread, so that is what the assertion reads. #10851 owns stopping the
+    leak; this test does not depend on that landing to be hermetic.
     """
     import falkordb
 
@@ -277,7 +295,11 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
 
     class _FakeFalkorDB:
         def __init__(self, *args, **kwargs):
-            calls.append({k: kwargs.get(k) for k in ("username", "password")})
+            calls.append({
+                **{k: kwargs.get(k) for k in ("username", "password")},
+                # Attribution, not decoration: see the docstring.
+                "thread": threading.current_thread(),
+            })
 
         def select_graph(self, name):
             raise RuntimeError("unit test: no graph")
@@ -292,8 +314,19 @@ def test_redirect_seam_decodes_userinfo(monkeypatch):
     with contextlib.suppress(Exception):
         FalkorProjection("/tmp/seam-3039-userinfo.db")
 
-    assert calls, "the redirect seam constructed no FalkorDB client"
-    assert calls[0]["password"] == "p@ss", calls
+    seam_calls = [
+        {k: v for k, v in c.items() if k != "thread"}
+        for c in calls if c["thread"] is threading.current_thread()
+    ]
+    assert seam_calls, (
+        "the redirect seam constructed no FalkorDB client on this thread"
+        f" (all constructions, by thread: {[(c['password'], c['thread'].name) for c in calls]})"
+    )
+    assert seam_calls[0]["password"] == "p@ss", seam_calls
+    assert [c["password"] for c in seam_calls] == ["p@ss"], (
+        "the redirect seam must hand the DECODED userinfo to FalkorDB — a raw"
+        f" `%40` would red the auth; got {seam_calls}"
+    )
 
 
 @pytest.mark.parametrize(

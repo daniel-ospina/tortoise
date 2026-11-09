@@ -1509,7 +1509,7 @@ def test_real_model_commits_on_present_value():
 
     INFORMATIONAL PROBE (test-review #2013 re-baseline): the majority-
     commit assert was REMOVED — the pinned default model
-    (openrouter:deepseek/deepseek-v4-flash) is documented in
+    (deepseek:deepseek-v4-flash, #8486 transport re-pin) is documented in
     docs/runbook/1987-ask-abstention-check.md as the binding constraint:
     "deepseek-v4-flash cannot hold both classes; the model is the
     constraint, not the clause" (the qwen3.8-max probe commits on the
@@ -1522,7 +1522,7 @@ def test_real_model_commits_on_present_value():
     model degradation in the log without failing the suite on a
     documented model limitation."""
     _require_reader_model()
-    reader = build_reader()  # pinned: openrouter:deepseek/deepseek-v4-flash
+    reader = build_reader()  # pinned: deepseek:deepseek-v4-flash
     hits = [
         {"content": t, "lme_session_index": 0,
          "session_date": "2025-06-10"}
@@ -1611,7 +1611,7 @@ def test_real_model_no_abstention_on_present_dated_evidence():
     on the pinned model: "minimal Phase 2 → commit '10 days ago'",
     prompt-ablation line.)"""
     _require_reader_model()
-    reader = build_reader()  # pinned: openrouter:deepseek/deepseek-v4-flash
+    reader = build_reader()  # pinned: deepseek:deepseek-v4-flash
     hits = [
         {"content": "I just got a smoker today!", "lme_session_index": 0,
          "session_date": "2023-03-15"},

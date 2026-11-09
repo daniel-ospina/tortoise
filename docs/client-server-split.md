@@ -300,8 +300,8 @@ endpoint comes from that SAME file (`api_url`), never from a `TORTOISE_MCP_URL`
 the environment supplies: a harness config can be committed to a repository, so
 letting it choose the host for a stored credential would be an exfiltration path.
 
-**What this does NOT do (residual, recorded on #10605).** The onboarding
-generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
+**What this does NOT do (residual — recorded on #10605, tracked OPEN on #10885).** The
+onboarding generator (`tortoise/__main__.py::_harness_mcp_config`) and this repo's committed
 `.mcp.json` still emit the `Authorization: Bearer ${TORTOISE_API_KEY}` capture for
 the **hosted** shape. That is deliberate and product-facing, not an oversight:
 the hosted recipe must work for a user who has installed *nothing* locally, and
@@ -310,6 +310,25 @@ fleet's own harness configs, which agent-infra owns — is the follow-up that
 retires the capture everywhere; until it lands the bridge is the recipe for
 anyone with the client installed, and the named refusal is what everyone else now
 gets instead of a misleading 401.
+
+⛔ **#10605 is CLOSED, so it is not the live home for that residual — #10885 is.**
+A reader checking whether the capture has been retired must follow **#10885**
+(OPEN, filed with this residual's `file:line` scope and its acceptance criterion); #10605
+records only where the residual came from. The same relay applies to the
+`503 consent_store_unavailable` arm and the keyless-re-entry hole, which now live
+on **#10884** rather than in #10487's closed thread.
+
+The two halves are held by DIFFERENT pins, and this paragraph names them
+separately rather than claiming one covers both. The #10885 sentence is held by
+`tests/test_mcp_bridge.py::test_the_hosted_recipe_residual_has_a_home_this_fold_does_not_close`,
+whose biconditional reads this `**What this does NOT do**` paragraph itself. The
+`#10884` half is held by the two pins in `tests/test_oauth_consent_bff_routes.py` —
+`test_the_store_fault_residual_names_a_home_this_fold_does_not_close` (that
+module's docstring) and
+`test_the_whitespace_attempt_key_residual_names_a_home_this_fold_does_not_close`
+(`presented_consent_attempt_key`'s own docstring) — because #10884's two residuals
+live in the CODE, not on this page: they red when the arm or the unstripped
+adoption goes away, and they cannot read a markdown paragraph at all.
 
 Both modules are staged into the client-only wheel (`client/build_client.sh`), and
 both have guards registered on the `api` CI surface:

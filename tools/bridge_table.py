@@ -143,6 +143,9 @@ DESTINATION = {
     "tortoise_list_graphs": "tenancy:list_memory_graphs",
     "tortoise_taxonomy": "graph_overview",
     "tortoise_overview": "graph_overview",
+    # #4282 — the container itself. It is a REGISTRY tool, so the map owes it a
+    # row; its destination is its own target name.
+    "tortoise_graph_overview": "graph_overview",
     "tortoise_status": "graph_overview",
     "tortoise_health": "graph_overview",
     "tortoise_stale": "graph_overview",
@@ -218,14 +221,13 @@ DESTINATION = {
     # #3540 ruling B: the consolidated source-management operation.
     "tortoise_manage_sources": "manage_sources",
     # ── Onboarding and packs ────────────────────────────────────────
-    "tortoise_onboarding_state": "REMOVED",
-    "tortoise_onboarding_seed": "REMOVED",
-    "tortoise_onboarding_demo_create": "REMOVED",
-    "tortoise_onboarding_github_connect": "REMOVED",
+    # ⛔ #4282 Phase 3.2 REMOVED the five `run_onboarding` members from the
+    # SERVED surface, so they no longer appear in this map at all. Their recorded
+    # reasons are kept in `REMOVED_IN_PHASE_3_2` below — the approval history —
+    # because a map key may not outlive the registry entry it describes.
     # #3540 ruling B: retired INTO the consolidated operation — the 0.1
     # destination is the tool that replaces it, so the redirect agrees.
     "tortoise_onboarding_github_index": "manage_sources",
-    "tortoise_onboarding_github_status": "REMOVED",
     # #3540 ruling B: retired INTO the consolidated operation — the 0.1
     # destination is the tool that replaces it, so the redirect agrees.
     "tortoise_onboarding_session_recording": "manage_sources",
@@ -307,6 +309,24 @@ REMOVALS: dict[str, str] = {
         "ONTOLOGY v2.5; pre-beta there are no legacy v2.5 graphs to migrate, so "
         "the tool has no caller"
     ),
+    "tortoise_packs_list": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
+        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
+        "installation on its agent API"
+    ),
+    "tortoise_pack_install": (
+        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
+        "tenant-visible WRITE is preserved there rather than folded into an "
+        "operator-only tool"
+    ),
+}
+
+#: The approval history for the five `run_onboarding` tools #4282 Phase 3.2
+#: removed from the served surface. NOT read by the validator — they are gone
+#: from the registry, so there is nothing left to validate — and kept because
+#: the reason a name left the surface is the thing a future "why can't I call
+#: X?" has to find.
+REMOVED_IN_PHASE_3_2: dict[str, str] = {
     "tortoise_onboarding_state": (
         "settled 2026-09-22 (canonical §run_onboarding) — `run_onboarding` dropped "
         "for `check_connection`; this tenant-visible READ is rehomed to the tenancy "
@@ -325,17 +345,8 @@ REMOVALS: dict[str, str] = {
         "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
     ),
     "tortoise_onboarding_github_connect": (
-        "settled 2026-09-22 — `run_onboarding` is not on the MCP target"
-    ),
-    "tortoise_packs_list": (
-        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the tenant read "
-        "is preserved on the SDK/REST pack surface, and no competitor exposes pack "
-        "installation on its agent API"
-    ),
-    "tortoise_pack_install": (
-        "settled 2026-09-22 — SDK/REST only and POST-BETA (#4663); the "
-        "tenant-visible WRITE is preserved there rather than folded into an "
-        "operator-only tool"
+        "settled 2026-09-22 — `run_onboarding` is not on the MCP target; the OAuth "
+        "handshake survives as `POST /v1/onboarding/github/connect`"
     ),
 }
 
@@ -1324,6 +1335,9 @@ def _approved_readings(
                         # the SDK method `invalidate_point`, and the evidence line quotes
                         # the row — so it must name the token that row actually contains.
                         "matched": sorted(aliases & menu[h]["members"]),
+                        # The row's own tokens, for the case where NO alias is one of
+                        # them: the line still needs a name the QUOTE contains.
+                        "members": sorted(menu[h]["members"]),
                     }
                     for h in homes
                 ],
@@ -1366,8 +1380,43 @@ def _approved_evidence_lines(approved: list[dict]) -> list[str]:
             )
             continue
         matched = a["homes_detail"][0]["matched"]
-        named = ", ".join(f"`{m}`" for m in matched) if matched else f"`{a['method']}`"
-        sdk = f" (SDK `{a['method']}`)" if a["method"] and a["method"] not in matched else ""
+        quote = a["homes_detail"][0]["quote"]
+        # #10602: the line must name a token its own QUOTE contains — that is what makes
+        # the claim checkable against the evidence printed directly beneath it.
+        #
+        # Two defects are closed here, both measured by review round 3:
+        #  (1) `m in quote` is a SUBSTRING test, so `query` was "found" in a quote whose
+        #      only occurrence is `paginated_query`. The test is token-bounded now.
+        #  (2) `... or matched` reproduced the old behaviour whenever NO alias was in the
+        #      quote — e.g. `tortoise_paginated_query`, whose matched token is
+        #      `paginated_query` over a quote reading `| 2 | list_knowledge | query |`. It
+        #      now falls back to a token the QUOTE carries (the row's own member) and lets
+        #      the `(SDK …)` slot carry the method, so the line is never a token the quote
+        #      lacks.
+        qtok = set(re.findall(r"[A-Za-z_][A-Za-z0-9_]*", quote))
+        named_tokens = [m for m in matched if m in qtok]
+        if not named_tokens:
+            row_members = a["homes_detail"][0].get("members") or []
+            # Prefer the row member a MATCHED token CONTAINS — the doc's own shorthand
+            # for that method (`query` inside `paginated_query`). Alphabetical order is
+            # NOT a relation: on a home row carrying several quote-visible members it
+            # would attribute one of them to a tool that does not carry it, and the
+            # owner verifying the line would confirm a mis-attribution (review round 4).
+            related = [m for m in row_members
+                       if m in qtok and m != a["home"]
+                       and any(m != tok and (m in tok or tok in m) for tok in matched)]
+            named_tokens = sorted(related)[:1]
+        named = ", ".join(f"`{m}`" for m in named_tokens)
+        sdk = (f" (SDK `{a['method']}`)"
+               if a["method"] and a["method"] not in named_tokens else "")
+        if not named:
+            # No token the quote carries could be named — say so rather than asserting a
+            # claim the quoted row cannot support.
+            out.append(f"- **`{a['tool']}`** — the approved row quoted below names no token "
+                       f"this tool carries; SDK `{a['method'] or a['tool']}` is absorbed by "
+                       f"`{a['home']}`:")
+            out.append(f"  > {a['quote']}")
+            continue
         out.append(f"- **`{a['tool']}`** — {named}{sdk} is absorbed by `{a['home']}`:")
         out.append(f"  > {a['quote']}")
     return out

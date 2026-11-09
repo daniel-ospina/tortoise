@@ -91,14 +91,45 @@ family_rank:
 # (create 18->17, operate 7->6, link 4->5 — `tortoise_manage_sources` derives
 # `link`). Recorded deliberately, per the note above: a change to the
 # distribution requires editing the registry AND recording the expectation here.
+#
+# #4282 (the `graph_overview` container, the first of the approved 27): FIVE advertised
+# tools retired INTO one container, 81 live -> 77, and three keywords moved with them —
+# `list` 9 -> 8 (`tortoise_audit` derives `list`), `check` 8 -> 6 (`summarize_structure`
+# and `validate_domain` derive `check`; `tortoise_check_structure` stays live this batch
+# and keeps its own row), `find` 6 -> 5 (`dream_health` derives `find`). `fetch` is UNCHANGED at 14: `tortoise_overview` (−1)
+# and `tortoise_graph_overview` (+1) both derive it, so the container trades one row for
+# another. Every number below is re-derived from the moved registry by
+# `tools/surface_manifest.py check`, which reds on any disagreement.
+# `tortoise_list_graphs` / `_namespaces` / `_topics` and `tortoise_issue_insight` are NOT
+# in this move: `tools/bridge_table.py`'s authored Phase-0.1 map sends them to the
+# tenancy block and to `list_knowledge` / `search_knowledge`, so they retire in the batch
+# that lands those containers.
+#
+# #4282 Phase 3.2 (landed on main while this branch was open): FIVE of the seven
+# `onboarding_*` tools left the ADVERTISED set, 81 -> 76 (`tortoise_onboarding_state`,
+# `_seed`, `_demo_create`, `_github_connect`, `_github_status`) — owner ruling 2026-09-22,
+# `run_onboarding` dropped for `check_connection`. They are DELETED rather than retired
+# into nothing, so no shim exists to keep serving them (SERVED 99 -> 94); every one of
+# their REST routes survives in `tortoise/hosted_api.py`. Moved on ITS base: create
+# 17->15, check 8->7, operate 6->5; `list`/`find`/`fetch`/`link`/`update`/`delete`/`trace`
+# unmoved.
+#
+# ⚠️ THE MERGE COMPOSES THE TWO MOVES — NEITHER SIDE'S OWN TABLE IS THE ANSWER. The name
+# sets are disjoint, so the merged distribution is both applied to the 81-tool base:
+# 72 live (81 − 4 from the container − 5 from Phase 3.2), with create 15 (Phase 3.2's),
+# list 8 and find 5 (the container's), check 5 (8 − 2 absorbed by the container − 1 from
+# Phase 3.2), operate 5 (Phase 3.2's), and fetch 14 / update 8 / delete 6 / link 4 /
+# trace 2 unmoved. Every number below is re-derived from the merged registry by
+# `tools/surface_manifest.py check`, which reds on any disagreement — and it is the
+# authority here, not this prose.
 baseline_counts:
   fetch: 14
-  create: 17
-  list: 9
-  check: 8
-  operate: 6
+  create: 15
+  list: 8
+  check: 5
+  operate: 5
   update: 8
-  find: 6
+  find: 5
   delete: 6
-  link: 5
+  link: 4
   trace: 2

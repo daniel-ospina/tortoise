@@ -40,6 +40,87 @@ pytestmark = pytest.mark.skipif(
 
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 
+#: A conftest that installs the repo's shared-temp scan guard (#3752) in the
+#: INNER run. The outer suite installs it from `tests/conftest.py`; writing it
+#: here is what makes the pins below environment-independent — see
+#: `_inner_pytest_cmd`.
+_GUARD_CONFTEST = '''\
+"""Reproduce the outer suite's shared-temp scan guard in this inner run."""
+
+from tests._tmpdir_hygiene import install_scan_guard
+
+install_scan_guard()
+'''
+
+
+def _inner_pytest_cmd(tmp_path: Path, test_file: Path) -> list[str]:
+    """argv for an inner pytest run over a fixture file written under `tmp_path`.
+
+    ⛔ ``--confcutdir`` is LOAD-BEARING, not tidiness — but only under a
+    CONDITION, so read the reason before treating a green run as proof.
+    pytest does not collect just the argument: it builds the path list from the
+    ``--confcutdir`` down to it (that option DEFAULTS to the rootdir) and
+    collects EVERY level (`_pytest/main.py::Session.collect`,
+    ``paths.insert(0, path)`` for each parent while ``_is_in_confcutdir``), and
+    each level's ``Dir.collect()`` is an ``os.scandir`` of that ancestor.
+    ⛔ WHEN a ``pyproject.toml``/``pytest.ini``/``setup.cfg``/``tox.ini`` at or
+    above the shared temp dir — or a rootdir otherwise resolved there — puts
+    that bound above the argument, the child scans ``/tmp`` and every level down
+    to it (``/`` too, when the rootdir is ``/``) — the O(whole-host) discovery
+    (#3752) that ``tests/_tmpdir_hygiene``'s scan guard exists to refuse — and,
+    with that guard inherited, the run dies during COLLECTION
+    (``ERROR collecting .`` / ``SharedTmpdirScanError: os.scandir('/tmp')``)
+    before either pin below can observe what it was written to observe. That is
+    what was measured on the required `test (f)` leg of PR #11066: the `#7655`
+    signal guard was fine, the collection was not. ⛔ ``conftest.py`` alone does
+    NOT do this: pytest resolves the rootdir from ``locate_config``'s config
+    files, not from a conftest (measured: a parent ``conftest.py`` leaves
+    ``rootdir`` at the fixture's own directory; a parent ``pyproject.toml``
+    moves it up one level).
+
+    ⛔ The condition is not decoration: on a box whose shared temp dir carries no
+    such file, pytest infers the rootdir from the fixture file ITSELF
+    (measured: ``rootdir: /tmp/tt_*/case``), the ancestor walk stops at that
+    directory, and stripping the flag still passes (measured: 2 passed, not 2
+    failed). So the cut is DEFENCE against runner state — it makes the child's
+    walk bounded whatever the host carries — NOT a reproduction that reds on its
+    own; do not read "the pins are green" as "the flag is unnecessary".
+
+    Pinning the cut to `tmp_path` bounds the walk to the ONE directory that is
+    this test's own, so only that directory is scanned (descendants are what
+    the guard allows) and no conftest above it can be imported — the sibling
+    half of the same hazard, already hit in `test-slow (d)` of #10636 where a
+    leaked `/tmp/conftest.py` was imported into an out-of-tree selection
+    (`tools/skip-guard.py::_selection_confcutdir` pins it for the same reason).
+    #11095 audits the remaining out-of-tree child runs for the same uncut
+    ancestor walk.
+    """
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        str(test_file),
+        "-q",
+        "-p",
+        "tests._signal_hygiene",
+        "--timeout=5",
+        "--timeout-method=signal",
+        "-p",
+        "no:cacheprovider",
+        f"--confcutdir={tmp_path}",
+    ]
+
+
+def _install_inner_scan_guard(tmp_path: Path) -> None:
+    """Give the inner run the shared-temp scan guard, as the suite has it.
+
+    On the CI runner the child inherited the guard and died at collection
+    (#11066 `test (f)`); without this file the pin below is only red there, and
+    passes on a box whose `/tmp` happens to be harmless — i.e. the pin would
+    depend on an accident of the host instead of on the behaviour it names.
+    """
+    (tmp_path / "conftest.py").write_text(_GUARD_CONFTEST, encoding="utf-8")
+
 
 def test_guard_refuses_alarm_while_the_harness_owns_the_timer(monkeypatch):
     """`signal.alarm` must not be allowed to replace the harness timer."""
@@ -159,20 +240,9 @@ def test_the_reproducer_fails_fast_instead_of_stalling_the_run(tmp_path):
         ),
         encoding="utf-8",
     )
+    _install_inner_scan_guard(tmp_path)
     env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        str(test_file),
-        "-q",
-        "-p",
-        "tests._signal_hygiene",
-        "--timeout=5",
-        "--timeout-method=signal",
-        "-p",
-        "no:cacheprovider",
-    ]
+    cmd = _inner_pytest_cmd(tmp_path, test_file)
     try:
         proc = subprocess.run(
             cmd,
@@ -214,20 +284,9 @@ def test_a_normal_failure_is_not_an_internalerror(tmp_path):
         ),
         encoding="utf-8",
     )
+    _install_inner_scan_guard(tmp_path)
     env = dict(os.environ, PYTHONPATH=str(_REPO_ROOT))
-    cmd = [
-        sys.executable,
-        "-m",
-        "pytest",
-        str(test_file),
-        "-q",
-        "-p",
-        "tests._signal_hygiene",
-        "--timeout=5",
-        "--timeout-method=signal",
-        "-p",
-        "no:cacheprovider",
-    ]
+    cmd = _inner_pytest_cmd(tmp_path, test_file)
     proc = subprocess.run(
         cmd,
         cwd=str(_REPO_ROOT),

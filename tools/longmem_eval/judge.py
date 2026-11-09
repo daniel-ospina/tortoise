@@ -1,20 +1,35 @@
 """Official LongMemEval answer-check judge (issue #1144, axis 2).
 
 Reimplements the benchmark's official judge (``evaluate_qa.py`` —
-``get_anscheck_prompt``) verbatim: task-specific yes/no templates judged by
-``gpt-4o-2024-08-06`` at temperature 0, max_tokens 10, label = ``'yes' in
-response.lower()``. The template text below is copied from the official
-repository (MIT license) so published numbers are directly comparable to the
-paper's reported accuracies.
+``get_anscheck_prompt``) verbatim: task-specific yes/no templates at
+temperature 0, max_tokens 10, label = ``'yes' in response.lower()``. The
+template text below is copied from the official repository (MIT license), so the
+RUBRIC is bit-identical to the paper's: a run graded by the ``OFFICIAL`` model is
+therefore directly comparable to the paper's reported accuracies. The copied
+text does not confer comparability on any other model — see the ruling below.
+
+⛔ The TEMPLATES are the official ones; the MODEL is not, by default. The #8486
+owner ruling (2026-10-27) re-pinned ``DEFAULT_JUDGE_MODEL`` to our own
+``deepseek-v4-flash``, so a default run grades with the official rubric and a
+NON-official model and records ``judge_pin: unpinned:…`` + ``verdict:
+inconclusive``. The official model (``gpt-4o-2024-08-06``, at temperature 0,
+max_tokens 10) is kept named as ``OFFICIAL_JUDGE_MODEL`` and is the only
+configuration whose number may be compared to a published figure.
 
 The judge model is configured via env, never hardcoded:
 
-    TORTOISE_LME_JUDGE_MODEL   judge model spec (default
-                               ``openai:gpt-4o-2024-08-06`` — the official
-                               judge model). The same official model is
-                               served by OpenRouter: with only
-                               ``OPENROUTER_API_KEY`` set, use
-                               ``openrouter:openai/gpt-4o-2024-08-06``
+    TORTOISE_LME_JUDGE_MODEL   judge model spec. DEFAULT: our own pinned
+                               model (``deepseek-v4-flash``) — the #8486
+                               owner ruling of 2026-10-27 ("progress against
+                               ourselves"; the receipt records
+                               ``unpinned:<model>`` + ``inconclusive``).
+                               The OFFICIAL model is
+                               ``OFFICIAL_JUDGE_MODEL`` =
+                               ``openai:gpt-4o-2024-08-06``: name it to get
+                               a number comparable to a published figure,
+                               e.g. ``openrouter:openai/gpt-4o-2024-08-06``
+                               (the model id is what makes it official, the
+                               transport is a routing detail)
     OPENAI_API_KEY             direct OpenAI key (NOT required when the
                                official model runs through OpenRouter etc.)
 
@@ -71,7 +86,68 @@ from .reader import (
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
+#: The OFFICIAL LongMemEval judge model — the model the benchmark's own
+#: `evaluate_qa.py` baseline ran, and the ONLY identity `w7_publish.JUDGE_PIN`
+#: is minted for (external comparability lives here, not in a default).
+#:
+#: Kept NAMED and reachable on purpose: serving it is still a legal
+#: configuration (`TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`,
+#: or a box holding `OPENAI_API_KEY`), it is just no longer what the run
+#: DEFAULTS to. A consumer that must grade with the official judge — the ask
+#: spot-check's #2071 decision record — names THIS constant, never the default.
+OFFICIAL_JUDGE_MODEL = "openai:gpt-4o-2024-08-06"
+
+#: The judge a run defaults to. **NOT the official model, by owner ruling.**
+#:
+#: #8486 owner ruling (2026-10-27), recorded verbatim on the issue: *"Judge: our
+#: own model (`deepseek-v4-flash`), pinned to an exact snapshot id — not a
+#: floating alias. … What the benchmark is for, for now: progress against
+#: ourselves."* The owner re-stated it on 2026-11-03 — *"i have already
+#: mentioned multiple times that we use deepseek and that i want to complete the
+#: p0 and p1 issues before doing an eval"* — and the decision comment recording
+#: that answer draws the consequence in its own words (not a quotation): the
+#: model is DeepSeek, not OpenAI, not OpenRouter, no credential request stands.
+#: So the official `gpt-4o-2024-08-06` pre-registration *cannot* be honoured on
+#: our boxes, and the substitution is the ruling rather than an accident.
+#:
+#: WHY a default and not an env override: an override is an undeclared
+#: configuration, and the whole point of this ruling is that the configuration a
+#: run used is READ OFF the code, not off whatever the launching shell happened
+#: to export. That sentence is the issue's **ALIGN arm** — **two** of its
+#: 2026-11-02 blocks state the rule as *"fix as constants, not env overrides"*
+#: (a third as *"re-pin judge and reader constants (not env overrides)"*), and
+#: the 2026-11-07 scope comment quotes it that way — not the wording of the
+#: owner's 2026-10-27 ruling, whose own words are *"pinned to an exact snapshot
+#: id — not a floating alias"*. Citing the arm for the arm's argument is the
+#: point; attributing it to the owner is not, and a lane reading the ruling must
+#: not find a sentence there that is not in it.
+#:
+#: The consequence is DELIBERATE and is not a failure: `w7_publish` derives the
+#: pin from the judge that graded, so this judge records
+#: `judge_pin: unpinned:deepseek-v4-flash` and `verdict: inconclusive`. The
+#: receipt gate is correctly saying "this is not the official baseline", and the
+#: run report must say the same in words — an **internal baseline series**,
+#: never "the LongMemEval number". R12 is untouched by this: only an
+#: officially-graded completed run still records `pass`.
+#:
+#: The snapshot-id half of the ruling is **NOT met** — `deepseek-v4-flash` is
+#: undated. Recorded as a deliberate departure on `#8486` (amendment comment,
+#: 2026-11-08), not as an oversight. The only dated
+#: id in this family the repo records is `deepseek-v4-flash-0731`, a TEST
+#: FIXTURE (`tests/test_analyze.py`) with no `PRICING_MAP` row — pinning it would
+#: make `spend_guard.arm()` refuse the run before its first call with no partial
+#: run and no resumable marker. `deepseek-v4-flash` is the id the serving
+#: endpoint names and the one the pricing map holds (measured 2026-11-02,
+#: `#8486` credential audit); adopting the fixture id would trade a real,
+#: priced, servable configuration for a cosmetic date.
+#:
+#: OVERRIDES: the published benchmark's official judge pin (`gpt-4o`, the
+#: `evaluate_qa.py` baseline) as the RUN default — we measure our own progress
+#: with a pinned, disclosed, non-official judge, because publishing vendors do
+#: not use the official judge either (mem0's own LongMemEval table uses GPT-5
+#: for both answering and judging), so matching it buys comparability with a
+#: configuration almost nobody publishes. Recorded on #8486 by the owner.
+DEFAULT_JUDGE_MODEL = "deepseek:deepseek-v4-flash"
 
 # Issue #1949 decision record — judge near-miss (subset-rule) policy.
 #
@@ -95,10 +171,16 @@ NEAR_MISS_GRADING = "strict"
 # UNIQUE words — that is STRUCTURALLY UNREACHABLE for rubric-style long-gold
 # SSP questions (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w: a correct
 # paraphrase never clears a ≥½-unique-word overlap bar). DECISION: the
-# spot-check grades EVERY question with this semantic judge (``build_judge()``
-# → the official gpt-4o anscheck — benchmark-identical to the graded eval
-# lane); the lexical bar is DEMOTED to the key-free CI (MockJudge) substitute
-# only. The graded eval is UNTOUCHED (``JUDGE_RUBRIC_ID "longmemeval-official"``
+# spot-check grades EVERY question with this semantic judge
+# (``build_judge(_judge_spec())`` → the OFFICIAL gpt-4o anscheck); the lexical
+# bar is DEMOTED to the key-free CI (MockJudge) substitute
+# only. ⛔ THE SPEC IS NAMED, NEVER INHERITED (#8486): a bare ``build_judge()``
+# resolves ``DEFAULT_JUDGE_MODEL``, and that default was re-pinned to
+# ``deepseek:deepseek-v4-flash`` by the #8486 owner ruling of 2026-10-27 for the
+# graded-eval RUN. A spot-check that inherited it would grade with a
+# non-official judge while this decision record says official — and its key
+# pre-flight would check a key nothing needs. The graded eval is UNTOUCHED
+# (``JUDGE_RUBRIC_ID "longmemeval-official"``
 # and its fingerprint are unchanged — no bump). Historical spot-check
 # aggregates (0.38/0.43) graded the 3 questions under the unreachable bar and
 # are NOT directly comparable (runbook 1987-ask-abstention-check comparability
@@ -462,7 +544,8 @@ class OfficialJudgeModel:
 
 
 class LLMJudge:
-    """Judge backed by an OpenAI-compatible chat model (official gpt-4o)."""
+    """Judge backed by an OpenAI-compatible chat model (the OFFICIAL judge is
+    gpt-4o; the run's default is our own pinned model — #8486)."""
 
     def __init__(self, model, model_id: str, *, model_spec: str | None = None,
                  provider: str | None = None):
@@ -634,14 +717,19 @@ class ScriptedSemanticJudge:
 def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     """Build the judge from env/config. ``mock=True`` returns MockJudge.
 
-    Default model: ``openai:gpt-4o-2024-08-06`` (the official judge model).
-    That default names OpenAI as the provider, but the SAME model is served
-    by OpenRouter too — set
-    ``TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`` to run
-    the official judge through OpenRouter (the model id is what makes the
-    judge official; the transport is a routing detail — external
-    comparability is unchanged). Fails closed when no provider key is set
-    and mock is off.
+    Default model: ``DEFAULT_JUDGE_MODEL`` = ``deepseek:deepseek-v4-flash`` —
+    the #8486 owner ruling of 2026-10-27 ("progress against ourselves"). It is
+    deliberately NOT the official judge: a run graded by it records
+    ``judge_pin: unpinned:<model>`` and ``verdict: inconclusive``, and must be
+    reported as an internal baseline series.
+
+    To grade with the OFFICIAL judge — the only configuration whose number may
+    be compared to a published figure — name ``OFFICIAL_JUDGE_MODEL``
+    (``openai:gpt-4o-2024-08-06``) or its routed form
+    ``TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06`` (the model
+    id is what makes the judge official; the transport is a routing detail).
+    That needs that provider's KEY as well as the spec — a key alone does not
+    select it. Fails closed when no provider key is set and mock is off.
     """
     if mock:
         return MockJudge()
@@ -660,13 +748,18 @@ def build_judge(spec: str | None = None, *, mock: bool = False) -> Judge:
     # RuntimeError, regardless of what the spec names (locked by tests).
     if not any(os.environ.get(_PROVIDERS[p][1]) for p in _PROVIDER_PRIORITY):
         raise RuntimeError(
-            "no LLM provider key configured for the LongMemEval judge "
-            "(set OPENROUTER_API_KEY / OPENAI_API_KEY / DEEPSEEK_API_KEY / "
-            "GEMINI_API_KEY). The official judge model is gpt-4o-2024-08-06; "
-            "OpenRouter serves it — with only OPENROUTER_API_KEY set, point "
-            "the spec there via "
-            "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06. "
-            "Or pass --mock for the offline mock judge.")
+            "no LLM provider key configured for the LongMemEval judge. The "
+            "DEFAULT judge is our own pinned model (deepseek-v4-flash), so "
+            "DEEPSEEK_API_KEY is what a default build needs — set that and "
+            "re-run, or pass --mock for the offline mock judge. Another "
+            "provider's key only helps when you ALSO name that provider's "
+            "spec (below the any-key gate, the named provider's key is what "
+            "is checked). To grade with the "
+            "OFFICIAL judge (the only configuration whose number may be "
+            "compared to a published figure) name it explicitly: "
+            "TORTOISE_LME_JUDGE_MODEL=openrouter:openai/gpt-4o-2024-08-06 with "
+            "OPENROUTER_API_KEY, or openai:gpt-4o-2024-08-06 with "
+            "OPENAI_API_KEY.")
     if provider is not None and not os.environ.get(_PROVIDERS[provider][1]):
         hint = ("" if provider != "openai" else
                 " — the SAME official model is served by OpenRouter; set "

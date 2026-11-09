@@ -146,20 +146,31 @@ by #10776 and declared here rather than left to be discovered.
 ⚠️ **BOUNDARY 4 — WHERE the carry runs (no lock, its own lane).** The fill above
 is a network read, so it must not be submitted to a pool (or a LOCK) that
 belongs to a different substrate, and it must not be held under a per-org
-mutex. Every gated REST door satisfies both: the ``points``/``documents`` doors
-run it through ``hosted_api._check_org_limit_off_loop`` (Supabase → the
+mutex. These doors satisfy both: the
+``points`` doors run it through ``hosted_api._check_org_limit_off_loop``
+(Supabase → the
 control-plane pool, self-host → the graph pool, because the registry IS the
-graph connection), the capture door runs the whole check on a worker thread,
+graph connection), the capture door runs it through the SAME twin
+(``_check_org_limit_off_loop``, ``check_org_limit.sessions`` — it used to run
+the whole check on a bare worker thread, which put a control-plane read on the
+loop's default executor; main-repair 2026-11-04),
 and ``POST /v1/sessions/commit`` runs the carry in the HANDLER, before its
 per-graph commit lock is taken, handing the stamped dict down (review round 13
 — held inside that lock, a control-plane stall was a network wait every other
 commit for the org queued behind, since #9567 made that in-lock gate perform
-this read). ONE door is the declared exception: ``/v1/demo`` runs the check
+this read). TWO doors do NOT, and both are named so neither is inherited
+silently. The first is the declared exception: ``/v1/demo`` runs the check
 inside its own per-org seed lock, deliberately, because the idempotent
 ``existing`` short-circuit must come BEFORE the read — a re-seed of an
 already-seeded org must not pay a control-plane read, and the lock is held only
-once per org's first seed. Any NEW gated door has to make this choice
-explicitly; inheriting whichever pool or lock the rest of its work uses is how
+once per org's first seed. The second is a declared GAP: the ``documents``
+door never reached this seam at all — it calls ``enforce_org_limit(limits,
+"documents", …)`` directly on a limits dict ``_run_docs_indexing`` resolved
+INLINE on the event loop, which is the on-loop read this whole boundary exists
+to prevent. It is pre-existing, it is filed as #10946, and it is named here
+because this sentence used to claim it as satisfied (main-repair 2026-11-04,
+review cycle 3). Any NEW gated door has to make this choice explicitly;
+inheriting whichever pool or lock the rest of its work uses is how
 review round 12 (a PostgREST read on the graph pool) and round 13 (the same
 read inside the commit lock) both happened.
 
@@ -682,15 +693,22 @@ def _reading(dim: AllowanceDimension, org_id: str,
             return None
         # ⛔ A missing meter is NOT a blocked dimension (#9567 review round 12,
         # P2). The two states are different and a fail-closed refusal must not
-        # misdescribe its own: before this branch the message rendered
-        # "… but is BLOCKED — None" for a dimension with no ``blocked_reason``
-        # at all (reachable through the ``meters=`` seam), i.e. it named a
-        # ruling that does not exist. Branch on ``dim.blocked``.
-        if dim.blocked:
-            raise QuotaCheckError(
-                f"dimension {dim.dimension!r} has an allowance configured for "
-                f"team {org_id!r} but is {BLOCKED.upper()} — "
-                f"{dim.blocked_reason}")
+        # misdescribe its own, so THIS branch names only the state it is in —
+        # "no meter plumbed" — and never a ruling: the BLOCKED message used to
+        # be reused here with ``dim.blocked_reason`` None, inventing a ruling
+        # that does not exist.
+        #
+        # ⛔ The BLOCKED state needs no arm HERE: the guard at the top of this
+        # function already raises for every ``dim.blocked`` that carries an
+        # allowance, so this point is reached only when ``observed_only`` is
+        # NOT set (that mode returns on the line above) AND ``dim.blocked`` is
+        # False. A ``if dim.blocked:`` re-check was
+        # present and could never run (main-repair, 2026-11-04: probed with a
+        # blocked dimension whose meter is suppressed through the ``meters=``
+        # seam — the TOP guard fires, line-for-line, and the inner arm never
+        # does). Removed rather than left as dead code, because an unreachable
+        # arm with a reachability rationale invites a reader to trust a path
+        # that does not exist.
         _logger.error(
             "allowance dimension has no meter (fail-closed): team=%s "
             "dimension=%s", org_id, dim.dimension)

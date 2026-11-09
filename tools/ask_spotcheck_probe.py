@@ -45,7 +45,11 @@ _REPO_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
-from tools.ask_spotcheck import _load_composition, _require_judge_key  # noqa: E402
+from tools.ask_spotcheck import (  # noqa: E402
+    _judge_spec,
+    _load_composition,
+    _require_judge_key,
+)
 from tools.ask_spotcheck_consistency import (  # noqa: E402
     CURATED_ANSWERS,
     LONG_GOLD_QIDS,
@@ -110,7 +114,15 @@ def main(argv: list[str] | None = None) -> int:
         except (RuntimeError, ValueError) as exc:
             print(f"ask_spotcheck_probe: {exc}", file=sys.stderr)
             return 2
-        judge = build_judge()
+        # ⛔ THE SPEC THE PRE-FLIGHT JUST CHECKED (#8486). A bare
+        # `build_judge()` resolves `DEFAULT_JUDGE_MODEL`, which the #8486 owner
+        # ruling re-pinned to DeepSeek — so the pre-flight would verify the
+        # OFFICIAL judge's key while a different model graded. Measured
+        # consequences: a DeepSeek-only box was refused for a key nothing
+        # needed, an OpenAI-only box died on an uncaught ValueError, and a
+        # both-keys box printed the official key env beside a non-official
+        # model. One resolver, so the two cannot disagree.
+        judge = build_judge(_judge_spec())
         judge_label = f"live {judge.model_id} ({key_env})"
 
     verdicts = run_probe(judge, probes)

@@ -22,8 +22,9 @@ reds on a line-number citation in §2 and on a symbol the tree does not bind. Th
 the change that made it **MARKS** — it read SILENT on every earlier head, and recording this document
 at an older commit while carrying the new row is exactly the stale-map shape (#6134) it exists to
 prevent.
-**Status:** C1 of #8447 (this document). C2 (boundary tests per surface) and C3 (the four doors)
-are tracked on the issue.
+**Status:** C1 of #8447 (this document). C2 (boundary tests per surface) is in the tree. C3 (the four
+doors): **record write** and **session read** landed on `main`; the **ingest door** lands with PR #11067
+(row below); **capture** is verified compliant and carries its own evidence in §6.
 
 ---
 
@@ -76,16 +77,22 @@ a reader who finds the number has drifted should search the quoted fragment: tha
 | `TortoiseSDK.list_batches` (MCP: `tortoise_list_batches`) | `limit=20` | **SILENT** | `tortoise/sdk.py::list_batches` — `return items[:limit]`; the method's contract is `-> list[dict]` (declared on the same `def`), so there is no field in which to say "there are more" |
 | `TortoiseSDK.suggest_entry_points` (MCP: `tortoise_suggest_entry_points`) | `limit=5` | **SILENT** | `tortoise/sdk.py::suggest_entry_points` — `results = results[:limit]` on a plain `[:limit]` cut with no offset and no cursor; declared `-> list[dict]` on the same `def` |
 | `tortoise_query(text=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `text=` arm only) | `limit` (100 on that arm) | **SILENT** | `tortoise/mcp_server.py::tortoise_query` calls `tortoise_fts_query(…, limit=eff_limit)` **without** the private marker sink, and the SDK method (`tortoise/sdk.py::tortoise_fts_query`) is declared `-> list[dict]` — so even though it CAN compute the marker (its `_truncation_out` sink), a bare list has nowhere to carry it. Its structural arm (`text=None`) is a different surface, and not all of its branches are marked, see ⚠️ below |
+| `tortoise_query(tag=…)` (MCP, `tortoise/tool_registry.py::TOOL_REGISTRY`; the `tag=` arm) | `limit` on the **response** (`eff_limit`); **no** bound on the READ | **SILENT** un-paginated, **MARKS** paged — and the walk is not lossless | `tortoise/mcp_server.py::tortoise_query` slices `rows[:eff_limit]` in the HANDLER, because `tortoise/sdk.py::query_points_by_tag` accepts no `skip`/`limit` and its own docstring says it *"returns the WHOLE tag population"* — so the RESPONSE is bounded and the READ is not, which is the shape the structural arm's fix rejects 60 lines away. The paged form returns `{results,total,hasMore}`, but that accessor orders `ORDER BY p.createdAt DESC` with **no `id(n)` tiebreak**: `createdAt` is not unique, so consecutive `offset=` windows are not adjacent ranges of ONE order (the #5346 defect) and a walk drops and repeats rows while `hasMore` — computed from that one call's own list — cannot see the loss. `tests/test_5346_paged_read_total_order.py` pins `paginated_query`, not this accessor. **Not bounded here: adding `skip`/`limit` to the public accessor is an MCP/SDK surface change and needs the owner's approval.** Follow-up and census owner: #11062 |
 | `GET /v1/points` (hosted, `tortoise/hosted_api.py::list_points`) | `limit=50` (`Query(50, ge=1, le=1000)`) | **MARKS** | the same function asks the store for `limit+1` (an internal probe row, dropped before delivery) and its own `mark_truncation`/`truncation_field` calls (`tortoise/truncation.py::truncation_field`) publish `truncated`; `total_available` is deliberately WITHHELD (`exact=False` — a probe proves *more exist*, not *how many*), so a truncated page takes the third state. `count` is still rows **delivered**, and the cap VALUES are unchanged |
 | `GET /points` (selfhost, `tortoise/selfhost_api.py::list_points`) | `limit=50` | **SILENT** | `response_model=list[PointResponse]` — a bare list on the route |
+| `tortoise-ingest` / `python -m tortoise.ingest` (CLI, `tortoise/ingest.py`) — the **ingest door** of C3 | the whole ask: a target the graph does not hold as a `:Document` Source, an idempotency claim, and a sweep that leaves work pending | **MARKS** (exit status) | `tortoise/ingest.py::IngestOutcome` — `main` returns a named outcome and `.returncode` **is** the exit status (`DONE`/`SKIPPED_*` → 0, `REFUSED_*`/`PARTIAL` → 1). ⛔ The exit status reaches the shell through `tortoise/ingest.py::cli`, which `pyproject.toml` names — **never** through `main`: the generated console wrapper is `sys.exit(<entry>())` and `IngestOutcome` is a `StrEnum`, so `sys.exit(<member>)` prints it and exits **1** for every arm including `DONE` (measured). A refusal writes NO completion artifact — no `--resolution` Point, no `points : N statements` summary, no `--out` render. ⚠️ **`PARTIAL` is not a refusal**: the run DID most of the ask, so the exit status is what carries the shortfall rather than an error — but ⛔ **what it writes is per-arm, not uniform**: full ingest prints its `points :` summary and writes its `--out` render; `--upgrade` returns `_do_upgrade`'s outcome from `main` **before** the completion block, so a PARTIAL `--upgrade` writes **neither**; `--upgrade-all` prints its own `upgrade-all complete:` summary and never writes a render. Two things are `PARTIAL` on every path — a sweep that leaves a candidate pending, and **an extract that reports failed sections** (`stats['failed_sections']`): `--upgrade`, `--upgrade-all` and full ingest all answer `PARTIAL` (exit 1) now, where they used to print `warning: N sections failed extraction` and return `DONE`. ⚠️ That list is empty from `ingest` today — the stage fills it only under `skip_on_failure=True`, which this module does not pass (`tortoise/extractor.py::_run_document` re-raises), so the branch is insurance, not a live path; the arms that pin it inject the stats (`tests/test_8447_c3_ingest_door.py::TestAPartialExtractionIsNotDone`). The **reachable** section-level partial is the S7 entity stage (`_s7_document_entities`, which DOES pass `skip_on_failure=True`): its omitted Subjects print a `warning:` and the run still exits 0 — a live **SILENT** bound, named here rather than fixed. ⚠️ **A skip writes nothing either** — and ⛔ **that is a change THIS PR makes, not a standing property**: before it, the skip arm fell through to the completion block and *did* refresh the render (along with writing the bogus `--resolution` Point and the `points :` summary). It now returns before that block, so the render file is left exactly as it was, and a caller who re-runs `tortoise-ingest` to refresh `--out` gets the old file and exit 0 — the `skip:` line on stdout is the signal. The `--resolution` Point and the `points :` line are absent because they were *lies*; the render's absence is a deliberate consequence of returning before the block, and is pinned by `TestTheSkipArmWritesNothing`. ⚠️ A **skip is not a refusal**: `SKIPPED_ALREADY_PROCESSED` / `_EXTRACTED` / `_NOTHING_PENDING` stay `0`, and the sweep's own `already claimed` bucket is NOT `PARTIAL` — an idempotent re-run's answer *is* the ask, so reddening it would train callers to ignore the exit status. Pinned by `tests/test_8447_c3_ingest_door.py` in both directions — an exit-status table (`TestTheExitContractIsOneMapping`), the live refusal (`TestARefusalIsNotSuccess`), the skip-writes-nothing arms (`TestTheSkipArmWritesNothing`), the partial-extraction arms on all three paths (`TestAPartialExtractionIsNotDone`), the live sweep (`TestTheSweepReportsOutstandingWork`) and the sweep decision in isolation (`TestTheSweepDoesNotRedOnItsOwnIdempotency`, whose stubbed population is what pins `not_document` separately from `unreadable` — `--upgrade-all` reads the WHOLE graph, so a live assertion cannot). ⚠️ **Which arm actually discriminates is stated precisely**: the *absence* of the `--out` render and of the `points :` summary is KILLED by `test_a_capture_metadata_run_on_a_non_document_is_refused` (that arm fell through to the completion block until this PR). The same two assertions on the `--upgrade` arm are REGRESSION pins, not mutant-killers — `--upgrade` has been terminal in `main` since #133, so they pass against the un-fixed module too (measured in review round 8). A test COUNT is deliberately not stated: a number here re-stales the moment an arm is added, which is the class #10523 records. ⛔ `--capture-metadata` on content with no `##` sections is `REFUSED_NOT_A_DOCUMENT` (exit 1): the ask — emit the document Source + `sessionCaptured` — is unperformable there, and it used to fall through to the completion summary with zero sources written. ⚠️ **This door MARKS its refusal, NOT its every bound**: `--max-utterances N` still cuts `sections[:N]` (`tortoise/extractor.py::extract_from_document`) with no marker, and `_do_upgrade` then clears `needs_extraction`/`doc_status` — so the cut is recorded as a complete extraction and no sweep can revisit it. **Two** of the sweep's buckets are permanently red and no flag of this command clears either: `unreadable` (a pending Source whose file is gone, or which resolves outside `TORTOISE_INGEST_BASE_DIR` — widen the base, restore the file, or delete the Source) and `not_document` (a pending Source whose content has no `##` sections — add sections, or delete the Source; the bucket is decided BEFORE `begin_ingest`, so `--force` cannot help). Both are named in the command's own `still pending:` line. ⛔ **A third arm answers `DONE` while destroying the retry signal**: `--upgrade` on a Source the graph **does** hold as a `:Document` whose *content* has no `##` sections (`tortoise/ingest.py::_do_upgrade`, the `is_doc` false branch) prints `warning: … is not a Document (no ## headers) — extraction skipped (no claim made)` and then runs the completion transition **anyway** (`SET s.needs_extraction = false REMOVE s.doc_status`), returning `DONE` → exit **0**, because `failed_sections` stays empty and the `PARTIAL` arm cannot fire. Once cleared, that Source is invisible to every future sweep — `_discover_pending_documents` answers `false` at `WHEN s.needs_extraction IS NOT NULL THEN false`, ahead of the `ELSE $unmarked` arm, so neither `--upgrade-all` nor `--include-unstamped` selects it again — and ⛔ **this row's own remediation for the `not_document` bucket ("add sections") no longer reaches it through a SWEEP**: adding the sections back changes nothing for `--upgrade` or `--upgrade-all`, because discovery no longer selects the node. It is not a dead end, though, and the repair is an ordinary one: a plain `tortoise-ingest <file>` re-extracts it — `_document_is_pending` is consulted only on the `--upgrade` path, full ingest gates on `is_doc` alone, and this arm mints no `begin_ingest` claim, so no idempotency skip blocks the re-ingest — as does deleting and re-creating the Source. The three arms answer the same condition three ways — `--capture-metadata` → `REFUSED_NOT_A_DOCUMENT` (exit 1), `--upgrade-all` → `PARTIAL` (exit 1) **and it keeps the marker**, `--upgrade` → `DONE` (exit 0) **and it clears it** — and the split is deliberate: clearing is the pinned pre-D10 `--upgrade` parity decision (`tests/test_5140_pending_extraction.py::test_upgrade_makes_no_claim_for_a_document_with_nothing_to_extract`), so changing the arm would be a `#8447` reopen, not a fix. That, `--max-utterances` below, the S7 entity-stage partial above, and this `--upgrade` arm, are live **SILENT**/**stuck** bounds on a door this row declares MARKS, named here rather than fixed: it is `DONE`-shaped output over a truncated result, the same class as the list-shaped surfaces in §2a. |
 | `GET /v1/events` (hosted, `tortoise/hosted_api.py::events_poll`) | `limit=100` (`le=_MAX_EVENT_PAGE`) | **REFUSES at the edge** | `limit: int = Query(100, ge=1, le=_MAX_EVENT_PAGE)` in `events_poll` refuses 0 at the route; the seam below it (`tortoise/event_store.py::read_after`) refuses both ends — see §3 |
 
 ⚠️ **`get_cross_lens_candidates` MARKS one of its three bounds.** The marker is
 `truncated = len(all_candidates) > limit` (`tortoise/sdk.py::get_cross_lens_candidates`), where `limit`
 derives from `max_candidates` inside that same method. Two further bounds on that same surface do not
-reach it at all: `top_k` (clamped to `tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`) bounds the
-per-point ANN pull (`limit=top_k + 1`, also inside `get_cross_lens_candidates`), and
-`tortoise/sdk.py::CROSS_LENS_POOL_CAP` cuts the eligible pool (same method). A saturated ANN window
+reach it at all, and ⚠️ neither of those cuts is inside `get_cross_lens_candidates` — the per-point
+ANN pull is `_cross_lens_pairs` and the pool cut is `_cross_lens_pool`, so both are cited by symbol
+below rather than described as "same method": `top_k`, clamped to `CROSS_LENS_ANN_TOP_K_MAX`
+(`tortoise/sdk.py::CROSS_LENS_ANN_TOP_K_MAX`), bounds the per-point ANN pull (`limit=top_k + 1`,
+`tortoise/sdk.py::_cross_lens_pairs`), and `CROSS_LENS_POOL_CAP = 1000`
+(`tortoise/sdk.py::CROSS_LENS_POOL_CAP`) cuts the eligible pool (`tortoise/sdk.py::_cross_lens_pool`).
+A saturated ANN window
 over a point with more above-threshold neighbours than `top_k` is precisely the *"a downstream leg
 lost rows"* case §4 item 3 requires to flip the marker — and it stays `false`. Read
 `truncated: false` on this surface as *"the candidate cut did not fire"*, never as *"nothing was
@@ -101,13 +108,38 @@ ANN-window case specifically), and this document is the census, not the fix.
 With `offset`/`page` given it returns a `hasMore`/`total` dict — the `tag` arm and the default arm
 both inside `tortoise/mcp_server.py::tortoise_query`, the latter via
 `tortoise/sdk.py::paginated_query`. Unpaginated it returns a bare list on the success path — `tag`, and
-default through `tortoise/sdk.py::query` — except when that list is empty, a `kind` was given, **and**
+the default arm, which **since #10602 reaches that SAME `paginated_query` accessor with
+`skip=0, limit=eff_limit` (100)** — except when that list is empty, a `kind` was given, **and**
 `tortoise/query_suggestions.py::compute_suggestion` has a hint to offer, where the same handler
 returns `{"results", "suggestion"}`, a dict carrying no `hasMore`/`total`. Boundary refusals
 (`page < 1`, `offset < 0`, `limit < 1`) and an SDK failure surfacing from `_safe` return a structured
 error dict instead. **This block is not an inventory**: none of these branches has a row in the census
 above, and per the absence rule below they read as named-but-not-yet-censused, never as compliant — a
 complete enumeration is a finding for a census row, not a parenthetical here.
+
+⛔ **#10602 measured that SILENT arm, and it was not merely incomplete — it was the outage.** The
+default arm had no LIMIT at all (`tortoise/sdk.py::query` is `MATCH (n:Point) WHERE … RETURN
+properties(n)`), so `tortoise_query(kind="statement", limit=3)` returned the whole label: **15,708
+rows, 15,417 ms, no data**, and a deterministic `-32009` "wait budget exceeded / retry_after: 10"
+against a 10 s `mcp_auth._TRANSPORT_WAIT_BOUND_S`. Four concurrent readers of it drove `db.latency_ms`
+to **6,291 ms** and left health unanswered for 9 s. The arm is now bounded at `eff_limit`; **the
+truncation is still SILENT on the wire** (a bare list carries no `hasMore`/`total`), so this row
+remains an OPEN census finding. What changed is only that the bound is now disclosed in the SERVED
+tool description (`tortoise/tool_registry.py` — the text a model reads, not the handler docstring),
+and that a paged read is advertised as the way to walk the population. Making the truncation visible
+on the wire — returning the `hasMore`/`total` dict when `total > len(results)` — is a return-shape
+change and is deliberately NOT done here.
+
+⚠️ **The `tag=` arm is a third surface on the same tool, and it is the one the bound never reached.**
+The structural READ is bounded at the accessor since **#10602**; on `tag=` only the RESPONSE is
+bounded, in the handler, because `tortoise/sdk.py::query_points_by_tag` has no `skip`/`limit` to push
+the bound into.
+The read volume that produced the outage is therefore unchanged on that arm: a large tagged population
+still costs the whole read and can still blow `mcp_auth._TRANSPORT_WAIT_BOUND_S` and return `-32009`,
+while the served description now says the *response* is bounded (which is true, and is why the served
+text names the distinction rather than calling the arm cheap). Its census row is in the table above;
+the accessor bound, and the total order a lossless walk needs, are #11062 — both are one approval and
+one signature away, and neither is a rider on #10602.
 
 ⚠️ **The census is a population, and this table is the part of it that has been measured** — it is
 NOT yet exhaustive. §1 also names *body/log caps* and *ingest chunking*, and no row here covers
@@ -116,8 +148,11 @@ failure mode this document exists to prevent is exactly "we audited the instance
 
 ### 2a. Why the remaining SILENT surfaces are parked, not fixed
 
-All six return a **bare list**, and each sits behind a published surface, so there is no
-non-breaking place to put an incompleteness marker:
+All six return a **bare list** *on the arm or the route the census measured* — the qualifier is
+load-bearing for one of the six: `tortoise_query` is censused here on its **`text=` arm**, which returns
+`tortoise_fts_query`'s bare list, while its *structural* arm (`text=None`) is a different surface that
+does not always return a list (see the ⚠️ above), so the parked set is the arm, not the whole tool. Each
+sits behind a published surface, so there is no non-breaking place to put an incompleteness marker:
 
 - adding a key to *each row* is not a marker (a caller counting rows cannot see it);
 - returning a wrapper object (`{"items": …, "truncated": …}`) changes the declared return type, and
@@ -274,3 +309,22 @@ A marker is only an instrument if a caller can act on it. Therefore:
   two reds and lose the only discrimination against a marker that is present but lying — so the
   nesting is the fact to carry, not a rounding detail.
 - `docs/architecture/STORAGE-ARCHITECTURE.md` — the storage seams these bounds sit on.
+
+## 6. Refusal-clause per door (C3)
+
+§1a is enforced door by door, not once:
+
+| door | mechanism | evidence |
+|---|---|---|
+| **record write** | `RecordWriteOutcome.REFUSED` + `RecordWrite.refusal`; `status` reads `degraded` | `tortoise/record_writer.py`; `_record_health` reads the counters from `/health` |
+| **session read** | the door abstains visibly instead of `200` + an empty transcript | PR #10021 |
+| **capture** | the 2xx receipt carries `errors` / `warnings` / `diagnostics`; the turn cap REFUSES at the handler (`MAX_SESSION_TURNS`), the per-turn cap MARKS (`_CAPTURE_TRUNCATION_SENTINEL`) | `tortoise/hosted_api.py::_capture_session_impl` (the REFUSE half); `tortoise/sdk.py::_CAPTURE_TRUNCATION_SENTINEL` (the MARK half's sentinel, which `hosted_api.py` never names) |
+| **ingest** | `tortoise/ingest.py::IngestOutcome` — the exit status is the marker, and a refusal writes no completion artifact | `tests/test_8447_c3_ingest_door.py`; its live **SILENT**/**stuck** bounds are enumerated in §2, not here — `--max-utterances`, the S7 entity stage, and the `--upgrade` on `##`-less content that exits `DONE` after clearing the retry marker |
+
+⛔ **A door's counters are part of the clause.** §1a forbids a value indistinguishable from success
+*while* the failure is recorded somewhere the caller does not read — so a door must not make a counter
+its instrument unless the caller can read it back. The record door's counters reach `/health` through
+`_record_health`; the ingest door's SWEEP counters (`upgraded` / `skipped` / `unresolved` /
+`not_document` / `already_claimed` / `partial_sections`) are read back by that sweep's own summary
+lines — they are *not* nothing — while a single door run's instrument is the exit status
+(`IngestOutcome`), not a counter.

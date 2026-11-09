@@ -23,22 +23,50 @@ message string:
 The boundary cases the issue names are covered as a set: exactly-at-limit,
 limit+1, and page-2-of-2 (via the paginated control).
 
-Lane: embedded (``TORTOISE_TEST_CARVE_OUT=1``) or any ``TORTOISE_DB_URI``
-(``tests/conftest.py`` session gate). ⚠️ The lane is not the whole environment: a GREEN here also
-needs a LIVE DENSE LEG — a real embeddings model, not a stub — because two pre-existing tests in
-this file read the fusion scores the store actually produces. Both were RED on ``main`` at
-``5b1888a6e`` (#10560) and are GREEN at ``83a22b2a7`` on a private docker lane with
-``--extra embeddings``; the intervening ``search_engine`` change is ``6b8793351`` (#10506).
+Lane: **EMBEDDED, always** — this module's own ``sdk`` fixture deletes ``TORTOISE_DB_URI`` and
+sets ``TORTOISE_DB_PATH`` (``tests/conftest.py``'s session gate still has to be satisfied, hence
+``TORTOISE_TEST_CARVE_OUT=1``). Measured on this box with ``EmbeddingModel.get()`` returning
+``None`` (no embeddings extra): the whole module passes, so a KEYWORD-ONLY lane is enough since
+#10560. The backend is not a variable here — the fixture pins it — so the ONE gate that decides
+which scorer owns the lexical slot is ``TORTOISE_BM25_LEXICAL`` (DEFAULT ON, #10240), and the floor
+test PINS it: the file's verdict does not depend on the shell's value of that knob. The pin is what
+makes that true, so a future test added here must pin it too rather than inherit it.
+
+⛔ **The DB backend is pinned; the DENSE LEG is NOT — it is a lane variable, and that gap has
+already cost a CI red.** CI's ``test (b)`` shard installs the embeddings extra, so there
+``EmbeddingModel.get()`` returns a model: the k-NN dense leg answers EVERY query (no threshold), a
+read therefore has a non-empty pool, and the degraded TF-IDF tiers (guarded by ``if not
+raw_results:``) are never reached. A keyword-only box (this one) reaches them every time. Measured
+at ``45faa1661``: ``TestAnArmThatServedTheSlotIsNotALostLeg::test_the_legacy_corpus_fallback_is_still_lost``
+red on CI with ``this test must exercise the LEGACY tier; got []`` while passing here — the same
+test, green on one lane and unable to reach its subject on the other. Its fix is the #1625
+precedent in ``tests/test_fallback_snapshot.py`` (an autouse ``_no_embedder`` fixture pinning the
+DENSE leg off), and it is scoped to the class that needs the fallback tiers: the other classes here
+are lane-tolerant (measured: this was the ONLY red this module produced on the dense-capable
+lane), and pinning a dense leg off where a test says nothing about it would quietly weaken that
+test. A future test that asserts anything about WHICH degraded tier answered owes the same pin.
+
+The module's two
+pre-existing reds at ``main`` ``5b1888a6e`` were GREEN at ``83a22b2a7`` on a private docker lane with
+``--extra embeddings`` (the intervening ``search_engine`` change is ``6b8793351``, #10506), but that
+lane is not a PRECONDITION — it was where the OLD fixture happened to produce a band, and the old
+fixture was the defect.
 ``TestAScoreFloorIsNotProofOfCompleteness::test_a_read_with_a_score_floor_never_publishes_a_total``
-derives a strict score band from the seeded store, and the seed is five points whose content differs
-only by an index — so with the dense leg degraded they tie (``0.0870113 == 0.0870113``) and the
-test reds on a property of the RANKING rather than on the behaviour it pins;
-``TestAnArmThatServedTheSlotIsNotALostLeg::test_the_same_read_without_the_arm_is_still_lost``
-needs the #8488 BM25 arm to actually be gated by ``TORTOISE_BM25_LEXICAL=0``. So quote the lane AND
-the embeddings extra with any whole-file count from this module — a bare "49 passed" does not say
-whether the dense leg ran. On a COLD first touch of the model the hermetic egress guard (#4387)
-blocks and retries the HuggingFace HEAD requests, which can push an early test past its timeout;
-warm the model once before collecting evidence.
+derives a strict score band from the seeded store. Its seed used to be five points whose content
+differed only by an index, and five identical rows on a one-token query TIE under both shipped
+scorers with no dense leg at all (measured ``0.0870113 ×5`` with the arm on, ``1.0 ×5`` with the
+graph scorer), so the test red on a property of the RANKING rather than on the behaviour it pins;
+since #10560 it is a TWO-TIER seed (three rows carrying both query terms, two carrying one), so the
+band is a property of the MATCH SHAPE — a document matching both query terms outranks one matching
+a single term in the lexical scorers we ship. The DENSE leg is fused in the same RRF and its rank
+is not monotone in term coverage, so a dense ordering that inverts the band reds here LOUDLY (the
+five scores are printed) rather than silently weakening the pin.
+``TestAnArmThatServedTheSlotIsNotALostLeg``
+needs the #8488 BM25 arm to actually be gated by ``TORTOISE_BM25_LEXICAL=0`` for its control test. On
+a COLD first touch
+of the embeddings model the hermetic egress guard (#4387) blocks and retries the HuggingFace HEAD
+requests, which can push an early test past its timeout; warm the model once before collecting
+evidence (only a lane that HAS a dense leg can be affected — see above).
 """
 from __future__ import annotations
 
@@ -55,6 +83,26 @@ from tortoise.truncation import (
 )
 
 # ── the marker's own contract ────────────────────────────────────────────
+
+#: A line coordinate in a census cell, in EITHER spelling the doc has used:
+#: contiguous (``hosted_api.py:10209``) and split across two code spans
+#: (`` `config/surface-manifest.yml` (`:121-143`) ``). The filename must be
+#: followed by the coordinate, allowing only the punctuation that separates
+#: them — a closing backtick, whitespace, and the opening paren/bracket.
+#:
+#: MODULE level, not a class attribute, because it is not this class's private
+#: business: `tests/test_8447_c3_ingest_door.py` asks the SAME question of its
+#: own docstrings and imports this predicate rather than re-spelling it. Two
+#: predicates for one question drift, and the drift is invisible in the worst
+#: direction — a citation one matches and the other misses is RED here and GREEN
+#: there.
+_LINE_CITATION = re.compile(
+    r"[\w./-]+\.(?:py|ya?ml)"
+    r"[\s`'\"]*"          # a closing code span and/or whitespace
+    r"[(\[]?"             # the split form's opening paren/bracket
+    r"[\s`'\"]*"
+    r":\d[\w-]*")        # the coordinate itself
+
 
 class TestMarkerVocabulary:
     def test_field_names_are_their_own_and_not_a_status_term(self):
@@ -396,19 +444,66 @@ class TestAScoreFloorIsNotProofOfCompleteness:
     nothing about the match population — and the count it leaves is a FLOOR.
     """
 
-    def test_a_read_with_a_score_floor_never_publishes_a_total(self, sdk):
-        _seed(sdk, 5)
+    def test_a_read_with_a_score_floor_never_publishes_a_total(self, sdk,
+                                                              monkeypatch):
+        # #10560: pin WHICH scorer owns the lexical slot, because the fixture's
+        # score SCALE is not the same in both regimes — measured on this seed,
+        # the default-ON BM25 arm gives plain BM25 arithmetic
+        # (0.626008 ×3 / 0.087011 ×2 — the second value is exactly the term's
+        # IDF over five documents, the first adds the second term's IDF) while
+        # the shipped graph scorer gives (3.0 ×3 / 1.0 ×2). Under the arm-off
+        # scale the probe-derived floor lands at 2.0, outside ``threshold``'s
+        # documented 0.0-1.0 range, so the read raises ``ValueError`` instead of
+        # exercising the cap — a red that reads as a product regression to a lane
+        # that gated the arm off. Pinning ON is the SHIPPED default (#10240), so
+        # this makes the fixture explicit rather than environment-dependent; the
+        # assertion below then states the invariant it depends on instead of
+        # assuming it. ⚠️ BM25 scores are unbounded ABOVE, so ``floor <= 1.0`` is
+        # a property of THIS fixture (a small corpus), not of the arm.
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "1")
+        # #10560: the fixture must produce a STRICT score band, and the band must
+        # not be an accident of one scorer's arithmetic. It used to be seeded as
+        # five identical rows on a one-token query, which ties under EVERY
+        # scorer we ship (measured: five rows at rrf 0.0870113769896297 under the
+        # default-ON BM25 arm, and all-equal under the graph scorer too) — so
+        # `rrf[2] > rrf[3]` was an assertion about the fusion's score spread, not
+        # about the cap, and it went red the moment the spread collapsed.
+        # Two tiers instead: three rows carrying BOTH query terms, two carrying
+        # one. A document that matches both terms outranks a document that
+        # matches one in the LEXICAL scorers we ship (rarity/term-coverage in
+        # BM25, the per-term count in the graph scorer), so the band is a
+        # property of the fixture's MATCH SHAPE rather than of one scorer's
+        # numbers. Honest bound: the dense leg is fused with the lexical one and
+        # its rank is NOT monotone in term coverage, so on a live dense leg an
+        # inversion of the band is possible — it reds loudly below (the five
+        # scores are printed) rather than silently weakening the pin.
+        for i in range(3):
+            sdk.create_point(kind="statement",
+                             content=f"zebra migration claim number {i:02d}",
+                             entity_type="point")
+        for i in range(2):
+            sdk.create_point(kind="statement",
+                             content=f"zebra sighting report number {i:02d}",
+                             entity_type="point")
         # Derive the floor from the scores this store ACTUALLY produces, so the
         # test drops a provable strict subset instead of hard-coding a magic
         # number that a fusion tweak would silently turn vacuous.
-        probe = sdk.tortoise_fts_query("zebra", limit=10)
+        probe = sdk.tortoise_fts_query("zebra migration", limit=10)
         rrf = sorted((r["scores"]["rrf"] for r in probe), reverse=True)
         assert len(rrf) == 5
-        assert rrf[2] > rrf[3], "no strict band to place the floor in"
+        assert rrf[2] > rrf[3], (
+            "fixture invariant: the two-tier corpus must produce a strict band "
+            f"(both-term rows above single-term rows); got {rrf}")
         floor = (rrf[2] + rrf[3]) / 2      # keeps the top 3 of 5, drops 2
+        assert 0.0 < floor <= 1.0, (
+            "fixture invariant: the derived floor must be a legal ``threshold`` "
+            f"(0.0-1.0); got {floor} from {rrf} — this fixture no longer models "
+            "a score floor, which means the lexical scorer's score scale moved "
+            "(the arm is pinned ON above, and this module's fixture is always "
+            "embedded, so the scale cannot come from the other backend)")
 
         sink: dict = {}
-        rows = sdk.tortoise_fts_query("zebra", limit=2, threshold=floor,
+        rows = sdk.tortoise_fts_query("zebra migration", limit=2, threshold=floor,
                                       _truncation_out=sink)
         assert len(rows) == 2              # the cap cuts one of the 3 survivors
         marker = truncation_field(sink)
@@ -843,6 +938,29 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
     judging the arm's own failure, one step further on.
     """
 
+    @pytest.fixture(autouse=True)
+    def _no_embedder(self, monkeypatch):
+        """Pin the DENSE leg off so the degraded TF-IDF tiers are reachable.
+
+        The reason is #1625's, measured here at ``45faa1661`` (PR #11468): the
+        dense leg is k-NN with no similarity threshold, so it returns rows for
+        EVERY query. A read that has any dense row never enters the
+        ``if not raw_results:`` block, so on a lane that HAS an embedder (CI
+        installs the embeddings extra) ``tfidf_snapshot`` / ``tfidf_legacy``
+        are unreachable and a test that means to pin WHICH tier answered can
+        only fail or go vacuous. With ``EmbeddingModel.get() -> None`` the
+        vector strategy is never submitted (``sdk.py`` records ``no_embedder``)
+        and the fallback fires deterministically — on every lane.
+
+        ⛔ Do NOT replace this with a skip-when-the-dense-leg-is-live: the CI
+        lane is the one where the fold is gated, so skipping there is exactly
+        the silent hole this class exists to close.
+        """
+        from tortoise.embeddings import EmbeddingModel
+
+        monkeypatch.setattr(EmbeddingModel, "get",
+                            staticmethod(lambda load_timeout=None: None))
+
     @staticmethod
     def _no_fulltext_index(monkeypatch):
         """The shipped lexical leg raises on a missing index and returns []."""
@@ -894,6 +1012,53 @@ class TestAnArmThatServedTheSlotIsNotALostLeg:
         assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
             "with the arm off, nothing read the lexical half — the rows are "
             "unreachable and the read may not claim completeness")
+
+    def test_the_legacy_corpus_fallback_is_still_lost(self, sdk, monkeypatch):
+        """The SECOND degraded fallback tier, pinned on its own (#10560).
+
+        `tfidf_snapshot` and `tfidf_legacy` are two different returns, and a
+        green on the snapshot half does not constrain the legacy half: measured
+        on the round-2 head (64 tests, this one absent), deleting ONLY the
+        legacy fold left the whole file green; with this test present the same
+        deletion gives `1 failed, 64 passed` and the failing one is this. The
+        legacy tier is reached by making the cached snapshot unavailable
+        (`get_or_build` -> None, the documented route into the legacy path), so
+        the path under test is the legacy one.
+
+        Mutation: delete the `_trunc["incomplete"] = bool(_lost_legs)` line in
+        the `tfidf_legacy` branch → this reds; the snapshot test stays green.
+        """
+        _seed(sdk, 3)
+        monkeypatch.setenv("TORTOISE_BM25_LEXICAL", "0")
+        self._no_fulltext_index(monkeypatch)
+
+        monkeypatch.setattr("tortoise.fallback_snapshot.get_or_build",
+                            lambda *a, **k: None)
+
+        trace: list[dict] = []
+        sink: dict = {}
+        rows = sdk.tortoise_fts_query("zebra", limit=5, _truncation_out=sink,
+                                     leg_trace=trace)
+
+        # The TIER is asserted, not assumed: the snapshot tier satisfies both
+        # assertions below, so a refactor that hoists the function-local
+        # ``get_or_build`` import to module level would leave this test green
+        # while it exercised the OTHER fold — re-opening the hole it exists to
+        # close, silently.
+        _fallback_reasons = [e.get("reason") for e in trace
+                             if e.get("leg") == "fallback"]
+        assert "tfidf_legacy" in _fallback_reasons, (
+            f"this test must exercise the LEGACY tier; got {_fallback_reasons}")
+        assert "tfidf_snapshot" not in _fallback_reasons, (
+            "the snapshot tier answered instead of the legacy one — the "
+            f"legacy fold is then not what this test pins; got {_fallback_reasons}")
+        # Non-vacuous: the legacy tier really answered (its rows are ranked from
+        # the whole corpus), so `truncated: false` is not an empty-read artifact.
+        assert rows, "fixture invariant: the legacy fallback must return rows"
+        assert truncation_field(sink)[TRUNCATED_FIELD] is True, (
+            "the legacy corpus fallback answers from the whole corpus, not from "
+            "the match set the dead lexical leg owed this read — it may not "
+            "publish completeness")
 
 
 # ── #8447 (C2): the four boundary cases on the PAGINATION CONTROL ────────
@@ -984,18 +1149,6 @@ class TestTheCensusNamesItsEvidenceHome:
         return text.split("## 2. The census", 1)[1].split(
             "## 3. `OVERRIDES:`", 1)[0]
 
-    #: A line coordinate in a census cell, in EITHER spelling the doc has used:
-    #: contiguous (``hosted_api.py:10209``) and split across two code spans
-    #: (```config/surface-manifest.yml` (`:121-143`)```). The filename must be
-    #: followed by the coordinate, allowing only the punctuation that separates
-    #: them — a closing backtick, whitespace, and the opening paren/bracket.
-    _LINE_CITATION = re.compile(
-        r"[\w./-]+\.(?:py|ya?ml)"
-        r"[\s`'\"]*"          # a closing code span and/or whitespace
-        r"[(\[]?"             # the split form's opening paren/bracket
-        r"[\s`'\"]*"
-        r":\d[\w-]*")        # the coordinate itself
-
     def test_the_pin_sees_the_split_form_too(self):
         """Positive control: the split spelling is a line coordinate TOO.
 
@@ -1008,12 +1161,12 @@ class TestTheCensusNamesItsEvidenceHome:
         against the symbol form that replaced it, which must NOT match), so
         narrowing the pattern reds here instead of silently reopening the hole.
         """
-        assert self._LINE_CITATION.findall(
+        assert _LINE_CITATION.findall(
             "a row in\n`config/surface-manifest.yml` (`:121-143`), **not** as an"), (
             "the census pin no longer sees the split spelling of a line "
             "coordinate, so it can pass over exactly the drift it exists to "
             "catch")
-        assert not self._LINE_CITATION.findall(
+        assert not _LINE_CITATION.findall(
             "a row in `config/surface-manifest.yml` → "
             "`response_fields[tortoise_search].truncated`, **not** as an"), (
             "the census pin reds on the SYMBOL form it recommends — a pin its "
@@ -1041,7 +1194,7 @@ class TestTheCensusNamesItsEvidenceHome:
         carried it. :meth:`test_the_pin_sees_the_split_form_too` is the
         positive control: it reds if this pattern narrows back to contiguous.
         """
-        stale = sorted(self._LINE_CITATION.findall(self._census_section()))
+        stale = sorted(_LINE_CITATION.findall(self._census_section()))
         assert not stale, (
             "the census cites absolute line numbers, which go stale on every "
             "unrelated edit to the file they point into — cite "
@@ -1090,6 +1243,101 @@ class TestTheCensusNamesItsEvidenceHome:
         assert not unresolved, (
             "the census cites symbols the tree does not bind (renamed, moved or "
             f"invented), so its evidence cells point at nothing: {unresolved}")
+
+    @staticmethod
+    def _unresolved_symbol_citations(citations) -> list[str]:
+        """The `<module>::<name>` citations this tree does not bind.
+
+        Resolution is an AST walk over each cited module (functions, classes and
+        module-level bindings such as `TOOL_REGISTRY`), so a rename or a move reds
+        the caller instead of silently misdirecting a reader. Shared by the two
+        artifacts that cite the census's evidence — §2 of the doc, and the
+        `docs/00_index.md` row that routes a lane into it — because the same rot has
+        to red in both places or the upstream one drifts again.
+        """
+        import ast
+        from pathlib import Path
+
+        root = Path(__file__).resolve().parent.parent
+        unresolved: list[str] = []
+        for module, name in citations:
+            path = root / module
+            if not path.is_file():
+                unresolved.append(f"{module} (module does not exist)")
+                continue
+            bound: set[str] = set()
+            for node in ast.walk(ast.parse(path.read_text(encoding="utf-8"))):
+                if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef,
+                                     ast.ClassDef)):
+                    bound.add(node.name)
+                elif isinstance(node, ast.Assign):
+                    bound.update(t.id for t in node.targets
+                                 if isinstance(t, ast.Name))
+                elif isinstance(node, ast.AnnAssign) and isinstance(
+                        node.target, ast.Name):
+                    bound.add(node.target.id)
+            if name not in bound:
+                unresolved.append(f"{module}::{name}")
+        return unresolved
+
+    def test_the_index_row_that_routes_readers_here_cites_no_line_numbers(self):
+        """The front door must speak the citation form the census speaks.
+
+        `docs/00_index.md`'s #8447 row is how a lane FINDS this census, and it
+        kept `sdk.py:28434` / `sdk.py:27022` / `sdk.py:34398` /
+        `event_store.py:974` after §2 itself was converted — the exact form the
+        pin above forbids, one artifact upstream of it. The coordinates were
+        exact when written, and `sdk.py` has already moved 695 lines under them
+        once (`62e3f2f61` -> `d72983b99`, #10523), so a lane following them from
+        the index lands wherever the last insertion put them. Same rule, same
+        artifact family: cite `<module>::<name>`, and resolve it.
+        """
+        import re
+        from pathlib import Path
+
+        index = (Path(__file__).resolve().parent.parent / "docs" / "00_index.md")
+        rows = [ln for ln in index.read_text(encoding="utf-8").splitlines()
+                if "docs/architecture/BOUNDED-OPERATION-CONTRACT.md" in ln]
+        assert len(rows) == 1, (
+            "expected exactly ONE docs/00_index.md row routing a reader into the "
+            f"census, found {len(rows)}")
+        row = rows[0]
+
+        stale = sorted(re.findall(r"[\w./-]+\.(?:py|ya?ml):\d[\w-]*", row))
+        assert not stale, (
+            "the index row cites absolute line numbers, which re-stale on the "
+            "next insertion into the file they point into — cite "
+            f"`<module>::<name>` instead: {stale}")
+
+        cited = sorted(set(re.findall(r"(tortoise/[\w/]+\.py)::([A-Za-z_]\w*)",
+                                     row)))
+        assert cited, (
+            "the index row names no `<module>::<name>` evidence this pin can "
+            "check — the pointer form regressed to something unresolvable")
+        unresolved = self._unresolved_symbol_citations(cited)
+        assert not unresolved, (
+            "the index row cites symbols the tree does not bind (renamed, moved "
+            f"or invented), so a reader is sent to nothing: {unresolved}")
+
+    def test_the_parked_summary_names_the_arm_the_census_measured(self):
+        """§2a's opening claim must carry its own scope.
+
+        Read alone, *"All six return a bare list"* is a claim about each whole
+        tool, and it contradicted the ⚠️ two paragraphs above it: `tortoise_query`
+        is censused on its `text=` arm, whose bare list is real, but its
+        STRUCTURAL arm (`text=None`) returns `{"results", "suggestion"}` on one
+        branch. A summary that over-reads its own disclosure is how the
+        disclosure stops being read — the parked set is the arm, not the tool.
+        """
+        park = self._census_section().split("### 2a.", 1)[1]
+        opening = park.split("All six return", 1)[1].split("\n\n", 1)[0]
+        assert "bare list" in opening, (
+            f"§2a no longer states what the parked surfaces return: {opening}")
+        assert "arm" in opening or "text=" in opening, (
+            "§2a's opening claim is not scoped to the arm/route the census "
+            "measured, so it reads as a statement about each whole tool — "
+            "`tortoise_query`'s structural arm returns `{'results', "
+            "'suggestion'}` on one branch (see the ⚠️ above), not a bare list")
 
     def test_every_test_the_contract_doc_names_exists(self):
         """A pointer to a TEST is only a pointer if that test resolves.

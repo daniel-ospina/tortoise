@@ -24,6 +24,7 @@ from __future__ import annotations  # noqa: I001
 
 import argparse
 import os
+from enum import StrEnum
 from pathlib import Path
 
 from .api import EventAPI, provenance
@@ -434,7 +435,10 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     ).result_set
     if not rows:
         print(f"not a Document: {source_id} (no document Source with this url)")
-        return
+        # #8447 C3: a REFUSAL, not a no-op. The operator named a target the
+        # graph does not hold; exiting 0 made that indistinguishable from an
+        # upgrade that ran (see ``IngestOutcome``).
+        return IngestOutcome.REFUSED_NOT_FOUND
     needs_ext, doc_status = rows[0][0], rows[0][1]
     # `other_legacy_is_pending=True`: pre-D10 `--upgrade` skipped on
     # `doc_status='extracted'` alone, so it also upgraded a `draft` document —
@@ -444,7 +448,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     if not _document_is_pending(needs_ext, doc_status,
                                 other_legacy_is_pending=True):
         print(f"doc already extracted, skipped: {source_id}")
-        return
+        return IngestOutcome.SKIPPED_ALREADY_EXTRACTED
 
     # 2. "Has anything to extract?" is answered BEFORE the idempotency claim
     #    (review round 7). `begin_ingest` MINTS a claim, and at a bumped
@@ -457,6 +461,18 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
     #    transition for a no-sections document (step 4): the operator named this
     #    document, pre-D10 `--upgrade` flipped it unconditionally, and leaving
     #    the marker would re-report it on every run.
+    # #8447 C3 (review P2, both review rounds): a PARTIAL extraction must not
+    # come back DONE. `extract_from_document` reports per-SECTION failures in
+    # `failed_sections` only under `skip_on_failure=True`, which this module
+    # does not pass — so the list is empty on every arm today and the warning
+    # below cannot print (verified against `tortoise/extractor.py::_run_document`:
+    # the `except` re-raises unless that flag is set). The outcome is wired
+    # anyway so the two channels can never disagree: the day a caller opts into
+    # tolerating a bad section, the exit status says PARTIAL instead of
+    # recording a truncated document as a completed ask (§1a). Pinned by a
+    # stubbed arm in tests/test_8447_c3_ingest_door.py, so this is not a
+    # comment-shaped promise.
+    failed_sections: list[str] = []
     is_doc, _ = _document_sections(text)
     if is_doc:
         from .idempotency import document_key
@@ -464,7 +480,7 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
                                   document_key(text), force=args.force)
         if result and result.skip:
             print(f"upgrade skip: {result.reason} (run {result.run_id}); use --force to reprocess")
-            return
+            return IngestOutcome.SKIPPED_ALREADY_PROCESSED
 
         print(f"upgrading {source_id} "
               f"(needs_extraction={needs_ext}, doc_status={doc_status}) …")
@@ -514,8 +530,10 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
         )
         print(f"  extracted {stats['points']} Points, {stats['operators']} operators "
               f"from {stats['sections']} sections")
-        if stats.get("failed_sections"):
-            print(f"  warning: {len(stats['failed_sections'])} sections failed extraction")
+        failed_sections = list(stats.get("failed_sections") or [])
+        if failed_sections:
+            print(f"  warning: {len(failed_sections)} sections failed extraction — "
+                  "those sections' Points are missing")
     else:
         print(f"  warning: {source_id} is not a Document (no ## headers) — "
               f"extraction skipped (no claim made)")
@@ -541,6 +559,114 @@ def _do_upgrade(transcript, text, source_id, proj, api, args):
 
     # 5. Lazy EP re-propagation on affected subgraph (#133 Task 3)
     _run_ep_propagation(proj, api)
+    # PARTIAL, not DONE: the ask was performed for the sections that extracted
+    # and left work behind for the rest — the enum's own definition. The marker
+    # is still cleared (pre-D10 parity, stated in `_do_upgrade_all`'s docstring),
+    # which is exactly why the exit status has to carry the shortfall: nothing
+    # else will.
+    if failed_sections:
+        return IngestOutcome.PARTIAL
+    return IngestOutcome.DONE
+
+
+class IngestOutcome(StrEnum):
+    """What an `ingest` run DID — the CLI's own completeness instrument (#8447 C3).
+
+    The ingest door is one of the four doors the refusal clause is enforced on
+    (`BOUNDED-OPERATION-CONTRACT.md` §6 enumerates them; §1a states the clause
+    itself, and names no doors):
+
+        A refused operation must either refuse visibly (an error, or a reply
+        field that says so) or succeed. It must never return a value
+        indistinguishable from success — ``None``, ``[]``, or a ``200`` with
+        an empty body — while recording the failure somewhere the caller does
+        not read.
+
+    Before this vocabulary the door had exactly one output channel that a
+    non-human caller reads — the process exit status — and ``main`` returned
+    ``None`` on EVERY arm that RETURNED at all, so the shell saw ``0`` for each
+    of them, the refusals included. (The argument guards are the exception and
+    always were: they raise ``SystemExit`` before an outcome exists, so they
+    reached the shell non-zero already — pinned, unchanged, by the test file's
+    entry-point arm.) A script that ran
+    ``tortoise-ingest --upgrade <path>`` on a path that is not a Document
+    Source printed ``not a Document: …`` to stdout and exited **0**; a
+    re-run that was refused by the idempotency gate printed ``skip: …`` and
+    then fell through to the completion summary (``points : N statements``)
+    and, under ``--resolution``, still WROTE a resolution Point for work it
+    never did. ``0`` there is the clause's own counter-example: the caller
+    cannot tell a refusal from a completed ingest.
+
+    ⛔ A SKIP IS NOT A REFUSAL, and the two are kept apart on purpose. A
+    skip is the ask already satisfied — the content is in the graph at this
+    extractor version, or the document was already extracted — so ``0`` is
+    the honest answer and a re-run in a pipeline stays green. A REFUSAL is
+    the door declining: the target does not exist, or it is not a Document.
+    Collapsing those two into one non-zero code would make an idempotent
+    re-run look like a failure, which breaks callers in the other direction.
+
+    The ``returncode`` property is the ONE mapping from outcome to exit
+    status. ``main`` returns the OUTCOME — never a status, and never a
+    ``sys.exit`` — and both entry points (the ``tortoise-ingest`` console
+    script and ``python -m tortoise.ingest``) go through :func:`cli`, which
+    dereferences it.
+    """
+
+    #: The ask was done: extraction ran, a metadata capture was written, or the
+    #: named document had no ``##`` sections to extract at all — that last arm
+    #: prints its own warning and still clears the pending marker, which is the
+    #: recorded ``--upgrade`` parity decision (``_do_upgrade`` step 2). It is
+    #: NOT the sweep's rule: the sweep leaves a no-sections document PENDING and
+    #: returns ``PARTIAL``, because a sweep did not name it. Same condition, two
+    #: honest answers, because only one of the two callers chose the target.
+    #: ⚠️ ``_do_upgrade`` DOES parse the content (step 2) and names the condition
+    #: in its own warning, so the parity decision here buys the exit channel, not
+    #: a blindness: the arm reports ``DONE`` with a warning because the caller
+    #: named the target and the marker is cleared, and that choice is recorded
+    #: rather than derived. A caller who must treat "not a Document" as a failure
+    #: gets ``REFUSED_NOT_A_DOCUMENT`` through ``--capture-metadata``, which holds
+    #: the same content and the same parse.
+    DONE = "done"
+    #: The ask was already satisfied: same content + extractor version.
+    SKIPPED_ALREADY_PROCESSED = "skipped-already-processed"
+    #: The ask was already satisfied: the document is already extracted.
+    SKIPPED_ALREADY_EXTRACTED = "skipped-already-extracted"
+    #: The sweep found nothing awaiting extraction. The ask's own answer.
+    SKIPPED_NOTHING_PENDING = "skipped-nothing-pending"
+    #: REFUSED — the named target is not there: no ``:Document`` Source holds it.
+    #: (``_do_upgrade`` cannot tell "absent" from "present but not a Document" —
+    #: both are a miss on its ``MATCH (s:Source {url})`` — so its arm reports
+    #: this one, and the enum does not claim a distinction that door cannot
+    #: make. ``REFUSED_NOT_A_DOCUMENT`` is reported by ``--capture-metadata``,
+    #: which parses the content it holds.)
+    REFUSED_NOT_FOUND = "refused-not-found"
+    #: REFUSED — the content is not a Document (no ``##`` sections), so the
+    #: metadata capture the caller asked for is unperformable.
+    REFUSED_NOT_A_DOCUMENT = "refused-not-a-document"
+    #: The door did part of the ask and left work behind — the ``--upgrade-all``
+    #: sweep when a candidate was unreadable or not a document, and ``--upgrade`` /
+    #: the full ingest when the extraction reported failed sections. ⛔ It is NOT set
+    #: by "already claimed at this extractor version": that is the sweep's own
+    #: idempotency skip, i.e. work that is DONE, and reddening a steady-state
+    #: corpus on every re-sweep would make the marker noise.
+    PARTIAL = "partial"
+
+    @property
+    def refused(self) -> bool:
+        """True iff the door DECLINED — never True for an already-satisfied ask."""
+        return self in (IngestOutcome.REFUSED_NOT_FOUND,
+                        IngestOutcome.REFUSED_NOT_A_DOCUMENT)
+
+    @property
+    def returncode(self) -> int:
+        """The process exit status this outcome must produce.
+
+        A refusal and a partial run are non-zero; every skip is ``0``. The
+        split is the point of the enum: a caller that only wants "did it
+        work" reads the code, and a caller that wants the reason reads the
+        stdout line the refusal printed.
+        """
+        return 1 if (self.refused or self is IngestOutcome.PARTIAL) else 0
 
 
 def _resolve_ingest_base() -> str | None:
@@ -653,7 +779,7 @@ def _do_upgrade_all(proj, api, args):
                  "signal at all" if include_unstamped else
                  "; pass --include-unstamped to also select documents with no "
                  "signal at all") + ")")
-        return
+        return IngestOutcome.SKIPPED_NOTHING_PENDING
 
     print(f"upgrade-all: {len(rows)} document(s) to upgrade"
           + (" (--include-unstamped: documents with no extraction signal are "
@@ -670,6 +796,12 @@ def _do_upgrade_all(proj, api, args):
     unresolved = 0
     not_document = 0
     already_claimed = 0
+    # A second kind of "left work behind": the document WAS extracted, but some
+    # of its sections were not (see the `failed_sections` note in
+    # `_do_upgrade` — unreachable today, wired so the verdict cannot lie if it
+    # ever becomes reachable). Counted apart from the three pending buckets
+    # because those keep their revisit marker and this one does not.
+    partial_sections = 0
     for doc_id, source_path, needs_ext, doc_status in rows:
         # #329: resolve the candidate (sourcePath OR s.url — BOTH are
         # tenant-mutable) strictly under the configured base. Fail-closed:
@@ -763,8 +895,11 @@ def _do_upgrade_all(proj, api, args):
             domain=args.domain,
         )
         print(f"    extracted {stats['points']} Points, {stats['operators']} operators")
-        if stats.get("failed_sections"):
-            print(f"    warning: {len(stats['failed_sections'])} sections failed extraction")
+        failed_sections = list(stats.get("failed_sections") or [])
+        if failed_sections:
+            print(f"    warning: {len(failed_sections)} sections failed extraction — "
+                  "those sections' Points are missing")
+            partial_sections += 1
         # Mark extracted: clear the live signal AND retire the legacy marker
         # (the pre-D10 flip is recorded by clearing, not by writing a retired
         # property — see `_do_upgrade`).
@@ -783,6 +918,21 @@ def _do_upgrade_all(proj, api, args):
         _run_ep_propagation(proj, api)
 
     print(f"upgrade-all complete: {upgraded} upgraded, {skipped} skipped")
+    # #8447 C3 (review round 8, P3): the two blocks below each used to print
+    # their OWN "this sweep exits NON-ZERO" sentence, so a population holding a
+    # partially-extracted document AND an unreadable one reached both and the
+    # door printed its verdict TWICE. Hoisting the predicate means the sentence
+    # is emitted once, from one place, and only where it is TRUE — the same
+    # class as round 5's P3 (the door's own output misstating its verdict).
+    outstanding = bool(unresolved or not_document or partial_sections)
+    if partial_sections:
+        # ⛔ Deliberately OUTSIDE `if skipped:` — a partially-extracted document
+        # IS `upgraded` (so `skipped` stays 0 and the block below never runs),
+        # which is exactly how this arm used to report a truncated document as
+        # a completed sweep: the `warning:` line printed and the exit said 0.
+        print(f"  ⚠️ {partial_sections} upgraded document(s) extracted only "
+              "PARTIALLY (the sections listed above failed) — their revisit "
+              "marker was cleared, so no later sweep retries them")
     if skipped:
         # Never let "0 upgraded" read as "nothing outstanding": the buckets name
         # the work that is still pending, and each one keeps its marker.
@@ -792,6 +942,39 @@ def _do_upgrade_all(proj, api, args):
               f"{not_document} not a document (no ## sections), "
               f"{already_claimed} already claimed at this extractor version "
               "(re-run with --force to reprocess)")
+        # #8447 C3 (review round 5, P3): this sentence used to ride the block
+        # above, so a sweep whose ONLY skip was `already claimed` printed
+        # "exits non-zero" and then exited 0 — the door's own output misstating
+        # its verdict, which is the class this issue exists to kill. The GUIDANCE
+        # now rides the condition that makes it relevant; the VERDICT itself is
+        # emitted once, below.
+        if unresolved or not_document:
+            print("  ⛔ neither bucket above is cleared by a flag of this "
+                  "command — for `unreadable` widen or set "
+                  "TORTOISE_INGEST_BASE_DIR, restore the file, or delete the "
+                  "Source; for `not a document` add `##` sections or delete "
+                  "the Source")
+    if outstanding:
+        print("  ⛔ this sweep exits NON-ZERO: part of the ask was not performed")
+    # #8447 C3: outstanding work after a sweep is NOT a completed ask. A sweep
+    # that left candidates unreadable or un-extractable used to exit 0 — the
+    # caller read "success" over a corpus that was never touched. PARTIAL is
+    # the marker; the output above says which kind.
+    #
+    # ⛔ `already_claimed` is deliberately NOT in this predicate. It is the
+    # sweep's idempotency bucket — the same ask `_do_upgrade` answers with
+    # SKIPPED_ALREADY_PROCESSED (0) — so counting it would red a steady-state
+    # corpus on every re-sweep and train operators to ignore the exit status,
+    # which destroys the marker. `not_document` keeps its pending marker (see
+    # the docstring) and IS outstanding; `partial_sections` counts documents
+    # that were upgraded with sections missing (they had their marker cleared,
+    # so nothing else can report them).
+    if outstanding:
+        # ⛔ THE SAME VARIABLE THE PRINTED VERDICT READS — a second copy of the
+        # expression is exactly the drift this line exists to prevent, and it
+        # said "same predicate" while re-spelling it (review round 11, P3).
+        return IngestOutcome.PARTIAL
+    return IngestOutcome.DONE
 
 
 def build_model(spec: str, *, reasoning: bool = False):
@@ -860,7 +1043,16 @@ def _s7_document_entities(text, source_id, api, args, extractor=None):
     return ent_stats["subject_names"]
 
 
-def main(argv=None):
+def main(argv=None) -> IngestOutcome:
+    """Run one ingest and return WHAT HAPPENED (#8447 C3).
+
+    ⛔ ``main`` NEVER hands its outcome to ``sys.exit`` itself, and the console
+    script must not either. ``IngestOutcome`` is a ``StrEnum`` — a ``str`` — and
+    ``sys.exit(<str>)`` prints it to stderr and exits **1**, so pointing
+    ``[project.scripts]`` at ``main`` turned every outcome, DONE included, into
+    exit 1 (measured on the installed wrapper). :func:`cli` is the entry point
+    that dereferences ``returncode``; it is what ``pyproject.toml`` names.
+    """
     ap = argparse.ArgumentParser(description="Tortoise live ingest")
     ap.add_argument("transcript", type=Path, nargs='?', default=None,
                     help="transcript file (not needed with --upgrade-all)")
@@ -869,7 +1061,11 @@ def main(argv=None):
     ap.add_argument("--db", type=str, required=True,
                     help="Docker URI (docker://:pass@host:port/graph) or file path")
     ap.add_argument("--log", type=Path, default=Path("events.jsonl"))
-    ap.add_argument("--out", type=Path, default=Path("graph.html"))
+    ap.add_argument("--out", type=Path, default=Path("graph.html"),
+                    help="graph render path — written by a full ingest that "
+                         "reaches completion; `--upgrade` and `--upgrade-all` "
+                         "write NO render, and a skip or a refusal leaves an "
+                         "existing file exactly as it was")
     ap.add_argument("--resolution", action="store_true",
                     help="mark this ingest as a resolution event (auto-grounds)")
     ap.add_argument("--force", action="store_true", help="reprocess even if seen")
@@ -968,29 +1164,33 @@ def main(argv=None):
         # Embedded mode: redislite creates the DB server at the given path on
         # first use (the file materializes on close — a fresh path NEVER
         # satisfies a pre-.exists() check). The .exists() gate + Docker
-        # fallback added in #26 made first-run `tortoise ingest --db <new>`
+        # fallback added in #26 made first-run `tortoise-ingest --db <new>`
         # silently no-op (sys.exit(0)) instead of creating the DB, breaking
         # the create-if-absent contract the CLI had before #26 and that
         # `tortoise init` still honors. Restored: unconditional construction.
         proj = FalkorProjection(args.db)
     api = EventAPI(log, initiated_by="extractor", agent_id=extractor.version,
                    projection=proj)
+    # The document stage's per-section failures, hoisted so the final return can
+    # answer PARTIAL (see the note in `_do_upgrade` — unreachable today because
+    # `skip_on_failure` is not passed, wired so the exit status can never report
+    # a truncated document as a completed ask).
+    failed_sections: list[str] = []
     try:
         # #133 --upgrade: re-run extraction on a captured document Source.
         # D10 (ONTOLOGY §4.4): the extraction signal is needs_extraction (the
         # retired doc_status flip is gone).
         if args.upgrade:
-            _do_upgrade(args.transcript, text, source_id, proj, api, args)
+            outcome = _do_upgrade(args.transcript, text, source_id, proj, api, args)
             # --upgrade is terminal: do NOT fall through to full ingest
             # (which would re-run begin_ingest + add_document and re-set the
             # needs_extraction flag — review cycle 3 caught this).
-            return
+            return outcome
 
         # #133 --upgrade-all: discover captured/needs_extraction Documents
         # and upgrade each. No single transcript — early return after.
         if args.upgrade_all:
-            _do_upgrade_all(proj, api, args)
-            return
+            return _do_upgrade_all(proj, api, args)
 
         # #125 capture-metadata skips begin_ingest — it is a DIFFERENT operation
         # from full extraction. Using begin_ingest here would write an
@@ -1005,12 +1205,36 @@ def main(argv=None):
                                       document_key(text), force=args.force)
         if result and result.skip:
             print(f"skip: {result.reason} (run {result.run_id}); use --force to reprocess")
+            # #8447 C3: a REFUSAL here must not produce a success-shaped
+            # artifact. Before this, the skip arm fell THROUGH to the
+            # completion block below: `--resolution` wrote a resolution Point
+            # for an ingest that never ran, and the summary printed
+            # `points : N statements` over the whole event log — a result
+            # indistinguishable from a completed ingest. A skip writes nothing,
+            # so it reports nothing that looks like a write.
+            return IngestOutcome.SKIPPED_ALREADY_PROCESSED
+        # ⛔ The `else` is NOT dead and must not be "tidied" into a de-indent of
+        # `if result:`: `result` is None in --capture-metadata mode, and the
+        # block below is the one that WRITES that mode's Source. Hoisting it
+        # under `if result:` silently disables the metadata capture.
         else:
             if result:
                 print(f"ingesting with {extractor.version} …")
 
             # S8: Extract document metadata from frontmatter → DocumentCreated event
             is_doc, _ = _document_sections(text)
+            # #8447 C3 (review round 3, P1): --capture-metadata's ask — emit the
+            # document Source + sessionCaptured Event — is UNPERFORMABLE for
+            # content with no `##` sections, and this arm used to fall straight
+            # through to the completion summary with no capture written at all:
+            # `points : 0 statements`, exit 0, `--out` written, zero `:Source`
+            # rows. REFUSE it visibly. (Do NOT "fix" it by letting the arm reach
+            # `extractor.run` — that was round 2's P2, where the door printed
+            # "extraction skipped" and then extracted.)
+            if not is_doc and args.capture_metadata:
+                print(f"[capture-metadata] refused: {source_id} is not a "
+                      f"Document (no ## sections) — nothing was captured")
+                return IngestOutcome.REFUSED_NOT_A_DOCUMENT
             if is_doc:
                 fm = _parse_frontmatter(text)
                 # Determine domain: frontmatter first, then directory_map fallback (#6883)
@@ -1127,14 +1351,23 @@ def main(argv=None):
                 )
                 print(f"extracted {stats['points']} Points, {stats['operators']} operators "
                       f"from {stats['sections']} sections")
-                if stats.get("failed_sections"):
-                    print(f"warning: {len(stats['failed_sections'])} sections failed extraction")
+                failed_sections = list(stats.get("failed_sections") or [])
+                if failed_sections:
+                    print(f"warning: {len(failed_sections)} sections failed extraction — "
+                          "those sections' Points are missing")
                 # Post-extraction: propagate confidence using factor-graph EP
                 # (replaces BFS propagate_shock — bidirectional, quadrature-based).
                 # #1157: shared helper — priors from stored confidence only;
                 # refuses (loud flag) when the graph has none.
                 _run_ep_propagation(proj, api, label="EP")
-            else:
+            elif not args.capture_metadata:
+                # #8447 C3 review (round 2, P2): this `else` used to catch the
+                # --capture-metadata arm too, so a metadata-only capture ran the
+                # session extractor AFTER printing "[capture-metadata] …
+                # extraction skipped" — measured: 2 statements + 2 operators
+                # written, while the door's own stdout said it extracted
+                # nothing. That is the clause this whole issue is about, in the
+                # one arm whose entire purpose is to skip extraction.
                 extractor.run(text, source_id, api, max_utterances=args.max_utterances)
 
         if args.resolution:
@@ -1149,9 +1382,27 @@ def main(argv=None):
         print(f"points : {len(statements)} statements, {len(operators)} operators")
         print(f"graph  : {args.db}  (Cypher-queryable)")
         print(f"render : {args.out}")
+        # PARTIAL is NOT a refusal: the completion artifacts above were written,
+        # because most of the ask WAS performed. What the caller must still be
+        # able to see is that some sections produced nothing — the `warning:`
+        # line alone is a channel a script reading `$?` never reads (§1a).
+        if failed_sections:
+            return IngestOutcome.PARTIAL
+        return IngestOutcome.DONE
     finally:
         proj.close()
 
 
+def cli() -> None:
+    """The ``tortoise-ingest`` console-script entry point (#8447 C3).
+
+    The ONE place an outcome becomes a process exit status for an installed
+    entry point. `pyproject.toml` names THIS, not :func:`main`: the generated
+    wrapper is ``sys.exit(main())``, and passing it a ``StrEnum`` member exits
+    **1** with the member printed — so a DONE ingest red as a failure.
+    """
+    raise SystemExit(main().returncode)
+
+
 if __name__ == "__main__":
-    main()
+    cli()

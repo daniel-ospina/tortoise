@@ -29,6 +29,36 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 HOOK = REPO_ROOT / "tortoise" / "codex-hooks" / "session-end.sh"
 VERSION_MARKER = "# tortoise-hook-version: 4"
 
+#: How long a DETACHED worker may take to reach its own completion event.
+#:
+#: A SPAWN-LATENCY bound, not a correctness one. The worker is a real
+#: `nohup … &` grandchild, so when its DONE lands is set by the RUNNER, not by
+#: the hook: measured on an idle 16-CPU host the hook returns in 0.05-0.14 s
+#: while the worker's DONE arrives 4.4-4.6 s later. The 10-12 s deadlines this
+#: file used left ~2.6x headroom on that measurement, which the self-hosted
+#: pool exhausts under a nine-shard sweep.
+#:
+#: Evidence (2026-11-05, head `192de3b5f`, PR #10610): `test (d)` on run
+#: 42006117288 reported `test_hook_detaches_so_codex_cannot_kill_the_capture`
+#: FAILED on `pi-runner-c5-x64-4`, in a leg that never finished: its own banner
+#: reads `WATCHDOG: pytest killed after 21m (1679 passed, 1 failed, 0 errored so
+#: far)`. Shards (a)-(c) and (f)-(i) were green. A spawn-latency miss, not a
+#: detach regression: nothing in that diff touches this seam or `tortoise/`.
+#:
+#: ⛔ NO BLANKET SPEED FACTOR (#10610 review cycle 3, P3). This comment used to say
+#: the banner "records the box running ~5x slower than the timing model". Measured:
+#: the banner records no ratio at all, and the ONE place this repo measures per-class
+#: cost, `.github/workflows/python-ci.yml` (`WHICH RUNNER CLASS CARRIES THIS LEG`),
+#: puts the x64 cells at **1.16x per test (1.45x sum)** and states in terms that "a
+#: blanket number would mispredict them". So the attribution is CONTENTION plus a
+#: spawn-latency model tuned on an idle host — named as what it is, not as a ratio
+#: the box never reported.
+#:
+#: The `elapsed < 2.5` bounds below are deliberately NOT widened — THOSE are
+#: the mutant detectors (a synchronous capture pays the fake's whole `sleep_s`),
+#: and they measured 18-50x margin under the same contention.
+_WORKER_DEADLINE_S = 60.0
+
 #: A VERBATIM copy of the live Codex rollout captured on 2026-09-18:
 #: ~/.codex/sessions/2026/09/18/
 #:   rollout-2026-09-18T13-39-54-01a0b5d1-677c-7ff2-89eb-689ff75241ba.jsonl
@@ -79,7 +109,7 @@ def _install_fake_nohup(bindir: Path) -> Path:
     return log
 
 
-def _wait_for_worker(nohup_log: Path, timeout: float = 12) -> None:
+def _wait_for_worker(nohup_log: Path, timeout: float = _WORKER_DEADLINE_S) -> None:
     """Bounded wait for the detached worker to EXIT.
 
     ``NOHUP-DONE`` (written by the fake `nohup` shim once the real one
@@ -192,13 +222,15 @@ def test_hook_detaches_so_codex_cannot_kill_the_capture(tmp_path):
         "so a synchronous capture is filed never")
     assert not log.exists(), "the capture finished before the hook returned"
 
-    deadline = time.monotonic() + 12
+    deadline = time.monotonic() + _WORKER_DEADLINE_S
     while time.monotonic() < deadline:
         if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
             break
         time.sleep(0.2)
     assert log.exists() and "DONE" in log.read_text(encoding="utf-8"), (
-        "the detached worker did not survive the hook's exit")
+        f"the detached worker did not survive the hook's exit within "
+        f"{_WORKER_DEADLINE_S:.0f}s — that is spawn latency, not the detach "
+        f"contract; `elapsed` above is the assertion that pins the hand-off")
 
 
 def test_hook_files_the_real_rollout_with_harness_codex_and_the_session_id(tmp_path):
@@ -224,7 +256,7 @@ def test_hook_files_the_real_rollout_with_harness_codex_and_the_session_id(tmp_p
         home=home, bindir=bindir)
     assert proc.returncode == 0, proc.stderr
 
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _WORKER_DEADLINE_S
     while time.monotonic() < deadline:
         if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
             break
@@ -541,7 +573,7 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     assert proc.returncode == 0, (
         "a failed capture must never break the session (fail-open)")
 
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _WORKER_DEADLINE_S
     while time.monotonic() < deadline:
         if log.exists() and "DONE" in log.read_text(encoding="utf-8"):
             break
@@ -559,7 +591,7 @@ def test_a_failed_capture_is_recorded_as_evidence_not_swallowed(tmp_path):
     # partial file and raise JSONDecodeError — the same "assert on the artifact
     # before it is complete" class this poll exists to close.
     crumb = home / ".tortoise" / "capture-errors" / "codex.json"
-    deadline = time.monotonic() + 10
+    deadline = time.monotonic() + _WORKER_DEADLINE_S
     record = None
     while time.monotonic() < deadline:
         try:

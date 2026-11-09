@@ -77,6 +77,10 @@ ROOT = Path(__file__).resolve().parent.parent
 DOC = ROOT / "docs" / "architecture" / "EXTRACTOR-V4-ARCHITECTURE.md"
 STORAGE = ROOT / "docs" / "architecture" / "STORAGE-ARCHITECTURE.md"
 ONTOLOGY = ROOT / "docs" / "ONTOLOGY.md"
+#: The fourth design document (#4051): the owner's 2026-11-07 ruling made this the
+#: canonical home for the search architecture, so it is bound by the same rule —
+#: a pin states a DESIGN FACT, never a delivery state.
+SEARCH = ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md"
 ONTOLOGY_CHANGELOG = ROOT / "docs" / "ONTOLOGY-CHANGELOG.md"
 INGEST = ROOT / "docs" / "INGEST_CONTRACT.md"
 EVAL_SPEC = ROOT / "docs" / "epistemic-layer-eval-spec.md"
@@ -243,7 +247,13 @@ RETRACTED_IN_SIBLINGS: dict[str, str] = {
 #: `done`, `open`, `closed`). A delivery-state pin reds the moment the document
 #: says the same thing in design language, which punishes the edit it should
 #: reward.
-FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
+#: An entry is ``(doc, name, literal)``, or ``(doc, name, literal, section)``
+#: when the name is SECTION-SCOPED ("SEARCH's §7 says …") — the literal is then
+#: ranged to that section's body, so the fact sliding out of §7 reds instead of
+#: passing on a document-wide substring match.
+FACT_STATEMENTS_IN_SIBLINGS: tuple[
+    tuple[Path, str, str] | tuple[Path, str, str, str], ...
+] = (
     (
         STORAGE,
         "STORAGE records the vector-trace mechanism",
@@ -251,8 +261,8 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     ),
     (
         STORAGE,
-        "STORAGE homes the embeddings ruling on the open V1 decision",
-        "the open **V1/§12.1c** decision (`#4997`)",
+        "STORAGE attributes the vector-LOCATION ruling to V1/§12.1c and the embeddings question to V3",
+        "settles where the vector index LIVES (Postgres, 2026-11-07), and it does not settle whether these two labels carry embeddings — that is §14.3 **V3**'s question",
     ),
     (
         ONTOLOGY,
@@ -267,12 +277,24 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
     (
         STORAGE,
         "STORAGE separates the `#4997` measurement from the live defect",
-        "the unindexed-embeddings defect is real, and its home is the V1/§12.1c decision",
+        "the unindexed-embeddings defect is real, and its home is §14.3 V3",
+    ),
+    # The linkage a review of this PR found missing: §7 explained the window as a
+    # COST question and never said what had previously made a per-tenant memory
+    # cap impossible, so a later lane could re-derive the index-rebuild block as
+    # live (`#7846`'s body still reads that way). The claim is pinned here because
+    # deleting it silently returns the document to that state.
+    (
+        SEARCH,
+        "SEARCH's §7 says a graph dump has no vector index to rebuild at all",
+        "a graph dump has **no vector index to rebuild at all**",
+        "7",
     ),
     (
         STORAGE,
         "STORAGE's §14.3 V4 row states the trace mechanism as landed",
         "so a full scan is distinguishable from an index hit",
+        "14.3",
     ),
     (
         INGEST,
@@ -293,11 +315,13 @@ FACT_STATEMENTS_IN_SIBLINGS: tuple[tuple[Path, str, str], ...] = (
         EVAL_SPEC,
         "the eval spec scopes P6 to the `#2421` design with the triage untracked",
         "**Scoped per the `#2421` design (CLOSED `COMPLETED`; the per-edge triage is not implemented and has no open tracker):**",
+        "P6",
     ),
     (
         EVAL_SPEC,
         "the eval spec names the closed `#2421` design, not a tracker, on the Case-2 TODO",
         "the design was `#2421`, CLOSED `COMPLETED`; no open tracker",
+        "P6",
     ),
     (
         STORAGE,
@@ -412,15 +436,38 @@ def test_the_sibling_documents_do_not_carry_the_retracted_claims():
 
 
 def test_the_sibling_documents_still_state_the_design_facts():
-    missing = [
-        f"{doc.name}: {name}"
-        for doc, name, literal in FACT_STATEMENTS_IN_SIBLINGS
-        if literal not in doc.read_text(encoding="utf-8")
-    ]
+    """Each pinned fact must still live where its NAME says it does.
+
+    ⛔ An entry may carry a fourth element, a section number. When it does, the
+    literal is RANGED to that section's body rather than the whole document —
+    because a name that claims "SEARCH's §7 says …" is falsified by the sentence
+    surviving one section up, while a document-wide `in` check stays green. That
+    is the same defect the `cache_projection` locator pin was rewritten to close
+    (`tests/test_10853_session_source_prose.py`: a locator that is not RESOLVED
+    is not a citation), and it is the reason this arm exists rather than a bare
+    presence scan.
+    """
+    missing: list[str] = []
+    for entry in FACT_STATEMENTS_IN_SIBLINGS:
+        doc, name, literal = entry[0], entry[1], entry[2]
+        section = entry[3] if len(entry) > 3 else None
+        if section is None:
+            body = doc.read_text(encoding="utf-8")
+            where = "its OWN document"
+        else:
+            try:
+                body = _section_body(doc, section)
+            except AssertionError:
+                missing.append(f"{doc.name}: {name} — §{section} does not exist")
+                continue
+            where = f"§{section} of its own document"
+        if literal not in body:
+            missing.append(f"{doc.name}: {name} — not found in {where}")
     assert not missing, (
-        "the corrected sibling passages no longer state the fact in their "
-        "OWN document — a passage was silently deleted rather than corrected, or "
-        "moved to a document that does not own the claim:\n  - "
+        "the corrected sibling passages no longer state the fact where the pin "
+        "names it — a passage was silently deleted rather than corrected, moved "
+        "to a document that does not own the claim, or slid out of the section "
+        "the pin is about:\n  - "
         + "\n  - ".join(missing)
     )
 
@@ -845,7 +892,7 @@ _STATUS_LOWER = r"(?:landed|shipped)"
 #:
 #: Defined above the class test that uses it because `STATUS_ABSENCE_DOCS` reads
 #: it — one definition, so the two guards cannot come to disagree about the set.
-DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
+DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE, SEARCH)
 
 #: Absence of work spoken as absence: *"`#3011` has not run"*, *"THE S0 HALF IS
 #: NOT BUILT"*, *"not yet wired"*. A design document states what the design IS;
@@ -859,7 +906,7 @@ DESIGN_DOCS: tuple[Path, ...] = (ONTOLOGY, DOC, STORAGE)
 #: Scope: this arm catches three absence forms — the CAPS form, the
 #: `#NNN`-adjacent lowercase form, and the producer-absence form (`no producer`,
 #: `spec-only`). It is NOT "the design documents are free of status prose":
-#: `ONTOLOGY.md:426` (*"**Not written by `_upsert_subject`**"*) and `:446`
+#: `ONTOLOGY.md:429` (*"**Not written by `_upsert_subject`**"*) and `:449`
 #: (*"**Not written by `_upsert_object`**"*) pass it — each ends *"— planned
 #: follow-up"*. That shape was measured (`not written` has 12 corpus
 #: lines, only 2 of them status claims) and deliberately left out.
@@ -1199,9 +1246,17 @@ def test_the_class_check_is_neither_dead_nor_noisy():
     #     an equality between the two names survives that edit untouched
     #     (measured: `DESIGN_DOCS = (DOC, STORAGE)` left all 8 tests green).
     # A guard that can be narrowed without reddening is a guard that will be.
-    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE}, (
+    # The pin is an EQUALITY in both directions on purpose: a document leaving the
+    # set must red this test, and so must one JOINING it, so that widening the
+    # scope is a deliberate edit someone has to write down rather than a side
+    # effect of adding a file to `docs/architecture/`. The last widening was
+    # `SEARCH-ARCHITECTURE.md` (#4051), which the owner's 2026-11-07 ruling made
+    # the canonical search-architecture document — it was measured at 0 hits on
+    # every arm above before it was added, so the guard stays neither dead nor
+    # noisy on it.
+    assert set(DESIGN_DOCS) == {ONTOLOGY, DOC, STORAGE, SEARCH}, (
         "DESIGN_DOCS is the set of documents these guards police; a document "
-        "silently leaving it is the narrowing this assert exists to catch"
+        "silently leaving (or joining) it is the change this assert exists to catch"
     )
     assert set(STATUS_ABSENCE_DOCS) == set(DESIGN_DOCS), (
         "STATUS_ABSENCE_DOCS no longer covers the same documents as the class "
@@ -1226,7 +1281,12 @@ def _changelog_entry(needle: str) -> str:
     return matches[0]
 
 
-_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*)[.\s]")
+#: ⛔ The label may be NUMERIC (`9.1`) or a LETTER+digit phase label (`P6`) — the
+#: eval spec's sections are `### P6 — …`, so a numeric-only pattern made
+#: ``_section_body(EVAL_SPEC, "P6")`` raise "carries no §P6" and forced every
+#: eval-spec pin to stay document-wide, i.e. a name that says P6 while the
+#: assertion cannot see P6.
+_SECTION_HEADING = re.compile(r"(?m)^(#{2,4}) (\d+(?:\.\d+)*|P\d+)[.\s]")
 
 
 def _section_body(path: Path, number: str) -> str:
@@ -1386,8 +1446,8 @@ def test_every_overrides_marker_the_design_documents_cite_is_the_one_the_code_ci
 
 # The two statements the entry once attributed to §9.1 *"in that place"* and that
 # `STORAGE-ARCHITECTURE.md` does NOT carry: the torn-tail TOLERATED decision (its
-# home is `tortoise/log.py:204`) and the tenant precedence the store decision asks
-# (its home is `tortoise/record_writer.py:842`/`:875`). Each token is the
+# home is `tortoise/log.py:215`) and the tenant precedence the store decision asks
+# (its home is `tortoise/record_writer.py:889`/`:922`). Each token is the
 # statement's own identifier, so the split can be checked without reading prose.
 _CODE_SETTLED_TOKENS = ("torn", "record_tenant_effective", "is_usable_tenant")
 
@@ -1406,7 +1466,7 @@ _OUTSIDE_HOME_CAVEAT = re.compile(
 _NAME_HOME = re.compile(r"((?:[\w.-]+/)*[\w-]+\.py):(\d+)")
 #: How far either side of a cited line the carried token may sit. A statement's
 #: home is a comment block or a short function, not one physical line: the
-#: torn-tail tolerance's block header is `log.py:204` and the word `torn` first
+#: torn-tail tolerance's block header is `log.py:215` and the word `torn` first
 #: appears a few lines below it, so a one-line window would red a CORRECT
 #: citation and teach the next lane to move the citation instead of the claim.
 _HOME_WINDOW = 20

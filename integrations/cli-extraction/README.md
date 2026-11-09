@@ -209,19 +209,26 @@ The transcript is captured user text and is treated as **data**, end to end:
   `extractedFromAll` property), and an ARRAY `extractedFrom` (the survivor was
   born from a ref SEQUENCE, or holds a prop-only ref no edge addresses). A point
   this run MINTED carries the scalar ref the writer passed. Counted
-  as `folded_onto_other_sources`; `new` counts points that are under this source
-  and were not before. A fold onto a survivor that had NO provenance of its own
-  adopts this source, so it is reported as `new` rather than as a fold.
+  as `folded_onto_other_sources`; a cross-source fold is READABLE under this
+  source but reports `new: 0` (it is counted under `folded_onto_other_sources`
+  instead, so one fold is never double-reported). A fold onto a survivor that
+  had NO provenance of its own adopts this source, so it is reported as `new`
+  rather than as a fold. So `new` counts the points that became readable under
+  this source through this run and are not a fold onto another source's point.
   An all-fold batch exits 0 with `folded_onto_existing` and leaves the
-  source untiered (nothing new to tier). Note the read-back cannot SEE a
-  survivor created under ANOTHER source: its `extractedFrom` stays that source
-  and `query()` matches that property by equality, so this source's own count
-  does not include it (the `:Source` EDGES are the authoritative provenance,
-  #3263; the general read-surface gap is #10063).
+  source untiered (nothing new to tier). The population read DOES see a
+  survivor created under ANOTHER source: since #10063 `query(extractedFrom=…)`
+  matches the authoritative `:Source` EDGES as well as the property (#3263), so
+  a folded survivor counts in `total_for_source`. The read-back's domain
+  assertion therefore excuses any point whose OWN creating ref is not this
+  source (a scalar naming another source, or an ARRAY from a ref sequence) —
+  it carries the domain it was created with, and asserting OURS on it would
+  refuse a healthy fold. That exclusion is read off each row's own provenance,
+  not off this run's fold list, so a fold performed by an EARLIER run stays
+  excused instead of failing the next run as `SDK signature drift`.
   An all-empty read-back with **no** fold reports is treated as SDK drift and
   fails. A fold can never be mistaken for a minted point by that guard: a mint
-  stores the scalar ref, which `query()` matches, and an ARRAY prop — the one
-  fold shape the read cannot see — is counted as a fold above. A write that dies
+  stores the scalar ref this source owns, which the read-back asserts. A write that dies
   mid-loop prints a partial receipt (`{"partial": true, "made_ids": [...]}`)
   on stdout before raising, so already-created ids are never lost.
 

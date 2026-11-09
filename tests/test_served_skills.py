@@ -55,13 +55,38 @@ SHIPPED_CORE = ("how-to-use-tortoise", "tortoise-decide", "tortoise-file-finding
 # by #5439; the other four are the #1652 follow-up filing (agent-infra is the
 # canonical source for these three skills, so the fix lands there first).
 KNOWN_STALE_TOOL_NAMES = {
+    "analyse-for-contradictions": {
+        # #4282 — FIVE of the six served skills are MIRRORS of
+        # `daniel-ospina/tortoise-skills-and-integrations`, whose canonical text this repo
+        # does not own: three are sha-pinned in `config/served-skills-upstream.yml`
+        # (how-to-use-tortoise, tortoise-decide, tortoise-file-finding) and two more are
+        # equally upstream-authored though unpinned — `tests/test_served_skill_byte_parity.py`
+        # names them as #4914's stated scope boundary (analyse-for-contradictions,
+        # research-domain). Only `tortoise-onboarding` is authored here, and its references
+        # WERE re-pointed in this batch. The names above still RESOLVE through the #3883
+        # warning shim and each warning names the container, so an agent following the
+        # skill is redirected rather than broken. Re-cutting the mirror from upstream
+        # SHRINKS these entries back out; the ratchet must never grow for any other reason.
+        "tortoise_audit",           # #4282 → tortoise_graph_overview(section="audit")
+    },
     "how-to-use-tortoise": {
         "tortoise_fts_query",      # an SDK method name, never a tool
-        "tortoise_list_pointkinds",  # retired #3883 → tortoise_overview
-        "tortoise_list_sources",     # retired #3883 → tortoise_overview
-        "tortoise_status",           # retired #3883 → tortoise_overview
+        # #4282 → tortoise_graph_overview(section="structure") — see the note above.
+        "tortoise_summarize_structure",
+        "tortoise_list_pointkinds",  # retired #3883 → tortoise_graph_overview
+        "tortoise_list_sources",     # retired #3883 → tortoise_graph_overview
+        "tortoise_status",           # retired #3883 → tortoise_graph_overview
+    },
+    "research-domain": {
+        # #4282 → tortoise_graph_overview(section=...) — see the note above.
+        "tortoise_audit",
+        "tortoise_overview",
     },
     "tortoise-file-finding": {"tortoise_list_sources"},
+    # #4282: `tortoise/onboarding/SKILL.md` is the ONE served skill authored in THIS repo
+    # (not the external mirror), so its `check_structure`/`overview` references were
+    # re-pointed at the container in the same change. This entry is unchanged by that
+    # re-pointing — `tortoise_health` predates this batch and still resolves via the shim.
     "tortoise-onboarding": {"tortoise_health"},
 }
 

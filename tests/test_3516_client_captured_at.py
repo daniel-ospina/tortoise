@@ -19,6 +19,7 @@ from datetime import datetime
 import pytest
 from pydantic import ValidationError
 
+from tests._verdict import require_answered, verdict_client
 from tests.test_hosted_api import TEST_ORG_ID
 from tortoise import hosted_api as ha_mod
 from tortoise.capture_install import (
@@ -1024,19 +1025,36 @@ def test_source_round_trips_through_the_http_boundary(tmp_path, monkeypatch):
     MUTATION THAT REDS THIS: delete `source=body.source` from the
     `_write_session_and_turns` call in `hosted_api` (the exact defect).
 
-    The transport wait bound is widened for this request because the property
-    under test is the STORE's `source`, not the bound: the POST is the first
-    request this process makes into the app, so it pays whatever cold setup the
-    runner has left, and on a loaded shard that setup outlived the shipped 10 s
-    and the middleware answered 503 with `_TRANSPORT_WAIT_BOUND_MESSAGE`
-    (observed on CI shard `a` of this PR — a bound property, already pinned by
-    `tests/test_transport_wait_bound.py`, deciding a persistence assertion).
-    Precedent for pinning the constant in a test that needs headroom:
-    `tests/test_transport_wait_bound.py:539`.
+    #5049 rule 1 / #10232 §(1): `POST /v1/sessions` is NOT exempt from the
+    transport wait bound, so a request that outlives it is answered with the
+    legible 504 refusal (`mcp_auth._TRANSPORT_WAIT_BOUND_MESSAGE`) rather than
+    an answer — measured on this very test in run 40589993103 and again in run
+    41750846941, where the assertion that failed was a wall-clock assertion
+    (`assert 504 == 200`). The property under test (`source` survives the HTTP
+    boundary) was never evaluated, so reading that refusal as a FAIL reports
+    HOST LOAD as a product defect.
+
+    Converted at the SEAM, not the leaf (#8582): this test builds its client
+    with `verdict_client`, so EVERY response it reads — including any read
+    added to it later — is routed through `require_answered`. The conversion is
+    declared in `tests/test_verdict_contract.py`'s `_CONVERTED_CLIENT_SEAMS`, so
+    a revert reds `test_every_converted_client_seam_builds_a_verdict_client`
+    (a leaf-by-leaf sweep would be invisible to that gate, and would cover only
+    the reads that exist today). The seam returns every other response —
+    including a genuine 4xx/5xx — unchanged, so this pin is not weakened: the
+    mutation above still reds it.
+
+    The transport wait bound is ALSO widened for this request, because the
+    property under test is the STORE's `source`, not the bound: the POST is the
+    first request this process makes into the app, so it pays whatever cold
+    setup the runner has left, and on a loaded shard that setup outlived the
+    shipped 10 s and the middleware answered 504 with
+    `_TRANSPORT_WAIT_BOUND_MESSAGE` (observed on CI shard `a` of this PR — a
+    bound property, already pinned by `tests/test_transport_wait_bound.py`,
+    deciding a persistence assertion). Precedent for pinning the constant in a
+    test that needs headroom: `tests/test_transport_wait_bound.py:539`.
     """
     import os
-
-    from fastapi.testclient import TestClient
 
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import (
@@ -1059,7 +1077,8 @@ def test_source_round_trips_through_the_http_boundary(tmp_path, monkeypatch):
         # `mcp_auth._TRANSPORT_WAIT_BOUND_S` into `await_under_wait_bound`), so
         # patching the module attribute governs this POST and nothing else.
         monkeypatch.setattr(mcp_auth_mod, "_TRANSPORT_WAIT_BOUND_S", 600.0)
-        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+        with verdict_client(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "hello"}],
                 "session_id": "s-3516-src-http",
@@ -1075,6 +1094,57 @@ def test_source_round_trips_through_the_http_boundary(tmp_path, monkeypatch):
     finally:
         os.environ.pop("TORTOISE_DB_PATH", None)
         _restore_tortoise_sdk_init(orig)
+
+
+def test_a_wait_bound_refusal_on_this_route_is_inconclusive_not_a_failure(monkeypatch):
+    """The verdict the round-trip pin above depends on, pinned on THIS file.
+
+    `tests/test_capture_session.py` pins the conversion for
+    `POST /v1/sessions`; this pins it for the ROUTE this module's round-trip
+    pin actually calls, so the verdict the pin above relies on is pinned in the
+    file that relies on it.
+
+    Non-vacuity is the plain-client control: it asserts the refusal arrives as a
+    504 carrying the product's refusal envelope, so this reds if the refusal is
+    ever a different shape (the helper then declines to call it a non-answer and
+    the skip is not raised) or if the route is ever added to
+    `_TRANSPORT_WAIT_BOUND_EXEMPT` (the middleware stops refusing and the
+    control's `504` assertion fails).
+
+    MUTATION THAT REDS THIS: make `require_answered` return the refusal
+    untreated (the pre-#5049 `assert 504 == 200` reading) — no skip is raised and
+    the `pytest.raises(pytest.skip.Exception)` arm fails; or exempt
+    `POST /v1/sessions`, which fails the control's `504`.
+
+    ⚠️ What this pins is the CONTRACT, not the call site: whether the
+    round-trip pin above uses the seam at all is `tests/test_verdict_contract.py`'s
+    job — `tests/test_3516_client_captured_at.py` is declared in
+    `_CONVERTED_CLIENT_SEAMS`, so reverting one of its clients to a plain
+    `TestClient` reds `test_every_converted_client_seam_builds_a_verdict_client`
+    without waiting for a loaded leg to produce a real refusal (the condition
+    this contract exists to stop reading as a verdict).
+    """
+    from fastapi.testclient import TestClient
+
+    from tests._verdict import INCONCLUSIVE_PREFIX, is_transport_wait_bound_refusal
+    from tortoise import mcp_auth
+    from tortoise.hosted_api import _TRANSPORT_WAIT_BOUND_EXEMPT, app
+
+    route = ("POST", "/v1/sessions")
+    assert route not in _TRANSPORT_WAIT_BOUND_EXEMPT, (
+        "this pin is void if the route is exempt — the bound never fires")
+    monkeypatch.setattr(mcp_auth, "_TRANSPORT_WAIT_BOUND_S", 0.0)
+    with TestClient(app, raise_server_exceptions=False) as tc:
+        control = tc.post(route[1], json={})
+        assert control.status_code == 504, control.text[:300]
+        assert is_transport_wait_bound_refusal(control), (
+            "the refusal must be the product's own envelope, not any 504")
+        with pytest.raises(pytest.skip.Exception) as excinfo:
+            require_answered(tc.post(route[1], json={}),
+                             what="POST /v1/sessions answered")
+    reason = str(excinfo.value)
+    assert reason.startswith(INCONCLUSIVE_PREFIX), reason
+    assert "POST /v1/sessions answered" in reason, reason
 
 
 def test_the_boundary_caps_source_like_its_siblings():
@@ -1149,8 +1219,6 @@ def test_the_floor_inputs_are_served_on_the_session_read_path(tmp_path):
     """
     import os
 
-    from fastapi.testclient import TestClient
-
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import (
         _patch_tortoise_sdk_init,
@@ -1171,7 +1239,8 @@ def test_the_floor_inputs_are_served_on_the_session_read_path(tmp_path):
     try:
         key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
-        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+        with verdict_client(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "hello"}],
                 "session_id": "s-3516-floor-read",
@@ -1215,8 +1284,6 @@ def test_the_floor_inputs_are_served_on_the_session_LIST_path(tmp_path):
     """
     import os
 
-    from fastapi.testclient import TestClient
-
     import tortoise.hosted_api as ha_mod
     from tests.test_hosted_api import (
         _patch_tortoise_sdk_init,
@@ -1233,7 +1300,8 @@ def test_the_floor_inputs_are_served_on_the_session_LIST_path(tmp_path):
     try:
         key = sdk.apikey_create(org, "11111111-2222-3333-4444-555555555555")
         h = {"Authorization": f"Bearer {key['api_key']}"}
-        with TestClient(ha_mod.app, raise_server_exceptions=False) as tc:
+        with verdict_client(ha_mod.app,
+                            raise_server_exceptions=False) as tc:
             r = tc.post("/v1/sessions", headers=h, json={
                 "conversation": [{"role": "user", "content": "hello"}],
                 "session_id": "s-3516-floor-list",

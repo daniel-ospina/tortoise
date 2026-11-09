@@ -1,6 +1,10 @@
 // Tenant provisioning Edge Function
-// Triggered on auth.users INSERT via the Supabase Auth `after_user_created`
-// webhook. Writes the master list into Supabase ONLY — organizations +
+// Reached SERVER-SIDE only, by the dashboard's same-origin BFF route
+// `website/apps/dashboard/functions/api/provision.ts` (#3501/#4054): the
+// browser posts to `/api/provision`, the BFF mints the caller's access token
+// from the HttpOnly `__Host-session` cookie and attaches it here, and the
+// browser never sees a token or a publicly-callable minting endpoint (#1120).
+// Writes the master list into Supabase ONLY — organizations +
 // org_memberships + api_keys in ONE atomic transaction via the
 // provision_team SECURITY DEFINER RPC (migration 0010, #669 plan Task 2 /
 // #770), then seeds the org's REAL starter graph via the FastAPI data
@@ -13,36 +17,35 @@
 // written here (E2E-1).
 //
 // ── CALLER AUTH (#802) ─────────────────────────────────────────────────
-// The function MUST be deployed with verify_jwt=false (--no-verify-jwt):
-// Supabase Auth hooks carry NO user JWT — the platform signs the hook
-// request itself with the hook secret (Standard Webhooks / Svix signature).
-// Because of that the function verifies the caller itself, and the public
-// anon key alone is NOT sufficient to mint orgs/API keys:
+// The function is deployed with verify_jwt=false (--no-verify-jwt) so the
+// gateway does not pre-empt the caller check below; the caller is verified
+// HERE, and the public anon key alone is NOT sufficient to mint
+// orgs/API keys:
 //
-//   1. Auth-hook calls → raw-body Standard-Webhooks signature verified
-//      against AUTH_HOOK_SECRET (the secret configured on the
-//      after_user_created hook; format `v1,whsec_...`, generated in
-//      Dashboard → Authentication → Hooks). See Supabase docs
-//      "Auth Hooks → Send email hook" for the canonical pattern.
-//   2. Direct calls → must present a USER JWT (Authorization: Bearer)
-//      whose identity (id + email) matches the user_id/email being
-//      provisioned — a user can only provision FOR THEMSELVES.
+//   A USER JWT (Authorization: Bearer) whose identity (id + email) matches
+//   the user_id/email being provisioned — a user can only provision FOR
+//   THEMSELVES. The dashboard BFF mints it server-side (#3501/#4054), so no
+//   browser ever holds the credential it mints with.
 //
-// Anything else → 401. Missing/unverifiable signature fails CLOSED
-// (mirrors the FASTAPI_URL / TORTOISE_SECRET_PEPPER fail-closed pattern).
-// NOTE: the CORS origin gate (see below) runs BEFORE this auth block:
-// browser requests from non-allowlisted origins are rejected 403 "Origin not
-// allowed" without reaching auth; server-side callers with no Origin (auth
-// hook, curl) skip the gate and hit exactly the 401/403 rules written here.
+// Anything else → 401. A missing/unverifiable token fails CLOSED (mirrors
+// the FASTAPI_URL / TORTOISE_SECRET_PEPPER fail-closed pattern).
+//
+// ⛔ The `after_user_created` auth-hook path (AUTH_HOOK_SECRET /
+// Standard-Webhooks signature) was DELETED by #1120. `after_user_created` is
+// not a supported Supabase auth hook: the docs list Before User Created,
+// Custom Access Token, Send SMS, Send Email, MFA Verification Attempt and
+// Password Verification Attempt, and nothing that fires AFTER a user row is
+// created. #839's "Error invoking hook" 500 was a platform-capability gap,
+// not the configuration gap #802 assumed, so the path could never be
+// re-enabled once #832 removed its secret.
 
 import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
-import { Webhook } from "https://esm.sh/standardwebhooks@1.0.0";
 import { lookupHash } from "../_shared/lookup.ts";
 
-// Supabase Auth hook payload: { metadata: {...}, user: { id, email, user_metadata, ... } }
-// Also tolerates a direct { user_id, email, display_name } payload for manual testing.
-interface HookPayload {
-  metadata?: Record<string, unknown>;
+// Provisioning payload: the Supabase-user shape `{ user: { id, email,
+// user_metadata } }` the BFF forwards, plus the flat `{ user_id, email,
+// display_name }` form kept for manual server-side testing.
+interface ProvisionPayload {
   user?: {
     id: string;
     email: string;
@@ -56,7 +59,7 @@ interface HookPayload {
   org_name?: string;
 }
 
-// Caller identity established by authentication (hook signature or JWT).
+// Caller identity established by the verified user JWT (#802).
 interface CallerIdentity {
   id: string;
   email: string;
@@ -70,66 +73,25 @@ interface ProvisionResponse {
   graph_name: string;
 }
 
-// Env var holding the after_user_created hook secret (v1,whsec_...).
-// Set via: supabase secrets set --project-ref ybetwichurajbfswfeqa \
-//   AUTH_HOOK_SECRET='v1,whsec_...'   (value from Dashboard → Auth → Hooks)
-const AUTH_HOOK_SECRET_ENV = "AUTH_HOOK_SECRET";
+// ── NO CORS SURFACE (#1120) ─────────────────────────────────────────────
+// This function used to answer a CORS preflight and carry an origin
+// allowlist, because the welcome page called it DIRECTLY from the browser
+// (#527/#802, production incident 2026-08-13 / #1111). That caller no longer
+// exists: welcome.html's provisioning pipeline is dead (#1566) and the
+// dashboard reaches this function through the same-origin BFF, which STRIPS
+// `Origin` before forwarding (`STRIP_REQUEST` in
+// website/apps/dashboard/functions/api/provision.ts). So the allowlist, the
+// preflight branch and every `Access-Control-*` header are GONE — #1120's
+// target is zero CORS surface, i.e. no preflight to answer and no origin
+// list to maintain. Do not reintroduce one: a browser caller is refused 403
+// below, so a cross-origin client could never be a legitimate caller.
 
-// ── CORS / origin allowlist ─────────────────────────────────────────────
-// The welcome page (website/apps/dashboard/public/welcome.html) calls this function DIRECTLY from
-// the browser via the JWT path (#527/#802): fetch(PROVISION_URL, { method:
-// "POST", headers: { Authorization: Bearer <jwt>, Content-Type: json } }).
-// A non-simple Content-Type forces a CORS preflight (OPTIONS), so without
-// CORS headers the browser blocks EVERY signup with "No
-// 'Access-Control-Allow-Origin' header" (production incident 2026-08-13).
-//
-// ALLOWED_ORIGINS + ORIGIN_SUFFIXES are kept identical to the other declaring
-// functions — deck-view, tenant-provision, waitlist-subscribe (parity test:
-// tests/test_provisioning_edge_function.py — change every declaring function
-// together). LOCAL_ORIGINS handling deliberately DIVERGES: tenant-provision
-// accepts ANY localhost/127.0.0.1 port because welcome.html's `isLocal`
-// treats every local port as local (wrangler --port, python http.server...),
-// while waitlist keeps a fixed 8788. Accepting any local port is safe: minting
-// still requires the caller's OWN valid JWT + identity match (#802), and a
-// local attacker page cannot read another local origin's storage to obtain it.
-//
-// The after_user_created auth-hook path (Path 2) is currently INERT in
-// production: #832 (2026-08-10) removed AUTH_HOOK_SECRET from Supabase
-// secrets, so Path 2 fails CLOSED (401) — the JWT path is the only live
-// consumer. The CORS gate treats a MISSING Origin as allowed (server-side
-// callers: auth hook, curl, tests), and the literal Origin: "null" sent by
-// sandboxed iframes is NOT allowlisted → 403 fail-closed.
-const ALLOWED_ORIGINS = [
-  "https://premiselabs.co",
-  "https://tortoise.premiselabs.co",
-  "https://app.premiselabs.co",
-  "https://premise-labs.pages.dev",
-];
-const ORIGIN_SUFFIXES = [".premise-labs.pages.dev"];
-// Any-port localhost/127.0.0.1 (see divergence note above).
-const LOCAL_ORIGIN_RE = /^http:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/;
-
-function originAllowed(origin: string | null): string | null {
-  if (!origin) return null; // no Origin (auth hook, curl, server-side) → treated as allowed
-  if (ALLOWED_ORIGINS.includes(origin) || LOCAL_ORIGIN_RE.test(origin)) return origin;
-  for (const suffix of ORIGIN_SUFFIXES) {
-    if (origin.endsWith(suffix)) return origin;
-  }
-  return null;
-}
-
-// Single response helper — ACAO + Vary: Origin on EVERY path so the browser
-// can read success AND error bodies from allowlisted origins. Never echo an
-// un-allowlisted request origin back (would grant CORS to arbitrary sites);
-// server-side callers with no Origin get the first allowlisted origin. Note:
-// a 403 to a NON-allowlisted origin is intentionally NOT browser-readable
-// (ACAO is the static fallback) — the browser surfaces it as a CORS error,
-// and the deny branches log the origin server-side for diagnosis.
-function json(body: unknown, status: number, corsOrigin: string | null): Response {
-  const headers: Record<string, string> = { "Content-Type": "application/json" };
-  headers["Access-Control-Allow-Origin"] = corsOrigin ?? ALLOWED_ORIGINS[0];
-  headers["Vary"] = "Origin";
-  return new Response(JSON.stringify(body), { status, headers });
+/** Every response goes through here — JSON, and nothing else. No CORS. */
+function json(body: unknown, status: number): Response {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 /**
@@ -137,10 +99,9 @@ function json(body: unknown, status: number, corsOrigin: string | null): Respons
  * when the request cannot be authenticated (→ the handler answers 401).
  */
 async function authenticateCaller(
-  req: Request,
-  rawBody: string
+  req: Request
 ): Promise<CallerIdentity | null> {
-  // ── Path 1: user JWT (direct callers) ────────────────────────────────
+  // ── The only path: a user JWT (minted server-side by the dashboard BFF) ──
   // Verify the token against Supabase Auth. The identity match against the
   // provisioning target is enforced by the caller (see handler) so user A
   // cannot mint orgs/keys for user B.
@@ -164,105 +125,81 @@ async function authenticateCaller(
     };
   }
 
-  // ── Path 2: Supabase Auth hook (after_user_created) ─────────────────
-  // GoTrue signs the raw body with the hook secret (Standard Webhooks:
-  // webhook-id / webhook-timestamp / webhook-signature headers). Fail
-  // CLOSED while the secret is unprovisioned so the function can never
-  // fall back to trusting unsigned requests.
-  const hookSecret = Deno.env.get(AUTH_HOOK_SECRET_ENV);
-  if (!hookSecret) {
-    console.error(
-      "tenant-provision: AUTH_HOOK_SECRET is not set (#802). Configure the " +
-        "after_user_created hook secret (Dashboard → Authentication → Hooks) " +
-        "and run: supabase secrets set --project-ref ybetwichurajbfswfeqa " +
-        "AUTH_HOOK_SECRET='v1,whsec_...'"
-    );
-    return null;
-  }
-  try {
-    const webhook = new Webhook(hookSecret.replace(/^v1,whsec_/, ""));
-    // Headers → plain object (webhook-signature / webhook-id / webhook-timestamp).
-    const headers: Record<string, string> = {};
-    req.headers.forEach((v, k) => { headers[k] = v; });
-    const payload = webhook.verify(rawBody, headers) as HookPayload;
-    const user = payload.user;
-    if (!user?.id || !user.email) return null;
-    return {
-      id: user.id,
-      email: user.email,
-      display_name: user.user_metadata?.display_name,
-    };
-  } catch (err) {
-    console.error("tenant-provision: hook signature verification failed:", err);
-    return null;
-  }
+  // No Authorization header at all, or a non-Bearer scheme: unauthenticated.
+  return null;
 }
 
 Deno.serve(async (req: Request) => {
-  const corsOrigin = originAllowed(req.headers.get("origin"));
   const requestOrigin = req.headers.get("origin");
 
-  // CORS preflight — respond BEFORE the method gate so the browser's
-  // OPTIONS probe succeeds (a 405 on preflight blocks the POST too).
-  if (req.method === "OPTIONS") {
-    if (requestOrigin && !originAllowed(requestOrigin)) {
-      console.error("tenant-provision: rejected origin not in allowlist:", requestOrigin);
-      return json({ error: "Origin not allowed" }, 403, corsOrigin);
-    }
-    return new Response(null, {
-      status: 204,
-      headers: {
-        "Access-Control-Allow-Origin": corsOrigin ?? ALLOWED_ORIGINS[0],
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "authorization, content-type",
-        "Access-Control-Max-Age": "600",
-        "Vary": "Origin",
-      },
-    });
-  }
-
-  // Only accept POST (Supabase Auth webhooks / welcome-page JWT calls)
+  // Method gate FIRST, and the only thing an OPTIONS probe ever gets: a plain
+  // 405 with no `Access-Control-*` header anywhere, so a browser's CORS
+  // preflight cannot succeed and the POST behind it never leaves the browser
+  // (#1120 — zero CORS surface, nothing to answer a preflight with).
+  //
+  // ⛔ LOG THE REFUSAL HERE TOO. A browser client must send `Authorization` +
+  // `Content-Type: application/json` (both non-safelisted), so it PREFLIGHTS
+  // first — and the preflight is answered by THIS branch, never reaching the
+  // origin gate below. Without this line the monitor's
+  // `refused a browser-origin call` count (tenant-provision-monitor.yml) can
+  // never fire for the class it watches (#1120 review F2): a client regressing
+  // to a page-based call would produce zero log lines, and the #1110 shape — a
+  // user discovers it — would be restored. An origin-less wrong-method call
+  // (curl, a scanner on GET) stays unlogged, so it cannot page anyone.
   if (req.method !== "POST") {
-    return json({ error: "Method not allowed" }, 405, corsOrigin);
+    if (requestOrigin) {
+      console.error(
+        "tenant-provision: refused a browser-origin call:",
+        requestOrigin,
+        req.method
+      );
+    }
+    const res = json({ error: "Method not allowed" }, 405);
+    res.headers.set("Allow", "POST");
+    return res;
   }
 
-  // Origin gate (browser requests carry Origin; auth hooks/curl omit it)
-  if (requestOrigin && !originAllowed(requestOrigin)) {
-    console.error("tenant-provision: rejected origin not in allowlist:", requestOrigin);
-    return json({ error: "Origin not allowed" }, 403, corsOrigin);
+  // SERVER-ONLY invariant (#1120): a browser call carries an `Origin` header;
+  // the dashboard BFF calls this server-side and strips it. Refusing an
+  // origin-bearing request keeps "no browser caller" a property of the
+  // endpoint rather than of the (now deleted) CORS headers — and it fails
+  // CLOSED if a future client tries to call this from a page.
+  if (requestOrigin) {
+    console.error("tenant-provision: refused a browser-origin call:", requestOrigin);
+    return json({ error: "Forbidden: this endpoint is server-only" }, 403);
   }
 
   try {
-    // Read the RAW body first — the hook signature covers the raw bytes,
-    // so the body must be verified before it is parsed/re-serialized.
+    // Read the RAW body first — the identity match below is decided on the
+    // payload as sent, exactly as the caller serialized it.
     const rawBody = await req.text();
 
-    // Caller auth (#802): signed auth-hook request OR user JWT matching
-    // the provisioning target. The public anon key is NOT sufficient.
-    const caller = await authenticateCaller(req, rawBody);
+    // Caller auth (#802): a user JWT matching the provisioning target. The
+    // public anon key is NOT sufficient.
+    const caller = await authenticateCaller(req);
     if (!caller) {
       return json(
         {
           error:
-            "Unauthorized: expected a signed Supabase auth-hook request or " +
-            "a user JWT matching the provisioning target",
+            "Unauthorized: a user JWT matching the provisioning target is " +
+            "required",
         },
-        401, corsOrigin
+        401
       );
     }
 
-    let body: HookPayload;
+    let body: ProvisionPayload;
     try {
-      body = JSON.parse(rawBody) as HookPayload;
+      body = JSON.parse(rawBody) as ProvisionPayload;
     } catch {
-      return json({ error: "invalid JSON body" }, 400, corsOrigin);
+      return json({ error: "invalid JSON body" }, 400);
     }
 
     // Post-parse type guard (code-review P2, PR #1111 — ports waitlist's
     // #723 fix): JSON.parse("null") → null and type-confused fields
-    // ({user_id: 123}) must answer a clean 400 with CORS, never throw into
-    // the outer catch (500). The caller is already authenticated at this
-    // point, so this is robustness, not security.
+    // ({user_id: 123}) must answer a clean 400, never throw into the outer
+    // catch (500). The caller is already authenticated at this point, so this
+    // is robustness, not security.
     const isObject = (v: unknown): v is Record<string, unknown> =>
       typeof v === "object" && v !== null;
     const isStr = (v: unknown): v is string => typeof v === "string";
@@ -279,12 +216,11 @@ Deno.serve(async (req: Request) => {
       (parsedObj.display_name === undefined || isStr(parsedObj.display_name)) &&
       (parsedObj.org_name === undefined || isStr(parsedObj.org_name));
     if (!bodyOk) {
-      return json({ error: "invalid JSON body" }, 400, corsOrigin);
+      return json({ error: "invalid JSON body" }, 400);
     }
-    body = parsed as HookPayload;
+    body = parsed as ProvisionPayload;
 
-    // The provisioning target must BE the authenticated caller. A signed
-    // hook payload only ever names the user GoTrue just created, and a JWT
+    // The provisioning target must BE the authenticated caller. The JWT
     // caller may only provision for themselves — user A cannot mint orgs
     // or API keys for user B (#802).
     const targetId = (body.user?.id || body.user_id || "").toLowerCase();
@@ -301,7 +237,7 @@ Deno.serve(async (req: Request) => {
             "Forbidden: provisioning target does not match the " +
             "authenticated caller",
         },
-        403, corsOrigin
+        403
       );
     }
 
@@ -324,7 +260,7 @@ Deno.serve(async (req: Request) => {
     // FalkorDB namespaces when called manually with a malformed payload).
     const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
     if (!UUID_RE.test(user_id)) {
-      return json({ error: "invalid user_id format" }, 400, corsOrigin);
+      return json({ error: "invalid user_id format" }, 400);
     }
 
     // Generate the org name from the wizard-typed name (#2323 Option B: name-first
@@ -355,8 +291,8 @@ Deno.serve(async (req: Request) => {
     }
 
     // Generate a DETERMINISTIC org_id per user — SHA-256(user_id) truncated
-    // to 26 hex chars. Retries (hook redelivery after a lost response, or a
-    // direct-JWT re-invocation) must be true same-payload retries: a fresh
+    // to 26 hex chars. Retries (a re-invocation after a lost response, or a
+    // direct-JWT re-run) must be true same-payload retries: a fresh
     // random id on every call would let provision_team's step-3 INSERT create
     // a SECOND org + membership + api_keys row (code-review P2, PR #847 —
     // the old update_user_team placeholder-only UPDATE could never duplicate,
@@ -384,10 +320,19 @@ Deno.serve(async (req: Request) => {
       // localhost:8000 was the old default — it points at the edge
       // function's own container and threw uncaught (500 "Error invoking
       // hook"). Fail with a clear, diagnosable error instead (dogfood 2026-08-08).
-      console.error("tenant-provision: FASTAPI_URL is not set in Supabase secrets");
+      // Log the SAME marker the monitor greps (`Provisioning misconfigured`).
+      // It used to live only in the response body below, which `function_logs`
+      // never stores — so THAT NEEDLE could never match, however often this
+      // condition happened. The incident still fired, but off the monitor's
+      // `FASTAPI_URL is not set` needle (the line this branch used to log at
+      // error), which names the SYMPTOM rather than the condition. The
+      // operator-visible text and the greped text are now one string.
+      console.error(
+        "tenant-provision: Provisioning misconfigured — FASTAPI_URL is not set in Supabase secrets"
+      );
       return json(
         { error: "Provisioning misconfigured (FASTAPI_URL missing). Please contact support." },
-        500, corsOrigin
+        500
       );
     }
     const fastApiKey = Deno.env.get("FASTAPI_INTERNAL_KEY") || "";
@@ -490,7 +435,7 @@ Deno.serve(async (req: Request) => {
       p_identity: null,
       p_org_id: orgId,
       p_org_name: safeName,
-      p_api_key: apiKey, // plaintext — shown once on welcome page, then nulled
+      p_api_key: apiKey, // plaintext — handed back once, then nulled
       p_key_hash: keyHash,
       p_lookup_hash: lookupHashHex,
       p_graph_name: `org_${orgId}`,
@@ -502,7 +447,53 @@ Deno.serve(async (req: Request) => {
         "provision_team failed for " + safeName + ":",
         provisionError
       );
-      return json({ error: "Provisioning failed. Please try again." }, 502, corsOrigin);
+      // ── #1981: the one-free-org entitlement refusal is TERMINAL ──────────
+      // The RPC's DB-level backstop (migration 20261108000001) raises
+      // `one_free_org_limit:<org_id>` when this person ALREADY OWNS a free
+      // organization. Answering it with 502 + "Please try again" puts a rule
+      // the product enforces behind the one status a client is entitled to
+      // retry, and retrying can never succeed: the condition is the user's
+      // EXISTING org, not a transient fault. This branch makes the refusal
+      // distinguishable on the wire — 402 plus the machine-readable payload
+      // `_one_free_org_detail` builds (#2789).
+      //
+      // ⛔ RESIDUAL, stated so this is NOT read as delivered (#11604). No client
+      // reads it yet: the live consumer is a JWT call from `POST /api/provision`
+      // (the `after_user_created` auth-hook path was DELETED by #1120, which also
+      // removed the origin allowlist — this function is server-only now), and the
+      // dashboard's `provisionInApp` retries any
+      // non-ok once and renders "Could not create your organization — try
+      // again." without parsing the body. The envelope does not match the
+      // reader either: this function's errors are FLAT (`{error: ...}` here,
+      // `{code, ...}` below) while the dashboard's coded-detail reader lifts
+      // `body.detail.code` and every Python lane wraps in `detail`. What this
+      // branch buys is that the wire no longer reports a terminal refusal as a
+      // retryable one — a prerequisite for that client fix, not a substitute
+      // for it.
+      //
+      // The payload's inner dict matches the Python lanes, contact sentence
+      // included: `_one_free_org_detail` builds the message through
+      // `tortoise/quota.py::with_limit_contact` (#5425), so the literal below
+      // is read from Python by the test rather than restated from memory —
+      // `tests/test_provisioning_edge_function.py::test_entitlement_refusal_is_mapped_to_the_product_402`
+      // reddens on drift in the marker, the code, the message or the status, and
+      // a behavioural twin in `tests/test_tenant_provision_server_only.mjs` drives
+      // the REAL handler and would red if this branch became unreachable.
+      const provisionMessage = String(provisionError.message ?? "");
+      const marker = "one_free_org_limit:";
+      const markerAt = provisionMessage.indexOf(marker);
+      if (markerAt >= 0) {
+        const blockingOrgId = provisionMessage
+          .slice(markerAt + marker.length)
+          .trim()
+          .split(/\s/)[0] || null;
+        return json({
+          code: "one_free_org_limit",
+          message: "You can only have one free organization. Need more? Contact support@premiselabs.co.",
+          org_id: blockingOrgId,
+        }, 402);
+      }
+      return json({ error: "Provisioning failed. Please try again." }, 502);
     }
 
     // ── #2360: REAL starter seed (supersedes the demo auto-seed) ──────
@@ -519,10 +510,10 @@ Deno.serve(async (req: Request) => {
     // seed completes the person anchor with a user-confirmed name when no
     // display name exists). Never touches the control_plane registry graph
     // (E2E-1: zero registry writes). AbortSignal.timeout bounds the await so
-    // a slow seed can never blow the hook deadline mid-retry (code-review
-    // P2, PR #847 — the RPC has already committed at this point; the hook
-    // redelivers the whole request, and deterministic org_id makes that a
-    // harmless no-op).
+    // a slow seed can never blow the caller's request budget mid-retry
+    // (code-review P2, PR #847 — the RPC has already committed at this
+    // point; a retried request is a same-payload retry, and deterministic
+    // org_id makes that a harmless no-op).
     // #1860 (P3-1): bind the response — a non-2xx body used to resolve
     // "successfully" (the old .catch() only handled transport/abort), so a
     // failed seed left the first-timer's graph silently missing starter
@@ -576,11 +567,11 @@ Deno.serve(async (req: Request) => {
       graph_name: `org_${orgId}`,
     };
 
-    return json(response, 201, corsOrigin);
+    return json(response, 201);
 
   } catch (err) {
     console.error("tenant-provision error:", err);
-    return json({ error: "Internal server error" }, 500, corsOrigin);
+    return json({ error: "Internal server error" }, 500);
   }
 });
 

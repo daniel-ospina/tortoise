@@ -169,6 +169,15 @@ and a rotation that updates only Fly is silently reverted by the next deploy** �
 including a routine push to `main`. Update the GitHub secret first; the Fly
 commands below then apply that same value without waiting for a deploy.
 
+⛔ **Except a name recorded in the mitigation ledger (#11122)** —
+`.github/scripts/fly-secret-mitigations.txt`, which declares secrets that are
+**deliberately ABSENT**. The sync step drops those names from the payload, so the
+deploy neither re-stages nor rotates them, and `flyctl secrets set` on Fly is the
+only thing that changes them. That is the point (a mitigation an operator removed
+must survive the next deploy) and it is also the hazard: **while an entry is in
+force, a GitHub rotation of that name does NOT reach the app.** §8.1's ledger
+subsection is the contract; to restore one, delete the entry.
+
 The scope is the `gh-secret:` token, not "every declared name". The manifest's
 other source tokens are deliberate, not gaps, and a rotation must **not**
 "tidy" one of them into GitHub (the manifest header defines each token; §8.3 is
@@ -741,6 +750,108 @@ with the data-plane probe wedged past the budget, so a handler that inherits the
 stall (the #2924 shape) reds. It complements
 `tests/test_health_ready_nonblocking.py`, which pins nonblocking *structure*
 in-process and names no client-visible budget.
+
+### 4.1.1 The read path's own signal — `wait_bound_breaches` (#10602)
+
+**Symptom this exists for.** `status: "ok"` and `db.ok: true` while the core
+read path fails. Measured on 2026-11-02T15:44Z: `tortoise_health` answered `ok`
+with `db.latency_ms` 3,030 – 6,080 ms while **6/6** single-agent
+`tortoise_search` calls were refused
+
+```text
+HTTP 504  {"error":{"code":-32009,"message":"The server's wait budget for this
+           request was exceeded before a response was ready. …",
+           "data":{"retry_after":10}}}
+```
+
+`status` is **not** the field that reports this, and that is a recorded decision
+rather than an oversight: `degraded` is tied to an observed *failure*, never to a
+latency reading, so a slow-but-reachable store must not flip it. Do not "fix" the
+miss by deriving `status` from latency — that reverses the decision.
+
+⚠️ What `degraded` folds differs by surface, and reading this section as if it
+did not is how an operator debugs the wrong thing:
+
+- on the MCP health report (`monitoring.metrics`) it is the data-plane probe
+alone;
+- on the hosted `/health` body this section's `curl` reads, `status` is `ok`
+only when `db.ok` **and** `backup_watcher.ok` **and** `record.ok` are all true
+(`tortoise/hosted_api.py`'s `health()`; the `record` counters' own section states
+the `record.ok` leg, and §4.1 states which fields the body carries — it
+deliberately does not restate the `status` rule, so this is the place it is
+written down). So `degraded` with
+`db.ok: true` there means the backup watcher or the `record` leg — not the probe.
+
+The `wait_bound_breaches` counter below feeds **neither**: it is additive, and it
+never rewrites `status` on either surface.
+
+**Read this field instead.** The health body carries
+
+```json
+"wait_bound_breaches": {"total": 0, "by_surface": {"mcp": 0, "rest": 0}, "error": null}
+```
+
+cumulative since process start, incremented on every wait-bound refusal — the
+`-32009` JSON-RPC body on the MCP surface, the `{"detail"}` 504 on the REST one.
+On a **successful** read both surface keys are present, at `0`, so a measured
+zero is distinguishable from a build that cannot see breaches at all.
+
+`error` is `null` when the read succeeded and names the reason when it did not.
+A failed read is **not** zeroed: `total` and `by_surface` are both `null` in that
+case, because a failed read reported as `0` would be the same false reassurance
+as an absent key — the None-not-zero rule this same body already applies to its
+`record` counters (#9548 review P2). **Check `error` before trusting a `0`:** a
+`total`-keyed alert rule sees `null` (not `0`) while the family is unreadable.
+
+```bash
+# CUMULATIVE since this process started — not a rate, not a current state.
+curl -sS https://api.premiselabs.co/health | jq '.wait_bound_breaches'
+```
+
+Three properties of this number, because a counter misread as a gauge is its own
+false reassurance:
+
+- **Cumulative, not a rate.** A non-zero `total` means "breached since boot", not
+  "breaching now". It resets to `0` on every deploy. Sample twice to get a rate.
+- **Per process and per machine.** Every Fly machine keeps its own; a `0` from
+  one `curl` is not a fleet-wide `0`. Read **each machine** over SSH against the
+  app's own port — there is **no `/metrics` route on the hosted app** (§6.9
+  item 2 below says the same thing about the 9090 listener: `/healthz` only,
+  404 for everything else, and `serve_health` is not a `fly.toml` process):
+
+  ```bash
+  fly ssh console -a tortoise-y4mjjq -C "curl -s localhost:8000/health" | jq .wait_bound_breaches
+  ```
+
+  `jq` runs on YOUR side of the quote on purpose — the hosted image carries
+  `curl` but no `jq` (§6.0's rule: probe with what the image has, parse on the
+  operator's side; §6.9 item 2 is the same trap for `ss`).
+- **Attributed by SURFACE, not by arm.** `mcp` covers everything under `/mcp`,
+  including the pre-SSE stall the transport refuses with the JSON-RPC `-32009`
+  body — which is the shape `#10602` recorded. So a recurrence of *this* P0
+  shows up as `mcp`, never as `rest`.
+
+The same field is on the MCP health tool (`tortoise_health`, or
+`tortoise_overview(section="health")`) — the surface `#10602` itself was
+measured on — and in `monitoring.serve_health`'s **`/health`** body.
+
+⛔ Do not go looking for this JSON shape on `serve_health`'s **`/metrics`**: that
+endpoint is the Prometheus exposition (`generate_latest`), not the health report.
+It carries the family `tortoise_wait_bound_breaches_total{surface="mcp"|"rest"}`,
+with both children declared at import so a scrape never reads "absent" — but it
+has **no** `total`, `by_surface` or `error` member, so the "check `error` before
+trusting a `0`" rule above has no carrier there, and a failed in-process read is
+not expressible on that surface. Read `/health` for the abstention; read
+`/metrics` for the scrape **series** — `rate()` across two scrapes gives the
+rate, but ONE sample is still a since-boot total, the same misread the bullet
+above forbids for this field.
+
+**What its absence used to cost.** Breaches were emitted to exactly one place —
+a best-effort external analytics write, swallowed at `debug` on failure — so
+finding this P0 required an agent to hand-measure six sequential calls. A
+non-zero `total` with a healthy `db.ok` means the store is too slow for the
+bound, not unreachable: the refusal is legible, the work may still complete, and
+the fix is capacity or a narrower query, never a retry loop.
 
 ### 4.2 Billing mirror drift — verify and repair an under-delivered plan (#8878)
 
@@ -1330,7 +1441,7 @@ The flap only became an outage because of three independent defects:
 
 | # | Defect | Status |
 |---|---|---|
-| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` are true; read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok`. `change_feed` (#9208) reports how many graphs' event feeds are DEGRADED in this process (`{degraded, feeds, stages}` — counts only, no graph names, because the endpoint is unauthenticated), which is the ONLY view of that state from outside: it is process memory whose acknowledgement is a Python call (`event_store.clear_degraded`) inside the process, so a 503 on `GET /v1/events` with `change_feed.degraded: true` on this worker means clear it there or restart that worker. It deliberately does **not** fold into `status` — folding it would restart-loop the worker holding the only acknowledgement path |
+| 1 | `path = "/health"` was coupled to a downstream — process liveness inherited every DB/probe stall | **mitigated in the app** — `hosted_api.health` (`@app.get("/health")`) returns 200 unconditionally with `status` = `ok`/`degraded`; DB truth lives in `/health/ready` (`hosted_api.health_ready`). `status` is `ok` only when `db.ok` **and** `backup_watcher.ok` **and** `record.ok` are all true (the three-term rule and its rationale: §4.1.1); read `backup_watcher.state` for which: `running` and `disabled` are `ok` (`disabled` = no sweep config, or `BACKUP_WATCHER_DISABLED=1`), while `stopped` (started, thread gone), `failed` (wanted, the start raised — `backup_watcher.error` carries it) and `unknown` (metadata unreadable) are not. Before this, a watcher that never started was invisible on `/health` while the process served normally (#2851/#2922: ~31 days). `backup_watcher.expected` rides every state and is what disambiguates `disabled`: `true` = this boot intended to run the watcher (it is a host where backups were supposed to be on — the hosted-boot marker), `false` = the non-hosted/TestClient default. It is a reader's disambiguation and does **not** affect `status`/`ok`. `change_feed` (#9208) reports how many graphs' event feeds are DEGRADED in this process (`{degraded, feeds, stages}` — counts only, no graph names, because the endpoint is unauthenticated), which is the ONLY view of that state from outside: it is process memory whose acknowledgement is a Python call (`event_store.clear_degraded`) inside the process, so a 503 on `GET /v1/events` with `change_feed.degraded: true` on this worker means clear it there or restart that worker. It deliberately does **not** fold into `status` — folding it would restart-loop the worker holding the only acknowledgement path |
 | 2 | Routing was decided by an **HTTP** service check, so any application-level latency (probe latency, event-loop queueing) could de-register the only machine | **fixed in config** — `[[services.tcp_checks]]` is kernel-served, so it is not starved by event-loop/thread-pool scheduling and a slow/starved app no longer de-registers the machine (§6.4); the application-level liveness signal is the now-**live** non-routing `[checks.loop_liveness]` check (§6.0/§6.4), which cannot affect routing |
 | 3 | One machine + an implicit, undeclared lifecycle policy | policy now explicit (§6.2); machine redundancy **blocked** (§6.3) |
 
@@ -1572,6 +1683,106 @@ A first failure at ≈60 s ⇒ the clamp is real; ≈`grace_period` s (or no fai
 before grace expires) ⇒ no clamp. `fly config show` only echoes the local
 config and cannot answer this. Nobody has run this test yet — it is listed in
 §6.9.
+
+#### 6.4.2 A check that can only pass by BEING SERVED — `/liveness` (#10892)
+
+The two checks in §6.4 are **liveness-shaped**: the TCP check's handshake is
+served by the kernel, and `9090 /healthz` answers from **state the loop last
+wrote**, with a verdict that errs to 200 by design. On 2026-11-04 `api.`
+was unusable for ~2 h (and again for ~6 h the same day) while **both reported
+`2 total, 2 passing`** — `loop_lag_max_ms: 483685` and `passing` in the same
+payload. Neither check can distinguish "answering" from "not answering at all",
+and nothing we RAN bounded the absence.
+
+Two halves close that, and neither is a health *reading*:
+
+1. **`GET /liveness`** (`hosted_api.liveness`) — the handler yields to the loop
+   once, then increments a per-process counter **for this request** and reports
+   the age of the PREVIOUS one, stamped on handler entry (not on delivery, so a
+   request that ran the loop and never delivered still counts). If the loop
+   cannot run, the coroutine never resumes, so there is no answer to mistake for
+   health. By construction it does no I/O of its own (one loop yield, one
+   counter increment — no DB and no network); with the loop blocked, `/health`
+   and `/liveness` both answer **nothing** inside a 5 s client budget
+   (`tests/test_10892_served_liveness.py`, which pins that shape and the
+   "handler must not become a state read" regression).
+2. **The prober that fails on absence** — `.github/workflows/availability-watchdog.yml`
+   probes it as a THIRD step with `PROBE_TIMEOUT_S='5'` (the API probe keeps its
+   generous 25 s), `PROBE_EXPECT_STATUS='200'`, its own incident label, and no
+   Fly token. `curl --max-time 5` is what turns *no answer* into a DOWN verdict
+   and a page — during the outage the app took 9–12 s to `000` from outside and
+   ~45 s to the eventual 504, so a 5 s bound alarms within one cycle. The URL is
+   in the script's production set (an unrecognised URL is a **DRILL**: `[DRILL]`-titled,
+   **never restartable** — but it still PAGES, with a `[DRILL]` label; a drill is
+   not silent, it is only non-production. Cases 88b and the e2e(l) arm pin both
+   halves) and deliberately NOT restartable — the primary API probe owns restarting the
+   machine, and a second restart arm would spend `MAX_RESTARTS_PER_HOUR` twice.
+   Pinned in BOTH directions by cases 99 (the step, its label, its production-set
+   membership and its 5 s bound), 88b (`000` → `PROD DOWN` + the machine-backed
+   prose) and 100 (`200` → UP, exit 0, no incident) of
+   `.github/scripts/availability-watchdog.test.sh`; case 101 covers the
+   `404` → `PROD DEGRADED` arm, and case 100b the `200`-with-an-INCOMPLETE-body
+   arm (a status line is not an answer).
+
+**Blind spots, stated rather than implied.** It detects a loop that cannot
+serve — and it also detects a loop that serves slower than the bound, by TWO
+mechanisms, because curl's behaviour differs by where the answer stalls:
+
+- an answer that never starts (no status line inside the bound) comes back as
+  `000` with a non-zero curl exit → `DOWN` (harness case 93);
+- an answer whose **headers** arrive inside the bound but whose **body** never
+  does comes back as a healthy `200` with a non-zero curl exit (28 timeout, 18
+  partial transfer, 56 recv error — measured: `"200 3.002614"`, `curl: (28) …
+  10 out of 40 bytes received`). `probe()` therefore grades an `UP` from the
+  status code **only when curl completed the transfer**; an incomplete transfer
+  falls through to the same `DOWN`/retry class as `000` (harness case 100b pins
+  it for both the liveness arm and the restartable API arm). Without that rule
+  a process that flushed headers and wedged mid-body would have read UP — a
+  false PASS on exactly the property this arm exists to prove.
+
+What it does NOT detect is a loop that serves slowly *within* the bound: a 4 s
+answer passes a 5 s prober. It says nothing about a deploy that never happened
+(`check-deploy-staleness.sh`), and it is not a substitute for the TCP check that
+catches a dead process. Do **not** replace it with `loop_stale_ms`: reading the
+loop's own tick to decide the loop is fine is the exact circularity that let this
+outage run unattended.
+
+> **OVERRIDES:** the industry-default liveness shape — a background heartbeat or
+> event-loop-lag gauge whose timestamp a health handler reads and reports back
+> (`loop_stale_ms` here; `toobusy-js`, `event-loop-lag` or a scheduler-lag probe
+> in comparable stacks) — this section's answer is a **served-request counter**
+> instead, because the default is the shape that failed on 2026-11-04:
+> `loop_liveness`'s predicate is `503 if (stale AND idle) else 200`, and
+> `workload_idle` is `False` for any box serving traffic, so it reported
+> `loop_lag_max_ms: 483685` and `passing` in the same payload (#10892). A guard
+> that errs to 200 whenever the box is serving cannot fail on the outage it
+> exists for, and a gauge the loop itself writes is not evidence the loop ran.
+> The marker is repeated on #10892, where a lane adopts or replaces this design.
+
+⚠️ **And, like the Pages auth arm, it never consults the egress control probe.**
+`control_ok()` runs only on the restartable path — the restart decision's own
+`if ! control_ok` guard, inside `if [ "$restart_mode" = "DOWN" ]` — because the
+disruptive action it guards — a machine restart — cannot happen on a
+disarmed arm. So a TOTAL
+runner-side egress failure pages `PROD DOWN` from THIS step instead of
+`INCONCLUSIVE`, even though nothing is wrong with the machine. See §7.8 (the
+INCONCLUSIVE bullet there is scoped to the restartable target) and #11401, which
+tracks consulting the control probe for every production arm.
+
+Operator check, one line, from anywhere:
+
+```bash
+curl -s -m 5 -w '\n%{time_total}s\n' https://api.premiselabs.co/liveness
+# {"status":"ok","served":<N>,"last_served_age_ms":<ms|null>}
+# <N> counts requests THIS PROCESS has served, so it must be a NEW number for
+# this process. It is NOT monotonic across a restart: the counter resets to 1 on
+# a redeploy/machine restart, and that reset is itself the evidence of a restart
+# (`tortoise/hosted_api.py`: "a restart starting again at 1 is itself the
+# evidence of a restart"). A SMALLER N right after a deploy is healthy, not a
+# replayed/cached body. `<ms|null>` is `null` on the FIRST answer this process
+# gives and a number from the SECOND on (the age is the pre-increment value, so
+# one served request has no previous tick to measure against).
+```
 
 ### 6.5 Cost reference (what "one machine warm" actually costs)
 
@@ -1859,12 +2070,15 @@ on a `*/5 * * * *` cron **intent** (measured delivery is ~15 min; see §7.5a).
   `*/30`) + `.github/scripts/availability-liveness.sh`, harness `bash .github/scripts/availability-liveness.test.sh`
   (the `Availability pager liveness check (#4573)` step of the same CI job). It is a separate workflow on purpose — see §7.8a.
 
-**Two production targets (#3628).** The watchdog now drives TWO surfaces, as two
-steps of the same job: the Fly API probe (§7.1a) and the Cloudflare Pages auth
-surface probe (§7.1b). They alert **independently** (the auth step runs even if
-the API step failed) and each files its **own** incident, keyed by its own host
-label — the two never share an issue. Only the Fly API target is restartable;
-the auth target is **hard-disarmed** from the restart leg (§7.4).
+**Three production targets (#3628, #10892).** The watchdog drives THREE
+surfaces, as three steps of the same job: the Fly API probe (§7.1a), the
+Cloudflare Pages auth surface probe (§7.1b) and the served-request liveness
+probe (§7.1c). They alert **independently** (each step runs even if another
+failed) and each files its **own** incident, keyed by its own host label — no
+two share an issue. Only the Fly API target is restartable; the auth target is
+**hard-disarmed** from the restart leg because it has no Fly machine (§7.4), and
+the liveness target is hard-disarmed because it IS that machine — a second
+restart arm would spend `MAX_RESTARTS_PER_HOUR` twice on one wedged machine.
 
 > **The `PROD DOWN` path has never fired; `PROD DEGRADED` fired once.**
 > `gh issue list --state all --search '"[monitor] PROD DOWN" in:title'` returns
@@ -1924,7 +2138,7 @@ The auth target's UP contract is **narrower and stronger** than the API's:
 |---|---|---|
 | `PROBE_EXPECT_STATUS` | `302` | A healthy `/auth/start` is a redirect, not a 200. The watchdog's built-in arms classify 3xx as UNEXPECTED, so **without this allow-list a healthy site would page** — the #1 way to get this wrong |
 | `PROBE_REQUIRE_HEADER` | `code_challenge_method=s256` | Proof the PKCE flow row was actually written to D1. A 302 **without** it is an *answered-but-wrong* (UNEXPECTED → `PROD DEGRADED`) verdict, not an outage — “the site is up but nobody can sign in”, the entire lesson of #3616 |
-| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Two production targets must not share one label, or they fight over a single issue |
+| `PROBE_HOST_LABEL` | `app.premiselabs.co` | The **session-bearing origin** the probe actually hits (the BFF moved here in #4054/#4104). The incident **title is built from this label** and the dedupe is an **exact-title match**, so it must agree with the host actually probed; renaming it **orphans incidents filed under the old title** (closed by hand, not auto-resolved). Production targets must not share one label, or they fight over a single issue |
 
 The allow-list replaces **only** the UP arms: `000`/`5xx` are checked **first**
 and stay **DOWN** even if listed, and any other status stays **UNEXPECTED**. A
@@ -1947,6 +2161,35 @@ restartable set; on a **DOWN** verdict the run log / incident body say
 (**DEGRADED**) verdict logs `disarmed:unexpected` — the restart leg is off the
 table either way.
 
+#### 7.1c The served-request liveness target (#10892)
+
+The third step probes `GET https://api.premiselabs.co/liveness`. It exists
+because neither Fly check could see the outage: `servicecheck-00-tcp-8000` is a
+kernel handshake (a hung app passes it) and `loop_liveness` reads the loop's own
+last tick from a listener on **another thread**, so on 2026-11-04 `api.` was
+unusable for ~2 h, and again for ~6 h the same day, while both read `passing`.
+`/health` itself cannot be answered while the loop is blocked — nothing we RAN
+bounded the **absence**.
+
+| | Value | Why |
+|---|---|---|
+| `PROBE_EXPECT_STATUS` | `200` | Healthy is `200` and nothing else: `000`/`5xx` are DOWN (checked before the list), and an answered `404`/`3xx` is UNEXPECTED → `PROD DEGRADED`, which is the honest reading for a deploy that lacks the route |
+| `PROBE_TIMEOUT_S` | `5` | **The bound IS the instrument.** The handler does no I/O of its own (one loop yield, one counter increment — no DB, no network), so 5 s cannot fire on a healthy origin while it does fire on the outage shape (measured 9–12 s to `000`, 45 s to the eventual 504). Do not widen it to the API probe's 25 s: that is the status-only probe this target replaces |
+| `PROBE_HOST_LABEL` | `api.premiselabs.co (served request)` | Own dedupe key, so a green primary probe cannot close a red liveness incident |
+| `HEARTBEAT_EMIT` | `0` | Exactly one step per job emits the rolling heartbeat (two writes seconds apart race GitHub's search index into a duplicate issue) |
+
+**Machine-backed, but never restartable.** This surface is the **same Fly
+machine** as the primary API probe, so its incident is disarmed from the restart
+leg on purpose: each probe's incident issue is its own restart ledger, and a
+second arm would let one wedged machine spend `MAX_RESTARTS_PER_HOUR` **twice**.
+`disarmed:no_machine` here therefore does **NOT** mean "no machine" — check the
+machine (`flyctl checks list`, `flyctl logs`, `flyctl machine list`) and
+cross-check the primary API incident, and do **not** go looking for a Cloudflare
+Pages deploy. The residual this bound accepts — a TRUE but duplicate DOWN page
+during a machine restart or a deploy rollout, because this arm's 35 s tolerance
+fires before the primary probe's 95 s budget — is stated under §7.8 Known
+limits.
+
 ### 7.2 How to read a failure
 
 1. **The workflow run goes RED** — that is the alert (enable GitHub Actions
@@ -1954,9 +2197,18 @@ table either way.
 2. **One GitHub issue** appears (or an existing one gets a comment):
    `[monitor] PROD DOWN — api.premiselabs.co is not answering the availability
    probe` (or `PROD DEGRADED` for the UNEXPECTED class), labelled `auto-filed`.
-   The auth target files a **separate** incident with its own host in the title
-   (`[monitor] PROD DOWN — app.premiselabs.co is not answering the
-   availability probe`). An external page (Telegram) also fires on the
+   Each of the **three** production targets files its **own** incident, titled by
+   its own host — so read the title before you conclude anything about the API:
+
+   | target | title host | what a DOWN means |
+   |---|---|---|
+   | API (default) | `api.premiselabs.co` | the API machine is not answering (§7.1a) |
+   | Pages auth | `app.premiselabs.co` | the Pages auth surface is not answering (§7.1b) |
+   | served-request liveness | `api.premiselabs.co (served request)` | the API accepts TCP but a request that must be **served** did not answer inside 5 s (§7.1c) |
+
+   ⚠️ The liveness incident is the one that fires when the API's Fly checks are
+   still green — that combination is the whole point of #10892, so do not dismiss
+   it because `/health` answers. An external page (Telegram) also fires on the
    transition when the paging secrets are set.
 3. The issue **body** is machine-managed and carries the verdict, the first
    observation time, the failing-run count, the raw probe evidence, and the
@@ -2019,7 +2271,11 @@ restart leg, and a production URL that is **not** restartable (the Pages auth
 surface — no Fly machine behind it, so a restart of the API app cannot repair a
 missing binding and would restart an unrelated service) is hard disarmed
 regardless of the failure class (`disarmed:no_machine` on a DOWN verdict,
-`disarmed:unexpected` on a DEGRADED one); (c) when the failure is
+`disarmed:unexpected` on a DEGRADED one); `no_machine` names the ARM, not the
+absence of a machine: the Pages auth target has no Fly machine, while the
+**served-request liveness** target IS the primary probe's machine and is
+disarmed so one wedged machine cannot spend the hourly restart budget twice
+(cross-check the primary incident for that one); (c) when the failure is
 one a restart cannot fix — `classify_failure()` maps curl's exit code to a
 class, and **DNS**
 (6) and **TLS/certificate** (35, 51, 58–60, 66, 77, 80, 82–83, 90–91) failures
@@ -2060,7 +2316,7 @@ Three further safeguards worth knowing:
 | Secret | Needed for | If missing |
 |---|---|---|
 | `FLY_API_TOKEN` | the automated restart of the **Fly API** target — **not** the Pages auth step, which is hard-disarmed regardless | **Already exists** (used by `deploy-hosted.yml`). If absent, the restart leg is skipped, the log says so, and the incident **body** (plus any comment that is not throttled away) names the secret — **alerting still works** |
-| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Both probe steps get them at STEP level |
+| `TELEGRAM_BOT_TOKEN` + `TELEGRAM_CHAT_ID` | transition paging (**optional**) **and** the sustained-incident escalation leg (**required once an incident is sustained**) | A transition page is skipped with a log line. A **sustained** incident's escalation is **fail-closed**: the run FAILS with `escalation REQUIRED and NOT DELIVERED`, nothing is stamped as delivered, and the incident body records `escalate_state=failed` — a broken pager is never rendered as “all clear”. Every one of the three probe steps gets them at STEP level |
 | `ESCALATION_CHAT_ID` | **optional** recipient override for the sustained-escalation leg only (restart / failed-restart / cap / INCONCLUSIVE pages keep going to `TELEGRAM_CHAT_ID`) | Defaults to `TELEGRAM_CHAT_ID`, so point it at an on-call group without moving any existing page |
 
 `GITHUB_TOKEN` is supplied by Actions and needs `issues: write` (granted in the
@@ -2086,7 +2342,7 @@ per `CAP_RENOTIFY_MINUTES` while it stays failing.
 
 | Knob | Derived default | Meaning |
 |---|---|---|
-| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — both probe steps read the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
+| `ESCALATE_ENABLED` | `1` | `0` is an operator **kill switch**: no sustained page, no stamp, logged loudly and stated in the incident body (a kill, never an “all clear”). **Wired in CI** — every probe step reads the repository variable `ESCALATE_ENABLED` (step-level, `vars.ESCALATE_ENABLED`), so the switch is usable *without editing the workflow*; an unset variable expands to empty, which is the enabled default. Only a **byte-exact** `0` disables escalation: a padded value (`" 0"`, `"0\n"`, a YAML block/folded scalar) warns and **keeps paging** |
 | `ESCALATE_SUSTAINED_MINUTES` | `3 × SUSTAINED_DOWN_MINUTES` = **30** | Wall-clock floor for the SUSTAINED page. Derived from the (normalized) sustained pair, and **clamped UP to `SUSTAINED_DOWN_MINUTES`** if set below it: the human page must never fire before the automated action it escalates. (The clamp floor is the restart gate, not the derived 30 — an explicit value in `[SUSTAINED_DOWN_MINUTES, 30)` is honoured). **Not wired in CI** — a script default; to override it (or `ESCALATE_MIN_RUNS`) in CI you must add it to the probe step's `env:` (same caveat as `.env.example`) |
 | `ESCALATE_MIN_RUNS` | `SUSTAINED_MIN_RUNS + 1` = **3** | Observed failing runs. One bad probe satisfies neither leg. **Not wired in CI** — a script default, overridable only by adding it to the probe step's `env:` |
 | `CAP_RENOTIFY_MINUTES` (shared) | `60` | For this leg: the minimum gap between a **confirmed** human page and the next sustained page, **and** the reminder interval while an incident stays failing — so this leg cannot re-page inside a window a confirmed page already covered. **One-directional, and not “of any kind”:** the pre-existing `cap` / `INCONCLUSIVE` re-notify gates still throttle on their own `cap_notified_ts` **attempt** stamp, which a failed send also consumes — that divergence is #4575 |
@@ -2157,9 +2413,11 @@ in §7.8a (#4573), on a channel independent of this leg's Telegram page.
 The watchdog stops after `MAX_RESTARTS_PER_HOUR` and asks for a human — treat
 that as “this is not a wedged process”. Four disarm reasons also land here
 without the cap being reached, and all are named in the incident body and the
-run log: **`disarmed:no_machine`** (a production surface with no Fly machine —
-the Pages auth target on a **DOWN** verdict: repair the binding/route, there is
-nothing to restart; the same target logs `disarmed:unexpected` on a DEGRADED
+run log: **`disarmed:no_machine`** (a production surface whose restart leg is
+disarmed — the **Pages auth** target on a **DOWN** verdict, where the repair is
+the binding/route and there is nothing to restart, and the **served-request
+liveness** target, which IS the primary probe's Fly machine: check the machine
+and cross-check the primary incident, not a Pages deploy; the same target logs `disarmed:unexpected` on a DEGRADED
 verdict, because a restart is off the table before the no-machine guard is even
 reached),
 **`disarmed:unfixable`** (a DNS or TLS/certificate failure — repair the
@@ -2233,14 +2491,26 @@ machinery (§7, §7.7). Two consequences:
    `is_prod` set would make every production run a silent drill (no PROD page),
    and nothing in the live path would tell you — the drill is where you notice.
 2. **Widening the production set must not let a drill arm self-heal.** The set
-   (`PROD_PROBE_URLS`) and the restartable set (`RESTARTABLE_PROBE_URLS`) are
-   separate; only exact members of the production set are PROD, and only exact
-   members of the restartable set may restart. An unrecognised URL stays a
+   (`PROD_PROBE_URLS`), the restartable set (`RESTARTABLE_PROBE_URLS`) and the
+   machine-backed set (`FLY_MACHINE_PROBE_URLS`) are three SEPARATE sets; only
+   exact members of the production set are PROD, and only exact members of the
+   restartable set may restart. An unrecognised URL stays a
    DRILL with self-heal disarmed — never add a flag, never loosen this to a
    prefix/wildcard match, and never let a drill URL appear in either set.
+   ⛔ **`FLY_MACHINE_PROBE_URLS` must be kept in step with `PROD_PROBE_URLS`.**
+   It decides whether an incident body says "served by Cloudflare Pages" or
+   "served by the same Fly machine". The ONLY production target it may omit is
+   the auth probe (`/auth/start`, served by Pages); every other production
+   target is machine-backed and must be listed. Omitting one does not degrade to
+   a cautious message — the body then positively claims there is no Fly machine
+   and sends on-call to check a Pages deploy during a machine outage, which is
+   the #10892 misdirection itself.
 
-**Both targets are probed on every run**, drills included: the auth step always
-uses its production URL and is hard-disarmed from the restart leg. Note the auth
+**All three targets are probed on every run**, drills included: the auth and
+liveness steps always use their production URLs and are hard-disarmed from the
+restart leg — the auth one because it has no Fly machine behind it, the
+liveness one because it IS that machine and a second restart arm would spend
+`MAX_RESTARTS_PER_HOUR` twice on one wedged machine (§6.4.2). Note the auth
 probe is **not** side-effect-free — asserting the PKCE header means the GET must
 reach `/auth/start`, which **writes an `auth_flows` row** (one per run). That row
 used to leak: the table's only deletion paths ran on flow *completion*, which an
@@ -2352,15 +2622,36 @@ tracked as **#5798**.
 
 ### 7.8 Known limits
 
-- **Two probes, still narrow.** The API probe checks ONE route
+- **Three probes, still narrow.** The API probe checks ONE route
   (`/v1/organizations`) and only its no-auth branch; the auth probe checks ONE
-  route (`/auth/start`) and asserts 302 + the PKCE header. An outage that leaves
-  either route answering as expected while other routes fail reads as UP
-  (green) — and so does an auth-leg break that rejects every *real* token (the
-  probe sends none). Together they cover the two paths where a silent outage is
-  worst, not the whole surface.
+  route (`/auth/start`) and asserts 302 + the PKCE header; the liveness probe
+  checks ONE route (`/liveness`) and asserts only that a request which does no
+  I/O of its own returns `200` inside 5 s. An outage that leaves a probed route
+  answering as expected while other routes fail reads as UP (green) — and so
+  does an auth-leg break that rejects every *real* token (the probe sends none).
+  Together they cover the paths where a silent outage is worst, not the whole
+  surface.
+- **The liveness arm's 35 s tolerance can file a TRUE but DUPLICATE page**
+  during a machine restart (`fly.toml` `kill_timeout = 30` plus a cold boot) or
+  a ~85 s deploy rollout (§6, cold boot): the primary API probe runs first and
+  owns both, and its 95 s budget absorbs them while this arm's 3×5 s + 2×10 s =
+  35 s does not, so it pages for a window in which nothing is serving. Left in on
+  purpose — the alternative, a longer bound here, is exactly the status-only
+  probe with a generous timeout this target replaces — and the two arms own
+  separate incident titles, so the operator sees “one machine restarting” rather
+  than a merged, unattributable alert. The same reasoning is stated beside the
+  step in `.github/workflows/availability-watchdog.yml`.
 - **A *total* runner-side network failure is INCONCLUSIVE, not DOWN** (the
-  `CONTROL_URL` check). Alerting still fires; no restart is issued. The
+  `CONTROL_URL` check) — **on the restartable Fly API target only.** The control
+  probe is consulted inside the restart decision
+  (its own `if ! control_ok` guard), so the TWO hard-disarmed arms — the Pages
+  auth surface and the served-request liveness surface — never reach it: a total
+  runner-side egress failure pages them as `PROD DOWN`/`PROD DEGRADED` (a TRUE
+  alert about the runner, not the app), and the case is disambiguated by the
+  primary probe's OWN verdict and by the run being RED. The control probe is not
+  run there because the action it guards (a machine restart) cannot happen on a
+  disarmed arm; #11401 tracks consulting it for every production arm. Alerting
+  still fires; no restart is issued. The
   INCONCLUSIVE page is throttled to at most once per `CAP_RENOTIFY_MINUTES`,
   measured from its own **attempt** stamp — so an *undelivered* inconclusive
   page also consumes the window (pre-existing; #4575) — and the per-run record is
@@ -2632,6 +2923,171 @@ bypassed** and always blocks the deploy. A `gh-secret:X` declaration also needs
 its matching probe line in the workflow's `GH_SECRETS_PRESENT` block: no CI
 token can list repository secrets, so the run states which ones it carries, and
 a forgotten line FAILS the deploy for that name rather than passing it.
+
+#### The mitigation ledger — a deliberate ABSENCE (#11122)
+
+The manifest says what the deploy **manages**. `.github/scripts/fly-secret-mitigations.txt`
+says what it must **not** manage, for now, on purpose: a secret an operator
+removed as the live mitigation for an incident must survive the next deploy.
+
+Why it exists, measured: on 2026-11-05/06 `SENTRY_DSN` was unset on
+`tortoise-y4mjjq` as the mitigation for #11092's source-context serialization
+storm (with it absent `/health` answered in 0.25–1.07 s; with it present three
+`py-spy dump`s showed the MainThread parked inside `sentry_sdk`). Deploys
+`42117073101` (23:13) and `42135045025` (`deploy-api` completed 01:04) **each put
+it back**, on builds
+(`46ea687dc`, `c3af2d0188`) that provably did not contain the fix — because the
+sync step asserts a desired state and cannot distinguish *unconfigured* from
+*deliberately removed 40 minutes ago*. It is the stale-flag pattern: a record of
+a past state applied as a measurement of the present, and it **inverts** the
+mitigation's logic — the more often we deploy, the faster the mitigation is
+undone.
+
+- **Declared inventory:** `.github/scripts/fly-secret-mitigations.txt`
+  (`<NAME> owner=<owner> expires=<YYYY-MM-DD> reason=<why>`) — its header is the
+  authoritative grammar; this is orientation.
+- **Enforced at SYNC time, in the workflow — in the ENVIRONMENT, before the
+  payload is composed.** The `Set all app secrets on Fly.io` step reads the ledger
+  at the TOP of its `run:` body, blanks every ledgered name in the environment, and
+  then removes any survivor from the `flyctl secrets set` argv at the tail.
+  **This is the load-bearing half**, and it is deliberately *not* the gate: an
+  exception that only quiets a gate is a **false exception** — the measured Argo CD
+  trap, where `spec.ignoreDifferences` suppresses the difference during comparison
+  while the sync still applies the desired value, so `RespectIgnoreDifferences=true`
+  is required for the exception to exist at all. Here the write is `flyctl secrets
+  set`, so that is where the filter lives.
+- **The ordering is part of the contract, not style.** A tail-only filter is not
+  enough: the payload COMPOSES from the environment — `BACKUP_SWEEP_ENABLED` only
+  when a conjunction of nine secrets is present, and the `::warning::` emitted when
+  `OPENROUTER_API_KEY` is unset — so filtering the finished argv left both computed
+  from the unfiltered values. (The versioned model default is selected by
+  `TORTOISE_SESSION_LLM_MODEL`, not by the key; it is the WARNING that a tail-only
+  filter suppressed.) A ledger entry for
+  `TORTOISE_BACKUP_KEY` then shipped `BACKUP_SWEEP_ENABLED=true` in the same argv
+  that omitted the key, and the app booted into a `ConfigError` asserting an
+  invariant that payload had just broken (the sweep and the staleness watcher start
+  disabled, with only a warning). Blanking the name in the environment first makes
+  every downstream `[ -n ]`, conjunction and default observe the deliberate absence.
+  The tail pass stays as the belt — it is load-bearing for a **renamed pair**
+  (`GITHUB_CLIENT_ID` ← `GH_CLIENT_ID`, `SUPABASE_SERVICE_ROLE_KEY` ←
+  `SUPABASE_SERVICE_KEY`; the manifest's header documents the class), where blanking
+  the Fly name does not blank the differently-named SOURCE the compose line reads.
+  ⛔ Stated residual: for a renamed pair the **sibling** names a compose guard emits
+  are still staged, and a guard that READS the source still sees it present, so its
+  warning does not fire. The recorded name is still never staged — only that warning
+  is out of reach.
+- **`[env]` placeholders do not block an entry; a `[env]` VALUE does.** `fly.toml`
+  carries five `[env] = ""` placeholders (`TORTOISE_BACKUP_KEY`, `R2_*`) purely to
+  document the names; a Fly secret shadows `[env]`, so with the secret absent the app
+  reads the empty string — which IS the deliberate absence. Only a non-empty `[env]`
+  value is a second delivery path, and that is what `LEDGER NOT HONOURED` refuses. So
+  the most likely incident mitigations (unset the backup key, unset an R2 credential)
+  are recordable.
+- **A ledger entry that empties a DERIVED name is reported, not called stale.** A
+  member of the `BACKUP_SWEEP_ENABLED` conjunction is ledgered → the conjunction goes
+  false → that name is never assigned. It is declared `workflow`, so the stale-
+  declaration arm would have demanded "declare the managing source … or manage it from
+  deploy-hosted.yml", and the only reading of that remedy is to make the assignment
+  unconditional — destroying the fail-closed default. The gate instead classifies the
+  same payload against an EMPTY ledger and reports the name as `LEDGER-EMPTIED`.
+  ⛔ **Unless the derived flag is already LIVE on Fly.** `flyctl secrets set` is
+  ADDITIVE, so omitting a name does not clear the value already there: a persisted
+  `BACKUP_SWEEP_ENABLED=true` survives the omission, the app boots
+  enabled-with-missing-secrets, and the sweep plus the staleness watcher start
+  disabled. That is not "the mitigation working", so it is reported as
+  `MITIGATION NOT IN EFFECT` (exit 1) with the one-command remedy — unset the flag on
+  Fly so the fail-closed value is what the next boot reads. The same arm fires when a
+  **non-empty `fly.toml [env]` value** supplies the name — that path applies whatever
+  the secret list says, so the omission is equally not in effect.
+- **The gate's half is the reverse check**, so the two cannot rot apart: a ledger
+  entry the payload still carries is `LEDGER NOT HONOURED` (dropping the filter
+  would otherwise re-arm every mitigation while the ledger kept reading as a
+  decision). ⛔ **Its bound, stated rather than implied:** it proves the name does not
+  reach the `flyctl secrets set` **argv**. The environment-blanking half — that derived
+  values were composed from the deliberate absence — is enforced by the block's
+  POSITION, and pinned by
+  `tests/test_fly_secret_drift.py::test_the_ledger_ENVIRONMENT_block_precedes_the_payload_composition`,
+  not by this gate. A reordering that kept the argv clean would pass the gate. It also fails an entry whose name is **live on Fly** (`MITIGATION
+  NOT IN EFFECT` — the entry is a false record *and* it freezes that secret's
+  rotation) and an **expired** entry (`MITIGATION LAPSED`).
+- **Exit classes.** Exit 2 (never bypassable): the ledger is missing, malformed,
+  **indented / carrying a line-break character the sync filter does not split on**,
+  duplicates a name, names a name the manifest does not declare, names a
+  non-`gh-secret:` source, names one of the app's **mandatory** secrets — seven,
+  per `MANDATORY_FLY_SECRETS` in the checker: `FASTAPI_INTERNAL_KEY`,
+  `TORTOISE_SECRET_PEPPER`, `FALKORDB_CLOUD_URI`, `STRIPE_SECRET_KEY`,
+  `STRIPE_WEBHOOK_SECRET`, plus `SUPABASE_ACCESS_TOKEN` and `FLY_API_TOKEN`, which
+  the manifest-declaration rule refuses first because they are never Fly secrets
+  (removing any of them is an outage, not a mitigation) —
+  names a Fly variable `fly.toml [env]` assigns a **NON-EMPTY** value (the deploy
+  would apply that value whatever the secret list says; an `[env] = ""` placeholder
+  does not block, because a Fly secret shadows it), **or records a name the deploy's
+  payload still stages (`LEDGER NOT HONOURED`)**. Exit 1 (incident-bypassable): expired,
+  or not in effect because the name is on Fly.
+  ⛔ `LEDGER NOT HONOURED` is exit 2 on purpose, and it is the one distinction in
+  this block that matters operationally: exit 1 is the `skip-fly-secret-provenance`
+  lane, so putting a broken sync filter there would let an operator arming that
+  bypass for an unrelated stale declaration re-stage every mitigated secret —
+  silently, because the bypass report speaks only about declarations.
+- **The window is real.** The filter knows a name only once the entry has **merged**:
+  between the `flyctl secrets unset` and the merge, a push to `main` re-stages the
+  secret from its GitHub secret, which is #11122 verbatim. Land the entry in the same
+  window and hold deploys to `main` until it merges. The reverse order is not a fix
+  either — an entry for a name still on Fly fails the deploy
+  (`MITIGATION NOT IN EFFECT`).
+- **A failed run can leave a PENDING stage — seen by the NEXT run, not prevented.**
+  The sync step uses `flyctl secrets set --stage`, which writes the vault and defers
+  the Machine update. A run that stages a name and then fails before `flyctl deploy`
+  leaves the change pending — and Fly documents what the stage means, which is *not*
+  "it takes a deploy": *the staged secret will be available only on Machines that are
+  started or updated after the `fly secrets set` command was run*
+  ([fly secrets](https://fly.io/docs/apps/secrets/)), because secrets are read from the
+  vault at boot. This app pins `auto_start_machines = true` (§6.2) as its self-heal
+  path, so a Machine that stops — host failure, crash-loop give-up, an operator stop —
+  starts again on the next request and boots **with** the staged secret. That re-arms
+  the mitigation with **no deploy and no run**, before any gate sees it — this is the
+  one path the ledger header records as NOT closed. **What the gate settles** (the
+  header's open question): `fly secrets list --json` — the source this gate reads —
+  lists a staged secret by name, and the [`fly secrets list`
+  reference](https://docs.fly.io/flyctl/cmd/fly_secrets_list) documents the deployment
+  status reported beside it (`Staged` = "staged but not deployed to any machines"; the
+  app-level [fly secrets](https://fly.io/docs/apps/secrets/) page shows only
+  `NAME | DIGEST | DATE`, so it is not the source for the status), so the NEXT run's
+  presence check SEES it and an entry for that name
+  fails the run with `MITIGATION NOT IN EFFECT`, ahead of that run's `flyctl deploy`
+  and ahead of the `Set all app secrets on Fly.io` staging step. ⛔ That red is on the
+  next run, and it is **exit 1**, the `skip-fly-secret-provenance` class: an operator
+  arming that bypass for an unrelated stale declaration applies the pending value
+  silently, and the entry also freezes rotation while it stands. Clear the stage
+  before re-running (`flyctl secrets unset <NAME> --stage -a tortoise-y4mjjq`, then
+  `flyctl secrets deploy -a tortoise-y4mjjq`, and confirm `flyctl secrets list` shows
+  no staged entry for the name) instead of bypassing. ⛔ Clearing it is a secret-set
+  change and restarts the sole Machine — an ~85 s zero-healthy-instance window (§6.2)
+  — so do it deliberately, in a window. Nothing in this repo reads or clears pending
+  staged state.
+- **`reason` is a review note, never the value.** The ledger is tracked and public,
+  and the gate prints every entry's `reason` on a CLEAN deploy (an exit-1 or exit-2
+  run reports the violations instead, and quotes the entry's `reason` only in
+  `MITIGATION LAPSED`).
+- **A lapsed entry KEEPS suppressing on purpose.** Silently re-arming on a date
+  is the same unannounced overwrite with extra steps; the deploy goes RED and the
+  remedy is one line either way — re-affirm with a new `expires`, or delete the
+  entry so the deploy resumes managing the name from GitHub.
+- **The belt, for the entry nobody wrote.** Independently of the ledger, the gate
+  emits ONE aggregated `::warning::` naming every `gh-secret:` this deploy is
+  about to **CREATE** because it is currently absent from the app, and points at
+  the ledger. `absent-from-Fly` + `absent-from-the-ledger` reads as *never
+  configured* — which is also exactly what a firefighting operator's `secrets
+  unset` looks like, so the warning is the only thing covering the normal case:
+  the removal happens at 01:20 and the paperwork does not.
+- **Tests:** `tests/test_fly_secret_drift.py::TestTheMitigationLedger` (both
+  halves, every refusal) and `tests/test_deploy_workflow.py`
+  (`test_the_sync_step_honours_the_mitigation_ledger` pins the filter and that it
+  uses **bash builtins only** — the gate classifies the payload by executing it
+  on a stub `PATH` holding only `fly`/`flyctl`, where a `grep` aborts the run;
+  `test_the_ledger_mandatory_set_matches_the_verify_gate` pins the mandatory set
+  against the workflow's own `exit 1` branches, so the hardcoded copy cannot
+  rot).
 
 ### 8.2 The `SKIP_*` bypass convention
 
@@ -3018,7 +3474,27 @@ whole reason this path exists.
 #    That message names no role and is the SAME text as a real outage, so read
 #    the exception TYPE as the discriminator: `RecordProjectionError` is a
 #    refusal (fix the DSN), a driver `OperationalError` is an outage (see
-#    "The record's connecting role").
+#    "The record's connecting role"). ⛔ A THIRD type is neither of those:
+#    `PlacementTableUnavailable` means the cache projection's placement table
+#    could not be resolved — absent from the package (an image ships no
+#    `docs/`), present but unreadable (including bytes that do not decode), or
+#    present but EMPTY (a carrier, or in a source checkout the doc itself, that
+#    parses to zero rows) — a fault in the INSTALL, not in the record, and since
+#    #10663 the verb names it as such INSTEAD of collapsing it into "the record
+#    is unreadable". No DSN or credential change clears it, and the remedy
+#    depends on which of FOUR shapes the message names:
+#      • CARRIER absent / stale / malformed (wrong `_generated_by`, a bad row, an
+#        undeclared table, a `_row_count` mismatch) → regenerate and ship it
+#        (`uv run python tools/gen_placement_table.py`);
+#      • CARRIER or DOC "EMPTY" / "ZERO rows" → ⛔ check the DOC FIRST, whatever
+#        the message quotes. The generator parses the doc, so over a doc with no
+#        table it writes an empty carrier, prints `wrote … (0 rows)`, exits 0,
+#        and `--check` then agrees — two green reports over a still-broken
+#        install. Restore the doc's table first; regenerate only once the doc
+#        yields rows again;
+#      • DOC unreadable / absent in a checkout → restore the doc, then
+#        regenerate;
+#      • neither present (an image) → the image lost its package data; ship it.
 #
 # 2. Restore. --cache-graph is REQUIRED and has no default (see below).
 python -m tortoise record-restore \
@@ -3163,7 +3639,7 @@ part of this section, and its status is stated rather than implied:
 | drill step | status |
 |---|---|
 | verb exists, composes the shipped projection, refuses an empty source | **MEASURED** — `tests/test_9556_record_restore_verb.py` (the file's whole collected set — 42 pins / 43 collected cases when this row was written; `--collect-only` is the authority, and this numeral is a measurement, not a promise, live cache graph included) |
-| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — blocked on an armed record (#9548 hosted arming / #9551 CI `TEST_RECORD_DB_URI`). No number is claimed here for a run that has not happened |
+| a restore executed against a **real armed record**, with the restored node/edge counts recorded | **NOT MEASURED** — and the blocker is **not** the arming any more: the record has reported `armed: true` since at least 2026-10-26 (see the Secrets Matrix row for `TORTOISE_RECORD_DSN`), and CI's `TEST_RECORD_DB_URI` is **already armed** (`#9551`, closed 2026-10-23; the `test-record-postgres` job provisions it via `.github/actions/postgres-provision`). What is missing is a **captured session that actually wrote a `journal_event` + `point` row** — an empty `record_write_failures` cannot stand in for one (this section's own rule: it is *NOT* evidence a row was written) — and, for the record leg, a backup-capable **direct** DSN. No number is claimed here for a run that has not happened |
 | the production graph name (`org_*`) restorable | **BLOCKED** — #2944's L2 graph-NAME guard (refusal 4 above) |
 
 When the record is armed, the drill is: capture into the record (scenario A of
@@ -3285,15 +3761,206 @@ operator who read the line above as "CI defends this" would never run it.
 | RESEND_FROM_EMAIL | ✅ (single managed sender identity — #1136; default `noreply@premiselabs.co`) | — | ✅ |
 | BILLING_FROM_EMAIL | optional (distinct billing sender override — #1136) | — | ✅ |
 | BILLING_NOTIFY_TO | ✅ (ops inbox for billing email) | — | ✅ |
-| TORTOISE_RECORD_DSN | ⛔ **POSTPONED — do not arm, provision or re-point it** (owner ruling 2026-11-01, quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below). The value **is already on Fly**: `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,…,"record_write_failures":{"write_failed":32},…}` on 2026-11-02 (**measured by another lane and recorded on #9548** — quoted here, not re-measured). Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) and is ⛔ postponed above |
+| TORTOISE_RECORD_DSN | ✅ **AUTHORISED (owner 2026-11-03) — the 2026-11-01 postponement is SUPERSEDED; read [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) below before acting.** The value **is already on Fly**. `GET /health` (`api.premiselabs.co`) read `"record":{"armed":true,"ok":true,…,"record_write_failures":{},"record_non_journal_skips":{},"record_position_unproven":0,…}` at **2026-11-05T11:38:16Z** (re-measured). ⚠️ **Read that emptiness for exactly what it is:** it **falsifies "writes are failing"** — the `write_failed: 32` this row used to quote is a 2026-11-02 reading — but it **cannot establish that a row was written** (see this section's own rule **"`record_write_failures: {}` is NOT evidence that a row was written"** and its capture-verification step — an empty counter has more than one cause and does not say which). It is **not** evidence the record is healthy, and an empty counter **cannot** say whether the dropping stopped — and the dropped rows recorded on `#9548` (302 at the 2026-11-02 measurement, 331 in the 2026-11-03 owner decision) remain unreaped. ⚠️ **The build attribution this cell used to carry is SUPERSEDED:** it read *"the serving build is `fc6a8a64b` (`migrations_head: 20261030000001_oauth_consent_tickets`), which predates `#10648`/`fafb8fdcc` and does not carry it"* — true until the deploy at **2026-11-05T23:14:03Z**. Re-read **2026-11-05T23:54:47Z**: `build.commit_sha` = **`46ea687dc`** and `migrations_head` = **`20261102000002_record_point_search_keys_text`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits **0** — so the deployed code **does** carry `#10648`. ⛔ **Do not read `migrations_head` as the applied schema** (this file's own `migrations_head` row: it is the highest migration the IMAGE CARRIES): whether `20261102000002` is applied to the database is read from `supabase_migrations.schema_migrations` — **not by that `/health` read**, but it **WAS measured, 2026-11-05T23:07:38Z**, by the fail-closed drift gate (see §"Arming the Postgres record" below: both migrations RECORDED APPLIED). Re-read `/health` before reusing any *endpoint* value here; the LEDGER question is the gate's to answer, and `/health` cannot answer it at all. Setting it **arms the Postgres record** (epic #7879 R1) via GitHub secret → Fly — already done, so **the arming is not the remaining work.** ⛔ **The remaining work is ORDERED, and it is not "migration + backup":** the 2026-11-03 decision puts a **verified backup FIRST** (*"No migration runs on an unbacked store"*), and **that first step is the live blocker** — a missing `TORTOISE_RECORD_BACKUP_DSN` (see the credential table in §"Arming the Postgres record"). This row is not a licence to run the apply. ⚠️ Its **user must be `tortoise_record_app`** (R6, #9554), never `postgres`/`service_role` — see [The record's connecting role](#the-records-connecting-role-r6-decision-2026-10-22-9554) below | — (the record is a Supabase Postgres project, not FalkorDB) | ✅ **set** — the GitHub secret and the Fly secret both exist; the app has reported `armed: true` continuously since at least 2026-10-26 (**measured on #9548**, quoted here, not re-measured — the row's former "value NOT created yet / no such GitHub secret exists today" was measured false). The *arming* procedure is [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548) — ✅ authorised 2026-11-03, gated by its own backup-first precondition |
 
 ### Arming the Postgres record — `TORTOISE_RECORD_DSN` (epic #7879 R1, #9548)
 
-> ⛔ **POSTPONED BY OWNER RULING — this section's command is not to be run.** The owner postponed the
+> ✅ **AUTHORISED AND PARTLY DONE — BUT THE 2026-11-01 POSTPONEMENT BELOW IS NO LONGER LIVE. READ
+> THIS BOX BEFORE THE QUOTE UNDER IT.** On **2026-11-03T19:06:10Z** the owner **superseded** the
+> postponement for this issue, in a comment on `#9548` headed
+> `## DECISION (owner, 2026-11-03) — no customers on the hosted deployment; arming it is authorised`
+> ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6612968196)), verbatim:
+>
+> > Owner verbatim: *"we dont have customers because i have been postponing for the beta launch until
+> > p0 and p1s are fixed. only me is using the service."*
+> >
+> > **OVERRIDES:** the standing "hosted postponed" ruling — superseded for this issue by the owner's
+> > explicit clarification that no customer is on the service and that the beta is blocked on P0/P1 closure.
+>
+> **What that changes here, precisely.** The *arming* act this section describes is **authorised**, and
+> the DSN is **already armed** (`GET /health` → `"record":{"armed":true,…}` at 2026-11-05T11:38:16Z).
+>
+> ⚠️ **Two LATER owner decisions on `#9548` postdate the 2026-11-03 authorisation, and they are
+> relayed here because they lived ONLY on the issue** — which is the defect this section was
+> corrected for:
+>
+> - **2026-11-05T20:58:18Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6669289145),
+>   `owner-decision-relay`) — *"#9548 yes i never authorised to wait. we need this asap."* So
+>   **"wait for authorisation" is no longer a valid state**, no lane may cite `#9548` as a reason to
+>   pause, and *"the only legitimate stop is a **specific technical blocker**, named with its failing
+>   step."*
+> - **2026-11-05T22:10:54Z** ([comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6670861090),
+>   `owner-decision-relay`) — *"doesn't matter much because i'm the only one using tortoise before we
+>   finish the p0 and p1 … so just do what's fastest."* So: **arm the hosted deployment directly and
+>   apply the pending migrations directly — no staging detour, no rehearsal deploy, no extra cycle to
+>   be safe.** *"Fastest" keeps the proofs*: a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy reaching green.
+>
+> ⛔ **What those two do NOT settle — and a lane must not settle it either:** whether the 2026-11-05
+> *"no extra cycle to be safe"* lifts the 2026-11-03 decision's **backup-first** step (1) below. The
+> two owner decisions are in tension on exactly that point, and the later one carves out *"anything
+> **irreversible to data that cannot be regenerated** — a purge, a drop, an overwriting backfill."*
+> The owner resolves it; a lane reports it. Steps (2)–(4) stand either way.
+>
+> The 2026-11-03 decision keeps a **non-negotiable procedure** in exchange: *(1)* a **verified backup
+> first** — dump the Postgres record and confirm it restores, no migration on an unbacked store;
+> *(2)* deploy the record migrations, including `20261102000002_record_point_search_keys_text.sql` and
+> the tenancy/role migration; *(3)* **measure**, do not assert, `record_write_failures.write_failed == 0`
+> on the running deployment plus indicator (a) — a captured session writes `journal_event` + `point`
+> rows; *(4)* close `#9548` only once (3) is posted there. ⚠️ **The closure happened WITHOUT it:**
+> `#9548` closed **2026-11-06T01:57:25Z** on PR **#11109**'s merge (`74fdd9ca0`), and its **last**
+> comment — **2026-11-05T23:15:15Z**, the `arm-9548` status — still reports **indicator (a)** as
+> **unreachable**. So **step (3) is still owed**, and the closure is **not** evidence that a
+> measurement was taken. Re-read the issue before quoting either state: this sub-section describes a
+> sequence whose step (3) has not run.
+> ⚠️ **Step (1) is the live blocker, and it is a missing CREDENTIAL, not a ruling:**
+> `TORTOISE_RECORD_BACKUP_DSN` and `TORTOISE_RECORD_SCRATCH_DSN` are **absent**, and the DSNs this
+> deployment DOES provision fail the backup's checks — on two independent gates, which
+> `create_record_backup` applies in this order — `require_direct_dsn` **before** `require_bypassing_role`
+> (⚠️ **shapes, not read values**: the table below states what the documented shapes are, never what a
+> held value was measured to be):
+>
+> | held value | gate 1 — `require_direct_dsn` | gate 2 — `require_bypassing_role` |
+> |---|---|---|
+> | `TORTOISE_RECORD_DSN` | ⛔ **refused by construction** — §"The value" below prescribes the project's **pooler** DSN for the app, and gate 1 refuses a `*pooler*` host | not reached; it also names the RLS-bound app role |
+> | `TORTOISE_AUDIT_DSN` | ⛔ **refused if set to its documented shape** — `.env.example` (`TORTOISE_AUDIT_DSN`) prescribes the **Supabase Postgres pooler connection string** for it | not reached; its user is a *bypassing* role (`postgres` per `.env.example`'s shape; `audit_writer` per `#9548`) |
+>
+> ⚠️ **Read that table for what it is: the GATES are code, the SHAPES are documentation — the held
+> VALUES were never read.** An earlier draft of this correction attributed a measurement of them to
+> lane `hosted-arm-9548` on `#9548`; that comment (`6613140019`) records the **opposite** — *"No
+> local escape: `psql`/`pg_dump`/`pg_restore` are not installed; no `TORTOISE_RECORD_DSN` /
+> `SUPABASE_DB_URL` / `DATABASE_URL` in the env"* — and it names `TORTOISE_AUDIT_DSN` nowhere. What
+> that comment **does** measure is the pair that is absent: `TORTOISE_RECORD_BACKUP_DSN` and
+> `TORTOISE_RECORD_SCRATCH_DSN`, both from its secret listing. ⛔ Its own recommendation — *"a
+> Supabase **pooler** DSN … for a role that bypasses RLS"* — is exactly what **gate 1 refuses**, and
+> is superseded here.
+> ⚠️ **So do not go hunting for a brand-new ROLE** — a bypassing role already exists. What is missing is a
+> **DIRECT** connection string (`db.<ref>.supabase.co:5432`, never the pooler) for one, which is exactly
+> what `TORTOISE_RECORD_BACKUP_DSN` resolves (`record_backup.py`'s `RECORD_BACKUP_DSN_ENV`). That value has never been held
+> in this environment — the blocker is a **credential**, not a ruling.
+>
+> ⚠️ **NO BACKUP CAN BE TAKEN FROM THIS ENVIRONMENT ON THE DOCUMENTED SHAPES — and the wording that
+> made the migrations look outstanding is now false, so it is corrected here rather than left to
+> mislead.** ⛔ **"On the documented shapes" is load-bearing, not a hedge:** the credential table above
+> states what each held value is *documented* to look like, and `08` §R1 carries the same falsifier —
+> *if a held value does not follow its documented shape this inference is FALSE, and then the backup
+> is possible today with a credential already held.* Read the value before treating this as settled.
+> `GET /health` re-read **2026-11-05T23:54:47Z** serves build **`46ea687dc`**
+> (`started_at 2026-11-05T23:14:03Z`). Two facts follow, and they are DIFFERENT facts:
+>
+> - **The deployed CODE carries `#10648`** (`fafb8fdcc`) — verified in-tree, not from the endpoint:
+>   `git merge-base --is-ancestor fafb8fdcc 46ea687dc` → **0**. So "the serving build predates the
+>   fix and does not carry it" is **false as of that deploy**, and the drop can no longer be
+>   attributed to an unfixed build.
+> - **The deployed IMAGE carries both migrations** — `migrations_head:
+>   20261102000002_record_point_search_keys_text`, i.e. `20261102000001_graphs_promote_default` and
+>   `20261102000002_…_search_keys_text` are in the image too. ⛔ **That is NOT "applied to the
+>   database"** — this file's own `migrations_head` row says so in as many words: the value
+>   is *"the highest numeric-prefixed `supabase/migrations/*.sql` file this IMAGE CARRIES"*, and
+>   *"It is NOT 'which migration has been APPLIED to the database'"*. The applied set is a database
+>   fact, read from `supabase_migrations.schema_migrations` — and it was **not** read AT THAT
+>   `/health` READING, so it is not claimed there. (⛔ **Not the 2026-11-05 decision's own proof,
+>   which is collected:** its proof list is *"a written row read back, the migrations visible in
+>   `supabase_migrations`, a deploy run reaching green"*, and the SECOND of the three is precisely
+>   the ledger read reported in the next bullet — so that proof IS held. The THIRD, *"a deploy run
+>   reaching green"*, is the one this section does not claim.)
+> - **Whether they are APPLIED has a measurement too, and calling it "unmeasured" would be the same
+>   defect one layer down.** The repo's own fail-closed drift gate, run **2026-11-03T18:56:04Z**
+>   (run `41694722380`, quoted in `#9548` comment
+>   [`6613140019`](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6613140019)),
+>   read `supabase_migrations.schema_migrations` — the artefact that row names — and reported:
+>
+>   ```text
+>   BLOCKING repo-ahead migrations (repo has them; prod's supabase_migrations.schema_migrations has NO row):
+>       - 20261102000001
+>       - 20261102000002
+>     note: BLOCKING list above is the COMPLETE repo-ahead set — 2 of 2 repo-ahead pending
+>   ```
+>
+>   A **complete-set** verdict **at that reading** — so **as of 2026-11-03T18:56:04Z** both were
+>   PENDING. (⛔ **Not "independently corroborated then":** the residual-plan row that says *"present in
+>   the repo, unapplied in production"* was written **2026-11-05**, so it cannot corroborate a
+>   2026-11-03 reading — and its own evidence column is the two migration **filenames**, not a
+>   `schema_migrations` read. The gate log above is the measurement; this row only repeats the
+>   conclusion.) ⛔ **That is no longer the last measurement either.** The
+>   repo's own fail-closed drift gate ran again **2026-11-05T23:07:38Z** — run `42117073101`,
+>   `deploy-api` job `127578919481`, the deploy that shipped `46ea687dc` — against prod project
+>   `ybetwichurajbfswfeqa`, and printed in full:
+>
+>   ```text
+>   check-migration-drift: repo migrations vs prod (project ybetwichurajbfswfeqa)
+>   check-migration-drift: OK (no blocking drift)
+>   ```
+>
+>   With **no** `warn-only repo-ahead migrations` line and **no** `remote-ahead (WARN …` line beside
+>   it — the two branches that print one — so `REPO_AHEAD` was **empty**: prod's
+>   `supabase_migrations.schema_migrations` **has a row for both**. The gate is fail-closed by
+>   contract (its own exit-code table: a missing token, a non-201/200 Management-API answer, or a
+>   body that is not a JSON array each exit **2**, never 0), so this is a positive read, not a skip.
+>   ⛔ **What it does NOT establish:** the gate reads VERSION ROWS, and says so itself — *"`supabase
+>   migration list --linked` — version ROWS only, so it cannot tell you whether the objects exist"*,
+>   and *"'repo-ahead' means prod has no schema_migrations ROW — NOT that prod lacks the objects"*
+>   (both `.github/scripts/check-migration-drift`). A version row is present because the DDL ran
+>   **or** because it was recorded by `supabase migration repair` after a bookkeeping drift (#9613).
+>   So: **both are RECORDED APPLIED; the OBJECTS are unread.**
+>
+>   ⚠️ **WHICH run first recorded them is NOT established — and that is a finding, not a
+>   reassurance.** The `supabase-deploy` history around that gate names no clean single apply:
+>
+>   | run | when | its `deploy` job |
+>   |---|---|---|
+>   | `41694722380` | 2026-11-03T18:32Z | **`skipped`** — a `push`, not a `workflow_dispatch`; only `check-drift` ran, and that is the 18:56 BLOCKING reading above |
+>   | `42091073635` | 2026-11-05T19:45Z | failed in ~17 s (job `2026-11-05T19:45:43Z` → `19:46:00Z`; the `Apply migrations` step itself took 1 s) — its apply never landed |
+>   | `42107006180` | 2026-11-05T21:40Z | failed the same way |
+>   | `42134064961` | 2026-11-06T00:04Z→00:17Z | ⚠️ **CANCELLED after ~13 min** — the one window nobody has examined, and a half-run `supabase db push` is exactly the shape that can leave a partial apply |
+>   | `42136459903` | 2026-11-06T00:55Z | the *job* is marked **failed**, but its *`Apply migrations` step SUCCEEDED* — `supabase db push --linked --include-all` → **«Remote database is up to date.»** The failure is the follow-on `deploy-hosted` dispatch. So this is a **second, later green ledger read**, not evidence of a pending apply |
+>
+>   ⇒ The ledger claim is **corroborated twice** (23:07:38Z, and `db push` at 00:55:49Z). ⛔ **And no
+>   run in that table can be the one that first RECORDED them:** the two runs inside the window died
+>   in `Apply migrations` — which **is** the step that runs `supabase db push --linked --include-all`
+>   in that workflow (the `--yes` that workflow carries today — `.github/workflows/supabase-deploy.yml`'s
+>   `supabase db push --linked --include-all --yes` — was added on 2026-11-06 by #11104, after
+>   every run in this table), so there is no earlier `db push` for them to have died "before" — when
+>   that push refused `supabase/config.toml` (`[inbucket]` is no longer supported, exit 1) before
+>   opening a connection,
+>   and the two that could have applied — the cancelled one and the 00:55 one — were both CREATED
+>   after 23:07:38Z (the cancelled run 56 minutes after it), so they postdate the reading that first
+>   saw the rows. The recorder is therefore an act **this run history does not contain**: an
+>   out-of-band `supabase db push`, or a `supabase migration repair` recording a version whose
+>   objects were already present (#9613) — which is exactly what the gate's own version-ROWS-only
+>   bound permits. ⛔ **Do not read `supabase-deploy`'s red as "the apply never ran"**: that
+>   is the same *a red signal means nothing happened* misread this section exists to correct, and on
+>   `42136459903` the apply step is **green inside a failed job**. The quoted `#9548` `6669720078`
+>   (*"the deployment cannot be refreshed until the migration apply runs"*) was written
+>   **2026-11-05T21:14:09Z — before that gate ran** and before the deploy of 2026-11-05T23:14:03Z.
+>
+> So: the reason this section gave for believing the `point.search_keys` narrowing was absent —
+> *"the serving build predates `#10648`"* — **is gone**; and the reason the first cut of *this*
+> correction gave for believing it was still pending (*"last read 2026-11-03, both pending, not
+> re-measured since"*) **is also gone**, because a later fail-closed read exists and says the ledger
+> has both. What survives unchanged is the blocker and the bound: **no backup can be taken from this
+> environment on the documented shapes** until a **direct** backup-capable DSN exists (below) — and,
+> as the credential table's own falsifier says, a held value that does not follow its documented shape
+> would make that false today; and *whether the objects exist*
+> is read from **schema**, not from the ledger — `supabase_migrations.schema_migrations` answers
+> "recorded", never "applied".
+>
+> **So the accurate state is AUTHORISED · CODE DEPLOYED (2026-11-05T23:54:47Z) · BOTH MIGRATIONS
+> RECORDED APPLIED IN PROD'S LEDGER (fail-closed gate, 2026-11-05T23:07:38Z) · DDL PRESENCE UNREAD ·
+> BACKUP CREDENTIAL STILL MISSING.**
+> A lane reading this section must not re-derive "postponed"; it reports the missing backup
+> credential, and it re-reads the ledger (and, if the objects matter, the schema) before asserting
+> either. Both readings are **measurements**, not standing facts — the 2026-11-03 one says what was
+> true then, and this one will be stale the moment another deploy lands.
+>
+> ---
+>
+> ⛔ **SUPERSEDED — kept as the record of the ruling that was overridden, not as an instruction.** What
+> follows is the 2026-11-01 postponement **as it stood**: The owner postponed the
 > hosted deployment setup on **2026-11-01T05:58:03Z**, in a comment on `#9548` headed
 > `## Owner decision — the hosted setup is POSTPONED` (the issue carries the `owner-decision` label;
 > the [comment](https://github.com/daniel-ospina/tortoise/issues/9548#issuecomment-6554166515) itself is
-> the ruling's home), verbatim:
+> that ruling's home), verbatim:
 >
 > > **The hosted deployment setup is postponed until the storage-architecture work and the
 > > extractor-architecture work are complete — otherwise we risk filling the hosted store with noise.**
@@ -3304,16 +3971,50 @@ operator who read the line above as "CI defends this" would never run it.
 >
 > **`OVERRIDES:`** epic #7879 **R1** — this section's own objective, "arm the record in the hosted
 > deployment" — and the provisioning steps further down (`gh secret set TORTOISE_RECORD_DSN`, the
-> deploy, `fly secrets list`). The owner postponed that act, so **this section is reference, not a task
-> list**: read it for the DSN's shape, its role rule and the verify reads; do not execute the
-> provisioning block. ⚠️ **The store is already armed** (`armed: true`) and already failing writes
-> (`write_failed: 32`, measured 2026-11-02 and recorded on `#9548`), so "finish what was started" is
-> *also* a resumption of the postponed act — the live state is evidence to report, never a licence.
-> Until the ruling lifts, the authority for captured sessions is the **local** record under
-> `~/.tortoise/session-events/`, never the hosted store.
+> deploy, `fly secrets list`). ⛔ **SUPERSEDED ON 2026-11-03 — the owner authorised this act; see the
+> AUTHORISED box at the head of this section.** What stands from the paragraphs below is the DSN's
+> **shape** and its **role rule**, plus the fact that the store is already armed. What does **not**
+> stand is "this section is reference, not a task list": the procedure is live again, gated by its own
+> backup-first precondition (and that gate is currently a missing `TORTOISE_RECORD_BACKUP_DSN`).
+> ⚠️ **The store is already armed** (`armed: true`) — and, re-measured
+> 2026-11-05T11:38:16Z, `record_write_failures` is EMPTY (the `write_failed: 32` quoted in this note was
+> a 2026-11-02 reading). That emptiness **falsifies "writes are failing"; it does not establish that a
+> write happened** — see this section's own rule — *"`record_write_failures: {}` is NOT evidence
+> that a row was written"* — and its capture-verification step: presence is shown by a
+> `journal_event` / `point` row appearing, never by a zero counter.
+> It also does **not** prove the drop stopped happening: the dropped rows recorded on `#9548` (302
+> measured 2026-11-02, 331 in the 2026-11-03 decision) are still unreaped. ⚠️ **The reason this
+> paragraph used to give is now FALSE and is recorded as such:** it read *"the serving build
+> `fc6a8a64b` predates `#10648` (`fafb8fdcc`)"* — true until the deploy at **2026-11-05T23:14:03Z**,
+> which now serves **`46ea687dc`**, and `git merge-base --is-ancestor fafb8fdcc 46ea687dc` exits
+> **0**, so the deployed code carries the fix (re-read 2026-11-05T23:54:47Z; `migrations_head:
+> 20261102000002` — the IMAGE-carried head, not the applied set, per this file's own
+> `migrations_head` row). So the drop can no longer be attributed to a build that lacks the fix;
+> whether it stopped is still **unproven**, because a zero counter cannot prove a write (the bound
+> above is unchanged). ⛔ **This paragraph's "never a licence" clause is SUPERSEDED with the ruling it
+> serves:** the 2026-11-03 decision authorises the act, so the live state is evidence *and* the
+> procedure above is the licence. The authority for **captured sessions** is the **local** record
+> under `~/.tortoise/session-events/` — that half is unchanged by either ruling, because it is a
+> read-authority statement, not a postponement, and no arming decision touches it. (This sentence
+> used to read *"Until the ruling lifts, the authority for captured sessions …"*; the 2026-11-01
+> ruling was **superseded**, not lifted — so a condition on *lifting* could never fire — hence the
+> unconditional form. `#9548` also closed (2026-11-06T01:57:25Z), but this rule never depended on
+> it: hanging an unconditional rule on a lapsed condition is what left a lane unable to tell
+> whether the rule still applied.)
 >
-> **The reopening route — where it lives, and what would lift it.** The ruling lives on `#9548`, in
-> that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
+> **The reopening route — where it lives, and what would lift it.** ⛔ **SUPERSEDED — but NOT by this
+> route.** The paragraph below describes the route the 2026-11-01 ruling itself prescribed, and that
+> route **was not taken**: it required *"a lane that believes both are complete states that on the
+> respective epic **with evidence**"*, and the storage half (`#10000`) is **still OPEN** and the
+> extractor work is open too. ⚠️ **Do not quote this section as evidence that the storage
+> architecture work is complete — it is not, and the owner did not lift the ruling on that ground.**
+> What actually happened is at the head of this section: a **separate** owner decision (2026-11-03,
+> no customers on the hosted deployment) superseded the postponement **for `#9548`'s arming (R1)
+> only**, and its own marker says so — *"superseded **for this issue**"*. The 2026-11-01 ruling's
+> **other** operational consequences are untouched and still stand: an expected `HTTP 402
+> quota_exceeded` is not a defect, the **local** record is the read-authority for captured sessions,
+> and a client retrying a postponed endpoint is still a defect. The 2026-11-01
+> ruling lived on `#9548`, in that `Owner decision` comment, and nowhere else. Its own words for the bar: *"The ruling lifts when the
 > **storage architecture** work and the **extractor architecture** work are complete — not on a date,
 > and not because a quota became available"*, and **the lifting is the owner's call, not a lane's**. So a lane
 > that believes both are complete states that on the respective epic **with evidence**, and asks the
@@ -3349,12 +4050,18 @@ database per team (refused on cost grounds).
 
 **Provisioning — one operator act, then the deploy does the rest.**
 
-⛔ **DO NOT RUN THESE UNTIL `#9548`'s RULING LIFTS.** Every command in the block below performs, or confirms, the
-postponed act (see the POSTPONED note at the top of this section, which quotes the
-ruling and names where it lives). They are written down so a *future*, un-postponed arming is not
-improvised, **not because they are scheduled**. Nothing about the arming being partly done makes any
-step below safe to resume: `armed: true` with `write_failed: 32` is a state to report on `#9548`, not
-a step to complete.
+✅ **AUTHORISED — the 2026-11-01 postponement this note used to carry was SUPERSEDED on 2026-11-03**
+(see the AUTHORISED box at the top of this section). Every command in the block below performs, or
+confirms, an act the owner authorised. ⚠️ **They are still not a licence to improvise:** the 2026-11-03
+procedure is non-negotiable and **backup-first**, but that ordering is a precondition on the
+**migration apply** (R2's `supabase-deploy.yml` dispatch), **not on this block** — this block only
+sets the credential and confirms it reached the machine (`gh secret set` → deploy → `fly secrets
+list`), so it neither takes a backup nor migrates anything. The backup (dump + restore test) must
+run before that R2 dispatch, and **it is blocked today on a missing `TORTOISE_RECORD_BACKUP_DSN`**,
+not on any ruling. `armed: true` with `record_write_failures` EMPTY
+(re-measured 2026-11-05T11:38:16Z) is the current state to record on `#9548`. The former sentence here
+— *"`armed: true` with `write_failed: 32` is a state to report on #9548, not a step to complete"* —
+is stale on both counts: the count is 0 and the act is authorised.
 
 ```bash
 # 1. the value's ONLY home (never a file, never a shell history):
@@ -3375,7 +4082,7 @@ fly secrets list -a tortoise-y4mjjq | grep -E '^TORTOISE_RECORD_DSN'
 **Verify it is ARMED, not merely set** — a set variable that reaches an
 unreachable or misconfigured database is the one failure this cannot show you.
 The first read below answers it directly: `GET /health`'s `record` block reports
-`armed`, the value's fingerprint, and the three counters.
+`armed`, the value's fingerprint, and the record counters.
 
 ⛔ **There is NO `/metrics` route on the hosted app — do not go looking for one.**
 The listener on **9090** is the dedicated liveness listener
@@ -3389,7 +4096,7 @@ prints **nothing in every state** — armed-and-writing, armed-and-refusing, and
 unarmed alike (`curl -s` prints the 404 body, `grep` matches none of it). An
 empty grep is **not** a passing reading: it is the silent `NOT_ARMED` class this
 section exists to close, one layer up. Hosted `GET /health` (8000) carries the
-record's **arming state and its three counters** in an additive `record` block
+record's **arming state and its record counters** in an additive `record` block
 (`hosted_api._record_health`, #9548) — but it still does not serve `/metrics`
 text, so do not grep the 9090 listener for a counter name.
 
@@ -3410,7 +4117,8 @@ text, so do not grep the 9090 listener for a counter name.
    | `armed` | `true` = the seam ACCEPTED the value: a Postgres scheme **and** a host (`record_dsn()`'s scheme + host rules). `false` + `error: null` = the supported default-off state (not a fault). `false` + `error` = a value was SET and the seam REFUSED it — a typo'd scheme, a **hostless** value (`postgresql://user:pw@`, the shape a clipped paste produces), or one carrying raw whitespace — and that case is one of five that flip `/health`'s `status` to `degraded` (with `degraded`, `counters_error`, `tenancy_error` and `refusal_error`), because every capture then counts `malformed_dsn` while the record stays empty |
    | `dsn` | the **8-hex fingerprint** of the value, never the value. To answer "is that the value I set?": `printf %s "$TORTOISE_RECORD_DSN" \| shasum -a 256 \| cut -c1-8` — equal ⇒ the machine carries THIS value; different ⇒ a stale secret, with nothing disclosed either way. ⚠️ The code fingerprints the value **after `.strip()`** (`record_dsn()`), so hash the secret the way it is staged: a file ending in a newline makes your `printf` result differ from the process's for the SAME secret. Trailing whitespace is stripped by both — interior whitespace is refused outright, so it cannot reach here |
    | `single_tenant_declared` | must be **`false`** on hosted. `true` means someone armed the process-global org/graph pair, which the multi-tenant app must refuse (#9192) |
-   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the counters this section's "pass bar" reads, now readable from the pod without `/mcp` auth |
+   | `record_write_failures` / `record_non_journal_skips` / `record_position_unproven` | the same three keys `monitoring.metrics()` publishes, under the same names — the failure/decline counters this section's "pass bar" reads (read them beside the positive pair in the next row, not as the whole shape), now readable from the pod without `/mcp` auth. ⚠️ All three are **failure/decline** channels: a `{}` here does NOT evidence that a row was written, so read the positive pair below beside them |
+   | `record_writes_applied` / `record_last_write_at` | **the positive channel (#9548)** — the number of live record writes THIS PROCESS has committed since it started, and the instant of the last one (ISO-8601 UTC). This is the field that answers *"is the record actually writing?"* on its own: `record_write_failures: {}` is equally consistent with "writes are landing" and with "no write has ever reached the seam", which is how #9548 was closed on an empty object and reopened. Read it **before and after** a capture: an unchanged count means nothing was written, whatever the failures object says. ⚠️ The two `null`s mean DIFFERENT things and `counters_error` is what separates them: for `record_writes_applied`, `null` = the counter could not be READ (so a `.get(…, 0)` must not turn an unanswered read into the never-writing finding), while for `record_last_write_at`, `null` = this process has not committed a write since it started, and it is also `null` on an unread snapshot. ⚠️ Two honest limits: they are in-process, so they reset on deploy/restart (`record_last_write_at` is how you date them), and a non-zero value claims *a transaction committed in this process*, not *how many rows landed* — the SQL row count below is still the witness for rows |
    | `degraded` / `degraded_reasons` / `refusing` | **the record's own verdict, and the field to read first** (#10185, #10620). `degraded`: `null` = not evaluated, because the counter snapshot could not be read (see `counters_error`) or the verdict itself could not be read (see `refusal_error`); `false` = no armed write was refused inside the window; `true` = **rows were dropped in the last `RECORD_REFUSAL_WINDOW_SECONDS` (5 min)**, and it flips `status` to `degraded`. `refusing` names *what* is refusing and *how long ago*: `{"reason": …, "age_s": …}`, or `null` = nothing is refusing. ⛔ The key is **ABSENT** when the verdict could not be read (`refusal_error` non-null), deliberately: absence and "not evaluated" are one fact, so a consumer must never read a missing key as "nothing is refusing" — the same rule `degraded: null` follows, one field over (#10648 review P3). `degraded_reasons` carries the reason behind that verdict with its cumulative count. ⛔ **The verdict is WINDOW-based, not a fold over the counters** — #10185 measured that folding `any(record_write_failures)` pins a deployment `degraded` for the life of the process after one transient refusal (and an always-red flag is one an operator ignores), while a restart reads `ok` with the rows still missing. So it CLEARS on its own after a quiet window, with no restart and **no counter reset or hidden** — read `record_write_failures` for the history, `degraded`/`refusing` for *now*. The vocabulary is SIX values, and **not all are replay-healable**: `write_failed` (replay heals), `circuit_open` (replay heals), `no_tenant` (heal the tenant resolution, then replay), `malformed_dsn` (fix the value); but `no_journal` (armed with **no journal** — no source exists, **no replay can heal it**) and `seam_unimportable` (the record module could not be imported, so the seam never ran) are fixed by their own cause, **not** by a replay. ⚠️ `record_non_journal_skips` and `record_position_unproven` are deliberately NOT folded in: those are healthy declines and self-healing skips, not lost rows |
    | `counters_error` | why the counter snapshot could not be read, or `null`. Kept apart from `error` so the pairing above stays true; non-null also flips `status` to `degraded` |
    | `refusal_error` | why the **refusal verdict** could not be read, or `null`. Kept apart from `error` for the same reason as `counters_error`, and one field further: `error`'s remedy is "fix the DSN", which is the wrong row for an unreadable process global. When it is non-`null` the verdict was NOT EVALUATED, so `degraded` is `null` — never `false`, which would claim "nothing is refusing" about a read that never happened. Non-null also flips `status` to `degraded` |
@@ -3427,15 +4135,18 @@ text, so do not grep the 9090 listener for a counter name.
    without a connection. A dead host, a paused project and a wrong password all
    still read `armed: true`.
 
-   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** All
-   three counters are FAILURE/DECLINE channels — there is no positive
-   `record_writes` counter anywhere in `monitoring.py` — so an armed-and-writing
-   deployment and one that has never written a row both read `{}`. A zero here
-   can only ever falsify "writes are failing"; it cannot confirm "writes
-   happened". Indicator (b) of #9548 (`record_write_failures` = 0) is therefore
-   only meaningful **beside the SQL row count** in “No unexpected failure” below:
-   a healthy-looking counter with no new `journal_event` / `point` row is the
-   R1-without-R2 state, not a pass.
+   ⛔ **`record_write_failures: {}` is NOT evidence that a row was written.** The
+   three failure/decline counters cannot show it on their own, so an
+   armed-and-writing deployment and one that has never written a row both read
+   `{}`. A zero there can only ever falsify "writes are failing"; it cannot
+   confirm "writes happened". **The positive witness is
+   `record_writes_applied`** (added for exactly this, #9548): it counts writes
+   this process COMMITTED, so a delta across the capture is the presence reading
+   item 1 below asks for. Indicator (b) of #9548 (`record_write_failures` = 0)
+   is therefore read as **the pair** — a rising `record_writes_applied` with no
+   growth in the failures, beside the SQL row count in “No unexpected failure”
+   below for how MANY rows landed: a healthy-looking counter with no new
+   `journal_event` / `point` row is the R1-without-R2 state, not a pass.
 
 1. **The failure log line** — every WARN-level non-write is logged with its reason
    (`tortoise/record_writer.py`: `malformed_dsn` / `no_tenant` / `circuit_open` /
@@ -3489,11 +4200,17 @@ text, so do not grep the 9090 listener for a counter name.
    ```
 
 2. **The counters** — `monitoring.metrics()`, read INSIDE the process that writes
-   the rows: the authenticated MCP tool `tortoise_overview(section="health")` on
+   the rows: the authenticated MCP tool `tortoise_graph_overview(section="health")` on
    the app's `/mcp` mount, which serves `monitoring.metrics()` from the same
    process that writes the rows (the retired name `tortoise_health` still answers
    as an alias), so `record_write_failures` (a `{reason: count}` dict),
-   `record_non_journal_skips` and `record_position_unproven` are the live shape.
+   `record_non_journal_skips` and `record_position_unproven` are the live
+   FAILURE/decline shape — and `record_writes_applied` (an int) beside
+   `record_last_write_at` (an ISO-8601 UTC instant, or `null` until this
+   process's first committed write) are the POSITIVE pair in the same dict
+   (#9548). Read the failure shape and the positive pair together: the four
+   counters are one snapshot, and the pair is what says anything was written at
+   all.
    ⛔ Do **not** substitute a
    `fly ssh console -C "python3 -c 'import tortoise.monitoring; …'"` one-liner:
    the counters are in-process memory, so a fresh interpreter answers **0**
@@ -3541,12 +4258,14 @@ So the bar has **two parts, and BOTH are required**:
 
 1. **Something must have APPEARED.** ⛔ **An all-empty reading is NOT a pass.**
    When the seam is unarmed, `write_live_record` returns *before counting
-   anything* — nothing on either counter, nothing in the WARN log — which is
-   **byte-identical** to a healthy zero. So **read both counters BEFORE the
-   capture and again after**: presence and growth are the *difference* between
+   anything* — nothing on any record counter, nothing in the WARN log — which is
+   **byte-identical** to a healthy zero. So **read every record counter BEFORE
+   the capture and again after**: presence and growth are the *difference* between
    the two reads, never an absolute count (a `write_failed` left from earlier in
    the process's life is not this capture's reading). After the capture, require
-   at least one reading **before** you interpret anything: any reason on
+   at least one reading **before** you interpret anything: a **delta on
+   `record_writes_applied`** (the positive witness, #9548 — this one alone says a
+   transaction committed), any reason on
    `record_write_failures`, any reason on `record_non_journal_skips`,
    a non-zero delta on `record_position_unproven`, or a new `journal_event` / `point` row
    on the record project. ⚠️ **The capture that proves presence must be a
@@ -3724,14 +4443,13 @@ pooler value §"The value" prescribes for the app.
 
 ### The record's connecting role (R6 decision, 2026-10-22, #9554)
 
-> ⛔ **Its steps 1 and 2 (granting the role `LOGIN` with a credential, and arming the DSN) are
-> postponed** by the `#9548` owner ruling of 2026-11-01, quoted
-> (its headline and operational point 3) in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
-> above — read that note before acting on anything here. The **role** decision (`tortoise_record_app`,
-> `NOBYPASSRLS`, never `postgres`/`service_role`) stands and is what a future arming must obey; the
-> **arming** does not happen until the ruling lifts — and **step 1 is provisioning too**
-> (`ALTER ROLE … LOGIN` + `\password` are run against the hosted project, which is exactly what the
-> ruling's "do not arm, provision, or point anything at the hosted store" forbids).
+> ✅ **Its steps 1 and 2 are AUTHORISED as of 2026-11-03** — the `#9548` owner ruling of 2026-11-01
+> that postponed them was **superseded** (AUTHORISED box in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)
+> above). Read that box before acting here. What is now true: the **role** decision
+> (`tortoise_record_app`, `NOBYPASSRLS`, never `postgres`/`service_role`) stands unchanged and is what
+> any arming must obey; the **DSN is already armed**; and step 1's `ALTER ROLE … LOGIN` is still a
+> *provisioning* act on the hosted project — permitted now, but the 2026-11-03 procedure puts a
+> **verified backup first**, and that is the blocking precondition today (no backup credential).
 
 The Postgres record's tenancy boundary is **row-level security**, and it is enforceable only if the
 application path connects as a role that does not bypass it. The role, the policies and the reason
@@ -3753,9 +4471,18 @@ in git, re-minted on every deploy.
 **1. Give the role a login credential, once, out of band** (SQL editor as `postgres`; `\password`
 keeps the plaintext out of the statement and off the logs):
 
-⛔ **Do not run this until `#9548`'s ruling lifts** (quoted at the head of this section): `ALTER ROLE …
-LOGIN` plus a credential is a *provisioning* act on the hosted store, which the ruling names explicitly.
-The step is kept because the role rule still governs a future arming; it is not scheduled.
+✅ **AUTHORISED (2026-11-03) — AND ALREADY SATISFIED, which this note previously denied.** The role
+was granted `LOGIN` and its credential provisioned out of band on **2026-10-26** (`#9548` comment
+`6407834085`: `tortoise_record_app.<ref>` as `LOGIN NOBYPASSRLS NOSUPERUSER NOCREATEDB NOCREATEROLE`,
+with that lane verifying the boundary by connecting **as** the role). The migration itself ships
+`NOLOGIN` (`supabase/migrations/20261025000001_record_tenancy_role_and_guc.sql`: *"`LOGIN` and setting
+its password is an OPERATOR act, done once"*), so the measured `LOGIN` state **is** proof this step ran.
+⛔ **The `22P02` write failures are NOT a second, independent proof of it** — this note used to say they
+were: an invalid-JSON cast fires for any **non-bypassing** role — `scope_connection()` refuses `postgres`/`service_role` before the first statement, so those never reach the cast — so it proves the role PASSED the posture gate and an `INSERT` was attempted, never WHICH non-bypassing role made it.
+⚠️ **So do NOT re-run it casually:** `\password tortoise_record_app` **rotates the live credential
+that the deployed `TORTOISE_RECORD_DSN` names**, and the GitHub secret **and** the Fly secret must be
+re-set with the new value in the same change, or the record stops authenticating. Keep this step as
+the rotation / re-mint reference, not as a pending task.
 
 ```sql
 ALTER ROLE tortoise_record_app LOGIN;
@@ -3763,10 +4490,10 @@ ALTER ROLE tortoise_record_app LOGIN;
 ```
 
 **2. Arm the DSN** (R1) with that role — for the shared pooler this is
-`<role>.<project-ref>` as the user. ⛔ **Do not do this until `#9548`'s ruling lifts** (2026-11-01;
-quoted in [Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)):
-this text is the DSN's *shape*, which the ruling does not change — the act it describes is what the
-ruling postpones:
+`<role>.<project-ref>` as the user. ✅ **Authorised (2026-11-03) — and ALREADY DONE**: `/health` reports
+`"record":{"armed":true,…}`. The 2026-11-01 postponement this note used to cite is superseded (see
+[Arming the Postgres record](#arming-the-postgres-record--tortoise_record_dsn-epic-7879-r1-9548)).
+This text is the DSN's *shape*, which no ruling changed:
 
 ```text
 TORTOISE_RECORD_DSN=postgresql://tortoise_record_app.<ref>:<password>@aws-0-<region>.pooler.supabase.com:5432/postgres?sslmode=require
@@ -3833,7 +4560,12 @@ verb wraps it as `RestoreUnavailable`/its reconcile equivalent, and both exit **
 never reach the *empty source* refusal (`refuse_unrestorable_source`, exit 3) or the divergence
 verdict (exit 3): those are what a correctly-roled but EMPTY record would produce. Read the
 exception TYPE as the discriminator — `RecordProjectionError` is a role/scope refusal (fix the
-DSN); a driver `OperationalError` in the same message is a transient outage.
+DSN); a driver `OperationalError` in the same message is a transient outage; and
+`PlacementTableUnavailable` (#10663) is neither — the placement table could not be resolved (absent
+from the package, with no `docs/` in an image; present but unreadable, including bytes that do not
+decode; or present but empty — a carrier, or in a checkout the doc itself, that parses to zero rows),
+i.e. the INSTALL is broken, and that verb now says so in its own words rather than reporting an
+unreadable record.
 ⚠️ Note `-m tortoise record-restore` behaves as described here, and "read-only" here means
 **read-only with respect to the RECORD**: the verb never writes the record — it reads it through
 `read_record_view` — but it **REBUILDS the cache graph** from what it read (it WIPES the target

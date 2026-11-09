@@ -295,9 +295,13 @@ def test_dedup_hit_accumulates_the_second_source(prov):
     assert _sources_of(proj, pid) == {
         "https://example.com/alpha", "https://example.com/beta"}, \
         "the fold dropped the second source — the evidence difference is LOST"
-    # The prop is the surface `list_drafts` reports AND the surface
-    # `query(extractedFrom=…)` matches by EQUALITY: it stays the scalar the
-    # Point was created under, with the folded set beside it (#7704 review P1).
+    # The prop is the surface `list_drafts` reports, and it stays the scalar the
+    # Point was created under with the folded set beside it (#7704 review P1 —
+    # the WRITE shape). ⚠️ It no longer bounds the read door, and saying so is
+    # the fix this file pins: `query(extractedFrom=…)` now answers through a
+    # UNION (property equality OR `(n)-[:extractedFrom]->(:Source {url: $k})`,
+    # #10063), so a prop-only reader is not what the read door matches by — do
+    # NOT re-narrow the read door to that scalar (#11038).
     assert _prop_refs(proj, pid) == "https://example.com/alpha", (
         "the convenience property must stay the survivor's own creating "
         f"source: {_prop_refs(proj, pid)!r}")
@@ -333,8 +337,16 @@ def test_a_fold_keeps_the_read_door_answering(prov):
     the scalar it always was (the survivor's own creating source) and the
     folded set rides ``extractedFromAll``. A survivor created under ANOTHER
     source is still not returned under THIS one's ref — the answer
-    ``origin/main`` gave, and the residual #10063 tracks — but nothing that
+    ``origin/main`` gave, and the residual #10063 tracked — but nothing that
     answered before the fold stops answering.
+
+    ✅ #10063 LANDED ON TOP OF THAT DECISION: the WRITE shape is untouched
+    (the property stays the survivor's own scalar, the folded set stays on
+    ``extractedFromAll``), and the read door now ALSO matches the authoritative
+    `:Source` edge — so the folded ref answers too. The pin that used to assert
+    ``query(extractedFrom=beta) == []`` with a "do not silently change shape"
+    note is now the fixed expectation, deliberately and visibly (#10063 asked
+    for exactly this, and the #7704 review deferred it here).
 
     MUTATION: write ``accumulated`` back into the property (the pre-fix arm) and
     the three read-door assertions below red while the edges stay green.
@@ -356,10 +368,230 @@ def test_a_fold_keeps_the_read_door_answering(prov):
     assert [p["id"] for p in page["results"]] == [pid], (
         "paginated_query went the same way — the whole read door, not one "
         f"method: {sorted(page)!r}")
-    assert sdk.query(extractedFrom=beta) == [], (
-        "#10063 residual, asserted so it cannot silently change shape: the "
-        "property holds ONE creating source, so the OTHER source's ref does "
-        "not match it — the EDGES are what carry that fact (#3263)")
+    assert [p["id"] for p in sdk.query(extractedFrom=beta)] == [pid], (
+        "#10063: the folded-in source must FIND its survivor — the property "
+        "holds the creating source only, so this answer comes from the "
+        "authoritative `:Source` edge (#3263). Before #10063 this was ``[]``"
+    )
+
+
+# ── #10063: the read door matches the AUTHORITATIVE EDGE, not just EQUALITY ──
+#
+# `query(extractedFrom=…)` filtered on ``n.`extractedFrom` = $extractedFrom``.
+# The property is the survivor's OWN creating source (a scalar: #7704 review
+# P1 keeps it that way deliberately), so every OTHER ref the Point carried was
+# invisible to the read door — the folded-in source of a dedup fold, and EVERY
+# ref of a sequence-born Point (an ARRAY is not equality-matchable at all).
+# ONTOLOGY §3.3 / #3263 say the `:Source` EDGES are the authoritative
+# provenance and the property is a query convenience, so the read door now
+# asks the edges as well. Both directions are pinned below: the refs the Point
+# CARRIES answer, and a ref it does not carry still does not.
+
+
+def test_query_answers_for_a_folded_ref_from_another_source(prov):
+    """#10063: a folded-in source must FIND the survivor it folded onto.
+
+    Measured before the fix: `query(extractedFrom=beta)` → ``[]`` while the
+    point held both refs (scalar prop + `extractedFromAll`) and BOTH edges.
+    """
+    sdk, _events = prov
+    alpha, beta = ("https://example.com/alpha", "https://example.com/beta")
+    content = "a folded claim must answer for every source it carries"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+
+    proj = sdk._get_proj()
+    # GUARDS — the write side is deliberately UNCHANGED by #10063: the
+    # convenience property is still the survivor's own scalar, the folded set
+    # still rides `extractedFromAll`, and the edges still carry both refs.
+    # A read-side fix that changed any of these would be a different (and
+    # unasked-for) decision than the one #7704 review P1 recorded.
+    assert _prop_refs(proj, pid) == alpha, (
+        "#10063 is a READ fix: the property must stay the creating source, "
+        f"got {_prop_refs(proj, pid)!r}")
+    assert sorted(_all_prop_refs(proj, pid)) == sorted([alpha, beta])
+    assert _sources_of(proj, pid) == {alpha, beta}, \
+        "guard: the fold must have wired the second ref"
+
+    for ref in (alpha, beta):
+        assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+            f"query(extractedFrom={ref!r}) must return the survivor — it "
+            "carries that ref on its `:Source` edges (#3263)")
+        page = sdk.paginated_query(extractedFrom=ref)
+        assert [p["id"] for p in page["results"]] == [pid], \
+            "paginated_query must answer identically (its total uses the same predicate)"
+        assert page["total"] == 1
+
+    # The other direction: a ref the Point does NOT carry must not match. A
+    # predicate that widened past the point's own refs would be over-matching,
+    # and the count/total above would be a lie about the graph.
+    assert sdk.query(extractedFrom="https://example.com/not-a-source") == []
+    assert sdk.paginated_query(
+        extractedFrom="https://example.com/not-a-source")["total"] == 0
+    # …and it must not drag in a Point that holds no source at all.
+    bare = sdk.create_point("statement", "a sourceless claim")
+    assert bare["id"] != pid
+    assert sdk.query(extractedFrom="https://example.com/not-a-source") == []
+
+
+def test_query_answers_for_every_ref_of_a_sequence_born_point(prov):
+    """#10063, the ARRAY shape: equality can never match it; the edge does.
+
+    A Point created with a ref SEQUENCE stores `extractedFrom` as an ARRAY
+    (the writer's shape rule, #3263). Before the fix BOTH refs were
+    unfindable — not even the one the Point was created under.
+    """
+    sdk, _events = prov
+    a, b = (f"https://example.com/seq-{n}" for n in ("a", "b"))
+    pid = sdk.create_point("statement",
+                           "a claim whose provenance arrived as a sequence",
+                           extractedFrom=[a, b])["id"]
+    proj = sdk._get_proj()
+    assert _prop_refs(proj, pid) == [a, b], \
+        "guard: a sequence-create stores an ARRAY"
+
+    for ref in (a, b):
+        assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+            f"query(extractedFrom={ref!r}) must return the sequence-born "
+            "Point — the ref is on its `:Source` edges")
+    assert sdk.query(extractedFrom="https://example.com/seq-c") == []
+
+
+def test_a_LIST_filter_value_answers_or_is_empty_but_never_raises(prov):
+    """A LIST filter value must answer or return ``[]`` — never raise (#11038).
+
+    ``query(extractedFrom=[a, b])`` is a LEGAL call shape pre-#10063: the old
+    clause was ``n.`extractedFrom` = $extractedFrom``, and array-valued
+    equality made it answer for a sequence-born Point's own property. The fix
+    additionally binds the same value into a node pattern map —
+    ``(:Source {url: $extractedFrom})`` — where a STRING ``url`` meets a LIST.
+
+    So this pins the property that makes the widening safe: the edge arm
+    degrades to *false* for a list, it does not raise. If a future engine (or a
+    rewritten clause) made that comparison raise, every list-valued ref filter
+    would start raising where it used to return rows — a regression INVENTED by
+    the fix, and one no in-repo caller would notice (nothing outside test
+    fixtures passes a list — see the ``query(extractedFrom=[...])`` call shape
+    below, which no product caller uses).
+    """
+    sdk, _events = prov
+    a, b = (f"https://example.com/listref-{n}" for n in ("a", "b"))
+    pid = sdk.create_point("statement",
+                           "a claim asked for by a LIST of refs",
+                           extractedFrom=[a, b])["id"]
+    proj = sdk._get_proj()
+    assert _prop_refs(proj, pid) == [a, b], \
+        "guard: a sequence-create stores an ARRAY property"
+
+    # The array-equality answer that existed BEFORE the fix must survive it.
+    assert [p["id"] for p in sdk.query(extractedFrom=[a, b])] == [pid], (
+        "a LIST filter value must still answer by array equality — the "
+        "equality arm is kept for exactly this shape")
+    page = sdk.paginated_query(extractedFrom=[a, b])
+    assert [p["id"] for p in page["results"]] == [pid]
+    assert page["total"] == 1, (
+        "`total` uses the same predicate, so it cannot drift from the rows"
+    )
+
+    # A list that matches nothing is a NO-MATCH, not an error.
+    absent = ["https://example.com/listref-absent"]
+    assert sdk.query(extractedFrom=absent) == []
+    assert sdk.paginated_query(extractedFrom=absent)["total"] == 0
+
+
+def test_a_prop_only_ref_still_answers_by_equality(prov):
+    """NO caller loses a match: the equality arm is KEPT, not replaced.
+
+    Pre-#3263 data can hold `extractedFrom` as a property with no `:Source`
+    edge at all. The edge arm alone would make those Points unfindable — a NEW
+    defect in place of the old one — so the two arms are a UNION, and this
+    pins the property-only half.
+    """
+    sdk, _events = prov
+    ref = "https://example.com/prop-only"
+    pid = sdk.create_point("statement", "a legacy property-only ref",
+                           extractedFrom=ref)["id"]
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MATCH (p:Point {id:$id})-[r:extractedFrom]->() DELETE r",
+        params={"id": pid})
+    assert _sources_of(proj, pid) == set(), "guard: the edge is gone"
+    assert [p["id"] for p in sdk.query(extractedFrom=ref)] == [pid], (
+        "the property equality arm must keep answering with no edge present")
+
+
+def test_scalar_property_filters_keep_EXACT_equality(prov):
+    """The membership arm is SCOPED to the ref property.
+
+    Two reasons, both pinned here: a scalar property filter must stay EXACT
+    (no widening to other points), and it must not be rewritten into a
+    membership test — ``$x IN <a scalar property>`` is a type mismatch in this
+    engine, which is exactly why #10063's arm is the `:Source` edge and not an
+    ``IN n.<prop>``.
+    """
+    sdk, _events = prov
+    mine = sdk.create_point("statement", "authored by tester",
+                            authoredBy="tester")
+    sdk.create_point("statement", "authored by another",
+                     authoredBy="another")
+    assert [p["id"] for p in sdk.query(authoredBy="tester")] == [mine["id"]]
+    assert sdk.query(authoredBy="test") == [], (
+        "a scalar filter widened past exact equality — 'test' must not match "
+        "the value 'tester'")
+
+
+def test_the_accumulated_refs_filter_answers_for_every_carried_ref(prov):
+    """`extractedFromAll` is a REF filter too: answered by the EDGE, not by
+    equality.
+
+    `_REF_FILTER_PROPERTIES` carries BOTH ref keys, because both can hold more
+    than one ref while the node property cannot be equality-matched: a fold
+    stores the accumulated set as an ARRAY beside the scalar, so
+    `n.extractedFromAll = $extractedFromAll` is `array = 'string'` — never
+    true. Without the edge arm the filter would answer for nothing at all.
+
+    Until this pin, `-k extractedFromAll` selected 0 tests, so nothing covered
+    the key: dropping it from the family, or rewriting the arm into a
+    membership test (`$x IN n.<prop>`, a type mismatch on a scalar), would
+    have changed the read door silently. Both directions are asserted, so an
+    over-matching arm fails here too.
+    """
+    sdk, _events = prov
+    alpha, beta = (f"https://example.com/all-{n}" for n in ("alpha", "beta"))
+    content = "a folded claim answers for the accumulated set as well"
+    pid = sdk.create_point("statement", content, extractedFrom=alpha,
+                           dedup=True)["id"]
+    sdk.create_point("statement", content, extractedFrom=beta, dedup=True)
+
+    proj = sdk._get_proj()
+    assert sorted(_all_prop_refs(proj, pid)) == sorted([alpha, beta]), \
+        "guard: the fold must accumulate both refs on the property"
+
+    for ref in (alpha, beta):
+        assert [p["id"] for p in sdk.query(extractedFromAll=ref)] == [pid], (
+            f"query(extractedFromAll={ref!r}) must return the survivor — the "
+            "accumulated ref is on its `:Source` edges (#3263)")
+        page = sdk.paginated_query(extractedFromAll=ref)
+        assert [p["id"] for p in page["results"]] == [pid]
+        assert page["total"] == 1
+
+    # The ARRAY shape, which equality can never match at all.
+    seq_pid = sdk.create_point(
+        "statement", "a sequence-born claim, queried by its accumulated refs",
+        extractedFrom=[alpha, beta])["id"]
+    assert seq_pid != pid
+    for ref in (alpha, beta):
+        assert sorted(p["id"] for p in sdk.query(extractedFromAll=ref)) == \
+            sorted([pid, seq_pid]), (
+                f"query(extractedFromAll={ref!r}) must return BOTH Points "
+                "carrying that ref")
+
+    # …and the over-match direction: a ref neither Point carries is not
+    # dragged in by the edge arm.
+    assert sdk.query(extractedFromAll="https://example.com/all-gamma") == []
+    assert sdk.paginated_query(
+        extractedFromAll="https://example.com/all-gamma")["total"] == 0
 
 
 def test_a_fold_keeps_the_refs_of_a_sequence_born_point(prov):

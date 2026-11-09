@@ -141,8 +141,9 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
     graph admits and reds there. The false-refusal one is not covered **in this
     file** — it IS covered repo-wide, at DOOR level, by
     `tests/test_8906_points_gate_counts_write_graph.py`'s
-    `test_default_graph_full_write_graph_empty_is_ADMITTED` (#10724, landed on
-    `main` after this branch point): that file pins the doors, this arm pins the
+    `test_default_graph_full_write_graph_empty_is_ADMITTED` (#10724, `f422799c4`
+    — an ANCESTOR of this fold's merge base, so "after" means after the lane's
+    own older fork, not after `main`): that file pins the doors, this arm pins the
     omitted-`sdk=` fallback inside `_check_org_limit`. Every case above that
     seeds a graph sets the DEFAULT graph to 0, so none of them can say what a
     FULL counted graph does to a write into an EMPTY bound graph — and that is
@@ -216,14 +217,34 @@ def test_a_FULL_default_graph_cannot_refuse_a_write_into_an_EMPTY_bound_graph():
         _check_org_limit(dict(GRAPH_BOUND_ORG), "points")
     assert ei.value.status_code == 402, ei.value
 
+    # ⛔ RESTORE THE FIXTURE BASELINE (#10807 review P3). This arm ends with the
+    # CUSTOM graph parked at `max_points`; the next arm,
+    # `test_org_wide_key_still_counts_the_default_graph`, seeds only the DEFAULT
+    # graph, so at 5 it would still 402 under a gate that WRONGLY counted the
+    # custom graph for an org-wide key (5 >= 5) — losing the only count-level
+    # discrimination that case has. Its own arm is made self-contained below as
+    # well; leaving the baseline clean means neither is order-dependent.
+    _seed(CUSTOM_GRAPH, 0)
+    assert _count(CUSTOM_GRAPH) == 0, "fixture: the custom graph is restored"
+
 
 def test_org_wide_key_still_counts_the_default_graph():
-    """Unchanged: an org-wide key (no `graph_id`) counts `org_<tid>`."""
+    """Unchanged: an org-wide key (no `graph_id`) counts `org_<tid>`.
+
+    ⛔ SELF-CONTAINED, NOT INHERITED (#10807 review P3): the CUSTOM graph is
+    seeded EMPTY here, so the 402 below can only come from the DEFAULT graph's
+    population. Without this the arm passed under the exact mutation it exists
+    to catch — a gate counting the CUSTOM graph — whenever a preceding case left
+    that graph at the cap.
+    """
     org_wide = {
         k: v for k, v in GRAPH_BOUND_ORG.items() if k not in ("graph_id", "graph_namespace")
     }
     assert _data_graph_name(org_wide) == DEFAULT_GRAPH
     _seed(DEFAULT_GRAPH, 5)
+    _seed(CUSTOM_GRAPH, 0)
+    assert _count(DEFAULT_GRAPH) == 5, "fixture: counted graph must be AT cap"
+    assert _count(CUSTOM_GRAPH) == 0, "fixture: the write graph must be empty"
     with pytest.raises(HTTPException) as ei:
         _check_org_limit(dict(org_wide), "points")
     assert ei.value.status_code == 402, ei.value

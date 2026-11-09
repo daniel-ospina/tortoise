@@ -380,6 +380,75 @@ _INDEX_CENSUS_RE = re.compile(
     r"\*\*(?P<tables>\d+) record tables \+ (?P<views>\d+) procedural views\*\*"
 )
 
+# ── the same row's ARMING claim, which is a live-state claim like any other ───
+# `test_the_routing_index_census_matches_the_record_migrations` reads this row's
+# CENSUS. The row ALSO declares the record's **live operational state**, and that
+# half carried the pre-arming census ("the record is NOT ARMED … because R1 has
+# still not armed the DSN") for eleven days after the arming was measured, while
+# `08-hosted-prerequisites.md` §A8 — the file this row's own source column points
+# at — and `09-record-tenancy-decision.md` were corrected to say the opposite
+# (#11064 review, P2: the correction stopped one hop short, at the doc that
+# ROUTES every reader, so a lane arrives at the corrected page with the stale
+# premise already loaded). The arming is measured, not asserted: `#9548` comment
+# `6407834085` (2026-10-26, `armed: true`, `tortoise_record_app` granted `LOGIN`)
+# and the owner's 2026-11-03 decision (comment `6612968196`) that superseded the
+# ruling which had forbidden the provisioning.
+_INDEX_ARMED_CLAIM = "the record is ✅ ARMED on the hosted deployment"
+#: What makes that claim EVIDENCE rather than a second assertion — the counter
+#: that was actually read (the epic's own rounded bound: an empty
+#: `record_write_failures` falsifies "writes are failing" and does NOT establish
+#: that a row was written).
+_INDEX_ARMED_EVIDENCE = ("record_write_failures",)
+#: …and the build the reading was taken on, pinned by **shape, not by value**
+#: (#11064 review, non-blocking note 1). The value in the row is a *measurement*
+#: (`fc6a8a64b` was serving when it was taken); it changes on the next deploy, so
+#: pinning the literal would steer the next fixer to restore a build that no
+#: longer serves — a stale evidence claim, which is the defect class this pin
+#: exists to close. What must survive is that the row names a build at all, so a
+#: rewrite cannot degrade the reading into an anonymous assertion.
+_INDEX_ARMED_BUILD_RE = re.compile(r"build `[0-9a-f]{7,40}`")
+#: The retired live-state sentences. They may STAY as history — this repo keeps a
+#: superseded statement in place, labelled and dated — but a row that carries one
+#: with no `SUPERSEDED` marker BEFORE it is telling a lane, in the present tense,
+#: something measured false on 2026-10-26.
+#:
+#: The three sites are named by DESCRIPTION, not by character offset (#11064
+#: review round 9, P3): they used to be cited as `08:205-238` and `09:196-212`,
+#: and the second was wrong the moment it was written — the offset it gave as the
+#: START sat on the tail of the PREVIOUS bullet, and the one it gave as the END
+#: on a blank line plus `## Reopening`, while the block it meant to name sat
+#: strictly BETWEEN them (it is the third bullet under *Not verified by this
+#: lane*, named in the list below). That block is therefore ALSO not restated
+#: here as a `09:<n>` span: it was correct when this paragraph was written and is
+#: a decay waiting to happen, which is the whole point. ⛔ **The rule below was
+#: quoted in round 10 as sitting "eight lines above this comment" — it did not
+#: exist anywhere in the repo, so the pointer is now stated here in place rather
+#: than quoted from a home it never had** (#11064 rebase review, P3): *no
+#: character offsets on purpose — they were pinned once and were stale by the
+#: next round.* A description survives the next edit; an offset does not.
+#:   * `08` §R1 — the `SUPERSEDED`-labelled block in its read-back bullet;
+#:   * `09` §6 — the third bullet under *Not verified by this lane* (the one that
+#:     opens "This decision does not arm anything itself — but the arming has
+#:     since happened", carrying `SUPERSEDED in part`);
+#:   * the runbook — its `AUTHORISED AND PARTLY DONE` box at
+#:     §"Arming the Postgres record".
+_INDEX_RETIRED_ARMING = (
+    "the record is NOT ARMED on the hosted deployment",
+    "because R1 has still not armed the DSN",
+)
+_INDEX_SUPERSEDED_MARKER = "SUPERSEDED"
+#: The two epic docs this row indexes, and the measured-arming sentence each now
+#: carries. Pinned PRESENT so a later edit cannot flip the row back into
+#: disagreement with the file it routes to.
+_ARMED_SOURCE_OF_TRUTH = {
+    "docs/epics/2026-10-10-7879-postgres-record/08-hosted-prerequisites.md": (
+        "ARMED — AND THE ACT IS AUTHORISED"
+    ),
+    "docs/epics/2026-10-10-7879-postgres-record/09-record-tenancy-decision.md": (
+        "is in force on production writes"
+    ),
+}
+
 # ── the two RE-DERIVED NUMBERS that are not table/view counts (#9638 P2) ─────
 # The census above counts tables and views. Two further figures are quoted in
 # the same ledgers as *the number of migrations on disk* and *how many lines a
@@ -410,6 +479,21 @@ _MIGRATION_FILENAME_RE = re.compile(r"\d{14}_[a-z0-9_]+\.sql")
 #: below names). It deliberately cannot reach §A1/R7's historical `over all` EOL
 #: → `65 migrations`, because there is no space after `all` there.
 _PREREQ_PGVECTOR_TOTAL_RE = re.compile(r"over all (?P<count>\d+)\s+migrations")
+#: The FOURTH and FIFTH homes of the same denominator, and the two that went
+#: stale while the three above were corrected (#1981 review, P2):
+#: `docs/00_index.md`'s #4051 row (*"pgvector appears in **0 of 79
+#: migrations**"*) and the doc THAT row routes to,
+#: `docs/architecture/SEARCH-ARCHITECTURE.md` (*"appears in 0 of 79\nmigrations"* — wrapped, hence `\s+`). Neither was read: the patterns above
+#: are anchored to §R7/§A5 of the prerequisites doc and to the #7879 index row,
+#: so `-#4051`'s copy had no reader at all and went stale in the identical
+#: direction. A count is only pinned where a pattern reaches it.
+_MIGRATION_COUNT_OF_RE = re.compile(r"0 of (?P<count>\d+)\s+migrations")
+#: The two documents carrying the `0 of N migrations` form — scanned WHOLE,
+#: because the phrase is not confined to one row.
+_COUNT_OF_DOCS = (
+    REPO_ROOT / "docs" / "00_index.md",
+    REPO_ROOT / "docs" / "architecture" / "SEARCH-ARCHITECTURE.md",
+)
 #: The `narrative|raw_turn|raw_text|transcript` census command's own terms —
 #: the alternation the two "N lines" claims were taken with.
 _NARRATIVE_CENSUS_TERMS = ("narrative", "raw_turn", "raw_text", "transcript")
@@ -644,6 +728,682 @@ def test_the_routing_index_census_matches_the_record_migrations():
         )
 
 
+# ── the label check, PER OCCURRENCE (it used to be first-occurrence only) ─────
+# #11064's round-7 review measured that the two retired-sentence guards below
+# were **fail-open for the exact regression they document**. Both were written
+# as a first-occurrence pair — `at = text.find(retired)`, `labelled =
+# text.find(marker)`, `assert labelled < at` — and `find` returns the EARLIEST
+# match of each. The #7879 row is a single multi-thousand-character line that
+# already carries an unrelated `SUPERSEDED` in the A8 cell, AHEAD of the retained
+# R1 clause and its own label, so the pair degraded to "the row contains the word
+# SUPERSEDED somewhere before this sentence". (No character offsets here on
+# purpose: they were pinned once and were stale by the next round — the same decay
+# this file's own doctrine removes. The span relation is the fact; the number is
+# a copy of it.) Replayed against
+# the head, that guard stayed GREEN for both mutations it exists to reject:
+#
+#   * append the retired sentence as a LIVE claim ("…and the record is NOT ARMED
+#     on the hosted deployment, so R1 is not work to pick up.") — the edit shape
+#     this row has actually taken every round; and
+#   * delete the label that covers the retained R1 clause, leaving only the
+#     unrelated earlier A8-cell label.
+#
+# A green run over either is a FALSE PASS on the premise that cost lane
+# `p0-10000` a whole write-path verification (#10000), which is the defect class
+# this PR exists to close — a gate that reports OK over the artifact being wrong.
+#
+# So the label requirement is now per occurrence AND adjacent: every occurrence
+# needs a `SUPERSEDED` **label** before it with no sentence boundary in between,
+# i.e. the marker must label the same sentence the retired text sits in. "Label"
+# is not "mention": the marker counts only where it is a standalone token CLOSED
+# by the label's own terminator — `SUPERSEDED,` / `SUPERSEDED:` / `SUPERSEDED.` /
+# `**SUPERSEDED** —` — and never where it merely modifies a following noun
+# (`the SUPERSEDED note`) or sits inside a parenthetical pointer (`(see
+# SUPERSEDED)`, `[SUPERSEDED]`). Writing that split down was not enough: three
+# further mutants beat the first cut of it (#11064 round-9 review, P3), and the
+# constructor is now shaped by them rather than by the spellings that happened to
+# be in front of it:
+#
+#   * a label whose own FULL STOP was consumed by the match read as "same
+#     sentence" across a sentence break — `SUPERSEDED. In short, <retired>` passed,
+#     and that is the strongest boundary a writer uses. The terminator is therefore
+#     a LOOKAHEAD: it stays in `gap`, so `_SENTENCE_BOUNDARY_RE` sees it.
+#   * `)` and `]` were accepted as closers, so `(see SUPERSEDED) and, as before,
+#     <retired>` — the exact anaphoric "see the label above" mention the round-8
+#     mutant exists to reject, with the noun dropped — passed. A bracket means a
+#     parenthetical, i.e. a mention; it is no longer a closer.
+#   * the docstrings advertised `**SUPERSEDED** —`, which the regex refused (an
+#     over-block: a fixer told to use the documented bold form would get a red and
+#     might weaken the guard instead of relabelling). A trailing emphasis run is
+#     now a closer, so the documented form works.
+#
+# Non-vacuity is per CLAIM, not per fault class: each clause of the property below
+# has a mutant that kills it, including one that must stay GREEN so the documented
+# label forms remain usable. See
+# `test_the_retired_sentence_guard_rejects_its_own_regressions`.
+#
+# Three more shapes survived that sentence rule, all measured GREEN on the real
+# row before this round and all of them the same false PASS (#11064 round-9):
+#
+#   * **the label closes its OWN sentence.** `SUPERSEDED.` consumes the period as
+#     part of the label token, so a boundary scan over the *gap* can never see it:
+#     *"The earlier note was SUPERSEDED. Because R1 has still not armed the DSN,
+#     nothing lands."* passed on a label that labelled the PREVIOUS sentence. A
+#     label that closed its own sentence or clause (`;`) cannot cover what follows.
+#   * **the label is in a different table cell.** These rows are markdown tables,
+#     so `| … SUPERSEDED, | … R1 has still not armed the DSN |` puts the label and
+#     the claim in two independent cells sharing a line; a cell boundary is as
+#     hard a boundary as a sentence one.
+#   * **the em-dash label was not accepted at all** — the shape this file's own
+#     docs use most (`**SUPERSEDED** — kept as …`). That is the opposite error (a
+#     false RED on a correctly labelled correction), and the comment above claimed
+#     it was accepted while `_SUPERSEDED_LABEL_RE` rejected it. A comment that
+#     states a property the code does not have is the same defect class as a doc
+#     that states a measurement the deployment does not have.
+#
+# The property this enforces, stated exactly (do not restate it as "labelled"):
+# **some `SUPERSEDED` LABEL token occurs before the retired text, and between
+# them there is neither a sentence/clause boundary nor a markdown table-cell
+# separator.** It is a textual proxy for "this clause is labelled history", not a
+# proof of intent — a label token followed by a comma chain that then re-asserts
+# the premise still passes. That residual is accepted and named, because the
+# alternative (parsing the prose) is a bigger fail-open than the one it closes.
+_SENTENCE_BOUNDARY_RE = re.compile(r"[.!?](?:\s|$)|;\s")
+#: A markdown table-cell separator. Cells are independent claims sharing a line,
+#: so a label in one does not label the text in the next. (`#7879`'s row IS a
+#: markdown table row, so this is not hypothetical.)
+_CELL_SEPARATOR = "|"
+#: Punctuation that CLOSES the sentence or clause the label token sits in. A label
+#: followed by one of these labels what PRECEDES it, never what follows.
+#: ⛔ This is NOT redundant with `_SENTENCE_BOUNDARY_RE`, and the merge that
+#: deleted the first lane's equivalent table on that assumption re-opened a hole:
+#: that regex only recognises a terminator followed by whitespace or end-of-text,
+#: so `SUPERSEDED."` — the ordinary quoted-closer shape — and a typo like
+#: `SUPERSEDED.Because` both escaped it. Whether a rule is redundant is a question
+#: about BEHAVIOUR on the mutants, not about the text of the two rules
+#: (#11064 round-10 review, P3: measured by loading both parents and this merge as
+#: three modules against the same artifact — peer RED, merge GREEN, on 11 mutant
+#: classes the textual diff showed as a tidy-up).
+_LABEL_CLOSES_ITS_OWN_CLAUSE = ".!?;"
+#: A `SUPERSEDED` that is a LABEL — a standalone token closed by `, ; : . ! ?`, by
+#: an em/en dash (with or without a preceding emphasis run, so both `SUPERSEDED —`
+#: and `**SUPERSEDED** —` are labels), by a trailing emphasis run
+#: (`**SUPERSEDED**`), by end of text, or by the qualifier `in part` before any of
+#: those closers (`**SUPERSEDED\n  in part:**`). The closer is a LOOKAHEAD so it stays in
+#: the text between the label and the retired sentence, where the
+#: sentence-boundary test can see it — with the closer CONSUMED, `SUPERSEDED.` read
+#: as "same sentence" across the very boundary the label had just closed. ⛔ `)`
+#: and `]` are deliberately NOT closers: a bracket is a parenthetical pointer,
+#: i.e. a mention. This list is the whole accepted set — nothing else is
+#: documented in prose, so a fixer is never told to use a form the regex refuses.
+_SUPERSEDED_LABEL_RE = re.compile(
+    re.escape(_INDEX_SUPERSEDED_MARKER)
+    # ⛔ `SUPERSEDED in part:` is a LABEL TOO (#11064 review r17, P3). The closer had
+    # to follow the token immediately (whitespace/emphasis only), so the form this
+    # repo itself ships — `**SUPERSEDED\n  in part:**`, `09-record-tenancy-decision.md`
+    # §5 — was not a label: a fixer copying the repo's own spelling got a false RED
+    # whose remedy ("add a SUPERSEDED label") did not fit the text in front of it.
+    # Latent when found (the guard is applied to the index row and 08 §R8, not 09),
+    # i.e. exactly the kind of hole that fires on the next file to use it.
+    + r"(?:\s+in\s+part)?"
+    + r"(?=[\s*_]*(?:[,;:.!?]|[\u2014\u2013]|[*_]+|$))"
+)
+
+
+def _assert_retired_claim_is_labelled(
+    text: str,
+    needle: str,
+    *,
+    where: str,
+    remedy: str,
+) -> None:
+    """Raise unless EVERY `needle` in `text` is covered by its own `SUPERSEDED` label.
+
+    Per occurrence, not first-occurrence (see the block comment above): a
+    retired sentence may be kept as labelled history — this repo's convention for
+    an overridden ruling — but each retained copy must be inside the sentence
+    whose LABEL covers it. A copy with no label before it, with only a *mention*
+    of the word (`the SUPERSEDED note`) in a preceding clause, with the covering
+    label a sentence away (so it was never covering this clause), with a label
+    that closed its own sentence (`SUPERSEDED.`), or with the label in another
+    table cell, is telling a reader something was measured false as if it were
+    live.
+    """
+    for match in re.finditer(re.escape(needle), text):
+        labels = list(_SUPERSEDED_LABEL_RE.finditer(text, 0, match.start()))
+        assert labels, (
+            f"{where} asserts {needle!r} with no "
+            f"{_INDEX_SUPERSEDED_MARKER} LABEL before it (a bare mention such as "
+            f"'the {_INDEX_SUPERSEDED_MARKER} note' does not label a clause) — "
+            f"that is a live instruction, not labelled history. {remedy}"
+        )
+        label = labels[-1]
+        gap = text[label.end() : match.start()]
+        # A label whose OWN terminator closes the sentence labels what precedes it,
+        # never what follows (`.!/;` — see `_LABEL_CLOSES_ITS_OWN_CLAUSE` for why
+        # this is not what the sentence-boundary scan below already covers).
+        after = gap.lstrip(" \t*_")
+        assert not after or after[0] not in _LABEL_CLOSES_ITS_OWN_CLAUSE, (
+            f"{where} asserts {needle!r} after a {after[0]!r}-closed "
+            f"{_INDEX_SUPERSEDED_MARKER} label ({label.group(0)!r}); that label "
+            "CLOSED its own sentence, so it labels the clause BEFORE it and not "
+            f"this one — the retired text still reads as live. {remedy}"
+        )
+        assert _CELL_SEPARATOR not in gap, (
+            f"{where} asserts {needle!r} with its nearest "
+            f"{_INDEX_SUPERSEDED_MARKER} label in a DIFFERENT table cell; cells "
+            f"are independent claims sharing a line, so that label does not "
+            f"cover this one. {remedy}"
+        )
+        assert not _SENTENCE_BOUNDARY_RE.search(gap), (
+            f"{where} asserts {needle!r} with the nearest "
+            f"{_INDEX_SUPERSEDED_MARKER} label a SENTENCE away ({gap[:160]!r}); "
+            "a label in an earlier sentence does not cover this one, so the "
+            f"retired text still reads as live. {remedy}"
+        )
+
+
+def _index_record_row() -> str:
+    """The routing index's #7879 row — exactly one, or a loud failure."""
+    rows = [
+        line
+        for line in _INDEX_DOC.read_text(encoding="utf-8").splitlines()
+        if _INDEX_RECORD_ROW_MARKER in line
+    ]
+    assert len(rows) == 1, (
+        f"docs/00_index.md has {len(rows)} rows for the record's hosted "
+        f"prerequisites (marker {_INDEX_RECORD_ROW_MARKER!r})"
+    )
+    return re.sub(r"\s+", " ", rows[0])
+
+
+def test_the_routing_index_declares_the_measured_arming_not_the_census():
+    """The index's #7879 row says ARMED, and any retained "not armed" is labelled.
+
+    The row is the entry point a lane reads FIRST (AGENTS.md → Documentation
+    Filing: *"For topic-to-file routing, see `docs/00_index.md`"*), and its own
+    source column points at `08-hosted-prerequisites.md`, whose §A8 was corrected
+    to say the record is armed and authorised. Until this pin, the row still said
+    the opposite in the present tense — the same defect class the epic artifacts
+    were fixed for, one hop further out, where the review's own sweep over "the
+    files this PR edits" could not see it.
+
+    RED on the pre-fix text — measured at #11064's head before the correction: the
+    row carried **neither** `the record is ✅ ARMED on the hosted deployment`
+    **nor** the `record_write_failures` counter and a measured build, and both
+    retired sentences appeared with **no** `SUPERSEDED` marker anywhere in the row.
+
+    Non-vacuity is the inverted half: the retired sentences are NOT banned — they
+    are this repo's convention for an overridden ruling (keep it, label it, date
+    it) — so the assertion is that any retained one is preceded by the label. A
+    row that re-asserts "R1 has still not armed the DSN" as live reds here, and so
+    does a rewrite that deletes the measured state instead of correcting it.
+
+    The build is pinned by SHAPE (a `build` reference plus a sha), never by value:
+    the value in the row is a measurement of a build that changes on the next
+    deploy, and pinning the literal would send the next fixer to restore a build
+    that is no longer serving (#11064 review, non-blocking note 1).
+    """
+    row = _index_record_row()
+    assert _INDEX_ARMED_CLAIM in row, (
+        "docs/00_index.md's #7879 row no longer states the MEASURED arming state "
+        f"({_INDEX_ARMED_CLAIM!r}). It is the routing surface a lane reads first, "
+        "and the epic doc it indexes (§A8) says the record is armed"
+    )
+    for needle in _INDEX_ARMED_EVIDENCE:
+        assert needle in row, (
+            f"docs/00_index.md's #7879 row states arming without {needle!r} — the "
+            "claim is then an assertion, not a measurement (cite the build and the "
+            "counter, and keep the bound: an empty `record_write_failures` is not "
+            "evidence that a row was written)"
+        )
+    assert _INDEX_ARMED_BUILD_RE.search(row), (
+        "docs/00_index.md's #7879 row states arming without naming the BUILD the "
+        "reading was taken on (expected a `build` reference plus a sha). Leave the "
+        "sha's value alone — it is a measurement, and it changes on the next "
+        "deploy; what must survive is the reference, so the claim cannot decay "
+        "into an anonymous assertion"
+    )
+    for retired in _INDEX_RETIRED_ARMING:
+        _assert_retired_claim_is_labelled(
+            row,
+            retired,
+            where="docs/00_index.md's #7879 row",
+            remedy=(
+                "That sentence is false since 2026-10-26 (#9548 comment "
+                "6407834085). Keep it only as labelled history, as 08 §A8 and 09 "
+                "do — one `SUPERSEDED` in the SAME sentence, not an earlier cell"
+            ),
+        )
+    # The row and the docs it routes to must AGREE — that disagreement is the
+    # finding, not the stale row on its own.
+    for path, anchor in _ARMED_SOURCE_OF_TRUTH.items():
+        text = re.sub(r"\s+", " ", (REPO_ROOT / path).read_text(encoding="utf-8"))
+        assert anchor in text, (
+            f"{path} no longer states the measured arming ({anchor!r}) — the "
+            "index row's correction was derived from it, so re-derive both together"
+        )
+
+
+# ── the SAME stale-premise sweep, applied to the file the index routes to ─────
+# #11064's round-1 fix corrected the runbook and left the two live epic docs
+# carrying the superseded ruling; the round-3 fix corrected those and left the
+# index; this round's finding is that the §A8 disclaimer then claimed a COMPLETE
+# enumeration of the remaining census-point statements — two — while the file
+# carried four. A closed list is the mechanism: it tells a reader that everything
+# unlisted is current, so each correction that enumerates its sites hands the
+# next stale sentence a place to hide. The two pins below hold the fix in the
+# shape that cannot rot that way (state the invariant, label the list
+# non-exhaustive) and hold the one cross-artifact disagreement this round found.
+
+#: §A8's disclaimer must say what makes a statement here trustworthy — its own
+#: measurement date — rather than claiming its list of exceptions is complete.
+_PREREQ_DISCLAIMER_INVARIANT = "does not carry its own measurement date"
+_PREREQ_DISCLAIMER_NOT_EXHAUSTIVE = "NOT exhaustive"
+#: The retired closed-list claim: `the two remaining census-point statements`.
+#: It was wrong when written (the file carried four — R6's read-back note, R7
+#: item 2, R8's drill attribution and the A8 RLS row — and the §G paragraph made
+#: five), and because it enumerated it made every unlisted sentence read as
+#: vetted-current.
+_PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST = "the two remaining census-point statements"
+
+#: R8's drill attribution after the correction, and the runbook's §9 drill row it
+#: must agree with. Two artefacts an operator reads for this epic disagreed on
+#: what blocks the drill, and the direction was the costly one: 08 said "blocked
+#: on arming", which is the premise that made lane `p0-10000` conclude that the
+#: only remaining move was the prohibited one.
+_DRILL_BLOCKER_ANCHORS = (
+    # a captured session that actually wrote the two row kinds
+    "captured",
+    "journal_event",
+    # the record leg needs a DIRECT (not pooler) backup-capable DSN
+    "direct",
+)
+_DRILL_RETIRED_ATTRIBUTION = "#9548 hosted arming / #9551 CI"
+_RUNBOOK_DOC = REPO_ROOT / "docs" / "infra-runbook.md"
+_RUNBOOK_DRILL_ROW_MARKER = "a restore executed against a **real armed record**"
+
+
+def test_the_epic_a8_disclaimer_states_an_invariant_not_a_closed_list():
+    """§A8 tells a reader how to judge any statement here, not just listed ones.
+
+    The disclaimer that the previous fix round added enumerated its exceptions
+    ("the two remaining census-point statements elsewhere in it") and was wrong
+    on its own count — the file carried four, and the §G paragraph made five. The
+    defect is not the number: an enumeration that claims completeness makes every
+    unlisted sentence read as vetted-current, which is exactly how a stale
+    "R1 is unarmed" survived two sweeps scoped to "the files this PR touched".
+
+    So the pin is on the shape: state the invariant (any statement without its own
+    measurement date describes the tree that was), label the list NOT exhaustive,
+    and never re-assert the closed-list claim. RED on the pre-fix text — measured
+    at #11064's head before this correction: `the two remaining census-point
+    statements` was present and neither the invariant nor the non-exhaustive
+    label was.
+    """
+    text = re.sub(r"\s+", " ", _PREREQUISITES_DOC.read_text(encoding="utf-8"))
+    assert _PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST not in text, (
+        "08-hosted-prerequisites.md §A8 claims its list of census-point "
+        f"statements is complete ({_PREREQ_DISCLAIMER_RETIRED_CLOSED_LIST!r}) — it "
+        "was not (the file carried four, R6's read-back note and R8's drill "
+        "attribution among them). State the invariant and label the list NOT "
+        "exhaustive instead of counting sites"
+    )
+    assert _PREREQ_DISCLAIMER_INVARIANT in text, (
+        "08-hosted-prerequisites.md §A8 no longer states the invariant that makes "
+        f"this file readable ({_PREREQ_DISCLAIMER_INVARIANT!r}): a statement "
+        "without its own measurement date describes the tree that was. Without "
+        "it, only the listed sites are safe and the next stale sentence hides"
+    )
+    assert _PREREQ_DISCLAIMER_NOT_EXHAUSTIVE in text, (
+        "08-hosted-prerequisites.md §A8's list of dated sites must be labelled "
+        f"{_PREREQ_DISCLAIMER_NOT_EXHAUSTIVE!r} — an unlabelled list of "
+        "exceptions reads as a complete one"
+    )
+
+
+def test_the_epic_r8_drill_blocker_agrees_with_the_runbook():
+    """R8's unmeasured-drill attribution must name what is actually missing.
+
+    Both artefacts state why the hosted drill has not run, and they disagreed:
+    `docs/infra-runbook.md` §9's drill row was corrected to *"the blocker is not
+    the arming any more"* (missing: a captured session that wrote a
+    `journal_event` + `point` row, and a direct backup-capable DSN), while R8
+    still said the row was unmeasured `(#9548 hosted arming / #9551 CI
+    TEST_RECORD_DB_URI)` — two things the same runbook states are both satisfied.
+    The costly direction: 08 sent a lane back to the arming premise.
+
+    RED on the pre-fix text: the retired attribution was present in R8 and neither
+    `captured` nor `direct` appeared in the R8 section. Non-vacuity is the
+    cross-artifact half — the runbook's own drill row must still carry the same
+    two elements, so this cannot be satisfied by weakening 08 alone.
+
+    The retired wording may STAY as labelled history (this repo keeps a superseded
+    statement in place, dated and relabelled), so it is only a failure when it
+    appears with no `SUPERSEDED` marker before it.
+    """
+    text = _PREREQUISITES_DOC.read_text(encoding="utf-8")
+    flat = re.sub(r"\s+", " ", text)
+    start = flat.index("### R8 —")
+    # R9 is the next section — scope to it so "the epic says captured somewhere"
+    # cannot stand in for "R8 names what blocks the drill".
+    section = flat[start : flat.index("### R9 —")]
+    for anchor in _DRILL_BLOCKER_ANCHORS:
+        assert anchor in section, (
+            f"08-hosted-prerequisites.md §R8 does not name {anchor!r} as part of "
+            "what blocks the hosted drill. The runbook's §9 drill row (the "
+            "corrected one) names a captured session that wrote a "
+            "`journal_event` + `point` row and a DIRECT backup-capable DSN; an "
+            "operator reading R8 must not be sent back to the arming premise"
+        )
+    _assert_retired_claim_is_labelled(
+        section,
+        _DRILL_RETIRED_ATTRIBUTION,
+        where="08-hosted-prerequisites.md §R8",
+        remedy=(
+            "Both of those blockers are satisfied (2026-10-26 arming; #9551 "
+            "closed 2026-10-23), so as a live attribution it sends a lane to "
+            "redo work that is done. Keep it only as labelled history — one "
+            "`SUPERSEDED` in the SAME sentence, not an earlier section"
+        ),
+    )
+    # …and the two artifacts must still agree, which is the finding itself.
+    runbook_rows = [
+        line
+        for line in _RUNBOOK_DOC.read_text(encoding="utf-8").splitlines()
+        if _RUNBOOK_DRILL_ROW_MARKER in line
+    ]
+    assert len(runbook_rows) == 1, (
+        "docs/infra-runbook.md §9 has no single "
+        f"{_RUNBOOK_DRILL_ROW_MARKER!r} drill row ({len(runbook_rows)} found) — "
+        "the correction in 08 §R8 is derived from it"
+    )
+    runbook_row = re.sub(r"\s+", " ", runbook_rows[0])
+    for anchor in ("captured", "direct"):
+        assert anchor in runbook_row, (
+            f"docs/infra-runbook.md §9's armed-record drill row no longer names "
+            f"{anchor!r} as part of the blocker — re-derive 08 §R8's attribution "
+            "with it rather than letting the two drift apart again"
+        )
+
+
+def test_the_retired_sentence_guard_rejects_its_own_regressions():
+    """The label guard is executed against the mutations it exists to reject.
+
+    The #11064 round-7 review measured that the two pins above were **fail-open**:
+    both located the retired sentence and the `SUPERSEDED` marker with
+    first-occurrence `find`, so on the real #7879 row — one very long line
+    carrying an unrelated `SUPERSEDED` well before this sentence — the check
+    reduced to "the word appears somewhere before this sentence", and it stayed
+    GREEN for both regressions below. A green run over a stale premise is a false
+    PASS, and a false PASS is the one verdict this whole file exists to prevent.
+
+    Restating the guard as "per occurrence + same sentence" is only half the
+    fix: the half that can rot is a docstring claiming a property nothing
+    executes. So this test takes the REAL head text — not a fixture, so it cannot
+    drift from the artifact — applies each mutation, and requires a red:
+
+    The mutants are grouped by the CLAIM each one kills, because a textual
+    invariant has no universal sufficient mutant set — coverage means every
+    declared claim has a mutant, not that the pile is large:
+
+    * **per occurrence** — (1) **append** the retired sentence as a live claim at
+      the end of the row, the edit shape this row has taken every round; (2)
+      **strip the covering label** from the retained clause, leaving the unrelated
+      earlier A8-cell marker as the only `SUPERSEDED` in the row.
+    * **a label, not a mention** — (3) `the SUPERSEDED note, because …`; (4) the
+      same with the noun dropped (`Per the SUPERSEDED note, …`); (5) a
+      **parenthetical pointer**, `(see SUPERSEDED) and, as before, …`; (6) a
+      bracketed one, `[SUPERSEDED] and …`. (5) and (6) are the anaphoric "see the
+      label above" move in its other spellings.
+    * **adjacent, not a sentence away** — (7) the label closes its **own**
+      sentence (`… was SUPERSEDED. Because …`, and the quoted-closer spelling
+      `… was SUPERSEDED." Because …`); (8) the label sits in a **different
+      markdown table cell** from the claim it is supposed to cover.
+    * **the inverse control** — (9) an **em-dash label** (`**SUPERSEDED** — …`)
+      must stay GREEN. It is this repo's most common labelled-history shape, and
+      refusing it was a false RED that would push a fixer into weakening the guard
+      rather than relabelling.
+
+    Each RED mutant is measured GREEN under the rule it was written to defeat —
+    not merely supposed to be — and if the guard is over-tightened so that a real
+    label stops counting, mutant (9) reds instead: the two failure directions are
+    pinned separately.
+    """
+    row = _index_record_row()
+    marker = _INDEX_SUPERSEDED_MARKER
+
+    # The head row is green under the guard — otherwise the mutations below
+    # would prove nothing about the guard (they would only restate a failure).
+    for retired in _INDEX_RETIRED_ARMING:
+        _assert_retired_claim_is_labelled(
+            row, retired, where="the head row", remedy="fix the row"
+        )
+
+    # The needle to mutate has to be one the head actually RETAINS: a needle that
+    # occurs zero times iterates zero times, so mutating it would prove nothing.
+    # Which retired sentence survives is the row's business, so it is read off the
+    # row rather than hard-coded.
+    retained = [n for n in _INDEX_RETIRED_ARMING if n in row]
+    assert retained, (
+        "the #7879 row retains none of "
+        f"{_INDEX_RETIRED_ARMING} — this pin mutates a retained sentence, so "
+        "either the row was rewritten (drop the mutation that no longer applies) "
+        "or labelled history was deleted rather than kept"
+    )
+    needle = retained[0]
+
+    def _expect(verdict: str, mutated: str, why: str) -> None:
+        """The guard must reach `verdict` on this mutation — that IS the deliverable."""
+        try:
+            _assert_retired_claim_is_labelled(
+                mutated, needle, where="the mutation", remedy="none"
+            )
+        except AssertionError as exc:
+            if verdict == "RED":
+                return
+            # Chained, not swallowed: the raised message carries WHAT the pin
+            # demanded, and the guard's own refusal stays on the traceback as
+            # the cause — a fixer needs both to tell an over-tight guard from a
+            # mutation that really is labelled.
+            raise AssertionError(
+                f"the guard REFUSED a form it must accept. {why}"
+            ) from exc
+        if verdict == "RED":
+            raise AssertionError(why)
+
+    def _expect_red(mutated: str, why: str) -> None:
+        _expect("RED", mutated, why)
+
+    # MUTATION 1 — the stale premise re-appended as a live claim. `find`-based
+    # first-occurrence logic sees the earlier, unrelated marker and passes;
+    # per-occurrence logic sees no marker inside this sentence and reds.
+    mutated_append = f"{row} In short: {needle}."
+    assert mutated_append.rfind(needle) >= len(row), (
+        "the append mutation did not land a second occurrence after the head "
+        "row, so it does not exercise the appended-live-claim shape"
+    )
+    assert mutated_append.find(marker) < mutated_append.find(needle), (
+        "the append mutation must leave a `SUPERSEDED` BEFORE the first "
+        f"{needle!r}, or a first-occurrence check would red anyway and the "
+        "mutation tests nothing"
+    )
+    _expect_red(
+        mutated_append,
+        "the retired-sentence guard accepted a row that re-appends "
+        f"{needle!r} as a LIVE claim — it is fail-open for the regression it "
+        "documents (the earlier `SUPERSEDED` it matched is an unrelated "
+        "clause). Require the label per occurrence AND in the same sentence",
+    )
+
+    # MUTATION 2 — the covering label deleted from the retained clause. Its own
+    # marker sits in the same sentence; removing it must red even though an
+    # unrelated `SUPERSEDED` still exists earlier in the row.
+    covering_at = row.rfind(marker, 0, row.find(needle))
+    assert covering_at != -1, (
+        "the head row no longer carries a `SUPERSEDED` marker before "
+        f"{needle!r} — the retained clause lost its own label, which is the "
+        "defect this pin exists to catch"
+    )
+    mutated_strip = row[:covering_at] + row[covering_at + len(marker) :]
+    assert marker in mutated_strip[: mutated_strip.find(needle)], (
+        "the strip mutation left no `SUPERSEDED` before the retained "
+        f"{needle!r}, so it no longer isolates the first-occurrence defect (a "
+        "first-occurrence check would red too). The row is expected to carry an "
+        "unrelated earlier marker"
+    )
+    _expect_red(
+        mutated_strip,
+        "the retired-sentence guard accepted a row whose retained "
+        f"{needle!r} lost its OWN `SUPERSEDED` label, because an unrelated "
+        "earlier marker still existed — that is the first-occurrence "
+        "defect. Require the label in the same sentence as the sentence",
+    )
+
+    # MUTATIONS 3–7 — one per CLAIM the docstring makes, not one per fault class.
+    # A textual invariant has no universal sufficient mutant set, so each clause of
+    # "label, not a mention; adjacent, not a sentence away" gets a mutant that
+    # kills it (#11064 round-9 review, P3 — the first cut of this drift was caught
+    # only because a reviewer wrote the mutants the test had not).
+    #
+    # Rounds 8 and 9 each contributed shapes the previous constructor accepted:
+    # the bare mention, the mention whose own full stop was swallowed by the match,
+    # and the parenthetical pointer. The last is the SAME anaphoric move as the
+    # bare mention with the noun dropped — `(see SUPERSEDED) and, as before,
+    # <retired>` — which is why a bracket is no longer a label closer.
+    for why, mention in (
+        (
+            "a bare mention of the word is not a label",
+            f"In short, the earlier {marker} note stands, and {needle}.",
+        ),
+        (
+            "the same mention, noun dropped — a label is not a pointer",
+            f"Per the {marker} note, {needle}, nothing lands.",
+        ),
+        (
+            "a label's own full stop must NOT read as the same sentence",
+            f"{marker}. In short, {needle}, nothing lands.",
+        ),
+        (
+            "a parenthetical pointer is a mention, not a label",
+            f"(see {marker}) and, as before, {needle}, nothing lands.",
+        ),
+        (
+            "a bracketed pointer is a mention, not a label",
+            f"[{marker}] and {needle}.",
+        ),
+        (
+            "a label adjacent through an emphasis run IS a label — this one must "
+            "stay GREEN, or the documented forms become unusable and a fixer "
+            "reds on correct prose",
+            f"**{marker}** — {needle}.",
+        ),
+    ):
+        mutated_mention = f"{row} {mention}"
+        assert mutated_mention.rfind(needle) >= len(row), (
+            "the mention mutation did not land a second occurrence after the "
+            f"head row: {mention!r}"
+        )
+        _expect(
+            "GREEN" if mention.startswith(f"**{marker}**") else "RED",
+            mutated_mention,
+            f"the retired-sentence guard got the wrong verdict on a sentence it "
+            f"must judge: {why}. Mutation was {mention!r}; the stale premise is "
+            f"{needle!r} and a LABEL is a token closed by `, ; : . ! ?`, a "
+            "trailing emphasis run, or end of text — never a bracket, and never "
+            "a word modifying a following noun",
+        )
+        # …and for the RED ones, the RETAINED occurrence must still be accepted:
+        # otherwise the mutant would red for the head row's own label being wrong,
+        # and it would prove nothing about the appended claim.
+        if not mention.startswith(f"**{marker}**"):
+            _assert_retired_claim_is_labelled(
+                f"{row} {marker}, and this stands.",
+                needle,
+                where="the control",
+                remedy="none",
+            )
+
+    # MUTATION 7 (own-sentence closer) — the label closes its OWN sentence and the
+    # premise is re-asserted as live in the next one. This was GREEN before round 9,
+    # on the most natural way to write a superseded marker: a sentence of its own.
+    mutated_closed = f"{row} The earlier note was {marker}. Because {needle}, nothing lands."
+    assert mutated_closed.rfind(needle) >= len(row), (
+        "the clause-closing mutation did not land a second occurrence after the "
+        "head row"
+    )
+    _expect_red(
+        mutated_closed,
+        "the retired-sentence guard accepted a label that closed its own "
+        f"sentence ('{marker}.') and then re-asserted {needle!r} as live in the "
+        "next one — the boundary was consumed by the label match, so the gap "
+        "scan never saw it. A label that closes a sentence or clause (`.!?;`) "
+        "labels what precedes it, never what follows",
+    )
+
+    # MUTATION 7b — the SAME own-sentence hole, in the spelling that survives a
+    # whitespace-anchored boundary scan: a quoted closer (`SUPERSEDED."`) or a typo
+    # with no space after the terminator. `_SENTENCE_BOUNDARY_RE` only recognises
+    # `[.!?]` followed by whitespace or end-of-text, so a rule built solely on the
+    # gap was GREEN for every one of these while the peer lane's terminator check
+    # was RED — measured differentially across both parents and this merge, which is
+    # how the regression this pins got in (#11064 round-10 review, P3).
+    for closer in ('."', ".B", ".**", ";B", "!B", "?B"):
+        mutated_closed_odd = f"{row} The earlier note was {marker}{closer} Because {needle}."
+        assert mutated_closed_odd.rfind(needle) >= len(row), (
+            f"the {closer!r}-closer mutation did not land a second occurrence "
+            "after the head row"
+        )
+        _expect_red(
+            mutated_closed_odd,
+            f"the retired-sentence guard accepted a label closed by {closer!r} and "
+            f"then re-asserted {needle!r} as live — the terminator closes the "
+            "label's own sentence whatever follows it, so a whitespace-anchored "
+            "boundary scan is not enough on its own",
+        )
+
+    # MUTATION 8 (other table cell) — the label and the claim sit in DIFFERENT cells
+    # of the same row. These docs are markdown tables, so this is the edit shape a lane gets
+    # when it labels one cell and re-asserts the premise in the next one; the cell
+    # separator is as hard a boundary as a sentence end.
+    mutated_cell = f"{row} | the earlier note was {marker}, | {needle} |"
+    assert mutated_cell.rfind(needle) >= len(row), (
+        "the cell mutation did not land a second occurrence after the head row"
+    )
+    _expect_red(
+        mutated_cell,
+        "the retired-sentence guard accepted a label in a DIFFERENT table cell "
+        f"from the {needle!r} it is supposed to cover — cells are independent "
+        "claims sharing a line, so the label does not reach across a `|`",
+    )
+
+    # MUTATION 9 (inverse control): an em-dash label must stay GREEN. This is the
+    # shape the docs in this repo use most (`**SUPERSEDED** — kept as …`), and
+    # `_SUPERSEDED_LABEL_RE` did not accept it before round 9 — so a correctly
+    # labelled correction was a false RED, and the block comment claimed otherwise.
+    mutated_dash = f"{row} Kept as the {marker} — {needle}, nothing lands."
+    assert mutated_dash.rfind(needle) >= len(row), (
+        "the em-dash mutation did not land a second occurrence after the head row"
+    )
+    _assert_retired_claim_is_labelled(
+        mutated_dash, needle, where="the em-dash label", remedy="none"
+    )
+
+    # MUTATION 10 (inverse control): the `in part` label must stay GREEN. This is the
+    # spelling `09-record-tenancy-decision.md` §5 ships
+    # (`**SUPERSEDED\n  in part:** the sentence below said …`), and
+    # `_SUPERSEDED_LABEL_RE` refused it before r17 — the closer had to follow the
+    # token immediately, so the repo's own form was not a label. A fixer who copies
+    # the shipped spelling must not be told to add a label that is already there.
+    mutated_in_part = f"{row} **{marker}\n  in part:** {needle}, nothing lands."
+    assert mutated_in_part.rfind(needle) >= len(row), (
+        "the `in part` mutation did not land a second occurrence after the head row"
+    )
+    _assert_retired_claim_is_labelled(
+        mutated_in_part, needle, where="the `in part` label", remedy="none"
+    )
+
+
 def test_the_prerequisites_a1_census_matches_the_record_migrations():
     """The epic's §A1 ledger must state what the migrations HAVE (#9638 P3).
 
@@ -784,6 +1544,24 @@ def test_the_migration_and_grep_census_reproduces_at_this_head():
             f"{_MIGRATIONS_DIR.relative_to(REPO_ROOT)} holds {on_disk} "
             f"({migrations[-1].name} is the newest). Update the stated number "
             "— a stale denominator is what makes the census unreproducible"
+        )
+
+    # The same denominator in its OTHER two homes (#1981 review, P2). These are
+    # scanned as whole documents rather than rows: the phrase is not confined to
+    # one row, and the one in `SEARCH-ARCHITECTURE.md` wraps across a line.
+    for path in _COUNT_OF_DOCS:
+        text = path.read_text(encoding="utf-8")
+        stated = [int(m.group("count")) for m in _MIGRATION_COUNT_OF_RE.finditer(text)]
+        assert stated, (
+            f"{path.relative_to(REPO_ROOT)} no longer states `0 of N migrations` "
+            "— restate it rather than deleting the phrase: this pin reads it"
+        )
+        assert set(stated) == {on_disk}, (
+            f"{path.relative_to(REPO_ROOT)} says `0 of {sorted(set(stated))} "
+            f"migrations`, {_MIGRATIONS_DIR.relative_to(REPO_ROOT)} holds "
+            f"{on_disk} ({migrations[-1].name} is the newest). Two sites of this "
+            "denominator already went stale while the other three were "
+            "corrected — a count is only pinned where a pattern reaches it"
         )
 
     # The same command the docs quote: `grep -riE '<terms>' supabase/migrations`
@@ -950,7 +1728,7 @@ def test_relation_is_never_a_bare_id():
     # `MIGRATIONS` list: that list is hand-maintained, so a future FORWARD
     # migration that re-declares a pin would re-create exactly the same defect
     # (the list is pinned by nothing — `RECORD_MIGRATIONS`' completeness has its
-    # own guard in `test_9231`, this one does not). Measured: over all 73 files
+    # own guard in `test_9231`, this one does not). Measured: over all 79 files
     # the pin set is identical to the 6-file list's (`source 1 · event 1 ·
     # session 1 · object 2 · subject 2 · point 1`), so reading the directory is
     # free and closes the recurrence instead of patching this round of it.

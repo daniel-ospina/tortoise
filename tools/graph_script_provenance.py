@@ -147,6 +147,13 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
         # durability doc tells an operator to run on an unmigrated graph. So it
         # takes the residue side, and the ceiling moves with it (below).
         "4125_migrate_legacy_session_sources.py",
+        # #11070: the LIVE operator path for the pre-#10852 session-Source prose
+        # repair. Same side, same reason as #4125's CLI above — every declared
+        # spelling asserts the script does not run, while this one is the
+        # runbook's census/repair/verify command against a live graph. Marking it
+        # would be a false provenance statement, so it takes the residue side and
+        # the ceiling moves with it (below).
+        "11070_repair_session_source_prose.py",
         "2146_e2e_live_orphan_cleanup.py",
         "2146_falkordb_graph_cleanup.py",
         "2199_baseline_source_rename.py",
@@ -189,7 +196,10 @@ UNMARKED_SCRIPTS: frozenset[str] = frozenset(
 #: 34 -> 35 (#4125): `4125_migrate_legacy_session_sources.py` is a LIVE operator
 #: CLI and cannot truthfully take a "does not run" marker — the deliberate,
 #: argued raise the ratchet reserves for the diff that adds such a script.
-UNMARKED_CEILING = 35
+#: 35 -> 36 (#11070): `11070_repair_session_source_prose.py` is the same shape —
+#: a live operator path, not a historical artefact — so it is declared residue
+#: rather than mislabelled, and the ratchet is raised in the diff that adds it.
+UNMARKED_CEILING = 36
 
 #: Scripts that assert a price **of this product**. #4830's sharpest gap: both
 #: ``bp_approach_cycle3``/``cycle4`` assert non-canonical tiers as ours and

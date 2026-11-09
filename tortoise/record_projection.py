@@ -146,6 +146,8 @@ from __future__ import annotations
 
 import json
 import re
+import threading
+import time
 from collections.abc import Iterable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -174,6 +176,8 @@ __all__ = [
     "RefusedJournalOperation",
     "ReplayReport",
     "UnknownJournalRecordType",
+    "column_types",
+    "jsonb_columns",
     "mutations_for",
     "refused_props_names",
     "replay",
@@ -707,12 +711,122 @@ class RecordStatementError(RecordProjectionError):
     withholds (`search_keys=<15 chars withheld>`) came back verbatim through the
     driver's own `CONTEXT` clause. See :func:`_primary_message`.
 
-    ⛔ THE LINE IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
+    ⛔ THE MESSAGE FORM IS COMPOSED TO FIT THE WRAPPING CONSUMER'S BUDGET
     (:func:`_failure_line`), because `record_writer._bounded_cause` keeps the
-    HEAD of a message: a line over its limit loses the TAIL, which is where this
-    method puts the driver's fault clause — the half that says what went wrong
-    (#10648 review P2).
+    HEAD of a message: a line over its limit loses the TAIL, which is where that
+    form puts the driver's fault clause — the half that says what went wrong
+    (#10648 review P2). ⚠️ That budget argument holds for the MESSAGE arm only,
+    and this note said it as though it covered the class: the cause form puts the
+    fault at the HEAD and :func:`Statement.attribution` — a column list of
+    unbounded length — in the TAIL, so an over-budget cause-form line loses the
+    SUBJECT instead. Nothing is lost that matters (`_bounded_cause` is applied to
+    a message this class RECEIVES, not to one it composes, and both arms keep the
+    fault), but a reader who trusted the sentence above would size the two arms
+    wrongly (#10726 review, P3).
+
+    ⚠️ TWO CALL SHAPES, because two lineages of this attribution met in the
+    batch fold and both are load-bearing:
+
+    * ``RecordStatementError(<message>)`` — what :func:`replay` raises, with the
+      line composed by :func:`_failure_line` around
+      :func:`_statement_attribution` (verb, table, declared columns, and the
+      driver's cause, all budgeted together).
+    * ``RecordStatementError(statement, cause, index=…, total=…)`` — what a
+      caller that still HOLDS the :class:`Statement` passes (a repair script, a
+      backfill, a test): the message is then
+      :func:`Statement.attribution` (``value_types()``, i.e. the Python type of
+      every bound value and whether a `jsonb`-column string parses) plus the
+      cause, so neither form can produce a report missing the fault clause.
+
+    ⛔ THE CAUSE FORM ALSO ADMITS A BARE STRING, because the signature does
+    (``statement: Statement | str``). A message string passed WITH a cause
+    degrades to its own text instead of raising: calling ``.attribution()`` on a
+    `str` would replace the driver's real cause with an ``AttributeError``
+    raised from the reporter itself — the "lost row nobody can attribute"
+    failure this class exists to end. Both arms keep the fault clause, so no
+    call shape is a trap.
+
+    ⛔ AND BOTH ARMS COMPOSE THE FAULT CLAUSE THE SAME WAY — ``_driver_fault``
+    (#11121). This one composed it as ``type(cause).__name__: {cause}``, i.e.
+    ``str(cause)``, which on a driver error is the protocol's fields
+    CONCATENATED: the ``DETAIL``/``CONTEXT`` clause quotes the refused row or a
+    prefix of its values, so the withhold documented above was true of the
+    message arm and false of the cause arm. The leak is entirely the DRIVER's
+    clause — the cause arm's own half (:meth:`Statement.attribution`) renders
+    ``value_types()`` and carries no bound value at all, and
+    :func:`_column_pair` is reached only from the message arm — so what came
+    back verbatim was *whatever the driver chose to quote*, not necessarily every
+    withheld value: pre-fix, on this PR's own fixture, the refused ``search_keys``
+    token reappeared. That fixture names nothing but ``search_keys`` in its
+    ``DETAIL``/``CONTEXT``, so it witnesses the leak rather than its extent — a
+    `CHECK` violation's ``DETAIL`` quotes the whole row, and none of the other
+    withheld columns has to appear for this arm to be the wrong place to compose
+    the clause. ``RecordStatementError``
+    carries neither ``diag`` nor ``pgcode``, and ``record_writer._bounded_cause``
+    narrows only on the OUTER exception's own ``diag``/``pgcode``, so it could
+    not repair this either — before this change it took its ``str(exc)`` branch
+    with the driver's ``DETAIL`` already embedded here. Those are two permanent
+    facts and one PRE-FIX consequence, and the tense is load-bearing (#11124
+    review cycle 4): the facts are unchanged, which is why this layer is the
+    only place the leak can be closed, but the consequence is not — the
+    narrowing still runs on every one of these errors and no longer has a driver
+    ``DETAIL`` to find.
+
+    ⚠️ AND THE NARROWING IS NOW SHAPE-BLIND, which is the one thing this fix
+    costs (#11124 review P3). :func:`_primary_message` falls back to the FIRST
+    LINE of ``str(exc)`` for every exception, not only a driver-shaped one, so a
+    multi-line NON-driver cause keeps its first line and drops the rest —
+    measured, on a `Statement` cause: ``ValueError("line one\\nline two")``
+    reported ``ValueError: line one`` where the pre-fix arm carried both. A cause
+    whose FIRST line is BLANK keeps nothing at all: ``splitlines()`` yields the
+    empty head, :func:`_primary_message` returns ``""``, and
+    :func:`_driver_fault` renders the type alone — ``ValueError("\\nline two")``
+    reports ``failed (ValueError)`` with no ``…``/``<withheld>`` marker, i.e.
+    indistinguishable from a cause that genuinely carried no message
+    (#11124 review cycle 3). It is
+    the same narrowing the message arm has applied SINCE #10648 (before it,
+    :func:`replay` composed ``f"{type(exc).__name__}: {exc!s}"`` — full
+    ``str(exc)`` — and only then took ``_driver_fault(exc)`` inside
+    ``_failure_line``), so the two arms are now consistent
+    rather than newly wrong. Stated because ``_bounded_cause`` escapes newlines
+    rather than dropping them (`record_writer._bounded_text`), i.e. pre-fix those
+    lines DID reach the log stream.
+    ⚠️ Cited by SYMBOL, not by line: two review cycles in a row found this
+    paragraph's line numbers dead, because every prose insertion above the call
+    site moves it (the second correction was measured against the pre-edit file).
+    A name survives an insertion; a number does not.
+
+    ⚠️ THE COST IS BOUNDED TO A MULTI-LINE **NON-DRIVER** CAUSE, and that
+    qualifier is load-bearing rather than decorative (#11124 review cycle 2):
+    the only in-tree multi-line cause is DRIVER-SHAPED — the
+    :class:`_DriverShapeError` double in
+    ``tests/test_9548_record_search_keys_shape.py`` (the other ``pgcode``/``diag``
+    double in-tree, :class:`_DriverError` in
+    ``tests/test_record_searchkeys_10620.py``, is never passed as a *cause*) —
+    and for that shape :func:`_primary_message` returns the protocol's
+    single-line ``M`` field, so nothing is lost. It is the plain
+    ``Exception("a\\nb")`` shape that loses its tail, and no in-tree caller
+    passes one.
+
+    No in-tree PRODUCTION caller builds this form today (only :func:`replay`
+    raises the class, via the message form; the cause form is built by this
+    module's own tests), which is exactly why it is pinned by a test rather than
+    left as a trap for the repair script or backfill the form is documented for.
     """
+
+    def __init__(self, statement: Statement | str,
+                 cause: BaseException | None = None, *,
+                 index: int = -1, total: int = -1) -> None:
+        if cause is None:
+            super().__init__(statement)
+            return
+        where = (f"statement {index + 1}/{total}" if index >= 0 and total > 0
+                 else "statement")
+        detail = (statement.attribution()
+                  if isinstance(statement, Statement) else str(statement))
+        super().__init__(
+            f"{where} failed ({_driver_fault(cause)}) — {detail}"
+        )
 
 
 class UnknownJournalRecordType(RecordProjectionError):
@@ -733,6 +847,8 @@ class RefusedJournalOperation(RecordProjectionError):
     fact from an **undeclared** type, and collapsing the two would hide which
     one a new producer tripped.
     """
+
+
 
 
 # ════════════════════════════════════════════════════════════════════════════
@@ -1341,9 +1457,6 @@ assert set(RECORD_MUTATIONS) == set(JOURNAL_EVENT_TYPES), (
 # the journal carries it" — the projection is where that becomes executable.)
 # ════════════════════════════════════════════════════════════════════════════
 
-_COLUMN_RE = re.compile(r'^\s*("[a-z_][a-z0-9_]*"|[a-z_][a-z0-9_]*)\s+'
-                        r'(?:text|jsonb|integer|boolean|bigint|double precision|'
-                        r'timestamptz)\b', re.M)
 _DERIVED_CHECK_RE = re.compile(
     r"chk_[a-z_]+_props_no_derived\s+CHECK\s*\(\s*NOT\s*\(\s*props\s*\?\|"
     r"\s*ARRAY\[(.*?)\]\s*::text\[\]\s*\)\s*\)",
@@ -1394,6 +1507,12 @@ def _migrations_dir() -> Path:
     ships no `supabase/` tree, so without the second location `table_columns()`
     raised `RecordProjectionError` before a single statement and every armed
     live write failed — the record empty, the gate green (#9231 review P2).
+
+    ⛔ ZERO ARGUMENTS, deliberately: `tests/test_health_build_identity_10447.py`
+    patches this NAME with a zero-arg callable, and patch-by-name is the
+    documented seam for "the migrations moved". Giving it parameters would make
+    that seam raise `TypeError` from inside a plan build, so the freshness
+    question is answered elsewhere (see `jsonb_columns`) rather than here.
     """
     repo = REPO_ROOT / "supabase" / "migrations"
     if _complete(repo):
@@ -1412,6 +1531,161 @@ def _read_migrations(migrations_dir: Path | None = None) -> str:
         for name in RECORD_MIGRATIONS
         if (base / name).exists()
     )
+
+
+#: How many distinct migration fingerprints the parsed-schema cache holds.
+#:
+#: Bounded because the process is long-lived and a test suite builds dozens of
+#: temporary migration trees; on overflow the whole cache is dropped rather than
+#: evicted one entry at a time, which is enough because the live set is tiny.
+#: ⛔ The population is NOT static: the key is `(tree, fingerprint)`, so a
+#: production process holds ONE entry while the migration files are unchanged and
+#: gains one more per distinct FILE STATE it observes — an edit, an addition, a
+#: removal. Stale states are exactly what the wholesale drop clears (#9558).
+_SCHEMA_CACHE_LIMIT = 8
+
+#: `{(base, fingerprint): {"sql": str | None, "parsed": {name: result}}}` —
+#: at most one entry per observed `(tree, fingerprint)` pair, so one migration
+#: TREE can hold several while its files change (#9558 / R10).
+_SCHEMA_CACHE: dict[tuple[str, tuple], dict[str, Any]] = {}
+_SCHEMA_CACHE_LOCK = threading.Lock()
+
+
+def _release_schema_cache() -> None:
+    """Drop the parsed-schema cache. The refresh the S6 pin needs (#9558).
+
+    The cache is invalidated by the migration FILES themselves (see
+    :func:`_schema_entry`), so nothing in production needs this: it exists so a
+    long-lived process that must PROVE a fresh read — and the test that asserts
+    a schema edit is seen — has a verb instead of a `del` on a private dict.
+    """
+    with _SCHEMA_CACHE_LOCK:
+        _SCHEMA_CACHE.clear()
+
+
+def _migrations_fingerprint(base: Path) -> tuple:
+    """A cheap identity for the migration FILES a schema parse would consume.
+
+    `(name, mtime_ns, size, inode, ctime_ns)` per record migration, in
+    `RECORD_MIGRATIONS` order. This is what makes the cache below safe to keep:
+    the parse is reused only while every file it was built from is, as far as the
+    filesystem can cheaply say, the file that is there now.
+
+    WHY IT IS SUFFICIENT — and exactly how far it reaches. The surface this
+    reader can be invalidated BY is the CONTENT of the files it parses: the
+    reader walks `RECORD_MIGRATIONS`, so a migration file OUTSIDE that tuple is
+    invisible to it with or without a cache (it is a code constant, and a
+    process that has not been redeployed does not read a new name at all — a
+    boundary this cache neither creates nor widens). Within that tuple: a changed
+    file moves `mtime_ns`/`size`, a file replaced by `git checkout`/`cp`/`mv`/an
+    editor's write-and-rename changes `mtime_ns`, `size` or `inode`, and a
+    DISAPPEARED file is recorded as absent — so the map can never be rebuilt from
+    a file that is no longer the schema.
+
+    ⚠️ **`ctime_ns` is in the key because `mtime_ns` alone is not enough, and the
+    tool that breaks it is ordinary.** `cp -p`, `rsync -a`/`-t`, `install -p`,
+    `tar -xp` and Docker's `COPY` all PRESERVE the source's mtime as a matter of
+    course, so a same-length content change delivered that way moves neither
+    `size` nor `mtime_ns` — and a key on those two alone serves the pre-change
+    map indefinitely (measured on a copy of this tree: five migrations rewritten
+    `content`→`contenu`, stat unchanged, stale map served). `ctime` is the field
+    those tools CANNOT restore — the kernel bumps it on every content or metadata
+    change, and setting it back needs privilege a migration burn does not have —
+    so the key now covers the whole reachable surface rather than the
+    append-mostly one.
+
+    ⚠️ **The residual, measured rather than dismissed — and it applies HERE, on
+    the default filesystem.** A stat-preserving rewrite is still invisible inside
+    one inode-clock tick, because `ctime` granularity is COARSE on ordinary Linux
+    filesystems: measured on this box on **ext4** (`/dev/root`, both `/tmp` and
+    the repo worktree), a write plus `utime` microseconds apart leaves
+    `st_ctime_ns` IDENTICAL (delta 0 ns). So a `cp -p` landing inside a single
+    tick can be served from the pre-edit map until any other stat field of any
+    registered file moves. ⛔ Do not read this as "an exotic mount" — it is the
+    common case, which is why the test below advances the inode clock explicitly
+    instead of hoping a tick boundary falls between two calls.
+
+    Closing it completely needs a content digest, and that was MEASURED and
+    rejected — with the arithmetic quoted from the SAME measurement, because an
+    earlier revision of this docstring compared the digest against one pass
+    instead of against the win: one fingerprint pass is 0.160–0.169 ms (`fingerprint-cost.json`),
+    blake2b over the same fifteen files (129,355 bytes) is 0.543–0.592 ms
+    (`fingerprint-cost.json` — min and mean, the same convention as the pass's
+    0.160–0.169), and the cached read it
+    would guard saves ~1.2 ms PER CONSULT (uncached `table_columns()` 1.546–1.588
+    ms → warm cached 0.332–0.353 ms, medians from the committed run set), so a
+    digest ADDS 0.374–0.432 ms net of the pass it replaces — **~30–36 % of the
+    win** (cross-paired: 0.374/1.256 = 29.8 %, 0.432/1.193 = 36.2 %). The ratio is
+    stated PER CONSULT on purpose and holds at the per-record
+    scale: `replay_plan` drives BOTH cached readers, so a record pays two consults
+    and therefore two digests, and both sides of the fraction double. ⚠️ Read that
+    against the artifact's bullet (a), which charges the column half as 2 × this
+    one consult's delta — the artifact's convention, since the committed probe priced
+    only THIS reader; the second reader parses the same bytes with different regexes
+    and a reviewer measured its delta at ~0.79× this one's (2.39–2.51 ms under the
+    convention, 2.14–2.25 ms at that ratio, of a 14.98–16.28 ms win; connection half
+    ~83–87 %), a SENSITIVITY rather than a bound. One consult alone is NOT the
+    column half of the win. Real but
+    not decisive, and not worth it for a residual that needs an archive extraction
+    landing inside a single inode-clock tick. The trade is therefore explicit:
+    covered for every writer except that one. The test reds it if the fingerprint
+    stops changing on an edit, an edit-of-an-edit, a same-size rewrite with a
+    burned tick, a same-size rewrite with the mtime RESTORED, or a removal.
+    """
+    entries: list[tuple] = []
+    for name in RECORD_MIGRATIONS:
+        try:
+            info = (base / name).stat()
+        except OSError:
+            # Absent is a fact worth fingerprinting: `table_columns` raises on a
+            # missing schema and must re-raise on every call, never serve a
+            # cached "complete" map after a file disappears.
+            entries.append((name, None))
+            continue
+        entries.append((name, info.st_mtime_ns, info.st_size, info.st_ino,
+                        info.st_ctime_ns))
+    return tuple(entries)
+
+
+def _schema_entry(migrations_dir: Path | None) -> dict[str, Any]:
+    """The cache entry for `migrations_dir`'s CURRENT contents (#9558).
+
+    One stat pass (:func:`_migrations_fingerprint`) replaces "read and
+    regex-parse fifteen migration files" — measured at 1.546–1.588 ms per call
+    (median) against a warm page cache, which the live record door paid ONCE PER JOURNAL RECORD
+    (`replay_plan` calls :func:`table_columns` and :func:`refused_props_names`
+    for every record).
+
+    ⚠️ The lock guards the DICT, not the entries. `entry["sql"]` and
+    `entry["parsed"][…]` are filled OUTSIDE it — deliberately, and only because
+    every write is IDEMPOTENT: two threads racing on one entry compute the same
+    bytes and the same map, each assignment is atomic under the GIL, and the
+    cost of losing the race is a duplicated parse, never a wrong answer. The
+    same argument covers `_SCHEMA_CACHE.clear()` detaching an entry another
+    thread is still filling (it fills its own copy; the next call re-parses).
+    ⛔ A future field that is NOT idempotent needs the lock around its write;
+    this comment is the reason the omission is safe today, not a licence to
+    copy it.
+    """
+    base = migrations_dir or _migrations_dir()
+    key = (str(base), _migrations_fingerprint(base))
+    with _SCHEMA_CACHE_LOCK:
+        entry = _SCHEMA_CACHE.get(key)
+        if entry is None:
+            if len(_SCHEMA_CACHE) >= _SCHEMA_CACHE_LIMIT:
+                _SCHEMA_CACHE.clear()
+            entry = {"base": base, "sql": None, "parsed": {}}
+            _SCHEMA_CACHE[key] = entry
+        return entry
+
+
+def _entry_sql(entry: dict[str, Any]) -> str:
+    """The concatenated migration SQL for `entry`, read at most once per file set."""
+    sql = entry["sql"]
+    if sql is None:
+        sql = _read_migrations(entry["base"])
+        entry["sql"] = sql
+    return sql
 
 
 def _parse_record_tables(sql: str) -> dict[str, frozenset[str]]:
@@ -1442,6 +1716,368 @@ def _parse_added_columns(sql: str) -> dict[str, frozenset[str]]:
     return {table: frozenset(cols) for table, cols in added.items()}
 
 
+#: THE declared-type vocabulary. One place, read by all three statement-shape
+#: readers below (#11075).
+#:
+#: ⛔ A TYPE NOT IN THIS LIST IS INVISIBLE TO EVERY READER. `column_types()`,
+#: `jsonb_columns()` and (for the typed shapes) the narrowing reader all match
+#: through this alternation, so a column of an unlisted type is silently SKIPPED
+#: — it is neither typed nor `jsonb`, which means a bound parameter's encoding and
+#: the declared-type pin both stop seeing it. Before #11075 the list was seven
+#: terms (`text|jsonb|integer|boolean|bigint|double precision|timestamptz`), and
+#: the record's own migrations happened to use only those seven; a `numeric`,
+#: `uuid`, `date`, `smallint`, `real`, `json`, `varchar` or array column would
+#: have joined the schema outside every pin with nothing red. Widen it HERE,
+#: never at a call site, and never by adding a second list.
+#:
+#: Ordering is load-bearing: longer spellings precede their prefixes
+#: (`timestamp with time zone` before `timestamp`, `jsonb` before `json`), and a
+#: trailing `\b` keeps `json` from matching the `jsonb` that follows it.
+_DECLARED_TYPE_ALTERNATION = (
+    r"timestamp\s+with\s+time\s+zone"
+    r"|timestamp\s+without\s+time\s+zone"
+    r"|double\s+precision"
+    r"|character\s+varying"
+    r"|timestamptz|timestamp"
+    r"|bigserial|smallserial|serial|bigint|smallint|integer"
+    r"|numeric|decimal|real"
+    r"|boolean|jsonb|json|text|varchar|uuid|bytea|date"
+)
+
+#: One column definition of a `CREATE TABLE`, with its TYPE. The name-only
+#: reader above exists to answer "does the table have this column"; this one
+#: answers "what SHAPE does the column take", which is the question a bound
+#: parameter's encoding depends on (#9548) and the whole of the declared-type
+#: contract pin (#11075). The `[]` suffix is part of the TYPE, not decoration:
+#: a PostgreSQL array column accepts a list and refuses a bare scalar, so a
+#: reader that dropped it would certify a list bound to `text` (#11075).
+_COLUMN_TYPE_RE = re.compile(
+    r'^\s*("?([a-z_][a-z0-9_]*)"?)\s+'
+    r'((?:' + _DECLARED_TYPE_ALTERNATION + r')\b(?:\[\])?)',
+    re.M | re.I)
+
+#: `table_columns()`'s column matcher — an ALIAS of `_COLUMN_TYPE_RE`, not a
+#: second list (#11075 review P2). It used to carry its own seven-term type
+#: alternation, so widening the vocabulary for the declared-type pin would have
+#: left the PLACEMENT reader (`_split_properties`) unable to see a
+#: `numeric`/`uuid`/`date` column: the column would be typed and
+#: closure-enforced by the pin while its value was still pushed into the `props`
+#: tail. One list, two readers — widening it widens both, which is the point.
+_COLUMN_RE = _COLUMN_TYPE_RE
+
+#: A `--` line comment or a `/* … */` block comment, stripped before a migration
+#: is PARSED.
+#:
+#: ⛔ WHY THIS EXISTS AND WHY IT IS NOT COSMETIC. The narrowing migrations carry
+#: their own DOWN direction in a trailing SQL comment
+#: (`20261102000002_record_point_search_keys_text.sql`: "`ALTER TABLE public.point
+#: ALTER COLUMN search_keys TYPE jsonb`"), because a migration is never edited and
+#: the reversal has to be recorded somewhere. A reader that parses the raw file
+#: therefore sees the UP narrowing and the DOWN reversal **and keeps whichever
+#: comes last** — the DOWN — so it reports the superseded `jsonb` for a column
+#: that is `text` in the live database. It happens not to bite today only because
+#: each commented line is prefixed with `--`, which breaks the `\s+` joins the
+#: statement regexes need; that is an accident of the comment's formatting, not a
+#: property of the reader (#11075). Stripping comments first makes the property
+#: real. Quote-aware: `--` inside a string literal is not a comment, and a
+#: `$$ … $$` body is kept VERBATIM — it is where both narrowing migrations put
+#: the `ALTER COLUMN … TYPE` this reader needs, so editing inside it would be the
+#: thing that hid them.
+
+#: A forward migration that ADDS a COLUMN with a TYPE — the type is what
+#: `_ADDED_COLUMN_RE` above does not keep, and `table_columns()` unions the same
+#: statements (append-only history adds a column that way, #2782). ⛔ The TYPE
+#: comes from the same CLOSED vocabulary as `_COLUMN_TYPE_RE`, with NO terminator
+#: lookahead: what follows the type is arbitrary (`NOT NULL DEFAULT '{}'::jsonb`,
+#: or end-of-statement), and a lookahead demanding `,;)\n` immediately after it
+#: matches NONE of this repo's own forward migrations (measured).
+_ADDED_COLUMN_TYPED_RE = re.compile(
+    r"ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?\"?([a-z_][a-z0-9_]*)\"?\s+"
+    r"((?:" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?)",
+    re.I | re.S)
+
+#: A forward migration that NARROWS or WIDENS an existing column's type:
+#: `ALTER TABLE public.<t> ALTER COLUMN <c> TYPE <type> [NOT NULL] [USING …]`.
+#: Append-only history means a landed type DECISION can only be reversed this way
+#: (#9264 turned `session.capture_redactions` from `jsonb` into `integer`), so a
+#: reader that understood only `CREATE TABLE` would report a `jsonb` column the
+#: live database no longer has. ⛔ Same rule as above — only the leading
+#: `TYPE <type>` token matters, never what follows it: a terminator lookahead here
+#: silently MISSED `… TYPE text NOT NULL` (measured), and that is the NARROWING
+#: direction. The name would have stayed in the `jsonb` set and every string
+#: bound to the now-`text` column would be JSON-QUOTED — no error, no counter,
+#: silent corruption.
+_ALTER_COLUMN_TYPE_RE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?public\.([a-z_]+)\s+"
+    r"ALTER\s+COLUMN\s+\"?([a-z_][a-z0-9_]*)\"?\s+TYPE\s+"
+    r"((?:" + _DECLARED_TYPE_ALTERNATION + r")\b(?:\[\])?)",
+    re.S | re.I)
+
+
+#: How long a parsed jsonb map may be reused, in seconds. `_jsonb_or_scalar`
+#: runs once per string parameter of EVERY statement, so an un-memoised parse
+#: measured 2.71 ms and made a 50-record `replay_plan` take 1182 ms instead of
+#: 5.8 ms — a ~200x regression on the SYNCHRONOUS capture path, which §17 forbids
+#: the seam from adding.
+#:
+#: ⛔ TWO CACHES, TWO INVALIDATION COSTS, CHOSEN BY CALL FREQUENCY (#9558).
+#: `table_columns()` / `refused_props_names()` are read ONCE PER RECORD by
+#: `replay_plan`, so they are keyed on the migration files' own fingerprint
+#: (:func:`_schema_entry`) — exact invalidation, no window, at the price of one
+#: `stat` pass per call, which a per-record read can afford. This map is read
+#: ONCE PER STRING PARAMETER, where even that `stat` pass would be a regression,
+#: so it is BOUNDED by a TTL instead: a migration landing while the process runs
+#: is seen within :data:`_JSONB_CACHE_TTL_SECONDS` at the cost of a clock read.
+#: The invariant both keep is the one that matters (`supabase/migrations` is
+#: applied by a workflow separate from the app deploy, so a long-lived process
+#: must never keep answering a map it parsed before a migration landed): a NEW
+#: `jsonb` column would re-open the 22P02 row drops, and a `jsonb→text`
+#: NARROWING would JSON-quote strings bound to a now-`text` column with no error
+#: and no counter.
+#:
+#: ⛔ NOT A `ContextVar` PER PLAN BUILD, which would have no window at all: this
+#: module is FORBIDDEN an ambient carrier — `tests/test_record_projection.py::
+#: test_this_module_has_no_ambient_tenant_READER` reads `contextvars` itself as
+#: ambient state, because a value that outlives a call is one value for every
+#: tenant the process serves.
+_JSONB_CACHE_TTL_SECONDS = 5.0
+_JSONB_CACHE: dict = {"at": float("-inf"), "names": frozenset()}
+
+
+def _jsonb_cache_clear() -> None:
+    """Drop the TTL memo (for a caller that changed the migrations under us)."""
+    _JSONB_CACHE.update({"at": float("-inf"), "names": frozenset()})
+
+
+def _strip_sql_comments(sql: str) -> str:
+    """The migration text with `--` and `/* … */` comments removed.
+
+    Deliberately a scanner rather than one regex: a `--` or `/*` INSIDE a string
+    literal is data, not a comment, and a migration that stores a comment-holding
+    string (a `COMMENT ON COLUMN` right below one of these files does) would be
+    truncated by the regex form. The newline of a `--` comment is KEPT, so a
+    column definition on the following line stays `^`-anchored for
+    :data:`_COLUMN_TYPE_RE`.
+    """
+    out: list[str] = []
+    i, n = 0, len(sql)
+    quote = False
+    #: Is the OPEN literal an `E'…'` one, where a backslash escapes? A PLAIN
+    #: `'C:\'` is a COMPLETE literal under `standard_conforming_strings=on` (the
+    #: PG default), so treating every literal as backslash-escaped swallows the
+    #: closing quote, never leaves quote mode, and preserves every later comment
+    #: — including a narrowing migration's DOWN direction, which is the misread
+    #: this function exists to prevent (#11075 review P2, measured).
+    escapes = False
+    dollar = ""  # an open `$$` / `$tag$` delimiter, "" when none
+    while i < n:
+        char = sql[i]
+        if dollar:
+            if sql.startswith(dollar, i):
+                out.append(dollar)
+                i += len(dollar)
+                dollar = ""
+                continue
+            out.append(char)
+            i += 1
+            continue
+        if quote:
+            out.append(char)
+            if escapes and char == "\\" and i + 1 < n:
+                # A backslash escape, and ONLY where it IS one.
+                out.append(sql[i + 1])
+                i += 2
+                continue
+            if char == "'":
+                if i + 1 < n and sql[i + 1] == "'":  # '' — an escaped quote
+                    out.append("'")
+                    i += 2
+                    continue
+                quote = False
+            i += 1
+            continue
+        if char == "$":
+            # `$tag$ … $tag$`: the shape every `DO $$ … $$` migration uses, and
+            # the body may legitimately contain `--` and `'`.
+            match = re.match(r"\$[A-Za-z_]*\$", sql[i:])
+            if match:
+                dollar = match.group(0)
+                out.append(dollar)
+                i += len(dollar)
+                continue
+        if sql.startswith("/*", i):
+            close = sql.find("*/", i + 2)
+            i = n if close == -1 else close + 2
+            continue
+        if sql.startswith("--", i):
+            while i < n and sql[i] != "\n":
+                i += 1
+            continue
+        if char == "'":
+            quote = True
+            # `E'…'` / `e'…'` — set from the character just emitted, so an
+            # ordinary `EXECUTE '…'` literal (nor the `E` of a preceding word) is
+            # not misread as an escape-carrying one.
+            escapes = bool(out) and out[-1] in ("E", "e")
+        out.append(char)
+        i += 1
+    return "".join(out)
+
+
+def _declared_types_for_dir(migrations_dir: Path) -> dict[str, dict[str, str]]:
+    """`{table: {column: declared_type}}` for ONE migrations directory.
+
+    THE one parse. Every reader of a column's DECLARED type answers through this
+    function — `column_types()` (the whole map, for the #11075 contract pin) and
+    `jsonb_columns()` (the `jsonb` names, for the #9548 encoding rule) are two
+    VIEWS of it, so the encoding and the pin can never disagree about what the
+    schema says.
+
+    Three statement shapes, in file order (append-only history: the LAST
+    declaration wins, which is the rule `key_properties()` applies):
+
+      1. `CREATE TABLE … ( <col> <type> … )` — the base;
+      2. `ALTER TABLE … ADD COLUMN [IF NOT EXISTS] <col> <type>` — a column a
+         landed table can only ever gain this way (#2782);
+      3. `ALTER TABLE … ALTER COLUMN <col> TYPE <type>` — a type DECISION
+         reversed (#9264). ⚠️ The load-bearing one: a reader that skips it
+         reports the superseded type, and the obvious "fix" for the resulting
+         false red — exempt the column, or revert the narrowing — re-creates the
+         outage the pin exists to prevent (#11075).
+
+    Comments are stripped first (:func:`_strip_sql_comments`), so a migration's
+    recorded DOWN direction cannot be read as its UP.
+    """
+    found: dict[str, dict[str, str]] = {}
+    for name in RECORD_MIGRATIONS:
+        path = migrations_dir / name
+        if not path.exists():
+            continue
+        sql = _strip_sql_comments(path.read_text(encoding="utf-8"))
+        for table, body in _TABLE_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            here = found.setdefault(table, {})
+            for _quoted, column, type_name in _COLUMN_TYPE_RE.findall(body):
+                here[column] = type_name.lower()
+        for table, body in _ALTER_ADD_COLUMN_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            here = found.setdefault(table, {})
+            for column, type_name in _ADDED_COLUMN_TYPED_RE.findall(body):
+                here[column] = type_name.lower()
+        # ⚠️ Matched against the WHOLE file, not an ALTER's `body`: the statement
+        # this shape needs is `ALTER TABLE public.<t> ALTER COLUMN …`, and the
+        # `[^;]*?` body `_ALTER_ADD_COLUMN_RE` yields has already consumed the
+        # `ALTER TABLE public.<t>` prefix the regex anchors on. Matching the body
+        # silently found NOTHING — so the narrowing read as the base `jsonb` and
+        # the pin would have reddened on a correct tree (#11075, measured).
+        for table, column, type_name in _ALTER_COLUMN_TYPE_RE.findall(sql):
+            if table not in THE_RECORD_TABLES:
+                continue
+            found.setdefault(table, {})[column] = type_name.lower()
+    return found
+
+
+def _jsonb_columns_for_dir(migrations_dir: Path) -> frozenset[str]:
+    """`jsonb_columns()` for ONE already-resolved migrations directory.
+
+    A VIEW of :func:`_declared_types_for_dir`, not a second parse (#11075): the
+    encoding rule and the declared-type contract pin then answer from ONE
+    reading of the migrations, so they cannot disagree about what the schema
+    says. Keyed by `(table, column)` while collecting, so a per-table narrowing
+    cannot delete a column that is `jsonb` in ANOTHER record table; flattened to
+    names at the end (the one caller is handed a column name and nothing else).
+    """
+    declared = _declared_types_for_dir(migrations_dir)
+    if not declared:
+        # ⛔ FAIL CLOSED, like `table_columns()`. An EMPTY set is the worst
+        # answer this function can give: it silently stops the #9548 encoding
+        # and the row drops come back with no signal at all. A partial tree (a
+        # migration missing) still yields a map — narrower, and the pin on
+        # #9264's narrowing is what notices — so only the "no schema at all"
+        # case is refused here.
+        raise RecordProjectionError(
+            "the record schema is not on disk — no CREATE TABLE for any record "
+            f"table was found in {migrations_dir}. The jsonb encoding rule "
+            "reads the DECLARED column types from those files, and an empty "
+            "answer would silently stop serialising a scalar bound to a jsonb "
+            "column — the row-drop class #9548 exists to end."
+        )
+    return frozenset(
+        column
+        for table, columns in declared.items()
+        for column, type_name in columns.items()
+        if type_name == "jsonb"
+    )
+
+
+def column_types(migrations_dir: Path | None = None) -> dict[str, dict[str, str]]:
+    """`{table: {column: declared_type}}` for the record's tables (#11075).
+
+    The DECLARED TYPE half of the write path's contract: a column's declared
+    type has now refused its producer's value twice (#9264 `jsonb` ← integer,
+    #10593 `jsonb` ← the graph's flat string), both times dropping the row while
+    the journal stayed intact and `/health` read `ok: true`. This function is
+    what a pin compares the writer's BOUND VALUE against, and it answers from
+    the same parse the writer's own `jsonb` encoding uses.
+    Parsed, never restated — a hand-copied type table is a second declaration of
+    the schema, and the second declaration is the one that goes stale. The three
+    shapes (CREATE TABLE, ADD COLUMN, ALTER COLUMN … TYPE) and the widened
+    vocabulary are documented at :func:`_declared_types_for_dir` and
+    :data:`_DECLARED_TYPE_ALTERNATION`.
+
+    ⛔ NOT CACHED, and that is a CALL-FREQUENCY decision rather than an oversight
+    (#9558): this is a contract read a pin performs, not a per-record read. The
+    two readers `replay_plan` drives once per record — `table_columns()` and
+    `refused_props_names()` — ARE cached on the migration files' fingerprint
+    (:func:`_schema_entry`); the map that runs once per string PARAMETER
+    (`jsonb_columns`) is TTL-bounded by `_JSONB_CACHE_TTL_SECONDS`. Caching this
+    one would buy nothing measured and add a third invalidation rule to keep
+    correct.
+    """
+    return _declared_types_for_dir(migrations_dir or _migrations_dir())
+
+
+def jsonb_columns(migrations_dir: Path | None = None) -> frozenset[str]:
+    """The record's `jsonb` COLUMN NAMES, parsed from the migrations.
+
+    Keyed by column NAME, not `(table, column)`, because the one caller
+    (:func:`_jsonb_or_scalar`) is handed a column name and nothing else. That is
+    sound only while no `jsonb` column shares its name with a non-`jsonb`
+    column of another record table — an invariant a name-keyed map can silently
+    break, so it is PINNED
+    (`tests/test_9548_record_search_keys_shape.py`) rather than assumed; the
+    PARSE is per `(table, column)`, and only its result is flattened.
+
+    A `CREATE TABLE` is the base; a FORWARD `ALTER TABLE … ADD COLUMN` and
+    `ALTER TABLE … ALTER COLUMN … TYPE` are applied over it, because append-only
+    history can only change a column's shape that way. #9264 is the concrete case
+    and it MATTERS here: `session.capture_redactions` is declared `jsonb` in the
+    base shape and narrowed to `integer` by its own forward migration, so a
+    reader that stopped at `CREATE TABLE` would call an integer column a
+    document container.
+
+    ⛔ RE-PARSING PER PARAMETER IS NOT AN OPTION: `_jsonb_or_scalar` runs once per
+    string parameter of every statement, so an un-memoised parse is the whole
+    cost of a plan build. The answer is memoised for
+    :data:`_JSONB_CACHE_TTL_SECONDS` — long enough that a plan (or a burst of
+    writes) parses once, short enough that a migration landing while the process
+    runs is seen without a restart. `table_columns()` is CACHED on the same
+    migration fingerprint (:func:`_schema_entry`) — it is a per-RECORD read, so
+    it pays a stat pass — while this one is TTL-bounded; two caches, two
+    invalidation costs, stated at the constant rather than implied.
+    """
+    if migrations_dir is not None:
+        return _jsonb_columns_for_dir(migrations_dir)
+    now = time.monotonic()
+    if now - float(_JSONB_CACHE["at"]) < _JSONB_CACHE_TTL_SECONDS:
+        return _JSONB_CACHE["names"]
+    names = _jsonb_columns_for_dir(_migrations_dir())
+    _JSONB_CACHE.update({"at": now, "names": names})
+    return names
+
+
 def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str]]:
     """`{table: {column}}` for the record's tables, parsed from the migrations.
 
@@ -1452,8 +2088,31 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
     A `CREATE TABLE` is the base; a FORWARD `ALTER TABLE … ADD COLUMN` is
     unioned over it, because append-only history means a landed table can only
     gain a column that way (#2782, the same rule as `refused_props_names`).
+
+    CACHED, AND INVALIDATED BY THE FILES THEMSELVES (#9558 / R10). This used to
+    be deliberately uncached "so a migration edit can never be read stale" —
+    correct about the risk, wrong about the price: the live record door calls it
+    once per journal record, so every record re-read and re-regex-parsed all
+    fifteen migration files (`record_writer` priced it at "~4 ms of plan
+    materialization"). The cache keeps the correctness property and drops the
+    price by keying on each migration file's `(name, mtime_ns, size, inode, ctime_ns)`
+    (:func:`_migrations_fingerprint`), so an edit, an addition or a removal is a
+    cache MISS — the S6 surface's requirement that a cached column map cannot
+    diverge from the live schema silently. Refreshing costs one stat pass
+    (0.160–0.169 ms of pure `stat` for the fifteen files; the whole cached call,
+    which also copies the map, measures 0.460–0.583 ms) versus the read+parse+regex
+    1.582–1.651 ms it replaces.
+
+    ⚠️ The returned dict is a fresh copy on every call, exactly as before: a
+    caller that edits the map it was handed mutates its own copy, never the
+    process's. The VALUES are `frozenset`s and are shared — they are immutable,
+    so sharing one cannot be observed.
     """
-    sql = _read_migrations(migrations_dir)
+    entry = _schema_entry(migrations_dir)
+    cached = entry["parsed"].get("table_columns")
+    if cached is not None:
+        return dict(cached)
+    sql = _entry_sql(entry)
     tables = _parse_record_tables(sql)
     for table, added in _parse_added_columns(sql).items():
         if table in tables:
@@ -1467,7 +2126,8 @@ def table_columns(migrations_dir: Path | None = None) -> dict[str, frozenset[str
             f"{PACKAGED_MIGRATIONS} (installed package — a wheel ships the "
             "record's migrations there)."
         )
-    return tables
+    entry["parsed"]["table_columns"] = tables
+    return dict(tables)
 
 
 #: `WHEN '<label>' THEN '<key property>'` — the pairs of `node_identity`'s
@@ -1523,8 +2183,18 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
     the projection-owned caches. The record must not store them as authority,
     and the projection drops them **by name** rather than relying on the CHECK
     to catch it later.
+
+    Cached on the same fingerprint as :func:`table_columns`, for the same reason
+    and with the same invalidation (#9558 / R10): `replay_plan` calls this next
+    to `table_columns` for every journal record, so an uncached parse here is
+    the other half of the per-record migration read. The copy-on-return rule is
+    the same too.
     """
-    sql = _read_migrations(migrations_dir)
+    entry = _schema_entry(migrations_dir)
+    cached = entry["parsed"].get("refused_props_names")
+    if cached is not None:
+        return dict(cached)
+    sql = _entry_sql(entry)
     out: dict[str, frozenset[str]] = {}
     # Bound each table to ITS OWN `CREATE TABLE … );` body (`_TABLE_RE`, the
     # same regex `table_columns` uses). Splitting on the CREATE headers alone
@@ -1547,7 +2217,8 @@ def refused_props_names(migrations_dir: Path | None = None) -> dict[str, frozens
             continue
         extra = frozenset(n.strip().strip("'") for n in arr.split(",") if n.strip())
         out[table] = out[table] | extra
-    return out
+    entry["parsed"]["refused_props_names"] = out
+    return dict(out)
 
 
 def snake(prop: str) -> str:
@@ -1648,6 +2319,33 @@ class Statement:
 
     sql: str
     params: tuple[Any, ...]
+    #: Aligned with ``params``: when this tuple is NON-EMPTY it has exactly one
+    #: entry per parameter, and ``param_columns[i]`` is the record COLUMN the
+    #: i-th parameter is bound to. An EMPTY tuple means the statement carries NO
+    #: attribution (the journal row, the relation/direct-edge/narrative builders)
+    #: — a declared gap, not a claim of alignment: nothing here could name those
+    #: parameters, and inventing `""` placeholders would make the map look total
+    #: while still naming nothing. Exists for ATTRIBUTION, not execution.
+    #: ⚠️ WHY IT EXISTS AT ALL: when Postgres refuses a parameter it names the
+    #: offending VALUE's position in the statement text (`...  'event', 'arm b
+    #: content', 'live', 'err4032 r...`) and never the column, so a failure log
+    #: built from the driver's message alone cannot say WHICH column disagreed
+    #: with the graph. #9548 lost 302 rows to exactly that silence: every one was
+    #: reported as `InvalidTextRepresentation` and nothing else.
+    #: ⚠️ `None` is ACCEPTED here at RUNTIME and normalized to `()` in
+    #: :meth:`__post_init__`. It is not a third spelling this module invented: on
+    #: `main` the third positional field WAS `columns`, so
+    #: `Statement(sql, params, None)` — a real in-tree call shape,
+    #: `tests/test_record_searchkeys_10620.py::
+    #: test_an_unattributed_update_names_every_set_column` — lands in THIS field
+    #: after the fold put `param_columns` third (#9956). `None` and `()` mean the
+    #: same thing here ("declines to state the pairing"), so the normalization is
+    #: faithful rather than a repair — but leaving `None` in the field made the
+    #: REPORTER a trap (#10726 review P3): `value_types()` iterated it and raised
+    #: `TypeError` from inside the report, replacing the driver's real cause with
+    #: a traceback from the diagnostic. Do not delete the normalization while an
+    #: in-tree caller spells this field `None`.
+    param_columns: tuple[str, ...] = ()
 
     #: The columns this statement writes, in `params` order — or ``None`` when
     #: they cannot be paired off positionally. The upsert's key may be a
@@ -1658,9 +2356,106 @@ class Statement:
     #: failure line names the columns without inventing their values.
     columns: tuple[str, ...] | None = None
 
+    def __post_init__(self) -> None:
+        """Normalize `param_columns=None` to `()` — see that field's note.
+
+        Frozen, so this is `object.__setattr__`: the coercion is the whole point
+        (every reader, present and future, then sees a tuple), and it is done
+        HERE rather than at each read site so a new reader cannot reintroduce
+        the trap by iterating the field directly.
+        """
+        if self.param_columns is None:
+            object.__setattr__(self, "param_columns", ())
+
     def render(self) -> str:
         """A readable one-liner for logs and hover-less debugging."""
         return f"{self.sql} -- {self.params!r}"
+
+    def value_types(self) -> str:
+        """`column=python_type[→jsonb(shape)]` for every parameter it binds.
+
+        Two halves, and the SECOND is the one built for #9548. The Python type
+        alone stopped being diagnostic the moment this fix landed: a `str` bound
+        to a `jsonb` column IS the correct shape now (the column takes a JSON
+        scalar), so an un-suffixed `column=str` reads identically for a good
+        binding and for the defect it was added for. So a `jsonb`-column `str`
+        parameter also reports whether it IS a JSON document: `→jsonb` when it
+        parses, `→jsonb(NOT a JSON document)` when it does not. Never raises: a
+        schema that cannot be read must not replace the driver's cause with its
+        own.
+
+        ⚠️ THE COLUMN THESE SHAPES ARE ILLUSTRATED ON IS `payload`, NOT
+        `search_keys` (#10726 review P3). `public.point.search_keys` — the
+        column #9548 was filed against — is `text` since #10620's
+        `20261102000002_record_point_search_keys_text.sql`, so it can no longer
+        produce either `→jsonb` suffix and an un-suffixed `search_keys=str`
+        there is now the CORRECT answer rather than a map miss. `payload` is
+        still declared `jsonb`, so all three shapes remain reachable on it —
+        which is why the pin below builds its hand-made `Statement` on
+        `payload` for the same reason.
+
+        ⛔ WHAT THE THREE SHAPES MEAN, and the one that carries a MAP miss
+        (#10692 review P2 — the earlier version of this docstring sold
+        `→jsonb(NOT a JSON document)` as "exactly the pre-fix binding, visible
+        in the log line", which overstated it):
+
+          * `payload=str→jsonb` — the good binding: a `str` the map says is a
+            `jsonb` column, and whose value parses as a JSON document.
+          * `payload=str` — **NO `→jsonb` suffix at all**. This is the one a
+            stale/partial `jsonb_columns()` map produces, and it is the miss
+            the encoder cannot see either (the encoder reads the SAME map), so
+            the ABSENCE of the suffix is the signal: the parameter was bound to
+            a column this module does not believe is `jsonb`, i.e. it went to
+            the driver VERBATIM. Read it that way — an un-suffixed string
+            parameter on a column the migrations declare `jsonb` is the #9548
+            condition, not a clean binding.
+          * `payload=str→jsonb(NOT a JSON document)` — a `str` bound to a
+            column the map DOES call `jsonb` whose value is not JSON. ⚠️
+            DEFENSIVE ONLY: no statement builder in this module can produce it
+            today, because `_jsonb_or_scalar` `json.dumps`-es every `str` bound
+            to a `jsonb` column before it becomes a parameter, and the only
+            other `str` parameters here (`org_id`, `graph_id`, `node_key`, `id`,
+            `url`) are not `jsonb` columns. It stays because it is the read-out
+            for the shape #9548 shipped — a caller that builds a `Statement`
+            OUTSIDE these builders (a repair script, a hand-written backfill)
+            gets the shape named rather than an opaque `str` — and it is PINNED
+            as that by `tests/test_9548_record_search_keys_shape.py::
+            test_the_pre_fix_binding_shape_is_still_readable_when_built_by_hand`
+            (a hand-built `Statement`, labelled defensive-only), so this is a
+            tested branch rather than claimed coverage.
+        """
+        try:
+            jsonb = jsonb_columns()
+        except Exception:
+            jsonb = frozenset()
+        pairs: list[str] = []
+        seen: set[int] = set()
+        # No guard here on purpose: `param_columns` is normalized to a tuple in
+        # `__post_init__`, so a guard at this site would be unreachable code —
+        # and a branch nothing can reach is coverage that is not there, this
+        # method's own subject (#10692 review P2). The field is the place to fix
+        # it, and `test_a_none_pairing_cannot_make_the_reporter_raise` pins it.
+        for index, name in enumerate(self.param_columns):
+            if not name or index in seen or index >= len(self.params):
+                continue
+            seen.add(index)
+            value = self.params[index]
+            declared = ""
+            if name in jsonb:
+                declared = "→jsonb"
+                if isinstance(value, str):
+                    try:
+                        json.loads(value)
+                    except (TypeError, ValueError):
+                        declared = "→jsonb(NOT a JSON document)"
+            pairs.append(f"{name}={type(value).__name__}{declared}")
+        return ", ".join(pairs)
+
+    def attribution(self) -> str:
+        """The failing statement, as much of it as a log line may carry."""
+        types = self.value_types()
+        columns = f" columns[{types}]" if types else ""
+        return f"statement {self.sql[:120]!r}{columns}"
 
 
 @dataclass(frozen=True)
@@ -1702,8 +2497,35 @@ def _jsonb_or_scalar(column: str, value: Any) -> Any:
     The caller supplies the value; this module does not coerce, because a
     journal carrying a string where the record's column is `boolean` is a
     journal/record disagreement and coercing it here would hide it.
+
+    ⛔ A `jsonb` COLUMN IS A DOCUMENT CONTAINER, NOT A LIST (#9548). A bare
+    string bound to it is a JSON *scalar* — `search_keys` WAS the case: the graph
+    stores it SPACE-JOINED (`flatten_search_keys_prop`, because FalkorDB's
+    Point FULLTEXT index cannot match an array-valued property, #5482) and the
+    journal carries the node's own value. Passing that string through unencoded
+    made Postgres read it as raw JSON TEXT and refuse EVERY such record with
+    `22P02` ("invalid input syntax for type json"); the seam counted one
+    `write_failed` and dropped the row. 302 drops were measured live at #9548.
+    ⚠️ That column is `text` since #10620 (`20261102000002_record_point_search_
+    keys_text.sql`), so THIS function now passes that one string through
+    untouched — the rule below still governs every column that IS `jsonb`, and
+    a live column added back to `jsonb_columns()` gets encoded.
+
+    ⚠️ `json.dumps` — not "store the array instead". The record is a CACHE OF
+    THE GRAPH (`cache_projection.node_from_row` reads this column straight back
+    onto the node), so the column must hold what a rebuild can materialize
+    without a repair pass: a JSON ARRAY reads back as a Python `list`, which is
+    the array-valued `search_keys` the FTS index cannot match — the breakage
+    moves from writes to reads (#10203/#5444 exist only to repair graphs that
+    carry one). A JSON STRING reads back as the graph's own flat `str`.
+
+    Which columns are `jsonb` is READ FROM THE MIGRATIONS (`jsonb_columns`),
+    never restated here: a hand-copied type list is a second declaration of the
+    schema, and the second declaration is the one that goes stale.
     """
     if isinstance(value, (dict, list)):
+        return json.dumps(value)
+    if isinstance(value, str) and column in jsonb_columns():
         return json.dumps(value)
     return value
 
@@ -1987,14 +2809,30 @@ def _upsert_statement(
     key_sql, key_params = _render_value(key)
     placeholders_list: list[str] = ["%s", "%s", "%s", key_sql]
     params: list[Any] = [org_id, graph_id, node.label, *key_params]
+    # Aligned with `params` (see `Statement.param_columns`): the four leading
+    # bindings are the record's own scope/key columns, then one entry per
+    # parameter the column's value expands to — a `_SqlExpr` can expand to
+    # several, which is why the name is repeated rather than zipped per column.
+    # ⛔ `key` IS A `_SqlExpr` TOO (#9956) and can expand to SEVEN parameters (a
+    # resolved `:Source` key is a `COALESCE(<6-param subquery>, %s)`), so its
+    # name must be repeated `len(key_params)` times. Seeding it ONCE misaligned
+    # every later name: measured on a `SourceCreated` plan, 20 params against 14
+    # names, `url_aliases` reported against a `graph_id` and the real `jsonb`
+    # parameter unnamed — i.e. defect 2 re-created on the one table that carries
+    # the most `jsonb` columns (`tests/test_9548_...::
+    # test_every_statement_s_param_columns_align_with_its_params` pins it).
+    param_columns: list[str] = ["org_id", "graph_id", "node_label",
+                               *(["node_key"] * len(key_params))]
     for column, value in col_values.items():
         fragment, values = _render_value(
             value if isinstance(value, _SqlExpr)
             else _jsonb_or_scalar(column, value))
         placeholders_list.append(fragment)
         params.extend(values)
+        param_columns.extend([column] * len(values))
     placeholders_list.append("%s")
     params.append(json.dumps(tail))
+    param_columns.append("props")
     placeholders = ", ".join(placeholders_list)
     # IDEMPOTENCE, stated once: re-applying the same record writes the same
     # absolute values onto the same row. A second replay of the journal
@@ -2019,7 +2857,16 @@ def _upsert_statement(
     # is worse than naming none (#10620).
     exact = not isinstance(key, _SqlExpr) and not any(
         isinstance(value, _SqlExpr) for value in col_values.values())
-    return Statement(sql, tuple(params), tuple(columns) if exact else None)
+    # ⛔ BOTH fields are named, never positional. `Statement` carries `sql, params,
+    # param_columns, columns` — the fold's #9956 field is THIRD and main's #10620
+    # field is FOURTH — so the pre-re-integration spelling (`Statement(sql, params,
+    # <columns>)`, correct on main where `columns` WAS third) silently bound main's
+    # column list into `param_columns` and left `columns` None: main's
+    # value-withholding and the fold's per-parameter naming were both dead, and
+    # `tests/test_record_searchkeys_10620.py` reds 4 pins on it.
+    return Statement(sql, tuple(params),
+                     param_columns=tuple(param_columns),
+                     columns=tuple(columns) if exact else None)
 
 
 def _patch_statement(
@@ -2033,17 +2880,26 @@ def _patch_statement(
 ) -> Statement:
     sets: list[str] = []
     params: list[Any] = []
+    # Aligned with `params` (see `Statement.param_columns`) — a patch binds
+    # exactly one parameter per column.
+    param_columns: list[str] = []
     for column, value in col_values.items():
         sets.append(f"{column} = %s")
         params.append(_jsonb_or_scalar(column, value))
+        param_columns.append(column)
     if tail:
         sets.append("props = props || %s::jsonb")
         params.append(json.dumps(tail))
+        param_columns.append("props")
     if not sets:
         # A patch with nothing to write is a 0-row no-op by construction; make
         # it a real statement so the caller still sees the record was consumed.
         sets.append("node_key = node_key")
     params.extend([org_id, graph_id, *([key] * len(match))])
+    # `match` NAMES the predicate columns (`_ENTITY_MATCH_COLUMNS["source"]` is
+    # `("id", "node_key")`), so the names come from it — labelling every match
+    # parameter `node_key` would report an `id` predicate as `node_key`.
+    param_columns.extend(["org_id", "graph_id", *match])
     predicate = " OR ".join(f"{c} = %s" for c in match)
     if len(match) > 1:
         predicate = f"({predicate})"
@@ -2051,7 +2907,14 @@ def _patch_statement(
         f"UPDATE public.{node.table} SET {', '.join(sets)} "
         f"WHERE org_id = %s AND graph_id = %s AND {predicate}"
     )
-    return Statement(sql, tuple(params), tuple(col_values) + (("props",) if tail else ()))
+    # Both fields named — see the note in `_upsert_statement`. `param_columns` is
+    # the fold's per-PARAMETER list (#9956: `sets` columns in `params` order,
+    # then `props`, then the predicate's `org_id`/`graph_id`/`match`), which is
+    # NOT the same thing as main's `columns` (the columns this statement
+    # WRITES); a patch has both, and taking one side left the other dead.
+    return Statement(sql, tuple(params),
+                     param_columns=tuple(param_columns),
+                     columns=tuple(col_values) + (("props",) if tail else ()))
 
 
 def _delete_statement(
@@ -3192,6 +4055,42 @@ def _op_dispatch_statements(
             # on a property, which is the class this change exists to close.
             drop=dispatch.never_store.get(table, frozenset()) | {"cache_tier"},
         )
+        # ⛔ A RENAME THAT APPLIES NO NAME IS THE SILENT-KEEP DEFECT (#9881).
+        #
+        # `_patch_statement`'s "a patch with nothing to write is a 0-row no-op by
+        # construction" fallback (`SET node_key = node_key`) is DELIBERATE for an
+        # op whose content lives in a column the layer table refuses — #9974's
+        # status-only `restatus` is exactly that shape (`never_store={"status"}`,
+        # and that residual is tracked there, not changed here). A RENAME has no
+        # such shape: its whole content IS the new name, so the same fallback can
+        # only ever mean "keep the OLD name and report the mutation consumed".
+        #
+        # The shape is REACHABLE and this tree declares it: `name` is a reserved
+        # `EntityMutated` envelope key (`projection::_ENTITY_MUTATION_RESERVED_KEYS`,
+        # accepted by the one builder, `sdk._journal_entity_mutation(name=…)`),
+        # and the GRAPH's fold is loud about a record carrying it — that builder's
+        # own note says such a record "unfolds and is reported as a fold miss"
+        # (`_warn_entity_mutation_fold_miss`: "a state-op miss is not exempt",
+        # #3585). A silent RECORD half is how a replay and a rebuild come to
+        # disagree about a node's name with no error at any layer, which is the
+        # class #9881 exists to end.
+        #
+        # So: refuse it, by name, and say where the name has to arrive instead.
+        # The producer's own record can never hit this — the ONE classifier
+        # returns `"rename"` only where the applied map carries `name`
+        # (`projection::classify_entity_mutation_op`) — so this guards the
+        # unproduced/legacy shapes without blocking a real write.
+        if op == "rename" and "name" not in col_values and "name" not in tail:
+            raise RecordProjectionError(
+                "EntityMutated op='rename' applies no `name`: the record would "
+                "keep the OLD name and report the mutation consumed, in "
+                "silence. A rename's whole content is the new name, so it must "
+                "arrive in `state['name']` — the applied map the writer "
+                "journals (#3590, `sdk._journal_entity_mutation`) — and not "
+                "only as the envelope's reserved top-level `name`, which the "
+                "graph's own fold does not read (#4769) and which would leave "
+                "the two stores disagreeing with no error at any layer. "
+                "Refusing here instead of emitting a 0-effect patch.")
         return [_patch_statement(org_id, graph_id, node, key, col_values, tail,
                                  match=match)]
     raise RecordProjectionError(
@@ -4813,13 +5712,17 @@ def _narrative_statements(
         values["narrative"] = narrative
 
     # ⛔ `summary` is projected ONLY from a record that ALSO carries the
-    # narrative. The capture's own session `:Source` sets `summary` to the
-    # transcript's first substantive utterance (`sdk._session_source_metadata`),
-    # which is NOT the S1 narrative — projecting it unconditionally would let an
-    # order-independent row hold a prose snippet in the narrative's companion
-    # column, and would make `SessionText.verbatim_available` true for a session
-    # whose narrative is unknown. One carrier owns both columns, so they cannot
-    # mean different things.
+    # narrative. The capture's own session `:Source` carries a descriptor built
+    # from the session's TOPIC lexicon (`sdk._session_source_metadata`; it held
+    # the transcript's first substantive utterance until #10000 removed the
+    # prose route, §9.1/D1), which is NOT the S1 narrative — projecting it
+    # unconditionally would let an order-independent row hold a transcript-derived
+    # topic descriptor in the narrative's companion column, and would make
+    # `SessionText.verbatim_available` true for a session whose narrative is
+    # unknown. One carrier owns both columns, so they cannot mean different
+    # things. (The noun matters: the value a post-#10000 row would bring here is a TOPIC DESCRIPTOR, not the S1
+    # NARRATIVE, though a space-less (CJK) descriptor carries the turn's run verbatim (residual:
+    # `sdk._session_source_metadata`) — which is why this guard is about the COLUMN, not about prose, and a reader who reads it as a prose guard will "tidy" it away, #10852 review P3.)
     if "narrative" in values:
         summary = carrier.get("summary")
         if isinstance(summary, str) and summary.strip():

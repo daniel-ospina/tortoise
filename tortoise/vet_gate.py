@@ -84,7 +84,7 @@ Vocabulary (owner ruling **O4**, `EXTRACTOR-V4-ARCHITECTURE.md` §16.3 / §16.4)
 - ``DISCARD`` — do not ship; the candidate is removed and its counterfactual
   recorded.
 - ``MERGE`` — fold into another candidate.
-- ``RENARRATE`` — **batch-level only**: re-extract the batch.
+- ``RENARRATE`` — **batch-level only**: re-extract the batch. ⛔ **This token HAS a consumer (#11002)**: ``extractor_v2`` reads a batch verdict's ``outcome`` after the S2.2 pass and, exactly once per run, re-narrates and re-extracts (``_renarrate_trigger`` → ``_arm_extract`` with the emphasis seam). The gate still performs no re-extraction itself — it says the batch is poor, the pipeline decides what to do about it, which is the same verdict/action split ``MERGE`` has above.
 
 This is VET's **selection** axis and is deliberately distinct from
 ``extractor_v2.DecisionRecord``'s consolidation axis (``ADD``/``UPDATE``/
@@ -142,6 +142,7 @@ exactly what produces that 422.
 """
 from __future__ import annotations
 
+import math
 import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
 from typing import Any
@@ -345,13 +346,337 @@ def _iter_items(embed_list: object
 def _narrative_statements(narrative: str) -> int:
     """A deterministic proxy for "how many things did the narrative state?".
 
-    Deliberately crude and **unmeasured** — it exists to be *reported*, not to
-    trigger an action. The design's `RENARRATE` trigger threshold is explicitly
-    something the draft-and-run loop must set on real sessions (§4.2), so this
-    function never decides anything by itself.
+    Deliberately crude and **unmeasured** — it is a *count*, never a threshold,
+    so it cannot decide anything by itself. It reaches an action only through
+    ``check_batch``'s ``coverage_suspect``, the ONE unambiguous coverage failure
+    (prose in, zero candidates out — no ratio, no number to choose); #11002 is
+    what consumes that flag. The design's `RENARRATE` trigger threshold remains
+    something the draft-and-run loop must set on real sessions (§4.2), and a
+    keep-rate threshold is therefore NOT chosen in advance here.
     """
     return sum(1 for part in _SENTENCE_SPLIT.split(str(narrative or ""))
                if part and part.strip())
+
+
+# ── #11534 — the PARTIAL-gap detector (statement + clause spans) ──────────
+#
+# ``coverage_suspect`` above answers ONE question — "did prose go in and
+# nothing come out?" (``total == 0``) — and that is the only coverage failure
+# it can see. A narrative that yielded 44 candidates while missing one
+# statement's claim is INVISIBLE to every instrument in the tree, which is what
+# #11534 exists to fix: an ADD-capable stage cannot be built on a detector that
+# can only count.
+#
+# ⛔ WHAT THIS DETECTOR IS, AND WHAT IT IS NOT. It is a **lexical, deterministic
+# coverage proxy**: a segment is *covered* when the content words it carries are
+# found in the candidate set, weighted by how DISCRIMINATING each word is in
+# this batch (idf over the batch's own item texts). It decides nothing — it
+# reports segments, an address for each, and what it thinks is missing — and it
+# never triggers a write by itself (`check_batch`'s contract is "reported, never
+# acted on", and #11534's own indicator 3 requires the detector to be SCORED
+# before it drives anything).
+#
+# ⚠️ Its measured limits, from the F3 population (#11534's evidence record,
+# ``docs/evidence/11534-partial-gap/``): on the 7 recorded sessions × the 2
+# recorded runs in ``docs/evidence/1789-s4-reeemit-tax/`` it flags **70 of 844
+# clause segments (8.3%)** and overlaps **9 of the 21 items S4 added — 8 of 12
+# `points` but 1 of 9 `operators`**. It catches clause-level elisions (a claim
+# the narrative made in a clause no candidate carries) and it MISSES the two
+# shapes this proxy cannot see by construction: (a) a **generalisation** — an
+# operator or point that restates a covered statement at a higher abstraction,
+# so no narrative span is uncovered even though the item is new — most of the 8
+# of 9 operators it does NOT reach (the record names 3), and (b) a **re-shaped**
+# item whose content the candidates already lexically carry. Read a low
+# ``coverage`` as evidence of missing prose, never as a claim a model should emit.
+#
+# ⚠️ The ADDRESS is a char span into the NARRATIVE — not into a source turn, and
+# not a graph span. #11534's body worried that the target needed `#2684`'s span
+# layer (point→source, `state: not-implemented`); it does not: a re-extraction
+# that reads the flagged span needs the span in the text it was given, which is
+# computed from the narrative string in hand. `#2684` remains a separate,
+# unbuilt mechanism and is not a precondition for this one.
+
+#: Marks a segment as *not accounted for* when its idf-weighted coverage falls
+#: below this floor. Measured, not chosen in the dark — and RE-DERIVED by
+#: ``tests/test_11534_partial_gap.py``::
+#: ``test_the_coverage_floor_is_justified_by_the_measured_distribution``,
+#: because this comment carried PRE-correction percentiles through two review
+#: rounds (both were unreproducible at the shipped settings, and quoting them
+#: here only gives the next reader a number to re-quote).
+#: Over the 7 committed sessions the population is a full-coverage MASS with a
+#: low TAIL: of the 210 segments that clear ``GAP_MIN_CONTENT_TOKENS``, **147 sit
+#: at exactly 1.0** and **35 fall below this floor** (median 1.0, p10 0.355, p25
+#: 0.736).
+#:
+#: ⛔ WHERE THE FLOOR SITS, SAID SO THAT IT IS TRUE (review round 4, P2). An
+#: earlier version of this comment called ``[0.5, 0.6)`` "the THINNEST band
+#: between the two", and that is FALSE on the population it cites: measured in
+#: 0.1-wide bands, ``[0.2, 0.3)`` holds 3 segments and ``[0.8, 0.9)`` holds 4, so
+#: the band the floor sits in is neither the thinnest nor uniquely thin. What the
+#: data does support is narrower and is what the pin asserts: across the three
+#: bands straddling the floor (``[0.4, 0.5)`` 6 · ``[0.5, 0.6)`` 4 · ``[0.6, 0.7)``
+#: 14) this one is the LOCAL MINIMUM, and it is a shallow one — of its four values
+#: (0.508 · 0.511 · 0.528 · 0.586) ONE sits above the floor, so 0.55 cuts three of
+#: the four. The floor's defensible justification is the mass/tail split above;
+#: the local minimum is corroboration, not a separation. Pinned by
+#: ``test_the_coverage_floor_is_justified_by_the_measured_distribution`` (which
+#: re-derives the bands), so the next reader cannot re-quote a claim nothing
+#: measures.
+GAP_COVERAGE_FLOOR = 0.55
+
+#: Segments carrying fewer content words than this are not claims — the class it
+#: removes is `**bold label**` and date-fragment segments; headings are masked
+#: BEFORE segmentation, so they are never flags. Re-derived by
+#: ``test_the_content_floor_s_removal_class_is_measured_not_asserted``.
+GAP_MIN_CONTENT_TOKENS = 4
+
+#: How many flagged segments ride ``stats["batch"]``. The full count is always
+#: reported in ``flagged_total``; the cap keeps a session's stats JSON bounded.
+GAP_MAX_FLAGGED = 20
+
+#: A word is a content word when it is at least this long and not in the stop
+#: set. Kept LOW on purpose — the vocabulary here is technical prose, and the
+#: idf weighting (not this length) is what keeps common words quiet.
+_GAP_MIN_WORD = 3
+
+_GAP_WORD = re.compile(r"[a-z0-9][a-z0-9\-]{1,}")
+
+#: Clause boundaries. ``,``/``:``/``—`` are the narrative's own separators;
+#: the conjunctions are included because the population writes a claim as
+#: "<covered clause>, though <the elided one>" — the elision is a CLAUSE, and a
+#: sentence-level detector never reaches it.
+_GAP_CLAUSE = re.compile(
+    r",|—|--|:|\bbut\b|\bso\b|\bthough\b|\bwhile\b|\bwhich\b|\bbecause\b"
+    r"|\band\b")
+
+_GAP_STOP = frozenset("""
+ a an and are as at be been being both but by can could did do does doesn done
+ each even ever every few for from had has have he her here his how if in into
+ is it its just may me might more most much must never no nor not now of off on
+ once one only or other our out over own per same she should since so some such
+ than that the their them then there these they this those through to too two
+ under until up us very was we were what when where which while who whom why
+ will with within without would yet you your also although because though still
+ three four five six seven eight nine ten does doesn nothing else what's dont
+ isn't""".split())  # noqa: SIM905 — one word per line is the readable form here
+
+#: Suffix stripping — deliberately the CRUDEST possible stemmer (longest match
+#: wins, one pass). It exists so "shares"/"shared"/"sharing" meet; a real
+#: stemmer would need a dependency this module may not take (it is stdlib-only by
+#: contract — see the module docstring).
+#:
+#: ⛔ BASE-FORM SYMMETRY IS THE PROPERTY THAT MATTERS, AND THE FIRST VERSION OF
+#: THIS FUNCTION DID NOT HAVE IT (review round 2, P2, measured). A bare
+#: "strip the suffix if the remainder is long enough" rule is ASYMMETRIC: the
+#: plural loses ``es`` *and* the ``e`` (``shares`` → ``shar``) while the singular
+#: keeps its ``e`` (``share`` → ``share``), so the pair the docstring named did
+#: not meet — and the failure is in the direction that INVENTS a gap (lower
+#: coverage), not the direction that hides one. Measured on the recorded
+#: population before the fix: 2 of the 70 flagged spans were this class (both
+#: ``stated`` vs the batch's ``state``). The fix is two normalisations that run on
+#: BOTH sides: ``-ies`` → ``-y`` (so ``policies``/``policy`` meet) and a trailing
+#: ``e`` dropped from the stem (so every one of
+#: stage/lease/cache/queue/service/share/state meets its plural).
+#:
+#: What remains asymmetric is disclosed rather than claimed away, and the class is
+#: WIDER than the one named here before: on the SHIPPED function ``status``/``statuses``,
+#: ``process``/``processes`` and ``class``/``classes`` stem differently too, so it
+#: is not only the non-``-s`` plurals; it can only lower coverage, never raise it.
+_GAP_SUFFIXES = sorted(
+    ("ations", "ation", "ments", "ment", "ings", "ing", "ied",
+     "ers", "er", "ed", "es", "s", "ly", "al"),
+    key=len, reverse=True)
+
+
+def _gap_stem(word: str) -> str:
+    if len(word) > 5 and word.endswith("ies"):
+        return word[:-3] + "y"                 # policies → policy, both sides
+    for suffix in _GAP_SUFFIXES:
+        if len(word) - len(suffix) >= 3 and word.endswith(suffix):
+            word = word[:-len(suffix)]
+            break
+    if len(word) > 3 and word.endswith("e"):
+        word = word[:-1]                        # stage/stages → stag, both sides
+    return word
+
+
+def _gap_tokens(text: object) -> set[str]:
+    """The content tokens of `text` — markdown punctuation stripped, stemmed.
+
+    Deliberately NOT :func:`_norm`: that one is the *identity* transform shared
+    with ``extractor_v2`` (operators, removals), and widening it here would
+    change what the gate means by "the same item". This is a coverage lens, not
+    an identity, and the two must stay separable.
+    """
+    cleaned = re.sub(r"[`*#_>|]+", " ", str(text or "").lower())
+    return {_gap_stem(w) for w in _GAP_WORD.findall(cleaned)
+            if len(w) >= _GAP_MIN_WORD and w not in _GAP_STOP}
+
+
+def _gap_mask(narrative: str) -> str:
+    """`narrative` with markdown HEADINGS blanked, SAME LENGTH.
+
+    Same length is the contract: every offset the detector reports is an offset
+    into the ORIGINAL narrative, so a caller can slice it back out.
+
+    ⚠️ WHAT IT IS FOR, MEASURED (review round 2, P2). An earlier version of this
+    docstring claimed the mask removes *"the population's dominant
+    false-positive class"*. It does not: removing the blanking entirely on the
+    recorded population changes **zero flags** (70 → 70, only the segment count
+    844 → 876), because the heading class is already suppressed by
+    :data:`GAP_MIN_CONTENT_TOKENS` — a heading that survives the split into a
+    colon-free clause is short. What the mask actually buys is **stable statement
+    NUMBERING**: a heading's own ``.`` (``## Root cause (preserved exactly).``)
+    would otherwise open a phantom statement and shift every subsequent index, so
+    the address :func:`narrative_segments` reports would drift with editorial
+    edits to the titles. That is the property it is kept for; the sentence above
+    used to attribute an effect to the wrong guard.
+    """
+    chars = list(narrative)
+    for match in re.finditer(r"(?m)^[ \t]*#{1,6}(?:[ \t][^\n]*)?$", narrative):
+        for i in range(match.start(), match.end()):
+            chars[i] = " "
+    return "".join(chars)
+
+
+def narrative_segments(narrative: str) -> list[dict]:
+    """The narrative's CLAUSE spans, each with a statement AND clause index.
+
+    Every entry is ``{"statement": i, "clause": j, "start": s, "end": e,
+    "text": t}`` where ``s``/``e`` index the ORIGINAL narrative, so the caller
+    can re-read exactly the bytes the detector judged. ``statement`` is a
+    SENTENCE ORDINAL in this function's own segmentation; ``clause`` orders the
+    segments within that statement.
+
+    ⛔ ``statement`` IS AN ADDRESS ONLY — it is **not** comparable to the
+    ``narrative_statements`` count :func:`_narrative_statements` reports. An
+    earlier version of this docstring said the two agree "up to the
+    headings"; they do not, and the in-sentence terminator is the bigger
+    divergence:
+
+    * headings — this split runs on the heading-blanked mask
+      (:func:`_gap_mask`), so a heading's own ``.`` opens no statement here,
+      while ``_narrative_statements`` counts the raw prose;
+    * **in-sentence terminators** — `_SENTENCE_SPLIT` breaks a terminator
+      only where whitespace or end-of-string follows it, while this splitter
+      breaks on EVERY ``.``/``;``: a decimal (`4.2`), a `.**` bold boundary,
+      a version number, a domain name or a URL each open an index here that
+      `_narrative_statements` never counts. Measured: "The p95 hit 4.2
+      seconds under load. Then it recovered." reports
+      `narrative_statements == 2` while the segments carry statement indices
+      0, 1, 2.
+
+    So read ``statement`` as a grouping key for the segments in THIS result —
+    stable for a given narrative, and useful because two flagged spans
+    sharing an index came from one sentence of this segmentation — and never
+    as an index into the reported statement count. ⛔ Do NOT "fix" this by
+    making the splitter match `_SENTENCE_SPLIT`: that reconciles the two and
+    also MOVES the flag count the recorded measurement (844 segments / 70
+    flags) is pinned on. The address is what a re-extraction reads; the count
+    was never this function's contract.
+    """
+    text = str(narrative or "")
+    if not text:
+        return []
+    masked = _gap_mask(text)
+    out: list[dict] = []
+    statement = -1
+    for sentence in re.finditer(r"[^.!?;\n\r]+", masked):
+        chunk = sentence.group(0)
+        if not chunk.strip():
+            continue
+        statement += 1
+        base = sentence.start()
+        separators = list(_GAP_CLAUSE.finditer(chunk))
+        starts = [0] + [m.end() for m in separators]
+        ends = [m.start() for m in separators] + [len(chunk)]
+        for clause, (a, b) in enumerate(zip(starts, ends, strict=True)):
+            if b <= a:
+                continue                        # adjacent separators
+            piece = chunk[a:b]
+            if not piece.strip():
+                continue
+            out.append({"statement": statement, "clause": clause,
+                        "start": base + a, "end": base + b,
+                        "text": text[base + a:base + b].strip()})
+    return out
+
+
+def partial_gaps(embed_list: object, narrative: str, *,
+                 coverage_floor: float = GAP_COVERAGE_FLOOR,
+                 min_content_tokens: int = GAP_MIN_CONTENT_TOKENS,
+                 max_flagged: int = GAP_MAX_FLAGGED) -> dict:
+    """Which narrative SEGMENTS does this batch not account for? (#11534)
+
+    For every clause span, the share of its content tokens (idf-weighted, over
+    this batch's own item texts) that no candidate carries. A segment below
+    ``coverage_floor`` with at least ``min_content_tokens`` content words is
+    **flagged**: it is prose the batch did not account for.
+
+    Returns::
+
+        {"segments": N, "coverage_floor": f, "min_content_tokens": k,
+         "flagged_total": K, "flagged": [ {...segment, "coverage": c,
+         "missing": [tokens]} ], "truncated": bool}
+
+    ``flagged_total`` is the TRUE count; ``flagged`` holds at most
+    ``max_flagged`` entries so a session's stats stay bounded. Entries are
+    ordered by ASCENDING coverage — the least accounted-for segment first, which
+    is the order a re-extraction wants.
+
+    **Total on every malformed shape** (fail-open): a non-str narrative yields
+    no segments, a malformed ``embed_list`` yields the empty candidate set (so
+    every content-bearing segment is flagged, which is the honest answer — with
+    no candidates nothing is accounted for), and no exception escapes.
+
+    ⚠️ idf is computed over the ITEM TEXTS, not a corpus: a word the batch uses
+    everywhere ("stage", "lease") is near-worthless as evidence of coverage,
+    and one it does not use at all scores highest — which is exactly the
+    "nothing here accounts for this word" signal. ``log((N+1)/(df+0.5))`` never
+    divides by zero and never returns a non-positive weight for a token in the
+    union.
+    """
+    segments = narrative_segments(narrative)
+    empty = {"segments": 0, "coverage_floor": coverage_floor,
+             "min_content_tokens": min_content_tokens,
+             "flagged_total": 0, "flagged": [], "truncated": False}
+    if not segments:
+        return empty
+
+    candidate_tokens = [_gap_tokens(_item_text(section, item))
+                        for section, _i, item in _iter_items(embed_list)]
+    candidate_tokens = [toks for toks in candidate_tokens if toks]
+    df: dict[str, int] = {}
+    for toks in candidate_tokens:
+        for token in toks:
+            df[token] = df.get(token, 0) + 1
+    n_items = len(candidate_tokens)
+
+    def _idf(token: str) -> float:
+        return math.log((n_items + 1) / (df.get(token, 0) + 0.5))
+
+    union = set(df)
+    flagged: list[dict] = []
+    for segment in segments:
+        toks = _gap_tokens(segment["text"])
+        if len(toks) < min_content_tokens:
+            continue
+        total = sum(_idf(t) for t in toks)
+        if total <= 0:                          # impossible for a non-empty set
+            continue
+        covered = sum(_idf(t) for t in toks if t in union)
+        coverage = covered / total
+        if coverage >= coverage_floor:
+            continue
+        flagged.append({**segment, "coverage": round(coverage, 3),
+                        "missing": sorted(t for t in toks if t not in union)})
+    flagged.sort(key=lambda entry: entry["coverage"])
+    return {"segments": len(segments),
+            "coverage_floor": coverage_floor,
+            "min_content_tokens": min_content_tokens,
+            "flagged_total": len(flagged),
+            "flagged": flagged[:max_flagged],
+            "truncated": len(flagged) > max_flagged}
 
 
 # ── Level 2 — the batch checks (mechanical, unique to VET) ─────────────────
@@ -359,11 +684,23 @@ def _narrative_statements(narrative: str) -> int:
 def check_batch(embed_list: object, narrative: str) -> dict:
     """Level 2 — *did this batch come out right?*
 
-    Two signals, both **reported, never acted on** in v1:
-
+    Three signals (#11534 adds the third). They are **inert HERE** — this gate never retries, re-narrates
+    or extracts anything (its role is to *select*), and no key below gates a
+    decision inside this module. The consumer is the PIPELINE: #11002 reads
+    ``coverage_suspect`` (and an arbiter's ``RENARRATE``, above) via
+    ``extractor_v2._renarrate_trigger`` and runs at most one re-narrate. An
+    earlier revision of this docstring said *"reported, never acted on in v1"*;
+    scoping #11002 measured that the ``in v1`` qualifier was the only thing
+    between that sentence and a false claim once the pipeline consumes it — so
+    the sentence now names the boundary that is actually true (inert at the
+    gate, consumed by the pipeline) instead of a qualifier a reader can miss.
     - **coverage** — candidates emitted vs. statements the narrative carried.
       ``coverage_suspect`` fires only on the unambiguous case (a non-empty
       narrative produced **zero** candidates — a definite loss, no threshold).
+    - **partial coverage** (#11534) — ``partial_gaps``: WHICH clause span no
+      candidate accounts for, with a char span into the narrative. The zero-case
+      signal above cannot see a narrative that yielded 44 candidates and still
+      left a statement uncovered; this one can, and it still only reports.
     - **abstraction** — the candidate count per family, so a session that spent
       itself on one family is visible to the hand review.
 
@@ -389,6 +726,11 @@ def check_batch(embed_list: object, narrative: str) -> dict:
         "coverage_ratio": (round(ratio, 3) if ratio is not None else None),
         # The ONE unambiguous coverage failure: prose in, nothing out.
         "coverage_suspect": bool(statements and total == 0),
+        # #11534: WHICH prose. ``coverage_suspect`` above can only fire on a
+        # zero-candidate batch, so a partial gap — a narrative that yielded
+        # candidates and still left a statement uncovered — is invisible to it.
+        # Additive key, same "reported, never acted on" contract.
+        "partial_gaps": partial_gaps(embed_list, narrative),
     }
 
 
@@ -488,6 +830,13 @@ def vet_candidates(embed_list: object, *,
     seam_stats: dict = {}
 
     # #4899 — the mechanical Level-2 predicate: identifier-only DISCARD.
+    #
+    # ⛔ This guard is WHY the default lives in ``value_gate.value_gate_enabled``
+    # and not in the pipeline wrapper (`#10996` Claim 4): a default flipped one
+    # file over would arm ``extractor_v2``'s pass while this line still read
+    # ``False``, giving ``enabled: False, fired: 0`` — the pass running with the
+    # predicate inert. The leaf reader is the effecting read, so the default sits
+    # there. ``TORTOISE_VALUE_GATE=0`` (or blank/garbage) is the kill-switch.
     #
     # It runs BEFORE the arbiter, deliberately: with ``TORTOISE_VET`` alone no
     # arbiter is supplied (``extractor_v2._s2_seam_arbiter`` supplies one only
@@ -614,8 +963,10 @@ def vet_candidates(embed_list: object, *,
         "by_outcome": by_outcome,
         "discarded": by_outcome.get(DISCARD, 0),
         "arbiter": "present" if arbiter is not None else "none",
-        # #4899: additive. ``enabled=False`` on every default run, so the flag
-        # is observable in the evidence surface without changing the rate.
+        # #4899: additive. ``enabled`` reports the RESOLVED value, so the
+        # evidence surface says whether the predicate ran — it is ``True`` on a
+        # default run since #10996 (the mechanical half defaults ON) and ``False``
+        # only under the explicit ``TORTOISE_VALUE_GATE=0`` kill-switch.
         "mechanical": {
             "enabled": value_gate.value_gate_enabled(),
             "fired": len(mechanical),
@@ -638,7 +989,8 @@ def vet_candidates(embed_list: object, *,
 # ── Applying the verdicts — the removal, and the Layer-1 guard ─────────────
 
 def _referenced_entity_names(embed_list: object,
-                             discarded_ids: set[str]) -> set[str]:
+                             discarded_ids: set[str], *,
+                             relation_endpoints: bool = True) -> set[str]:
     """Entity names referenced by any candidate that is NOT being discarded.
 
     This is the P0 guard's input. Only *surviving* items are scanned: an
@@ -649,6 +1001,19 @@ def _referenced_entity_names(embed_list: object,
     :func:`apply_vet` handles the removed-entity-endpoint case separately. A
     shape we do not recognise contributes nothing, which is safe because the
     guard's only failure mode is keeping too much.
+
+    ``relation_endpoints`` (#10999) decides WHICH WARNING is truthful about the
+    entity↔entity channel's endpoints — never whether an endpoint protects its
+    entity. Both the DISCARD guard and the Rule-4 RESTORE leg count relation
+    endpoints as references (the default ``True``); the channel is **result-level**
+    — an endpoint naming an entity no pass emitted leaves ``execute_embed``'s
+    ``relations`` unresolved, dropped and named (the declared fail-open), and the
+    Layer-1 payload never carries it, so it cannot 422. ``False`` therefore asks
+    the narrower question "is this entity referenced by something Layer-1 CAN
+    reject?", which only the DOWNGRADE message may answer with "Layer-1
+    referential integrity"; passing it into the restore computation is the
+    defect #10999 fixed — the entity stayed gone and S5 then dropped the edge
+    as unresolvable, with nothing in the record saying why.
     """
     names: set[str] = set()
     for section, index, item in _iter_items(embed_list):
@@ -667,6 +1032,53 @@ def _referenced_entity_names(embed_list: object,
                 for r in refs:
                     if isinstance(r, Mapping) and r.get("name"):
                         names.add(_norm(r["name"]))
+    # #10999: an entity an entity↔entity relation NAMES is referenced. The
+    # per-item scan above reads `about_entities`/`slots` only, so an entity
+    # whose sole tie to the emission is a relation's endpoint looked
+    # unreferenced and could be DISCARDed — and S5 would then drop the
+    # relation as unresolvable, one stage after this guard authorised it.
+    #
+    # ⚠️ `_norm(ref)` ALONE leaves this arm half-closed. S5 resolves the
+    # endpoint on EITHER fold (``extractor_v2._endpoint_fold_keys`` — `_norm`,
+    # which collapses a whitespace RUN, and `.casefold()`, which folds ß/İ;
+    # neither is a superset of the other), while this module's key is in
+    # ``_norm`` space and its probe adds ``.casefold()`` — the very pair the
+    # ``_norm`` docstring above names as DIVERGENT on ('Straße', 'İ'). For a
+    # spelling variant the two folds disagree on, S5 resolves "STRASSE" →
+    # "Straße" and ``_norm("STRASSE")`` is "strasse" ≠ "straße", so the
+    # entity whose ONLY tie is that relation is still DISCARDed — the gap this
+    # arm exists to close, one spelling variant in. Carry every emitted entity
+    # the endpoint could resolve to instead; keeping too much is this guard's
+    # only safe failure mode.
+    #
+    # ⛔ THIS IS A THIRD SHAPE OF THE FOLD, and a COPY by construction: this
+    # module is stdlib-only and may not import `extractor_v2`, so
+    # `_endpoint_fold_keys`' pair cannot be called here. The index below is
+    # `_norm(name).casefold()` with two probes — NOT the emitter's two-key pair —
+    # so "the identity rule has one home" holds for the two RESOLVER stages and
+    # NOT for this guard. Measured over a 14x20 spelling matrix: 0 S5-resolvable
+    # pairs are left unprotected, 2 are over-protected ('Straße  X' /
+    # 'STRASSE X'), and over-protecting is this guard's declared safe direction —
+    # it can keep an entity whose relation S5 then drops, never mint a wrong edge.
+    if not relation_endpoints:
+        return names
+    emitted: dict[str, set[str]] = {}
+    for entity in _section_items(embed_list, "entities"):
+        if isinstance(entity, Mapping):
+            key = _norm(entity.get("name"))
+            if key:
+                emitted.setdefault(key.casefold(), set()).add(key)
+    for rel in _section_items(embed_list, "relations"):
+        if not isinstance(rel, Mapping):
+            continue
+        for side in ("src", "dst"):
+            ref = rel.get(side)
+            if not (isinstance(ref, str) and ref.strip()):
+                continue
+            names.add(_norm(ref))
+            # both folds, because the emitter's own key may carry either
+            for probe in (ref.strip().casefold(), _norm(ref).casefold()):
+                names |= emitted.get(probe, set())
     return names
 
 
@@ -870,6 +1282,48 @@ def removal_pool(before: object, after: object) -> dict:
     }
 
 
+def applied_discards(before: object, after: object,
+                     decisions: Mapping[str, Mapping[str, Any]]) -> int:
+    """How many candidates a ``DISCARD`` verdict ACTUALLY removed.
+
+    ``stats["discarded"]`` counts **verdicts**, and that is the right number for
+    *"what did the gate say?"*. It is the wrong number for a **keep-rate**:
+    :func:`apply_vet`'s Rule 2 downgrades a discard to ``KEEP`` whenever the
+    entity is still referenced by a surviving candidate (dropping it would fail
+    ``validate_layer1`` and 422 the session), and Rule 4 RESTORES one an earlier
+    pass removed. On those runs the verdict count reports a loss that did not
+    happen — so a rate built on it under-states the yield, can select the wrong
+    narrative in a tie-break, and can fire a hand-armed threshold on a removal
+    that never occurred.
+
+    Counts by the SAME two questions the applied pass answers, so it cannot
+    disagree with the output it describes: the item carried a ``DISCARD``
+    verdict (``_item_id`` on ``before``, the list those ids came from) **and** it
+    is absent from ``after`` (:func:`_survives`, the value equality
+    :func:`removal_pool` rests on — which is also what makes a downgraded
+    discard correctly count as ZERO here).
+
+    Collateral prunes are deliberately NOT counted: an operator pruned because
+    it referenced a removed item carries no verdict of its own, and counting it
+    would report a loss of a candidate the narrative never produced.
+
+    Fail-open in the reporting direction: anything unreadable contributes 0, so
+    an unparseable decision or list under-reports removals rather than inventing
+    them — the same direction as :func:`apply_vet`'s own guards.
+    """
+    decisions = decisions if isinstance(decisions, Mapping) else {}
+    removed = 0
+    for section, index, item in _iter_items(before):
+        decision = decisions.get(_item_id(section, index, item))
+        if not isinstance(decision, Mapping):
+            continue
+        if str(decision.get("outcome") or "").strip().upper() != DISCARD:
+            continue
+        if not _survives(section, item, after):
+            removed += 1
+    return removed
+
+
 def _rewrite_entity_references(embed_list: Mapping[str, Any],
                                restored: Mapping[str, str]) -> None:
     """Re-spell a reference to the emitted entity's exact name.
@@ -979,6 +1433,17 @@ def apply_vet(embed_list: Mapping[str, Any],
         return dict(base), warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
+    # The Layer-1 half of the same set, and the ONLY half a downgrade may
+    # truthfully cite as "Layer-1 referential integrity". A relation endpoint
+    # protects its entity (the edge is the story's assertion and would vanish
+    # with it) but the channel is RESULT-level: no Layer-1 reference names the
+    # entity, so it cannot produce a 422 (#10999). ⛔ This narrower set is for
+    # the WORDING only — the Rule-4 restore below still counts relation
+    # endpoints, because that leg is the only one that can bring back an entity
+    # an earlier pass removed, and S4 supplies the narrative's conclusion
+    # between the two passes.
+    layer1_referenced = _referenced_entity_names(
+        base, discarded_ids, relation_endpoints=False)
     removed_entity_names: set[str] = set()
     removed_context: set[str] = set()      # norm CONTENT of removed points/events
     # norm entity name -> the spelling that must win in a reference. Populated
@@ -1019,10 +1484,21 @@ def apply_vet(embed_list: Mapping[str, Any],
                     # entity name rewritten verbatim would CREATE the 422 the
                     # reconciliation exists to prevent.
                     canonical[name] = str(item.get("name") or "").strip()
-                    warnings.append(
-                        f"vet: entity {str(item.get('name'))!r} was DISCARDed "
-                        "but is referenced by a surviving candidate — kept "
-                        "(Layer-1 referential integrity)")
+                    if name in layer1_referenced:
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is referenced by a surviving "
+                            "candidate — kept (Layer-1 referential integrity)")
+                    else:
+                        # A relation endpoint is the entity's only tie to the
+                        # emission. The edge is kept, the 422 claim is not:
+                        # `relations` never enters the Layer-1 payload.
+                        warnings.append(
+                            f"vet: entity {str(item.get('name'))!r} was "
+                            "DISCARDed but is named by a surviving "
+                            "entity↔entity relation — kept (the relation is "
+                            "the story's own assertion; this is NOT a "
+                            "Layer-1 reference)")
                     kept.append(item)
                     continue
                 if name:
@@ -1046,27 +1522,125 @@ def apply_vet(embed_list: Mapping[str, Any],
     # now needs, and reconcile the reference's SPELLING. Computed BEFORE the
     # prune: a restored name is present again, so it must not be pruned as if
     # it were discarded.
-    present = set(_entity_map(out))
+    present_map = _entity_map(out)
+    present = set(present_map)
+    # #10999: relation endpoints DO count for the restore — a relation naming an
+    # entity an earlier pass removed is exactly the cross-pass case Rule 4
+    # exists for (S4 supplies the conclusion between the two passes). The
+    # `relation_endpoints` flag splits the WARNING, not the restore: it was
+    # applied to this whole computation once, so the entity stayed gone and S5
+    # then dropped the edge as unresolvable — with nothing in the record saying
+    # why. `layer1_referenced` is what may truthfully be called a Layer-1
+    # reference; a relation endpoint is result-level and cannot 422.
+    layer1_referenced = _referenced_entity_names(
+        out, set(), relation_endpoints=False)
     to_restore = _referenced_entity_names(out, set()) - present
-    for name in sorted(to_restore):
+    # The DISCARD arm above matches an endpoint on EITHER fold; the RESTORE
+    # lookup must be fold-complete too, or the cross-pass case this arm exists
+    # for fails one spelling variant in: `prior_entities` is keyed by `_norm`
+    # (see `_entity_map`), so a casefold-only endpoint spelling ('STRASSE' vs
+    # 'Straße', 'İ' vs 'i') restored nothing and S5 then dropped the edge as
+    # unresolvable. Unique-or-nothing, and never a SECOND copy of an entity
+    # this pass already holds under a different casefold.
+    # Held spellings, by casefold, kept CURRENT as restores land (a restore
+    # appends to `out["entities"]`, and a stale snapshot is how a later
+    # reference in the same loop is left unreconciled).
+    held_folded: dict[str, str] = {}
+    for _key, _item in present_map.items():
+        _spelling = str(_item.get("name") or "").strip()
+        if _spelling:
+            held_folded.setdefault(_key.casefold(), _spelling)
+    restored_keys: set[str] = set()
+    for ref_name in sorted(to_restore):
+        name = ref_name
+        # A RELATION endpoint whose entity this pass already holds under another
+        # casefold is the same entity: restoring the prior copy would put two
+        # Objects in the emission, make S5's fold index ambiguous, and drop the
+        # very edge the arm exists to save. Layer-1 references are NOT skipped
+        # — payload identity is EXACT (`(str(name).strip(), kind)`), so when
+        # `prior` can supply the spelling a point/`slots` reference actually
+        # names, restoring it is correct and re-pointing the reference at a
+        # casefold sibling would silently attribute the statement to a
+        # DIFFERENT entity (this module's own doctrine: guessing is worse than
+        # a miss).
+        if ref_name not in layer1_referenced \
+                and name.casefold() in held_folded:
+            # The append is skipped, and the reference is recorded so the Layer-1
+            # surfaces `_rewrite_entity_references` actually rewrites
+            # (`about_entities`, `slots`) name the held spelling. ⛔ It does NOT
+            # rewrite a RELATION endpoint: `_iter_items` walks
+            # `entities`/`events`/`points` only, so `relations[].src/dst` keep
+            # the spelling as written and rely on S5's own endpoint fold — a
+            # future consumer of `embed_list["relations"]` that matches EXACTLY
+            # would see the unreconciled name.
+            canonical[ref_name] = held_folded[name.casefold()]
+            continue
         original = prior_entities.get(name)
+        if original is None:
+            folded = [key for key in prior_entities
+                      if key.casefold() == name.casefold()]
+            if len(folded) == 1 and folded[0].casefold() not in held_folded:
+                name = folded[0]
+                original = prior_entities[name]
         if original is not None and str(original.get("name") or ""):
             # STRIP, as above: the emitted name is stripped (see the downgrade
-            # branch for why).
-            canonical[name] = str(original["name"]).strip()
+            # branch for why). Stamped on the REFERENCE's key: the folded prior
+            # key is not what a reference's `_norm` form looks up.
+            canonical[ref_name] = str(original["name"]).strip()
+            if name in restored_keys:
+                # Two divergent references can both resolve to ONE prior entry
+                # (the direct hit and a folded sibling): reconcile, never append
+                # a second copy or repeat the warning.
+                continue
+            restored_keys.add(name)
             out.setdefault("entities", [])
             if isinstance(out["entities"], list):
                 out["entities"].append(original)
-            warnings.append(
-                f"vet: entity {name!r} was discarded by an earlier pass but "
-                "is referenced after S4 — restored (Layer-1 referential "
-                "integrity)")
-        else:
-            warnings.append(
-                "vet: ⚠️ a surviving candidate references entity "
-                f"{name!r}, which no pass emitted — it cannot be restored "
-                "here; the payload will fail Layer-1 unless the extractor "
-                "emits it")
+            # Re-stamp: two divergent spellings can both be in `to_restore`, and
+            # the second must not restore the same entity again.
+            held_folded.setdefault(name.casefold(), canonical[ref_name])
+            if ref_name in layer1_referenced or name in layer1_referenced:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but is referenced after S4 — restored (Layer-1 "
+                    "referential integrity)")
+            else:
+                warnings.append(
+                    f"vet: entity {name!r} was discarded by an earlier pass "
+                    "but an entity↔entity relation now names it — restored "
+                    "(the relation is the story's own assertion; this is NOT "
+                    "a Layer-1 reference)")
+        elif ref_name in layer1_referenced:
+            # `prior` cannot supply this spelling, but the emission may already
+            # HOLD the entity under a casefold sibling — and payload identity
+            # is EXACT, so leaving the reference as written makes
+            # `validate_layer1` reject the whole session ("about_entities
+            # reference unknown entities"), where re-spelling it onto the held
+            # entity is both valid and what the reference names to every other
+            # stage. Reconcile when a held spelling exists; warn only when
+            # nothing can be reconciled (then the 422 is real and named).
+            held = held_folded.get(name.casefold())
+            if held:
+                canonical[ref_name] = held
+                # ⚠️ RESIDUAL (review round 10, P3, NOT fixed here): this
+                # re-spelling emits no warning. It is deliberate — payload
+                # identity is EXACT, so the reference as written would fail
+                # Layer-1 — but the held spelling may be a DIFFERENT entity
+                # (Layer-1 identity is `(name, kind)`), and the doctrine 50
+                # lines above says "guessing is worse than a miss". The arm was
+                # not reproduced by probe at 4ff6f2310 (to_restore carried the
+                # reference and `held_folded` held the sibling, yet this branch
+                # produced neither a rewrite nor a warning), so the disclosure
+                # is left as a follow-up rather than claimed as fixed.
+            else:
+                warnings.append(
+                    "vet: ⚠️ a surviving candidate references entity "
+                    f"{name!r}, which no pass emitted — it cannot be restored "
+                    "here; the payload will fail Layer-1 unless the extractor "
+                    "emits it")
+        # else: a relation endpoint naming an entity no pass emitted restores
+        # nothing and warns nothing — it cannot 422 (result-level channel), and
+        # S5 names the dropped relation itself.
     if canonical:
         _rewrite_entity_references(out, canonical)
 

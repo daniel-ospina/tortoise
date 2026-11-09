@@ -2673,6 +2673,83 @@ CONSENT_PREVIEW_PATH = "/oauth/consent/preview"
 CONSENT_TOKEN_HEADER = "X-Consent-Token"
 
 
+def presented_consent_attempt_key(query: str) -> str:
+    """The attempt key a query string PRESENTS, by the READERS' predicate.
+
+    ONE predicate, because there is more than one reader and they must not
+    disagree about what "present" means: `hosted_api.oauth_authorize` selects
+    the page-vs-bounce branch with it, and both actual consumers of the value —
+    the page's own `attemptKey()` (JS, `URLSearchParams.get`) and
+    `start.ts::presentedKey` — take the FIRST value. So: the FIRST value,
+    STRIPPED, and ``""`` for absent, blank and whitespace-only alike.
+
+    ⛔ ONE READER IS NOT A FIRST-VALUE READER, AND THIS IS WHY THE EMIT BELOW IS
+    SINGLE-KEYED RATHER THAN MERELY "THE FIRST ONE WINS". The AS's own
+    `request.query_params.get` is a Starlette ``ImmutableMultiDict`` lookup:
+    ``__getitem__`` returns ``_dict[key]``, and ``setlist`` stores
+    ``values[-1]`` — the **LAST** value (verified against the installed
+    Starlette, not the prose; the upstream docs have said "first" and been
+    wrong). It is not a consumer of the flow's key, and it must not be listed
+    alongside the two that are.
+
+    A duplicate pair is therefore read differently by the AS gate and by the
+    page/`start.ts`, and the disagreement is not harmless: on the ONE caller
+    that can be handed a pair — the page's own sign-in link (``consent_page_html``
+    → ``SIGNIN_URL``, whose ``raw_query`` is the caller's) —
+    ``attempt_key=&attempt_key=K2`` reads ``""`` for the page's first-value
+    reader and ``K2`` for the AS's last-value one. That is why
+    `consent_bounce_url` re-emits exactly ONE segment, so first == last on the
+    URL it returns and no reader of THAT URL can disagree. The residual — the
+    page's own reader still reading the caller's raw query on the page branch —
+    is the pre-existing dead end in #10865, not closed by this hop.
+
+    ⛔ Stripping is part of the PREDICATE, not a nicety (#10487 review):
+    ``attempt_key=%20`` is a TRUTHY one-character key. Read unstripped it
+    selects the PAGE branch, the page's sign-in link appends a second key, and
+    `start.ts` binds the row to the guessable key ``" "`` — reopening the
+    ownerless-window takeover the insert-only key exists to close (#10208).
+    Blank and whitespace-only are ONE state: absent.
+
+    ⚠️ Scope — TWO rules on this hop, not one, and this function is only the
+    first of them. **Branch selection** uses this predicate; it has exactly one
+    call site, `hosted_api.oauth_authorize`'s page-vs-bounce test. **The emission
+    in `consent_bounce_url` does NOT call it** and applies a WIDER rule of its
+    own: the first NON-BLANK `attempt_key` segment survives, because a key
+    already on the URL must be ADOPTED and never minted away (its own docstring
+    states that rule; the duplicate-pair arms beside it pin ADOPTION over a
+    mint). The width is not cosmetic — it is the one shape where the two rules
+    answer differently: on ``attempt_key=&attempt_key=K2`` (blank FIRST, a real
+    key after) this predicate says ``""``, so the hop BOUNCES, while the
+    emitter carries `K2` into the returned URL and `start` adopts it. Neither
+    answer is a defect: the AS bounces on the reading its own consumers use, and
+    the emitter still hands `start` the real key, so the visitor lands on the key
+    the attempt row holds.
+    ⛔ So do NOT "de-duplicate" the two by making the emitter call this
+    predicate. That swaps ADOPTION for a MINT on that input, putting the page
+    and `start.ts` on a key the attempt row does not hold — the
+    `403 flow_not_yours` dead end these docstrings exist to prevent. RFC 6749
+    §3.1 forbids sending a parameter twice, so no spec fixes a reader precedence
+    here; each end states its own rule rather than one pretending to cover both.
+    **OVERRIDES:** one shared predicate at both ends of the hop — the emitter
+    must ADOPT a first-non-blank key rather than mint one, so it cannot borrow
+    this first-value rule.
+    What the page and `start.ts` DO receive is one non-blank token, because the
+    emission is single-keyed whatever rule chose it — so they never need to
+    strip, and the emitter therefore keeps the adopted value's OWN bytes
+    (padding included): a stripped emit would put the page's POST and this
+    link's key on different bytes. Neither of them strips ON ITS OWN, though, so a whitespace
+    `attempt_key` presented STRAIGHT to `/api/consent/start`, bypassing the AS,
+    is still adopted verbatim there; that predates this hop and is recorded in
+    #10487 rather than fixed silently here.
+    ⛔ #10487 is RETIRED by the fold that lands this hop, so the live home for
+    that residual is #10884, which is filed OPEN. Point a reader at the open
+    issue, not at a closed thread and not at this docstring.
+    """
+    values = parse_qs(query, keep_blank_values=True).get(
+        CONSENT_ATTEMPT_KEY_PARAM, [])
+    return values[0].strip() if values else ""
+
+
 def consent_app_origin() -> str | None:
     """The session origin — where the mint lives, and where a cold browser is
     sent to sign in. ``None`` when the binding is not an absolute http(s)
@@ -2716,58 +2793,6 @@ def consent_app_origin() -> str | None:
     return None
 
 
-def _is_attempt_key_segment(segment: str) -> bool:
-    """Does this RAW query segment name the attempt key — at all, blank or not?
-
-    The test is on the DECODED NAME, so a %-encoded spelling of the parameter
-    (``%61ttempt_key=``) is recognised rather than passing through as an unknown
-    segment.
-
-    ⛔ IT DELIBERATELY IGNORES THE VALUE, and that is the whole point (review P3,
-    #10487). The hops that read this parameter do NOT agree about duplicates —
-    and they do not even agree about WHICH query they are reading:
-
-    * ``start.ts`` uses ``url.searchParams.get()`` → the **FIRST** value;
-    * ``hosted_api.oauth_authorize`` uses ``request.query_params.get()``, and
-      Starlette's ``MultiDict.__getitem__`` returns ``_dict[key]``, which
-      ``setlist`` fills with ``values[-1]`` → the **LAST** value;
-    * the mint gate below used to decide from ``any(...)`` → *some* value;
-    * the rendered page's own inline script reads the **caller's original**
-      query (``ATTEMPT_KEY_PARAM`` carries only the NAME — "the server does not
-      re-embed it", `consent_page_html`) → the **FIRST** value of the query this
-      function was HANDED, not of the URL it emits.
-
-    A duplicate pair therefore makes the readers disagree about which key the
-    flow adopts, and the disagreement is not harmless: on the ONE caller that
-    can actually be handed one — the page's sign-in link (``consent_page_html``
-    → ``SIGNIN_URL``, whose ``raw_query`` is the caller's) —
-    ``attempt_key=&attempt_key=K2`` reads ``""`` for the page's first-value
-    reader and ``K2`` for the AS gate's last-value one. Dropping EVERY segment
-    that names the parameter and re-emitting exactly one makes first == last ==
-    any on the URL this function returns, so no reader of THAT URL can disagree
-    about which key the flow adopts.
-
-    ⛔ THIS DOES NOT FIX THE AS's OWN DUPLICATE GATE, and must not be read as
-    closing it. A pair is resolved by ``hosted_api.oauth_authorize``'s gate from
-    its LAST value before either branch is taken, so
-    ``attempt_key=&attempt_key=K2`` (blank FIRST) renders the PAGE — where the
-    page's own first-value read is still ``""`` and ``mint()`` aborts with no
-    sign-in link offered — while ``attempt_key=K2&attempt_key=`` (blank LAST)
-    takes the BOUNCE branch, where the collapse below adopts ``K2``. The page
-    branch ALSO calls this function (through ``consent_page_html`` →
-    ``SIGNIN_URL`` with the caller's raw query), and the collapse there is what
-    makes that sign-in link single-keyed — which is not the same thing as fixing
-    the page's own reader. The page-branch arm is a separate, PRE-EXISTING dead
-    end recorded in #10865, not closed by this hop.
-
-    The page's reader is the reason the collapse must keep a caller's real key
-    rather than always minting: it reads the input query, so the value this hop
-    emits has to be the value the flow already carries wherever one exists.
-    """
-    name, _sep, _value = segment.partition("=")
-    return unquote_plus(name) == CONSENT_ATTEMPT_KEY_PARAM
-
-
 def consent_bounce_url(app_origin: str, raw_query: str) -> str:
     """The app-owned sign-in leg for an authorize request this server will not
     render: ``{app}/auth?next=/api/consent/start?{raw}``.
@@ -2800,61 +2825,77 @@ def consent_bounce_url(app_origin: str, raw_query: str) -> str:
       in on a DIFFERENT `/auth` entry for the same flow (the back button, a
       refresh, this bounce's own return target) came back without it and was
       refused with `403 flow_not_yours`: the row was already claimed by a key
-      nobody could present. Generating the key HERE makes it the property of the
-      flow rather than of one emitted URL — the bounce, the sign-in return, and
-      every re-entry through a URL this hop emits carry the same value, so
-      `start` ADOPTS it on the insert and the insert-only row is never poisoned.
-      ⛔ IT IS MINTED PER REQUEST, so a SECOND fresh bounce of the same flow
-      yields a different key and does not own the row the first one wrote: a
-      Back-button return to the ORIGINAL keyless authorize URL is still
-      `403 flow_not_yours` for a signed-in visitor (#10865 — closing that needs a
-      RESUMABLE binding for an ownerless row, not a different mint). It is
-      `secrets`, not a counter: it is the browser's only proof of ownership, so
-      it must not be predictable from the `state` (which is client-chosen and
-      public).
+      nobody could present. Minting HERE gives the bounce and ITS OWN return
+      leg one value end to end: `start` ADOPTS what it is handed instead of
+      inventing one on the insert, so the row is bound to the key the visitor's
+      browser is actually carrying and the bounce's own return can reclaim it.
+      ⚠️ It is PER-BOUNCE, not per-flow, and that is what it is: every call
+      mints a FRESH `secrets.token_urlsafe(32)` (a property this module's tests
+      pin as desirable — a key derived from the client-chosen, PUBLIC `state`
+      would be predictable, and this is the browser's only proof of ownership).
+      So a KEYLESS re-entry AFTER the row exists mints a DIFFERENT key and is
+      refused exactly as before — #10487's remaining hole, deliberately not
+      closed in this lane (its OPEN home is #10884, filed rather than left in a
+      closed thread): closing it needs a key an unauthenticated re-entry
+      can re-derive (an HMAC over the authorize request), which trades an
+      unguessable carrier for a forgeable one. That is a decision, not a review
+      fix. Recovery stays what it was — a NEW authorize request (fresh `state`).
     """
-    inner = CONSENT_START_PATH + (("?" + raw_query) if raw_query else "")
-    # ⛔ EMIT EXACTLY ONE ATTEMPT-KEY SEGMENT — NEVER ZERO, NEVER TWO (review P3, #10487).
-    # The two callers are not alike: the bounce (`hosted_api.oauth_authorize`) carries no key,
-    # but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a
-    # keyed flow, so ITS raw_query always carries one. Both must leave here with a single key
-    # the flow will actually adopt, because the hops that read it DISAGREE about duplicates:
-    # `start.ts` (`url.searchParams.get`) takes the FIRST value, and this server's own gate
-    # (`request.query_params.get`, Starlette `MultiDict.__getitem__` → `_dict[key] = values[-1]`)
-    # takes the LAST. A value-blind gate therefore satisfies neither: on the one caller that can be
-    # handed a duplicate (the page's sign-in link, whose `raw_query` is the caller's),
-    # `attempt_key=&attempt_key=K2` reads `""` for the first-value reader and `K2` for the
-    # last-value one, so which key the flow adopted depended on which hop you asked. Collapsing
-    # every segment that names the parameter to ONE makes first == last == any, so there is nothing
-    # to disagree about; `attempt_key=K1&attempt_key=K2` likewise collapses to the first (`K1`),
-    # which is the value the app was already adopting.
-    #
-    # ⛔ THE "ALREADY EXACTLY ONE, AND NON-BLANK" CASE IS LEFT BYTE-EXACT AND UNTOUCHED. That is
-    # the page's sign-in leg, i.e. the common path — it re-emits nothing.
-    #
-    # ⛔ EVERY OTHER SEGMENT IS PASSED THROUGH BYTE-EXACT when a rebuild IS needed. `state` and
-    # `redirect_uri` are compared byte-for-byte by the client, so re-encoding the query here would
-    # be the `+`/`%2B`/`%20` CSRF-mismatch class this function's docstring refuses everywhere else.
-    # Only the segments naming THIS parameter are dropped, and only the chosen key is re-encoded.
-    values = parse_qs(raw_query, keep_blank_values=True).get(CONSENT_ATTEMPT_KEY_PARAM, [])
-    # ⛔ "ABSENT" MEANS THE EMPTY STRING, NOT `.strip()` (review P2, #10757). Both readers this
-    # hop reconciles test the value's TRUTHINESS, and `" "` is truthy in BOTH: the AS gate
-    # (`hosted_api.py`, `oauth_authorize`: `if not request.query_params.get(
-    # CONSENT_ATTEMPT_KEY_PARAM)`) renders the page for `attempt_key=+`, and
-    # `start.ts:255-256`
-    # (`presentedKey || newAttemptKey()`) ADOPTS `" "` as the key. Treating whitespace as absent
-    # here minted a second key for a flow that already had one, so the page minted with `" "`
-    # while its own sign-in link carried the minted one — the two-readers-disagree defect this
-    # function exists to remove, and a `403 flow_not_yours` for a caller that used to work.
-    if len(values) != 1 or values[0] == "":
-        # Adopt a real key if the caller presented one (first non-empty wins, matching the
-        # consumers); otherwise mint. Minting beside a blank or duplicate value is what made the
-        # mint inert before, so only mint when there is genuinely nothing to adopt.
-        chosen = next((v for v in values if v), "") or secrets.token_urlsafe(32)
-        segments = [s for s in raw_query.split("&")
-                    if s and not _is_attempt_key_segment(s)]
-        segments.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: chosen}))
-        inner = CONSENT_START_PATH + "?" + "&".join(segments)
+    # ⛔ EMIT EXACTLY ONE `attempt_key`, AS THE FIRST AND ONLY VALUE.
+    # Two callers, and they are NOT alike: the bounce (`hosted_api.oauth_authorize`) carries no
+    # key, but the page's own sign-in link (`consent_page_html` → SIGNIN_URL) is rendered ONLY for a
+    # keyed flow, so ITS raw_query already carries one. Appending handled neither shape:
+    #   * appending unconditionally emitted `…&attempt_key=K&attempt_key=<minted>` for the page's
+    #     link — benign only while every reader takes the FIRST value, i.e. correctness resting on a
+    #     detail no consumer promises, and the day one takes the last the page's sign-in leg presents
+    #     the minted key instead of the row's and the visitor meets this very dead end again (#10487);
+    #   * appending after a blank/whitespace `attempt_key` (the guard below correctly judged those
+    #     ABSENT) emitted `…&attempt_key=&attempt_key=<minted>` — the mint happened, and the minted
+    #     value went where NO FIRST-VALUE reader looks: `start.ts::searchParams.get` and the page's
+    #     `attemptKey()` take the FIRST value, so `start` read `""` and minted its own key anyway.
+    #     (The AS's own `request.query_params.get` is last-value-wins — see
+    #     `presented_consent_attempt_key`. That the mint stayed unread there too is a consequence of
+    #     the first segment being blank, NOT evidence that the AS is a first-value reader; the
+    #     single-key emit below is what makes the two kinds of reader agree, and it is not a promise
+    #     any consumer makes.) The whitespace form was worse than dead: `%20` is
+    #     TRUTHY upstream, so the PAGE rendered, and `start.ts` adopted the one-character key `" "`.
+    # So ONE pass decides AND emits, by the readers' own rule — and WIDER than the AS gate's
+    # predicate: `presented_consent_attempt_key` takes the FIRST value and strips it, so a blank
+    # first segment is ABSENT and the hop BOUNCES; here the first NON-BLANK value survives, so a
+    # real key behind a blank one is ADOPTED rather than minted away. That width is deliberate —
+    # read the predicate's ⚠️ Scope paragraph before collapsing the two into one call. So: the
+    # first non-blank value survives, every blank/whitespace/duplicate `attempt_key` segment is
+    # DROPPED, and a minted key is emitted only where nothing survives. A surviving value is
+    # re-emitted DECODED with its PADDING INTACT — the strip above decides only ABSENT-vs-PRESENT.
+    # ⛔ Do NOT "tidy" that into the stripped form. NO reader on this hop strips: the page's own
+    # `attemptKey()` returns the CALLER's first value verbatim (`URLSearchParams.get`) and POSTs
+    # exactly that to `/api/consent/token`, and `start.ts::presentedKey` / `token.ts` adopt and
+    # hash what they are handed verbatim. So emitting the stripped form splits one flow across
+    # two keys — the page's POST carries ` K ` while this sign-in link carries `K` — and
+    # `recordConsentAttempt` writes `attempt_key_hash` ONLY on INSERT, so `owns_flow` is false
+    # for the second and the signed-in visitor is answered `403 flow_not_yours`: the very dead
+    # end this function exists to remove. Measured on `attempt_key=%20K%20` (review P2 at
+    # 04c9d5256; the pre-fix emitter was byte-exact on exactly the single-non-blank-key case, so
+    # stripping there was a REGRESSION, not a hardening). Stripping was never the protection: the
+    # whitespace-only form is dropped by the blank TEST above, before the value is ever emitted.
+    # Every OTHER segment is passed through verbatim and in order — see the `+`/`%20` note above;
+    # only `attempt_key` is re-encoded, and its value is an opaque token, so `urlencode` is the
+    # identity there.
+    out: list[str] = []
+    presented = ""
+    for segment in (raw_query.split("&") if raw_query else []):
+        name, sep, value = segment.partition("=")
+        if unquote_plus(name) != CONSENT_ATTEMPT_KEY_PARAM:
+            out.append(segment)
+            continue
+        decoded = unquote_plus(value) if sep else ""
+        if presented or not decoded.strip():
+            continue        # a duplicate, or the blank/whitespace form no reader can use
+        presented = decoded
+        out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: presented}))
+    if not presented:
+        out.append(urlencode({CONSENT_ATTEMPT_KEY_PARAM: secrets.token_urlsafe(32)}))
+    inner = CONSENT_START_PATH + (("?" + "&".join(out)) if out else "")
     return (app_origin.rstrip("/") + CONSENT_SIGNIN_PATH + "?"
             + urlencode({"next": inner}))
 

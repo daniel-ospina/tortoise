@@ -436,7 +436,7 @@ jobs:
         # the non-gating lane (each entry → its resolved file count) and the
         # shard → file-count map the run is about to expand. A reader can then
         # SEE that `tests/eval/**` + `tests/longmem_eval/**` are absent from all
-        # nine shards instead of inferring it from a total.
+        # ten shards (nine when #11602 wrote this) instead of inferring it from a total.
         #
         # Report-only on purpose: it reads the same `push_legs()` derivation the
         # matrix step above emits, and it exits 0 on every path. The gate on this
@@ -745,6 +745,76 @@ jobs:
     runs-on: ${{ fromJSON(matrix.runner) }}
     strategy:
       fail-fast: false
+      # #6744: BOUND THE FAN-OUT. Unset, a matrix ADMITS its whole shard set at
+      # once — a PR that selects all three lanes requests 18 matrix jobs at the
+      # same instant (10 fast + 5 slow + 3 carve-out). The `test-slow` and
+      # `test-carve-out` matrices are `if:`-guarded on the diff, but `test` is
+      # NOT conditionally skippable: `changes` writes `python=true` on every
+      # pull request (`# tier-1 smoke runs on every PR`), so every PR hands the
+      # pool all 10 fast legs at once — which is the fan-out this bounds.
+      # Measured over 9 `python-ci` runs (2026-10-30T21:48Z ..
+      # 2026-10-31T02:54Z, jobs API `filter=all`, completed jobs only): ONE PR's
+      # peak simultaneous jobs was p50 11 / **max 18** against a 12-runner pool
+      # (92%–150% of it), and the fast matrix alone peaked at 8–9, i.e. 75% of
+      # the pool. Fleet-wide, at 352 of the 367 sampled instants with >=6 jobs
+      # running a SINGLE run held >=50% of them (median share 0.73, max 1.00) —
+      # that, not job duration, is what makes the queue (`queued=35`,
+      # `in_progress=3` at the read) serve one PR at a time.
+      #
+      # `3` IS DERIVED, NOT CHOSEN. One cap for all three matrices, and the two
+      # inequalities pin it: with equal caps only 3 satisfies both (`C >= 3` from
+      # (a), `C <= 3` from (b)). ⛔ The two inequalities alone do NOT pin 3 — an
+      # unequal split can satisfy them too (3/2/3 holds 8 and needs at most 3
+      # waves, and the shipped test accepts it), so what rules those out is the
+      # choice of ONE cap, not the invariants:
+      #   (a) DO NOT INVENT WAVES THE POOL ALREADY CREATES. Measured per-shard
+      #       wall p50 10.5m (range 5.8–15.7m) against a measured start stagger
+      #       across the 10 shards of 4.0–23.9m (p50 ~10m): under the present
+      #       queue the pool already delivers these shards in 2–4 waves. A cap
+      #       that needs MORE than 4 waves is strictly new wall —
+      #       `ceil(10/C) <= 4  =>  C >= 3`.
+      #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
+      #       `changes` and overlap, so a PR's maximum MATRIX hold is
+      #       `C_fast + C_slow + C_carve`. Keeping 3 of the 12 measured
+      #       runners outside any one PR's matrix bound so three other PRs can
+      #       make progress on their matrix legs:
+      #       `sum <= pool - 3 = 9`, i.e. with equal caps `C <= 3`. This bounds
+      #       MATRIX slots only; the eligible non-matrix jobs are bounded by
+      #       neither this invariant nor the pool (see WHAT THIS DOES NOT DO).
+      # The interval simulation over those same 9 runs — each job keeps its own
+      # observed start as an earliest bound, so the delta is an UPPER bound that
+      # does NOT credit back the queue this PR no longer waits behind — gives
+      # per-PR peak / matrix-band delta: cap 2 → 8 / +31.8m; cap 3 → 9 /
+      # +17.9m; cap 4 → 10 / +10.1m; uncapped → 11 (max 18) / 0. Re-derive from
+      # a fresh measurement if the pool or the per-shard wall moves.
+      #
+      # ⛔ WHAT THIS DOES NOT DO, so it is never judged on the wrong clock:
+      # `cancel-in-progress` is keyed per PR (`refs/pull/N/merge`), so a cap
+      # protects OTHER PRs from this one. It does not make a capped PR finish
+      # sooner; the target is "no single PR holds more than 9 MATRIX slots" —
+      # 8 of this workflow's 12 non-matrix jobs are eligible concurrently with
+      # the matrices (3 carry no `needs:`; the fourth `needs:`-less job is
+      # `changes`, which the matrices wait on and so cannot overlap them; 5 need
+      # only `changes`). On a full selection a PR REQUESTS 29 jobs (18 matrix
+      # legs + 11 non-matrix; `canary-streak` is push-gated), at most 17 of them
+      # in flight at once (9 capped matrix slots + the 8 eligible non-matrix).
+      # The POOL does not bound that -- it bounds only the subset that lands on
+      # it. `test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
+      # `ubuntu-24.04`, but on this repo BOTH labels can be answered by the pool
+      # while their mitigations are engaged (`docs/ops/ci-runner-x64.md`, "the
+      # label contract"), so all three matrices are pool-eligible; what stops the
+      # pool being a hard ceiling is that a hosted runner answers those same
+      # labels too, so a leg that cannot get a pool slot is served outside it.
+      # That is how one run was measured at 18 simultaneous jobs over a 12-runner
+      # pool. The cap bounds the FAN-OUT, not the total.
+      # ⛔ AND WHAT IT CANNOT DO: `max-parallel` limits START order only. Every
+      # bound in this job is measured from runner pickup (the in-step watchdog
+      # is started INSIDE the job), so a start delayed by the cap can never
+      # consume a shard's budget — the failure mode this cannot introduce.
+      # It does not touch the matrix itself: the shard set is still exactly the
+      # selector's `fast_matrix`, so no shard can be skipped, and `needs:` on a
+      # matrix job waits for EVERY leg regardless of ordering (#5219).
+      max-parallel: 3
       # #6135: the WHOLE matrix is the selector's output — the shard count
       # (`config/ci-surfaces.yml::fast_shards`) and the leg names are derived,
       # and neither is written here. `include` rows carry `half` (the positional
@@ -910,28 +980,115 @@ jobs:
         # this suite's `node --test` passes no `--experimental-strip-types` flag).
         with:
           node-version: '22'
-      - name: Cache uv + pip dependency caches (#7612)
-        # #7612: the runners are EPHEMERAL (ubuntu-latest) and nothing cached the
-        # dependency caches, so every job resolved and downloaded its deps from
-        # cold on every run. This step sits BEFORE install-cpu-torch so that the
-        # LARGER cold download is served from cache too (torch: 140 wheels,
-        # ~3.2 GB, 93-219s per job, per that action's own measurement) — not just
-        # the `Install package + test extras` step it originally targeted
-        # (measured 26-47s x 16 expanded instances, run 37547203551).
-        # Why this cannot change what CI catches: a warm cache only supplies
-        # already-downloaded artifacts. In THIS job `uv sync --frozen` still runs
-        # afterwards and enforces uv.lock, so the installed versions are
-        # unchanged. Reverting this step costs wall-clock only.
-        uses: actions/cache@v4
+      # ─────────── Dependency caches: read the big half, bound the write (#11063)
+      #
+      # THE DEFECT THIS SHAPE FIXES. Run 42000057137, job `test (d)` 127165076497
+      # (runner `pi-runner-vm-6`, 90 m cap): the uv+pip restore MISSED
+      # (`Cache not found for input keys: uv-pip-Linux-8755d72f…, uv-pip-Linux-`)
+      # while the other eight shards HIT it in 5.7-32.7 s, so this is the MISS arm
+      # and not a key collision. `actions/cache` then saved in its POST step — a
+      # step with no `timeout-minutes` of its own, charged against the job's
+      # (#10182), so no cap can amortize it: tar 10:54:53 -> 10:59:00 (4 m 07 s)
+      # then `Sent 3019898880 of 3882423064 (77.8%), 0.9 MBs/sec` at 11:51:52,
+      # i.e. 3,019,898,880 B in 3,412 s and still 22% short when the cap fired.
+      # Every WORK step was green (suite 10:28:58 -> 10:45:07, orphan gate
+      # 10:45:54) and the job ended `cancelled`, which `python-ci-gate` reads as
+      # RED by design (#5219) — a REQUIRED check withheld by a cache upload.
+      #
+      # THE PAYLOAD IS TWO PAYLOADS, AND THAT IS THE FIX. `actions/caches`:
+      #   `pip-Linux-8755d72f…`     refs/pull/11036/merge  3,616,385,308 B
+      #   `pip-Linux-8755d72f…`     refs/heads/main          397,897,273 B
+      #   `uv-pip-Linux-8755d72f…`  refs/heads/main          662,393,744 B
+      # so the pip half is #7612's own payload — the torch wheel set, installed in
+      # this job by `.github/actions/install-cpu-torch` with `pip` — and pip alone
+      # accounts for 93% of the 3,882,423,064 B payload that was uploaded (that
+      # row is 3,616,385,308 B on its own). TWO other jobs still write
+      # `pip-<os>-<hash uv.lock>` — `test-slow` and `test-d14-hosted-api`; #11063
+      # moved `test-concurrency-falkor` and `test-record-postgres` to
+      # `actions/cache/restore@`, so neither writes it, and THIS job only ever
+      # READ that key. The uv half keeps one writer, explicitly and bounded.
+      #
+      # HOW BIG IS THE UV HALF? Only one scope has both keys and it is NOT this
+      # job's scope: `refs/heads/main` holds `uv-pip-…` at 662,393,744 B and
+      # `pip-…` at 397,897,273 B, i.e. 252 MiB of uv. Scope variance is large (pip
+      # alone is 398 MB on `main` against 3.6 GB on `refs/pull/11036/merge`), so
+      # treat 252 MiB as an ORDER OF MAGNITUDE and not as a bound.
+      #
+      # SIZE: `uv cache prune` before the save removes entries no current
+      # environment reaches (uv docs) — that bounds the ACCUMULATION case, which
+      # is the one a persistent runner pays: this box's `~/.cache/uv` is 7.2 GB,
+      # 6.6 GB of it `archive-v0` from environments that no longer exist. It is
+      # NOT a bound for a single-environment cache, and it is not claimed as one
+      # here: what actually bounds this write is the fail-open time bound below.
+      #
+      # ⛔ OVERRIDES: the vendor's own CI recommendation — uv docs, "Caching
+      # dependencies" — is to run `uv cache prune --ci`, which "removes all
+      # pre-built wheels"; we keep plain `uv cache prune` (unused entries +
+      # centralised environments), and the reason is NOT the torch set: `~/.cache/uv`
+      # holds only what `uv sync --frozen` puts there — the dev group, with no
+      # torch in it — so `--ci` would drop the registry wheels each cold shard
+      # re-resolves (~252 MiB on `main`, order of magnitude); the 3.2 GB torch
+      # set is `pip`'s cache (`install-cpu-torch`), which this save never touches.
+      #
+      # ARM 2, ARITHMETICALLY (`docs/ops/ci-wall-clock.md` §2: `cap >= SUM x 1.5`
+      # and the `test` cap stays 90 ⇒ SUM <= 60 m). The measured `test` SUM without
+      # any cache-write term is 51.6 m — 10 m last-failed pre-phase + 28 m emitted
+      # worst shard watchdog + 6 m embedder + 3.03 m `Set up job` + 4.23 m of
+      # uncapped pre-suite + 0.38 m last-failed save — so <= 8.4 m is available;
+      # this shape takes 8 (1 m prune + 7 m save), SUM 59.6, x 1.5 = 89.5.
+      # (The watchdog read 32 m at `fast_shards: 9` on the 2026-11-09 map; #11602
+      # raised it to 10, which re-packs the worst shard to 28 m. Two numbers, two
+      # owners: the emission is `tools/ci_selection.py --emit-push-matrix`'s, and
+      # §2's own copy in `docs/ops/ci-wall-clock.md` is held to it by
+      # `tests/test_ci_selection.py::test_the_test_job_carries_no_unbounded_cache_post_step`
+      # (that pin parses §2's phrase `the emitted <N> m per-shard watchdog`). THIS
+      # paragraph is NOT pin-read — that is why the sub-total here read 52.6 for a
+      # 28 m watchdog until it was recomputed by hand (#11602 review, P2).)
+      #
+      # WHY SPLIT RATHER THAN JUST BOUND 3.88 GB, at its real size: the degraded
+      # uplink this run measured is 0.9 MB/s sustained (3,019,898,880 B in 3,412 s),
+      # at which a 7 m save affords ~380 MB. But the SAME runner class completed a
+      # cold 3,616,385,308 B write four hours later (PR 11036, run 42032493028, job
+      # 127280762096: `Sent 3616385308 of 3616385308 (100.0%), 7.1 MBs/sec` at
+      # 14:42:50Z — the action's own rate, 4.9 MB/s across the whole 12 m 21 s post
+      # step), so the honest cost of 3.88 GB is ~13 m healthy and ~57 m+ degraded
+      # against the ~8.4 m of room: over the bound either way, but by ~1.6x rather
+      # than 8x. Splitting the payload is what brings it inside — not an assumption
+      # that this pool cannot write it.
+      #
+      # FAIL-OPEN IN EVERY BRANCH: a prune or save that aborts on its bound is a
+      # MISS, never a red — both are `continue-on-error: true` — and the save is
+      # gated on the restore's own `cache-hit`, so a HIT writes nothing at all.
+      # On a MISS the cost is that all ten shards tar their payload before one of
+      # them can win the key: `@actions/toolkit` `cache.ts` orders `createTar()`
+      # before `reserveCache()`, and a lost reservation is logged and exits 0.
+      # Nothing blocks and nothing reds, but ~9 shards' work is wasted per
+      # cold key (the first run after this lands, and every `uv.lock` bump) — which
+      # is why the bound is 7 m and not 30.
+      - name: Restore pip dependency cache (#7612, read-only — #11063)
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
-          path: |
-            ~/.cache/uv
-            ~/.cache/pip
-          key: uv-pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          path: ~/.cache/pip
+          key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
           restore-keys: |
-            uv-pip-${{ runner.os }}-
+            pip-${{ runner.os }}-
+      - name: Restore uv dependency cache (#7612, read-only — #11063)
+        id: uv-cache
+        continue-on-error: true
+        uses: actions/cache/restore@v4
+        with:
+          path: ~/.cache/uv
+          key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-cache-${{ runner.os }}-
       - uses: ./.github/actions/install-cpu-torch
       - name: Install package + test extras
+        # `id` consumed by the uv cache save at the end of this job: `uv sync` is
+        # what populates `~/.cache/uv`, so a leg that died INSIDE it must not write
+        # the key — a partial archive would be immutable (a cache key cannot be
+        # overwritten) and every later run would hit it.
+        id: install-extras
         # embeddings extra required at COLLECTION time: test_gmm_proofs.py,
         # test_embeddings.py, test_cross_lens.py, test_sdk_group3.py import
         # sklearn at module scope (post-merge-validation.yml installs
@@ -977,13 +1134,53 @@ jobs:
           TMPD=$(python3 -c "import tempfile;print(tempfile.gettempdir())")
           find "$TMPD" -maxdepth 1 -type d -name "tmp*" -mmin +30 -exec rm -rf {} + 2>/dev/null || true
           echo "tempdir cleaned"
-      - name: Cache HF embedding model (BAAI/bge-small-en-v1.5)
+      - name: Restore HF embedding model (BAAI/bge-small-en-v1.5) (#11063)
         # ~130MB; persisted so the pre-cache step below is a no-op on
         # subsequent runs and CI never re-downloads from huggingface.co.
         # Cache key v2 (#1349 T10): the v1 cache holds all-MiniLM-L6-v2 and
         # must never serve bge-small runs — a v1 restore would silently
         # exercise the WRONG embedder.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, and this job does not need to write it (#11063).
+        # `actions/cache` saves in a POST step charged against this job's
+        # `timeout-minutes` (#10182) with no timeout of its own. On the run that
+        # filed #11063 the RESTORE TIMED OUT — that is NOT a miss: the entry
+        # existed (`Cache hit for: hf-embedding-cache-v2-Linux` 10:25:10.499;
+        # `refs/heads/main` holds it at 78,606,219 B) and the transfer died
+        # mid-flight (`Received 8388608 of 78130875 (10.7%)` 10:26:59.604, then
+        # `Failed to restore: The operation cannot be completed in timeout`) — and
+        # the post step then RE-SAVED it, taking **8 m 57 s**
+        # end-to-end to land `Cache saved with key: hf-embedding-cache-v2-Linux`
+        # (10:45:55.928 → 10:54:52.693) for a 78,130,925 B archive, uploading at
+        # `Sent 72024064 of 78130925 (92.2%), 0.2 MBs/sec` — the slowest post step
+        # anywhere in that job, and 5.5x the 1 m 38 s the carve-out job measured
+        # for the same cache, which is why #10327 could leave it in place there
+        # and this job cannot.
+        #
+        # Nothing is lost: this key is SHARED, and THREE sibling jobs carry a
+        # writer for it — `test-slow`, `test-concurrency-falkor`, `test-carve-out`
+        # (they mount the same `~/.cache/huggingface` on
+        # `hf-embedding-cache-v2-<os>`) — so this job only ever READ it. None of
+        # the three writes it on EVERY run (`test-slow` is gated on
+        # `slow_run == 'true'`, `test-carve-out` on `carve_out_run == 'true'`, and
+        # a primary-key hit skips the save), but `test-concurrency-falkor` shares
+        # THIS job's `python == 'true'` gate, so every run that reaches this step
+        # still has a writer for the key. That is the SAME argument #10327 used
+        # for the pip cache on the carve-out job, applied to the one archive
+        # where the post step measured expensive here.
+        #
+        # Recorded, not hidden: that load-bearing writer is ITSELF an
+        # `actions/cache@v4` implicit save, on a 15 m cap whose own SUM
+        # `docs/ops/ci-wall-clock.md` §2 calls unmeasured past 21 m in-step. It is a member of
+        # the un-fixed class (see "Not fixed here" on #11063), not an exception to
+        # it, so this job's restore-only shape is only as durable as that job is
+        # un-cancelled.
+        #
+        # continue-on-error: a cache-SERVICE error must never red the leg; a miss
+        # is the fail-open case (the provision step below downloads the pinned
+        # model, and its own failure mode is already named, #2573/#4387).
+        continue-on-error: true
+        uses: actions/cache/restore@v4
         with:
           path: ~/.cache/huggingface
           key: hf-embedding-cache-v2-${{ runner.os }}
@@ -1466,7 +1663,8 @@ jobs:
               # (and `tests/test_pytest_attribution.py` reds on it by design,
               # because this leg's failure set is a SUBSET of the half).
               # One definition: pytest-attribution.sh.
-              bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$LF_RC"
+              bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$LF_RC" \
+                --junit "$PYTEST_JUNIT_LF"
               echo "==================== pytest failure nodeids ===================="
               grep -E '^(FAILED|ERROR) ' "$PYTEST_LOG" || echo "(no FAILED/ERROR nodeids)"
               echo "ci-selection: last-failed-subset (#6142) — this half ran only its previous failures; the FULL half did NOT run in this job"
@@ -1485,6 +1683,7 @@ jobs:
               echo "==================== WATCHDOG: last-failed pre-phase interrupted/killed (rc=$LF_RC; $passed passed, $failed failed, $errored errored) — inconclusive, falling through to the FULL half ===================="
             fi
           fi
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -n "$XDIST_WORKERS" --dist loadscope -v --timeout=300 -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           # #1436: -v truncates skip reasons to terminal width (80 cols when
           # redirected to a file with COLUMNS unset), dropping e.g.
@@ -1516,7 +1715,9 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: the leg's own junitxml — a killed leg's log has no FAILED record.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -1535,8 +1736,10 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) on runner class '$RUNNER_CLASS' ($RUNNER_IDENTITY) — last test lines above ===================="
+            # #3719: the budget is not the elapsed time — the script derives it.
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" --budget-min "${{ matrix.watchdog_minutes }}" || true
             if [ "$RUNNER_CLASS" = "self-hosted" ]; then
-              echo "(killed by its own budget on the self-hosted pool — uninformative about the diff, and NOT a pass: a hosted re-run of this same commit is what decides it, and a kill that reproduces THERE is about the diff)"
+              echo "(a kill on the self-hosted pool is uninformative about the diff, and NOT a pass: a hosted re-run of this same commit is what decides it, and a kill that reproduces THERE is about the diff)"
             fi
           fi
           echo "==================== pytest exit code: $rc ===================="
@@ -1818,10 +2021,68 @@ jobs:
             --argv "$ARGV"
 
       - name: Stop FalkorDB services (#6673)
-        # Last step + always(): a failed or cancelled job must not leave a
-        # FalkorDB container holding memory on the runner host.
+        # always(): a failed or cancelled job must not leave a FalkorDB container
+        # holding memory on the runner host. It runs BEFORE the cache write below
+        # on purpose — a container left holding memory is a host-level fault,
+        # while the uv cache save is best-effort (#11063).
         if: always()
         uses: ./.github/actions/falkordb-teardown
+
+      # ────── The ONLY DEPENDENCY-cache writer this job carries, bounded twice (#11063)
+      #
+      # "Dependency"-cache: `Save pytest last-failed state (#6142)` above is a SECOND
+      # writer with NO time bound — disclosed, not hidden (#11063). An explicit step,
+      # not an `actions/cache` POST step: a post step cannot be ordered against
+      # anything else in the job, which is half of why the implicit save cost a green shard.
+      #
+      # Bound 1 — SIZE. `uv cache prune` (uv docs, "Caching dependencies":
+      # removes unused entries and centralised project environments, both of which
+      # are recreated as needed) drops every entry no current environment reaches,
+      # so the ACCUMULATION case is bounded. It is NOT what shrank this upload: the
+      # 5.9x is pip's SCOPE variance (397,897,273 B on `main` vs 3,616,385,308 B in
+      # a PR scope) and the uv half is ~266 MB in both — splitting the payload did
+      # it. NOT `--ci`: that would drop the dev-group wheels `uv sync` re-resolves (OVERRIDES above).
+      #
+      # Bound 2 — TIME. `timeout-minutes: 1` / `7`: an aborted prune leaves a
+      # bigger archive for a still-bounded save, and an aborted save leaves a
+      # MISS. Neither can red this leg, and neither withholds a required check —
+      # which is the whole defect (#11063/#5219). 1 + 7 = 8 m is what arm 2 has
+      # room for (SUM 49.6 -> 57.6, x 1.5 = 86.5 against the 90 m cap). The cache-LOCK wait is bounded to 10 s INLINE (`UV_LOCK_TIMEOUT`), because `uv`'s default is 300 s — longer than this step may live, so the 1 m bound would be inert.
+      - name: Prune the uv cache before saving it (#11063)
+        if: always()
+        continue-on-error: true
+        timeout-minutes: 1
+        run: |
+          # `uv` is installed by `Install package + test extras`; on a leg that
+          # failed before that step it is absent, and a prune that cannot run is
+          # not an error — the save below is bounded on its own.
+          if command -v uv >/dev/null 2>&1; then
+            du -sh ~/.cache/uv 2>/dev/null || true
+            UV_LOCK_TIMEOUT=10 uv cache prune
+            du -sh ~/.cache/uv 2>/dev/null || true
+          else
+            echo "uv is not on PATH — skipping the prune; the save's own bound still applies"
+          fi
+      - name: Save uv dependency cache (#11063, BOUNDED)
+        # `cache-hit` is `'true'` ONLY on an exact primary-key match (on a
+        # `restore-keys` partial match it is `'false'`, and on a full miss it is
+        # unset — `restoreImpl.ts`: "`cache-hit` is intentionally not set to
+        # `false` here"), so `!= 'true'` is the correct "would a save add
+        # anything" gate. `always()` so a RED SUITE still warms the cache — but
+        # NOT a leg whose install step failed, because `~/.cache/uv` is what that
+        # step populates: `actions/cache@v4` itself only ever saved after
+        # success (`post-if: success()`), and a partial archive written into an
+        # immutable key would be hit by every later run until `uv.lock` moves.
+        if: always() && steps.uv-cache.outputs.cache-hit != 'true' && steps.install-extras.outcome == 'success'
+        continue-on-error: true
+        timeout-minutes: 7
+        uses: actions/cache/save@v4
+        with:
+          # ⛔ `~/.cache/uv` ALONE. Adding `~/.cache/pip` here is what made the
+          # payload 3.88 GB; that half is written on the shared key by TWO other jobs and is read
+          # above, so a second writer would only re-upload 3.6 GB per miss shard.
+          path: ~/.cache/uv
+          key: uv-cache-${{ runner.os }}-${{ hashFiles('uv.lock') }}
 
   test-slow:
     needs: changes
@@ -1962,6 +2223,21 @@ jobs:
       # projected wall. `test_slow_shards_are_duration_packed_and_meet_the_wall_target`
       # reds when the projection leaves the guideline, and
       # `test_slow_shards_declaration_is_fail_closed` pins the config contract.
+      #
+      # #6744: bounded like the fast matrix, and for the same derivation — read
+      # the `test` job's `max-parallel` comment for the measurement and the two
+      # inequalities. `3` here costs ONE extra wave (ceil(5/3) = 2 instead of 1),
+      # the one wave THIS matrix adds: measured leg wall p50 8.9m → the band goes
+      # ~9m → ~18m (1 wave → 2), still narrower than the fast band under the same cap
+      # (3 waves × 10.5m ≈ 31.5m), so it does not become the run's widest matrix.
+      # It is NOT the whole regression — the fast matrix is pinned at its 3-wave
+      # ceiling too, and the run-level cost is the simulation's matrix-band end
+      # delta (+17.9m p50 / +23.2m max), which is the figure a rollback decision
+      # must use. Capping at 5 instead (keeping its single wave) would put a PR's
+      # maximum MATRIX hold at 3 + 5 + 3 = 11 of the 12 measured runners —
+      # failing inequality (b) and reinstating exactly the monopolisation this
+      # exists to remove.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.slow_matrix) }}
     name: test-slow (${{ matrix.half }})
     # #3239: OUTER cap, strictly above the in-step watchdog below — that kill
@@ -2374,6 +2650,8 @@ jobs:
           # the budget when the leg set moves is
           # the whole point of `test_slow_leg_bounds_clear_the_committed_work`,
           # which reds here if this literal stops clearing the committed work.
+          # #3719: pytest's own start stamp — see the fast-shard site above.
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 40m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -2388,7 +2666,13 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -2407,6 +2691,13 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: pytest killed after 40m ($passed passed, $failed failed, $errored errored so far) — last test lines above ===================="
+            # #3719: 40m is the BUDGET, not the elapsed time — and the measured
+            # instance this leg's own header cites (run 39309984832: 39.6 min of
+            # test time against this 40m budget) is precisely the one a triager
+            # must be able to tell apart from a kill that landed early.
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" \
+              --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" \
+              --budget-min 40 || true
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
@@ -2634,13 +2925,22 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip dependency caches (#7612)
+      - name: Restore pip dependency caches (#7612, RESTORE-ONLY — #11063)
         # #7612: ephemeral runners, no dependency cache — every job downloaded
         # its wheels cold on every run. Placed BEFORE install-cpu-torch so torch
         # (140 wheels, ~3.2 GB) is served from the cache as well.
         # Coverage-neutral: pip-only job, no uv.lock to enforce; pip's cache is
         # content-addressed and cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY, for the same measured reason as
+        # `test-record-postgres` (#10182's remedy applied by #11063): a
+        # POST cache SAVE is charged against this job's `timeout-minutes` and
+        # has no timeout of its own, so at a 15m cap it can never be amortized —
+        # and the `cancelled` it causes reds a REQUIRED check on a green leg
+        # (#5219). This job only ever READ the shared key; `test-d14-hosted-api`
+        # is its unconditional writer (saving on a MISS), `test-slow` only under `slow_run`.
+        uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -2872,11 +3172,11 @@ jobs:
     needs: changes
     if: needs.changes.outputs.python == 'true'
     runs-on: ubuntu-latest
-    # #3239: this job carried NO outer cap, so GitHub's 360m default applied —
-    # a hung Track B leg could withhold the REQUIRED python-ci-gate for six
-    # hours. Measured 2026-09-30 (60 newest completed runs): pytest-step max
-    # 0.08m, job max 1.15m — 10m is a floor, not a measurement-thin bound.
-    timeout-minutes: 10
+    # #3239: GitHub's 360m default applied to a job measured at 1.15m max — but
+    # it ALSO saves the shared 3.6 GB pip archive in a POST step charged here
+    # (#10182, `setup-python cache: pip`): run 42154769896 passed 4 tests at
+    # 44.96s, tarred, then `cancelled` at 10m15s. SUM 15m × 1.5 → 30m.
+    timeout-minutes: 30
     # Epic #1647 Task 9 Step 5: track-b flips to docker — the track_b tests'
     # db_path SDK constructions redirect to the server lane via the seam.
     # The URI carries the test-prefixed path (P1-2) for consistency.
@@ -2965,8 +3265,8 @@ jobs:
         # (the coverage-manifest observed-set source).
         run: |
           set +e
-          # #3239: 5m (was 20m) — the measured pytest step is 0.08m; the
-          # in-step kill must stay BELOW the job's 10m outer cap (#798).
+          # #3239: 5m (was 20m) — the measured pytest step is 0.08m; the in-step
+          # kill must stay BELOW the job's 30m outer cap (#798; 10m when it was written).
           timeout -s INT -k 10 5m stdbuf -oL python -m pytest \
             tests/test_ingest_safety.py -m track_b -v --timeout=300 \
             -p no:cacheprovider --maxfail=20 -r fEs --junitxml="$PYTEST_JUNIT" \
@@ -2982,7 +3282,13 @@ jobs:
           # channel. Read the summary from the FULL log instead, and name the
           # INCOMPLETE case out loud. One definition: pytest-attribution.sh.
           tail -25 "$PYTEST_LOG"
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           echo "track-b rc=$rc (must-pass — gate member)"
           exit $rc
       - name: Skip-fail guard (track-b, epic #1647 Task 9)
@@ -3089,6 +3395,18 @@ jobs:
     # rail would refuse as unattributable instead of comparing (#4453).
     strategy:
       fail-fast: false
+      # #6744: bounded, same derivation as the `test` job's `max-parallel`
+      # (read it there — the measurement and both inequalities live in one
+      # place on purpose). At `carve_shards: 3` this cap equals the shard count
+      # and therefore adds NO wave today; it is declared rather than omitted so
+      # the per-PR hold bound (`C_fast + C_slow + C_carve <= pool - 3`) holds
+      # here by construction instead of by accident, and so a future rise in
+      # `carve_shards` cannot silently reinstate unbounded fan-out on this band.
+      # Removing this key is NOT a one-line rollback: the pin in
+      # `tests/test_ci_selection.py` derives every matrix-bearing job id and
+      # requires each to declare an integer `max-parallel`, so deleting this
+      # line reds that test. The rollback is this line AND the pin, in one change.
+      max-parallel: 3
       matrix: ${{ fromJSON(needs.changes.outputs.carve_matrix) }}
     # ⛔ The BARE `test-carve-out` is shard 0's name (`suffix == ''`), NOT
     # `test-carve-out (a)`. The merge rail's lane-parity subtracts main's job
@@ -3163,15 +3481,15 @@ jobs:
         # Its cap is pinned at ≤ `_CAP_CEILING_FACTOR` x the measured 16.02m
         # pytest step = 48m (`test_carve_out_shard_bounds_clear_the_committed_
         # work_without_dwarfing_it`), and 30m is already 19m of shard watchdog
-        # (floor-clamped, `carve_shards: 3`) + ~1.5m setup/provision, i.e. ~9m
-        # of headroom against a ~9m COLD save and none at all against a slow
-        # one. Raising the cap instead would re-open #3239's stale-head
+        # (floor-clamped, `carve_shards: 3`) + a 10m embedder cap + ~1m setup
+        # + the 1m38s HF POST ≈ 31.6m — already ~1.6m PAST the 30m cap, and worse
+        # against a slow one. Raising the cap instead would re-open #3239's stale-head
         # exposure (the cap IS that exposure) and buy finite headroom under an
         # UNBOUNDED term — the save has no timeout of its own.
         #
         # Nothing is lost by not saving here: the key is SHARED
-        # (`pip-<os>-<hash uv.lock>`), and it is written on EVERY run by
-        # `test-d14-hosted-api` (unconditional, PR + push) and by `test-slow`.
+        # (`pip-<os>-<hash uv.lock>`), written by `test-d14-hosted-api` on EVERY run
+        # (unconditional, PR + push), by `test-slow` only under `slow_run` — each saving on a MISS.
         # This job only ever READ it.
         #
         # `continue-on-error`: a cache-SERVICE error (transport/503) must never
@@ -3316,6 +3634,8 @@ jobs:
           # to remove. The outer `timeout-minutes` stays a literal and must
           # clear this value — `test_every_bounded_pytest_job_caps_above_its_
           # watchdog` re-derives that from the emitted matrix.
+          # #3719: pytest's own start stamp — see the fast-shard site above.
+          PYTEST_T0=$SECONDS
           timeout -s INT -k 10 ${{ matrix.watchdog_minutes }}m stdbuf -oL python -m pytest $FILES -v --timeout=300 -p no:cacheprovider -m 'not track_b and not live and not integration' --maxfail=20 -r fEs --durations=15 --junitxml="$PYTEST_JUNIT" -o junit_family=xunit1 > "$PYTEST_LOG" 2>&1
           rc=$?
           echo "$rc" > "${RUNNER_TEMP:-/tmp}/pytest-rc"
@@ -3330,7 +3650,13 @@ jobs:
           # FULL log instead, and name the INCOMPLETE case out loud so an
           # unattributable leg is a NAMED failure rather than a silent gap in
           # the #3467 failure set. One definition: pytest-attribution.sh.
-          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc"
+          # #10914: pass the leg's OWN junitxml. A leg killed at its watchdog never
+          # reaches `-r fEs`, so this log carries no `FAILED <nodeid>` record and the
+          # #9984 predicate read `ids=0` → `job-unreadable::` → BLOCK (measured on run
+          # 42050189058, job `test (f)`: 907 passed, 1 failed). The artifact did record
+          # it; the reporter now states it from there.
+          bash .github/scripts/pytest-attribution.sh --log "$PYTEST_LOG" --rc "$rc" \
+            --junit "$PYTEST_JUNIT"
           # Emit the FAILED/ERROR nodeids explicitly. Under `-v` the
           # `short test summary info` block sits far from the end (a ~10.8k
           # line log puts the FAILED lines ~2.4k lines back), so the tail
@@ -3345,6 +3671,13 @@ jobs:
             failed=$(grep -c ' FAILED' "$PYTEST_LOG")
             errored=$(grep -c ' ERROR' "$PYTEST_LOG")
             echo "==================== WATCHDOG: carve-out shard pytest killed after ${{ matrix.watchdog_minutes }}m ($passed passed, $failed failed, $errored errored so far) ===================="
+            # #3719: the budget above is not the elapsed time. This leg is the
+            # sharpest case measured: #10914 `test-carve-out (b)` printed a
+            # COMPLETE `505 passed in 518.25s`, still ended rc=137, and the
+            # banner reported "killed after 19m".
+            bash .github/scripts/pytest-kill-attribution.sh --rc "$rc" \
+              --elapsed "${PYTEST_T0:+$((SECONDS - PYTEST_T0))}" \
+              --budget-min "${{ matrix.watchdog_minutes }}" || true
           fi
           echo "==================== pytest exit code: $rc ===================="
           exit $rc
@@ -3602,23 +3935,23 @@ jobs:
     # cancelled leg certifies nothing), so a job whose work was green reddened
     # a REQUIRED check on a diff that touches three Markdown files.
     #
-    # The arithmetic that forces the raise is the job's OWN in-step cap, not
-    # this run's duration: `timeout … 15m` (below) + ~1m setup/install + ~9m
-    # for a cold save ≈ 25m against a 20m ceiling. On measured norms the margin
-    # is thinner than it looks — whole-job p50 4.71m / p95 7.23m / max 8.03m
-    # (docs/ops/ci-wall-clock.md) is measured over `success`/`failure` jobs
-    # only, so it CANNOT see a save that ran to cancellation; against a ~9m
-    # save that leaves ~3m, and this run's test step had already spent 12m32s
-    # of its own 15m cap.
+    # The arithmetic that forces this number is the SUM of the job's own in-step
+    # cap and its post-step save, never its duration: `timeout … 20m` (below) +
+    # ~1m setup/install + ~9m for a cold save ≈ 30m → ×1.5 → 45 → next 10 = 50
+    # (docs/ops/ci-wall-clock.md §2, the save-arm rule). The measured norms are
+    # thinner than they look — whole-job p50 4.71m / p95 7.23m / max 8.03m are
+    # taken over `success`/`failure` jobs only, so they CANNOT see a save that
+    # ran to cancellation (#10182's blind spot), and against a ~9m save this
+    # job's test step had already spent 14m30s of its own in-step cap.
     #
-    # What this does NOT fix, and no job cap can: the in-step `15m` cap
-    # SIGINT-kills the step (pytest-attribution then emits INCOMPLETE) instead
-    # of letting it finish, and this run was within 2m28s of that — 9m11s of
-    # its 12m32s was COLLECTION (01:00:53 → 01:10:04) against a 221s norm for
-    # the whole step (docs/ci-timing.md). Tracked in #10212. Raising this number
-    # stops the cache SAVE from being the term that reds the gate; it does not
-    # make the shared-HOME pip cache small, which is why the save is 3.6 GB.
-    timeout-minutes: 40
+    # What this does NOT fix, and no job cap can: the in-step cap SIGINT-kills
+    # the step (pytest-attribution then emits INCOMPLETE) instead of letting it
+    # finish. MEASURED (run 42154769896, job 127701854811): COLLECTION alone took
+    # 11m10s of the then-15m cap (04:23:22 → 04:34:32) against a 221s norm for
+    # the whole step (docs/ci-timing.md); all 256 selected tests passed in 200s
+    # and the kill still reddened a REQUIRED check with no failing test in the
+    # artifact. SIZED FROM THAT (#10212): 15 → 20m, not the 3.6 GB save.
+    timeout-minutes: 50
     env:
       TORTOISE_TEST_CARVE_OUT: "1"
     steps:
@@ -3666,32 +3999,48 @@ jobs:
         run: |
           set -eo pipefail
           # #3470: the log is captured through `tee`, so this leg needs the SAME
-          # attribution every `tail -n` leg gets — without it a D14 leg killed at its
-          # 15m watchdog emits no INCOMPLETE marker and its unobservable failure set
+          # attribution every `tail -n` leg gets — without it a D14 leg killed at
+          # its in-step watchdog emits no INCOMPLETE marker and its unobservable set
           # is indistinguishable from a clean leg, on a job `python-ci-gate` needs.
           rc=0
-          timeout -s INT -k 10 15m python -m pytest tests/ -m embedded_only \
+          timeout -s INT -k 10 20m python -m pytest tests/ -m embedded_only \
             -v --timeout=300 -p no:cacheprovider --junitxml="${RUNNER_TEMP:-/tmp}/junit-d14.xml" -o junit_family=xunit1 2>&1 | tee "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || rc=$?
-          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "${RUNNER_TEMP:-/tmp}/pytest-d14.log" --rc "$rc" \
+            --junit "${RUNNER_TEMP:-/tmp}/junit-d14.xml"
           [ "$rc" -eq 0 ] || exit "$rc"
           # Fail-closed on a silent all-skip — the #2188 review P3-1 shape,
-          # widened. The floor is 30 and the number is NOT arbitrary: the four
+          # widened. The floor is 40 and the number is NOT arbitrary: the four
           # marked files that are ALREADY carve-out registered (precision_leak
-          # 6 + test_hosted_api 5 + fork_slot_wedge 12 + fork_safety 4 = 27 marked,
-          # of which 25 PASS on the ubuntu runner — the two darwin-gated
-          # fork_safety ones skip) are the always-passing baseline, so a floor at
-          # 25 would still be met by a hook broadened to skip exactly the class
-          # #4164 rescues. 30 sits above that baseline (25) and below the measured
-          # total, so losing the rescued class reds the job while a few legitimate
-          # removals do not.
-          # Measured 2026-09-20 on this tree (run 35518962357, head fd23a4033): 35
-          # passed / 34 skipped (each skip exogenous — the 32 module-level gate
-          # markers, and the two darwin-gated #3845 fork tests; no real test skips
-          # for any other reason). The contract is that the marks RUN; the exact
-          # count is free to grow.
+          # 6 + test_hosted_api 12 + fork_slot_wedge 12 + fork_safety 4 = 34
+          # marked, of which 32 PASS on the ubuntu runner — the two darwin-gated
+          # fork_safety ones skip) are the always-passing baseline, so a floor
+          # that is not ABOVE that baseline is met by a hook broadened to skip
+          # exactly the class #4164 rescues. 40 sits above the baseline (32) and
+          # far below the measured total, so losing the rescued class reds the
+          # job while a few legitimate removals do not.
+          # ⛔ THE FLOOR MUST BE RE-CUT WHEN THE BASELINE GROWS — this is the rule
+          # that had silently stopped holding. The floor was 30, calibrated
+          # against a 25-PASS baseline; `origin/main` then added one more mark to
+          # that same file (25→26), and #10962 marked six further `embedded_only`
+          # legs inside `test_hosted_api.py` — a BASELINE file — taking that file
+          # 6→12 passing and the baseline 26→32, i.e. ABOVE the 30 floor, so the
+          # arm this comment exists for could no longer fire while the step stayed
+          # green. The `#4207` manifest arm below does NOT cover it:
+          # `skip-guard.py --manifest-only` accepts a nodeid appearing as passed
+          # OR skipped, so a broadened skip-hook leaves the manifest green and
+          # this count is the only detector left.
+          # Measured 2026-11-06 at this head (the marker selection over `tests/`,
+          # URI unset, `TORTOISE_TEST_CARVE_OUT=1`): 261 passed / 40 skipped
+          # overall, and the
+          # four baseline files ALONE 32 passed / 2 skipped. The earlier figure is
+          # kept only to show the growth, NOT as current: 35 passed / 34 skipped
+          # (measured 2026-09-20 on run 35518962357, head fd23a4033; each skip
+          # exogenous — the 32 module-level gate markers and the two darwin-gated
+          # #3845 fork tests). The contract is that the marks RUN; the exact count
+          # is free to grow.
           passed=$(grep -c ' PASSED' "${RUNNER_TEMP:-/tmp}/pytest-d14.log" || true)
           echo "embedded_only-marked tests passed: $passed"
-          [ "$passed" -ge 30 ] || { echo "::error::expected >=30 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
+          [ "$passed" -ge 40 ] || { echo "::error::expected >=40 embedded_only-marked tests to RUN (got $passed passed — all-skip, URI leak, a broadened hook, or the non-carve-out class lost?)"; exit 1; }
           # #4207: the floor above is a COUNT of PASSED lines, so a single
           # subtracted test leaves 34 and the step stays green — and the pin in
           # tests/test_markers.py reads this step's TEXT, so a deselecting flag
@@ -3883,11 +4232,46 @@ jobs:
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
+        with:
+          # #11057 review P2: the `cut_at_commit` provenance step below must be able to
+          # RESOLVE the recorded commit, and a `fetch-depth: 1` checkout cannot (an
+          # ancestor is absent from it by construction). The `changes` job already pays a
+          # full-history fetch on every run, so this is the same shape one job over — and
+          # it is the price of the alternative being worse: a provenance gate that runs
+          # only where it cannot answer is a NO-OP gate, and an unresolvable recorded
+          # commit stayed green in every job for eight review rounds while `render`
+          # published that sha to `docs/product/mcp-sdk-surface.md` for the owner to read.
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
       - name: Install
         run: pip install -e .
+      # ── THE RECORDED CUT COMMIT MUST RESOLVE AND SURVIVE (#11057) ───────────────
+      # ⛔ IT RUNS BEFORE THE PIN, and the reason is the STRICT ARM: this is the only
+      # arm that fails CLOSED when the checkout cannot answer, so it runs while the clone
+      # is certainly full. The pin below used to fetch its base ref with `--depth=1`,
+      # which sets the REPO-LEVEL shallow flag while keeping the objects it had already
+      # fetched (measured on a 3-commit scratch clone: full clone → `false`, then a
+      # `--depth=1` fetch → `true`, first commit still present) — so any LATER answer was
+      # "unprovable", and the strict arm would have red for the wrong reason. The pin no
+      # longer passes a depth at all (see its own note), so this ordering is defence in
+      # depth rather than the only thing between the check and a false red.
+      # `--provenance-strict` turns "this checkout cannot answer" into a RED rather than a
+      # notice, so dropping `fetch-depth: 0` above reds here instead of silently
+      # weakening the gate to a log line.
+      #
+      # ⚠️ THIS STEP RUNS THE CHECKOUT'S OWN `tools/surface_manifest.py`, so on its own it
+      # is a rule the PR under test can delete in the same commit that records a bogus
+      # SHA (#11057 review F2). The AUTHORITATIVE half is the pinned copy of
+      # `tools/surface-guard.py`, which grades the same two questions from the base ref
+      # — see the step below the pin. This one is kept because it is the only arm that
+      # fails CLOSED on an unprovable checkout (the pinned copy's default arm reds only
+      # on a PROVEN defect, so that a shallow local run is not a false red) and because
+      # it is what covers the single PR that introduces the pinned arm (#5192's accepted
+      # residual: the base copy of a tool cannot yet contain the rule being added).
+      - name: The baseline's recorded cut commit resolves
+        run: python3 tools/surface_manifest.py check --provenance-strict
       # ── PIN THE TOOLING TO THE BASE REF (#4606) ───────────────────────────
       # The step below would otherwise run the CHECKOUT'S OWN copy, so a PR
       # could add a surface tool and stub the gate out in the same commit: the
@@ -3914,11 +4298,21 @@ jobs:
       # On `push`/`schedule` there is no `base_ref` and the checkout IS the
       # protected ref, so `HEAD` is used. A `git show` that fails leaves `set -e`
       # to fail the step, so the pin fails CLOSED rather than silently skipping.
+      #
+      # ⛔ NO `--depth=1` ON THE FETCH (#11057 review F2). `--depth=1` marks the WHOLE
+      # clone shallow (a repo-level flag) while keeping the objects it already fetched,
+      # which disarms the provenance arm in the PINNED copy of `tools/surface-guard.py`
+      # that the next step runs: "cannot answer" is not a red in its default arm, so the
+      # one gate the PR cannot edit would quietly stop grading. The job already pays
+      # `fetch-depth: 0` at checkout, so a full fetch of the base branch is a ref update.
+      # With the depth dropped, a checkout that someone makes shallow later reports
+      # "unprovable" — and the strict step ABOVE reds on exactly that, which is the
+      # fail-closed behaviour this ordering was protecting.
       - name: Pin the gate's tooling to the base ref
         run: |
           set -euo pipefail
           if [ -n "${{ github.base_ref }}" ]; then
-            git fetch --no-tags --depth=1 origin "${{ github.base_ref }}"
+            git fetch --no-tags origin "${{ github.base_ref }}"
             base=FETCH_HEAD
           else
             base=HEAD
@@ -3950,6 +4344,12 @@ jobs:
           done
           wc -l tools/surface-guard.py tools/surface_manifest.py
       - name: The surface cannot expand without an explicit human decision
+        # #11057 reviews F1 + F2: the pinned copy ALSO grades the baseline's recorded
+        # `cut_at_commit` — it must resolve AND be in the default branch's history. It
+        # runs from the BASE REF (the pin above), so a PR cannot delete the rule while
+        # recording a SHA that will not survive the squash merge. Its default arm prints
+        # a `::notice::` where the checkout cannot answer; the strict step above is what
+        # turns that state into a red.
         run: python3 tools/surface-guard.py
       - name: The ordering lint (AC13)
         run: python3 tools/surface_manifest.py check
@@ -4184,8 +4584,40 @@ jobs:
     # against a warm database, and ~100s when the container first applies the
     # record migrations. The arm-gate tests this PR adds (they run the gate over
     # fixture XMLs) take the collection to 70 — measured 2026-10-23 on a fresh
-    # container: 70 passed / 0 skipped in ~194s, migrations included. 20m is a
-    # runaway bound, not a measurement-thin one.
+    # container: 70 passed / 0 skipped in ~194s, migrations included.
+    #
+    # ⛔ 20, NOT 50 — and the reason changed AFTER the incident this block records.
+    # MEASURED (run 41975408278, job 127110027242, head 9e32e81a3): the WORK was
+    # green and never at risk, and the job still reddened.
+    #
+    #   07:40:25  job starts (cap 20m)
+    #   07:42:36  pytest starts        07:44:46  pytest ends — 130s, 0 failed
+    #   07:44:53  work is DONE (postgres stopped); every WORK step green
+    #   07:44:53  `Post Cache pip dependency caches` begins a ~3.6 GB save
+    #   08:00:46  killed at 79.8% (2,885,681,152 of 3,616,385,407 sent) when the
+    #             20m cap elapsed -> conclusion `cancelled`
+    #
+    # `python-ci-gate` reads `cancelled` as red BY DESIGN (#5219: a cancelled leg
+    # certifies nothing), so a green leg reddened a REQUIRED check on a diff that
+    # never touched this job — the #5219 / #10327 class. The first response here
+    # was to raise the cap to 50 over the SUM including that save.
+    #
+    # ⛔ THAT ARM IS NO LONGER AVAILABLE, because #11063 removed the save. This
+    # job is RESTORE-ONLY (`actions/cache/restore@v4`, no post step — see the
+    # cache step below), so no save is charged against this cap and the
+    # 12 + ~1 + ~20 = ~33m SUM the raise was derived from cannot occur here.
+    # Holding the raised cap would pin a per-PR concurrency slot at 50m (#3239)
+    # against a SUM that no longer exists.
+    #
+    # Re-derived on the steps this job actually has (arm-2: SUM x 1.5, rounded
+    # UP to the next 10m):
+    #
+    #   12m in-step pytest watchdog + ~1m setup/provision = ~13m
+    #   ->  x1.5 = 19.5  ->  20
+    #
+    # — what `main` carried before #10962 raised it, re-derived rather than
+    # inherited. The WORK is ~194s for the 70-test collection (above), so this
+    # bounds a runaway, not a measurement-thin step, and the POST step is gone.
     timeout-minutes: 20
     env:
       # The record's database is POSTGRES, not a tortoise graph: this job exports
@@ -4198,11 +4630,36 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: '3.12'
-      - name: Cache pip dependency caches (#7612)
+      - name: Restore pip dependency caches (#7612, RESTORE-ONLY — #11063)
         # Same key shape as the other pip-only sites, so it SHARES their cache
         # and a warm restore is a no-op. Coverage-neutral: pip's cache is
         # content-addressed, so it cannot substitute a different version.
-        uses: actions/cache@v4
+        #
+        # ⛔ RESTORE-ONLY (#10182's remedy, applied here by #11063).
+        # `actions/cache` saves in a POST step, and (#10182) that step is
+        # charged against the job's `timeout-minutes` like any other step. The
+        # save has no timeout of its own, so it is UNBOUNDED, not merely large,
+        # and this job's 20m cap is documented above as bounding a runaway, not a
+        # measurement-thin step, for a ~349 s leg — it cannot absorb an unbounded one.
+        #
+        # MEASURED (run 42090497973, job `test-record-postgres` 127519984967,
+        # PR #10790): every WORK step was green — `192 passed, 1 xfailed in
+        # 349.59s` at 21:39:44Z, and the postgres teardown succeeded at
+        # 21:39:58Z — and then `Post Cache pip dependency caches` tarred
+        # ~/.cache/pip for 5m43s (21:39:58Z → 21:45:41Z) and began pushing a
+        # **3.6 GB** archive ("Sent 0 of 3616384780") at ~7 MB/s. It reached
+        # 76% at 21:51:52Z, when the 20m cap elapsed and the job was recorded
+        # `cancelled`. `python-ci-gate` reds a cancelled leg BY DESIGN (#5219: a
+        # cancelled leg certifies nothing), so a GREEN leg that failed no test
+        # withheld a REQUIRED check on a diff that never touched this job.
+        #
+        # Nothing is lost by not saving here: the key is SHARED
+        # (`pip-<os>-<hash uv.lock>`) and is written by ONLY `test-d14-hosted-api`
+        # (50m, headroom this job does not have) and `test-slow` (60m, at its cap).
+        # ⛔ NOT `test`: restore-only on this path since #11063, it saves
+        # `.pytest_cache` and `~/.cache/uv`. This job only ever READ the key.
+        uses: actions/cache/restore@v4
+        continue-on-error: true
         with:
           path: ~/.cache/pip
           key: pip-${{ runner.os }}-${{ hashFiles('uv.lock') }}
@@ -4221,6 +4678,22 @@ jobs:
         # run). The action binds loopback (#7637) and exports
         # `TEST_RECORD_DB_URI`; paired with the teardown step below.
         uses: ./.github/actions/postgres-provision
+      - name: Provision the DRILL's scratch Postgres — a SECOND server (#9567 D8)
+        # D8 is "restore from the record's own backup", and `run_restore_drill`
+        # REFUSES a scratch target that is the same database as the record
+        # (`refuse_same_database`, by identity of coordinates, not by string
+        # equality). So the drill cannot be armed with one server — and until this
+        # step existed D8 was measured on NO CI leg (`rg 'test_record_backup'
+        # .github/workflows/` ⇒ 0 hits; #9567 comment 6690574287 §4 names exactly
+        # this as one of D8's two missing halves).
+        #
+        # The two NAMES are inputs because `$GITHUB_ENV` is last-one-wins: with the
+        # defaults this call would overwrite `TEST_RECORD_DB_URI` and the first
+        # container's label, and the drill would then point at itself.
+        uses: ./.github/actions/postgres-provision
+        with:
+          dsn_var: TEST_RECORD_SCRATCH_URI
+          label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
       - name: Run the record's Postgres legs (armed — #9551)
         run: |
           set +e
@@ -4246,18 +4719,39 @@ jobs:
           # in the list on purpose: D10's policy drill re-applies the tenancy
           # migration, so nothing another file asserts on may run after it
           # without its own re-read.
+          #
+          # #9881: `test_9881_rename_reaches_the_record.py` is armed HERE for
+          # the same reason — its end-to-end leg (public `update_entity(name=…)`
+          # -> journal -> record row, live == replay) SKIPS without this job's
+          # DSN, and this job's leg gate FAILS on ANY skip (#9551), which is
+          # what makes it run rather than pass by absence. It sits BEFORE the
+          # capstone because the capstone is last on purpose (D10, above).
+          # #9558 (R10): `test_9558_record_write_cost.py` is armed HERE because
+          # its pool half needs the DRIVER (the `[postgres]` extra), and the
+          # sharded `test` job installs none — so there its `importorskip` pins
+          # would SKIP, leaving the connection-reuse mechanism this change is FOR
+          # covered by no CI leg at all. Here the extra is installed, so not one
+          # item skips and this job's any-skip leg gate (#9551) stays green; its
+          # schema-cache half is DB-free and already runs in `core`. ⚠️ Nothing
+          # in the file may CONDITIONALLY skip: a filesystem-dependent skip here
+          # is a nondeterministic RED on a required context, which is why the
+          # ctime arm burns an inode-clock tick instead of skipping when a tick
+          # boundary happens not to fall between two calls (#9558 cycle 2, P1).
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             tests/test_record_searchkeys_10620.py \
+            tests/test_9881_rename_reaches_the_record.py \
+            tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \
             --junitxml="$SCRATCH/junit.xml" -o junit_family=xunit1 \
             2>&1 | tee "$SCRATCH/pytest.log"
           rc=${PIPESTATUS[0]}
           echo "$rc" > "$SCRATCH/pytest-rc"
-          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest.log" --rc "$rc"
+          bash .github/scripts/pytest-attribution.sh --log "$SCRATCH/pytest.log" --rc "$rc" \
+            --junit "$SCRATCH/junit.xml"
           exit $rc
       - name: The DB legs RAN, not skipped (#9551)
         # The target of the issue is "0 of the two DB legs skipped in the armed
@@ -4293,6 +4787,14 @@ jobs:
       - name: Stop Postgres (#9551)
         if: always()
         uses: ./.github/actions/postgres-teardown
+      - name: Stop the drill's scratch Postgres (#9567 D8)
+        # Selected by ITS OWN label variable: two instances share a job, and the
+        # default name would make one teardown remove whichever container the
+        # other labelled last.
+        if: always()
+        uses: ./.github/actions/postgres-teardown
+        with:
+          label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
 
   # ── "DID THIS PR INTRODUCE A FAILURE?" (#9984) ──────────────────────────────
   # The required check used to ask "does anything fail anywhere?". Because it is ONE
@@ -4367,12 +4869,47 @@ jobs:
       # The rail's predicate, at a PIN. Unpinned, this job would track agent-infra
       # `main` and could go red on a change nobody in this repo reviewed — on the
       # surface every PR's merge depends on.
+      #
+      # ⛔ THE PIN IS PART OF THE PREDICATE'S BEHAVIOUR, so a stale one silently
+      # changes the VERDICT (#3690, agent-infra). `ci_exemption.py` reads main's union
+      # rates through `_NODEID_RE`, whose `rest` class spelled the parameter-SYNTAX
+      # characters `[A-Za-z0-9_\[\]\-.:]` — and carried no `/`, so EVERY main rate
+      # row for a path-PARAMETRISED pytest id was parsed, then DROPPED as malformed:
+      #
+      #   tests/test_entry_point_python_guard.py::test_entry_point_guards_the_
+      #   interpreter_before_its_imports[tools/build_site_icons.py]
+      #
+      # With the row dropped, `decide` saw an id absent from `main_rates` and reported
+      # main's OWN red as *"absent from main's failure set … introduced by this PR"* —
+      # a false BLOCK on a failure the PR cannot reach, for every affected id. The
+      # asymmetry is what hid it: the main SIGNATURE table parses through
+      # `is_failure_key_loose`, which always admitted the path, so the signature gate
+      # passed and only the presence gate refused. Measured on PR #11508 (`test (a)/
+      # (b)/(e)/(f)` red on main's own head, `tools/build_site_icons.py` never touched
+      # by the diff): at `0b8cfa37` the shared decision BLOCKED 2 such ids; at
+      # `cb7de2572` it EXEMPTED both, with the identical inputs.
+      #
+      # Bump = the minimal commit carrying the fix (`agent-infra#3690`, an ancestor of
+      # agent-infra `main`), not `main` itself — the pin still cannot track another
+      # repo's head. Revert only by pointing at a predicate whose `rest` class admits
+      # a `/`; a pin older than `cb7de2572` reinstates the false BLOCK.
+      #
+      # ⛔ DO NOT READ THIS BUMP AS "THE PARAMETER SPACE IS NOW ADMITTED". `rest` is an
+      # ALLOWLIST of parameter-SYNTAX characters, not the whole space — the pinned
+      # module says so itself and carries an open KNOWN RESIDUAL for it
+      # (agent-infra#3691): a SPACE-bearing param (`[chromium-Claude Desktop]`), a
+      # `\`, or a non-ASCII test name is still dropped from main's rate table and
+      # still produces this same "absent from main's failure set" BLOCK. So if a
+      # future false BLOCK names a DIFFERENT character, the pin is not the regression
+      # — it is that residual, and the fix belongs in `rest` (or the producer), not
+      # here. Sending a fixer to the pin for a space is the trap this paragraph is
+      # written to prevent.
       - name: Check out the shared CI predicate (pinned, #9984)
         uses: actions/checkout@v4
         with:
           repository: daniel-ospina/agent-infra
           path: .ci-predicate
-          ref: 0b8cfa37ea73c6b6b47db10c6bc32921d3b2d904
+          ref: cb7de2572518b7e49b6f51a0d3aec8d2a4a1135c
 
       # #9018: this job shells out to `gh`, which is simply ABSENT on the fallback
       # pool's minimal non-login PATH — where it reads as a test failure and is not

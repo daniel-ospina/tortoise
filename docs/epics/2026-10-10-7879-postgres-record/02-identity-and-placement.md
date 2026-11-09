@@ -307,7 +307,7 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 | `eventStatus` | P | hosted_api.py; entities.py `_event_plain_merge` open-set | open-set passthrough ($props) | lifecycle |
 | `name` | P | hosted_api.py | open-set passthrough |  |
 | `summary` | P | hosted_api.py | open-set passthrough |  |
-| `story_arc` | P | hosted_api.py | open-set passthrough |  |
+| `story_arc` | P | hosted_api.py | open-set passthrough | **not projected into the cache** — §9.1/D1 puts the narrative in Postgres and NOT in the graph, and the record IS Postgres, so the column is authority here and forbidden in the cache (`cache_projection.CACHE_FORBIDDEN_COLUMNS`; `#10394`) |
 | `keywords` | P | hosted_api.py | open-set passthrough |  |
 | `capturedAt` | P | hosted_api.py | open-set passthrough |  |
 | `sessionId` | P | hosted_api.py | open-set passthrough |  |
@@ -366,7 +366,7 @@ The full per-property table (**216 rows from the `#7955` pass, plus the 5 `#2782
 | `event_id` | P | `_SOURCE_NODE_PROPS` | SourceCreated ev.event_id |  |
 | `source_path` | P | `_SOURCE_NODE_PROPS` | SourceCreated ev.source_path |  |
 | `needs_extraction` | P | `_SOURCE_NODE_PROPS`; ingest.py | SourceCreated ev.needs_extraction | read back by ingest |
-| `story_arc` | P | `_SOURCE_NODE_PROPS`; hosted_api.py | SourceCreated ev.story_arc |  |
+| `story_arc` | P | `_SOURCE_NODE_PROPS`; hosted_api.py | SourceCreated ev.story_arc | **not projected into the cache** — §9.1/D1: the record holds it, the cache must not (`cache_projection.CACHE_FORBIDDEN_COLUMNS`; `#10394`). The narrative's ONE home for readers is `public.session_narrative` |
 | `document_knowledge_domain` | P | `_SOURCE_NODE_PROPS` | SourceCreated ev.document_knowledge_domain |  |
 | `authored_by` | P | `_SOURCE_NODE_PROPS` | SourceCreated ev.authored_by | document provenance metadata |
 | `owned_by` | P | `_SOURCE_NODE_PROPS` | SourceCreated ev.owned_by |  |

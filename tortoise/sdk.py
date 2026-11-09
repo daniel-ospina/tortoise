@@ -36,7 +36,7 @@ import os
 import re
 import stat
 import unicodedata
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from contextvars import ContextVar
 from time import monotonic as _monotonic
 from typing import Any, ClassVar
@@ -203,6 +203,9 @@ from .quota import (
 from .canonical import derive_batch_id
 # #4911: the ONE credential scrubber for stored turn text. Stdlib-only module
 # (no `tortoise` imports), so this adds no import-cycle risk to this hot module.
+from .session_source_display import (
+    SESSION_SOURCE_SUMMARY_PREFIX as _SESSION_SOURCE_SUMMARY_PREFIX,
+)
 from .security import redact_secrets
 import threading
 from datetime import UTC
@@ -4097,27 +4100,238 @@ _SESSION_SOURCE_STOPWORDS = frozenset({
 })
 
 
+#: #10000: the DISPLAY prefix on a session Source's ``summary`` — imported, not
+#: defined here. It has ONE home (`tortoise/session_source_display.py`) because
+#: the CACHE PROJECTION reads the same value as the WITNESS that tells a
+#: post-#10000 row's lexicon ``_searchText`` from a pre-#10000 row's prose, and it
+#: may not import the capture to get it (#10965 / #10852 review P2).
+
+
+#: #10000: the transcript's own FRAMING label — the ``Speaker: text`` prefix
+#: ``_session_llm_transcript`` writes for every turn. It is not vocabulary the
+#: session used, so it may never become a topic, and THIS pattern is the only
+#: thing that stops it: ``_session_source_metadata`` strips it from the LINE it
+#: sits on BEFORE tokenising, so the label is gone while a body word that merely
+#: SPELLS a role survives.
+#:
+#: ⛔ POSITION, NEVER SPELLING (#10852 review, P2 — measured). This was a
+#: ``frozenset({"user", "assistant", "speaker", "system", "tool"})`` applied to
+#: EVERY token, so those five words could never be a session's vocabulary
+#: anywhere: ``_session_source_metadata("User: the system keeps restarting after
+#: the deploy")`` dropped ``system`` from the lexicon, and
+#: ``_session_source_metadata("User: system\nAssistant: tool")`` derived
+#: ``("", [])`` — ``summary=''`` with no
+#: ``_searchText``, i.e. exactly the #3518 unfindability the docstring forbids,
+#: reached by a transcript that HAS tokens of its own (the fourth cliff of that
+#: shape, after stopword-only / short-word-only / digit-only). ``system`` and
+#: ``tool`` are ordinary English CONTENT words; they are in that set only
+#: because ``_session_llm_transcript`` title-cases a role into the speaker
+#: position, and ``_normalize_turn_role`` does no casing of its own. The label is
+#: at a KNOWN POSITION (one ``"<Speaker>: <body>"`` line per turn, joined by
+#: ``\n``, speaker title-cased and matched against ``^[A-Z][\w .'-]{0,40}$``), so
+#: the fix is to delete that one prefix per line and tokenise the BODIES: a
+#: labels-only transcript still derives nothing (its bodies are empty), while a
+#: body word survives wherever it appears. Before this pattern existed the
+#: fallback admitted ``user``/``assistant`` into every ack-only session's lexicon
+#: — a constant pair, i.e. the same measurable defect
+#: ``_SESSION_SOURCE_SUMMARY_PREFIX`` is kept out of ``_searchText`` to avoid
+#: (under the OR-union every such session would match a one-word source query
+#: for "user") — and the strip keeps that closed for the same reason.
+#:
+#: ``[ \t]*`` after the colon (never ``\s*``, which would swallow the newline
+#: that separates a labels-only turn from the next one's body): the builder
+#: always writes one space, and a hand-written/unit fixture may not
+#: (``"user:\nassistant:"``).
+#:
+#: ⚠️ Stated residual: a caller that hands this function a BARE SENTENCE whose
+#: first word is followed by a colon (``"Note: the deploy failed"``) loses that
+#: word. The capture path never does — it passes ``_session_llm_transcript``'s
+#: output, whose every line starts with the speaker — and the alternative
+#: (filtering the token stream by spelling) is the defect above.
+_SESSION_SOURCE_TURN_LABEL_RE = re.compile(
+    r"^[^\W\d_][\w .'-]{0,40}:[ \t]*", re.MULTILINE)
+
+
+def _session_source_lexicon(counts: Mapping[str, int]) -> list[str]:
+    """The six most frequent words, ties broken by the TOKEN itself.
+
+    ⛔ ``Counter.most_common`` breaks ties by FIRST-ENCOUNTERED order, and in the
+    ordinary short-session shape (every content word occurring once) that made
+    the lexicon the transcript's first six content words IN TRANSCRIPT ORDER —
+    i.e. a (comma-separated) re-wording of the session's own opening instruction,
+    and the reason the docstring's order-independence claim was false. Sorting
+    the ties by the token makes the lexicon a function of the WORD MULTISET
+    alone: REORDERING the turns cannot change it, while changing that multiset
+    (adding or editing a turn) does — the multiset is the INPUT, not a
+    guarantee. An earlier wording claimed "adding an identical turn" could not
+    change it; it can, and the counter-example is one line long: on
+    ``alpha beta`` / ``gamma gamma`` the lexicon is ``[gamma, alpha, beta]``, and
+    appending a copy of the first turn makes all three count 2, i.e.
+    ``[alpha, beta, gamma]`` (#10852 review, P3).
+    """
+    return [w for w, _ in sorted(counts.items(), key=lambda kv: (-kv[1], kv[0]))[:6]]
+
+
 def _session_source_metadata(transcript: str) -> tuple[str, list[str]]:
-    """Derive cheap capture metadata (summary + topics) for the session Source
-    from the extraction transcript (#1352) — no LLM call, deterministic:
-    the summary is the first substantive utterance, topics are the top
-    frequent content words. Returns ("", []) for an empty transcript."""
+    """Derive the session Source's searchable TOPIC LEXICON (#1352, #10000).
+
+    ⛔ §9.1/D1 (owner ruling 2026-09-23) keeps a session's transcript in the
+    RECORD — *"not in the graph, not a `Document` node, not a `Point`"*. This
+    builder used to return the transcript's FIRST SUBSTANTIVE UTTERANCE as
+    ``summary``, which put raw turn prose on the session's ``:Source`` node AND
+    into the Source FTS index (``_searchText``) — measured in
+    ``docs/verify/2026-10-31-record-capstone.md`` §4 item 2, *"the second prose
+    passthrough onto a node"*. Redaction (#4911) does not close that: a scrubbed
+    sentence is still the session's sentence.
+
+    So the derived metadata is the session's TOPIC LEXICON — never a CHOSEN sentence and
+    never a CHOSEN quote: the six most frequent content words of the (already redacted) transcript,
+    words the capture already derives, as one stable descriptor (⚠️ a space-less CJK run is
+    ONE token and can BE that sentence — see the residual below), keeping a captured session findable through
+    ``tortoise_fts_query(entity_type='source')`` — the regression #3518 closed,
+    and the reason this function must return SOMETHING for a non-empty
+    transcript. ``("", [])`` only when the transcript has no token of its OWN
+    at all — empty, blank, punctuation-only, or nothing but the ``Speaker:``
+    framing labels. The question is about TOKENS, never about letters or width:
+    a number is a token too (see the DIGIT-ONLY note below).
+
+    ⛔ A STOPWORD-ONLY transcript ("ok" / "yes") takes the UNFILTERED content
+    list rather than returning nothing. Returning nothing blanked an
+    acknowledgement-only session's ``summary``, gave it no ``_searchText`` and
+    left it unfindable — reintroducing the very #3518 regression the lexicon
+    exists to prevent, as a side effect of a filter that is a precision
+    preference and not part of the §9.1/D1 rule. It is still a LEXICON, so it
+    puts no CHOSEN sentence on the node (a whole space-less run can be one) — but it
+    drops the transcript's FRAMING labels (``_SESSION_SOURCE_TURN_LABEL_RE``): those
+    are the generator's ``Speaker:`` prefix, not words the session used, and indexing
+    them put a constant ``user, assistant`` pair on every acknowledgement-only session.
+
+    ⛔ THE LABEL IS DROPPED BY POSITION, NOT BY SPELLING (#10852 review, P2).
+    The strip happens per LINE, BEFORE tokenising, so it removes the speaker and
+    nothing else: ``system`` and ``tool`` are ordinary content words that were
+    in the label set only because a role can sit in that position, and filtering
+    them out of the whole token stream made them unreachable as vocabulary —
+    ``"User: the system keeps restarting"`` lost ``system``, and
+    ``"User: system\nAssistant: tool"`` derived ``("", [])``: ``summary=''``,
+    no ``_searchText``, the #3518 unfindability, on a transcript that HAS tokens
+    of its own. Both are pinned in
+    ``tests/test_10000_source_prose.py::test_a_role_word_that_is_also_a_content_word_survives``.
+
+    ⛔ That fallback is reached by THREE transcript shapes, and the presence test
+    must not exclude any of them: stopword-only ("ok" / "yes"), short-word-only
+    ("ok go"), and DIGIT-only ("42" — the SCRIPT/DIGIT notes below). The
+    3-character CONTENT floor is a RANKING
+    preference (a two-letter token discriminates poorly), so it is applied only
+    where the content counts are built — never to decide whether the transcript
+    has word tokens at all. Running it inside the presence test made a
+    non-empty transcript whose words are ALL short (``"User: ok go"``) take the
+    ``("", [])`` arm, which wrote ``summary=''`` and NO ``_searchText`` at all
+    (``_source_search_text(topics=[])`` is ``None``, and this writer never
+    passes ``summary``) — the #3518 unfindability this docstring forbids,
+    reintroduced one arm over (#10852 review, P2). The presence test is
+    therefore WIDTH-FREE and the floor lives in the content filter.
+
+    ⛔ The presence test is SCRIPT-FREE too — same class, one word over. The
+    token pattern used to be ``[A-Za-z][A-Za-z0-9_-]*``, an ASCII word class, so
+    a Cyrillic, Greek, Hebrew, Arabic, Devanagari, Thai or CJK transcript had NO
+    word tokens as far as this function could see and took the ``("", [])``
+    arm: ``summary=''`` and no ``_searchText`` — the #3518 unfindability, for a
+    whole class of languages (#10852 review, P2). The letter class became
+    ``[^\\W\\d_][\\w-]*`` (a Unicode LETTER, then word characters), which is the
+    same shape as before for ASCII and correct for every script Python's ``re``
+    knows — and it is what the CONTENT arm still uses. The stopword and framing
+    sets stay ASCII — that is only a PRECISION
+    filter (``.lower()`` still folds Latin), never a presence decision.
+
+    ⛔ DIGIT-ONLY is the third dimension of the same hole (#10852 review), and
+    the one the SCRIPT fix left behind: ``[^\\W\\d_]`` excludes digits as well
+    as non-ASCII. A transcript whose only non-framing tokens are numbers
+    (``"User: 42\\nAssistant: 100 200"`` — an ID/number-only session) therefore
+    had NO word tokens, took the ``("", [])`` arm, and was written
+    ``summary=''`` with ``_searchText`` NULL: silent on the node and absent from
+    the Source FTS index. ⛔ The REACHABLE production shape is
+    ``"Assistant: 100 200"``: ``_session_llm_transcript`` drops a turn whose
+    marker-free body carries no >=3-char extractable sentence, so the shorter
+    numeric turns never reach here (that is the shape the live leg in
+    ``tests/test_10000_source_prose.py`` captures; the two-turn form above is a
+    unit-level input, not a transcript this builder can emit).
+    Against ``main`` that is a genuine REGRESSION, not
+    only a doc inaccuracy — the pre-#10000 derivation fell back to
+    ``transcript.strip()[:200]``, so those digits DID reach the index (as prose,
+    the §9.1/D1 violation this change removes — but the findability was real),
+    and RediSearch tokenises on whitespace and punctuation, so a numeric run is
+    an ordinary index term rather than something search cannot express. The
+    presence test is therefore ``[^\\W_][\\w-]*`` — any run of word characters
+    that is not underscore-only, LETTER **or** DIGIT — while the CONTENT arm
+    keeps the letter class below, so a numeric token keeps a digit-only session
+    findable through the fallback without ranking against the session's words.
+
+    ⚠️ Stated residual: a script that does not delimit words with spaces (CJK,
+    not Thai) yields ONE run per script run, so the descriptor can carry that
+    run whole. Splitting it needs a segmenter (RediSearch ships one for Chinese
+    via Friso), not a regex — and the alternative here, returning ``("", [])``,
+    is the unfindability this function exists to prevent. ⛔ Thai is NOT that
+    case: ``\\w`` drops its combining marks, so its runs FRAGMENT — named, not traded.
+
+    ⛔ The descriptor is a function of the word MULTISET — frequency order, ties
+    broken by the token itself (``_session_source_lexicon``), so it does NOT
+    depend on the transcript's word order — and it never quotes: a summary that
+    echoed the utterance back (even truncated, even redacted) is the defect this
+    shape exists to remove. ``tests/test_10000_source_prose.py`` scans every
+    node's string properties for the capture's own TEXT and reds if it reaches
+    anything but the episodic turn store; a bag of the session's words is §4.4
+    metadata and is deliberately allowed in a word-delimited script; a fragment of its prose is not (a whole space-less run is the named exception).
+
+    ⛔ The DISPLAY value carries ``_SESSION_SOURCE_SUMMARY_PREFIX`` and the
+    INDEXED value does not — the two are deliberately different strings, and
+    ``_source_search_text`` takes the bare ``topics`` for exactly that reason.
+    Writing the prefixed descriptor anywhere the FTS index reads it is a real
+    search-quality regression: ``session``/``capture``/``topics`` are not
+    stopwords, so every captured session would match a query for any of the
+    three (measured: two sessions with disjoint vocabularies both returned for
+    "session capture topics"). An earlier cut of #10000 dropped the prefix from
+    BOTH values to fix that; the prefix is kept here because it costs the index
+    nothing once the index stops reading ``summary``, and a bare comma list in a
+    column named ``summary`` reads as an unfinished sentence.
+    """
     if not transcript.strip():
         return "", []
-    summary = ""
-    for line in transcript.splitlines():
-        text = line.split(": ", 1)[1] if ": " in line else line
-        text = text.strip()
-        if len(text) >= 10:
-            summary = text[:200]
-            break
-    if not summary:
-        summary = transcript.strip()[:200]
     from collections import Counter
-    words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
-    counts = Counter(w for w in words if w not in _SESSION_SOURCE_STOPWORDS)
-    topics = [w for w, _ in counts.most_common(6)]
-    return summary, topics
+    # ⛔ WIDTH-FREE presence test, 3-char floor only when RANKING: see the
+    # docstring. A pattern with ``{2,}`` here conflates "no lexicon" with "no
+    # word tokens of 3+ characters", and that conflated case is a real, reachable
+    # transcript (``"User: ok go"`` — a kept turn with no long word).
+    # ⛔ SCRIPT-FREE too: ``[^\W\d_]`` is a Unicode LETTER, so this is the same
+    # word class as ``[A-Za-z]`` for English and a correct one for every other
+    # script — an ASCII class made a Cyrillic/CJK transcript wordless and wrote
+    # it ``summary=''`` with no ``_searchText`` (#10852 review, P2).
+    # ⛔ …and DIGIT-SEEING (#10852 review): the presence test asks whether the
+    # transcript has a token of its OWN, which is not a question about letters.
+    # ``[^\W_]`` (a word character that is not ``_``) admits a LETTER-or-DIGIT
+    # run, so an ID/number-only session is presence-True; the CONTENT arm below
+    # keeps the letter class, so a numeric token still does not RANK against the
+    # session's words — it reaches the fallback, which is what keeps the session
+    # findable. Without this, ``"User: 42\nAssistant: 100 200"`` returned
+    # ``("", [])``: ``_searchText`` NULL and unfindable (#3518), a regression
+    # against the pre-#10000 prose derivation that DID index those digits.
+    # ⛔ THE TURN LABELS GO FIRST, BY POSITION (#10852 review, P2): the speaker
+    # sits at the start of its line, so stripping there removes the label and
+    # leaves every body word — including ``system``/``tool``, which the old
+    # token-set filter killed wherever it appeared.
+    tokens = re.findall(r"[^\W_][\w-]*",
+                        _SESSION_SOURCE_TURN_LABEL_RE.sub("", transcript).lower())
+    if not tokens:  # no tokens at all (empty/blank/punctuation-only,
+        return "", []  # or nothing but the transcript's own Speaker: labels)
+    words = [w for w in tokens if re.match(r"[^\W\d_]", w)]
+    counts = Counter(w for w in words
+                     if w not in _SESSION_SOURCE_STOPWORDS and len(w) >= 3)
+    topics = _session_source_lexicon(counts)
+    if not topics:  # stopword-only, short-word-only OR digit-only: fall back
+        # to the transcript's own vocabulary. All three shapes are non-empty
+        # transcripts with nothing to derive a CONTENT lexicon from, and each
+        # must still yield a descriptor or the session is unfindable (#3518).
+        topics = _session_source_lexicon(Counter(tokens))
+    return _SESSION_SOURCE_SUMMARY_PREFIX + ", ".join(topics), topics
 
 
 #: #3518: the ONE searchable-text field on a :Source — the field the Source
@@ -4127,21 +4341,34 @@ SOURCE_SEARCH_TEXT_FIELD = "_searchText"
 
 
 def _source_search_text(*, title: str | None = None,
-                        summary: str | None = None) -> str | None:
-    """#3518: the ONE rule for a Source's searchable text — the title when
-    present, else the summary (``None`` when neither carries text).
+                        summary: str | None = None,
+                        topics: list[str] | None = None) -> str | None:
+    """#3518: the ONE rule for a Source's searchable text — the ``title`` when
+    the writer has one, else the session's TOPIC LEXICON, else the ``summary``
+    (``None`` when none of them carries text).
 
     Both Source writers resolve their ``_searchText`` through here so the two
     cannot drift into different vocabularies: the indexer
     (``_index_source_merge`` → ``create_source(..., _searchText=...)``) passes
     its frontmatter ``title``; the capture path
     (``_materialize_session_source``) has no title and passes its derived
-    ``summary``. Before this, the indexer set the field but the capture path
+    ``topics``. Before this, the indexer set the field but the capture path
     never did, and no ``Source`` FTS index existed at all — a captured session
     was unfindable through ``tortoise_fts_query(entity_type='source')``.
+
+    ⛔ #10000: the capture path passes ``topics``, NOT its ``summary``. The two
+    differ by the DISPLAY prefix ``summary`` carries
+    (``_SESSION_SOURCE_SUMMARY_PREFIX``), and that prefix must never reach the
+    index: this leg OR-unions its query terms (``sparse.build_or_query``), so a
+    constant "session capture topics" in every capture's search text makes every
+    captured session match any source query containing one of those three words.
+    The lexicon alone is what discriminates; the prefix only reads well.
     """
-    text = title or summary
-    return text or None
+    if title:
+        return title
+    if topics:
+        return ", ".join(topics)
+    return summary or None
 
 
 def _session_extraction_estimate(conversation: list[dict], *,
@@ -5862,6 +6089,108 @@ _ENTITY_ANCHOR_CANDIDATES = 20
 _ENTITY_ALIAS_MAX = 200
 _ENTITY_ALIAS_PER_ANCHOR = 64
 
+#: #2518 indicator 2 (dense-leg parity) — the switch that arms the dense half of
+#: the entity/fact-augmented key expansion, and the bounds on the alias text it
+#: appends to the read's own dense query.
+#:
+#: Default OFF: the #1745 fail-safe convention (a new retrieval lever ships OFF
+#: in the product until a measured delta adopts it), and the same posture the
+#: sparse half of this expansion already carries — the measured arm (issue
+#: comment 5821461301, ``NOT DECISIVE``) is the sparse-only arm, so its code path
+#: must stay BYTE-IDENTICAL and this switch is the only way the dense half can
+#: differ. Explicit falsy (``0``/``false``/``no``/``off``) is the operator's OFF;
+#: unset/blank/garbage resolves to the default through the ONE declared env
+#: contract (``tortoise/env_truthy.py``), so a typo never flips the knob.
+_ENTITY_KEY_DENSE_ENV = "TORTOISE_ENTITY_KEY_DENSE"
+#: The composer's bound, in the unit the encoder sees. An embedding is a
+#: FIXED-WIDTH vector no matter how long its input, so an unbounded alias tail
+#: costs no storage — it DILUTES the query vector, and a 200-alias tail would
+#: outvote the eight-token question it was meant to augment. Both bounds apply;
+#: whichever is hit first wins.
+_ENTITY_DENSE_ALIAS_CHARS = 240
+_ENTITY_DENSE_ALIAS_TERMS = 32
+
+
+def _entity_key_dense_enabled() -> bool:
+    """Is the DENSE half of C2's key expansion armed (#2518 indicator 2)?
+
+    Resolution goes through :func:`tortoise.env_truthy.env_flag`, whose contract
+    is exactly this case: unset/blank/garbage -> the DEFAULT (OFF), explicit
+    truthy -> True, explicit falsy -> False. A typo therefore never arms a
+    retrieval lever nobody measured.
+
+    The switch is INDEPENDENT of the sparse lever's (``entity_key_expansion``,
+    the SDK argument). Both must be on for the pass to fire at all — the dense
+    half is a PARITY, not a second mechanism — but this one alone decides
+    whether the measured sparse-only arm runs byte-identically, which is what
+    makes the two arms separable in an A/B.
+    """
+    from .env_truthy import env_flag
+
+    return env_flag(_ENTITY_KEY_DENSE_ENV, False)
+
+
+def _entity_key_dense_query(
+    dense_query: str | None, aliases: list[str] | None,
+) -> str | None:
+    """Compose the expansion's dense query text (#2518 indicator 2).
+
+    The read's OWN dense query (already carrying C6's date anchor when
+    ``time_aware`` rewrote it) followed by as many harvested aliases as the
+    bounds allow. Pure: no DB, no model, no clock — the testable half of the
+    pass, factored out the way :func:`tortoise.time_aware.dense_query_for` was.
+
+    Returns ``None`` when the composition adds NOTHING — the read's own tokens
+    already cover every alias token, or the alias pool is empty. The caller then
+    skips the extra embed entirely, which is the same "no wasted second pass"
+    guard the sparse half applies (a re-embed that cannot change the query
+    vector would only cost latency).
+
+    Determinism: ``aliases`` arrives sorted and de-duplicated from the harvest,
+    and this function never reorders — so two reads with the same harvest
+    compose the same string, and the same string embeds to the same vector.
+    """
+    if not dense_query or not str(dense_query).strip():
+        return None
+    if not aliases:
+        return None
+    from .sparse import tokenize_sparse_query
+
+    have = set(tokenize_sparse_query(dense_query, keep_numeric=True))
+    if not have:
+        return None
+    picked: list[str] = []
+    used_chars = 0
+    used_terms = 0
+    for alias in aliases:
+        text = alias.strip()
+        if not text:
+            continue
+        alias_toks = tokenize_sparse_query(text, keep_numeric=True)
+        new_toks = [t for t in alias_toks if t not in have]
+        if not new_toks:
+            continue
+        if used_chars + len(text) + 1 > _ENTITY_DENSE_ALIAS_CHARS:
+            continue
+        # The TERM budget bounds the text this composer APPENDS — so it counts
+        # every token of the alias, not only the novel ones. Counting the novel
+        # half read as a budget that could never bind: a measured composition
+        # appended 33 tokens under a 32-token bound, because the repeated tokens
+        # (which still lengthen the composed query) were free (review finding,
+        # PR #11459).
+        if used_terms + len(alias_toks) > _ENTITY_DENSE_ALIAS_TERMS:
+            continue
+        picked.append(text)
+        have.update(new_toks)
+        used_chars += len(text) + 1
+        used_terms += len(alias_toks)
+        if (used_chars >= _ENTITY_DENSE_ALIAS_CHARS
+                or used_terms >= _ENTITY_DENSE_ALIAS_TERMS):
+            break
+    if not picked:
+        return None
+    return f"{str(dense_query).strip()} {' '.join(picked)}"
+
 # #1709: process-local serialization for the registry recovery mint (FalkorDB
 # has no transactions; parity with the Supabase lane's FOR UPDATE row lock —
 # concurrent same-token recoveries must not overshoot the non-bootstrap key
@@ -6906,6 +7235,138 @@ def _item_supplied_key(item: dict) -> object:
     return nested.get("key") if isinstance(nested, dict) else None
 
 
+#: The characters the engine's key INDEX trims — its own set, measured (#10481),
+#: NOT Python's ``str.isspace()`` class (see :func:`_key_seek_term`).
+_KEY_INDEX_TRIM_SET = " \t\n\v\f\r"
+
+
+def _key_seek_term(key: object) -> object:
+    """The term the KEY-IDENTITY seek must send for ``key`` — the value the
+    engine's index actually holds, which is the ASCII-TRIMMED term (#10481).
+
+    ⛔ Why this exists, measured: ``key`` is index-backed
+    (``projection._POINT_RANGE_INDEX_PROPS``, #8400) and FalkorDB stores the
+    TRIMMED term in the index while the equality seek does not trim its query
+    side (#9599), so a node written under ``"  PK  "`` is INVISIBLE to
+    ``n.key = $key`` with ``key="  PK  "`` and findable only by ``key="PK"``.
+    ``_find_points_by_key`` therefore returned ``[]`` for a key the graph
+    demonstrably holds, and ``create_point(dedup=True, key="  PK  "..)`` minted
+    a SECOND carrier of one key — the #6110 duplicate the key-identity
+    machinery exists to prevent. It is not only the writer: the
+    #6110/#8400/#9819 Phase-1 guard (``_key_holder_state``) asks the same seek
+    and got the same empty answer, so it CERTIFIED the duplicate write.
+
+    ⛔ NOT a reopen of #9553's recorded position, and deliberately narrow. The
+    pending owner question on #9599 (comment 6342343424: refuse / trim /
+    store-verbatim) is about the STORED value, and this function never touches
+    it: a padded identity is still stored VERBATIM (asserted by
+    ``test_a_padded_key_is_still_STORED_VERBATIM``). What it normalises is the
+    SEARCH TERM — to the very term the engine already indexed and already
+    matched by the trimmed spelling, so the seek starts answering the spelling
+    it was given instead of inventing a third one. Nothing a caller can observe
+    about a stored row changes; a padded row gains findability by its own
+    spelling (it had none) and a pre-existing twin pair becomes visible as the
+    multi-holder set ``_find_points_by_key`` already returns and the writer
+    already WARNS about, rather than being silently half-invisible.
+
+    Scoped to the key leg on purpose: ``key`` is the only identity prop this
+    seek serves, and applying it to the other indexed props (``id``,
+    ``pointKind``, ``content_hash``) would be the wider ruling that question
+    reserves (§Scope of the ruling). A non-string keeps its current shape and
+    is refused downstream exactly as before.
+
+    ⛔ THE TRIM SET IS THE ENGINE'S, NOT PYTHON'S — ``\\t\\n\\v\\f\\r`` and a
+    space, exactly, never bare ``str.strip()``. Measured on the EMBEDDED engine
+    (review finding, #10481): the index trims those SIX ASCII characters and no
+    others. That measurement is re-taken as a SEPARATE pin on the engine CI
+    actually runs — ``falkordb-server:v4.20.6``, in
+    ``tests/test_indexes.py::test_docker_lane_key_index_serves_the_SDK_seek_term``
+    — which is why the two tests name one set each rather than one test standing
+    for both engines. So for a pad the engine does NOT trim — ``"\\u00a0PK\\u00a0"``
+    (NBSP), ``\\u2003`` (em space), ``\\u3000`` (ideographic), ``\\x1f`` — the
+    seek matches the RAW term verbatim. ``str.strip()`` uses Python's much
+    wider ``str.isspace()`` class, so it would rewrite an NBSP pad to ``"PK"``
+    and send a term the index does not hold: a key that was findable by its own
+    spelling BEFORE this fix would lose it, and two ``dedup=True`` writes that
+    folded would mint a duplicate again — the defect inverted, and worse. The
+    ``test_a_NON_ASCII_pad_is_seekable_by_its_OWN_spelling`` case pins it.
+
+    ⚠️ A whitespace-ONLY term answers ``""``, and that is safe only because
+    every call site pre-gates on ``key.strip()`` truthiness
+    (``_resolve_dedup_hit``, ``_key_holder_state``, ``_item_dedup_key``), so it
+    is never reached. It must STAY that way: ``""`` is not a key identity
+    anything above this line defines, and a caller that stopped gating would be
+    asking this seek a question the key-identity path does not answer. (Measured
+    on the embedded engine: ``n.key = ""`` matches nothing, so the failure would
+    be a silent MISS rather than a cross-key match — still wrong, and still
+    not this function's to paper over.)
+    """
+    return key.strip(_KEY_INDEX_TRIM_SET) if isinstance(key, str) else key
+
+
+def _key_seek_terms(key: object) -> tuple[object, ...]:
+    """EVERY term the key-identity seek must send for ``key`` — the
+    ENGINE-TRIMMED term first (the term the ``:Point(key)`` index serves), plus
+    the caller's RAW spelling when the two differ (#10481 review P2).
+
+    ⛔ WHY TWO TERMS, and why one was not enough. ``n.key = $term`` has TWO
+    engine forms and only ONE of them normalises:
+
+      * **index-served** (the normal state): the range index holds the TRIMMED
+        term, so a seek must send the trimmed term — that is
+        :func:`_key_seek_term`, and it is why ``"  PK  "`` was unfindable by its
+        own spelling (#10481). The index does NOT trim the QUERY side.
+      * **label scan** (the degraded state): with no ``:Point(key)`` index the
+        predicate is evaluated against the STORED bytes with no normalisation
+        at all. Index creation is BEST-EFFORT (``projection/__init__.py``
+        ``_ensure_indexes_declared``: every ``CREATE INDEX`` is in a
+        ``try/except`` that only logs), so this is a silent, reachable steady
+        state — and a not-yet-OPERATIONAL index is its transient form.
+
+    MEASURED on the embedded engine (2026-11-06, one Point written under
+    ``"  PK  "``), the two forms answer OPPOSITE seeks for the same row::
+
+        index present: seek "  PK  " -> []          seek "PK"     -> [id]
+        index ABSENT:  seek "  PK  " -> [id]        seek "PK"     -> []
+
+    So the trimmed term ALONE (the #10481 fix as first written) is correct in
+    the index form and a NEW-MISS in the scan form: post-fix, a padded-stored
+    key is unfindable by BOTH spellings there, and the #6110 duplicate this fix
+    exists to close is re-created — in the one state where the pre-fix code was
+    right. ``_key_holder_state`` asks this same seek, so that form also
+    CERTIFIES the duplicate. Sending both terms makes the predicate a strict
+    SUPERSET of the pre-fix predicate in BOTH forms (a pre-fix hit meant
+    ``stored == raw``, which is exactly the raw disjunct), so the PR's "ZERO
+    old-hit → new-miss" claim holds unconditionally rather than only where an
+    index is served.
+
+    ⛔ IDENTITY-SAFE by construction, which is why this is not a widening of
+    what a key IS. Both disjuncts accept only stored spellings whose
+    ENGINE-TRIMMED form equals the trimmed term we seek: the trimmed disjunct
+    because the index holds exactly ``trim(stored)``, the raw disjunct because
+    it requires ``stored == raw`` and therefore ``trim(stored) == trim(raw)``
+    (the trimmed term). So no holder outside the caller's own trimmed identity
+    class can ever match — a padded key cannot fold onto a DIFFERENT key. What
+    the raw disjunct buys is the label-scan form's own (unnormalised)
+    findability, not a second identity.
+
+    ⚠️ Residual, stated rather than implied: in the label-scan form a stored
+    value padded DIFFERENTLY from the query (stored ``"PK\\t"``, seek
+    ``"  PK  "``) is still a miss — the two forms agree only on the spellings we
+    actually send. That is exactly the pre-fix behaviour for that state (it was
+    a miss before too), it is not reachable once the index exists, and closing
+    it would need a normalising predicate on the STORED side, which cannot use
+    the index — the 40x label scan that #8400's index exists to remove.
+
+    A non-string (or an already-trimmed string) yields a single term and the
+    seek keeps its exact pre-existing shape.
+    """
+    trimmed = _key_seek_term(key)
+    if isinstance(key, str) and trimmed != key:
+        return (trimmed, key)
+    return (trimmed,)
+
+
 def _item_dedup_key(item: dict) -> str | None:
     """The effective dedup ``key`` of an ingest bundle item — the SAME value
     ``create_point`` sees after ``_coerce_props`` flattens the item (#6110,
@@ -6915,8 +7376,17 @@ def _item_dedup_key(item: dict) -> str | None:
     ``props`` on collision, and that precedence is by PRESENCE, not by
     truthiness — see :func:`_item_supplied_key`, the one home for it.
 
-    ⛔ THIS answers *"what key does the RESOLVER receive?"*, which is why a
-    blank key is treated as ABSENT (the historic content-only path). That is
+    ⛔ THIS answers *"what key does the RESOLVER receive?"*, so it returns the
+    SAME normalised term the resolver seeks — ``_key_seek_term`` (#10481): the
+    engine's equality seek is index-served by the TRIMMED term, so `"  PK  "`
+    and `"PK"` are ONE key to the writer. That is what makes the bundle-order
+    simulation agree with the write it predicts: `minted_keys` /
+    `minted_terminal` are keyed by this value, so two items naming one key by
+    two paddings are recognised as the same identity instead of one being
+    certified as a fresh mint that the writer then FOLDS (the #8400/#9173
+    terminal-mutation hazard, review finding 1).
+
+    A blank key is treated as ABSENT (the historic content-only path) —
     ``create_point``'s own test on the way IN (``_has_key`` is a ``.strip()``
     test, and it passes ``key=None`` when it fails). It is NOT the same
     question as *"what does the minted NODE hold?"* — see
@@ -6925,7 +7395,7 @@ def _item_dedup_key(item: dict) -> str | None:
     (#9819 review P2).
     """
     val = _item_supplied_key(item)
-    return val if isinstance(val, str) and val.strip() else None
+    return _key_seek_term(val) if isinstance(val, str) and val.strip() else None
 
 
 def _item_stored_key(item: dict) -> str | None:
@@ -6952,17 +7422,18 @@ def _item_stored_key(item: dict) -> str | None:
     ⛔ Do NOT "tidy" the blank/padded case here into a strip or a refusal. A
     padded-but-REAL identity (``"  s1  "``) is a RECORDED POSITION — #9599's
     body records those as legitimate identities, and trimming or refusing one
-    REOPENS that position, so the answer is an OPEN OWNER QUESTION on #9599
-    (comment 6342343424: refuse / trim / store-verbatim, with their measured
-    consequences), not a caller's choice. It is sharp for THIS field because
-    ``key`` is index-backed (``_POINT_RANGE_INDEX_PROPS``) and the engine's
-    equality seek does not trim the query side while the index stores the
-    trimmed term: measured on the embedded engine here, ``"  PK  "`` is
-    invisible to ``_find_points_by_key`` (empty) and findable only by the
-    trimmed spelling, so two ``create_point(dedup=True, key="  PK  ")`` calls
-    mint TWO carriers of one key. That is the #6110 duplicate this repo exists
-    to prevent — it is filed, not absorbed, and this simulation must model the
-    writer AS IT IS until the owner rules. (#9819 review P2.)
+    REOPENS that position, so what is STORED is still an OPEN OWNER QUESTION on
+    #9599 (comment 6342343424: refuse / trim / store-verbatim, with their
+    measured consequences), not a caller's choice. `"  PK  "` is therefore
+    stored VERBATIM, and this function's truthiness test is unchanged.
+
+    ⚠️ What #10481 DID fix is the SEEK, not the stored value:
+    ``_find_points_by_key`` now sends ``_key_seek_term(key)``, the TRIMMED term
+    the engine's index actually serves, so ``"  PK  "`` is no longer invisible
+    to its own spelling and two ``create_point(dedup=True, key="  PK  ")``
+    calls now FOLD onto one carrier instead of minting two (#6110). The writer
+    stores the padded value and resolves it by the trimmed term — i.e. this
+    simulation still models the writer as it is.
     """
     val = _item_supplied_key(item)
     return val if isinstance(val, str) and val else None
@@ -7914,6 +8385,13 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "story_arc_chars": len(out.get("story_arc") or "")},
         # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
         # is S2's own output; ``embed_list`` is what S4 left of it).
+        # ⛔ ON THE ``TORTOISE_PARTIAL_GAP_FILL`` ARM THIS COUNT IS NOT S2.1's
+        # OWN OUTPUT (#11534 review, P2): S2.2b-ADD rebinds ``embed_list`` to the
+        # union of S2.1's candidates and the spans it filled BEFORE ``s2_embed``
+        # is assigned, so the count includes that stage's additions. "Pre-S4"
+        # still holds — no S4 item is in it — but a reader attributing the whole
+        # number to S2.1 over-counts on that arm; ``stats["partial_gap_fill"]``
+        # (``added_items`` / ``added_by_section``) is what separates them.
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},
@@ -9799,6 +10277,66 @@ def _ledger_record(label: str, rows: list[dict]) -> None:
 #: Object / Source) that has no such property.
 _CLAIM_CLASS_POINT_TYPES: frozenset[str] = frozenset({"point", "operator"})
 
+#: Property filters that name a Point's PROVENANCE REFS — the one filter family
+#: whose value a Point can hold MANY of (#10063). Everything else is matched by
+#: exact property equality and is deliberately left alone.
+_REF_FILTER_PROPERTIES: frozenset[str] = frozenset({
+    "extractedFrom", "extractedFromAll",
+})
+
+
+def _property_filter_clause(key: str) -> str:
+    """The WHERE clause for one ``query()`` / ``paginated_query()`` filter.
+
+    DEFAULT: exact property EQUALITY — ``n.`<key>` = $<key>``. That is the
+    behaviour every core caller has always had, and it does not change here.
+
+    ``extractedFrom`` / ``extractedFromAll`` are the exception (#10063). They
+    name provenance REFS, and a Point can carry N of them, while the node
+    property is not the authority for that: ONTOLOGY §3.3 / #3263 make the
+    ``:Source`` EDGES authoritative and the property a query convenience. The
+    equality-only predicate therefore answered for exactly ONE ref:
+
+      * a dedup fold keeps the survivor's OWN creating ref in
+        ``extractedFrom`` as a SCALAR (deliberately, so the creating source
+        keeps answering — #7704 review P1) and carries the folded set on
+        ``extractedFromAll``; the folded-IN source matched NOTHING, so a claim
+        that had just been given a second source was invisible to it.
+      * a Point born from a ref SEQUENCE stores an ARRAY (the writer's shape
+        rule, #3263) — and an array never equals a string, so NONE of its refs
+        answered, including the ones it was created under.
+
+    The clause is a UNION of that equality (KEPT, so a ref that exists only as
+    a property — data from before the edges were written — still answers, and
+    NO caller loses a match it had before) and a PATTERN PREDICATE over the
+    authoritative edge.
+
+    ⚠️ The equality arm is LIVE only for the SINGLE-VALUED key. A fold stores
+    the accumulated set as an ARRAY beside the scalar, so
+    ``n.`extractedFromAll` = $extractedFromAll`` is ``array = 'string'`` and
+    never true: that key answers through the EDGE arm ALONE, and a Point
+    carrying it as a property with no ``:Source`` edge is not findable. Both
+    keys are in the family because they are the same provenance question, not
+    because both equality arms can match.
+
+    ⛔ The edge arm is a pattern predicate, NOT ``$x IN n.<prop>``: this engine
+    raises ``Type mismatch: expected List or Null but was String`` when the
+    right-hand operand of ``IN`` is a scalar, so an ``IN`` arm would break
+    EVERY filter in the graph, not just the ref ones. FalkorDB documents
+    pattern predicates in ``WHERE`` as fully supported and
+    ``exists((n)-[:R]->(m))`` as NOT (docs.falkordb.com/cypher/cypher-support
+    and /cypher/functions) — this is the supported spelling; ``exists(...)``
+    over a pattern raises ``Unable to resolve filtered alias``.
+
+    Both directions are pinned in ``tests/test_provenance_extractedfrom_3263.py``:
+    a carried ref answers, an uncarried one still does not, a scalar property
+    filter stays exact, and a property-only ref keeps answering.
+    """
+    if key in _REF_FILTER_PROPERTIES:
+        return (f"(n.`{key}` = ${key} OR "
+                f"(n)-[:extractedFrom]->(:Source {{url: ${key}}}))")
+    return f"n.`{key}` = ${key}"
+
 
 class TortoiseSDK:
     """Layer 1 facade for Tortoise epistemic graph interaction.
@@ -10345,22 +10883,23 @@ class TortoiseSDK:
             # `EventLog.carried_records`); its absence is not proof of early
             # life, so this only ever ADDS a report, never invents one.
             #
-            # ⛔ AND THE MAP IS THE SECOND WITNESS (review round 16, finding 1).
-            # On the RESUME path `narrowed` is empty by construction, so the
-            # answer below used to be `False` — "a typo" — for an id the
-            # RETAINED MAP held as PRESENT. A map that says ``True`` was folded
-            # from records that named this point, so the honest answer to a
-            # journal whose file just went away is UNJUDGED (``None``), not the
-            # silence this whole method exists to end: `journal_unreadable` is
-            # the vocabulary's own word for "nothing can be judged here". The
-            # inverse map value (``False``) is NOT the same case — it is a
-            # record the map READ (a delete, a merge loser), so answering it
-            # silently is what that evidence says.
+            # ⛔ AND THE RETAINED MAP IS THE SECOND WITNESS (review round 16,
+            # finding 1). On the RESUME path `narrowed` is empty by
+            # construction, so the answer below used to be `False` — "a typo"
+            # — for an id the RETAINED MAP held as PRESENT. A map that says
+            # ``True`` was folded from records that named this point, so the
+            # honest answer to a journal whose file just went away is UNJUDGED
+            # (``None``), not the silence this whole method exists to end:
+            # `journal_unreadable` is the vocabulary's own word for "nothing
+            # can be judged here". The INVERSE map value (``False``) is NOT the
+            # same case — it is a record the map READ (a delete, a merge
+            # loser), so answering that silently is what its evidence says.
+            #
             # The retained map describes a file that is GONE, so it is dropped
-            # rather than left to answer a next call: an unlink frees the inode,
-            # and a re-created path can be handed the same `(st_dev, st_ino)`
-            # back — the one identity a memo cannot tell apart from the file it
-            # was folded from.
+            # rather than left to answer a later call: an unlink frees the
+            # inode, and a re-created path can be handed the same
+            # `(st_dev, st_ino)` back — the one identity a memo cannot tell
+            # apart from the file it was folded from.
             self._journal_presence_memo = None
             if self._journal_carried_records(log) or known.get(point_id) is True:
                 _logger.warning(
@@ -10392,54 +10931,131 @@ class TortoiseSDK:
         # scan per absent write on the append-active lane #7405 describes.
         seam = self._journal_seam(log, resume)
         stat_after = self._journal_stat_key(log)
+        # ⛔ THREE DIFFERENT FACTS, ONE ANSWER (review rounds 17/18/20; header
+        # corrected round 21). `stat_after is None`, "a new inode sits at the
+        # path", and "the same inode was truncated under the fold" are NOT the
+        # same evidence, and each arm below names its own with the citation
+        # that justifies it. But since round 20 they are the SAME ANSWER:
+        # every one of them drops the memo and hands `known` on to the needle
+        # as the WITNESS. So the three arms are, as of this writing,
+        # byte-identical — the split is documentation-of-evidence, NOT three
+        # behaviours, and the whole block is equivalent to
+        #
+        #   if (stat_after is None or stat_after[:2] != stat_key[:2]
+        #           or stat_after[2] < resume):
+        #
+        # Collapsing it would therefore be a semantic no-op today. It is left
+        # split because each arm's comment is the record of WHY that
+        # interleaving must be loud (rounds 17/18 answered differently, and
+        # THAT divergence — not the collapse — is what once put this tree BELOW
+        # `main` for one interleaving); round 20 made the answers agree, and
+        # this header is the correction that says so instead of still claiming
+        # two answers.
+        #
+        # * ``stat_after is None``: the path no longer names a file. `open()`
+        #   binds the INODE, and unlink(2) says a file with an open descriptor
+        #   "will remain in existence until the last file descriptor referring
+        #   to it is closed"
+        #   (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so the fold
+        #   DID read bytes this journal really held, and `known` (folded from
+        #   them) is valid EVIDENCE, not a stale map. It is handed to the needle
+        #   as the WITNESS: an id it holds as PRESENT must answer UNJUDGED
+        #   (``None`` ⇒ `journal_unreadable`), because the deletion that removed
+        #   the path can take the position sidecar with it, and then
+        #   `_journal_carried_records` cannot see the loss either. Without the
+        #   witness that loss was reported as "a typo" — silent — which is
+        #   #10515 indicator 1, and is exactly what `main` reported loudly.
+        # * REPLACEMENT: a new `st_dev`/`st_ino` (a rotate, an `mv`, a restore),
+        #   so `resume`/`seam` describe the NEW file while `known` came from the
+        #   OLD one. The map is NOT evidence about presence at THIS path — the
+        #   re-fold answers that, and the memo is always dropped. But it IS
+        #   evidence about the question `_journal_knows_point` actually asks
+        #   ("was a revision LOST"): `rename(2)` guarantees the fd the fold read
+        #   still named the OLD file, so a map entry of ``True`` was folded from
+        #   records that really existed at this path and really named this point.
+        #   It is handed on as the WITNESS, like the two arms below (review round
+        #   20, finding 1: leaving this arm map-free made it the ONLY post-fold
+        #   arm that stayed quiet). ⚠️ This arm is a deliberate TIGHTENING over
+        #   this PR's base, NOT the parity the ``stat_after is None`` arm has:
+        #   `origin/main` folded truncation TOGETHER WITH replacement into one
+        #   MAP-FREE arm (``stat_after[2] < resume or stat_after[:2] !=
+        #   stat_key[:2]`` → ``_journal_presence_needle(log, point_id)``), so an
+        #   id the retained map held PRESENT answered ``False`` there — "a
+        #   typo", with no counter and no WARNING. The window is NARROW: the
+        #   rotate/`mv`/restore must land INSIDE one fold, because a rotation
+        #   between calls is absorbed by the memo-identity check above, where
+        #   `known` is still ``{}`` and the witness is inert. But `rename(2)`
+        #   makes the map valid evidence for the question being asked, and
+        #   silence about a destroyed record is the class #10515 indicator 1
+        #   forbids.
+        # * TRUNCATION of the SAME inode (``stat_after[2] < resume``): no new file
+        #   exists — the bytes the fold read were merely cut away — and this arm
+        #   is reachable ONLY when the fold consumed them, so `known` is the one
+        #   surviving record of what was destroyed. It is handed on as the
+        #   WITNESS, exactly as on the ``stat_after is None`` arm (review round
+        #   18, finding 1: both sub-cases shared ONE map-free arm, and for this
+        #   interleaving that put the crossing call's answer BELOW `main`'s).
         if stat_after is None:
-            # ⛔ THE PATH WENT AWAY UNDER THE FOLD, AND THE MAP IS A WITNESS TO
-            # IT (review round 17, finding 1). unlink(2): "if the name was the
-            # last link to a file but any processes still have the file open,
-            # the file will remain in existence until the last file descriptor
-            # referring to it is closed"
-            # (<https://man7.org/linux/man-pages/man2/unlink.2.html>) — so a
-            # deletion that lands AFTER the fold's `open()` raises NOTHING
-            # inside the fold: the scan reads the (now nameless) inode to EOF
-            # through the live fd, and the disappearance surfaces only here, at
-            # the post-fold stat. That interleaving is the SAME world state as a
-            # deletion landing one microsecond earlier, which the fold's own
-            # `FileNotFoundError` arm answers UNJUDGED when the map holds the id
-            # — and the evidence here is STRONGER, because `known` was folded
-            # from bytes this very call just read. So the map earns the same
-            # answer: an id it holds as PRESENT is `None` (⇒
-            # `journal_unreadable`), never "a typo"; the inverse value stays
-            # silent, because that id's record was actually READ. One extra
-            # `known` entry cannot invent an alarm: it is the same predicate the
-            # normal map path reports `journal_known` from.
             self._journal_presence_memo = None
             return self._journal_presence_needle(log, point_id, known)
-        if stat_after[2] < resume or stat_after[:2] != stat_key[:2]:
-            # The journal no longer holds the bytes that were folded, or was
-            # REPLACED under the fold (a new `st_dev`/`st_ino`: a rotate, an
-            # `mv`, a restore) — so `resume`/`seam` describe the NEW file while
-            # `known` came from the OLD one. Memoising would serve another file's
-            # records; one re-fold costs less. ⛔ AND THIS ARM STAYS MAP-FREE: a
-            # truncation or a replacement means the map describes bytes the file
-            # no longer has (round 9's rule), so `known` must not be consulted
-            # here — the re-fold answers for the file that is there now.
+        if stat_after[:2] != stat_key[:2]:
+            # The journal was REPLACED under the fold (a new `st_dev`/`st_ino`: a
+            # rotate, an `mv`, a restore) — so `resume`/`seam` describe the NEW
+            # file while `known` came from the OLD one. Memoising would serve
+            # another file's records; one re-fold costs less.
             #
             # ⛔ AND THE RE-FOLD IS THE ANSWER, NOT JUST THE MEMO'S FATE (review
             # round 16, finding 1). The comment above already says this map is
-            # not a prefix of the current file — and the next line used to answer
-            # THIS call out of it anyway, so a rotation/`mv`/restore that landed
-            # during the fold could silence a ``journal_known`` loss for exactly
-            # the call that detected it (``known[point_id] is False`` from the
-            # OLD file while the NEW one holds a ``PointAdded``). `open()` binds
-            # the inode, so the fd the fold read keeps the old file while a
-            # fresh read of the PATH resolves to the new one — rename(2): "Open
-            # file descriptors for oldpath are also
-            # unaffected" (<https://man7.org/linux/man-pages/man2/rename.2.html>).
-            # So the discarded map is re-derived from the file that is there now,
+            # not a prefix of the current file — and the next line used to
+            # answer THIS call out of it anyway, so a rotation/`mv`/restore that
+            # landed during the fold could silence a ``journal_known`` loss for
+            # exactly the call that DETECTED it (`known[point_id] is False` from
+            # the OLD file while the NEW one holds a ``PointAdded``). `open()`
+            # binds the inode, so the fd the fold read keeps the old file while
+            # a fresh read of the PATH resolves to the new one — rename(2):
+            # "Open file descriptors for oldpath are also unaffected"
+            # (<https://man7.org/linux/man-pages/man2/rename.2.html>). So the
+            # discarded map is re-derived from the file that is there NOW,
             # needle-filtered: bounded memory, one pass, and an answer that
             # describes THIS path rather than the one that was moved away.
+            #
+            # ⛔ AND `known` GOES WITH IT AS A WITNESS (review round 20, finding
+            # 1). Round 16 was right that this map cannot answer for the NEW
+            # file — so the re-fold answers, and the memo goes — but the same
+            # `rename(2)` fact cuts the other way too: the fd the fold read is
+            # still the OLD file, so a map entry of ``True`` is a record of a
+            # revision that existed HERE and that the live graph does not hold.
+            # Answering a bare "a typo" for it is the silence #10515 indicator 1
+            # forbids, and it made this the only post-fold arm that is QUIET
+            # while both of its siblings are loud. The needle applies it the
+            # round-19 way, so it can only ever make the answer LOUDER: a
+            # vacuous re-read (`point_id not in state`) ⇒ ``None``
+            # (`journal_unreadable`), a folded delete/merge-loser ⇒ ``False``
+            # (silent, its own evidence), so no `journal_known` is ever claimed
+            # that this call cannot support.
             self._journal_presence_memo = None
-            return self._journal_presence_needle(log, point_id)
+            return self._journal_presence_needle(log, point_id, known)
+        if stat_after[2] < resume:
+            # ⛔ THE SAME INODE, WITH THE FOLDED BYTES TRUNCATED AWAY (review
+            # round 18, finding 1). This is NOT the replacement case above: no
+            # new file exists, so `known` still describes THIS journal — it was
+            # folded over ``[0, resume)`` from a file we are still looking at,
+            # and the shrink proves those bytes were destroyed after that read.
+            # The map is therefore the witness of what existed, and the re-fold
+            # of the now-shorter file cannot see it. Answering "a typo" there is
+            # the silent loss #10515 indicator 1 forbids. ⚠️ This arm is a
+            # deliberate TIGHTENING over this PR's base, NOT parity: `origin/main`
+            # folded truncation together with replacement into one MAP-FREE arm
+            # (``stat_after[2] < resume or stat_after[:2] != stat_key[:2]`` →
+            # ``_journal_presence_needle(log, point_id)``), so a retained PRESENT
+            # map met a re-read that no longer holds the id and the call answered
+            # ``False`` — silent. (At the older `fcc742b8a` the single arm did
+            # consult the map via ``known.get(point_id, False)``, which is where
+            # the parity reading came from; that is not the base this branch
+            # lands on.) The answer can only get LOUDER, never manufacture a
+            # ``journal_known``.
+            self._journal_presence_memo = None
+            return self._journal_presence_needle(log, point_id, known)
         self._journal_presence_memo = {
             'log': log, 'ident': stat_after[:2], 'folded_to': resume,
             'mtime_ns': stat_after[3], 'known': known, 'seam': seam,
@@ -10518,25 +11134,76 @@ class TortoiseSDK:
     def _journal_presence_needle(self, log, point_id: str, known=None):
         """Re-fold the journal AS IT IS NOW, filtered to *point_id* (#10543 r16).
 
-        The honest answer once the retained map has been declared untrustworthy:
-        the map is dropped from the memo AND from this call's answer, because it
-        was folded from a file the path no longer names. Filtered to the one id,
-        so the pass is bounded in memory (at most one entry) and single-purpose.
+        The honest answer once the retained map has been declared
+        untrustworthy for THIS path: the map is always dropped from the memo, and
+        it is ALSO handed to this call as a WITNESS on all THREE post-fold arms.
+        On the ``stat_after is None`` arm and on the truncation arm the path still
+        names the inode the fold read (through its fd, or after a shrink); on the
+        REPLACEMENT arm the fd the fold read still named the OLD file, which
+        `rename(2)` leaves untouched. So on every one of them `known` is a record
+        of what the path held while the re-fold answers for the file that is there
+        now — which is why dropping the witness on the replacement arm made it the
+        ONE post-fold arm that stayed silent about a destroyed record (review
+        round 20, finding 1).
+        Filtered to the one id, so the pass is bounded in memory (at most one
+        entry) and single-purpose.
 
-        ``known`` is the map the CALLER folded, and it is consulted ONLY by the
-        caller whose evidence still describes this journal: the post-fold
-        ``os.stat`` answering ``None`` (the path went away while the fold read it
-        through an open fd — review round 17, finding 1). Every other caller
-        passes nothing, because a truncated or REPLACED file never held the
-        folded bytes (round 9's rule).
+        *known* is the RETAINED MAP as a WITNESS, and it is passed on EVERY
+        post-fold arm, because on every one of them it is evidence about a
+        different question from the one the re-fold answers. The re-fold answers
+        "does this file, HERE AND NOW, name the id". `known` answers "did a
+        revision at this path NAME the id that the live graph no longer holds" —
+        which is the question ``_journal_knows_point`` exists to report, and
+        ``rename(2)`` ("Open file descriptors for oldpath are also unaffected") /
+        unlink(2) (an open file survives its name) are what make the fold's own
+        map valid evidence for it even when the path has moved on: the
+        ``stat_after is None`` arm (the path went away while the fold read it),
+        the truncation arm (the same inode, its folded bytes cut away), and the
+        replacement arm (a new inode at the path, the fold having read the old
+        one). A map that says ``True`` was folded from records that named this
+        point, so a path that no longer answers for it cannot be judged
+        (``None`` ⇒ ``journal_unreadable``) — the same reading the fold's own
+        ``FileNotFoundError`` arm applies to its retained map. No entry of it can
+        invent an alarm: only ``True`` is ever consulted, and only when the
+        re-read has no line for the id.
+
+        ⛔ THE WITNESS IS APPLIED TO EVERY NON-ANSWER, NOT JUST THE RAISED ONE
+        (review round 18, finding 1). A re-read that SUCCEEDS and carries no LINE
+        for the id is equally unable to confirm a witness that says the journal
+        HELD it — the path can be recreated between the post-fold ``stat`` and
+        this read, and then ``FileNotFoundError`` never fires. So a ``False``
+        from the re-read is ``None`` whenever the witness holds the id as
+        PRESENT: a destroyed record must never be reported as "a typo".
+
+        ⛔ BUT ONLY A VACUOUS ``False`` IS A NON-ANSWER (review round 19, finding
+        1). ``state.get(point_id, False)`` collapses two different facts, and
+        round 18's override tested the dumped value instead of the fact:
+
+        * VACUOUS — no record in the re-read names the id, so this read has no
+          evidence and the witness' ``True`` is unconfirmed ⇒ ``None``;
+        * POSITIVE — a presence-REMOVING record names the id and was folded to
+          ``False`` (``EntityMutated op='delete'``, a hard ``PointRetracted``, a
+          merge loser), so the needle MATCHED it, parsed it and folded it. The
+          journal now says the point is GONE, and that is the answer its own
+          evidence supports ⇒ ``False``, silent.
+
+        Escalating the second to ``None`` files ``journal_unreadable`` for an
+        ordinary write-after-delete — indicator 2 of the caller's own docstring,
+        "a counter that fires on every write-after-delete can never be alerted
+        on", and the exact reading this method family already applies to the
+        retained map a few hundred lines up (``sdk.py:10347-10359``: "The INVERSE
+        map value (``False``) is NOT the same case — it is a record the map READ
+        (a delete, a merge loser), so answering that silently is what its
+        evidence says"). ``point_id in state`` is what tells the two apart, and it
+        is the only term the round-18 condition lacked.
 
         Three outcomes, the same vocabulary the rest of this method uses:
         ``True``/``False`` from the records that are there now, and ``None``
         (UNJUDGED ⇒ ``journal_unreadable``) when the re-read cannot answer — a
-        file that went away with records behind it, **or one the caller's map
-        proves carried this id**, or any failure. ``False`` is reserved for the
-        shape its own evidence supports: a journal that carried nothing, whose
-        absent id really is just a typo.
+        file that went away with records behind it, a witness that said it held
+        the id while this read found no line for it, or any failure. ``False`` is
+        reserved for the shape its own evidence supports: a journal that carried
+        nothing (a typo), or one that positively says the point is gone.
         """
         state: dict[str, bool] = {}
         try:
@@ -10545,11 +11212,9 @@ class TortoiseSDK:
         except FileNotFoundError:
             # The SAME two facts the fold's own FileNotFoundError arm splits: a
             # path nothing ever wrote is a typo (silent), a journal that carried
-            # records and then went away is UNJUDGED. The caller's map is the
-            # third witness, and it is the only one that survives the deletion
-            # shape that takes the `.position` sidecar WITH the journal — a
-            # PRESENT entry proves the journal carried this id even when nothing
-            # else can answer.
+            # records and then went away is UNJUDGED — and so is an id the
+            # WITNESS map held as PRESENT, which is the one fact that survives
+            # the sidecar going away with the journal.
             if known is not None and known.get(point_id) is True:
                 return None
             return None if self._journal_carried_records(log) else False
@@ -10560,7 +11225,23 @@ class TortoiseSDK:
                 "rather than asserted to be a typo (#10515)",
                 point_id, exc_info=True)
             return None
-        return state.get(point_id, False)
+        answer = state.get(point_id, False)
+        if (answer is False and point_id not in state
+                and known is not None and known.get(point_id) is True):
+            # The re-read SUCCEEDED and found no LINE for the id, but the witness
+            # proves the journal this call folded NAMED this point: the records
+            # are gone (a truncation, or a path recreated before this read), so
+            # the absence cannot be judged. ``False`` here is the silence #10515
+            # indicator 1 forbids.
+            #
+            # ⛔ ``point_id not in state`` IS THE OTHER HALF (review round 19,
+            # finding 1). Without it this condition also caught a ``False`` that
+            # a DELETE record folded — positive evidence that the journal now
+            # says the point is gone — and escalated an ordinary
+            # write-after-delete to `journal_unreadable`, which is indicator 2 of
+            # the docstring this method answers to.
+            return None
+        return answer
 
     @staticmethod
     def _journal_carried_records(log) -> bool:
@@ -12796,19 +13477,43 @@ class TortoiseSDK:
                 # nor an authored word (a bare dedup hit), so that path costs no
                 # extra query.
                 #
-                # ⛔ `props` is NEVER empty at this point, so the guard cannot be
-                # `props or …`: `content_hash` is set on it unconditionally
-                # above ("dedup flag only gates the existing-point lookup, not
-                # hash persistence", fix #80) and is not popped until the fold's
-                # own write leg, far below. A guard that reads `props` therefore
-                # admits EVERY dedup hit and spends a `LIFECYCLE_FANOUT_QUERY` on
-                # the bare one this comment promises costs nothing (#10841
-                # review, P3). The condition is the CALLER'S props — the set
-                # minus the hash this function itself added — which is what the
-                # sentence above actually describes.
-                _caller_props = set(props) - {"content_hash"}
+                # ⛔ THE GATE IS WHAT THE FOLD COULD **WRITE**, not the `props`
+                # dict as it happens to sit on this line. `content_hash` was put
+                # into `props` UNCONDITIONALLY at the top of this door and is not
+                # popped until after the #7704 provenance retrofit below, and
+                # `extractedFrom` is that retrofit (deliberately NOT refused) —
+                # so `if props` was ALWAYS true here, the "bare dedup hit costs
+                # no extra query" arm was unreachable, and every dedup hit spent
+                # a fan-out read on the NORMAL path ("the self-host surface
+                # dedups by DEFAULT", see the #10368 note above).
+                #
+                # ⚠️ THIS DEFECT WAS FIXED TWICE, INDEPENDENTLY: `origin/main`
+                # gates on `_caller_props = set(props) - {"content_hash"}` (#10841
+                # review, P3) and this fold gates on `_fold_words`, one name
+                # narrower. Both are the same repair; the difference is the
+                # DIRECTION of the subset: `_fold_words` is a SUBSET of
+                # `_caller_props`, so every hit that takes the read HERE would
+                # also have taken it under main's gate, and the evidence-only hit
+                # (an `extractedFrom` retrofit alone) is the only case that
+                # differs — main reads a verdict there, this gate does NOT, and
+                # there is nothing to decide: that hit writes no prop and no word.
+                #
+                # `_fold_words` is the PRE-POP image of what
+                # `_terminal_fold_refused` reads after its own pops, so the two
+                # can never disagree: `_TEMPORAL_RESTAMP_PROPS` shares no member
+                # with the two excluded names, so `_temporal ⊆ _fold_words` and
+                # the #7819 arm keeps its verdict; `key` stays in `_fold_words`,
+                # so a KEY-resolved fold is still governed (#6110); and an
+                # empty `_fold_words` with no authored word leaves the props leg
+                # with nothing to write, so there is no refusal to decide.
+                # Pinned by BOTH tests the two fixes brought, which is why the
+                # merge keeps both suites' cases:
+                # `tests/test_10368_terminal_create_fold.py::
+                # test_a_bare_dedup_hit_costs_no_terminal_read` (this fold) and
+                # `…::test_a_bare_dedup_hit_spends_no_terminal_read` (main).
+                _fold_words = set(props) - {"content_hash", "extractedFrom"}
                 _terminal = (self._lifecycle_terminal_marker(pid)
-                             if (_caller_props or cred_prior is not None)
+                             if (_fold_words or cred_prior is not None)
                              else None)
                 _temporal = _TEMPORAL_RESTAMP_PROPS & set(props)
                 if _temporal and _terminal is not None:
@@ -12867,6 +13572,47 @@ class TortoiseSDK:
                                 "the identity; pass a fresh key with "
                                 "dedup=False to mint a second point (#6110)",
                                 _supplied_key, pid)
+                        # The supplied spelling can differ from the one this
+                        # point was MINTED with, in BOTH directions — and only
+                        # one of them is #10481's:
+                        #   * PADDED supplied → TRIMMED holder is #10481's new
+                        #     reach (the seek is trim-aware now, so "  PK  "
+                        #     hits a holder of "PK");
+                        #   * TRIMMED supplied → PADDED holder was ALREADY
+                        #     reachable pre-fix, because the raw term matched
+                        #     the engine's trimmed index entry (#10481's own
+                        #     measurement). That half closes a PRE-EXISTING
+                        #     silent reassignment, not a #10481 consequence.
+                        # Either way the key IS the identity and the
+                        # FIRST-WRITER spelling is what the graph holds (#6110:
+                        # a dedup hit never silently reassigns an existing
+                        # key) — so the incoming spelling is NOT applied.
+                        # Relaying it would rewrite the stored value on a pure
+                        # dedup hit, bump ``updatedAt`` on every alternating
+                        # re-run (#490 churn), and be LIVE-ONLY:
+                        # ``PointRevised`` folds no ``key`` arm, so a rebuild
+                        # reverts the spelling (#9732).
+                        _existing_key = _existing.get("key")
+                        if (isinstance(_existing_key, str) and _existing_key
+                                and _existing_key != _supplied_key):
+                            props.pop("key", None)
+                            # …and SAY it (#10481 review, P3): the CONTENT-hit
+                            # branch below already warns when it refuses to
+                            # reassign a key, so a caller whose spelling was not
+                            # applied is told there. Popping silently here made
+                            # the same refusal invisible on the KEY-hit path —
+                            # the caller writes `"  PK  "`, gets a correct fold,
+                            # and never learns the graph kept `"PK"`. Same
+                            # posture as #6110's "say so, or the collision stays
+                            # silent", and for the same reason: the spelling the
+                            # graph holds is a fact about THEIR identity.
+                            _logger.warning(
+                                "create_point: key %r not applied — the key "
+                                "resolved point %s, which already holds key %r. "
+                                "A dedup hit never reassigns an existing key "
+                                "(#6110 first-writer-wins); the stored spelling "
+                                "is kept verbatim",
+                                _supplied_key, pid, _existing_key)
                     else:
                         # The hit came from CONTENT, not from the key: never
                         # silently REASSIGN an existing point's key. A key
@@ -15155,6 +15901,15 @@ class TortoiseSDK:
         # whose recorded read version is no longer current (shared with the
         # hosted receipt via the ONE home, so the two cannot drift).
         _attach_source_change_notices(resp, meta)
+        # #11237: what the S5 Job 1 relation write leg did — per-edge +
+        # counts. Additive and ALWAYS present when the leg ran, because the
+        # E4/E6 readings must read a WRITTEN number from the capture receipt
+        # rather than infer one: "the channel arrived" and "the edge landed"
+        # are different claims, and this key is the difference. Absent (not
+        # zeroed) on a capture with no relations at all, so a reader cannot
+        # confuse "nothing was stated" with "nothing was written".
+        if isinstance(meta.get("relation_write"), dict):
+            resp["relation_write"] = meta["relation_write"]
         # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
         # capture write path (after provenance stamp + operators wired) the
         # extracted claims are promoted draft→live and the BOUNDED ingest EP
@@ -15767,6 +16522,10 @@ class TortoiseSDK:
         # name only case-insensitively matches a subject name, while the
         # `MATCH (o:Object {name:$n})` resolution below is case-SENSITIVE.
         subject_entity_names: set[str] = set()
+        # #11237: `{name: [(graph_id, kind), …]}` — every entity THIS capture
+        # wrote, so the S5 Job 1 relation leg can resolve a stated endpoint
+        # name to the node it denotes (see the write leg below).
+        entity_index: dict[str, list[tuple[str, str | None]]] = {}
         for e in payload.get("entities", []) or []:
             name = str(e.get("name", "")).strip()
             if not name:
@@ -15780,15 +16539,25 @@ class TortoiseSDK:
                 subject_entity_names.add(name)
             try:
                 if _is_subject:
-                    self.create_entity(
+                    _written = self.create_entity(
                         "subject", name,
                         **({"subjectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
                 else:
-                    self.create_entity(
+                    _written = self.create_entity(
                         "object", name,
                         **({"objectKind": _ekind} if _ekind is not None else {}),
                         is_episodic=False)
+                # #11237: the S5 Job 1 relation write leg needs the GRAPH id
+                # each emitted entity resolved to — a relation names two
+                # entity NAMES, and an edge needs two nodes. Captured here,
+                # at the only call site that knows both, and keyed by name so
+                # the leg can also see a name this capture wrote TWICE under
+                # different kinds (an ambiguity it must refuse, not resolve —
+                # Layer-1 identity is `(name, kind)`, #11235).
+                _node_id = str((_written or {}).get("node", {}).get("id") or "")
+                if _node_id:
+                    entity_index.setdefault(name, []).append((_node_id, _ekind))
             except Exception as exc:  # noqa: BLE001, RUF100 — #2164: the
                 # old `except: pass` was indicator-4 hygiene — a swallowed
                 # create_entity failure silently stranding an Object a
@@ -16414,6 +17183,31 @@ class TortoiseSDK:
                 session_id=session_id, warn=warnings.append)
         except Exception as exc:  # pragma: no cover - defensive outer bound
             _logger.warning("supersession apply failed: %s", exc, exc_info=True)
+        # ── S5 Job 1 remainder (#11237): the narrative's entity↔entity
+        #    relations land as Object→Object edges ──
+        # `#10999` made the channel TRANSPORT ONLY — `result["relations"]`
+        # reached the caller and nothing consumed it, so a story that states
+        # "A changed because of B" produced two Objects and no edge between
+        # them. This is the consumer. It runs LAST, after every entity the
+        # relation can name has been written (a relation names entity NAMES;
+        # an edge needs graph ids), and it consumes ONLY the typed record —
+        # never the story's text, `summary` or `_searchText` (⛔ #10000, P0).
+        # Best-effort like the sibling legs: a write-path refusal is counted
+        # and named, never a capture failure.
+        relation_write: dict | None = None
+        if out.get("relations"):
+            try:
+                from tortoise.relation_write import apply_relation_edges
+                relation_write = apply_relation_edges(
+                    self, out.get("relations") or [], entity_index,
+                    warn=warnings.append)
+            except Exception as exc:  # pragma: no cover - defensive outer bound
+                _logger.warning("relation write leg failed: %s", exc,
+                                exc_info=True)
+                warnings.append(
+                    "narrative relation write leg failed "
+                    f"({type(exc).__name__}: {exc}) — the stated relations "
+                    "stay uncommitted (#11237)")
         # P1 #1529 (D6): completed-but-empty v2 output (no errors, no points)
         # is an additive warning — nothing extractable is not a failure and
         # never a silent extracted: 0.
@@ -16454,6 +17248,14 @@ class TortoiseSDK:
             # #5516: this capture's write-time source-change notices — the
             # capture RECEIPT is the write result its caller sees.
             "source_change_notices": source_change_notices,
+            # #11237: what the S5 Job 1 write leg did with the narrative's
+            # relations — the per-edge record plus the counts, so the E4/E6
+            # readings and the eval receipt read a WRITTEN number instead of
+            # "the channel arrived". ADDITIVE (absent, not zeroed, when the
+            # extractor stated no relations) so a reader cannot confuse
+            # "nothing was stated" with "nothing was written".
+            **({"relation_write": relation_write}
+               if relation_write is not None else {}),
         }
         return extracted, meta
 
@@ -16480,20 +17282,73 @@ class TortoiseSDK:
         references edge (test_backfill_sources.py).
 
         #4911: the transcript is SCRUBBED before anything is derived from it or
-        persisted. ``summary`` is the first substantive utterance and ``topics``
-        are the six most frequent content words — i.e. the session's own turn
-        text — so redacting only the turn Points left the SAME credential in
-        ``Source.summary`` / ``Source.topics`` on the same write (reproduced in
-        review). ``contentHash`` is taken over the redacted transcript too, so
-        the hash describes what is stored.
+        persisted. ``topics`` are the six most frequent content words (the
+        transcript's whole vocabulary when it is stopword-only) and ``summary``
+        is a DISPLAY descriptor built FROM them (#10000: it used to be the first
+        substantive utterance, i.e. raw turn prose on a node — see
+        ``_session_source_metadata``) — so redacting only the turn Points left
+        the SAME credential in ``Source.summary`` / ``Source.topics`` on the
+        same write (reproduced in review). ``contentHash`` is taken over the
+        redacted transcript too, so the hash describes what is stored.
 
         #3518: it also populates ``_searchText`` — the field the Source FTS
         index is declared on — via the shared ``_source_search_text`` rule
-        (title-else-summary; the capture path has no title). Without it the
+        (title-else-lexicon; the capture path has no title). Without it the
         captured session was created but NOT findable through
-        ``tortoise_fts_query(entity_type='source')``. The SET is a
-        ``coalesce``, so a re-capture of an empty transcript cannot erase the
-        text a previous capture (or the indexer path) established.
+        ``tortoise_fts_query(entity_type='source')``. It indexes the BARE
+        lexicon, never ``summary``: the display prefix is a constant, and this
+        leg OR-unions, so indexing it would make every capture match a query for
+        "session"/"capture"/"topics" (#10000). The SET is a ``coalesce``, so a
+        re-capture of an empty transcript cannot erase the text a previous
+        capture (or the indexer path) established. ``summary`` is written under
+        that SAME guard, so the display column and the indexed column keep
+        together or replace together and can never disagree.
+
+        ⛔ A pre-fix node is NOT healed by a re-capture, and the reason is the
+        MINT GATE, not this clause: this method's only production caller sits
+        inside ``if not session_existed or (retry_failed_capture and not
+        no_provider)`` in ``capture_session``, so re-capturing an ALREADY
+        CAPTURED session id is the #1727 no-op replay and never reaches these
+        SETs. A node that holds the pre-fix pair was written by a run of this
+        same method — i.e. one where ``session_existed`` was False — so it
+        coexists with the ``:Session`` node of its own capture (``capture_ok``
+        True) and the stale ``summary``/``_searchText`` pair survives every
+        later capture of that id, in the graph and in the Source FTS index.
+        MEASURED, not reasoned (#10852 review, P1): capture, overwrite the node
+        with the pre-fix prose, re-capture the identical conversation and again
+        with an extra turn — the pair is unchanged, only the counts move.
+
+        The routes that DO clear it are THREE, and they are named by
+        ``graph-scripts/11070_repair_session_source_prose.py``'s own reconciler
+        plus the two destructive ones: (1) a retry of a prior FAILED capture
+        (``retry_failed_capture``, #2335 — the gate admits that arm, so the
+        mint re-runs for the SAME node and the SETs above overwrite the pair);
+        (2) ``tortoise.session_source_prose_migration.reconcile_session_source_prose``
+        (#11070, shipped via #11152), which repairs the PAIR IN PLACE from the
+        record without a wipe — the only NON-destructive route; and (3) a full
+        ``record-restore``, whose ``_wipe_all_nodes`` is unconditional and
+        whole-graph, so it clears the pair along with everything else.
+        Two things that look like repairs are NOT, and a reader who acts on
+        them leaves the prose exactly where it is (#10852 review, P3): a
+        capture under a NEW ``session_id`` materialises a DIFFERENT node, since
+        the MERGE key is ``url = "session:<session_id>"`` — the old node keeps
+        its pair; and a record-sourced re-projection is a PREVENTION route, not
+        a clearing one — its write is additive
+        (``MERGE … SET n += $props``, ``cache_projection.node_statement``) and
+        ``summary`` is declined on that door, so a node that ALREADY carries
+        the pair keeps it, and the projection only ever produces a prose-free
+        node where none existed — PREVENTION, and that is all an INCREMENTAL
+        projection does. ⛔ It is not what a full restore does (route 3 above).
+        Everything else is a replay.
+
+        ⛔ Do NOT make the healing true by re-SETting on the replay arm. A
+        replay that writes is not a replay: #2104/#1727 require a re-capture of
+        an existing session to be a TRUE no-op — it must not re-SET the first
+        capture's ``capturedAt``/``contentHash`` either — and an earlier cut of
+        #10000 changed the ``coalesce`` below to an equivalent ``CASE WHEN $st
+        IS NOT NULL …`` while claiming it healed, which the two identical
+        functions cannot do. Do not restore that claim, and do not "fix" the
+        indexer's ``coalesce($st, s._searchText, s.title)`` on its strength.
         Additive and idempotent: never touches ``_link_source`` or
         ``_session_event_write``; re-capturing a session re-MERGEs the same
         url. The references edge is skipped when ``event_id`` is None (Event
@@ -16530,10 +17385,12 @@ class TortoiseSDK:
         # capture path MUST populate it or the captured session stays
         # unfindable. The capture path has no title (the indexer path is the
         # one that carries frontmatter), so the shared rule resolves to the
-        # derived summary. `coalesce` keeps an existing value when a
-        # re-capture of an empty transcript yields no text, mirroring the
-        # merge semantics `_upsert_source` applies on the indexer side.
-        search_text = _source_search_text(summary=summary)
+        # derived TOPIC LEXICON — not to `summary`, which is the same lexicon
+        # behind a display prefix that must not be indexed (#10000). `coalesce`
+        # keeps an existing value when a re-capture of an empty transcript
+        # yields no text, mirroring the merge semantics `_upsert_source` applies
+        # on the indexer side.
+        search_text = _source_search_text(topics=topics)
         params = {
             "url": url,
             "sk": "agentSession",
@@ -16566,8 +17423,42 @@ class TortoiseSDK:
             "OR s.contentHash <> $ch THEN $now "
             "ELSE coalesce(s.updatedAt, $now) END",
             "s.contentHash=$ch",
-            "s.summary=$sum",
-            "s.topics=$topics",
+            # #10000: `summary` and `_searchText` move under the SAME guard —
+            # both keep their previous value exactly when the derivation is
+            # empty, so the display column and the indexed column cannot
+            # disagree. It used to be `s.summary=$sum` unconditionally while the
+            # `_searchText` SET had a keep-arm, so a text-less re-capture BLANKED
+            # `summary` and left the indexed text (measured) — two columns that
+            # `_source_search_text` deliberately ties together, diverging on
+            # caller-controlled input. `coalesce(..., '')` keeps the value a
+            # fresh text-less node has always had.
+            "s.summary=CASE WHEN $sum <> '' THEN $sum "
+            "ELSE coalesce(s.summary, '') END",
+            # #10000: `topics` moves under the SAME guard as `summary`. It used to
+            # be unconditional (`s.topics=$topics`), so a text-less re-capture
+            # left `topics=[]` while `summary`/`_searchText` kept the lexicon
+            # those topics name — the third column disagreeing with the two it
+            # is a view of.
+            "s.topics=CASE WHEN size($topics) > 0 THEN $topics "
+            "ELSE coalesce(s.topics, []) END",
+            # #10000: `coalesce` keeps the stored text ONLY when this capture
+            # derives none — the KEEP-ARM, which is all a keep-arm can be. It
+            # is NOT the healing mechanism, and neither is the DERIVATION: a
+            # PRE-FIX node (one that ALREADY carries the prose pair) is not
+            # healed by a re-capture at all, because the MINT GATE makes a
+            # re-capture of an already-captured session the #1727 no-op REPLAY,
+            # and a replay never reaches these SETs. The mechanism, and the
+            # routes that DO clear such a node, are in this method's docstring
+            # above; the survival is pinned by
+            # `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
+            # Load-bearing alongside it, and correct on its own: an earlier cut
+            # rewrote this clause as an equivalent `CASE WHEN $st IS NOT NULL
+            # …` and claimed THAT rewrite was the healing — the two forms are
+            # the same function, so the change was a no-op and its claim was
+            # false (measured — `#10852` review, P2). Do not restore either
+            # claim; the ⛔ in the docstring is the guard. The two capture
+            # writes cannot collide with the indexer either way: this writer
+            # only touches `session:<id>` Sources.
             f"s.{SOURCE_SEARCH_TEXT_FIELD}=coalesce($st, s.{SOURCE_SEARCH_TEXT_FIELD})",
             # ⛔ THIS STAYS A `coalesce` — #398's NEVER-OVERWRITE CONTRACT, and
             # #9451's fix is in the RECORD, not here. `ingestedAt` means "when
@@ -16652,7 +17543,17 @@ class TortoiseSDK:
             # other two: #9451 — the record must state the instant this write
             # STORED, which is the earlier writer's when the stub pre-existed
             # (`s.ingestedAt=coalesce(s.ingestedAt, $now)` keeps it), not `now`.
-            + " RETURN s.validFrom, s.is_episodic, s.ingestedAt",
+            # #10000: the three DERIVED columns are read back for exactly the
+            # same reason as the three above — `summary`/`topics`/`_searchText`
+            # now all have a keep-arm, so the record must state what this write
+            # STORED, not what the call derived. Journalling the call's empty
+            # derivation made `derived != replay(journal)`: a text-less
+            # re-capture kept the display column live and the replay wrote `''`
+            # over it (measured — `rebuild()` and `rebuild_all()` both blanked
+            # `summary` while `_searchText` survived, the #5024/#5097 class this
+            # carrier exists to close).
+            + f" RETURN s.validFrom, s.is_episodic, s.ingestedAt,"
+              f" s.summary, s.topics, s.{SOURCE_SEARCH_TEXT_FIELD}",
             params=params,
         ).result_set
         prior_valid_from = _rows[0][0] if _rows else None
@@ -16668,6 +17569,12 @@ class TortoiseSDK:
         # the very divergence this issue closes, on that one state.
         _stored = _rows[0][2] if _rows else None
         stored_ingested_at = now if _stored is None else _stored
+        # #10000: the stored derived columns (see the RETURN note above). The
+        # call's values are the fallback only for a MERGE that returned no row —
+        # nothing was written, so there is no stored value to state.
+        stored_summary = _rows[0][3] if _rows else summary
+        stored_topics = _rows[0][4] if _rows else topics
+        stored_search_text = _rows[0][5] if _rows else search_text
         # ⛔ §17.1 ORDER (#9206 review P1): THE RECORD IS APPENDED HERE, BEFORE
         # the `link_source_to_event` write below — not after it (where it used to
         # sit), and BEFORE the record's own explanatory block explains why it is
@@ -16717,11 +17624,11 @@ class TortoiseSDK:
             # in `record_projection._RECORD_ONLY_KEYS` so it never enters a
             # record's props tail.
             _ingestedAtStored=True,
-            **{SOURCE_SEARCH_TEXT_FIELD: search_text},
+            **{SOURCE_SEARCH_TEXT_FIELD: stored_search_text},
             sessionId=session_id,
             capturedAt=now,
-            summary=summary,
-            topics=topics,
+            summary=stored_summary,
+            topics=stored_topics,
             **(({"eventId": event_id}) if event_id else {}),
         )
         if event_id:
@@ -19865,7 +20772,24 @@ class TortoiseSDK:
                 # this arm's mixed-``idx`` sibling closes, on the direction axis).
                 # A node with no ``op_type`` is pre-v3.6 legacy; the rel type that
                 # carried it into this set IS its mechanism then.
-                _dirs = {_d for _, _d in _meta_rows}
+                # ⛔ A stored ``direction`` may be a RAW-WRITTEN non-scalar (list/
+                # map — hand edit, a foreign/legacy writer, a bulk import) and
+                # such a value is UNHASHABLE, so the bare set comprehension this
+                # replaced raised ``TypeError: unhashable type`` BEFORE any
+                # verdict — aborting every supersede that touched that operator,
+                # not only override-shaped ones (#10559).
+                # The reading mirrors #10552's 2a-DIRECT arm: a PRESENT
+                # non-string is judged BOTH ways (``<->``, which
+                # ``_canonical_direction`` returns verbatim for every type, so
+                # the stand-in flows through the existing predicate unchanged —
+                # fail-CLOSED, since a reader sees a present junk token as the
+                # mutual default), while ABSENT (``None``) keeps the edge type's
+                # own default exactly as before.
+                _dirs = {
+                    _d if isinstance(_d, str)
+                    else ("<->" if _d is not None else None)
+                    for _, _d in _meta_rows
+                }
                 # ⛔ A stored ``op_type`` OUTSIDE the pair is no exemption
                 # (#10418 review P3). ``create_operator`` routes every other
                 # ``op_type`` to a ``hasPart`` edge (``:20244``), so
@@ -19958,10 +20882,14 @@ class TortoiseSDK:
         #
         # ⛔ ONE predicate: ``claim_class.direction_blocks_create``, fed the
         # edge's stored direction — a string verbatim, the edge TYPE's default
-        # when ABSENT, both ways for a present non-string (see the per-row
-        # note) — and, for the first two, the same canonicalizer as
-        # ``create_operator``, ``create_direct_edge``, ``ingest``'s
-        # partial-absorb branch and #10195's operator pre-flight above. A
+        # when ABSENT, and a present non-string VERBATIM TOO, which
+        # ``direction_flows`` then reads as BOTH ways (see the per-row note) —
+        # and, all three of them, through the same canonicalizer as
+        # ``create_operator``, ``create_direct_edge`` and ``ingest``'s
+        # partial-absorb branch. #10195's operator pre-flight above reads the
+        # same predicate, but it screens a non-string to ``"<->"`` BEFORE
+        # canonicalizing — a hashability screen, not a second policy (see the
+        # per-row note). A
         # second copy of "may this edge exist" would be a finding of its own.
         # The REFUSAL message is that
         # predicate's own (``override_refusal``), with this surface named —
@@ -20130,56 +21058,60 @@ class TortoiseSDK:
                     continue
                 _rdict = (dict(_rel.properties)
                           if hasattr(_rel, "properties") else {})
-                # ⛔ Only a STRING token reaches the predicate: a raw-written
-                # non-scalar ``direction`` (a list/map property) is UNHASHABLE,
-                # and ``direction_flows`` tests membership in a frozenset — so
-                # handing it over aborts the supersede with a ``TypeError`` the
-                # guard is not about. ⚠️ The three cases below are DIFFERENT,
-                # and none is read off ``create_direct_edge`` blindly: a string
-                # is judged on the leg set ``direction_flows`` gives it, a
-                # present non-string is judged BOTH ways (the hashable reader
-                # verdict, and the fail-closed stand-in where no reader verdict
-                # exists), and only the ABSENT case takes the creation door's
-                # canonical form — because that is the token the door WRITES,
-                # so no reader ever sees a door-made absent edge. A *string*
-                # token passes through verbatim (one outside the vocabulary is
-                # read by ``direction_flows`` as both ways — the leg set the EP
-                # backstop sees, so a door reading it more narrowly would judge
-                # ONE leg of a two-leg factor (the backstop NARROWS, it does not
-                # drop — measured: such a factor loads as ``'<-'`` with
-                # ``skipped == []``); an ABSENT token takes the
-                # edge TYPE's default (what ``create_direct_edge``
-                # canonicalizes it to before judging — deliberately NOT
+                # ⛔ ONE reader — no door-local copy of the direction policy
+                # (#10520 A4). The stored token goes straight to
+                # ``_canonical_direction``, the same canonicalization
+                # ``create_direct_edge`` applies, and the VERDICT then comes from
+                # ``claim_class.direction_blocks_create`` ->
+                # ``live.direction_flows``, the same normalizer the EP backstop
+                # reads. A PRESENT value is returned VERBATIM (only ABSENT is
+                # replaced by the edge TYPE's default — deliberately NOT
                 # ``ep.py``'s ``coalesce(r.direction, 'bidirectional')``, which
                 # would be the over-refusal the directionless-NAND pin exists to
-                # prevent); a PRESENT non-string token is judged BOTH ways: a
-                # HASHABLE one (``3``, ``True``) is read as both ways by
-                # ``direction_flows`` and ``ep.py``, so both ways matches the
-                # leg set they see, while an UNHASHABLE one (list/map) makes
-                # ``direction_flows`` raise ``TypeError`` — there is no reader
-                # verdict to mirror, so both ways is the fail-closed stand-in
-                # (and keeps that value out of a frozenset membership test).
+                # prevent), and a present JUNK value is read as BOTH ways by
+                # ``direction_flows`` — which is also the fail-closed reading the
+                # EP backstop sees. Its ``isinstance(..., str)`` screen is what
+                # keeps a NON-``str`` unhashable value (a list, a map) out of a
+                # frozenset membership test; it is NOT a guarantee for an
+                # unhashable ``str`` SUBCLASS, which passes that screen and would
+                # still raise inside ``canonical_direction``'s own membership test
+                # (unreachable from a graph read — neither FalkorDB nor a JSON
+                # projection can yield one). ⛔ Do NOT reintroduce a per-value
+                # branch here: a second copy of the policy is what let this door
+                # publish its own token as ``judged`` in the refusal below, and it
+                # is behaviour-invisible (it verdicts identically by design), so
+                # the SHAPE is what is pinned —
+                # ``tests/test_2351_claim_class.py::
+                # test_the_repoint_door_carries_no_door_local_direction_filter``
+                # is the mechanical guard a comment cannot be.
+                # ⛔ Scope of "ONE reader": the 2a-OPERATOR pre-flight above DOES
+                # still screen a stored direction (``_d if isinstance(_d, str)
+                # else ("<->" if _d is not None else None)``) — that is a
+                # HASHABILITY screen, not a copy of this policy: the value becomes
+                # a SET KEY there, and an unhashable list/map aborted the whole
+                # pre-flight (#10559). Its ``<->`` stand-in yields the same verdict
+                # as this door's reading; what it does NOT do is name the stored
+                # value in its refusal, publishing ``'<->'`` for a value the graph
+                # does not carry — that residue is tracked as **#11072** (it is NOT
+                # #11033, which is the ID axis of the same pre-flight), not this
+                # door's.
                 _raw_dir = _rdict.get("direction")
-                if isinstance(_raw_dir, str):
-                    _eff_dir = self._canonical_direction(_rtype, _raw_dir)
-                elif _raw_dir is None:
-                    # ABSENT: the edge TYPE's own default (NAND ->
-                    # ``unidirectional``), exactly as ``create_direct_edge``
-                    # canonicalizes it before judging.
-                    _eff_dir = self._canonical_direction(_rtype, None)
-                else:
-                    # ⛔ A PRESENT non-string token is NOT "absent" to any
-                    # reader: ``live.direction_flows`` reads it as BOTH ways
-                    # (unknown ⇒ the mutual default), which is also the leg set
-                    # ``ep.py`` sees. Judging it as the type default would judge
-                    # ONE leg of a two-leg wiring — for NAND that let a supersede
-                    # write ``asserted -[NAND {junk}]-> derived``, whose backward
-                    # leg is the override ``create_direct_edge(NAND, …,
-                    # 'bidirectional')`` refuses (measured). Both ways is the
-                    # fail-CLOSED reading, and it also keeps the unhashable case
-                    # away from ``direction_flows``' frozenset membership (which
-                    # raises ``TypeError``).
-                    _eff_dir = "bidirectional"
+                _eff_dir = self._canonical_direction(_rtype, _raw_dir)
+                # ⛔ SAY ONLY WHAT THE MESSAGE DOES NOT ALREADY SAY. The
+                # canonicalizer substitutes ONLY for an ABSENT value (a present
+                # one is returned VERBATIM), so rendering ``(judged X)`` beside
+                # ``direction X`` is pure duplication — and deleting the
+                # door-local filter is exactly what turned the parenthetical
+                # from "the token this door substituted" into a copy of the
+                # value beside it. Render it ONLY where the canonicalization
+                # SUBSTITUTED: that is the one reading the caller cannot take
+                # from the stored value itself. ⛔ The condition is "did this
+                # substitute" (``_raw_dir is None``), NOT "is the result the same
+                # object": those coincide only while every token is returned
+                # by identity, and a normalizer that returned an EQUAL BUT
+                # DISTINCT token would silently re-create the duplicate.
+                _judged = ("" if _raw_dir is not None
+                           else f" (judged {_eff_dir!r})")
                 if _direction == "out":
                     _src_id, _tgt_id = new_id, _tid
                     _src_classes, _tgt_classes = _new_classes, _tid_classes
@@ -20197,8 +21129,7 @@ class TortoiseSDK:
                         surface=(f"supersede_point: re-pointing the "
                                  f"{_rtype} edge {_src_id!r}->{_tgt_id!r} "
                                  f"(from {old_id!r} to {new_id!r}, "
-                                 f"direction {_raw_dir!r} "
-                                 f"(judged {_eff_dir!r}))")))
+                                 f"direction {_raw_dir!r}{_judged})")))
 
         # #432 Task 3: durable PointSuperseded event (append-before-mutation,
         # AFTER the guard + edge-type validation — P2 review fix: emitting
@@ -22244,13 +23175,19 @@ class TortoiseSDK:
         # gap, out of #2030 scope.)
         warnings: list[dict] = []
         if label:
-            from tortoise.domain_loader import _get_registry
             from tortoise.enforcement import emit_violation, warning_for_relation
-            from tortoise.pack_registry import CORE_OPERATOR_LABELS
-            reg = _get_registry()
-            declared = set(CORE_OPERATOR_LABELS)
-            if reg is not None:
-                declared |= {r.get("predicate") for r in reg.list_relations()}
+            from tortoise.pack_registry import (
+                CORE_OPERATOR_LABELS,
+                declared_relation_predicates,
+            )
+            # ONE home for the declaration set — see
+            # `pack_registry.declared_relation_predicates` (#2766). An
+            # unreadable union falls back to the core vocabulary alone: this
+            # check is warn-not-block (#1934) and must never raise into the
+            # write path.
+            declared = declared_relation_predicates()
+            if declared is None:
+                declared = CORE_OPERATOR_LABELS
             # #4937: MITIGATES is NOT a built-in operator label — it is absent
             # from both legs above, so a caller spelling it here gets the
             # undeclared-relation warning instead of a silent peer spelling of
@@ -22845,8 +23782,17 @@ class TortoiseSDK:
                 mitigation point is a calibrated live evidence point and the
                 decide flow ranks on the first try (no CalibrationError).
 
-        Raises ValueError if id not found, not an operator, strength out of
-        [0, 1], or credibility outside the ladder.
+        Raises ``ValueError`` if id not found, not an operator, strength out of
+        [0, 1], or credibility outside the ladder — AND
+        ``UnaddressableClaimError`` (a ``ValueError`` SUBCLASS, ``exceptions.py``,
+        #9754) when the operator's existing mitigation Point carries no ``id``:
+        the node this call would rewrite cannot be addressed at all, so refusing
+        is the only honest answer (it used to return ``{}`` — a false success).
+        The two are distinguishable BY CLASS, which is the point of the subclass:
+        a caller that can skip one unrepairable node and continue catches the
+        subclass (``commit_ops.apply_payload_operators`` does exactly that, per
+        item), while a caller that must abort on a defect in its OWN record
+        leaves the parent uncaught.
         Idempotent: a second call updates the existing CURRENT mitigation
         (reason + strength), does not create a duplicate. A mitigation the graph
         records as terminal (retracted/superseded/outdated/archived) is never
@@ -22928,21 +23874,50 @@ class TortoiseSDK:
         ).result_set
         if existing:
             mid = existing[0][0]
-            # #9262 (review cycle 2): an id-less mitigation Point (a
-            # hand-written / imported shape) makes ``mid`` None, and EVERY write
-            # in this branch is id-keyed — ``update_point``, the baseline writer
-            # and the word stamp all match zero rows. Until #9262 the baseline
-            # writer accepted what it could not bind, so this silently updated
-            # nothing and returned ``{}``; since #9262 it REFUSES that id, so
-            # without this guard the whole call aborts with a remedy the caller
-            # cannot execute (it named the OPERATOR, not the mitigation), and
-            # ``commit_ops`` would abort a write loop mid-graph. MEASURED on
-            # origin/main: the call returns ``{}`` and leaves
-            # ``_evidence[None] = (3.0, 1.0)``; that false PASS is a defect of
-            # its own (#9754) — this guard keeps the historical outcome rather
-            # than turning it into an abort.
+            # #9754: an id-less mitigation Point (a hand-written / imported
+            # shape) makes ``mid`` None, and EVERY write in this branch is
+            # id-keyed — ``update_point``, the baseline writer and the word
+            # stamp all match zero rows. #9262 guarded this branch to keep the
+            # historical outcome, but that historical outcome WAS the defect:
+            # ``return self.get_point(None)`` → ``{}``, an empty success the
+            # caller cannot distinguish from "there is no mitigation" (the
+            # reason/strength update did not land and no baseline was written,
+            # so EP's calibration gate then refuses the operator while
+            # ``calibrate_summary``'s advice — ``set_point_baseline(None, …)`` —
+            # cannot be executed). Measured: the call returns ``{}``.
+            # (An earlier version of this comment added "and leaves
+            # ``_evidence[None] = (3.0, 1.0)``" — false on both trees: #9262
+            # returned before ``set_point_baseline`` was ever reached, and
+            # ``_evidence`` is written only by ``create_point``'s baseline,
+            # ``set_point_baseline`` after its representability guard, and
+            # ``_hydrate_evidence`` — none of which this path enters. Dropped
+            # rather than carried forward: tests/test_calibration.py states the
+            # correct reading in this same change.)
+            #
+            # The repair is option 1 of #9754: REFUSE with the real cause. The
+            # message names the MITIGATION, never the operator the caller
+            # passed — the operator is addressable and its id is actionable by
+            # nobody here, so a refusal about it names a node the caller cannot
+            # repair. ``UnaddressableClaimError`` is the existing shape for
+            # "a node the run must price carries no usable id" (#9275), so
+            # callers already have one word for this class.
+            # ``apply_payload_operators`` classifies it per item (#9754): a
+            # single unaddressable mitigation must not abort a commit's whole
+            # write loop.
             if mid is None:
-                return self.get_point(mid)
+                from .exceptions import UnaddressableClaimError
+                raise UnaddressableClaimError(
+                    f"Operator {id!r} carries a mitigation Point with no id "
+                    "(a hand-written or imported shape), so the "
+                    "re-mitigation cannot be written: every write on this "
+                    "path is keyed on the mitigation's id. No reason, "
+                    "strength or baseline can be stored on it, and the "
+                    "calibration gate will keep refusing the operator while "
+                    "its advice (`set_point_baseline(<mitigation id>, …)`) "
+                    "has no id to name. Repair the graph: give the existing "
+                    "mitigation Point an id, or drop that unaddressable "
+                    "mitigation and call mitigate_operator again to mint an "
+                    "addressable one (#9754).")
             self.update_point(mid, content=f"[MITIGATION] {reason}",
                               mitigation_strength=strength)
             # An explicit belief on the idempotent-update path re-baselines
@@ -23168,7 +24143,7 @@ class TortoiseSDK:
             # overwrote auto-generated parameters).
             from .security import validate_filter_key
             validate_filter_key(key)
-            clauses.append(f"n.`{key}` = ${key}")
+            clauses.append(_property_filter_clause(key))
             params[key] = val
         where = " AND ".join(clauses) if clauses else "true"
         rows = proj.g.query(
@@ -23239,7 +24214,7 @@ class TortoiseSDK:
             # overwrote auto-generated parameters).
             from .security import validate_filter_key
             validate_filter_key(key)
-            clauses.append(f"n.`{key}` = ${key}")
+            clauses.append(_property_filter_clause(key))
             params[key] = val
         where = " AND ".join(clauses) if clauses else "true"
         total = proj.g.query(
@@ -24120,14 +25095,21 @@ class TortoiseSDK:
         """The model direction a Layer-2 semantics value records (#7852).
 
         ``SEMANTICS_DIRECTIONS`` is the single source of truth, and its values are
-        drawn from the model's four-value vocabulary (`->` / `<->` / `-` — no
-        ruled semantics produces `<-`), so this returns the recorded direction
-        UNCHANGED — including `-` for the
+        drawn from the model's four-value vocabulary (`->` / `<-` / `<->` / `-`),
+        so this returns the recorded direction UNCHANGED — including `-` for the
         neutral meanings (`related`, `transacts`), which must be stored as `-`
         rather than fall through to the mutual default: `-` means the
         connection exists and NO confidence transfers (owner ruling), and a
         fall-through to `bidirectional` would propagate confidence along an
         edge the model declares belief-free.
+
+        ⚠️ `<-` IS produced by a table value since #11083: `produces` records
+        `<-` (target→source), because production runs producer → product and the
+        shipped declaration is `asset → program`. An earlier revision of this
+        docstring asserted no ruled semantics produced `<-`; that sentence became
+        false when `produces` returned as a Layer-2 meaning (owner ruling
+        2026-11-05, `OVERRIDES:` on #7848), so it is corrected here rather than
+        left to mislead the next reader of the table.
         """
         from tortoise.pack_registry import SEMANTICS_DIRECTIONS
         return SEMANTICS_DIRECTIONS.get(semantics)
@@ -24305,7 +25287,29 @@ class TortoiseSDK:
                                f"mitigation) for multi-input fan-out",
                 })
             direction = conn.get("direction")
-            if direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
+            if direction is not None and not isinstance(direction, str):
+                # #10520 (A3) / #11031 item 2: a NON-SCALAR ``direction`` is a
+                # SHAPE violation, REPORTED — never a crash. The membership test
+                # below is a raw frozenset test, and an unhashable value (a
+                # list/map from a JS caller or a bulk import) raised
+                # ``TypeError: unhashable type: 'list'``, aborting the WHOLE
+                # validator with a traceback instead of returning the violation it
+                # exists to return. The ``to`` arm screens its items the same way,
+                # for the same reason (#1091's shape guards): the contract's job
+                # is to NAME the bad field, and a traceback names nothing a caller
+                # can act on. ⛔ Scope: this closes the class for ``direction``
+                # ONLY. The sibling ``operator`` and ``relation`` keys are still
+                # raw frozenset membership tests, and a non-scalar there still
+                # raises ``TypeError`` — pre-existing, tracked as **#11071** (NOT
+                # #11031, whose three items are all direction surfaces), and
+                # deliberately not widened here.
+                violations.append({
+                    "section": "connections", "index": index,
+                    "message": f"ingest: connections[{index}] 'direction' must "
+                               f"be a string token, got "
+                               f"{type(direction).__name__}",
+                })
+            elif direction is not None and direction not in self._INGEST_DIRECTION_VALUES:
                 violations.append({
                     "section": "connections", "index": index,
                     "message": f"ingest: connections[{index}] direction must "
@@ -33950,11 +34954,39 @@ class TortoiseSDK:
         (#6110 — key is unique per pointKind, not globally). The WHERE clause
         is the shared ``_dedup_match_clauses`` non-operator predicate, so this
         path can never resolve a dedup onto an operator node (#2949).
+
+        ⛔ THE TERM IS NORMALISED, and this function is the BOUNDARY for it
+        (#10481): ``key`` is index-backed and the engine indexes the STRIPPED
+        term (#9599), so a seek sent the caller's raw spelling misses a node
+        stored under a padded one — see :func:`_key_seek_term`. Fixing it HERE
+        rather than in the writer is what makes the writer (``_resolve_dedup_hit``)
+        and the Phase-1 key-identity guard (``_key_holder_state``) agree: both
+        call this method, so neither can certify a write the other would fold.
+
+        ⛔ BOTH TERMS when the spelling is padded — the trimmed one AND the raw
+        one — because this predicate has two engine forms that normalise
+        differently: an index-served seek holds the TRIMMED term, a label scan
+        compares the STORED bytes. Sending only the trimmed term (as #10481 was
+        first written) made a padded key unfindable by BOTH spellings wherever
+        the best-effort index is absent or not yet OPERATIONAL — the #6110
+        duplicate re-created in the one state where the pre-fix seek was right.
+        See :func:`_key_seek_terms` for the measurement and for why two
+        disjuncts cannot widen the identity.
         """
         clauses, params = self._dedup_match_clauses(
             point_kind=pointKind, exclude_id=exclude_id)
-        clauses.append("n.key = $key")
-        params["key"] = key
+        terms = _key_seek_terms(key)
+        if len(terms) == 1:
+            clauses.append("n.key = $key")
+            params["key"] = terms[0]
+        else:
+            # A padded spelling: the index holds $key (trimmed); a label scan
+            # matches the stored bytes, which are $key_raw. Both disjuncts sit
+            # inside ONE clause so the shared non-operator predicate cannot be
+            # re-narrowed by precedence (#2949).
+            clauses.append("(n.key = $key OR n.key = $key_raw)")
+            params["key"] = terms[0]
+            params["key_raw"] = terms[1]
         rows = self._get_proj().g.query(
             f"MATCH (n:Point) WHERE {' AND '.join(clauses)} RETURN n.id",
             params=params,
@@ -34177,9 +35209,13 @@ class TortoiseSDK:
         # had. Two shapes, two reasons, and the fold must not convert one into
         # the other:
         #   * a Point created under a SCALAR keeps that scalar — deliberately,
-        #     so `query(extractedFrom=…)` (property EQUALITY) keeps answering
-        #     for the source it was created under; the folded SET rides
-        #     `extractedFromAll` beside it (#7704 review P1).
+        #     so the source it was created under stays readable OFF THE NODE
+        #     ITSELF (`get_point` is `properties(n)`), and
+        #     `query(extractedFrom=…)` keeps answering for it through the
+        #     EQUALITY arm of `_property_filter_clause` — which #10063 widened
+        #     with the authoritative `:Source` edge rather than replacing it;
+        #     the folded SET rides `extractedFromAll` beside it (#7704 review
+        #     P1).
         #   * a Point born from a SEQUENCE keeps its ARRAY — that is the shared
         #     writer's own shape rule ("a STRING when a single string was
         #     passed … an ARRAY whenever a SEQUENCE was passed — even a
@@ -36365,13 +37401,22 @@ class TortoiseSDK:
             entity anchors (ALL sessions, via the ``aboutObject`` edges) become
             ADDITIVE OR terms for a second sparse pass, so subject-matching
             points from sessions the one-shot top-k starves can join the pool.
-            Fail-open (any fetch/query failure keeps the original fts leg),
+            Fail-open (any fetch/query failure keeps the original legs — the
+            harvest is SHARED with the dense half below, so a failure cancels
+            whichever half was about to run),
             additive-only, bounded (3 anchors; the A4 expansion-term cap 8),
             deterministic. Default False = byte-identical (single pass).
             OFF by default in the product (the #1745 fail-safe decision — the
             sealed #2513 A/B gate decides adoption); the eval arms it via
             ``TORTOISE_LME_ENTITY_KEY_EXPANSION`` / its ``--entity-key-
             expansion`` flag.
+            ⛔ This argument alone arms the SPARSE half. The DENSE half
+            (indicator 2 of the same issue — the same harvested alias pool also
+            re-embeds the query and re-runs the dense leg, additively and
+            fail-open) is a SEPARATE switch, ``TORTOISE_ENTITY_KEY_DENSE``
+            (default OFF, see ``.env.example``), so the measured sparse-only
+            arm stays byte-identical and the two halves are separable in an A/B.
+            Both must be on for the dense half to fire.
         fusion_weights (A3 #2070): explicit per-strategy RRF weights
             override. Default None = the shared global resolution
             (TORTOISE_FUSION_WEIGHTS env → the shipped ``{"vector": 1.5}``)
@@ -36964,6 +38009,14 @@ class TortoiseSDK:
                     "shipped lexical scorer's rows are used",
                     "search_keys_prf" if search_keys_prf
                     else "entity_key_expansion")
+        # #4199: the read's OWN kind scope, resolved ONCE. Only ever supplied
+        # when a trace is being recorded (it decides a DECLARATION, never which
+        # rows are returned), so a leg_trace=None production caller pays neither
+        # the extra scope count nor any behavior change.
+        _scope_kinds = (
+            tuple(expanded_kinds)
+            if leg_trace is not None and query_vec is not None
+            and expanded_kinds else None)
         raw_results = degradation_chain(
             graph, query, struct_kind, query_vec, strategies,
             entity_type=entity_type, limit=str_limit,
@@ -36985,10 +38038,14 @@ class TortoiseSDK:
             # trace is being recorded (it decides a DECLARATION, never which
             # rows are returned), so a leg_trace=None production caller pays
             # neither the extra scope count nor any behavior change.
-            scope_kinds=(
-                tuple(expanded_kinds)
-                if leg_trace is not None and query_vec is not None
-                and expanded_kinds else None),
+            # Hoisted to ``_scope_kinds`` so C2's dense expansion pass (#2518
+            # indicator 2) measures the SAME scope: a second dense leg that
+            # omitted it recorded a healthy UNSCOPED entry, and one healthy
+            # vector entry is all ``declared_degraded_read`` needs to call the
+            # read hybrid — so an untagged expansion entry would launder the
+            # shipped leg's genuine ``no_embeddings`` into ``hybrid: True``
+            # (the #4199/#5287 class via a new leg).
+            scope_kinds=_scope_kinds,
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -37170,6 +38227,30 @@ class TortoiseSDK:
                     _trunc["candidates"] = len(snap_hits) + (
                         1 if len(snap_hits) >= limit else 0)
                     _trunc["exact"] = False
+                    # #8447/#10560: the SAME fold the early return above and the
+                    # ``no_fallback_applicable`` return below both carry, and for
+                    # the same reason. This tier answers by RANKING the whole
+                    # kind-scoped corpus instead of by asking the retrieval
+                    # legs, so an ASKED leg that never answered
+                    # (``fts``/``index_missing`` — the #8488 lexical half
+                    # unreachable) contributes nothing to the rows this tier
+                    # saw: ``candidates`` counts only what THIS tier ranked, so
+                    # it can say nothing about the dead leg. The verdict this
+                    # tier must not publish is therefore ``truncated: false``
+                    # merely because the page came back short — the matches the
+                    # dead leg would have supplied were never READ by it — and
+                    # the tier's own recorded posture is "conservative in the
+                    # safe direction — this arm already reports
+                    # ``status: degraded``, so over-marking cannot turn a
+                    # HEALTHY read into a partial".
+                    #
+                    # ⚠️ Reaching this tier means the arm did NOT SERVE the
+                    # slot — if it had, ``raw_results`` would be non-empty and
+                    # this block is unreachable. It does NOT mean the arm is
+                    # disabled: a tripped breaker, a raised arm and a
+                    # cap-driven ``declined`` all leave the slot unserved with
+                    # ``TORTOISE_BM25_LEXICAL=1``.
+                    _trunc["incomplete"] = bool(_lost_legs)
                     return _with_read_status(
                         _decorate_fallback_hits(snap_hits, graph))
                 points = self.query(kind=kind,
@@ -37232,6 +38313,15 @@ class TortoiseSDK:
                     status_trace.append(_trace_entry(
                         "fallback", ran=True, degraded=True,
                         reason="tfidf_legacy", count=len(legacy_hits)))
+                # #8447/#10560: fold the lost-leg verdict here too — the same
+                # fold the floored return and the snapshot tier above carry, and
+                # the one ``no_fallback_applicable`` below carries as well (it
+                # is the third degraded return of the three; this is the second).
+                # A read whose ASKED lexical leg never answered may not publish
+                # ``truncated: false`` merely because the corpus fallback found
+                # rows: those rows were ranked from the whole corpus, not from
+                # the match set the dead leg owed this read.
+                _trunc["incomplete"] = bool(_lost_legs)
                 return _with_read_status(
                     _decorate_fallback_hits(legacy_hits, graph))
             if status_trace is not None:
@@ -37310,19 +38400,69 @@ class TortoiseSDK:
         # 'operator' arm would merge POINT ids into an event/operator top-k
         # and silently truncate the real hits (P1 #2557 review — the event
         # arm returned [] where OFF returned the event).
+        #
+        # #2518 indicator 2 (dense-leg parity): the same harvest also feeds a
+        # SECOND dense pass (``_entity_key_dense_pass``) when the operator arms
+        # ``TORTOISE_ENTITY_KEY_DENSE``. The harvest is taken ONCE and shared, so
+        # the dense half costs no extra graph query WHEN THE SPARSE HALF ALREADY
+        # NEEDED ONE; and the harvest itself runs whenever EITHER half can use it
+        # — so a read whose sparse leg came back empty still expands its dense
+        # leg (and vice versa), instead of the two halves being chained on one
+        # another's success. ⛔ That second case is the one where arming the dense
+        # half DOES add work: with an empty sparse leg the disarmed code stopped
+        # at the old ``if not fts_hits`` guard, so the armed read pays the anchor
+        # FTS plus the ``aboutObject`` join (whose server-side ``collect()`` has
+        # no LIMIT — the per-anchor cap is applied client-side) on a read that
+        # previously paid neither. Stated rather than left to be discovered. With the dense switch
+        # OFF (the default, and the measured arm) the gate below reduces to the
+        # sparse half's original ``raw_results.get("fts")`` condition, and the
+        # code path is byte-identical to the shipped one.
+        _eek_dense_on = _entity_key_dense_enabled()
+        # additive to an EXISTING dense leg only: the pass never resurrects a
+        # leg this read did not have, and never re-populates one the #4028
+        # relevance floor emptied (that empty answer is the read's declared
+        # result).
+        _eek_dense_ok = bool(
+            _eek_dense_on
+            and raw_results.get("vector")
+            and "vector" not in _floored_legs
+            and query_vec is not None
+        )
         if (entity_key_expansion and entity_type == "point"
-                and raw_results.get("fts")):
-            expanded_fts = self._entity_key_expansion_pass(
-                query, raw_results["fts"],
-                str_limit=str_limit,
-                excluded_statuses=() if include_terminal else None,
-                leg_trace=status_trace,
-                # the anchor + alias tokenization honors the caller's A1
-                # numeric policy (same posture as the A4 P1-fix).
-                keep_numeric=keep_numeric,
-            )
-            if expanded_fts is not None:
-                raw_results["fts"] = expanded_fts
+                and (raw_results.get("fts") or _eek_dense_ok)):
+            _eek_aliases = self._entity_key_alias_harvest(
+                query, keep_numeric=keep_numeric)
+            if _eek_aliases and _eek_dense_ok:
+                expanded_vec = self._entity_key_dense_pass(
+                    _dense_query, raw_results["vector"],
+                    aliases=_eek_aliases,
+                    str_limit=str_limit,
+                    excluded_statuses=() if include_terminal else None,
+                    leg_trace=status_trace,
+                    min_similarity=_vector_floor,
+                    # #4199/#5287: the SAME scope the shipped leg measured, so
+                    # the expansion's entry is tagged (or re-labelled) exactly
+                    # like it — see the pass docstring's declaration note.
+                    scope_kinds=_scope_kinds,
+                    # the shipped leg's own timeout, so on a slow store the
+                    # expansion no-ops for the same reason rather than sooner.
+                    timeout_ms=int(_elevated_timeout_ms or 500),
+                )
+                if expanded_vec is not None:
+                    raw_results["vector"] = expanded_vec
+            if _eek_aliases and raw_results.get("fts"):
+                expanded_fts = self._entity_key_expansion_pass(
+                    query, raw_results["fts"],
+                    aliases=_eek_aliases,
+                    str_limit=str_limit,
+                    excluded_statuses=() if include_terminal else None,
+                    leg_trace=status_trace,
+                    # the anchor + alias tokenization honors the caller's A1
+                    # numeric policy (same posture as the A4 P1-fix).
+                    keep_numeric=keep_numeric,
+                )
+                if expanded_fts is not None:
+                    raw_results["fts"] = expanded_fts
 
         # 4. Fuse via RRF (skip if single strategy or full-scan)
         if is_full_scan or len(raw_results) == 1:
@@ -38479,20 +39619,19 @@ class TortoiseSDK:
     # the cross-session join key (b) of the scoping doc). The alias pool
     # re-enters ``build_or_query``'s bounded expansion tail (never displaces
     # original query tokens — the A4 slot-reservation regression guard).
-    def _entity_key_expansion_pass(
+    def _entity_key_alias_harvest(
         self,
         query: str,
-        fts_hits: list[tuple[str, float]],
         *,
-        str_limit: int,
-        excluded_statuses: tuple | None,
-        leg_trace: list[dict] | None,
         keep_numeric: bool = False,
-    ) -> list[tuple[str, float]] | None:
-        """C2 (#2518): entity/fact-augmented key expansion — bounded second
-        sparse pass with ADDITIVE entity anchors + linked points' E3 keys.
+    ) -> list[str] | None:
+        """C2 (#2518) steps 1-2: the ONE harvest both expansion legs consume.
 
-        Three deterministic steps (each bounded, each fail-open):
+        Bounded, deterministic, fail-open, and shared — so arming the dense half
+        (#2518 indicator 2, ``_entity_key_dense_pass``) costs NO extra graph
+        query: one anchor-resolution FTS pass over the Object spine plus one
+        batched ``aboutObject`` harvest feed both the sparse and the dense
+        re-run.
 
         1. **Anchor resolution (the query's own entities, via the index)** —
            bounded FTS over the Object-name spine with the query text
@@ -38500,26 +39639,28 @@ class TortoiseSDK:
            by (score, id) — stable tiebreak). A question that names its
            subject maps to the Object nodes whose names share its tokens;
            a question with no entity-name overlap resolves zero anchors and
-           the pass no-ops (quality gate by construction).
+           the expansion no-ops (quality gate by construction).
         2. **Key harvest (the entity spine join)** — for each resolved
            anchor, the anchor's own name + the E3 ``search_keys`` of EVERY
            Point linked ``-[:aboutObject]->`` to it, across ALL sessions
            (one batched Cypher query; the cross-session subject join).
-        3. **Additive sparse re-run** — ``run_fts_query(expansion_terms=…)``:
-           original query tokens keep their OR slots and the harvested
-           aliases fill the bounded expansion tail (``build_or_query``'s
-           A4 cap — never displacing an original token). Points in OTHER
-           sessions that carry the subject's keys in their index text
-           (content \u222a search_keys) now match and join the fts leg.
 
-        Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
-        empty harvest returns ``None`` and the caller keeps the ORIGINAL fts
-        leg — byte-identical behavior; the expansion can never turn a working
-        lane into a broken one. Returns the MERGED fts leg (expanded run
-        first, first-pass-only ids appended in their original order) when the
-        expansion ran and returned hits; ``None`` otherwise.
+        Returns the alias pool — sorted, de-duplicated, capped at
+        ``_ENTITY_ALIAS_MAX`` — or ``None``. ``None`` means "no expansion": a
+        blank query, no anchor, no alias, a fetch failure, or an alias pool
+        that tokenizes to ONLY the query's own tokens (a pool that cannot add
+        recall; ``build_or_query``'s reserved-slot contract would drop it all,
+        so both legs no-op instead of paying for an identical pass).
+
+        Fail-open contract (mirrors A4 #2070): EVERY failure returns ``None`` and
+        the caller keeps its original legs — byte-identical behavior; the
+        expansion can never turn a working lane into a broken one.
+
+        ``query`` is the USER's question, never C6's dense rewrite: entity
+        anchoring reads the question's own vocabulary, so a date-injected dense
+        query must not change which Objects resolve.
         """
-        if not fts_hits or not query or not query.strip():
+        if not query or not query.strip():
             return None
         from .sparse import tokenize_sparse_query
         original_tokens = tokenize_sparse_query(
@@ -38542,9 +39683,13 @@ class TortoiseSDK:
                 # only the surfaced search legs hide them by default.
                 excluded_statuses=())
         except Exception:
+            # Same shared-harvest rule as the key join below: this message is
+            # inside the ONE harvest both halves consume, so on a dense-armed
+            # read with an empty sparse leg the leg preserved is the DENSE one
+            # and there is no fts leg in play (review round 3, PR #11459).
             _logger.warning(
-                "C2 anchor resolution failed — keeping the original fts "
-                "leg", exc_info=True)
+                "C2 anchor resolution failed — keeping the original legs",
+                exc_info=True)
             return None
         if not anchor_rows:
             return None
@@ -38566,7 +39711,11 @@ class TortoiseSDK:
             ).result_set
         except Exception:
             _logger.warning(
-                "C2 key harvest failed — keeping the original fts leg",
+                # The harvest feeds BOTH halves (sparse AND dense), so the
+                # message names the LEGS, not the fts one: on a dense-armed read
+                # whose sparse leg was empty, a harvest failure cancels the
+                # dense expansion and there is no fts leg in play at all.
+                "C2 key harvest failed — keeping the original legs",
                 exc_info=True)
             return None
         aliases: list[str] = []
@@ -38612,14 +39761,53 @@ class TortoiseSDK:
             return None
         # An alias pool that tokenizes to ONLY original-query tokens cannot
         # add recall (build_or_query's reserved-slot contract would drop it
-        # all) — no-op instead of a wasted identical second pass.
+        # all) — no-op instead of a wasted identical second pass. The DENSE
+        # half inherits this guard for free, and needs it just as much: an
+        # alias tail made of the query's own words cannot change the query
+        # vector, so re-embedding it would buy latency and nothing else.
         orig_set = set(original_tokens)
         new_toks: set[str] = set()
         for alias in aliases:
             new_toks.update(tokenize_sparse_query(alias, keep_numeric=True))
         if not (new_toks - orig_set):
             return None
-        # Step 3 — the additive second sparse pass (A4 merge contract).
+        return aliases
+
+    def _entity_key_expansion_pass(
+        self,
+        query: str,
+        fts_hits: list[tuple[str, float]],
+        *,
+        aliases: list[str],
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        keep_numeric: bool = False,
+    ) -> list[tuple[str, float]] | None:
+        """C2 (#2518): the SPARSE half of entity/fact-augmented key expansion —
+        bounded second sparse pass with the harvested entity anchors + linked
+        points' E3 keys (step 3 of the pass; steps 1-2 are
+        ``_entity_key_alias_harvest``, shared with the dense half).
+
+        **Additive sparse re-run** — ``run_fts_query(expansion_terms=…)``:
+        original query tokens keep their OR slots and the harvested aliases fill
+        the bounded expansion tail (``build_or_query``'s A4 cap — never
+        displacing an original token). Points in OTHER sessions that carry the
+        subject's keys in their index text (content \u222a search_keys) now match
+        and join the fts leg.
+
+        Fail-open contract (mirrors A4 #2070): any fetch/query failure or an
+        empty expansion returns ``None`` and the caller keeps the ORIGINAL fts
+        leg — byte-identical behavior; the expansion can never turn a working
+        lane into a broken one. Returns the MERGED fts leg (expanded run
+        first, first-pass-only ids appended in their original order) when the
+        expansion ran and returned hits; ``None`` otherwise.
+        """
+        if not fts_hits or not query or not query.strip() or not aliases:
+            return None
+        proj = self._get_proj()
+        from .search_engine import run_fts_query
+        # The additive second sparse pass (A4 merge contract).
         _exp_trace: list[dict] = []
         try:
             expanded = run_fts_query(
@@ -38641,6 +39829,141 @@ class TortoiseSDK:
         seen = {pid for pid, _score in expanded}
         merged = list(expanded)
         merged.extend((pid, s) for pid, s in fts_hits if pid not in seen)
+        return merged
+
+    def _entity_key_dense_pass(
+        self,
+        dense_query: str,
+        vector_hits: list[tuple[str, float]],
+        *,
+        aliases: list[str],
+        str_limit: int,
+        excluded_statuses: tuple | None,
+        leg_trace: list[dict] | None,
+        min_similarity: float | None = None,
+        scope_kinds: tuple[str, ...] | None = None,
+        timeout_ms: int = 500,
+    ) -> list[tuple[str, float]] | None:
+        """C2 (#2518) indicator 2 — DENSE-leg parity for the key expansion.
+
+        The sparse half re-runs the sparse leg with the harvested aliases; the
+        dense leg kept the query vector of the ORIGINAL query, so a
+        same-subject point whose embedding is close to the ENTITY's vocabulary
+        but not to the question's phrasing stayed invisible to it. This pass
+        re-embeds the composed query (:func:`_entity_key_dense_query`) and
+        re-runs the dense leg **additively**.
+
+        Cost is bounded to EXACTLY ONE extra embed and ONE extra leg query per
+        read: the alias pool is capped by the harvest, the composition by
+        ``_ENTITY_DENSE_ALIAS_CHARS``/``_ENTITY_DENSE_ALIAS_TERMS``, and the
+        pass fires at most once. It is additionally skipped entirely when the
+        composition adds nothing (``_entity_key_dense_query`` returns ``None``).
+
+        Merge contract — identical to the sparse half's: the expanded run comes
+        first, the pass-1-only ids follow in their original order. No id is ever
+        DROPPED (that is what "additive" means here, exactly as in A4), and the
+        candidate SET only grows.
+
+        ⛔ State the second half of that contract plainly, because it is real
+        behaviour and not a footnote: the merged leg's ORDER is the composed
+        query's, so an id already in pass 1 can move up **or down**, and in the
+        degenerate case where the expansion finds nothing new the leg is still
+        re-ranked. That is inherent, not a bug — ``rrf_fusion`` is rank-based, so
+        a merge IS an ordering, and the composed query is the same question with
+        entity context attached (no original token is removed), so its ranking is
+        the mechanism rather than a side effect. It is also exactly what the
+        sparse half does. What a caller must NOT read into "additive" is
+        "order-preserving": on a lever that ships OFF and unmeasured, a state
+        that re-orders a dense leg is a decision to be measured, not a promise
+        the code can keep.
+
+        Fail-open (mirrors A4 #2070 / the sparse half): no embedder, an encode
+        failure, a query failure or an empty result returns ``None`` and the
+        caller keeps the ORIGINAL dense leg — byte-identical behavior. The
+        expansion's trace entries are appended ONLY on success (the sparse
+        half's own pattern), so a leg-local failure here can never declare a
+        healthy read degraded — the same false-positive the #8488 arm refuses.
+
+        Stand-downs, both deliberate:
+        * the caller only calls this when the read's dense leg PRODUCED rows, so
+          the pass can never resurrect a leg the read did not have, and never
+          re-populates one the #4028 relevance floor emptied (that empty answer
+          is the read's declared result);
+        * ``EmbedderUnavailableError`` is re-raised rather than swallowed when
+          ``TORTOISE_EMBEDDING_MODEL_REQUIRED=1`` armed it (#5275): the contract
+          is "fail loud, never a silent keyword-only read", and an expansion
+          pass is not a licence to convert a named refusal into a degrade.
+        """
+        if not vector_hits or not aliases:
+            return None
+        composed = _entity_key_dense_query(dense_query, aliases)
+        if composed is None:
+            return None
+        from .embeddings import EmbeddingModel
+        from .exceptions import EmbedderUnavailableError
+        try:
+            model = EmbeddingModel.get()
+        except EmbedderUnavailableError:
+            raise  # #5275: REQUIRED — fail loud, never a silent fallback
+        except Exception:  # noqa: BLE001, RUF100
+            model = None
+        if model is None:
+            return None
+        try:
+            # THE bounded extra embed: one composed string, one vector.
+            expanded_vec = model.encode([composed])[0].tolist()
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "C2 dense expansion encode failed — keeping the original "
+                "dense leg", exc_info=True)
+            return None
+        proj = self._get_proj()
+        from .search_engine import (
+            PROVENANCE_ENTITY_KEY_EXPANSION,
+            run_vector_query,
+        )
+        _exp_trace: list[dict] = []
+        try:
+            expanded = run_vector_query(
+                proj.g, expanded_vec, limit=str_limit,
+                is_embedded=getattr(proj, "_is_embedded", True),
+                entity_type="point",
+                vector_index_api=getattr(proj, "_vector_index_api", None),
+                excluded_statuses=excluded_statuses,
+                leg_trace=_exp_trace,
+                min_similarity=min_similarity,
+                # The READ's own kind scope, so this entry is tagged/relabelled
+                # by the same #4199 probe as the shipped leg's. Omitting it made
+                # the expansion record a healthy UNSCOPED entry, and ONE healthy
+                # vector entry is all ``declared_degraded_read`` needs to call
+                # the read hybrid — which would launder the shipped leg's
+                # genuine ``no_embeddings`` into ``hybrid: True`` (the class
+                # ``_vector_leg_healthy``'s docstring forbids).
+                scope_kinds=scope_kinds,
+                timeout_ms=timeout_ms,
+                # ONE dense slot, ONE tally: the shipped leg already counted it
+                # (the #8488 arm's ``meter=False`` precedent — the trace still
+                # records the second pass, so a measurement can see it ran).
+                meter=False,
+                # …and the trace says WHICH pass. Without this the second entry
+                # is shape-identical to the shipped one — same leg, ran,
+                # degraded, reason AND the same ``mechanism`` — so a measurement
+                # could only assert "two vector entries", never "the expansion's
+                # leg engaged" (review round 3, PR #11459).
+                provenance=PROVENANCE_ENTITY_KEY_EXPANSION,
+            )
+        except Exception:  # noqa: BLE001, RUF100
+            _logger.warning(
+                "C2 dense expansion leg failed — keeping the original dense "
+                "leg", exc_info=True)
+            return None
+        if not expanded:
+            return None
+        if leg_trace is not None:
+            leg_trace.extend(_exp_trace)
+        seen = {pid for pid, _score in expanded}
+        merged = list(expanded)
+        merged.extend((pid, s) for pid, s in vector_hits if pid not in seen)
         return merged
 
     def expand_relationships(self, point_id: str) -> list[dict]:
@@ -48399,7 +49722,9 @@ class TortoiseSDK:
 
         ``members`` is deliberately NOT marked: ``memberOf`` has a real
         producer (``onboarding/seed.py::seed_onboarding_anchors``, reached
-        from hosted onboarding and the ``tortoise_onboarding_seed`` tool), so
+        from hosted onboarding — via ``POST /v1/onboarding/seed``; the
+        ``tortoise_onboarding_seed`` MCP tool that also called it left the
+        surface in #4282 Phase 3.2), so
         an empty list there means no membership was filed — a finding, not a
         gap.
         """
@@ -48995,11 +50320,22 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # unwrapped would make the reader cover the lane that keeps both claims and skip
 # the lane that deletes one.
 #
-# Wrapped here, at module scope, rather than by inserting lines inside the method:
+# Wired here, at module scope, rather than by inserting lines inside the method:
 # `sdk.py`'s line numbers are cited by the #7949 capstone bundle (`:15484`,
-# `:15765`, …) and a hook inside the method re-stales them.  `functools.wraps`
-# keeps the name, docstring and signature, so every `self._extract_session_llm`
-# call site and every test that inspects the method resolve to the wrapper.
+# `:15765`, …) and a hook inside the method re-stales them.
+#
+# ⛔ LAZY, not at import (review P2, measured): binding the real wrapper at
+# module scope made `import tortoise.sdk` eagerly import `tortoise.extractor_v2`
+# — measured `'tortoise.extractor_v2' in sys.modules` = True here against False
+# on `main`, pulling `value_gate`/`vet_gate`/`near_dup_merge`/`failure_policy`
+# with it. That contradicts this repo's own documented policy for this module
+# (`hosted_api` keeps the same import function-local because "`extractor_v2` is
+# a documented cold-start cost", which is why `:17466` and `:38136` do it that
+# way). So the installed attribute is a ONE-SHOT lazy entry: the first call pays
+# the import, rebinds the class attribute to the real wrapper, and every later
+# call goes straight there. `functools.wraps` keeps the name, docstring and
+# signature, so every `self._extract_session_llm` call site and every test that
+# inspects the method resolve to the wrapper.
 #
 # The import is FUNCTION-local and the wiring is one module-level CALL, not a
 # module-level `import`: a bare import down here is `E402` (module level import
@@ -49007,11 +50343,24 @@ def _validate_extracted_from(props: dict, *, door: str) -> None:
 # the import block would shift every line of this file, re-staling the same
 # #7949 cites the wrapper exists to leave alone.
 def _wire_vocabulary_gap_run_reader_10626() -> None:
-    """Rebind the M2 entry through the #10626 run-level reader (once)."""
-    from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+    """Insist the M2 entry runs through the #10626 reader, paying on FIRST CALL."""
+    import functools
 
-    TortoiseSDK._extract_session_llm = _scope_run(
-        TortoiseSDK._extract_session_llm)
+    original = TortoiseSDK._extract_session_llm
+    wired: list = []
+
+    @functools.wraps(original)
+    def _lazy_entry(self, *args, **kwargs):
+        if not wired:
+            from .extractor_v2 import _run_scoped_vocabulary_gap as _scope_run
+
+            wired.append(_scope_run(original))
+            # Bind for every later call, so the lazy hop is paid ONCE per
+            # process and not on every capture.
+            TortoiseSDK._extract_session_llm = wired[0]
+        return wired[0](self, *args, **kwargs)
+
+    TortoiseSDK._extract_session_llm = _lazy_entry
 
 
 _wire_vocabulary_gap_run_reader_10626()

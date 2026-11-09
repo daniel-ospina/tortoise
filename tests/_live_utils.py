@@ -11,6 +11,7 @@ import contextlib
 import logging
 import os
 import re
+import time
 
 logger = logging.getLogger(__name__)
 
@@ -497,3 +498,74 @@ def drop_test_graph(proj, *, name: str | None = None) -> bool:
             "sweep, which owns every journaled graph", gname, exc)
         _record_delete_event(gname, "failed", repr(exc))
         return False
+
+
+def close_embedded_clients_opened_since(before: set, *, quiet_s: float = 1.0,
+                                        budget_s: float = 6.0) -> int:
+    """Close the embedded DB clients a boot opened — and only those.
+
+    The real ``hosted_api`` lifespan opens embedded (redislite) clients for the
+    boot sweeps and the DB-probe SDK and never closes them: in production the
+    process exit does (the #1371/#2203 atexit seams). A test that boots the app
+    in-process must therefore reproduce the closing half, or every boot leaks
+    those clients and their redis-server children into the suite — which is
+    exactly what the #1005 orphan-hygiene gate counts. (Moved here from
+    ``tests/test_health_client_effect.py``, whose two boots leaked ~5-6 clients
+    each; measured 2026-09-22. Every in-process ``hosted_api`` boot needs it,
+    and ``tests/test_10892_served_liveness.py`` was a second such boot.)
+
+    ``embedded_lifecycle.close_embedded_clients()`` is the process-wide seam
+    and is deliberately NOT called here, for two measured reasons:
+
+    * It closes clients this test did not open. A session-scoped
+      ``shared_proj`` co-tenant (``tests/_embedded.py``) sharing the pytest
+      process is shut down and its socket dir rmtree'd, reding every later
+      test that uses it — ``cotenant_holds_server()`` protects a server with
+      other live clients, but not the LAST remaining one, which is what a
+      session fixture is mid-suite.
+    * It routes each client through ``atexit_fast_close(at_exit=True)``, whose
+      first call ARMS the process-global #4214 atexit budget; a mid-suite call
+      then makes the real interpreter-exit cascade skip closes it would
+      otherwise perform (the breakage recorded in
+      ``tests/test_embedded_lifecycle.py::
+      test_release_owner_uses_the_captured_socket_after_teardown``).
+
+    First it waits (bounded) for the boot's DB work to go quiet. That work —
+    the probe refresher and the two boot sweeps — runs on daemon workers the
+    app's shutdown ABANDONS by design (``monitoring.run_on_daemon_worker``: a
+    wedged worker must never delay shutdown), so a boot can still register an
+    embedded client after the server has stopped. Closing while one is
+    mid-connection is not harmless: ``cotenant_holds_server()`` reads that
+    transient connection as a live peer, declines the final SHUTDOWN, and
+    leaves the server alive with no client left to shut it down.
+
+    The close itself goes through the same idempotent per-client seam the
+    canonical helper uses on its non-fast path (``_t_close`` → guarded
+    ``close()``, which releases the #3599 owner record), so nothing else is
+    touched and nothing is orphaned. Returns the number of clients closed.
+    """
+    from tortoise import embedded_lifecycle as embedded_lifecycle
+
+    def opened() -> list:
+        return [c for c in embedded_lifecycle._embedded_clients if c not in before]
+
+    deadline = time.monotonic() + budget_s
+    seen = len(opened())
+    quiet_until = time.monotonic() + quiet_s
+    while time.monotonic() < deadline:
+        now = time.monotonic()
+        current = len(opened())
+        if current != seen:
+            seen = current
+            quiet_until = now + quiet_s
+        if now >= quiet_until:
+            break
+        time.sleep(0.05)
+
+    clients = opened()
+    for client in clients:
+        closer = getattr(client, "_t_close", None) or getattr(client, "close", None)
+        if closer is not None:
+            with contextlib.suppress(Exception):
+                closer()
+    return len(clients)

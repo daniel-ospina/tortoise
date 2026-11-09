@@ -18,6 +18,7 @@ to validate, a red row with no named cause. Each one has a stable finding code
 """
 from __future__ import annotations
 
+import ast
 import importlib.util as _ilu
 import json
 import re
@@ -33,6 +34,64 @@ from tools import capstone_verdict_check as cvc  # noqa: E402
 
 LOG = _REPO / "docs/evidence/7949-capstone/capstone.log"
 PROBE = _REPO / "docs/evidence/7949-capstone/probes/capstone_run.py"
+
+#: The ``_MEASUREMENT_RUN_KEYS`` members the emitter writes NESTED rather than at
+#: run-block level, so the run-block scan in
+#: ``test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set`` cannot
+#: see them: ``errors`` rides inside each ``sessions[]`` entry
+#: (``capstone_measure.py`` run-block ``sessions`` comprehension) and
+#: ``corpus_sha256`` rides inside ``e1_e2_artifact``. DECLARED here rather than
+#: inlined into the assertion, because an inline ``- {"errors", "corpus_sha256"}``
+#: is an escape hatch any later author can extend silently, and a stale entry
+#: silenced that way is exactly the fail-open the arm exists to close (review P2,
+#: #10982). A new entry here must name the nesting path in this comment.
+_NESTED_MEASUREMENT_RUN_KEYS = ("errors", "corpus_sha256")
+
+
+def _run_block_keys(source: str) -> list[str]:
+    """The TOP-LEVEL keys of the emitter's ``"run": { ... }`` literal, read by PARSING.
+
+    ⛔ NOT BY INDENT, which is how the previous cut silently SKIPPED a key. It read the
+    literal line-by-line and dropped every line whose indent was not *exactly* 12, so an
+    unregistered measurement key written at indent 10 or 14 — which Python allows, and
+    which the very commit that adds a key is free to re-indent — left this arm GREEN
+    (``unregistered=[]``) while ``_record_carries_a_measurement`` stayed blind to it, so
+    ``_blocker_exempt`` would exempt a ``REFUSED`` table whose ``blocked_by`` has CLOSED
+    from V12: a false PASS in a verdict gate. Measured at #11331 review round 8 with a
+    14-space ``"e6_receipt": 1`` inside the run dict. That is the same fail-open the
+    arm's own docstring says a skip would restore, one column off.
+
+    The AST cannot be wrong about which keys an object literal carries, so this is the
+    ONE definition of "the keys the emitter writes".
+
+    ⛔ A ``**spread`` REFUSES. ``ast.Dict`` carries ``None`` where it cannot name a key,
+    so the keys a spread brings are invisible here — reporting "no new key" over them
+    would be the same fail-open with a different trigger. A computed key refuses for the
+    same reason. And there must be exactly ONE run-block literal: two would make the
+    scan ambiguous about which one the emitter actually writes.
+    """
+    found: list[list[str]] = []
+    for node in ast.walk(ast.parse(source)):
+        if not isinstance(node, ast.Dict):
+            continue
+        for key, value in zip(node.keys, node.values, strict=True):
+            if not (isinstance(key, ast.Constant) and key.value == "run"
+                    and isinstance(value, ast.Dict)):
+                continue
+            keys: list[str] = []
+            for inner in value.keys:
+                assert isinstance(inner, ast.Constant) and isinstance(inner.value, str), (
+                    "the emitter's run block carries a key this scan cannot read: a "
+                    "SPREAD (`**mapping`) or a computed key hides the measurements it "
+                    "brings, so the arm would report 'no new key' while the record's "
+                    "exemption set stayed blind. Spell the keys literally.")
+                keys.append(inner.value)
+            found.append(keys)
+    assert len(found) == 1, (
+        f"expected exactly ONE `\"run\": {{...}}` literal in the emitter, found {len(found)} "
+        "— a second run block makes this scan ambiguous about which one the emitter writes")
+    assert found[0], "the emitter's run-block literal carries no keys — re-derive this scan"
+    return found[0]
 
 
 def _load_probe():
@@ -278,12 +337,16 @@ def test_unknown_criterion_is_a_finding():
 
     Non-vacuity: the old version relabelled E5 to "E6", which deleted E5 and let
     the missing-row arm satisfy the assertion. A sixth row keeps 5/5 present, so
-    only the "not an E1–E5 criterion" branch can produce this finding.
+    only the "not an E1–E5 or A1–A5 criterion" branch can produce this finding.
+
+    The vocabulary widened on 2026-11-06 (`#10982`): the record now registers `A1`–`A5`, so the
+    gate must RECOGNISE them (`RECOGNISED_CRITERIA`) without making them REQUIRED — and `E6` is
+    still unknown, which is what keeps this arm non-vacuous.
     """
     rec = _record()
     rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
     msgs = _messages(rec)
-    assert any("not an E1–E5 criterion" in m for m in msgs), msgs
+    assert any("not an E1–E5 or A1–A5 criterion" in m for m in msgs), msgs
 
 
 # ── V4/V5: green means measured, with a file ─────────────────────────────
@@ -2045,8 +2108,20 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     f"{sources['extractor_v2'][entry_line - 1].strip()!r}")
 
     # (b) The eight-row step table: `` `symbol` `:NNNN` `` into the same file.
+    #
+    # #10833 review (P1): the population is EXACT, not a floor. It read
+    # `>= 8`, so the loop below could pass while a re-chunk of the table hid a
+    # row from the regex — the same shape rule (c) already refuses on the
+    # probe (`== 9`), applied to the document that went stale in this PR: the
+    # fold's own `+33` moved every one of these eight numbers and this
+    # assertion was the thing that should have said so. A row added or removed
+    # on purpose updates this number deliberately; a row that stops matching
+    # reds instead of quietly shrinking the sweep.
     pairs = re.findall(r"`([A-Za-z_][\w.]*)`\s*`:(\d+)`", readme)
-    assert len(pairs) >= 8, f"the step table's cites are gone: {pairs}"
+    assert len(pairs) == 8, (
+        f"the step table is eight rows (one per step; S6 COMMIT prints no "
+        f"number) — {len(pairs)} cites matched, so a row was added, removed or "
+        f"reformatted and the sweep below is not reading it: {pairs}")
     for symbol, lineno in pairs:
         text = sources["extractor_v2"][int(lineno) - 1]
         assert symbol.split(".")[-1] in text, (
@@ -3659,6 +3734,11 @@ def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
             ("e5_rescore", {"raw_recovery": 0.48}),
             ("e1_e2_artifact", {"after_share": 0.6}),
             ("errors", ["boom"]),
+            ("corpus_sha256", "7dff2436deadbeef"),
+            # #10982: the newest key the emitter grew. Without it this arm passed
+            # while a `REFUSED` table carrying only `a_row_census` was EXEMPTED
+            # from V12's CLOSED-blocker refusal (#10982 review round 4, F1).
+            ("a_row_census", {"A1": {"edges_total": 7}}),
     ):
         run = {"status": "REFUSED", key: value}
         assert cvc._blocker_exempt(run, "refusal", None, None) is False, (
@@ -3687,6 +3767,108 @@ def test_a_refused_run_whose_RECORD_still_carries_a_measurement_is_not_exempt():
     assert cvc._record_carries_a_measurement(refusal["run"]) is False, (
         "the shipped `capstone.log` refusal now reads as carrying a measurement "
         "— its five rows would red V12 on historical causes")
+
+
+def test_every_MEASUREMENT_key_the_emitter_writes_is_in_the_exemption_set():
+    """A NEW emitter measureMENT key must red HERE, not fail open (#10982 review round 4, F1).
+
+    ⛔ WHY THE HAND-WRITTEN LOOP ABOVE IS NOT ENOUGH, and why this is a separate arm:
+    the construction has now been reopened TWICE by the same defect. #10601 round 2
+    found a fail-open because the set named two keys and the emitter wrote nine;
+    #10982 then added ``a_row_census`` to the emitter's run block and the set did not
+    grow, so a record whose only surviving measurement was the A-row census read as
+    "measured nothing" and V12 EXEMPTED it from its CLOSED-blocker refusal. A
+    hand-listed pin can only pin the keys somebody remembered to list. This arm reads
+    the emitter's own ``"run": {`` literal and demands every key in it is EITHER a
+    registered measurement (fail closed) or a declared non-measurement, so the next
+    added key reds HERE instead of reopening V12 a third time.
+
+    ⛔ AND THE SCAN MUST NOT BE ABLE TO SKIP A KEY IT CANNOT PARSE (review P1, #10982).
+    The first cut of this arm matched ``^ {12}"([a-z0-9_]+)":``, so a key spelled with
+    a capital, a dot or a dash — ``"E6_receipt"``, the naming the ``E``-rows already
+    use — was silently SKIPPED, and a ``**spread`` hid every key it carried: measured,
+    ``"e6_receipt"`` reds this arm while ``"E6_receipt"`` leaves it GREEN, i.e. the
+    arm promised exactly the guarantee it did not provide. The capture now accepts any
+    quoted key, and a 12-space line that is neither blank, a comment, nor a quoted key
+    REFUSES rather than being skipped — the residual fail-open a skip would restore.
+    """
+    measure = _load_measure_probe()
+    emitter_keys = _run_block_keys(Path(measure.__file__).read_text())
+    # A declared NON-measurement must name a key the emitter really writes: otherwise the
+    # declaration list drifts into a dumping ground of names nothing produces, and the
+    # forward check below silently accepts a key that no longer exists.
+    stale_non_measurement = sorted(set(cvc._NON_MEASUREMENT_RUN_KEYS) - set(emitter_keys))
+    assert not stale_non_measurement, (
+        f"{stale_non_measurement} are declared NON-measurement run-block keys but the "
+        "emitter never writes them — a stale declaration is how the hand-listed escape "
+        "hatch stops describing the emitter")
+    unregistered = sorted(
+        key for key in emitter_keys
+        if key not in cvc._MEASUREMENT_RUN_KEYS
+        and key not in cvc._NON_MEASUREMENT_RUN_KEYS)
+    assert not unregistered, (
+        f"the emitter writes run-block key(s) {unregistered} that the V12 exemption does not "
+        "know about — a record carrying only one of them is read as 'measured nothing' and "
+        "EXEMPTED from the CLOSED-blocker refusal. Register it in _MEASUREMENT_RUN_KEYS "
+        "(the fail-closed direction) unless it genuinely carries no number")
+    # …and the other direction, so a RENAME cannot hide behind a stale entry: a key the
+    # set defends but the emitter can no longer write is a key no run produces. The two
+    # set members the emitter writes NESTED rather than at run-block level are excluded
+    # BY NAME from a declared constant, not from an inline literal that any future
+    # author could extend silently (review P2, #10982).
+    phantom = sorted((set(cvc._MEASUREMENT_RUN_KEYS) - set(emitter_keys))
+                     - set(_NESTED_MEASUREMENT_RUN_KEYS))
+    assert not phantom, (
+        f"{phantom} are registered as measurement keys but the emitter never writes them — a "
+        "stale entry masks the moment the emitter's real key is renamed")
+
+
+def test_the_emitter_key_scan_cannot_be_defeated_by_INDENTATION():
+    """The scan reads keys by PARSING, so re-indenting the literal cannot hide one (#11331).
+
+    The arm above is only as strong as its ability to see every key the emitter writes.
+    Its previous cut read the literal line-by-line and skipped any line whose indent was
+    not exactly 12 — so a measurement key at indent 10 or 14 escaped the scan while the
+    run block really carried it. This test drives the scan directly with a re-indented
+    literal and with the shapes it must still refuse; the emitter itself is not mutated.
+    """
+    measure = _load_measure_probe()
+    source = Path(measure.__file__).read_text()
+    baseline = _run_block_keys(source)
+    assert "a_row_census" in baseline, baseline
+
+    # (1) A key written at 14 spaces is still SEEN. This is the measured fail-open: the
+    #     indent-filtered cut returned unregistered=[] over exactly this mutation.
+    reindented = source.replace('            "a_row_census":',
+                                '              "a_row_census":', 1)
+    assert reindented != source, "the emitter's a_row_census line is no longer at 12 spaces"
+    assert "a_row_census" in _run_block_keys(reindented), (
+        "a run-block key that is merely re-indented became invisible to the scan — which is "
+        "the fail-open that lets an unregistered measurement key reach the V12 exemption")
+
+    # (2) A SPREAD inside the run block REFUSES rather than reporting "no new key".
+    spread = source.replace('        "run": {',
+                            '        "run": {**{"e6_receipt": 1},', 1)
+    assert spread != source
+    try:
+        _run_block_keys(spread)
+    except AssertionError as exc:
+        assert "SPREAD" in str(exc) or "cannot read" in str(exc), exc
+    else:  # pragma: no cover - the assertion below is the failure
+        raise AssertionError(
+            "a `**spread` inside the run block was expanded or ignored instead of refused — "
+            "the keys it carries are invisible, so this arm would certify a set it never read")
+
+    # (3) A SECOND run-block literal is ambiguous and refuses.
+    doubled = source + "\n_OTHER = {\"run\": {\"e6_receipt\": 1}}\n"
+    try:
+        _run_block_keys(doubled)
+    except AssertionError as exc:
+        assert "exactly ONE" in str(exc), exc
+    else:  # pragma: no cover
+        raise AssertionError(
+            "a second `run` dict literal did not refuse — the scan would then pick one "
+            "arbitrarily and could certify the emitter against the wrong block")
 
 
 def test_the_blocker_record_was_refreshed_with_the_log_it_covers():

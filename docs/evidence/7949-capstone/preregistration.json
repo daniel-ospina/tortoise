@@ -3,7 +3,6 @@
   "issue": 9075,
   "epic": 7949,
   "document": "docs/evidence/7949-capstone/PRE-REGISTRATION.md",
-  "document_sha256": "sha256:8c87126bae1ba66236c854085030ca1c655443a9e3b03992044cae8e323e377b",
   "written_before_any_scored_run": true,
   "written_before_any_scored_run_basis": "No SCORED run exists at this commit. docs/evidence/7949-capstone/e1-e2.log predates this record and is UNPREREGISTERED by its own lines (prereg=UNPREREGISTERED, every criterion verdict=UNPREREGISTERED, result=UNPREREGISTERED, exit=3), so it was never compared against a bar and can never be scored against these thresholds. See PRE-REGISTRATION.md section 0 for the disclosed cost: the author of the E1 bar had seen the unscored 60.0%.",
   "unscored_runs_before_this_registration": [
@@ -89,7 +88,7 @@
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "the measurement RAN at 2026-10-19T01:39:26Z (the receipt's own `date`), BEFORE this record's add-commit a6085af84 (2026-10-21T21:49:11Z) — but its ARTIFACT, tests/eval/write_path/receipts/w2b-operator-2026-10-19.json, was not in the tree: it landed at d50217273 (2026-10-22T05:34Z), AFTER the registration. So this `false` is a claim about VISIBILITY, not about existence: nothing measured by this row was in the tree its author wrote. That distinction is stated in PRE-REGISTRATION.md section 0's row and section 10.3 — leaving it unstated is what let the row be read as 'no measurement existed', a claim the measurement's own date refutes (#10525 review).",
       "threshold_basis": "the 15 edge gold replaced a 4-edge denominator that swung 0-2 of 4 on identical code; no rate may ever be reported against 4",
-      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3."
+      "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23): edge_correct=2 of 15 planted on receipt tests/eval/write_path/receipts/w2b-operator-2026-10-19.json — RED. NOT re-scored here: the receipt's corpus_hash sha256:943a99ec... is not the frozen fixtures_hash, so it measures its own corpus revision; denominator 15 and threshold 15-of-15 are UNCHANGED (#9736/#9738 do not reach this row). Disclosed in PRE-REGISTRATION.md section 10.3. ⚠️ THE ROW'S FIGURE AT THIS HEAD IS 5 OF 15, read from the FROZEN-corpus receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json, extractor extract_session_v2); the 2/15 above is the OTHER, non-frozen receipt's number, kept as a historical disclosure. See §1.6.3 and corpus_rows.E4.reconciles_with."
     },
     {
       "id": "E5",
@@ -100,6 +99,57 @@
       "measurement_visible_to_author_basis": "#7947's raw-vs-narrative measurement landed in ecc7bc8ca (2026-10-19) — docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md section 10. Its receipt is stated as LOSS: raw 80.0% (20/25) vs narrative 48.0% (12/25), i.e. RECOVERED 5/25 (20%) vs 13/25 (52%). E5 registers the ratio of RECOVERED claims, so the prior ratio is 2.6 (PASSES >= 0.90) and what it falsifies is the raw ABSOLUTE floor: 0.20 < 0.80. It PRECEDES this record (a6085af84, 2026-10-21) by two days, which is why the field is true and why section 0's row is struck rather than deleted (#9738). The bar is NOT retro-fitted to it: section 10's population is 25 bound qualifiers and E5 is registered over the 29 marker-bearing sentences, so this is a prior — RED-leaning on the absolute floor — and NOT a verdict; E5 must be re-measured on its own 29-sentence population.",
       "threshold_basis": "the ratio alone is degenerate - two arms both at 20% give ratio 1.0 - so the raw absolute floor is required too",
       "post_registration_measurement": "capstone-measured-e0fc940b.log (2026-10-23) re-scored the #7947 arm receipts against THIS corpus's gold: ratio=1.0833 (passes >= 0.90) but raw_absolute=0.4800 (FAILS >= 0.80) on n=25 sentences, with an incomplete raw receipt disclosed (wp07_bluepeak_followup:raw partial=True). RED on the registered bar, and on 25 sentences rather than the registered 29 — both numbers are quoted; neither is final until the populations are reconciled."
+    },
+    {
+      "id": "A1",
+      "metric": "`object→object` edges written by the run, by **declared relation type** and by **endpoint kind**, plus the number of **rollup queries** the run asks that answer (return at least one row)",
+      "denominator": "every `:Object` node written by the run, same arm, same commit (floor of at least 30 Objects); and the rollup queries asked (floor of at least 1 query)",
+      "threshold": "`>= 1` edge for **each** relation family pinned in `a1_relation_families` (`hasPart` — the ONE relationship label the pack's two declared hierarchy predicates `decomposesInto`/`hasPart` are both **written** as; a pin on the declared spelling names a label no writer stamps, which makes the bar unsatisfiable), and **every** rollup query answers (`>= 1` row); zero object→object edges on a population that clears the floor is **RED**, never REFUSED",
+      "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured `object→object edges []` — zero of every relation type — against 5,314 Objects (#7949 comment 6645275147), while the declared vocabulary already exists (packs/dev/manifest.yaml:142 `decomposesInto`, :148 `hasPart`); the bar is the pack's own declaration, not a number invented here. ⛔ The family is pinned to the WRITTEN label: both of the pack's hierarchy entries (`Theme -> Epic`, `Epic -> Issue`, manifest:192-196) are written `type: hasPart`, and every writer folds `composedOf`/`decomposesInto`/`contains`/`wraps` onto it (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513); `hasPart` is in `create_edge`'s own predicate set and `decomposesInto` is not (edges.py:621-632), so a pin on the declared spelling would name a label that never occurs and the bar could never be met (#10982 review round 2). A1 is NOT E6 (#11083): E6 measures the declared→writable→written chain per pack across all 36 declared relations; A1 measures what the WRITTEN graph can answer.",
+      "measurement_visible_to_author": false,
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no committed artifact exists': on the PINNED corpus, docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04 — two days BEFORE this row was written) carries the object population (`\"Object\": 64`) and a COMPLETE edge-type enumeration (`MATCH ()-[r]->() RETURN type(r)`, so an absent type is 0 and not uncounted) which carries no `hasPart` — i.e. A1's pinned family reads 0 on this corpus from a committed artifact. The owner's 2026-11-04 live-v4 hand reading is additionally this row's `threshold_basis`. The bar was therefore written with a figure in view; that discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.11, and #10984 (C3) owns the scoring run.",
+      "floor": "a1_objects"
+    },
+    {
+      "id": "A2",
+      "metric": "S3 RESOLVE candidates **attached** to an existing `:Object` versus **minted**, plus candidates **held** and each held candidate named with its reason",
+      "denominator": "the **decided** S3 RESOLVE candidates in the scored run (floor of at least 30 decided candidates — `a2_decided_candidates`; the all-candidate count is reported beside it, never used as the floor)",
+      "threshold": "`attach_share >= 0.50` of **decided** candidates, and every `held` candidate named with its reason — a run that holds candidates without naming them is **RED**",
+      "threshold_basis": "it is a two-way decision, so the bar is its half-way point. The measured context it exists to reverse is the backfill's own census (tortoise/definite_description_backfill.py:15-23): of a drop-shaped population of 6,533 Objects, 2,614 are single-use and 402 unused, on 7,870 Objects and 27,324 reference edges - i.e. 40% of that class is single-use. The 62.3% figure in section 1.2 is a DIFFERENT measurement (the '-prefixed rows: 4,901 of 7,870) and is NOT a single-reference share; a bar must not be justified by a class it does not describe. No A2 run exists, so nothing is fitted to one; #10985 (C4) owns the scoring run.",
+      "measurement_visible_to_author": false,
+      "measurement_visible_to_author_basis": "no S3-RESOLVE attach/mint census has ever been taken on any graph, so no measurement of this metric exists anywhere; #10985 (C4) owns it.",
+      "floor": "a2_decided_candidates"
+    },
+    {
+      "id": "A3",
+      "metric": "statements that **join a chain** under the definition registered here — carrying at least one incident `IMPL`/`NAND` edge **and** at least one such edge crossing a batch boundary (a different `Event` root, with an `eventId` on **both** ends) — with the CHEAP rate (any incident `IMPL`/`NAND`, no cross-batch requirement) reported beside it and explicitly NOT the bar",
+      "denominator": "the statements written by the run that carry an `eventId` — `Point` nodes whose `pointKind` is `statement` **and** whose `eventId` is present (floor of at least 30 statements AND an event-root coverage of at least 0.50); the unstamped statements and the `NULL` `pointKind` population are reported separately, never folded in",
+      "threshold": "`cross_batch_rate >= 0.50` over the stamped statements; the cheap rate and the coverage are reported and never compared to this bar",
+      "threshold_basis": "9,910 of 15,534 statements (63.8%) carried NEITHER IMPL nor NAND in the owner's 2026-11-04 live-v4 reading (#7949 comment 6645275147), i.e. 36.2% join at the CHEAP definition, so one half is a reversal of the measured majority and still below a demand the operator lane has never met. The cross-batch requirement is what makes the CLAIM the measured thing: intra-session CONTAINS/extractedFrom/INPUT already exist and may not count as the link. 'member of a connected component of >= 2' is NOT a third definition — any incident edge already makes a component of two, so it collapses into the cheap one. #10986 (C5) owns the scoring run.",
+      "measurement_visible_to_author": false,
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no artifact exists': this row's threshold_basis quotes the owner's 2026-11-04 live-v4 reading of the CHEAP chain-join rate (9,910 of 15,534 statements carried neither IMPL nor NAND), and on the pinned corpus docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04) carries the IMPL/NAND edge totals from the same complete enumeration. What NO committed artifact carries is the registered CROSS-BATCH rate, which is why the row still has to be measured rather than scored; but the cheap rate is reported beside it and is explicitly NOT the bar (section 3.1, section 3.7), so what was in view is a different definition and not this row's value. That discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.11, and #10986 (C5) owns the scoring run.",
+      "floor": "a3_statements"
+    },
+    {
+      "id": "A4",
+      "metric": "typed claims — **claim** Points (neither a truthy `is_episodic` nor a truthy `is_operator`) whose `pointKind` is present, not blank and not `statement` — reported by kind, with the `statement` and `NULL`/blank populations reported beside them",
+      "denominator": "all **claim** `Point` nodes written by the run (floor of at least 30 typed statements); the excluded turn-row and operator-Point populations are counted and reported beside it, never folded in",
+      "threshold": "UNMEASURED(the bar is owner-gated on the D3 fork — `#10988` and `#1022` decide whether A4 overrides D3; until that is ruled the row is REPORTED and compared to no bar, above the floor of `>= 30` typed statements)",
+      "threshold_basis": "NO BAR EXISTS and this registration may not invent one: the owner's assertion ('0.6% typed is the ceiling the capstone must beat') points OPPOSITE to D3's 'statement only', #10988 (C7) is BLOCKED on that reopen, and #1022 carries the decision. The row is REPORTED above its floor and compared to nothing until the fork is ruled.",
+      "measurement_visible_to_author": false,
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no committed artifact': the owner's 0.6%-typed hand reading of the hosted graph is a measurement of this row's metric and predates the row (it is the contrast the row's threshold records), and docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04) carries `point_composition` on the pinned corpus. What no artifact carries is the `pointKind` HISTOGRAM over claim Points that this row registers, which is why the bar is `UNMEASURED` pending #10988 (C7) and #1022. That discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.11, and #10988 owns the measurement once the D3 fork is ruled.",
+      "blocked_by": "#10988",
+      "floor": "a4_typed_statements"
+    },
+    {
+      "id": "A5",
+      "metric": "`:Subject` nodes written by the run, and the **four subject-edge families** (`aboutSubject`, `memberOf`, `ownedBy`, `managedBy`) counted per family (`count(DISTINCT r)`), plus the statements carrying at least one of them",
+      "denominator": "the distinct actors the A-corpus names — `a5_actors`, floor of at least 30 named actors — with the `:Subject` count and the `Point` population reported beside them, never used as the actor denominator",
+      "threshold": "`>= 1` `:Subject` per distinct actor named in the A-corpus and `>= 1` statement carrying a subject edge; a family that is zero is named with its reason rather than averaged away",
+      "threshold_basis": "the owner's 2026-11-04 live-v4 reading measured 26 Subjects against 19,300 points (#7949 comment 6645275147) while #4889 is CLOSED and the symptom persists; the bar is the corpus's OWN actor count, not the number 26, so it cannot be satisfied by writing one Subject per run. #10987 (C6) owns the scoring and the #4889 verdict.",
+      "measurement_visible_to_author": false,
+      "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no census exists': this row's Subject count and three of its four families are already readable on the PINNED corpus from docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04 — `\"Subject\": 19` at :275, `relationship_counts` at :299-309, produced by a COMPLETE edge-type enumeration so an absent family is 0 and not uncounted), and RECONCILE-A1-A2-A5.md section 3 states that four-family reading. The bar was therefore written with a figure in view; that discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.11, and #10987 (C6) owns the scoring run.",
+      "floor": "a5_actors"
     }
   ],
   "prior_measurements": {
@@ -158,6 +208,14 @@
       "registration_added": "2026-10-21",
       "measurement_date": "2026-10-19",
       "kind": "DISCLOSURE corrected, no value moved: measurement_visible_to_author stays false and now carries a measurement_visible_to_author_basis; the measurement RAN 2026-10-19 (before the registration) but its artefact landed d50217273 on 2026-10-22 (after it), so nothing was visible to the row's author; PRE-REGISTRATION.md section 0's row was corrected from 'no measurement existed' to 'no measurement was visible'; metric, 15-edge denominator and 15-of-15 threshold UNCHANGED; old text quoted in section 10.4"
+    },
+    {
+      "issue": 10982,
+      "criterion": "A1+A2+A3+A4+A5",
+      "amended": "2026-11-06",
+      "registration_added": "2026-10-21",
+      "measurement_date": null,
+      "kind": "five A-rows ADDED to the criteria table and to criteria[] — no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; required_criteria_rows stays [E1..E5], so the new rows are registered and reported, never demanded by the gate (a required row would red every existing verdict table for rows nobody has run); the superseded pins line and the table's E-only shape are quoted in PRE-REGISTRATION.md section 10.11. ⛔ Review round 2 corrected three things in this amendment: (a) `a1_relation_families` pinned the DECLARED spellings `decomposesInto`/`hasPart`, but `decomposesInto` is never a written label — both hierarchy entries are written `hasPart` (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513), so the '>= 1 edge for EACH family' bar was unsatisfiable; the pin is now the one WRITTEN family, with `a1_relation_family_fold` naming the declared spellings that fold onto it. (b) `measurement_visible_to_author` stays false for all five on the `a6085af84` anchor, and A1/A3/A4/A5 all had a figure in view, but the stated GROUND was the gate's blind spot rather than history: A1/A3/A4/A5 were written with the owner's 2026-11-04 hand reading in view, and A1/A5 are also readable on the pinned corpus from the committed capstone-measured-9152448d.log (31f996f91, 2026-11-04) — section 0 now carries the A-rows and states the post-visible discount. (c) the floors are SEVEN counts of 30 plus the two non-count refusal boundaries (`a1_rollup_queries: 1`, `a3_event_root_coverage: 0.50`) that existed only in section 3.1 prose and are now pinned."
     }
   ],
   "steps": {
@@ -174,7 +232,7 @@
     "conditional": [
       {
         "step": "S2.3",
-        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:9934, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
+        "condition": "the S2 map left at least one candidate's kind missing or `unclassified`, so `_collect_classify_items` (tortoise/extractor_v2.py:11402, `def _collect_classify_items`) had an item to hand the classifier; when the map types every candidate the pass has no work and neither classify pass runs",
         "idle_evidence": "the run's own classify surface reads enabled=true with empty s2/union, the receipt's error/warning surfaces carry no `classify(S2) failed` / `classify(union) failed` / `classify-later init failed` — the fail-open path leaves the SAME empty counters, so the absence of a failure marker is what separates 'nothing to do' from 'crashed' — AND the receipt's `step_witness` carries a POSITIVE candidate count for the map: an absent or zero count is the shape an EMPTY item set leaves when it skips the pass's `try`, so it cannot support an idle claim (#10215 review r2 P2)",
         "evidence_issue": 10215
       }
@@ -186,8 +244,186 @@
     "e1_min_before_share": 0.2,
     "e2b_surviving_units": 30,
     "e3_derived_nodes": 30,
-    "e5_rate_min_sentences": 10
+    "e5_rate_min_sentences": 10,
+    "a1_objects": 30,
+    "a2_candidates": 30,
+    "a3_statements": 30,
+    "a4_typed_statements": 30,
+    "a5_points": 30,
+    "a2_decided_candidates": 30,
+    "a5_actors": 30,
+    "a1_rollup_queries": 1,
+    "a3_event_root_coverage": 0.5
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
-  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over."
+  "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
+  "a_corpus": {
+    "status": "RECONCILED by #10983 (C2), landed as #11298 — the A-rows are carried by this corpus under the SAME rule §1.6.3 applies to the E-rows. They are FIXTURE-corpus rows; none of them is a fleet measurement (see `not_a_proof_of`).",
+    "path": "tests/eval/write_path",
+    "pinned_by": "the SAME fixtures_hash the E-rows pin; a run handed a DIFFERENT corpus is REFUSED by the record's own G1 rule, never scored",
+    "requires": "a pack that declares a part-whole hierarchy (goal to initiative to work item) for A1, and statements carrying bindable subject slots for A5. A row whose population is absent is REFUSED with the absent population NAMED, never scored on a population of three objects. #10983 was expected to land such a session and did not: the requirement is on the CORPUS's content, not on a pending landing, so it survives C2's close unreduced.",
+    "why_one_corpus": "the record's corpus pin is a single fixtures_hash (#9075); two corpora would make the A-rows and the E-rows incomparable on one run",
+    "zero_denominator": "REFUSED for every A-row: A2's decided-candidate count of zero and A5's named-actor count of zero make the row REFUSED, and the instrument emits UNMEASURED(<the absent population>) - never a 0/0 rate. The floors a2_decided_candidates and a5_actors sit under the RATE's own denominator, not merely under the population it is drawn from.",
+    "not_a_proof_of": "the owner's 2026-11-04 live-v4 figures that each A-row's `threshold_basis` quotes (A1's `object→object edges []` against 5,314 Objects; A3's 9,910 of 15,534 statements; A4's 0.6% typed; A5's 26 Subjects against 19,300 points). This corpus is the FIXTURE (§1.6.3), so an A-row scored here is a statement about this fixture and NOT a measurement of the fleet graph it was written to reverse. A fleet claim is `corpus_rows.fleet-claim`, which pins `fleet-capture` — a corpus this registration does not pin, so that row MAY NOT be scored until one is registered."
+  },
+  "a1_relation_families": [
+    "hasPart"
+  ],
+  "a1_relation_family_fold": {
+    "hasPart": [
+      "hasPart",
+      "decomposesInto",
+      "composedOf",
+      "contains",
+      "wraps"
+    ]
+  },
+  "door": {
+    "lane": "v2",
+    "lane_env": "TORTOISE_SESSION_EXTRACTOR",
+    "entry_point": "sdk.capture_session -> sdk._extract_session_v2 -> extractor_v2.extract_session_v2",
+    "hosted_selector": "tortoise/hosted_api.py::_capture_lane",
+    "hosted_selector_semantics": "the hosted endpoint and the SDK dispatch read the SAME variable with the SAME comparison, so 'hosted endpoint or SDK path' is one door with an optional HTTP boundary, not two doors (#10983)",
+    "not_the_door": "the m2 lane (sdk._extract_session_llm -> tortoise/extractor.py::LLMExtractor) is the opt-in, non-default extractor",
+    "seams": [
+      {
+        "env": "TORTOISE_VET",
+        "resolver": "extractor_v2._vet_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "the VET flag contributes nothing; the pass can still be armed by TORTOISE_VALUE_GATE (see below)"
+      },
+      {
+        "env": "TORTOISE_CLASSIFY_LATER",
+        "resolver": "extractor_v2._classify_later_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "S2.3 CLASSIFY is entirely off-path; kinds are emitted inline by S2.1"
+      },
+      {
+        "env": "TORTOISE_S2_DECISION_SEAM",
+        "resolver": "s2_decision_seam.seam_enabled",
+        "default": "off",
+        "behaviour_seam": true,
+        "unset_behaviour": "no arbiter: the model-backed typed-decision seam is off-path. Fail-closed: no network call, no spend"
+      },
+      {
+        "env": "TORTOISE_VALUE_GATE",
+        "resolver": "value_gate.value_gate_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "ON since #10996. The mechanical identifier-only predicate runs inside the VET pass, and extractor_v2 ORs this term into vet_enabled — so the S2.2 pass is ARMED on the fleet's default write path even with TORTOISE_VET unset. #10983's ledger said this seam was default-off; the code says otherwise at this head",
+        "evidence": "value_gate.value_gate_enabled / extractor_v2.vet_enabled"
+      },
+      {
+        "env": "TORTOISE_S4_DELTA",
+        "resolver": "extractor_v2._s4_delta_enabled",
+        "default": "on",
+        "behaviour_seam": true,
+        "unset_behaviour": "unset -> delta contract (the shipped default); an explicit falsy value selects the LEGACY complete-list contract, which changes S4's output without an audible seam"
+      },
+      {
+        "env": "TORTOISE_LABEL_ORDER",
+        "resolver": "extractor_v2._label_order_rng",
+        "default": "off",
+        "behaviour_seam": false,
+        "unset_behaviour": "NOT a behaviour seam: a render DIAGNOSTIC. 'shuffle' randomises the kind lists per call, so pinning it unset is what makes two runs of the same arm comparable"
+      }
+    ],
+    "acceptance_arm": {
+      "set_on": [
+        "TORTOISE_VET",
+        "TORTOISE_CLASSIFY_LATER"
+      ],
+      "pinned_off": [
+        "TORTOISE_CHANGE_FEED",
+        "TORTOISE_CONTEXT_ENRICH",
+        "TORTOISE_EXTRACTOR",
+        "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+        "TORTOISE_EXTRACTOR_MAX_TOKENS",
+        "TORTOISE_EXTRACTOR_PROMPT",
+        "TORTOISE_EXTRACT_MODEL",
+        "TORTOISE_LABEL_ORDER",
+        "TORTOISE_LABEL_ORDER_SEED",
+        "TORTOISE_PARTIAL_GAP_FILL",
+        "TORTOISE_REFERENTIALITY",
+        "TORTOISE_RENARRATE_KEEP_RATE",
+        "TORTOISE_S2_DECISION_SEAM",
+        "TORTOISE_SESSION_EXTRACTOR",
+        "TORTOISE_SESSION_LLM_MOCK",
+        "TORTOISE_SUBJECT_TAU_HI",
+        "TORTOISE_SUBJECT_TAU_LO",
+        "TORTOISE_VALUE_GATE"
+      ],
+      "pinned_to": {
+        "TORTOISE_S4_DELTA": "1",
+        "TORTOISE_JSON_MODE": "1",
+        "TORTOISE_IDENTIFIER_TOKENS": "1",
+        "TORTOISE_STATE_VALUE_VERBATIM": "1"
+      },
+      "why_value_gate_off": "its default flipped ON in #10996; an arm that declares itself OFF must pin the explicit 0 or it measures the predicate's population",
+      "read_back": "The set is CLOSED over the modules named in tests/test_7949_c2_door.py::path_modules — a pointer, not a count, because a count in this field went stale three rounds running — and what `tests/test_7949_c2_door.py` enforces mechanically is the CENSUS over that list, not the list's membership: `path_modules` is a hand-maintained tuple, and every ``TORTOISE_*`` read inside those modules must be classified (arm seam, pin, declared input, or an acknowledged non-seam with a stated reason) or the suite reds. Membership is hand-kept, so a read added to a module OUTSIDE that tuple is not caught by it; the same chain's infrastructure reads (record DSN, packs dir, embedding gates, store connection) are inputs, deliberately outside the partition, the sdk/hosted_api helpers those two hops call are in neither, which is the measured gap tracked as #11410, and a new derived module is a one-line change to the test's path_modules. Every value is re-read from os.environ after setting and a mismatch REFUSES the run.. Cycle 7 added the two reads the closure was still missing, both consulted on the acceptance path and previously in no pin, no ledger row and no closure: TORTOISE_CONTEXT_ENRICH (context_enrich.enrich_enabled, reached as sdk.capture_session(enrich_fn=_capture_enriched_texts) — it rewrites the text each turn embeds) pinned off (fail-safe OFF, so the pin matches today's behaviour), and TORTOISE_JSON_MODE (model_adapters, default-ON and read per call, flips the request's response_format) pinned to \"1\". A new read inserted in enrich_enabled() left the closure pin GREEN at the previous head (measured). Cycle 8 added TORTOISE_CHANGE_FEED (change_feed.py, reached via sdk._change_feed_enabled on PointRevised) pinned off: an ambient =1 adds a :GraphEvent to the graph the run writes and the probe's S6 step witness prints that count (measured on one capture of the registered corpus: 2 vs 3 :GraphEvent). Cycle 9 added TORTOISE_IDENTIFIER_TOKENS (sparse.py:226, default-ON, read through projection/entities.py:1208 point_identifier_aliases on the write path), pinned to its shipped default 1: it rewrites search_keys on every :Point the run writes, and the registered corpus yields no aliases either way (measured: 0 of 27 points, 0 of 7 fixtures), so the pin makes the population shell-insensitive without moving a number. tortoise/sparse.py is now in path_modules.. Cycle 10 added TORTOISE_SUBJECT_TAU_HI/_LO (subject_binding.py:189 via bind_point_subjects, read through a PARAMETER so no resolver sees them) pinned unset, and made the closure read LITERALS as well as resolved reads: measured 0.90 -> bound at the defaults, suspected with TORTOISE_SUBJECT_TAU_HI=0.99, i.e. the :aboutSubject/:aboutObject edge is not written. Cycle 11 added TORTOISE_STATE_VALUE_VERBATIM (extractor_v2._state_value_verbatim_enforced, the one name #11449 gave the #10360 carve-out's write-path off-switch; read PER EMITTED POINT at extractor_v2.py:10157 and handed to the rule as armed=), pinned to its shipped default 1: the switch is default-ON, and with it off the emit site takes no judgment at all — no refusal, no hard-cut disclosure, and refused_value_contents/refused_value_slots stay empty so the resurrection guard cannot fire either — so an ambient =0 WRITES a rewritten value that main withholds and the point population grows under a door whose header would still claim the pin held. It arrived AFTER cycle 10's closure (landed in #11449, 2026-11-07) and the census redded on it for every PR until it was classified, which is the closure doing its job. The pin is the shipped default, so it moves no number and makes the population shell-insensitive. This branch (`#11534`) adds `TORTOISE_PARTIAL_GAP_FILL` (`extractor_v2._partial_gap_fill_enabled`, its one `env_flag` read, consumed by the S2.2b-ADD gap-fill stage BEFORE S3) pinned OFF: an armed `=1` spends a bounded model call ADDING items to the embed list, i.e. it changes the population of the capture this door scores, under a header that would still claim the door held. It is DEFAULT OFF, and unset is the only state the registered corpus was scored under, so the pin matches today's behaviour and needs no value. The entry sits at probes/capstone_measure.py:527. It is NOT cite-neutral, and the branch that authored it said it was kept on ONE source line for that reason: the union squashed as a1dff7cec8 landed it with a 10-line comment above it instead, and that 11-line insert moved every downstream cite in the file by +11 (measured: \"arm\": arm_record( 4008 at a1dff7cec8^ -> 4019 at a1dff7cec8). Nothing in DOOR_PINNED_ON is exempt, but the scope is DOWNSTREAM: a line inserted inside the tuple moves every probes/capstone_measure.py:NNNN cite BELOW it, and no cite above it. The bundle demonstrates both halves — it carries :275-283, which sits above the tuple and did NOT move when a1dff7cec8's :278 hunk changed no line COUNT, and it carries :2747-2749, which sits below: a1dff7cec8 moved that window :2713-2715 -> :2724-2726 (+11, the same shift as everything below the tuple), THIS branch's own +2 lines inside DOOR_PINNED_ON's comment then moved it :2724-2726 -> :2726-2728, and #11517's own `TORTOISE_RENARRATE_KEEP_RATE` arm inside `DOOR_PINNED_OFF` (`7dabb59e0f45`) moved it again :2726-2728 -> :2738-2740 (+12), and `#11534`'s own `TORTOISE_PARTIAL_GAP_FILL` arm inside `DOOR_PINNED_OFF` then moved it once more :2738-2740 -> :2747-2749 (+9) - so the window's final position is not any single commit's, it is the sum of the four."
+    },
+    "negative_control": {
+      "arms": [
+        "v2 (the door)",
+        "m2 (sdk._extract_session_llm)"
+      ],
+      "seam": "TORTOISE_SESSION_LLM_MOCK=1",
+      "measured": "v2 (the door): Object=1 Point=27 Event=2 Session=1 Operator=0, objects=['the strategy']; m2 (the other lane): Object=0 Point=149 Event=1 Session=1 Operator=0, objects=[] — same corpus session wp01_quarry_debug, same offline model seam, one embedded graph each",
+      "verdict": "MEASURED DIFFERENCE (structural)",
+      "why": "it is a different EXTRACTOR, not a different seam of the same one: the m2 lane mints no :Object at all on this session and 5.5x the Points, so a number measured on one lane is not a number about the other",
+      "consequence": "rows whose corpus is the m2 lane (E1b) are not fleet facts; the door is ALSO pinned structurally so the control cannot be the only guard",
+      "structural_in_kind_not_only_in_size": "the m2 lane mints no :Object at all — that is a difference in KIND, not a matter of degree — and the 5.5x Point count is the SIZE of the same difference, not the reason it matters"
+    },
+    "pinned_by": "tests/test_7949_c2_door.py"
+  },
+  "corpus_rows": {
+    "E1": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the ^the <X> share falls >=50% on THIS fixture corpus, both arms, same commit",
+      "not_a_proof_of": "that the fleet's graph volume falls"
+    },
+    "E1b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "anti-gaming control: planted units survive the deterministic m2 lane (90/90 at this fixtures_hash)",
+      "not_a_proof_of": "anything about the v2 door: E1b is measured on the m2 lane (tests/eval/write_path/baselines/m2.json, posture 'm2'), a DIFFERENT extractor, so unit survival there says nothing about what the v2 lane writes",
+      "lane": "m2",
+      "published_figure": "the probe publishes E1b from docs/evidence/9889/e1-e2-scores.json (e1b.real_facts=90), whose artifact is docs/evidence/9889/on-arm.log — a no-loss CONTROL on the SCORED (v2) arm, whose own note says no committed artifact carries grading.strict_survival_counts over the m2 lane. So the published 90/90 is not an m2 measurement; this row's m2 attribution describes the control's DEFINITION and the baseline below, not the lane the published figure was read from.",
+      "carried_forward": "tests/eval/write_path/baselines/m2.json records salient_unit_survival_strict=1.0 (= 90/90) at this fixtures_hash (dd7e8520…) and posture 'm2', but its own history entry for that hash records the gated metrics as CARRIED FORWARD from the 943a99ec6 measurement (only the planted_qualifiers gold changed), not re-measured at this one."
+    },
+    "E2a": {
+      "corpus": "tests/eval/write_path",
+      "claim": "value-bearing units survive; nothing is filtered away",
+      "not_a_proof_of": "the fleet's correctness, which needs a capture through the door"
+    },
+    "E2b": {
+      "corpus": "tests/eval/write_path",
+      "claim": "surviving units are not fused into each other",
+      "not_a_proof_of": "the fleet's atomicity on a real capture"
+    },
+    "E3": {
+      "corpus": "the run's own door-written graph",
+      "claim": "every derived node from a door-written graph carries a version anchor (a structural property of the writer)",
+      "not_a_proof_of": "any content claim — E3 is shape, not extraction quality; it is also not a fleet-population claim, since the graph it counts is whichever graph the run wrote"
+    },
+    "E4": {
+      "corpus": "tests/eval/write_path",
+      "claim": "5 of 15 planted operator edges are wired and persisted against the registered bar (15), read from the receipt the probe SELECTS by corpus_hash (w2b-operator-2026-10-24-8503-b.json)",
+      "not_a_proof_of": "the fleet's graph: this is the fixture corpus, and the row is graded through the v2 door on it (not on the m2 lane) — a fleet claim needs a captured corpus",
+      "lane": "v2",
+      "reconciles_with": "§10.3 and criteria.E4's post_registration_measurement record 2/15 from receipt w2b-operator-2026-10-19.json, whose corpus_hash (943a99ec…) is NOT the frozen fixtures_hash (dd7e8520…): that figure measures a different corpus revision and stays as the historical disclosure it is. The FROZEN-corpus receipt the probe SELECTS reads 5/15, and 5/15 is this row's figure at this head."
+    },
+    "E5": {
+      "corpus": "tests/eval/write_path",
+      "claim": "the raw-vs-narrative premise, measured on this corpus (§10)",
+      "not_a_proof_of": "a fleet-corpus premise: a different corpus is a different measurement"
+    },
+    "fleet-claim": {
+      "corpus": "fleet-capture",
+      "claim": "what the fleet's write path actually produces, measured on a real capture through the door",
+      "not_a_proof_of": "nothing yet — this registration pins NO fleet-capture corpus, and one must be registered BEFORE such a number is scored"
+    }
+  },
+  "document_sha256": "sha256:47fa70aed483f9bc9268755441aabbb5192f3e4701cc5f9386a4aa67a1f899ae"
 }

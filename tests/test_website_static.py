@@ -69,12 +69,15 @@ import ast
 import json
 import os
 import re
+import struct
 import sys
 import tempfile
+import zlib
 from html import unescape
 from html.parser import HTMLParser
 from itertools import pairwise
 from pathlib import Path
+from urllib.parse import urljoin, urlsplit
 
 # `pytest` is deliberately not imported (#8066): this file's only use was the
 # `pytest.skip` that made the tortoise-decide gate green-while-blind.
@@ -3957,3 +3960,1906 @@ class TestARenderedCodeElementGetsAMonoFace:
             "element a mono family inside the emitter, or declare the file in `ROOTS` "
             "and extend the ratchet, so the exclusion stays deliberate:\n  "
             + "\n  ".join(grew))
+
+
+class TestSiteIconAndSocialPreviewContract:
+    """Every page must carry a real icon and a real preview image (PR #11092 era).
+
+    THE DEFECT THIS PINS. Both live origins answered `/favicon.ico` with **404**,
+    and the two pages that matter most (`index.html` for premiselabs.co,
+    `product.html` for tortoise.premiselabs.co — the host that serves it at `/`)
+    declared **no icon at all and no `og:image`**: a browser showed a blank tab,
+    and a link pasted into Slack/X/WhatsApp rendered as a bare title with no
+    card. Five other pages did declare an icon — `/logo.png`, a 400x244 WORDMARK
+    — which a tab renders as a squashed bar, so "there is a `rel=icon`" was
+    never the property that mattered.
+
+    So the contract is stated in the three parts a human actually sees, and each
+    part is checked against the file on disk rather than against the tag:
+
+    1. **The icon resolves.** `/favicon.ico`, `/favicon.png` and
+       `/apple-touch-icon.png` exist in the served tree, the PNG is SQUARE and
+       at least 180px (the apple-touch size), and the ICO is a real icon
+       container holding an embedded PNG — not a renamed image.
+    2. **The preview resolves and is the size it claims.** `og:image` maps to a
+       file in the tree, and `og:image:width`/`height` match the JPEG's actual
+       SOF header. A card whose declared size disagrees with the bytes is
+       cropped by the scraper that trusts the tag.
+    3. **No page re-uses the wordmark as an icon.** `/logo.png` is a wordmark;
+       it may appear in page content, never in a `rel=icon`.
+
+    The dimensions are read with `struct`/`re` over the SVG-free formats we
+    ship (PNG IHDR, JPEG SOF, ICO directory) — stdlib only, no imaging library,
+    so the guard runs in the fast lane.
+
+    ⛔ WHAT THIS CAN SEE ABOUT CONTENT, AND WHAT IT STILL CANNOT. Every icon is
+    DECODED (`_png_palette`) — `favicon.png`, `apple-touch-icon.png`, and the PNG
+    payloads inside `favicon.ico` (the container Windows and Edge actually draw) — and
+    must hold more than one colour with no colour above 95% of the canvas, so a flat
+    rectangle in place of a mark reds. Two colours is legitimate art and passes; the
+    measured placeholder this PR deletes reds at 99.2% one colour. The card is
+    a JPEG, which this file cannot decode without dragging a wheel into the fast
+    lane, so it is bounded by ENCODED SIZE (>= 40 KB) — a proxy, with its
+    measurements written beside it, and it does reject a solid 1200x630 JPEG (22,016
+    bytes measured).
+    What remains unseen is whether the card DEPICTS the right thing: a 60 KB
+    photograph of something unrelated passes. The blog's own head is emitted by
+    `website/functions/blog/_lib.ts` and is guarded by `tests/test_blog_seo_meta.mjs`,
+    which executes the real renderer.
+    """
+
+    WEB = REPO_ROOT / "website"
+    ICON_ICO = "favicon.ico"
+    ICON_PNG = "favicon.png"
+    ICON_APPLE = "apple-touch-icon.png"
+    # Declared once: every page's preview image is 1200x630 (the 1.91:1 the
+    # scrapers crop to), and the two bespoke pages below ship their own.
+    OG_SIZE = (1200, 630)
+    # The two hosts this site is served from. Declared once because every page's
+    # preview URL is checked against it — see the og:image assertions.
+    SITE_ORIGINS = frozenset({"premiselabs.co", "tortoise.premiselabs.co"})
+    # Every page is served at `/` from one of those hosts, so this is the base an
+    # icon href is resolved against before it is compared with a file's path.
+    SITE_ROOT = "https://tortoise.premiselabs.co/"
+    # The encoded-size floor a link-preview card must clear. MEASURED, not guessed:
+    # a FLAT 1200x630 JPEG at maximum quality is 22,016 B (`sips -s formatOptions
+    # best`), so the first cut's 20 KB floor passed the very image it was written to
+    # reject. The floor is enforced on EVERY page's declared card, and the three cards
+    # at this head are 94,066 B (og-tortoise.jpg), 49,555 B (investors-og.jpg) and
+    # 50,393 B (design-partners-intro-og.jpg) — i.e. 2.35x, 1.24x and 1.26x the floor,
+    # not 2.35x each. Re-encoding the SAME pixels is what eats the margin: with
+    # `ffmpeg -q:v 4` the two smaller cards measure 37,024 B and 39,818 B, both under
+    # the floor. That is the one false red this bound can produce, which is why
+    # `_card_floor_violation`'s message tells the reader to LOOK at the card first.
+    # `test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors`
+    # holds this floor ABOVE the flat measurement, so lowering it to 20 KB again is red.
+    CARD_MIN_BYTES = 40_000
+    # What a flat 1200x630 JPEG measures — the image CARD_MIN_BYTES exists to reject.
+    # Recorded as a number so the relationship is ASSERTED (`FLAT_CARD_BYTES <
+    # CARD_MIN_BYTES`) rather than left implicit in a comment.
+    FLAT_CARD_BYTES = 22_016
+    # A decoded icon must hold at least this many distinct colours — TWO, because a
+    # hard-edged two-colour mark is legitimate art (pixel art, a `crispEdges` SVG
+    # export, anything without antialiasing) and a guard that reds honest artwork is a
+    # guard the next person weakens instead of fixes. This was 8, and the comment
+    # beside the check claimed "a two-colour logo would still pass at 8" — it could
+    # not, 2 < 8, so the sentence asserted the opposite of what the code did. What
+    # rejects the degenerate case is the PAIR: one flat colour trips this floor AND
+    # the dominant-colour floor below. Neither alone is enough to describe a mark.
+    ICON_MIN_COLOURS = 2
+    # How much of the canvas the mark must span. The artwork's own padding put it at
+    # 68% (#11318 shipped that straight downscale) and in a tab strip it read as a
+    # small glyph on a slab; `tools/build_site_icons.py` crops it to 84%. 80% is the
+    # floor, not the target: it is the point at which the mark stops reading as small
+    # next to a neighbour whose glyph fills its tile, and it sits above 68% so a
+    # re-export of the unpadded artwork reds instead of quietly undoing this.
+    MARK_WIDTH_FLOOR = 0.80
+    # The tile's corner pixels. 0 = the tab background shows through the rounded corner;
+    # apple-touch-icon is the exception and must stay opaque (iOS masks it itself).
+    ROUNDED_CORNER_ALPHA = 0
+    # Transparent corners alone do not make a rounded tile — four punched pixels would
+    # pass. This is how far along each edge the first fully-opaque pixel must sit, as a
+    # fraction of the side: an arc of radius r reaches an edge at exactly r, so with the
+    # builder's 21% this measures 21%, while a nibbled square measures under 1%.
+    CORNER_INSET_FLOOR = 0.10
+    # ...and no single colour may cover more than this fraction of its canvas.
+    ICON_MAX_DOMINANT = 0.95
+
+    # --- format readers -------------------------------------------------
+
+    @staticmethod
+    def _png_size(data: bytes) -> tuple[int, int]:
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        return struct.unpack(">II", data[16:24])
+
+    @staticmethod
+    def _png_pixels(data: bytes) -> tuple[int, int, list[list[tuple[int, ...]]]]:
+        """Decode an 8-bit PNG to (width, height, rows of pixel tuples) — stdlib only.
+
+        ⛔ WHY A DECODER LIVES IN A TEST. `/blog/og-image.png` was a 4.6 KB
+        placeholder: two colours, 99.2% of the canvas flat background, a bare accent
+        rule, no mark and no text. Every dimension assertion in this file passed on
+        it, because a 1200x630 rectangle IS 1200x630. A card (or an icon) that renders
+        as an empty block is the failure these guards exist to prevent, and only the
+        pixels can tell it apart from art. No imaging library is in the dev env, and
+        adding one for a guard would make the fast lane depend on a wheel — so this
+        decodes 8-bit PNGs (the only depth this repo writes) directly.
+
+        ⛔ ONE DECODER, TWO CONSUMERS. `_png_palette` counts colours and the rounded-tile
+        guard reads GEOMETRY and ALPHA out of the same rows. A second decoder for the
+        second question is how the two drift, and this file already carries the cost of
+        one reader being right in one place and wrong in another (the source-order meta
+        readers). Alpha stays in the tuple, so a transparent pixel is its own colour: a
+        decoder that silently dropped the alpha channel reds the colour floor rather
+        than passing a blank tile.
+        """
+        assert data[:8] == b"\x89PNG\r\n\x1a\n", "not a PNG"
+        pos = 8
+        width = height = 0
+        depth = colour = 0
+        idat = b""
+        palette: list[tuple[int, ...]] = []
+        while pos < len(data):
+            (length,) = struct.unpack(">I", data[pos:pos + 4])
+            kind = data[pos + 4:pos + 8]
+            body = data[pos + 8:pos + 8 + length]
+            pos += 12 + length
+            if kind == b"IHDR":
+                width, height, depth, colour = struct.unpack(">IIBB", body[:10])
+                assert body[12] == 0, "interlaced PNG — not the shape this repo writes"
+            elif kind == b"PLTE":
+                palette = [tuple(body[i:i + 3]) for i in range(0, len(body), 3)]
+            elif kind == b"IDAT":
+                idat += body
+            elif kind == b"IEND":
+                break
+        assert depth == 8, f"bit depth {depth} — this decoder reads 8-bit PNGs"
+        channels = {0: 1, 2: 3, 3: 1, 4: 2, 6: 4}[colour]
+
+        def paeth(a: int, b: int, c: int) -> int:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            if pa <= pb and pa <= pc:
+                return a
+            return b if pb <= pc else c
+
+        stride = width * channels
+        # ⛔ BOUNDED, because an unbounded `zlib.decompress` inflates whatever a
+        # checked-in IDAT expands to (zlib reaches ~1000:1), so a crafted icon could
+        # allocate without limit in CI. The IHDR already states the exact size — one
+        # filter byte per row plus `width * channels` — so the bound is known before a
+        # byte is inflated, and a stream that overruns it is a malformed PNG rather
+        # than something to keep decoding.
+        expected = height * (stride + 1)
+        stream = zlib.decompressobj()
+        raw = stream.decompress(idat, expected + 1)
+        assert len(raw) == expected and not stream.unconsumed_tail, (
+            f"PNG image data does not expand to the {expected} B its IHDR geometry "
+            f"({width}x{height}, {channels} channel(s)) declares — refusing to decode it")
+        prev = bytearray(stride)
+        rows: list[list[tuple[int, ...]]] = []
+        off = 0
+        for _ in range(height):
+            ftype = raw[off]
+            off += 1
+            line = bytearray(raw[off:off + stride])
+            off += stride
+            if ftype:
+                for i in range(stride):
+                    a = line[i - channels] if i >= channels else 0
+                    b = prev[i]
+                    c = prev[i - channels] if i >= channels else 0
+                    if ftype == 1:
+                        line[i] = (line[i] + a) & 0xFF
+                    elif ftype == 2:
+                        line[i] = (line[i] + b) & 0xFF
+                    elif ftype == 3:
+                        line[i] = (line[i] + (a + b) // 2) & 0xFF
+                    elif ftype == 4:
+                        line[i] = (line[i] + paeth(a, b, c)) & 0xFF
+                    else:
+                        raise AssertionError(f"bad PNG filter {ftype}")
+            prev = line
+            row: list[tuple[int, ...]] = []
+            for x in range(0, stride, channels):
+                px = tuple(line[x:x + channels])
+                row.append(palette[px[0]] if colour == 3 else px)
+            rows.append(row)
+        return width, height, rows
+
+    @classmethod
+    def _png_palette(cls, data: bytes) -> dict[tuple[int, ...], int]:
+        """How many pixels of each colour a PNG really holds."""
+        _w, _h, rows = cls._png_pixels(data)
+        counts: dict[tuple[int, ...], int] = {}
+        for row in rows:
+            for px in row:
+                counts[px] = counts.get(px, 0) + 1
+        return counts
+
+    @staticmethod
+    def _flat_png(size: int = 256,
+                  rgba: tuple[int, int, int, int] = (0x06, 0x0B, 0x14, 0xFF)) -> bytes:
+        """A one-colour 8-bit RGBA PNG — the degenerate icon, built here.
+
+        ⛔ WHY A SYNTHETIC IMAGE IS IN THIS FILE. The pixel floor below is worth
+        something only if it REJECTS, and the file it was written for
+        (`/blog/og-image.png`, the deleted two-colour placeholder) is gone. This is
+        that shape rebuilt in memory, so the guard's FAILURE path runs on every CI
+        run instead of surviving as a spot check recorded in a PR body.
+        """
+        ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+        raw = (b"\x00" + bytes(rgba) * size) * size      # filter byte + one pixel/column
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    @staticmethod
+    def _two_colour_png(size: int = 256, band: int = 20) -> bytes:
+        """A two-colour, hard-edged mark — the artwork the colour floor must NOT red.
+
+        ⛔ WHY THIS FIXTURE EXISTS. The floor beside it started at 8 distinct colours,
+        and its own comment claimed "a two-colour logo would still pass at 8" — it
+        could not, 2 < 8, so a `crispEdges`/pixel-art mark (no antialiasing, exactly
+        the art a designer might choose) reded with "that is a flat rectangle, not a
+        mark". Lowering the floor to 2 fixed that, but nothing MEASURED the fix: the
+        only icons in the tree decode to ~200+ colours, so pushing the floor back to
+        8 left every assertion green. With this fixture it reds.
+
+        20 rows of accent over 256 is 7.8% of the canvas, i.e. dominant 92.2% — under
+        `ICON_MAX_DOMINANT` on purpose, so the fixture isolates the COLOUR-COUNT floor
+        from the dominant one.
+        """
+        ihdr = struct.pack(">IIBBBBB", size, size, 8, 6, 0, 0, 0)  # 8-bit RGBA
+        accent, background = (0x06, 0xB6, 0xD4, 0xFF), (0x06, 0x0B, 0x14, 0xFF)
+        raw = b"".join(
+            b"\x00" + (bytes(accent) if y < band else bytes(background)) * size
+            for y in range(size))
+
+        def chunk(kind: bytes, body: bytes) -> bytes:
+            return (struct.pack(">I", len(body)) + kind + body
+                    + struct.pack(">I", zlib.crc32(kind + body) & 0xFFFFFFFF))
+
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(raw)) + chunk(b"IEND", b""))
+
+    @classmethod
+    def _icon_mark_violations(cls, name: str, data: bytes, *,
+                              in_tree: bool = True) -> list[str]:
+        """Every reason a decoded icon is not a mark; empty means it carries art.
+
+        Split out of the guard so the SAME predicate can be run against a blank
+        fixture (see `test_the_content_guards_reject_a_blank_image_and_keep_their_
+        measured_floors`). A check whose failure path is never executed cannot be
+        told apart from a no-op.
+
+        `name` is a BARE name of a file in the served tree: the `website/` prefix is
+        added here, so a caller that passes one produces `website/website/…` in the
+        only message that matters. A SYNTHETIC fixture is not in the tree, so it
+        passes `in_tree=False` — otherwise its message names a path that does not
+        exist, and the reader is sent looking for a file that was never there.
+        """
+        counts = cls._png_palette(data)
+        pixels = sum(counts.values())
+        where = f"website/{name}" if in_tree else name
+        problems: list[str] = []
+        if len(counts) < cls.ICON_MIN_COLOURS:
+            problems.append(
+                f"{where} holds {len(counts)} distinct colour(s) over "
+                f"{pixels} pixels — that is a flat rectangle, not a mark; every size "
+                "assertion would pass on it")
+        dominant = max(counts.values()) / pixels
+        if dominant >= cls.ICON_MAX_DOMINANT:
+            problems.append(
+                f"{where} is {dominant:.1%} a single colour — a mark needs to "
+                "carry something the background does not")
+        return problems
+
+    @classmethod
+    def _og_asset_path(cls, image: str) -> Path:
+        """The file a declared `og:image` URL resolves to in the served tree.
+
+        The QUERY is stripped before the URL becomes a path: `…/og-tortoise.jpg?v=2`
+        is a legitimate cache-bust that changes no file, and a guard that keeps it
+        reports "not in the served tree" about a page that is correct. The ORIGIN is
+        deliberately dropped rather than matched here — the same tree is served from
+        two hosts, and that is a separate assertion (`SITE_ORIGINS`).
+        """
+        return cls.WEB / urlsplit(image).path.lstrip("/")
+
+    @classmethod
+    def _og_card_bytes(cls, image: str) -> tuple[Path | None, bytes]:
+        """The file a declared card URL resolves to, and its bytes; `(None, b"")` if absent.
+
+        The default `load` for `_card_violations`: existence and the bytes come from the
+        served tree, through `_og_asset_path` (so a `?v=2` cache-bust still resolves).
+        """
+        path = cls._og_asset_path(image)
+        return (path, path.read_bytes()) if path.is_file() else (None, b"")
+
+    @staticmethod
+    def _filtered_png() -> tuple[bytes, dict[tuple[int, ...], int], list[int]]:
+        """A 5-row RGB PNG whose rows use filter types 0–4, and the histogram it encodes.
+
+        ⛔ WHY THIS FIXTURE EXISTS. Both fixtures around it emit filter type 0
+        (`b"\x00" + row`), so Sub/Up/Average/Paeth reconstruction — the branch every
+        REAL icon in this tree takes (measured: favicon.png rows use filters 1,2,3,4) —
+        was executed by no test. The failure direction is why that matters: a wrong
+        predictor invents extra colours AND lowers the dominant share, i.e. it satisfies
+        both content floors, so a broken decoder would read noise as art while every
+        assertion stayed green.
+
+        The rows are a gradient, not a flat fill, because a flat row makes Sub, Up,
+        Average and Paeth degenerate to the same output and the fixture would prove
+        nothing about any of them.
+
+        Returns `(png, expected histogram, filter types the stream uses)` — the filter
+        list is returned so a future edit cannot quietly collapse it back to type 0 and
+        leave this test passing on the untested path again.
+        """
+        width, height = 8, 5
+        pixels = [
+            [((x * 37 + y * 13) & 0xFF, (x * 53 + y * 29) & 0xFF, (x * 71 + y * 17) & 0xFF)
+             for x in range(width)]
+            for y in range(height)
+        ]
+
+        def paeth(a: int, b: int, c: int) -> int:
+            p = a + b - c
+            pa, pb, pc = abs(p - a), abs(p - b), abs(p - c)
+            if pa <= pb and pa <= pc:
+                return a
+            return b if pb <= pc else c
+
+        body = bytearray()
+        prev = [0] * (width * 3)
+        filters: list[int] = []
+        for y, row in enumerate(pixels):
+            flat = [c for px in row for c in px]
+            ftype = y % 5
+            filters.append(ftype)
+            encoded = bytearray()
+            for i, value in enumerate(flat):
+                a = flat[i - 3] if i >= 3 else 0
+                b = prev[i]
+                c = prev[i - 3] if i >= 3 else 0
+                predictor = (0, a, b, (a + b) // 2, paeth(a, b, c))[ftype]
+                encoded.append((value - predictor) & 0xFF)
+            body += bytes([ftype]) + bytes(encoded)
+            prev = flat
+
+        ihdr = struct.pack(">IIBBBBB", width, height, 8, 2, 0, 0, 0)  # 8-bit RGB
+
+        def chunk(kind: bytes, payload: bytes) -> bytes:
+            return (struct.pack(">I", len(payload)) + kind + payload
+                    + struct.pack(">I", zlib.crc32(kind + payload) & 0xFFFFFFFF))
+
+        expected: dict[tuple[int, ...], int] = {}
+        for row in pixels:
+            for px in row:
+                expected[px] = expected.get(px, 0) + 1
+        return (b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", ihdr)
+                + chunk(b"IDAT", zlib.compress(bytes(body))) + chunk(b"IEND", b""),
+                expected, filters)
+
+    @staticmethod
+    def _jpeg_stream_length(data: bytes) -> int:
+        """The bytes up to the EOI that ENDS THE SCAN — not the last `FFD9` in the file.
+
+        ⛔ A PADDED FILE IS NOT A CARD, and file length cannot tell: a flat 1200x630
+        JPEG is 4,723 B, and the SAME image padded with ~36 KB of trailing zeros cleared
+        a 40 KB floor with every other assertion — dimensions, type, magic bytes — still
+        green.
+
+        ⛔ AND `rfind(b"\\xff\\xd9")` CANNOT TELL EITHER. Byte-stuffing makes FFD9
+        unambiguous only INSIDE an entropy-coded scan (`FF` is always followed by `00` or
+        a restart marker there); bytes appended AFTER the image are inside no stream, so
+        padding closed with a two-byte trailer measured as if it had been painted on —
+        measured: 4,723 B + zeros + `FF D9` = 41,500 B and the floor cleared. So the walk
+        follows the segment chain from SOI to SOS and then the scan itself, and stops at
+        the FIRST EOI it meets. A real card's stream ends there; anything after it is
+        padding and does not count.
+
+        Residual, accepted and named: an in-band metadata block (an EXIF thumbnail, a
+        large ICC packet) sits BEFORE the EOI and still counts toward the floor. That is
+        the residual the floor has always had — it bounds encoded bulk, never whether the
+        card DEPICTS the right thing — and closing it would mean decoding the JPEG, which
+        this fast-lane guard deliberately does not do.
+        """
+        n = len(data)
+        i = 2
+        while i + 4 <= n:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker == 0xFF:
+                i += 1
+                continue
+            if marker == 0xD9:  # EOI with no scan (header-only or empty image)
+                return i + 2
+            if marker == 0xDA:  # SOS: entropy-coded data follows
+                j = i + 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+                while j + 1 < n:
+                    if data[j] == 0xFF:
+                        nxt = data[j + 1]
+                        if nxt == 0xD9:
+                            return j + 2
+                        if nxt == 0x00 or 0xD0 <= nxt <= 0xD7:  # stuffing / restart
+                            j += 2
+                            continue
+                    j += 1
+                return n
+            i += 2 + struct.unpack(">H", data[i + 2:i + 4])[0]
+        return n
+
+    @staticmethod
+    def _png_stream_length(data: bytes) -> int:
+        """The bytes up to the end of the IEND chunk — a PNG's image IS its chunks.
+
+        The JPEG walk above must never be applied to a PNG: `FF D9` inside IDAT is
+        ordinary compressed data, so a card would be measured by a random interior byte
+        pair. Both directions were measured on real bytes: a flat PNG padded past 40 KB
+        measured 41,000 under a JPEG-only measure (a blank card clearing the floor), and
+        `website/logo.png` — 35,670 B, whose IDAT does contain `FF D9` — measured 29,390
+        under the superseded `rfind` measure, i.e. 6,280 B short of a legitimate card.
+        The padded-PNG fixture in `test_the_content_guards_reject_a_blank_image_and_keep_
+        their_measured_floors` is what catches a dispatch regression; the `logo.png` pin
+        beside it asserts the PNG path still measures a real PNG at its full length.
+        """
+        n = len(data)
+        pos = 8
+        while pos + 8 <= n:
+            (length,) = struct.unpack(">I", data[pos:pos + 4])
+            kind = data[pos + 4:pos + 8]
+            if kind == b"IEND":
+                return min(pos + 12 + length, n)
+            if length > n:  # malformed length: do not walk off the end
+                return n
+            pos += 12 + length
+        return n
+
+    @classmethod
+    def _encoded_length(cls, data: bytes) -> int:
+        """How many bytes of this card are actually IMAGE, dispatched on its magic.
+
+        A format with no reader here is measured as its file length — the only honest
+        statement the guard can make without parsing it, and the floor is a bulk check,
+        not a format check (`_card_size` owns the declared-type dispatch).
+        """
+        if data[:2] == b"\xff\xd8":
+            return cls._jpeg_stream_length(data)
+        if data[:8] == b"\x89PNG\r\n\x1a\n":
+            return cls._png_stream_length(data)
+        return len(data)
+
+    @classmethod
+    def _card_floor_violation(cls, page: str, path: Path, data: bytes) -> str | None:
+        """Why an encoded card is too small to BE a card — None when it clears."""
+        encoded = cls._encoded_length(data)
+        if encoded >= cls.CARD_MIN_BYTES:
+            return None
+        return (f"{page}'s card {path.name} holds only {encoded} bytes of encoded image "
+                f"({len(data)} B on disk), under the "
+                f"{cls.CARD_MIN_BYTES // 1000} KB floor — a flat 1200x630 card of one "
+                f"colour measures {cls.FLAT_CARD_BYTES // 1000} KB, so a card this "
+                "small is usually near-uniform and a link preview of it is an empty "
+                "block. If this card is REAL, open it: a legitimate re-encode can land "
+                "here (the smallest real card is 49,555 B; re-saving it with "
+                "`ffmpeg -q:v 4` measures 37,024 B). Then lower CARD_MIN_BYTES in "
+                "tests/test_website_static.py and record what you measured.")
+
+    @classmethod
+    def _card_size(cls, declared_type: str, raw: bytes) -> tuple[int, int]:
+        """The card's real pixel size, read with the reader the page's TYPE names.
+
+        Split out of the guard so BOTH dispatch branches run against real bytes (see
+        `test_the_card_type_dispatch_reads_the_format_the_page_names`): every page in
+        this tree declares `og:image:type: image/jpeg`, and the only PNG card the repo
+        ever had is deleted by this PR, so without that fixture the `image/png` branch
+        is executed by nothing and a JPEG-only dispatch reads green.
+
+        The declared type is the page's own statement about its card, so it is taken at
+        its word and the BYTES are held to it — a page that legitimately ships a PNG
+        card is read by the PNG reader instead of being reported as "not a JPEG", and
+        a page that lies about the type still reds.
+        """
+        readers = {"image/jpeg": cls._jpeg_size, "image/png": cls._png_size}
+        assert declared_type in readers, (
+            f"og:image:type {declared_type!r} has no reader here — this guard reads "
+            f"{sorted(readers)}; add a reader rather than dropping the assertion")
+        return readers[declared_type](raw)
+
+    @classmethod
+    def _card_violations(cls, page_name: str, head: str, load=None) -> list[str]:
+        """Every way this page's link-preview card fails the contract; empty means it passes.
+
+        ⛔ SPLIT OUT SO THE PAGE-LEVEL APPLICATION IS DRIVEN BY A TEST, not only by this
+        tree's own pages — the same reason `_icon_trio_violations` is. MEASURED on the
+        code before this split, all 13 tests in this class GREEN under each of three
+        mutants: the encoded-size floor application deleted, `_card_size` reverted to
+        `_jpeg_size` (the JPEG-only dispatch this PR replaced), and the image resolved
+        with the raw `image.split("//", 1)[-1]` form (the `?v=2` false red this PR
+        fixed). The three behaviours this PR exists to add on the card path were pinned
+        only at the helpers they call, never at the loop that calls them — so the loop's
+        half could be `assert True` and nothing noticed.
+
+        `load` is the test seam: it maps an `og:image` URL to `(path | None, bytes)`. The
+        default reads the served tree (which is what the page loop uses), so the
+        query-stripping path is exercised by the real pages rather than bypassed.
+
+        Every check is collected rather than asserted, so a card that is BOTH the wrong
+        format and too small reports both — a guard that stops at the first defect is how
+        the second one stays hidden.
+        """
+        load = load or cls._og_card_bytes
+        image = cls._og(head, "image")
+        if not image:
+            return [f"{page_name} declares no og:image — a shared link renders no card"]
+        path, raw = load(image)
+        if path is None:
+            return [f"{page_name} points og:image at {image}, which is not in the served "
+                    f"tree (looked for {cls._og_asset_path(image)}) — the scraper fetches "
+                    "a 404 and shows no card"]
+
+        violations: list[str] = []
+        declared_type = cls._og(head, "image:type")
+        actual: tuple[int, int] | None = None
+        if not declared_type:
+            violations.append(
+                f"{page_name} declares no og:image:type — a scraper that has to sniff the "
+                "format is a scraper that can guess wrong")
+        else:
+            try:
+                actual = cls._card_size(declared_type, raw)
+            except AssertionError as exc:
+                violations.append(
+                    f"{page_name} declares og:image:type {declared_type!r} but "
+                    f"{path.name}'s bytes are not one: {exc}")
+
+        declared = (cls._og(head, "image:width"), cls._og(head, "image:height"))
+        if not all(value and value.strip().isdigit() for value in declared):
+            violations.append(
+                f"{page_name} declares og:image:width/height {declared[0]!r}x{declared[1]!r}, "
+                "which is not a pixel count — a scraper then reserves a box nobody promised")
+        elif actual is not None and (int(declared[0]), int(declared[1])) != actual:
+            violations.append(
+                f"{page_name} declares {int(declared[0])}x{int(declared[1])} but "
+                f"{path.name} is {actual[0]}x{actual[1]}")
+
+        floor = cls._card_floor_violation(page_name, path, raw)
+        if floor:
+            violations.append(floor)
+        return violations
+
+    @staticmethod
+    def _jpeg_size(data: bytes) -> tuple[int, int]:
+        assert data[:2] == b"\xff\xd8", "not a JPEG"
+        i = 2
+        while i < len(data) - 9:
+            if data[i] != 0xFF:
+                i += 1
+                continue
+            marker = data[i + 1]
+            if marker in (0xC0, 0xC1, 0xC2):  # SOF0/SOF1/SOF2 carry the frame size
+                height, width = struct.unpack(">HH", data[i + 5:i + 9])
+                return width, height
+            if marker in (0xD8, 0xD9) or 0xD0 <= marker <= 0xD7:
+                i += 2
+                continue
+            length = struct.unpack(">H", data[i + 2:i + 4])[0]
+            i += 2 + length
+        raise AssertionError("no SOF marker in JPEG")
+
+    @classmethod
+    def _ico_entries(cls, data: bytes) -> list[dict]:
+        """One dict per icon: the DIRECTORY's claim and what its PAYLOAD really is.
+
+        The directory and the payload are two independent statements about the
+        same image, and only the payload is what a renderer draws. A file whose
+        second entry declares 48x48 while pointing at the 32x32 payload renders
+        blank in Edge and fine in Chrome — so both are read here and compared.
+        """
+        reserved, kind, count = struct.unpack("<HHH", data[:6])
+        assert (reserved, kind) == (0, 1), "not an icon container"
+        assert count >= 1, "an .ico with no entries"
+        out = []
+        for n in range(count):
+            base = 6 + 16 * n
+            w, h, _cols, _res, planes, bpp, length, offset = struct.unpack(
+                "<BBBBHHII", data[base:base + 16])
+            assert offset + length <= len(data), (
+                f"favicon.ico entry {n} runs past the end of the file "
+                f"(offset {offset} + length {length} > {len(data)} bytes)")
+            assert length > 0, f"favicon.ico entry {n} declares an empty payload"
+            payload = data[offset:offset + length]
+            is_png = payload[:8] == b"\x89PNG\r\n\x1a\n"
+            out.append({
+                "declared": (w or 256, h or 256),
+                "planes": planes,
+                "bpp": bpp,
+                "is_png": is_png,
+                "actual": cls._png_size(payload) if is_png else None,
+                # Kept so the CONTENT check can decode what the directory merely
+                # describes: every assertion above reads the container's claims and
+                # the payload's geometry, and a solid-colour payload satisfies both.
+                "payload": payload,
+            })
+        return out
+
+    # --- helpers --------------------------------------------------------
+
+    def _pages(self):
+        pages = sorted(self.WEB.glob("*.html"))
+        assert pages, "no pages found — the guard would pass vacuously"
+        return pages
+
+    @classmethod
+    def _head(cls, html: str) -> str:
+        """The head's MARKUP: comments and inline `<style>`/`<script>` bodies removed.
+
+        ⛔ This is not tidying — it is the fix for a fail-open the first cut had. The
+        value readers below are regexes over this text, and an HTML comment is
+        invisible to a browser: wrapping `og:image` in `<!-- -->` shipped a page with
+        NO preview image at all while all eight assertions passed, because the regex
+        happily matched the commented-out tag. A guard that reads what a browser
+        ignores reports green on a page a scraper sees as empty. Stripping first makes
+        the value readers and `test_the_head_is_well_formed_markup` answer about the
+        SAME text, which is the text a scraper parses.
+
+        Comments are also where this repo QUOTES tags (the noindex rationale on
+        `design-partners-intro.html` quotes a `<meta name="robots">`), and
+        `404.html` carries its whole stylesheet in the head — counting either as
+        markup is the opposite error.
+        """
+        start = html.index("<head")
+        return cls._head_markup(html[start:html.index("</head>", start)])
+
+    # The readers below go through the PARSER, not a regex, and that is not
+    # fastidiousness: `<meta content="…" property="og:image">` is identical to a
+    # browser, to every scraper and to this file's own structural test, but a
+    # source-order regex reports "declares no og:image — a shared link renders no
+    # card" about a page that is correct. A guard that cries wolf on a legitimate
+    # edit teaches the next person to weaken it, which is how a guard dies.
+    @classmethod
+    def _meta_content(cls, head: str, **attrs: str) -> str | None:
+        metas, _ = cls._head_metas(head)
+        for meta in metas:
+            if all(meta.get(k) == v for k, v in attrs.items()):
+                return meta.get("content")
+        return None
+
+    @classmethod
+    def _og(cls, head: str, prop: str) -> str | None:
+        return cls._meta_content(head, property=f"og:{prop}")
+
+    @classmethod
+    def _twitter(cls, head: str, name: str) -> str | None:
+        return cls._meta_content(head, name=f"twitter:{name}")
+
+    @classmethod
+    def _links(cls, head: str) -> list[dict[str, str]]:
+        """Every `<link>` element in the head, as its attribute dict."""
+
+        class Collector(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.links: list[dict[str, str]] = []
+                self.in_head = False
+
+            def handle_starttag(self, tag: str, attrs) -> None:
+                if tag == "head":
+                    self.in_head = True
+                elif tag == "link" and self.in_head:
+                    self.links.append({k: (v or "") for k, v in attrs})
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "head":
+                    self.in_head = False
+
+        collector = Collector()
+        collector.feed(head)
+        collector.close()
+        return collector.links
+
+    # --- 1. the icon resolves ------------------------------------------
+
+    def test_every_page_declares_the_icon_trio(self):
+        """Two `rel=icon` rows (ICO + PNG) plus the apple-touch icon, every page.
+
+        The `rel` is asserted, not just the `href`: `<link rel="preload"
+        href="/favicon.ico">` mentions the file and gives the tab no icon at all, and
+        an href-only check cannot tell the two apart.
+
+        The `sizes` attribute is held to the BYTES rather than to a literal, because a
+        declared size is a promise a renderer reserves space for: a 512px re-export of
+        a 256px file is square, is >= 180, passes every size assertion — and makes all
+        14 pages lie about it. So the tag is checked against the IHDR (PNG) and against
+        the directory (ICO), which is what the tab will actually draw.
+        """
+        png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple_w, _apple_h = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {
+            i["declared"][0]
+            for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
+        }
+
+        png = (png_w, png_h)
+        apple = (apple_w, _apple_h)
+        for page in self._pages():
+            violations = self._icon_trio_violations(
+                page.name, page.read_text(), png, ico_sizes, apple)
+            assert not violations, "\n".join(violations)
+
+    def _icon_trio_violations(self, page_name: str, head: str,
+                              png: tuple[int, int], ico_sizes: set[int],
+                              apple: tuple[int, int]) -> list[str]:
+        """Every way this page's `<head>` fails the icon contract; empty means it passes.
+
+        ⛔ SPLIT OUT SO THE PAGE-LEVEL APPLICATION IS DRIVEN BY A TEST, not only by this
+        tree's own pages. The commit that added these assertions proved the off-host and
+        wrong-`sizes` paths with a hand-run probe against `website/404.html` and never with
+        a suite assertion — so replacing either one with `assert True` left 87 tests green,
+        and a real page regression would have shipped green. That is precisely the class of
+        defect this guard exists to end, one level ABOVE the helpers it calls.
+        """
+        links = self._links(self._head(head))
+        # `rel` is split CASE-INSENSITIVELY: HTML lowercases attribute NAMES, never values,
+        # so `rel="ICON"` is the same relation — comparing the raw value reded a correct
+        # page with a message that blamed it for having no icon at all.
+        violations = [
+            f"{page_name} does not declare {href} with the rel that makes it an icon — a "
+            "page with no icon shows a blank tab and, on a share, no avatar; iOS draws a "
+            "screenshot instead of the mark"
+            for href in self._missing_icon_links(links)]
+        # ⛔ EVERY link is audited, and the apple-touch branch is dispatched BY NAME:
+        # `"apple-touch-icon".split()` is `["apple-touch-icon"]`, so a `"icon" in rel`
+        # filter reaches neither of its branches and the apple link's `sizes` went
+        # unchecked while this guard reported the page correct.
+        violations += [
+            v for v in (self._declared_sizes_violation(
+                page_name, link, png, ico_sizes, apple) for link in links) if v]
+        return violations
+
+    @classmethod
+    def _missing_icon_links(cls, links: list[dict]) -> list[str]:
+        """The icon files this `<link>` set fails to declare with the rel that makes it one.
+
+        Split out of the trio guard so the SAME predicate can be run against a synthetic
+        link set (`test_the_declared_sizes_guard_refuses_a_wrong_apple_slot`): every page
+        in this tree spells `rel` in lower case, so the case-INSENSITIVE read is
+        unobservable on the real population — a regression to `.split()` alone leaves
+        every page-level assertion green while `rel="ICON"` (valid HTML) reds a correct
+        page. A check whose failure path never runs cannot be told apart from a no-op.
+        """
+        declared = {(cls._icon_ref(ln.get("href", "")), token)
+                    for ln in links
+                    for token in ln.get("rel", "").lower().split()}
+        missing: list[str] = []
+        for href in (f"/{cls.ICON_ICO}", f"/{cls.ICON_PNG}"):
+            if (href, "icon") not in declared:
+                missing.append(href)
+        if (f"/{cls.ICON_APPLE}", "apple-touch-icon") not in declared:
+            missing.append(f"/{cls.ICON_APPLE}")
+        return missing
+
+
+    @classmethod
+    def _icon_ref(cls, href: str) -> str:
+        """The PATH an icon href names when it is THIS site's; "" when it is not.
+
+        The query is not part of what is served: `?v=2` on a favicon href is standard
+        cache-busting, changes no file and is honoured by every browser, so comparing
+        raw hrefs reports "declares no rel=icon" about a page that is correct — the
+        same false red `_og_asset_path` avoids for `og:image`.
+
+        ⛔ AND THE ORIGIN IS CHECKED, NOT DROPPED. `urlsplit("//evil.example/
+        favicon.ico").path` is `/favicon.ico` — the netloc is discarded — so a
+        protocol-relative href "declared" the icon by path while the browser fetched
+        it from ANOTHER HOST, and the guard reported green on a tab that has no icon
+        (or someone else's). Only an href that resolves to one of `SITE_ORIGINS`
+        yields a path; anything else yields "" and matches no icon assertion.
+        """
+        url = urlsplit(urljoin(cls.SITE_ROOT, href))
+        if url.hostname not in cls.SITE_ORIGINS:
+            return ""
+        return url.path
+
+    @staticmethod
+    def _parse_declared_sizes(token: str) -> set[int] | None:
+        """The square, single-slot sizes a `sizes="32x32 48x48"` token promises.
+
+        `None` means "this token is not that list" — the CALLER turns it into a
+        violation, quoting the token. ⛔ IT MUST NOT RAISE. Its only caller is
+        `_declared_sizes_violation`, which is a VIOLATION COLLECTOR: `_icon_trio_
+        violations` documents itself as returning *every* way a page fails the contract,
+        and a raise here instead escapes the collector with ONE raw AssertionError,
+        losing every other violation on the page. Measured on the code that raised: a
+        spec-valid head whose `rel="icon"` links omit the OPTIONAL `sizes=` raised, and
+        a head that ALSO omitted two of the three icon links reported only the sizes
+        assertion — the two missing-link violations were never returned.
+        """
+        pairs = re.findall(r"(\d+)x(\d+)", token)
+        if not pairs or not all(a == b for a, b in pairs):
+            return None
+        return {int(a) for a, _ in pairs}
+
+    @classmethod
+    def _declared_sizes_violation(cls, page_name: str, link: dict,
+                                  png: tuple[int, int], ico_sizes: set[int],
+                                  apple: tuple[int, int]) -> str | None:
+        """Why a `<link>`'s declared `sizes=` disagrees with the file's bytes; None = agrees.
+
+        ⛔ SPLIT OUT OF THE TRIO GUARD for the reason `_icon_mark_violations` is: the
+        apple-touch branch fires only when a page declares `sizes=` on that link, and
+        NO page does — measured at this head, 14 pages carry 14 apple links and 0 of
+        them declare one. Inline it was therefore unreachable, and a check whose
+        failure path never runs cannot be told apart from a no-op.
+        `test_the_declared_sizes_guard_refuses_a_wrong_apple_slot` now feeds it the
+        link the branch is written for, in both directions.
+
+        `sizes` is OPTIONAL on the apple link — the href alone is what iOS needs — so
+        absent is not a defect. When it IS declared it is a promise like the others
+        (MDN's own example is `rel="apple-touch-icon" sizes="114x114"`), and this
+        guard knows the file's real geometry, so a wrong one must not pass silently.
+
+        ⛔ ON THE `rel="icon"` LINKS IT IS REQUIRED, AND THAT IS A HOUSE RULE, not the
+        spec. The spec makes `sizes` a hint that is optional everywhere; this site pins
+        both tab-icon slots so a renderer reserves the right box instead of guessing, so
+        a page that omits one is reported. Stated here because the alternative is that
+        the requirement looks like an accident of the parser. Every omission and every
+        token this guard cannot read is RETURNED as a violation — never raised — so one
+        defect can never hide the rest.
+        """
+        rels = link.get("rel", "").lower().split()
+        path = cls._icon_ref(link.get("href", ""))
+        declared = link.get("sizes")
+        if "icon" in rels and path == f"/{cls.ICON_PNG}":
+            return cls._sizes_violation(page_name, declared, {png[0]}, cls.ICON_PNG,
+                                       f"IHDR is {png[0]}x{png[1]}", "box")
+        if "icon" in rels and path == f"/{cls.ICON_ICO}":
+            return cls._sizes_violation(page_name, declared, ico_sizes, cls.ICON_ICO,
+                                       f"directory holds {sorted(ico_sizes)}", "container")
+        if ("apple-touch-icon" in rels and path == f"/{cls.ICON_APPLE}"
+                and declared):
+            return cls._sizes_violation(page_name, declared, {apple[0]}, cls.ICON_APPLE,
+                                       f"IHDR is {apple[0]}x{apple[1]}", "box")
+        return None
+
+    @classmethod
+    def _sizes_violation(cls, page_name: str, declared: str | None, expected: set[int],
+                         target: str, truth: str, unit: str) -> str | None:
+        """Why a `<link>`'s declared `sizes=` disagrees with what the bytes hold.
+
+        Returns a violation string — never raises — because every branch below is a way
+        a page can fail a contract, not a programming error. `truth` states what the file
+        actually holds (`"IHDR is 256x256"` / `"directory holds [32, 48]"`) and `unit`
+        names the thing that ends up wrong (`box` for a PNG, `container` for the ICO).
+        """
+        if not declared:
+            return (f"{page_name} declares no sizes= for {target} — this site pins that "
+                    f"slot ({truth}) so a renderer reserves the right {unit} instead of "
+                    "guessing. `sizes` is OPTIONAL in the spec, so this is a house rule "
+                    "(see `_declared_sizes_violation`); declare it, or change the rule "
+                    "deliberately")
+        parsed = cls._parse_declared_sizes(declared)
+        if parsed is None:
+            return (f"{page_name} declares sizes={declared!r} for {target}, which is not "
+                    "a square '<w>x<h>' slot list — a tab icon is square, and a token "
+                    "this guard cannot read is a promise it cannot check")
+        if parsed == expected:
+            return None
+        return (f"{page_name} declares sizes={declared!r} for {target}, whose {truth} — "
+                f"the tag and the {unit} must agree, or the tab reserves the wrong {unit}")
+
+    def test_the_declared_sizes_guard_refuses_a_wrong_apple_slot(self):
+        """NON-VACUITY: the branches no page in this tree drives must still be able to RED.
+
+        ⛔ WHY. The apple-touch `sizes` branch fires only when a page declares `sizes=` on
+        that link, and none does (14 apple links, 0 declaring one, measured at this
+        head), so inline it was dead code. The trio's `icon`/rel membership is the same
+        class of hole from the other side: every page here spells `rel` in lower case,
+        so the case-insensitive read is unobservable on the real population.
+
+        Each edge is pinned in BOTH directions — the wrong slot reds, the right one does
+        not — so none of these assertions is either dead or a constant.
+        """
+        png = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {i["declared"][0]
+                     for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())}
+        apple_link = {"rel": "apple-touch-icon", "href": f"/{self.ICON_APPLE}"}
+
+        wrong = dict(apple_link, sizes="114x114")
+        assert apple[0] != 114, (
+            "the fixture's wrong size (114) is the file's real width, so it isolates "
+            "nothing")
+        assert self._declared_sizes_violation("page.html", wrong, png, ico_sizes, apple), (
+            f"declaring sizes=114x114 for a {apple[0]}x{apple[1]} apple-touch icon was not "
+            "reded — the branch that exists to catch it is dead")
+
+        right = dict(apple_link, sizes=f"{apple[0]}x{apple[1]}")
+        assert self._declared_sizes_violation(
+            "page.html", right, png, ico_sizes, apple) is None, (
+            "the correct apple-touch size was reded, so the branch is not a check")
+
+        assert self._declared_sizes_violation(
+            "page.html", apple_link, png, ico_sizes, apple) is None, (
+            "omitting the OPTIONAL sizes= on the apple link was reded — the href alone "
+            "is what iOS needs")
+
+        # The ICO branch: the directory holds [32, 48], so a single-slot declaration
+        # must red. Killing this branch outright left the suite green, which is the
+        # only reason it needs an edge of its own here.
+        ico_link = {"rel": "icon", "href": f"/{self.ICON_ICO}",
+                    "sizes": " ".join(f"{n}x{n}" for n in sorted(ico_sizes))}
+        assert self._declared_sizes_violation(
+            "page.html", ico_link, png, ico_sizes, apple) is None, (
+            "the ICO's own directory sizes were reded")
+        ico_wrong = dict(ico_link, sizes=f"{sorted(ico_sizes)[0]}x{sorted(ico_sizes)[0]}")
+        assert self._declared_sizes_violation(
+            "page.html", ico_wrong, png, ico_sizes, apple), (
+            f"declaring sizes={ico_wrong['sizes']!r} for an ICO whose directory holds "
+            f"{sorted(ico_sizes)} was not reded — the ICO branch is dead")
+
+        upper = {"rel": "ICON", "href": f"/{self.ICON_PNG}", "sizes": "1x1"}
+        assert self._declared_sizes_violation(
+            "page.html", upper, png, ico_sizes, apple), (
+            'rel="ICON" with a wrong sizes= was not reded — a case-sensitive read '
+            "skips the link entirely, which is how a correct page reds and a wrong "
+            "one passes)")
+
+        off_host = {"rel": "icon", "href": "//evil.example/favicon.ico",
+                    "sizes": f"{png[0]}x{png[1]}"}
+        assert self._icon_ref(off_host["href"]) == "", (
+            "a protocol-relative href was resolved to this site's path — the netloc was "
+            "dropped, so an off-host icon reads as declared")
+
+        # ...and the trio's own membership predicate, driven with a synthetic link set:
+        # the real pages all spell `rel` in lower case, so this is the only place the
+        # case-insensitive read is observable.
+        complete = [{"rel": "icon", "href": f"/{self.ICON_ICO}"},
+                    {"rel": "icon", "href": f"/{self.ICON_PNG}"},
+                    dict(apple_link)]
+        assert self._missing_icon_links(complete) == [], (
+            "a complete, correctly-spelled icon trio was reported as missing links")
+        assert self._missing_icon_links(
+            [dict(ln, rel=ln["rel"].upper()) for ln in complete]) == [], (
+            "an upper-case rel was reported as missing — HTML lowercases attribute "
+            "NAMES, never values, so rel=\"ICON\" is the same relation")
+        assert self._missing_icon_links(complete[:2]) == [f"/{self.ICON_APPLE}"], (
+            "dropping the apple-touch link was not reported as a missing icon")
+        assert self._missing_icon_links([complete[0], complete[2]]) == [f"/{self.ICON_PNG}"], (
+            "dropping the PNG rel=icon was not reported as a missing icon")
+        # ⛔ THE FILE KEY OF THE ICO AND APPLE BRANCHES. On this tree the PNG conjunct
+        # shadows them (every page's PNG link is graded first and the ICO/apple hrefs are
+        # the only other ones), so dropping either lets a SECOND, correctly-declared
+        # variant (`/favicon-32.png`, `/apple-touch-icon-120x120.png`) be graded against
+        # the default file and red — a false red nothing in the suite noticed.
+        assert self._declared_sizes_violation(
+            "page.html", {"rel": "icon", "href": "/favicon-32.png", "sizes": "32x32"},
+            png, ico_sizes, apple) is None, (
+            "a second, correctly-declared PNG icon was graded against the ICO")
+        assert self._declared_sizes_violation(
+            "page.html", {"rel": "apple-touch-icon",
+                          "href": "/apple-touch-icon-120x120.png", "sizes": "120x120"},
+            png, ico_sizes, apple) is None, (
+            "a correctly-declared apple-touch variant was graded against apple-touch-icon.png")
+        # ...and the PAGE-LEVEL application itself, driven by a synthetic head. Without
+        # this, either assertion in the loop could be `assert True` and the suite stayed
+        # green — measured by the round-6 reviewer against a genuinely broken 404.html.
+        broken = ("<head>"
+                  '<link rel="icon" href="/favicon.ico" sizes="32x32">'
+                  f'<link rel="icon" href="/favicon.png" sizes="{png[0]}x{png[1]}">'
+                  "</head>")  # no apple-touch link, and the wrong ICO slot
+        trio = self._icon_trio_violations("synthetic.html", broken, png, ico_sizes, apple)
+        assert any(self.ICON_APPLE in v for v in trio), (
+            f"a head with no apple-touch link produced no page-level violation: {trio}")
+        assert any(self.ICON_ICO in v and "sizes" in v for v in trio), (
+            f"a head declaring the wrong ICO slot produced no page-level violation: {trio}")
+        good = ("<head>"
+                f'<link rel="icon" href="/favicon.ico" '
+                f'sizes="{" ".join(f"{n}x{n}" for n in sorted(ico_sizes))}">'
+                f'<link rel="icon" href="/favicon.png" sizes="{png[0]}x{png[1]}">'
+                f'<link rel="apple-touch-icon" href="/{self.ICON_APPLE}" '
+                f'sizes="{apple[0]}x{apple[1]}">'
+                "</head>")
+        assert self._icon_trio_violations(
+            "synthetic.html", good, png, ico_sizes, apple) == [], (
+            "a complete, correctly-declared head was reported as violating the contract")
+        # ⛔ THE REL TOKEN, NOT JUST THE HREF. `<link rel="preload" href="/favicon.ico">`
+        # mentions the file and gives the tab no icon at all — an href-only reduction of
+        # this predicate reports all three as declared, which is the exact earlier cut's
+        # defect, and it is silent unless this case drives it.
+        assert self._missing_icon_links(
+            [dict(ln, rel="preload") for ln in complete]
+        ) == [f"/{self.ICON_ICO}", f"/{self.ICON_PNG}", f"/{self.ICON_APPLE}"], (
+            "an icon file mentioned by a non-icon relation satisfied the trio — the rel "
+            "token, not just the href, is what makes the link an icon")
+        # ...and a NON-SQUARE `sizes=` token is rejected, not merely parsed: `32x32 48x16`
+        # parses to {32, 48}, which EQUALS the ICO's directory, so without this the same
+        # declaration is ACCEPTED. Rejection is `None` (not a raise — see
+        # `_parse_declared_sizes`: the parser feeds a collector, which must return a
+        # violation rather than escape the whole page over one unreadable token).
+        assert self._parse_declared_sizes("32x32 48x16") is None, (
+            'a non-square sizes= token was accepted — "48x16" is not a slot a tab can '
+            "draw, and it parses to the same set as the ICO's directory")
+        # ...and the parser still PARSES what it should, so `None` is not the only answer
+        # it can give (a guard whose every input returns None passes the row above
+        # vacuously).
+        assert self._parse_declared_sizes("32x32 48x48") == {32, 48}, (
+            "a square multi-slot sizes= token did not parse — the ICO's own declaration "
+            "then rededs as unreadable")
+        assert self._parse_declared_sizes("any") is None, (
+            'sizes="any" parsed as a pixel slot — it is SVG-only syntax that names no '
+            "size at all, so it cannot be checked against a raster icon's IHDR")
+        assert self._missing_icon_links(
+            [dict(ln, href="//evil.example/favicon.ico")
+             if ln["href"] == f"/{self.ICON_ICO}" else ln for ln in complete]
+        ) == [f"/{self.ICON_ICO}"], (
+            "an off-host href was accepted as this site's ICO — the origin was dropped")
+
+    def test_the_trio_collector_returns_every_violation_instead_of_raising(self):
+        """A violation COLLECTOR must return them all; one defect may not hide another.
+
+        ⛔ WHY THIS EXISTS. `_icon_trio_violations` is documented as returning *every* way
+        a page's `<head>` fails the icon contract, and `sizes` is OPTIONAL on
+        `rel="icon"` in the spec — so a minimal, universally-supported icon declaration
+        is honest markup. Measured on the code that ASSERTED instead of returning: that
+        head raised `AssertionError: the tag declares no sizes= — a renderer then
+        guesses` straight out of the collector, and a head that also omitted two of the
+        three icon links reported only the sizes assertion — the missing-link violations
+        were computed and then thrown away with the exception. On the `rel="icon"`
+        links the requirement is a HOUSE RULE (see `_declared_sizes_violation`) and it is
+        reported as a violation; the apple link's stays OPTIONAL.
+        """
+        png = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        apple = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        ico_sizes = {i["declared"][0]
+                     for i in self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())}
+
+        minimal = ("<head>"
+                   f'<link rel="icon" href="/{self.ICON_ICO}">'
+                   f'<link rel="icon" href="/{self.ICON_PNG}">'
+                   f'<link rel="apple-touch-icon" href="/{self.ICON_APPLE}">'
+                   "</head>")
+        trio = self._icon_trio_violations("synthetic.html", minimal, png, ico_sizes, apple)
+        assert len(trio) == 2, (
+            "a spec-valid head whose two rel=icon links omit the OPTIONAL sizes= must "
+            f"report exactly the two house-rule violations; got {trio}")
+        assert any(self.ICON_ICO in v and "sizes" in v for v in trio), (
+            f"omitting sizes= on the ICO link was not reported: {trio}")
+        assert any(self.ICON_PNG in v and "sizes" in v for v in trio), (
+            f"omitting sizes= on the PNG link was not reported: {trio}")
+        assert not any(self.ICON_APPLE in v for v in trio), (
+            "omitting the OPTIONAL sizes= on the apple link was reported as a violation — "
+            "the href alone is what iOS needs, and that exemption is deliberate")
+
+        # An unreadable token is a VIOLATION with the token quoted, not a raise: `any`
+        # is SVG-only syntax naming no size, and a non-square list cannot be a tab slot.
+        cases = {
+            "any": "SVG-only token",
+            f"{png[0]}x{apple[0]}": "non-square slot list",
+            "big": "not a <w>x<h> list at all",
+        }
+        for token, why in cases.items():
+            link = {"rel": "icon", "href": f"/{self.ICON_PNG}", "sizes": token}
+            violation = self._declared_sizes_violation(
+                "page.html", link, png, ico_sizes, apple)
+            assert violation and token in violation, (
+                f"sizes={token!r} ({why}) was not returned as a violation quoting the "
+                f"token; got {violation!r}")
+
+        # ...and ONE DEFECT MAY NOT HIDE ANOTHER. The head below omits two icon links
+        # AND the sizes= on the one link it does declare; both must come back.
+        partial = ("<head>"
+                   f'<link rel="icon" href="/{self.ICON_ICO}">'
+                   "</head>")
+        both = self._icon_trio_violations("synthetic.html", partial, png, ico_sizes, apple)
+        assert any("does not declare" in v for v in both), (
+            f"the missing icon links were not reported: {both}")
+        assert any("sizes" in v for v in both), (
+            f"the omitted sizes= was not reported alongside the missing links: {both}")
+
+    def test_the_icon_files_exist_and_are_usable(self):
+        """Every icon a page points at exists, and has the shape the tag implies."""
+        for name in (self.ICON_ICO, self.ICON_PNG, self.ICON_APPLE):
+            assert (self.WEB / name).is_file(), f"website/{name} is missing — every page links it"
+
+        png_w, png_h = self._png_size((self.WEB / self.ICON_PNG).read_bytes())
+        assert png_w == png_h, f"favicon.png is {png_w}x{png_h} — a tab icon must be square"
+        assert png_w >= 180, (
+            f"favicon.png is {png_w}px; the apple-touch slot needs >=180 and a "
+            "smaller source is upscaled blurry by the OS")
+
+        apple_w, apple_h = self._png_size((self.WEB / self.ICON_APPLE).read_bytes())
+        assert (apple_w, apple_h) == (180, 180), (
+            f"apple-touch-icon.png is {apple_w}x{apple_h}; iOS reads 180x180")
+
+        icons = self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())
+        assert len(icons) >= 2, f"favicon.ico holds {len(icons)} image(s) — ship 32 and 48"
+        assert all(i["is_png"] for i in icons), (
+            "favicon.ico carries a raw DIB image — this repo's builder writes PNG "
+            "payloads, and a DIB rewrite means the container was replaced by hand")
+        assert {i["declared"][0] for i in icons} >= {32, 48}, (
+            f"favicon.ico sizes are {sorted(i['declared'][0] for i in icons)}; Windows uses 32 and 48")
+        for i in icons:
+            assert i["declared"] == i["actual"], (
+                f"favicon.ico declares {i['declared']} but the payload is {i['actual']} — "
+                "the directory's size is what a renderer reserves, so a mismatch draws "
+                "a blank or clipped icon in some browsers and looks fine in others")
+            assert (i["planes"], i["bpp"]) == (1, 32), (
+                f"favicon.ico entry declares planes={i['planes']} bpp={i['bpp']}; "
+                "a PNG payload is 1 plane / 32bpp and anything else is a hand-edited directory")
+
+        # ...and every one of them has something DRAWN on it. A 256x256 flat
+        # rectangle is a valid PNG at a valid size and shows a blank tab: the
+        # measured placeholder this PR deletes from the blog was exactly that shape.
+        # ⛔ THE ICO'S PAYLOADS ARE INCLUDED. `favicon.ico` is the file Windows and Edge
+        # draw, and every assertion above reads the container's CLAIMS plus the
+        # payload's geometry — a two-entry ICO declaring 32 and 48 over solid
+        # `#060b14` payloads satisfies the entry count, the `{32,48}` set, the
+        # `declared == actual` pairing AND `(1 plane, 32 bpp)`, i.e. all of them, while
+        # rendering a blank tab. Measured on a synthesized file.
+        # ⛔ WHAT THIS DOES NOT ASSERT. The pair below answers "is anything drawn on
+        # it", not "is this the right art": one flat colour reds (dominant == 1.0) and
+        # the deleted placeholder reds at 99.2%, but a 60 KB photograph of something
+        # unrelated passes both. The distinct-colour floor is **2**, not 8: a
+        # hard-edged two-colour mark (pixel art, a `crispEdges` SVG export, any mark
+        # without antialiasing) is legitimate art and must not red — and the earlier
+        # floor of 8 did red it while this very comment claimed a two-colour logo
+        # would pass at 8. It could not, and a guard that cries wolf at honest
+        # artwork is a guard the next person weakens instead of fixes.
+        drawn: list[tuple[str, bytes]] = [
+            (n, (self.WEB / n).read_bytes())
+            for n in (self.ICON_PNG, self.ICON_APPLE)
+        ]
+        drawn += [
+            (f"{self.ICON_ICO} entry {n} ({i['declared'][0]}x{i['declared'][1]})",
+             i["payload"])
+            for n, i in enumerate(icons) if i["is_png"]
+        ]
+        for name, data in drawn:
+            problems = self._icon_mark_violations(name, data)
+            assert not problems, "\n".join(problems)
+
+    def test_the_icon_is_a_rounded_tile_and_the_mark_fills_it(self):
+        """The tab icon is a ROUNDED tile whose MARK fills it — the shape, not the size.
+
+        Both claims are the owner's report in #11486, and both were invisible to every
+        assertion above: the shipped icon was a 256x256 opaque SQUARE whose triangle
+        spanned 68% of the canvas, so it passed the size check, the decode, the pixel
+        floors, the ICO directory checks and the wordmark ban, and still looked like a
+        hard slab with a small glyph next to neighbours whose art fills their tile.
+
+        Measured on the bytes, not on the markup: a page that declares a 256x256 icon
+        says nothing about what is drawn inside it.
+
+        `apple-touch-icon.png` is asserted the OTHER way round on purpose — iOS applies
+        its own rounded mask to that file, so a pre-rounded image would be rounded twice
+        and show dark corners on a light home screen.
+        """
+        def alpha_of(px: tuple[int, ...]) -> int:
+            """A pixel's alpha; a PNG with no alpha channel is opaque by definition.
+
+            ⛔ MEASURED, because the first version REQUIRED four channels here and the
+            apple-touch assertion went through the same helper — so an apple-touch that
+            was opaque and square (exactly what its message demands) but saved as colour
+            type 2 redded with "an icon with no alpha channel cannot have a rounded
+            corner", which is the opposite of that file's contract. The old asset set was
+            colour type 2, so an honest re-export tripped it.
+            """
+            return px[3] if len(px) == 4 else 255
+
+        def check_tile(label: str, data: bytes) -> None:
+            w, h, rows = self._png_pixels(data)
+            # The TAB icons are the ones that must be rounded, and a 3-channel PNG cannot
+            # be: there is no alpha to carry the corner. (apple-touch is checked apart.)
+            assert all(len(px) == 4 for row in rows for px in row), (
+                f"{label} has no alpha channel — a tab icon must be a rounded tile, and a "
+                "PNG without transparency can only be a square. Rebuild it with "
+                "tools/build_site_icons.py")
+            corners = ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1))
+            for x, y in corners:
+                alpha = alpha_of(rows[y][x])
+                assert alpha == self.ROUNDED_CORNER_ALPHA, (
+                    f"{label} is opaque at its ({x},{y}) corner (alpha {alpha}) — a "
+                    "hard square edge, which is the shape #11486 reports as a slab. "
+                    "Rebuild it with tools/build_site_icons.py, which masks the corners")
+
+            # ...and the tile is ROUNDED, not merely nibbled. "Corner is transparent" is
+            # satisfied by four punched pixels on a square slab (measured green), so the
+            # arc is measured as an inset along each edge, in fractions of the side: a
+            # radius-r arc reaches the edge at exactly r.
+            floor = int(self.CORNER_INSET_FLOOR * w)
+            edges = {
+                "top": [(x, 0) for x in range(w)],
+                "bottom": [(x, h - 1) for x in range(w)],
+                "left": [(0, y) for y in range(h)],
+                "right": [(w - 1, y) for y in range(h)],
+            }
+            for edge, line in edges.items():
+                for start, step in ((0, 1), (len(line) - 1, -1)):
+                    inset = 0
+                    i = start
+                    while 0 <= i < len(line) and alpha_of(rows[line[i][1]][line[i][0]]) < 255:
+                        inset += 1
+                        i += step
+                    assert inset >= floor, (
+                        f"{label} is fully opaque {inset}px in from the {edge} corner — "
+                        f"under the {floor}px ({self.CORNER_INSET_FLOOR:.0%} of {w}) a "
+                        "rounded tile needs, so the corner is nibbled rather than rounded "
+                        "and the tab still reads as a square slab (#11486)")
+
+            # The ground is whatever opaque colour covers the most pixels; the mark is
+            # everything far from it. Both are measured, so no colour is hardcoded.
+            opaque = [px for row in rows for px in row if px[3] == 255]
+            assert opaque, f"{label} has no fully opaque pixel at all"
+            counts: dict[tuple[int, ...], int] = {}
+            for px in opaque:
+                counts[px[:3]] = counts.get(px[:3], 0) + 1
+            ground = max(counts, key=lambda c: counts[c])
+            xs = [x for y in range(h) for x in range(w)
+                  if rows[y][x][3] == 255
+                  and sum(abs(rows[y][x][i] - ground[i]) for i in range(3)) > 60]
+            assert xs, f"{label} shows nothing that is not its ground colour"
+            span = (max(xs) - min(xs) + 1) / w
+            assert span >= self.MARK_WIDTH_FLOOR, (
+                f"{label}'s mark spans {span:.0%} of the canvas width ({(1 - span) / 2:.0%} "
+                f"padding each side) — under the {self.MARK_WIDTH_FLOOR:.0%} floor, so in a "
+                "tab strip it reads as a small glyph on a slab (#11486). The artwork "
+                "carries its own padding; tools/build_site_icons.py crops it out rather "
+                "than shrinking the mark to fit it")
+
+        check_tile(self.ICON_PNG, (self.WEB / self.ICON_PNG).read_bytes())
+        for i, entry in enumerate(self._ico_entries((self.WEB / self.ICON_ICO).read_bytes())):
+            if not entry["is_png"]:
+                continue
+            w, h = entry["declared"]
+            check_tile(f"{self.ICON_ICO} entry {i} ({w}x{h})", entry["payload"])
+
+        # ...and apple-touch is the exception, asserted rather than skipped.
+        apple = (self.WEB / self.ICON_APPLE).read_bytes()
+        w, h, rows = self._png_pixels(apple)
+        for x, y in ((0, 0), (w - 1, 0), (0, h - 1), (w - 1, h - 1)):
+            assert alpha_of(rows[y][x]) == 255, (
+                f"{self.ICON_APPLE} is transparent at ({x},{y}) — iOS masks this file "
+                "itself, so pre-rounded corners render as dark notches on a light home "
+                "screen. It is the one icon that must stay a full-bleed square")
+
+    def test_the_wordmark_is_never_used_as_an_icon(self):
+        """`/logo.png` is a 400x244 wordmark — a tab renders it as a squashed bar.
+
+        Reads the same parsed `<link>` elements the trio assertion reads, and splits
+        `rel` the same way: a regex over the raw markup is case-sensitive,
+        double-quote-only and order-sensitive, so `rel="shortcut icon"` — which the
+        trio assertion deliberately accepts — walked straight past it.
+
+        The href is resolved against a root URL before it is compared, because every
+        page here is served at a root-level path: on `/faq`, `href="logo.png"` IS
+        `/logo.png`, and a substring test on the attribute sees neither. Matching on
+        `"icon" in token` rather than on two exact tokens is what covers
+        `apple-touch-icon-precomposed`, which iOS still honours.
+        """
+        for page in self._pages():
+            head = self._head(page.read_text())
+            for ln in self._links(head):
+                rel = ln.get("rel", "").lower().split()
+                if not any("icon" in token for token in rel):
+                    continue
+                violation = self._icon_target_violation(page.name, ln)
+                assert violation is None, violation
+
+    @classmethod
+    def _icon_target_violation(cls, page_name: str, link: dict) -> str | None:
+        """Why an ICON link's TARGET is not a usable tab icon; None means it is.
+
+        Split out of the guard above for the reason `_declared_sizes_violation` is: every
+        page in this tree links three valid icons, so inlined the whole check was executed
+        only by CORRECT input. Measured: restoring the existence check to AFTER the `.svg`
+        exemption (the pre-fix order) kept every test green while `href="/assets/nope.svg"`
+        silently passed — the same "proved with a hand-run probe, pinned by nothing"
+        defect this class exists to end. `test_the_icon_target_guard_reads_existence_and_
+        shape` drives each branch with a synthetic link set.
+
+        ⛔ THE BLACKLIST IS ONE FILENAME WIDE. The property it is about is "a tab icon
+        must be square" — a browser squashes a wide image into the square slot — and a
+        filename test cannot see `assets/premiselabs-logo.png`, which is 160x98 and is the
+        same wordmark by another name (measured: it passed while `logo.png` was refused).
+        So the TARGET IS READ.
+        ⛔ AND THE BYTES ARE READ FOR EVERY FORMAT, NOT JUST `.png`: gating on one
+        extension is the same one-rule-wide hole one level down — measured,
+        `rel="icon" href="/assets/og-tortoise.jpg"` (1200x630) passed every icon
+        assertion, and so did a href naming a file that does not exist.
+        ⛔ AND EXISTENCE COMES FIRST, BEFORE ANY FORMAT EXEMPTION. The `.svg` exemption is
+        about having no intrinsic pixel box to squash — it is NOT a licence to skip the
+        file check, and an early `continue` that did so let a page link a nonexistent
+        vector icon while this guard reported green (measured: the only format that did).
+        """
+        # ⛔ THE ORIGIN IS CHECKED, NOT DROPPED — via `_icon_ref`, the one helper that
+        # already does it. `urlsplit("//evil.example/favicon.png").path` is
+        # `/favicon.png`, so a netloc-discarding read grades an off-host icon as this
+        # site's own file and reports green on a tab that draws someone else's image.
+        # Measured before this fix: `_icon_target_violation("page.html", {"rel": "icon",
+        # "href": "//evil.example/favicon.png"})` returned None.
+        path_part = cls._icon_ref(link.get("href", ""))
+        if not path_part:
+            # `_icon_ref` also returns "" for an href that names NO host at all — an
+            # inline `data:` icon is legitimate HTML, so "another host" would be a
+            # false statement about it. The branch says what is true of every case.
+            return (f"{page_name} links an icon that is not a file this site serves "
+                    f"(rel={link.get('rel')!r} href={link.get('href')!r}) — this guard "
+                    "cannot verify it")
+        assert "/logo.png" not in path_part, (
+            f"{page_name} uses the wordmark as an icon: rel={link.get('rel')!r} "
+            f"href={link.get('href')!r}")
+        target = cls.WEB / path_part.lstrip("/")
+        if not target.is_file():
+            return (f"{page_name} links an icon this site does not serve ({path_part}) — "
+                    "the tab draws nothing")
+        if path_part.endswith(".svg"):
+            # A vector icon has no intrinsic pixel box to squash — the tab sizes it from
+            # the viewBox — so it is EXEMPT BY NAME from the shape check, above.
+            return None
+        raw = target.read_bytes()
+        if raw[:8] == b"\x89PNG\r\n\x1a\n":
+            w, h = cls._png_size(raw)
+        elif raw[:2] == b"\xff\xd8":
+            w, h = cls._jpeg_size(raw)
+        elif raw[:4] == b"\x00\x00\x01\x00":
+            # The ICO's directory entries are the slots a renderer reserves, so each of
+            # them must be square too.
+            for entry in cls._ico_entries(raw):
+                if entry["declared"][0] != entry["declared"][1]:
+                    return (f"{page_name} uses {path_part} as a tab icon and its "
+                            f"{entry['declared'][0]}x{entry['declared'][1]} directory "
+                            "entry is not square — that icon is drawn squashed")
+            return None
+        else:
+            raise AssertionError(
+                f"{page_name} uses {path_part} as a tab icon; this guard reads PNG, JPEG "
+                "and ICO, and exempts only .svg — add a reader rather than leaving the "
+                "tab unchecked")
+        if w != h:
+            return (f"{page_name} uses a {w}x{h} non-square image as a tab icon "
+                    f"({path_part}) — the tab squashes it into a square")
+        return None
+
+    def test_the_icon_target_guard_reads_existence_and_shape(self):
+        """NON-VACUITY for `_icon_target_violation`, driven by a synthetic link set.
+
+        Every page links three valid icons, so on the real population this predicate is
+        only ever run against input that passes — a regression in any branch is
+        unobservable. MEASURED before this test existed: moving the existence check back
+        below the `.svg` exemption left all 13 icon/card tests green while
+        `href="/assets/nope.svg"` was accepted. Each edge is pinned in BOTH directions.
+        """
+        for link in ({"rel": "icon", "href": "/favicon.png"},
+                     {"rel": "icon", "href": "/favicon.png?v=2"},
+                     {"rel": "icon", "href": "/apple-touch-icon.png"},
+                     {"rel": "icon", "href": "/favicon.ico"}):
+            assert self._icon_target_violation("page.html", link) is None, (
+                f"a valid icon link was reded: {link}")
+
+        for missing in ("/assets/nope.png", "/assets/nope.svg"):
+            violation = self._icon_target_violation(
+                "page.html", {"rel": "icon", "href": missing}) or ""
+            assert "does not serve" in violation, (
+                f"an icon link to a missing file ({missing}) was accepted — the format "
+                "exemption must come AFTER the existence check, measured: an early "
+                f"`.svg` continue re-opened exactly this. Got: {violation!r}")
+
+        wide = self._icon_target_violation(
+            "page.html", {"rel": "icon", "href": "/assets/og-tortoise.jpg"}) or ""
+        assert "non-square" in wide, (
+            "a 1200x630 JPEG used as a tab icon was accepted — the shape check is "
+            f"`.png`-only again. Got: {wide!r}")
+
+        wordmark = self._icon_target_violation(
+            "page.html", {"rel": "icon", "href": "/assets/premiselabs-logo.png"}) or ""
+        assert "non-square" in wordmark, (
+            "a 160x98 wordmark was accepted as a tab icon — the filename blacklist is the "
+            f"only rule again. Got: {wordmark!r}")
+
+        # ⛔ THE ORIGIN EDGE, AND IT MUST BE PINNED HERE OR THE FIX IS UNWATCHED. This
+        # helper is graded on hrefs; every other fixture in this test is ON-SITE, so a
+        # revert to `urlsplit(urljoin(...)).path` (which discards the netloc) leaves
+        # every other assertion in this test behaving identically and the suite GREEN.
+        # MEASURED with that revert restored: both off-host forms below return None.
+        # `data:` is included because `_icon_ref` rejects it too, for a different
+        # reason (it names no host at all), so the branch must not claim "another host".
+        for off_host in ("//evil.example/favicon.png",
+                         "https://evil.example/favicon.png",
+                         "data:image/png;base64,AAAA"):
+            refused = self._icon_target_violation(
+                "page.html", {"rel": "icon", "href": off_host}) or ""
+            assert "not a file this site serves" in refused, (
+                f"{off_host!r} was accepted as a tab icon — the origin is being "
+                f"discarded again (`urlsplit(...).path` drops the netloc). "
+                f"Got: {refused!r}")
+
+        try:
+            self._icon_target_violation("page.html", {"rel": "icon", "href": "/logo.png"})
+        except AssertionError:
+            pass
+        else:
+            raise AssertionError("the wordmark was accepted as a tab icon")
+
+    # --- 2. the preview resolves and is the size it claims ---------------
+
+    @staticmethod
+    def _head_markup(head: str) -> str:
+        """The head with its two non-markup regions removed: comments and CSS/JS bodies.
+
+        Both legitimately CONTAIN angle brackets — this repo's own noindex rationale
+        quotes `<meta name="robots" content="noindex">` inside an HTML comment, and
+        404.html inlines its whole stylesheet — so counting raw `<meta` occurrences
+        in the document would flag prose as a broken tag.
+
+        `<noscript>` and `<template>` are stripped for the same reason `<script>` is:
+        their contents are not live head metadata. A scraper does not read an
+        `og:image` that only exists inside a `<noscript>` fallback, so a guard that
+        did would report green on a page with no preview — measured, before this
+        list was complete.
+        """
+        text = re.sub(r"<!--.*?-->", "", head, flags=re.S)
+        stripped = re.sub(r"<(style|script|noscript|template)\b.*?</\1>", "", text,
+                          flags=re.S | re.I)
+        # An UNCLOSED wrapper defeats the strip above, and CPython's parser treats
+        # `noscript`/`template` as ordinary elements, so the metas inside are still
+        # counted and still found — while a browser puts them in the inert fragment
+        # and renders no card. Measured: an unclosed `<template>` before the metas read
+        # green. `style`/`script` are CDATA to that parser and already fail closed, so
+        # they are listed here only to keep one rule rather than two.
+        leftover = re.findall(r"<(style|script|noscript|template)\b", stripped, flags=re.I)
+        assert not leftover, (
+            f"an unclosed <{leftover[0]}> in the head — the strip cannot remove a "
+            "wrapper with no end tag, so the tags after it read as live markup here "
+            "while a browser treats them as inert content (and a scraper sees no card)")
+        return stripped
+
+    @staticmethod
+    def _head_metas(head: str) -> tuple[list[dict[str, str]], list[str]]:
+        """Parse the head: one dict per `<meta>` element, plus any text that leaked.
+
+        Used instead of the regexes above wherever STRUCTURE is the question. A
+        regex answers "does this substring appear", which a malformed tag also
+        satisfies; only a parser tells you the substring became an element.
+        """
+
+        # Elements whose TEXT is legitimate head content: a `title`, an inlined
+        # `style` (404.html carries all of its CSS in the head), a `script`.
+        # Their data is not the remnant of an unclosed tag, so it is not stray.
+        TEXT_ELEMENTS = frozenset({"title", "style", "script", "noscript"})
+
+        class Collector(HTMLParser):
+            def __init__(self) -> None:
+                super().__init__(convert_charrefs=True)
+                self.metas: list[dict[str, str]] = []
+                self.stray: list[str] = []
+                self.in_head = False
+                self.text_depth = 0
+
+            def handle_starttag(self, tag: str, attrs) -> None:
+                if tag == "head":
+                    self.in_head = True
+                elif not self.in_head:
+                    return
+                elif tag == "meta":
+                    self.metas.append({k: (v or "") for k, v in attrs})
+                elif tag in TEXT_ELEMENTS:
+                    self.text_depth += 1
+
+            def handle_endtag(self, tag: str) -> None:
+                if tag == "head":
+                    self.in_head = False
+                elif tag in TEXT_ELEMENTS and self.text_depth:
+                    self.text_depth -= 1
+
+            def handle_data(self, data: str) -> None:
+                if self.in_head and not self.text_depth and data.strip():
+                    self.stray.append(data.strip())
+
+        collector = Collector()
+        collector.feed(head)
+        collector.close()
+        return collector.metas, collector.stray
+
+    def test_the_head_is_well_formed_markup(self):
+        """A meta tag that lost its `>` swallows the next one — and the regexes still pass.
+
+        MEASURED ON THIS VERY CHANGE, which is why this test exists. Two pages were
+        edited to add `twitter:image:alt`; the edit dropped the closing `>` of the
+        `og:image:alt` line, so the file read
+
+            <meta property="og:image:alt" content="…"
+            <meta name="twitter:image:alt" content="…">>
+
+        Every value assertion in `test_every_page_declares_a_social_preview` passed on
+        both pages (`_og`/`_twitter` match `name="twitter:…"` anywhere in the head,
+        including inside text another tag swallowed). A browser instead parsed ONE
+        element, found no `twitter:image:alt` at all, and leaked a bare `>` into the
+        head as visible text. A guard whose verdict is unchanged by a broken tag is
+        not measuring the tag.
+
+        So the structure is asserted from the parsed tree: every `<meta` the source
+        spells must arrive as its OWN element (a swallowed one loses the count), and
+        no non-whitespace text may appear in the head at all.
+        """
+        for page in self._pages():
+            text = page.read_text()
+            assert "<head" in text and "</head>" in text, f"{page.name} has no head"
+            markup = self._head(text)
+
+            metas, stray = self._head_metas(markup)
+            assert not stray, (
+                f"{page.name} emits text into <head>: {stray[:3]} — almost always the "
+                "remnant of a tag that was not closed, which a browser renders as a "
+                "stray character and a scraper ignores")
+            assert markup.count("<meta") == len(metas), (
+                f"{page.name} spells {markup.count('<meta')} '<meta' occurrences in the head "
+                f"but only {len(metas)} parse as elements — a tag lost its '>' and "
+                "swallowed the next one")
+
+            # A swallowed tag, a stray quote or a doubled `"` all show up as an
+            # attribute that has no business being there — a bare `"` parses as an
+            # attribute whose KEY is a quote character. An all-or-nothing key check
+            # is what catches the shape; no value assertion can, because the value
+            # the regex reads is the one before the damage.
+            allowed = {"property", "name", "content", "charset", "http-equiv"}
+            for meta in metas:
+                assert meta, f"{page.name} has a <meta> element with no attributes"
+                odd = set(meta) - allowed
+                assert not odd, (
+                    f"{page.name} parsed a <meta> with attribute key(s) {sorted(odd)!r} "
+                    f"({meta}) — a stray or doubled quote leaves a quote character "
+                    "where an attribute name should be, and a swallowed tag leaves tag "
+                    "text there")
+                assert "<" not in " ".join(meta.values()) and ">" not in " ".join(meta.values()), (
+                    f"{page.name} parsed a <meta> whose attributes contain tag text "
+                    f"{meta} — the following tag was swallowed by an unclosed one")
+
+    def test_every_page_declares_a_social_preview(self):
+        """`og:image` + its size + alt, and the Twitter mirror, on every page."""
+        for page in self._pages():
+            head = self._head(page.read_text())
+            image = self._og(head, "image")
+            assert image, f"{page.name} declares no og:image — a shared link renders no card"
+            assert image.startswith("https://"), (
+                f"{page.name} og:image is {image!r}; a link-preview scraper does NOT "
+                "resolve a relative URL, so a same-origin path silently renders no card "
+                "at all while the page looks configured (the failure mode the bespoke "
+                "preview pages already document)")
+            assert image.split("/")[2] in self.SITE_ORIGINS, (
+                f"{page.name} og:image points at {image.split('/')[2]}, not one of "
+                f"{sorted(self.SITE_ORIGINS)} — the card must be served by us or the "
+                "scraper fetches it from a host we do not control")
+            assert self._og(head, "image:width") and self._og(head, "image:height"), (
+                f"{page.name} declares og:image without its dimensions; scrapers that "
+                "trust the tag then request an assumed size")
+            alt = (self._og(head, "image:alt") or "").strip()
+            assert alt, (
+                f"{page.name} declares no usable og:image:alt — the card is unreadable to "
+                "a screen reader and to any client that suppresses remote images (a "
+                "whitespace-only value is not alt text)")
+            assert (self._twitter(head, "image:alt") or "").strip() == alt, (
+                f"{page.name} twitter:image:alt ({self._twitter(head, 'image:alt')!r}) "
+                f"disagrees with og:image:alt ({alt!r}) — one platform then describes a "
+                "different picture than the other")
+            assert self._twitter(head, "card") == "summary_large_image", (
+                f"{page.name} twitter:card is {self._twitter(head, 'card')!r}; without "
+                "summary_large_image the 1200x630 image is cropped to a square thumbnail")
+            assert self._twitter(head, "image") == image, (
+                f"{page.name} twitter:image ({self._twitter(head, 'image')}) disagrees "
+                f"with og:image ({image}) — one of the two platforms gets the wrong picture")
+
+    def test_the_declared_preview_size_matches_the_file(self):
+        """The tag is a promise about bytes; check it against the bytes.
+
+        The per-page checks live in `_card_violations` so the PAGE-LEVEL application can
+        be driven by a test (`test_the_page_card_predicate_applies_every_check_it_
+        declares`); this loop applies them to every shipped page, which is what makes the
+        tree's own cards guarded rather than only their helpers.
+        """
+        for page in self._pages():
+            head = self._head(page.read_text())
+            violations = self._card_violations(page.name, head)
+            assert not violations, "\n".join(violations)
+
+    def test_the_page_card_predicate_applies_every_check_it_declares(self):
+        """NON-VACUITY for `_card_violations`: each branch REDS through the predicate.
+
+        ⛔ WHY. MEASURED on the code before this predicate existed, all 13 tests in this
+        class GREEN under each of three mutants — the floor application deleted,
+        `_card_size` reverted to `_jpeg_size`, and the image resolved with the raw
+        `image.split("//", 1)[-1]` form. The helpers were pinned and nothing pinned the
+        loop that called them, so the loop's half could be `assert True`. That is the
+        identical defect the icon half of this class was already fixed for.
+        """
+        good = self._head((self.WEB / "index.html").read_text())
+        image = self._og(good, "image")
+        assert image, "the fixture page declares no og:image"
+        assert self._card_violations("index.html", good) == [], (
+            "the shipped index.html was reported as violating its own card contract: "
+            f"{self._card_violations('index.html', good)}")
+        card_path, card_bytes = self._og_card_bytes(image)
+        assert card_path is not None and len(card_bytes) > self.CARD_MIN_BYTES, (
+            "the fixture card does not resolve in the served tree")
+
+        def violations(head: str, load) -> list[str]:
+            return self._card_violations("synthetic.html", head, load=load)
+
+        # 1. THE ENCODED-SIZE FLOOR, applied by the PREDICATE and not merely by the
+        #    helper: a flat 1200x630 JPEG whose pixels are nothing.
+        flat = b"\xff\xd8" + b"\x00" * (self.FLAT_CARD_BYTES - 2)
+        assert self._card_floor_violation("synthetic.html", card_path, flat), (
+            "the fixture is not the flat card this case needs — FLAT_CARD_BYTES no "
+            "longer trips the floor")
+        flat_v = violations(good, lambda _url: (card_path, flat))
+        assert any("floor" in v and "flat" in v for v in flat_v), (
+            "a flat card fed through the page predicate produced no floor violation, so "
+            f"the loop is not applying it; got {flat_v}")
+
+        # 2. THE FORMAT DISPATCH reads the type the PAGE declares, and holds the bytes to
+        #    it. Reverting `_card_size` to a JPEG-only reader reds the first case.
+        png = self._two_colour_png(180)
+        png_typed = good.replace('content="image/jpeg"', 'content="image/png"')
+        assert png_typed != good, "the fixture head does not declare og:image:type"
+        png_ok = violations(png_typed, lambda _url: (card_path, png))
+        assert not any("og:image:type" in v for v in png_ok), (
+            "a page that honestly declares a PNG card was reported as failing the "
+            f"format check — the predicate is not dispatching on the declared type: {png_ok}")
+        jpeg_typed_over_png = violations(good, lambda _url: (card_path, png))
+        assert any("og:image:type" in v for v in jpeg_typed_over_png), (
+            "a card whose bytes contradict the declared og:image:type passed the "
+            f"predicate; got {jpeg_typed_over_png}")
+
+        # 3. THE QUERY-STRIPPING PATH, with the REAL loader: a `?v=2` cache-bust on a
+        #    correct tag resolves to the served file. Restoring the raw split form reds
+        #    this — the helper test alone cannot, because it calls `_og_asset_path`
+        #    directly rather than through the predicate.
+        busted = good.replace(image, image + "?v=2")
+        assert busted != good, "the fixture head does not carry the card URL"
+        bust_v = self._card_violations("synthetic.html", busted)
+        assert not any("not in the served tree" in v for v in bust_v), (
+            "a legitimate ?v=2 cache-bust turned the card into a 404 in the predicate — "
+            f"the query is not being stripped on this path: {bust_v}")
+
+        # 4. AN ABSENT CARD and a page with no og:image at all, both reported.
+        missing = good.replace(image, image.rsplit("/", 1)[0] + "/nope.jpg")
+        assert any("not in the served tree" in v
+                   for v in self._card_violations("synthetic.html", missing)), (
+            "a card URL that resolves to nothing was accepted")
+        headless = self._head("<head></head>")
+        assert any("no og:image" in v
+                   for v in self._card_violations("synthetic.html", headless)), (
+            "a head with no og:image produced no violation")
+
+        # 5. A USER-ENTERED size that is not a pixel count is a violation, not a crash:
+        #    `int()` on a non-numeric attribute raised out of the loop before this split.
+        junk = good.replace('content="1200"', 'content="wide"')
+        assert junk != good, "the fixture head does not declare og:image:width"
+        junk_v = self._card_violations("synthetic.html", junk)
+        assert any("not a pixel count" in v for v in junk_v), (
+            f"og:image:width='wide' did not produce a dimension violation: {junk_v}")
+
+        # 6. A DECLARED size that disagrees with the bytes, so the dimension comparison
+        #    itself is pinned (deleting it otherwise leaves every case above green).
+        wrong = good.replace('content="1201"', 'content="1202"')
+        if wrong == good:
+            wrong = good.replace('content="1200"', 'content="1201"')
+        wrong_v = self._card_violations("synthetic.html", wrong)
+        assert any("1201x630" in v or "1x630" in v for v in wrong_v), (
+            f"a declared width one pixel off the file was not reported: {wrong_v}")
+
+    def test_the_card_type_dispatch_reads_the_format_the_page_names(self):
+        """NON-VACUITY for `_card_size`: BOTH reader branches, on real bytes.
+
+        Every page in this tree declares `og:image:type: image/jpeg`, and the only PNG
+        card the repo ever had is deleted by this PR — so the `image/png` branch of the
+        dispatch was executed by NOTHING. A branch that returned the other format's
+        numbers, or a `readers` dict reduced to JPEG alone, read green.
+
+        Each branch is run here against bytes it must accept AND against bytes of the
+        other format, so the dispatch cannot be weakened by deleting a reader; and an
+        unknown type must be REFUSED rather than sniffed, because a sniffing guard
+        accepts a lie about the type it was written to catch.
+        """
+        card = (self.WEB / "assets" / "og-tortoise.jpg").read_bytes()
+        assert self._card_size("image/jpeg", card) == (1200, 630), (
+            "the shipped card, declared as what it is, does not read its own SOF frame")
+
+        png = self._two_colour_png(180)
+        assert self._card_size("image/png", png) == (180, 180), (
+            "a PNG card must be read by the PNG reader and report its own IHDR")
+
+        for declared, raw, expected in (("image/jpeg", png, "not a JPEG"),
+                                        ("image/png", card, "not a PNG")):
+            try:
+                size = self._card_size(declared, raw)
+            except AssertionError as exc:
+                assert expected in str(exc), (
+                    f"declaring {declared!r} over the OTHER format must red with "
+                    f"{expected!r}, got: {exc}")
+            else:
+                raise AssertionError(
+                    f"declaring {declared!r} over bytes of the other format returned "
+                    f"{size} — a lying og:image:type passed the guard")
+
+        try:
+            self._card_size("image/webp", card)
+        except AssertionError as exc:
+            assert "no reader" in str(exc), exc
+        else:
+            raise AssertionError("an unknown og:image:type was accepted, not refused")
+
+    def test_the_content_guards_reject_a_blank_image_and_keep_their_measured_floors(self):
+        """NON-VACUITY: each content guard must FAIL on the image it was written for.
+
+        Every floor in this class was argued from measurements taken outside CI, and
+        a guard's failure path is exactly what a PR body forgets. Asserted here: the
+        decoder reads real pixels, a blank image really reds BOTH floors, and the
+        card floor really sits above the flat JPEG that defeated its first value.
+
+        ⛔ The two card numbers are a PAIR, on purpose. #11318's first card floor was
+        20 KB while a flat 1200x630 JPEG at maximum quality measures 22,016 B — so
+        the check passed the exact image it existed to reject. Raising the floor
+        without re-measuring the flat case repeats the mistake; this pin makes that
+        red instead of green.
+        """
+        blank = self._flat_png()
+        counts = self._png_palette(blank)
+        assert sum(counts.values()) == 256 * 256, (
+            "the decoder did not count every pixel of a 256x256 PNG, so a dominant-colour "
+            "ratio computed from it is meaningless")
+        assert len(counts) == 1, f"a flat PNG decoded to {len(counts)} colours, not 1"
+
+        problems = self._icon_mark_violations(self.ICON_PNG, blank)
+        assert len(problems) == 2, (
+            "a blank icon must trip BOTH content floors (distinct colours and dominant "
+            f"colour); it tripped {len(problems)}: {problems}")
+
+        # A SYNTHETIC fixture is not in the served tree, so its message must not name a
+        # `website/…` path — that sends the reader looking for a file that never existed.
+        synthetic = self._icon_mark_violations("a synthetic fixture", blank, in_tree=False)
+        assert synthetic and not any(p.startswith("website/") for p in synthetic), (
+            "a synthetic fixture's message claims a `website/…` path: "
+            f"{synthetic}")
+
+        # ...and the OTHER direction, which nothing measured: a legitimate TWO-COLOUR
+        # mark must not red. Without this fixture `ICON_MIN_COLOURS` can go back to 8 —
+        # the review-1 defect, red on a `crispEdges`/pixel-art mark — and every test in
+        # this class stays green, because the only icons in the tree decode to 200+
+        # colours. A floor is only pinned when both of its edges are.
+        mark = self._two_colour_png()
+        mark_counts = self._png_palette(mark)
+        assert len(mark_counts) == 2, (
+            f"the two-colour fixture decoded to {len(mark_counts)} colours, so it isolates "
+            "nothing")
+        assert max(mark_counts.values()) / sum(mark_counts.values()) < self.ICON_MAX_DOMINANT, (
+            "the fixture's accent covers too little of the canvas to isolate the "
+            "colour-count floor from the dominant-colour one")
+        assert self._icon_mark_violations(
+            "the two-colour fixture", mark, in_tree=False) == [], (
+            "a hard-edged two-colour mark reded "
+            f"({self._icon_mark_violations('the two-colour fixture', mark, in_tree=False)}) "
+            f"— ICON_MIN_COLOURS "
+            f"is {self.ICON_MIN_COLOURS}, and a mark without antialiasing is art the "
+            "next person might choose, not a blank rectangle")
+
+        assert self.FLAT_CARD_BYTES < self.CARD_MIN_BYTES, (
+            f"the card floor ({self.CARD_MIN_BYTES} B) is not above the flat 1200x630 "
+            f"JPEG it exists to reject ({self.FLAT_CARD_BYTES} B), so a flat card passes")
+        flat_card = b"\xff\xd8" + b"\x00" * (self.FLAT_CARD_BYTES - 2)
+        # ⛔ AND PADDING IS NOT PAINT. Measuring FILE length let a flat image clear the
+        # floor by appending zeros after the EOI — measured: +36 KB of trailing zeros
+        # took a 4,723 B flat card past 40,000 B green. The floor reads the ENCODED
+        # image, so the same bytes padded are still rejected.
+        padded = flat_card[:2] + b"\x00" * (self.FLAT_CARD_BYTES - 4) + b"\xff\xd9"
+        padded += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded))
+        assert len(padded) > self.CARD_MIN_BYTES, "the padding fixture is not past the floor"
+        assert self._card_floor_violation("page.html", Path("card.jpg"), padded), (
+            "a flat card PADDED past the floor cleared it — the floor is measuring the "
+            "file, not the encoded image, and trailing bytes are not paint")
+
+        # ...and the DECODER itself, on the path every real icon takes. Both fixtures
+        # above emit filter type 0 only, so Sub/Up/Average/Paeth reconstruction was
+        # executed by no test — and a wrong predictor there invents MORE colours and a
+        # LOWER dominant share, i.e. it satisfies both floors while the guard reads
+        # noise as art. The failure direction is a false PASS, so nothing else in this
+        # file would notice; this fixture is patterned row by row so each filter has a
+        # different, non-degenerate predictor.
+        filtered, expected, filters = self._filtered_png()
+        assert filters == [0, 1, 2, 3, 4], (
+            f"the fixture no longer exercises every PNG filter type (got {filters}) — "
+            "then the reconstruction branch is untested again")
+        assert self._png_palette(filtered) == expected, (
+            "the decoder did not reproduce the pixels a filter-type-1..4 PNG encodes — "
+            "every real icon in the tree uses those filters")
+        assert self._card_floor_violation("page.html", Path("card.jpg"), flat_card), (
+            "a card the size of a measured flat JPEG cleared the floor")
+        # ...and the card that ships is what clears it, so the floor is not just
+        # "always red" and not "any file at all".
+        shipped = (self.WEB / "assets" / "og-tortoise.jpg").read_bytes()
+        assert self._card_floor_violation("page.html", Path("og-tortoise.jpg"),
+                                          shipped) is None, (
+            f"the shipped card ({len(shipped)} B) no longer clears the floor — look at "
+            "it, then re-measure before touching CARD_MIN_BYTES")
+
+        # ⛔ AND A TRAILING `FF D9` IN THE PADDING RE-OPENED THE HOLE. `rfind` finds the
+        # last EOI in the FILE, and the two bytes that close padding are indistinguishable
+        # from an image's end once you are outside any scan — measured: the same 4,723 B
+        # flat card + zeros + `FF D9` = 41,500 B cleared the floor green. The walk now
+        # stops at the EOI that ends the SCAN, so the trailer is not paint.
+        trailer = (flat_card[:2] + b"\x00" * (self.FLAT_CARD_BYTES - 4) + b"\xff\xd9"
+                   + b"\x00" * (self.CARD_MIN_BYTES + 1_000 - self.FLAT_CARD_BYTES)
+                   + b"\xff\xd9")
+        assert len(trailer) > self.CARD_MIN_BYTES, "the trailer fixture is not past the floor"
+        assert self._card_floor_violation("page.html", Path("card.jpg"), trailer), (
+            "a flat card padded and CLOSED WITH FF D9 cleared the floor — the measure is "
+            "taking the last EOI in the file instead of the one that ends the image")
+
+        # ⛔ AND THE MEASURE IS FORMAT-AWARE. A PNG's image ends at its IEND chunk; `FF D9`
+        # inside IDAT is ordinary compressed data, so a measure that hunts `FF D9` both
+        # FALSE-PASSES a padded PNG card and FALSE-FAILS a real one. `website/logo.png`
+        # is the real witness: 35,670 B, and its IDAT happens to contain `FF D9`.
+        # ⛔ MEASURED AT THIS HEAD, because the number is not folklore: the 6,280-short
+        # (29,390 B) reading belongs to the SUPERSEDED `rfind`-for-the-last-`FF D9`
+        # measure. The current segment/scan walk reads `logo.png` at its full 35,670 B
+        # even when handed the JPEG branch, so it does NOT stop at an interior `FF D9`.
+        # What the pin below therefore witnesses is narrower than the bug story: that
+        # whichever branch ran ended at the file's own end. HEAD-MEASURED, it can NOT
+        # tell the PNG branch from the JPEG one on `logo.png` — deleting the PNG branch
+        # leaves it green, because the current JPEG walk also reads this PNG in full.
+        # The padded-PNG fixture above is what catches a dispatch regression; this
+        # assertion only catches a walk that ends anywhere but the file's own end.
+        padded_png = self._flat_png(64)
+        padded_png += b"\x00" * (self.CARD_MIN_BYTES + 1_000 - len(padded_png))
+        assert self._card_floor_violation("page.html", Path("card.png"), padded_png), (
+            "a flat PNG padded past the floor cleared it — the floor measured the file, "
+            "not the PNG's chunks")
+        in_tree_png = (self.WEB / "logo.png").read_bytes()
+        assert b"\xff\xd9" in in_tree_png, (
+            "website/logo.png no longer contains an FF D9 byte pair, so it no longer "
+            "isolates the JPEG-delimiter bug it was chosen for — pick another PNG (or "
+            "state that this witness is gone)")
+        assert self._encoded_length(in_tree_png) == len(in_tree_png), (
+            f"website/logo.png ({len(in_tree_png)} B) measures "
+            f"{self._encoded_length(in_tree_png)} B — the PNG chunk walk did not end at "
+            "the file's own end (a mis-parsed chunk length, or trailing bytes after "
+            "IEND)")
+        assert self._encoded_length(shipped) == len(shipped), (
+            f"the shipped JPEG ({len(shipped)} B) measures "
+            f"{self._encoded_length(shipped)} B — its stream must end at its own EOF")
+
+        # The VALUE readers accept honest markup. A reordered attribute and a
+        # cache-busting query are identical to a browser and to every scraper; the
+        # source-order regexes they replaced called both broken (#11318 review 2).
+        tag = ('<head><meta content="https://tortoise.premiselabs.co/assets/'
+               'og-tortoise.jpg?v=2" property="og:image">')
+        image = self._og(tag, "image")
+        assert image is not None and image.endswith("og-tortoise.jpg?v=2"), (
+            f"a reordered og:image tag read as {image!r} — that is the false red the "
+            "parser replaced the regex for")
+        assert self._og_asset_path(image).is_file(), (
+            "a legitimate `?v=2` cache-bust on a correct og:image resolves to no file")
+
+    def test_the_shared_preview_is_the_agreed_size(self):
+        """1200x630 is the size the scrapers crop to; the shared image must be it."""
+        shared = self.WEB / "assets" / "og-tortoise.jpg"
+        assert shared.is_file(), "the shared preview image is missing"
+        assert self._jpeg_size(shared.read_bytes()) == self.OG_SIZE, (
+            f"assets/og-tortoise.jpg is not {self.OG_SIZE[0]}x{self.OG_SIZE[1]}")
+
+    def test_both_origins_root_pages_carry_the_preview(self):
+        """The two URLs that get pasted into a chat: premiselabs.co and the product root."""
+        for name, expected_origin in (("index.html", "https://premiselabs.co/"),
+                                      ("product.html", "https://tortoise.premiselabs.co/")):
+            head = self._head((self.WEB / name).read_text())
+            assert self._og(head, "image").startswith(expected_origin), (
+                f"{name} serves {expected_origin} but points its preview at "
+                f"{self._og(head, 'image')} — the card must come from the host it is on")

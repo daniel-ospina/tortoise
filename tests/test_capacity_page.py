@@ -578,3 +578,260 @@ def test_the_unmeasured_dimensions_are_still_named():
             f"docs/capacity.md no longer names the unmeasured dimension "
             f"'{gap}'"
         )
+
+
+# ── The held cap says so, at the cap (#10175) ───────────────────────────────
+
+#: The clauses that stop a lane meeting a 402 from clearing it. Every entry is
+#: a phrase ONLY the added clause supplies, checked against the page as it stood
+#: before this relay — where each of them occurred **zero** times. That is the
+#: load-bearing part: loose keywords are satisfied by text that was already on the
+#: page (`402`, `429` and `max_points` all predate the relay), so a keyword pin
+#: stayed green with the clause's whole stock-vs-flow bullet deleted. Each entry
+#: names a distinct requirement of the ruling and its 2026-11-02 amendment.
+#:
+#: Written WITHOUT markup and matched through `_plain()`, because the substance is
+#: the words and not the formatting: a re-emphasised sentence is a meaning-preserving
+#: edit, and a pin that reds on one is the false alarm that gets a guard deleted.
+#: Markup-neutral matching also lets the entries bind a full conclusion rather than
+#: stopping at the delimiters — `", so the graph stays"` and `"only after …"` are
+#: exactly the halves a lane acts on.
+_HELD_CAP_CLAUSES = (
+    "overrides: the default engineering reflex",  # the marker + what it overrides
+    "is refused (owner ruling",  # the ruling itself, not merely a marker
+    "not an outage to remediate",  # the 402 is the correct state
+    "the refusal is terminal",  # a stock, not a flow
+    "backoff is not a remedy",  # the retry branch that must not be shared
+    "a max_points override",  # the remedy that is forbidden
+    "the field is not out of an operator's hands",  # an override is reachable
+    "permits removing that one graph",  # the 2026-11-02 amendment authorises it
+    "only after a count-verified export to durable local storage",  # ...exclusively after this
+    "and with a journalled delete",  # ...and only journalled
+    "delete path exists yet, so the graph stays",  # ...and it therefore stays
+    "not planned",  # the storage limb's owner is closed, not open
+    "no backfill of the old graph",  # survives the amendment
+    "no reading of its 402 as a defect",  # survives the amendment
+)
+
+#: The claims the ruling's 2026-11-02 amendment SUPERSEDED, and the two the first
+#: relay got wrong. Asserted ABSENT, because a presence-only pin cannot catch the
+#: superseded sentence being put back beside the corrected one: the phrases the
+#: pin looks for survive verbatim in the amended text, so the page could state
+#: both the permission and the withdrawn prohibition and stay green.
+_HELD_CAP_SUPERSEDED = (
+    # The pre-amendment half: an export exists, so this is false. Bound as the
+    # CLAIM ("is the only copy"), never as the bare substring "only copy": a
+    # future editor's *correct* clarification — "the only sample, not the only
+    # copy" — contains the substring and would red on right text, which is the
+    # false alarm this file's doctrine says gets a guard deleted.
+    "is the only copy",
+    "sole writer",  # false: `sdk.org_update` accepts the field
+    "never on an operator override",  # false, and the opposite of the ruling
+    "deletes the measurement",  # the predicate the withdrawn sentence acted on
+)
+
+#: The ONE permission §4 grants — the sanctioned route — and the scope the ruling
+#: puts on it. The prohibition alone is not enough: a lane holding the 402 reads
+#: the *permission*, so a pin set that carried only the prohibitions stayed green
+#: while the page licensed the exact move the ruling refuses. Each entry is a
+#: claim-shaped phrase, so rewording or deleting that sentence reds here.
+_HELD_CAP_LEVER = (
+    "the sanctioned lever is the plan",  # the lever is named at all
+    "max_points := tier_limits(tier)",  # ...and the code path that moves it
+    "never on the held one",  # ...scoped OFF this org
+    "in place is refused",  # ...the in-place raise above all
+)
+
+#: The lift-condition's storage limb, pinned as a TRUTH VALUE. Written as an
+#: ownership fact ("#10017 is closed, so no open issue owns this limb") it is
+#: neither satisfied nor outstanding, so "is the conjunction false?" becomes
+#: unanswerable from the page and a reader waits for a prerequisite that is
+#: already deployed.
+_HELD_CAP_STORAGE_LIMB = (
+    "is satisfied today",  # the limb's truth value, stated
+    "record.armed=true",  # ...and the measurement it rests on
+)
+
+#: The clause that binds the finding to §4 — its own heading, which no other
+#: section carries. Deliberately NOT one of the phrases `_HELD_CAP_CLAUSES`
+#: checks, so this pin can fail on its own rather than only in the presence
+#: pin's shadow.
+_HELD_CAP_TITLE = "### A held cap is not a defect — one tenant is refused on purpose"
+
+_SEC4_HEADING = "## 4. Graph size (hosted node cap)"
+_SEC4_NEXT_HEADING = "## 5. Retrieval latency"
+
+#: Prose re-wraps; a clause must not depend on where a line broke. Matching is
+#: done on whitespace-collapsed text so reflowing a paragraph cannot red the
+#: guard into a false alarm — a guard that cries wolf gets deleted, which is the
+#: outcome it exists to prevent.
+_WHITESPACE = re.compile(r"\s+")
+
+
+def _collapsed(text: str) -> str:
+    return _WHITESPACE.sub(" ", text)
+
+
+def _plain(text: str) -> str:
+    """Collapsed, lowercased, with markdown emphasis / code spans stripped.
+
+    Both scans match through this, so typography can shift neither: a withdrawn
+    claim restored as ``the only *copy*`` (or ``only **copy**``, or a code span)
+    is still the withdrawn claim, and a still-correct clause that is re-emphasised
+    is still correct. The page uses both ``*old*`` and ``**only**``, so this is a
+    live variant, not a hypothetical one.
+
+    Accepted residual: HTML tags, entities, zero-width characters and `_word_`
+    emphasis are NOT stripped. Underscores are deliberately left alone — in this
+    page they are identifier characters (`max_points`, `graph_size_cap`), so
+    stripping them would corrupt the very phrases the pin looks for. `docs/capacity.md`
+    contains no HTML and no zero-width characters, so a tag or entity is an
+    adversarial construction rather than an edit someone would make here; the
+    docstring names the gap instead of growing a regex for it.
+    """
+    return re.sub(r"[*`~]", "", _collapsed(text)).lower()
+
+
+def _section4(text: str) -> str:
+    """The §4 slice, failing (not erroring) if a heading was renamed.
+
+    `str.index` on a missing heading raises `ValueError`, which pytest reports as
+    an ERROR with no diagnostic that says what happened. The heading is part of
+    what this file binds, so its absence is an assertion, not a crash.
+    """
+    for heading in (_SEC4_HEADING, _SEC4_NEXT_HEADING):
+        assert heading in text, (
+            f"docs/capacity.md no longer carries the heading {heading!r} — the "
+            "held-cap clause is pinned to §4, the section that owns the cap, so "
+            "a renamed heading must be re-pinned here rather than silently "
+            "dropped from the check"
+        )
+    return text[text.index(_SEC4_HEADING) : text.index(_SEC4_NEXT_HEADING)]
+
+
+def test_the_held_capture_cap_states_that_clearing_it_is_refused():
+    """#10175 is an owner ruling in force, and §4 is where a lane MEETS the cap.
+
+    The ruling lives on the issue; the cap it protects is documented here. A
+    lane holding a 402 arrives through this page — it names the cap, its value,
+    and its enforcement — so a page that states the enforcement without stating
+    the refusal hands that lane the remedy (`max_points`) and withholds the
+    prohibition. That asymmetry is the failure: the reflex it triggers is a
+    `max_points` override, a refill for headroom, or a prune.
+
+    Scoped to §4 and matched on clause-only phrases, deliberately: whole-page
+    keyword matching would be satisfied by the enforcement text this page already
+    carried, and would stay green through a rewrite that kept the vocabulary and
+    dropped the ruling.
+    """
+    text = _plain(_section4(_read(CAPACITY)))
+    dropped = [clause for clause in _HELD_CAP_CLAUSES if clause not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer carries the #10175 refusal clause — "
+        f"missing: {dropped}. The page still documents the cap's value and its "
+        "402 enforcement, so a lane reading it is told the cap is real and is "
+        "not told that clearing it is refused (owner ruling 2026-10-27). Relay "
+        "the clause back instead of deleting it: an OVERRIDES line on a closed "
+        "issue is invisible to the lane that meets the refusal."
+    )
+
+
+def test_the_held_cap_clause_is_in_the_section_that_owns_the_cap():
+    """Relocated into §9 or the appendix, it stops being read at the cap.
+
+    Anchored on the clause's own heading rather than on the `OVERRIDES` marker: a
+    lone marker left in §4 would satisfy a marker test while the clause sat at
+    the end of the file.
+    """
+    text = _read(CAPACITY)
+    assert _HELD_CAP_TITLE in text, (
+        "docs/capacity.md no longer carries the held-cap clause heading "
+        f"{_HELD_CAP_TITLE!r} — the clause is pinned to §4 by this heading, so a "
+        "retitled clause must be re-pinned here rather than silently escaping "
+        "the placement check"
+    )
+    assert _HELD_CAP_TITLE in _section4(text), (
+        "the #10175 refusal clause is no longer inside §4 (Graph size, the "
+        "hosted node cap) — it is the section a lane holding a 402 reads, and "
+        "the clause is load-bearing only where the cap is documented"
+    )
+
+
+def test_the_sanctioned_lever_is_scoped_off_the_held_org():
+    """The page names a lever; the ruling scopes it, and both halves must survive.
+
+    `tortoise/billing.py::apply_limits` raises **this** org's cap, and the owner's
+    2026-11-07 answer on `#10175` refuses exactly that: raising this org's tier in
+    place is "the exact move the prohibition names". So the sentence naming the
+    lever is the sentence that can re-open the prohibition, and a pin set holding
+    only the prohibitions cannot see it — the licence is the permission, not a
+    restatement of the refusal.
+
+    Scoped to §4 and matched through `_plain()`, like its siblings: the clause is
+    load-bearing where the cap is documented, and re-emphasis is not a regression.
+    """
+    text = _plain(_section4(_read(CAPACITY)))
+    dropped = [phrase for phrase in _HELD_CAP_LEVER if phrase not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer carries the sanctioned lever with the "
+        f"ruling's scope on it — missing: {dropped}. The lever is "
+        "`tortoise/billing.py::apply_limits`, and it is sanctioned on a new org "
+        "or the switchover's new graph, never on the held one: a tier change on "
+        "this org in place is refused for the same reason an override is "
+        "(owner answer 2026-11-07 on #10175). Naming the lever unscoped hands a "
+        "lane holding the 402 the remedy the ruling refuses — restore the scope "
+        "rather than deleting either half."
+    )
+
+
+def test_the_lift_condition_states_the_storage_limbs_truth_value():
+    """A limb is either satisfied or outstanding, and the page must say which.
+
+    The storage half of the switchover was recorded as an ownership fact —
+    `#10017` closed *not planned*, "this limb is not owned by an open issue" —
+    inside a conjunction the page says the hold stands until it is all true. That
+    leaves the reader unable to evaluate the limb at all. It is in fact deployed:
+    the hosted record is armed and writing, so the limb is satisfied and does not
+    hold the conjunction false. Asserting the truth value keeps a later edit from
+    reverting it to a prerequisite nobody owns.
+    """
+    text = _plain(_section4(_read(CAPACITY)))
+    dropped = [phrase for phrase in _HELD_CAP_STORAGE_LIMB if phrase not in text]
+    assert not dropped, (
+        "docs/capacity.md §4 no longer states the storage limb of the lift "
+        f"condition as satisfied — missing: {dropped}. `#10017` closed *not "
+        "planned* because the local half was a no-op; the hosted record it "
+        "deferred to is armed (`/health` `record.armed=true`, "
+        "`record.ok=true`, `record_writes_applied` non-zero). State that it is "
+        "satisfied, or name the issue that owns it if it stops being true — an "
+        "unowned prerequisite inside the conjunction makes the hold "
+        "unevaluable."
+    )
+
+
+def test_the_held_cap_clause_does_not_restate_a_superseded_claim():
+    """The relay must not carry the claim AND its retraction side by side.
+
+    The owner's 2026-11-02 amendment superseded the no-prune prohibition for one
+    graph, and the first relay's "sole writer" claim was simply false. Presence
+    pins cannot catch either regression: they look for phrases that the corrected
+    text keeps, so a sentence restoring the superseded claim passes them. This is
+    the half that fails when the old text is put back.
+
+    It is a pin on the specific superseded WORDINGS, not a proof that no wording
+    can restate them: a rewrite that keeps the sentence asserting an override is
+    reachable and only rewords a closing clause stays green, which is why the
+    presence pin binds that sentence as well.
+    """
+    section = _plain(_section4(_read(CAPACITY)))
+    restated = [claim for claim in _HELD_CAP_SUPERSEDED if claim in section]
+    assert not restated, (
+        "docs/capacity.md §4 restates a claim this ruling already corrected: "
+        f"{restated}. The graph is the only *sample* of the old extractor's "
+        "output, not the only copy (an export is verified by count and the "
+        "removal is journalled, #10175 amendment 2026-11-02); and an operator "
+        "override is reachable — a stored `max_points` column is honoured with "
+        "precedence over `graph_size_cap` and `sdk.org_update` accepts the "
+        "field — which is why the ruling forbids it rather than claiming it "
+        "cannot be done."
+    )

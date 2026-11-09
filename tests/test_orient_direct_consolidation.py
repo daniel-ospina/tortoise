@@ -94,6 +94,136 @@ def _seed_graph(sdk: TortoiseSDK) -> dict:
 
 # ── overview: section parity with legacy tools ─────────────────────
 
+# ── #10085: a section that returns ROWS must ship STRUCTURED content ──
+#
+# `tortoise_overview` is annotated `-> Any`, so FastMCP derives NO output
+# schema for it, and `Tool.convert_result` (fastmcp/tools/base.py) carries
+# `structured_content` ONLY for a dict return when no schema is declared. A
+# section that returns a LIST therefore reached a client as a bare text block —
+# measured through the ChatGPT connector as `{"text": "[\"org_…\"]"}`, a JSON
+# string the model has to double-parse — while its own alias
+# `tortoise_list_graphs` (annotated `-> list[str]`, i.e. FastMCP's wrap
+# envelope) shipped `{"result": [...]}`. Two tools, one payload, two wire
+# shapes, and the one the SERVED DOCS tell users to call was the broken one.
+#
+# These pins are at the WIRE (through `mcp.call_tool`), because that is where
+# the defect lived: the Python-level tool bodies already returned identical
+# payloads, which is exactly why the existing section-parity tests were green.
+
+
+def _section_payload(result):
+    """The section's payload as a caller receives it.
+
+    A row-returning section ships FastMCP's wrap envelope
+    (``{"result": [...]}``, #10085); a mapping-returning section ships its own
+    dict as the structured content. Unwrap the envelope so the parity
+    assertions below keep comparing PAYLOADS.
+    """
+    structured = getattr(result, "structured_content", result)
+    if isinstance(structured, dict) and set(structured) == {"result"} \
+            and isinstance(getattr(result, "structured_content", None), dict):
+        return structured["result"]
+    return structured
+
+
+@pytest.fixture
+def quiet_telemetry(monkeypatch):
+    """No analytics sink, and NO ambient credential.
+
+    Two independent reasons a wire test must own its environment: the sink would
+    reach the network, and a ``TORTOISE_API_KEY`` exported in the caller's shell
+    CLOSES the #236 stdio gate — every call then answers a plain
+    ``{"error": "Authentication required..."}`` dict with ``is_error=False``,
+    which has structured content and is non-empty, so these assertions would
+    pass while verifying nothing (measured). The repo's convention for a guarded
+    tool is to delete the key, not to inherit it.
+    """
+    import tortoise.mcp_server as mcp_mod
+    monkeypatch.setattr(mcp_mod, "_emit_mcp_tool_call_telemetry",
+                        lambda *a, **k: None)
+    monkeypatch.delenv("TORTOISE_API_KEY", raising=False)
+
+
+@pytest.mark.asyncio
+async def test_overview_graphs_ships_structured_content(sdk, mcp_sdk,
+                                                        quiet_telemetry):
+    """#10085: `overview(section='graphs')` must ship what its alias ships."""
+    from tortoise.mcp_server import mcp
+
+    legacy = await mcp.call_tool("tortoise_list_graphs", {})
+    overview = await mcp.call_tool("tortoise_overview", {"section": "graphs"})
+
+    assert legacy.structured_content is not None, (
+        "guard: the alias is the shape this section must match")
+    assert overview.structured_content == legacy.structured_content, (
+        "overview(section='graphs') did not ship structured content equal to "
+        f"its alias: {overview.structured_content!r}")
+    assert isinstance(_section_payload(overview), list)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("section", ["graphs", "pointkinds", "tags",
+                                     "sources", "namespaces",
+                                     "structure_check"])
+async def test_every_row_section_ships_structured_content(sdk, mcp_sdk,
+                                                         quiet_telemetry,
+                                                         section):
+    """The defect was per-TOOL, not per-section: every ROW-returning section
+    lost its structured payload, so the fix must not special-case `graphs`.
+
+    ⛔ MEASURED, not assumed — the six parametrized below are ALL of them.
+    Every member of `_OVERVIEW_SECTIONS` was called through `mcp.call_tool` and
+    classified by the wire shape it answers with:
+
+      ROW (`{"result": [...]}` envelope — the #10085 defect) — graphs,
+        pointkinds, tags, sources, namespaces, structure_check;
+      MAPPING (its own dict, never wrapped) — taxonomy, structure, topics,
+        health, status, stale, validate_domain, audit, dream_health.
+
+    A mapping section already shipped structured content before the fix (no
+    output schema + a dict return ⇒ dict structured content, #10085), so it
+    proves nothing here and is deliberately excluded — `taxonomy` is pinned as
+    a mapping in the next test instead. `topics` and `stale` are MAPPINGS, not
+    rows (`tortoise_list_topics() -> dict` via `taxonomy.list_topics`,
+    `stale_points()` -> `{"stale": …, "count": …}`): a #11038 review filed
+    them as missing rows and they are recorded `⛔ DO NOT APPLY` with this
+    measurement on the PR — adding them here would assert a LIST over a dict.
+    If a section starts returning rows later, add it HERE and to this list.
+    """
+    from tortoise.mcp_server import mcp
+
+    _seed_graph(sdk)
+    result = await mcp.call_tool("tortoise_overview", {"section": section})
+    assert result.is_error is False, f"{section}: {result!r}"
+    payload = _section_payload(result)
+    if section != "structure_check":
+        # An EMPTY payload would make the envelope assertion below prove
+        # nothing about the rows. `structure_check` is exempt on purpose: a
+        # clean seeded graph HAS no violations, and `{"result": []}` (the
+        # fixed shape) still differs from the pre-fix `None`.
+        assert payload, f"{section} returned an EMPTY payload — nothing to prove"
+    assert isinstance(payload, list), \
+        f"{section} is not a row section: {type(payload).__name__}"
+    assert result.structured_content == {"result": payload}, (
+        f"overview(section={section!r}) did not ship its rows as structured "
+        f"content (#10085): {result.structured_content!r}")
+
+
+@pytest.mark.asyncio
+async def test_a_mapping_section_keeps_its_own_shape(sdk, mcp_sdk,
+                                                     quiet_telemetry):
+    """A dict-returning section worked BEFORE the fix (no schema + dict ⇒
+    structured content): the fix must not wrap it a second time."""
+    from tortoise.mcp_server import mcp
+
+    _seed_graph(sdk)
+    result = await mcp.call_tool("tortoise_overview", {"section": "taxonomy"})
+    assert isinstance(result.structured_content, dict)
+    assert "result" not in result.structured_content, (
+        "a mapping section must NOT be wrapped in the row envelope — its shape "
+        f"is its own contract: {sorted(result.structured_content)!r}")
+
+
 class TestOverviewSections:
     def test_section_taxonomy_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import (  # noqa: I001
@@ -117,15 +247,17 @@ class TestOverviewSections:
             tortoise_check_structure, tortoise_overview,
         )
         _seed_graph(sdk)
-        assert tortoise_overview(section="structure_check") == tortoise_check_structure()
-        assert isinstance(tortoise_overview(section="structure_check"), list)
+        assert _section_payload(tortoise_overview(section="structure_check")) \
+            == tortoise_check_structure()
+        assert isinstance(
+            _section_payload(tortoise_overview(section="structure_check")), list)
 
     def test_section_pointkinds_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import (  # noqa: I001
             tortoise_list_pointkinds, tortoise_overview,
         )
         _seed_graph(sdk)
-        result = tortoise_overview(section="pointkinds")
+        result = _section_payload(tortoise_overview(section="pointkinds"))
         assert result == tortoise_list_pointkinds()
         kinds = {r["kind"] for r in result}
         assert {"statement", "decision"} <= kinds
@@ -133,7 +265,7 @@ class TestOverviewSections:
     def test_section_tags_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_list_tags, tortoise_overview
         _seed_graph(sdk)
-        result = tortoise_overview(section="tags")
+        result = _section_payload(tortoise_overview(section="tags"))
         assert result == tortoise_list_tags()
         names = {r["name"] for r in result}
         assert {"t1", "t2"} <= names
@@ -141,7 +273,7 @@ class TestOverviewSections:
     def test_section_sources_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_list_sources, tortoise_overview
         _seed_graph(sdk)
-        result = tortoise_overview(section="sources")
+        result = _section_payload(tortoise_overview(section="sources"))
         assert result == tortoise_list_sources()
         urls = {r["url"] for r in result}
         assert "https://w3.example.com/doc" in urls
@@ -150,19 +282,21 @@ class TestOverviewSections:
         from tortoise.mcp_server import (  # noqa: I001
             tortoise_list_namespaces, tortoise_overview,
         )
-        result = tortoise_overview(section="namespaces")
+        result = _section_payload(tortoise_overview(section="namespaces"))
         assert result == tortoise_list_namespaces()
         assert isinstance(result, list) and result
 
     def test_section_graphs_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_list_graphs, tortoise_overview
-        assert tortoise_overview(section="graphs") == tortoise_list_graphs()
+        assert _section_payload(tortoise_overview(section="graphs")) \
+            == tortoise_list_graphs()
 
     def test_section_topics_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_list_topics, tortoise_overview
         seed = _seed_graph(sdk)
         pid = seed["p1"]["id"]
-        assert tortoise_overview(section="topics", entity_id=pid) == \
+        assert _section_payload(
+            tortoise_overview(section="topics", entity_id=pid)) == \
             tortoise_list_topics(pid)
 
     def test_section_health_matches_legacy(self, sdk, mcp_sdk):
@@ -183,8 +317,10 @@ class TestOverviewSections:
     def test_section_stale_matches_legacy(self, sdk, mcp_sdk):
         from tortoise.mcp_server import tortoise_overview, tortoise_stale
         _seed_graph(sdk)  # fresh points are not stale (createdAt = now)
-        assert tortoise_overview(section="stale") == tortoise_stale()
-        assert tortoise_overview(section="stale", days=1, limit=5) == \
+        assert _section_payload(tortoise_overview(section="stale")) \
+            == tortoise_stale()
+        assert _section_payload(
+            tortoise_overview(section="stale", days=1, limit=5)) == \
             tortoise_stale(days=1, limit=5)
 
     def test_section_is_case_insensitive_and_stripped(self, sdk, mcp_sdk):
@@ -255,11 +391,12 @@ class TestOverviewDefaultSummary:
         # asserted instead, and the rows stay reachable via section=.
         for sec in ("taxonomy", "structure", "namespaces", "graphs",
                     "health", "status", "stale"):
-            assert _stable(combined[sec]) == _stable(tortoise_overview(section=sec)), sec
+            assert _stable(combined[sec]) == \
+                _stable(_section_payload(tortoise_overview(section=sec))), sec
         # `sources` — see TestOverviewSourcesSummary.
         assert combined["sources"] == {"total": 1, "with_points": 1,
                                        "by_kind": {"document": 1}}
-        assert len(tortoise_overview(section="sources")) == 1
+        assert len(_section_payload(tortoise_overview(section="sources"))) == 1
         # `tags`, `pointkinds`, `structure_check` — see
         # TestOverviewBoundedSections.
         assert combined["tags"] == {"total": 2,
@@ -267,9 +404,10 @@ class TestOverviewDefaultSummary:
         # `pointkinds` folds in POINTS (magnitude), so `total` is the summed
         # Point count, not the number of kinds in the section row list.
         assert combined["pointkinds"]["total"] == sum(
-            r["count"] for r in tortoise_overview(section="pointkinds"))
+            r["count"] for r in
+            _section_payload(tortoise_overview(section="pointkinds")))
         assert combined["structure_check"]["total"] == \
-            len(tortoise_overview(section="structure_check"))
+            len(_section_payload(tortoise_overview(section="structure_check")))
 
 
 class TestOverviewSourcesSummary:
@@ -317,7 +455,8 @@ class TestOverviewSourcesSummary:
             assert default["sources"]["total"] == n
             assert default["sources"]["with_points"] == 5
             # the explicit opt-in is UNCHANGED — all rows, still unbounded
-            assert len(tortoise_overview(section="sources")) == n
+            assert len(_section_payload(
+                tortoise_overview(section="sources"))) == n
         assert sizes[10] < 200, sizes
         assert sizes[1000] - sizes[10] < 64, sizes
 
@@ -406,7 +545,8 @@ class TestOverviewBoundedSections:
                 assert "other" not in summary
             assert sum(summary[out_field].values()) + summary.get("other", 0) == n
             # the explicit opt-in is UNCHANGED — all rows, still unbounded
-            assert len(tortoise_overview(section=section)) == n
+            assert len(_section_payload(
+                tortoise_overview(section=section))) == n
         # 50,000 rows is still ONE top-N fold, not 50,000 rows: the whole
         # summary is a couple hundred bytes, and past the top-N only the
         # digits of total/with_points/other move (4 bytes here).
@@ -534,7 +674,8 @@ class TestOverviewBoundedSections:
         assert summary["by_rule"] == {"orphaned_draft": 400,
                                       "orphan_use_case": 1}
         assert sum(summary["by_rule"].values()) == 401
-        assert len(tortoise_overview(section="structure_check")) == 401
+        assert len(_section_payload(
+            tortoise_overview(section="structure_check"))) == 401
         assert len(json.dumps(summary)) < 200
 
     @pytest.mark.parametrize("section,tool", [
@@ -717,7 +858,8 @@ class TestLegacyAliases:
         # overview sections
         assert mcp_mod.tortoise_taxonomy() == mcp_mod.tortoise_overview(section="taxonomy")
         assert mcp_mod.tortoise_status() == mcp_mod.tortoise_overview(section="status")
-        assert mcp_mod.tortoise_list_tags() == mcp_mod.tortoise_overview(section="tags")
+        assert mcp_mod.tortoise_list_tags() == _section_payload(
+            mcp_mod.tortoise_overview(section="tags"))
         # get types
         pid = sdk.create_point("statement", "alias-check")["id"]
         assert mcp_mod.tortoise_get_point(pid) == mcp_mod.tortoise_get(pid, type="point")
@@ -730,13 +872,15 @@ class TestRegistry:
     def test_new_tools_registered_with_readonly_policy(self):
         from tortoise.tool_registry import TOOL_REGISTRY
         names = {t.name for t in TOOL_REGISTRY}
-        assert "tortoise_overview" in names
+        # #4282: `tortoise_overview` retired into the approved container, so the live W3
+        # orientation tool is `tortoise_graph_overview`.
+        assert "tortoise_graph_overview" in names
         # `tortoise_get` retires into `tortoise_get_entity` (owner decision,
         # docs/product/canonical-mcp-tools.md @ approval_pr 4120), so the live
         # W3 fetch tool is `get_entity`.
         assert "tortoise_get_entity" in names
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get_entity"):
+            if t.name in ("tortoise_graph_overview", "tortoise_get_entity"):
                 assert t.http_policy is True
                 assert t.annotations.readOnlyHint is True
 
@@ -746,17 +890,18 @@ class TestRegistry:
         import tortoise.mcp_server as mcp_mod
         from tortoise.tool_registry import TOOL_REGISTRY
         for t in TOOL_REGISTRY:
-            if t.name in ("tortoise_overview", "tortoise_get_entity"):
+            if t.name in ("tortoise_graph_overview", "tortoise_get_entity"):
                 assert t.name in mcp_mod.__dict__, t.name
                 assert callable(mcp_mod.__dict__[t.name])
 
     def test_group_assignments(self):
         from tortoise.tool_registry import GROUP_BY_NAME
-        assert GROUP_BY_NAME["tortoise_overview"] == "reasoning"
+        assert GROUP_BY_NAME["tortoise_graph_overview"] == "reasoning"
+        assert GROUP_BY_NAME["tortoise_overview"] == "reasoning"  # retired, group retained
         assert GROUP_BY_NAME["tortoise_get_entity"] == "graph"
 
     def test_http_allowed_derived(self):
         from tortoise.tool_registry import get_http_allowed
         allowed = get_http_allowed()
-        assert "tortoise_overview" in allowed
+        assert "tortoise_graph_overview" in allowed
         assert "tortoise_get_entity" in allowed

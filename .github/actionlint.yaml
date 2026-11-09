@@ -29,7 +29,7 @@
 # name; it does not make a job schedule. A label no runner carries leaves the
 # job queued (GitHub holds it to the 24h limit) with NO red, which is exactly
 # why pinning a REQUIRED leg to the pool is refused at
-# `.github/workflows/python-ci.yml:1891` and `docs/ops/ci-runner-x64.md:62`.
+# `.github/workflows/python-ci.yml:2151` and `docs/ops/ci-runner-x64.md:62`.
 # Re-measure the live label set before pinning anything to a label named here:
 #
 #   gh api repos/<owner>/<repo>/actions/runners

@@ -46,6 +46,7 @@ from tortoise.coverage_loop import facet_window_bounds
 from tortoise.temporal_leg import (
     DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
     DEFAULT_TEMPORAL_LEG_LIMIT,
+    DEFAULT_TEMPORAL_LEG_NON_EVICTION,
     DEFAULT_TEMPORAL_LEG_WEIGHT,
     effective_promotion_budget,
     temporal_leg_fusion_order,
@@ -69,7 +70,8 @@ def replay(questions: list[dict], *, window: int,
            limit: int = DEFAULT_TEMPORAL_LEG_LIMIT,
            weight: float = DEFAULT_TEMPORAL_LEG_WEIGHT,
            bucket_cap: int = DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
-           placement: str = "tail") -> dict:
+           placement: str = "tail",
+           non_eviction: bool = DEFAULT_TEMPORAL_LEG_NON_EVICTION) -> dict:
     """Run the base ranking and the leg-fused ranking over each question."""
     base_recall = leg_recall = 0.0
     base_all_turns = leg_all_turns = 0
@@ -136,11 +138,20 @@ def replay(questions: list[dict], *, window: int,
             for i in base_order
         ]
         # the SHIPPED wiring (no re-implementation): window-tail placement
-        # + the fixed promotion budget.
+        # + the fixed promotion budget + (#10538) the non-eviction guard that
+        # the shipped call now resolves by default. ``non_eviction`` is a knob
+        # of THIS instrument too, and the resolved value is stamped into the
+        # returned config block below: without the stamp a guarded row and a
+        # pre-ruling row are byte-identical receipts whose numbers differ, which
+        # is the unattributable-comparison class this repo keeps paying for.
+        # ⚠️ The pinned 55-Q temporal subset is ``ordering``-only, so the window
+        # branch cannot fire there and the published table is unaffected by the
+        # guard — that is a property of the subset, not of this default.
         order_ids, picks = temporal_leg_fusion_order(
             candidates, anchors=constraint.anchors, window=window,
             limit=limit, bucket_cap=bucket_cap, weight=weight,
-            placement=placement, date_window=date_window)
+            placement=placement, date_window=date_window,
+            non_eviction=non_eviction)
         leg_order = [int(pid) for pid in order_ids]
         if picks:
             fired += 1
@@ -168,6 +179,7 @@ def replay(questions: list[dict], *, window: int,
         "weight": weight,
         "bucket_cap": bucket_cap,
         "placement": placement,
+        "non_eviction": non_eviction,
         "evidence_turn_recall_base": round(base_recall / n, 4) if n else 0.0,
         "evidence_turn_recall_leg": round(leg_recall / n, 4) if n else 0.0,
         "all_gold_turns_base": base_all_turns,
@@ -198,6 +210,13 @@ def main(argv: list[str] | None = None) -> int:
                              "the rank-0 counterfactual (diagnostic; "
                              "equal-or-better here, so placement is settled "
                              "structurally, not by this proxy)")
+    parser.add_argument("--non-eviction", dest="non_eviction",
+                        choices=("on", "off"), default="on",
+                        help="#10538 non-eviction guard (shipped default ON): "
+                             "'off' reproduces the pre-ruling tail splice. The "
+                             "resolved value is echoed in the --json config "
+                             "block, so a guarded row and a pre-ruling row are "
+                             "never two indistinguishable receipts")
     parser.add_argument("--data", default=None,
                         help="local LongMemEval-S JSON (skips the cache)")
     parser.add_argument("--json", action="store_true", help="print JSON")
@@ -205,7 +224,8 @@ def main(argv: list[str] | None = None) -> int:
     questions = _subset_questions(args.data)
     out = replay(questions, window=args.window, limit=args.limit,
                  weight=args.weight, bucket_cap=args.bucket_cap,
-                 placement=args.placement)
+                 placement=args.placement,
+                 non_eviction=(args.non_eviction == "on"))
     if args.json:
         print(json.dumps(out, indent=2, sort_keys=True))
     else:

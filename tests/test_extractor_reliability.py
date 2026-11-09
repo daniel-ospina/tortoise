@@ -571,11 +571,11 @@ def test_llm_truncated_warning_only_not_error(monkeypatch):
     out = v2.extract_session_v2(_TruncatedClean(), _conv())
     assert out["errors"] == []
     assert out["error_census"] == {}
-    assert out["stats"]["llm"]["truncated"] == 2  # S2 + S4 (per-STAGE flag)
+    assert out["stats"]["llm"]["truncated"] == 3  # S2 x2 (retry, #11002) + S4 (per-STAGE flag)
     # both truncations were RECOVERED by the one-shot escalation (the
     # warning-only readout survives under R2 — recovery is not an error)
-    assert out["stats"]["recovery"]["escalated"] == 2
-    assert out["stats"]["recovery"]["escalated_recovered"] == 2
+    assert out["stats"]["recovery"]["escalated"] == 3  # #11002: S2 retried once
+    assert out["stats"]["recovery"]["escalated_recovered"] == 3  # #11002: S2 retried once
 
 
 def test_recovered_retry_records_truncation_flag(monkeypatch):
@@ -619,7 +619,7 @@ def test_recovered_retry_records_truncation_flag(monkeypatch):
     # (llm calls/retries are documented not-load-bearing — the parse-retry
     # lands in the nested stats["llm"]["retries"] counter, distinct from the
     # session roll-up; D2 #1746).
-    assert out["stats"]["llm"]["truncated"] == 2
+    assert out["stats"]["llm"]["truncated"] == 3  # #11002: S2 retried once
 
 
 def test_ingest_v2_llm_and_recovery_rollup(tmp_path, monkeypatch):
@@ -683,7 +683,7 @@ def test_ingest_v2_llm_and_recovery_rollup(tmp_path, monkeypatch):
         # session 0: S1(1) + S2(1) + S4(1) = 3 extractor calls rolled from
         # out["stats"]["llm"]; session 1: the session-level exception path
         # contributes exactly 1 call / 0 truncated (D7).
-        assert stats["llm"] == {"calls": 4, "retries": 0, "truncated": 0}
+        assert stats["llm"] == {"calls": 6, "retries": 0, "truncated": 0}  # #11002: +S1+S2 (retry)
         assert stats["recovery"] == {}
         assert len(stats["errors"]) == 1
         assert stats["error_census"] == {"transient_unknown": 1}
@@ -710,7 +710,7 @@ def test_extract_stats_llm_rollup(monkeypatch):
 
     out = v2.extract_session_v2(_model(model_complete), _conv())
     llm = out["stats"]["llm"]
-    assert llm["calls"] == 4   # S1(2) + S2(1) + S4(1)
+    assert llm["calls"] == 6   # S1 x3 (429 + its retry, + the retry arm) + S2 x2 (#11002) + S4 x1
     assert llm["retries"] == 1  # only S1's recovered retry
     assert llm["truncated"] == 0
     assert out["error_census"] == {}  # fully recovered → no census entries
@@ -752,7 +752,7 @@ def test_extract_census_empty_on_clean_run(monkeypatch):
     assert out["error_census"] == {}
     assert out["stats"]["llm"]["retries"] == 0
     assert out["stats"]["llm"]["truncated"] == 0
-    assert out["stats"]["llm"]["calls"] == 3  # S1 + S2 + S4
+    assert out["stats"]["llm"]["calls"] == 5  # S1 x2 + S2 x2 (#11002 coverage retry) + S4
 
 
 # ── #1787 Task 1: live-API probes — max_tokens=16000 acceptance ─────────────

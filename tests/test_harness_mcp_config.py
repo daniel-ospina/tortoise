@@ -34,7 +34,10 @@ from tortoise.__main__ import (  # noqa: I001
     _onboard_ready_lines,
     _print_harness_instructions,
 )
-from tortoise.capture_install import PI_EXTENSION_NAME
+from tortoise.capture_install import (
+    PI_EXTENSION_NAME,
+    PI_VOLUNTEER_EXTENSION_NAME,
+)
 from tortoise.auth import API_KEY_PREFIXES
 from tortoise.oauth import ACCESS_TOKEN_PREFIX, REFRESH_TOKEN_PREFIX
 
@@ -578,8 +581,8 @@ class TestPrintHarnessInstructions:
     #
     # These surfaces used to advertise a `tortoise-context` extension that has
     # never existed in this repo or in agent-infra, plus a per-turn context
-    # injection Pi has no seam for (#2119 is the injection seam and is still
-    # open). The name was hardcoded prose with nothing coupling it to the
+    # injection Pi has no seam for (that seam is #2119 — since landed). The
+    # name was hardcoded prose with nothing coupling it to the
     # shipped artifact, so nothing failed when the two drifted. The name is now
     # DERIVED from the install contract; these tests are the CI half of the
     # issue's fix — the drift fails the build instead of the user.
@@ -594,31 +597,53 @@ class TestPrintHarnessInstructions:
         assert "tortoise-context" not in out, (
             "`tortoise-context` has never existed — the Pi seam is the capture "
             "extension declared in hook_install.ARTIFACT_CONTRACTS")
-        # The gap is Tortoise's wiring of Pi's injection seam, NOT a ceiling in
+        # The gap was Tortoise's wiring of Pi's injection seam, NOT a ceiling in
         # Pi: Pi's extension API exposes `before_agent_start`, which injects a
         # message (our own `skill-enforcer`/`loop-enforcer`/`cmux-session`
-        # extensions use it). So do NOT assert "auto-inject" is absent in the
-        # abstract — that would red the build for copy that is TRUE once #2119
-        # lands. Pin the honest disclosure about the SHIPPED extension instead.
-        assert "does not inject context per turn" in out, (
-            "the Pi block must disclose that the SHIPPED extension is capture "
-            "only (Tortoise's per-turn injection is #2119, still open)")
-        assert "#2119" in out, (
-            "the disclosure must point at the issue that wires the seam")
+        # extensions use it). #2119 landed that wiring, so the block now names
+        # BOTH shipped artifacts and the capture-only disclaimer is GONE — it
+        # would now be the same false claim in the other direction, and the one
+        # a user would act on by reaching for the MCP tools instead. Both names
+        # are asserted here because the claim is only true while the installer
+        # writes those two files (`install_capture("pi")`, pinned by
+        # `tests/test_pi_volunteer_seam.py`).
+        assert "does not inject context per turn" not in out, (
+            "the capture-only disclaimer is FALSE since #2119 — an `install "
+            "pi` writes the per-turn read seam")
+        assert PI_VOLUNTEER_EXTENSION_NAME in out, (
+            "the Pi block must name the per-turn READ extension the installer "
+            "writes")
         assert (REPO_ROOT / "tortoise" / "pi-hooks" / PI_EXTENSION_NAME).is_file(), (
             "the advertised extension must be a real file the installer copies")
 
-    def test_every_advertised_extension_resolves_to_a_real_artifact(self):
+    def test_every_advertised_extension_resolves_to_a_real_artifact(self, tmp_path, monkeypatch):
         """#3502: every extension an install surface names must resolve to a
         real extension artifact.
 
         Covers prose claims (`<name> extension`) and install-path claims
         (`extensions/<name>`). MUTATION: hardcode any other extension name
         into any of these surfaces → RED.
+
+        ⛔ HERMETIC HOME (#11584 review, P1). The `--uninstall` surface below
+        runs the REAL verb, and since #2119 that verb DELETES the read seam
+        (`_uninstall_pi_volunteer` → `target.unlink()`) under
+        `Path.home()/.pi/agent/extensions/`. Before #2119 the pi arm printed a
+        sentence and touched nothing, so the row was harmless; now it is a live
+        delete of the machine running the suite, with no backup, and it accepts
+        stale-generation and locally-edited copies as "provably ours". The
+        symptom is the one #4314 exists to prevent: the seam silently stops
+        existing and per-turn memory goes quiet with no error. Pin the home the
+        verb resolves (and `dry_run`, belt-and-braces — nothing here asserts on
+        a deletion) so a test invocation can never opt a runner's machine OUT
+        of the W4 posture, the same rule `tests/test_platform_seams.py:763`
+        states for the sibling row.
         """
         from types import SimpleNamespace
 
         from tortoise.__main__ import _install_read_hook_impl
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
 
         real = self._real_extension_names()
         surfaces = {
@@ -631,7 +656,8 @@ class TestPrintHarnessInstructions:
         # #3502 P2/P3: the `--uninstall` message names the install path too —
         # it was the lone retyped literal in the class this guard closes.
         surfaces["`tortoise install pi --uninstall` message"] = self._capture_call(
-            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+            _cmd_install_hooks,
+            SimpleNamespace(uninstall=True, harness="pi", dry_run=True))
 
         advertised: set[str] = set()
         for label, text in surfaces.items():
@@ -648,7 +674,7 @@ class TestPrintHarnessInstructions:
             "the Pi surfaces must name the extension the installer writes; a "
             "guard that also passes when the claim is deleted pins nothing")
 
-    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch):
+    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch, tmp_path):
         """#3502: `tortoise install pi --uninstall` must name the file the
         installer writes, DERIVED — never a retyped literal.
 
@@ -662,10 +688,16 @@ class TestPrintHarnessInstructions:
         """
         from types import SimpleNamespace
 
+        # HERMETIC HOME (#11584 review, P1) — see the row above: the verb now
+        # DELETES the read seam under `Path.home()`, so it must never see the
+        # runner's own extensions directory.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
         monkeypatch.setattr(
             "tortoise.capture_install.PI_EXTENSION_NAME", "tortoise-renamed.ts")
         out = self._capture_call(
-            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+            _cmd_install_hooks,
+            SimpleNamespace(uninstall=True, harness="pi", dry_run=True))
         assert "tortoise-renamed.ts" in out, (
             "the --uninstall message retyped the extension name instead of "
             "deriving it from the install contract:\n" + out)
@@ -683,6 +715,13 @@ class TestPrintHarnessInstructions:
         for contract in ARTIFACT_CONTRACTS.values():
             names.add(contract.install_name)
             names.add(Path(contract.install_name).stem)
+            # #2119: a seam may ship a SECOND artifact beside its graded one
+            # (Pi's per-turn read extension). Both are declared by the same
+            # contract, so both may legitimately be advertised — and neither
+            # may be asserted as a literal anywhere.
+            if contract.volunteer_source is not None:
+                names.add(contract.volunteer_source.name)
+                names.add(Path(contract.volunteer_source.name).stem)
         return names
 
 
@@ -1136,15 +1175,18 @@ class TestDocsPageAndSkillConfig:
         # validation error at the one moment it is trying to orient itself.
         assert 'section="graphs"' in row, (
             "the row must name the advertised overview(section=\"graphs\") form")
-        assert "tortoise_overview" in active, (
+        # #4282: the advertised orientation tool is the `graph_overview` container;
+        # `tortoise_overview` retired into it, so asserting the old name would assert
+        # the surface shape the owner-approved target removes.
+        assert "tortoise_graph_overview" in active, (
             "the row names the advertised overview tool, so it must stay active")
-        assert active["tortoise_overview"].risk == "read", (
+        assert active["tortoise_graph_overview"].risk == "read", (
             "overview must stay read-risk — it is the orientation call")
         # …and callable by a CONNECTOR at all: the row asks the user to have the
         # agent call these, so an http-exposure flip (the #3883 class this suite
         # already guards for other tools) must fail here rather than silently
         # hiding the tool from a tool-grant client.
-        for name in ("tortoise_list_graphs", "tortoise_overview"):
+        for name in ("tortoise_list_graphs", "tortoise_graph_overview"):
             assert active[name].http_policy is True, (
                 f"step 8 asks the agent to call {name}; it must stay "
                 "http-exposed or a ChatGPT connector cannot make the call "

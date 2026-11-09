@@ -21,8 +21,9 @@ Usage notes (#2280):
 
 Grading (issue #2071 owner decision 2026-08-31 — full semantic): EVERY
 question is graded by the benchmark-standard semantic judge
-(``build_judge()`` → the official gpt-4o anscheck judge — the same judge
-the graded eval lane uses for every question). The old word-overlap bar
+(``build_judge(_judge_spec())`` → the official gpt-4o anscheck judge this
+tool names explicitly; ``_judge_spec`` NEVER reads the graded-eval lane's
+``DEFAULT_JUDGE_MODEL``, which #8486 re-pinned to DeepSeek). The old word-overlap bar
 (``max(2, len(gold_words)//2)`` on UNIQUE words) is REMOVED from this
 path — it was structurally unreachable for the 3 SSP long-gold questions
 (d6233ab6 79w / 1d4e3b97 68w / b0479f84 63w; a correct paraphrase never
@@ -37,7 +38,13 @@ provider key is absent (see ``_require_judge_key``).
 Requires live provider keys: DEEPSEEK_API_KEY / OPENROUTER_API_KEY /
 VENICE_API_KEY for the reader AND the judge provider key
 (``TORTOISE_LME_JUDGE_MODEL`` — default ``openai:gpt-4o-2024-08-06`` →
-``OPENAI_API_KEY``) for grading. Seeding (``_seed_memory``, #3910)
+``OPENAI_API_KEY``) for grading. That default is the OFFICIAL judge by the
+#2071 decision record, and it is named explicitly
+(``judge.OFFICIAL_JUDGE_MODEL``) rather than read off
+``judge.DEFAULT_JUDGE_MODEL``: the graded-eval lane's default judge was
+re-pinned to DeepSeek by the #8486 owner ruling (2026-10-27), and this
+spot-check's recorded purpose is to grade with the OFFICIAL judge, so it must
+not inherit that re-pin by accident. Seeding (``_seed_memory``, #3910)
 reproduces the memory the question was asked about in the CAPTURE shape a
 captured session's turn store actually has: one episodic turn Point per
 windowed turn of every session that passes the shared blank gate (a session
@@ -100,7 +107,7 @@ if _REPO_ROOT not in sys.path:
     sys.path.insert(0, _REPO_ROOT)
 
 from tools.longmem_eval.judge import (  # noqa: E402
-    DEFAULT_JUDGE_MODEL,
+    OFFICIAL_JUDGE_MODEL,
     MockJudge,
     build_judge,
 )
@@ -788,11 +795,15 @@ _BODY_FENCE = "  | "
 #: covers both spacings (and still never matches ``[validity …]``).
 _VALID_WINDOW_OPEN = re.compile(r"\[valid\b")
 _FLAG_SUPERSEDED_BY = re.compile(r"\[SUPERSEDED BY:")
-#: The CLOSED-window flag is shape-exhaustive without a change: the arrow only
-#: appears in ``[valid <from> → <to>]`` (orderable start ⇒ a space) or
-#: ``[valid → <to>]`` (a PRESENT but UNORDERABLE start: #9730 omits the start
-#: clause and the literal space before the arrow is retained — an ABSENT start
-#: renders no marker at all, so this shape never comes from a missing bound).
+#: The CLOSED-window flag is shape-exhaustive: the arrow only appears in
+#: ``[valid <from> → <to>]`` (orderable start) or ``[valid → <to>]`` (no start
+#: clause: a PRESENT but UNORDERABLE start, #9730, or — since #8067 — a start
+#: that was never stored, i.e. an END-ONLY window such as the one
+#: ``invalidate_point`` writes). BOTH keep the literal space before the arrow,
+#: which is the invariant this pattern actually depends on — ⚠️ the earlier
+#: note here claimed an ABSENT start "renders no marker at all, so this shape
+#: never comes from a missing bound", and #8067 refuted it while leaving the
+#: regex correct.
 _FLAG_CLOSED_WINDOW = re.compile(r"\[valid [^\]]*→")
 
 
@@ -1087,7 +1098,7 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
     if cases is None:
         cases = load_supersession_cases(fixture)
     if judge is None:
-        judge = build_judge()
+        judge = build_judge(_judge_spec())
     out = out or sys.stdout
     sdk_factory = sdk_factory or _default_sdk_factory
 
@@ -1150,6 +1161,20 @@ def run_distilled_leg(*, cases: list[dict] | None = None, judge=None,
     return report
 
 
+def _judge_spec() -> str:
+    """The judge spec the #2071 spot-check grades with.
+
+    Env override, else the **OFFICIAL** judge — named explicitly and NEVER read
+    off ``judge.DEFAULT_JUDGE_MODEL``: that default was re-pinned to DeepSeek by
+    the #8486 owner ruling (2026-10-27) for the graded-eval run, while this
+    tool's recorded purpose (#2071, 2026-08-31) is to grade with the official
+    anscheck judge. ONE resolver, so the key pre-flight and `build_judge` can
+    never disagree about which model is about to grade.
+    """
+    return (os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip()
+            or OFFICIAL_JUDGE_MODEL)
+
+
 def _require_judge_key() -> str:
     """Fail-fast pre-flight (issue #2071 step 6): the semantic judge grades
     EVERY question, so a judge provider key is required BEFORE any question
@@ -1160,7 +1185,7 @@ def _require_judge_key() -> str:
     would re-False the 3 long-gold questions under an unreachable bar and
     produce a misleading aggregate (the pre-#2071 defect).
     """
-    raw_spec = os.environ.get("TORTOISE_LME_JUDGE_MODEL", "").strip() or DEFAULT_JUDGE_MODEL
+    raw_spec = _judge_spec()
     provider, _model = _parse_model_spec(raw_spec)
     if provider is not None:
         if provider not in _PROVIDERS:
@@ -1238,8 +1263,8 @@ def _grade(question: dict, result: dict, judge=None) -> tuple[bool, str, str]:
     """Semantic grading (issue #2071 owner decision 2026-08-31).
 
     EVERY question is graded by the benchmark-standard semantic judge
-    (``build_judge()`` → official gpt-4o anscheck — the same judge the
-    graded eval lane uses). The word-overlap bar is REMOVED from this
+    (``build_judge(_judge_spec())`` → the official gpt-4o anscheck; the spec
+    is named explicitly, never the graded-eval lane's ``DEFAULT_JUDGE_MODEL``). The word-overlap bar is REMOVED from this
     path (demoted to the key-free CI MockJudge substitute only).
 
     Returns ``(ok, note, kind)`` where ``kind`` is the scoring method:
@@ -1249,7 +1274,7 @@ def _grade(question: dict, result: dict, judge=None) -> tuple[bool, str, str]:
     abstention template).
     """
     if judge is None:
-        judge = build_judge()
+        judge = build_judge(_judge_spec())
     qid = question.get("question_id") or ""
     if "_abs" in qid:
         marker_ok = result["abstained"] and any(
@@ -1300,7 +1325,7 @@ def _distilled_judge():
             == "mock"):
         return build_judge(mock=True)
     _require_judge_key()
-    return build_judge()
+    return build_judge(_judge_spec())
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1353,7 +1378,17 @@ def main(argv: list[str] | None = None) -> int:
     except (RuntimeError, ValueError) as exc:
         print(f"ask_spotcheck: {exc}", file=sys.stderr)
         return 2
-    judge = build_judge()
+    # ⛔ THE PRE-FLIGHT AND THE JUDGE MUST RESOLVE FROM THE SAME SPEC. This
+    # call used to be `build_judge()` (no spec), which resolves
+    # `DEFAULT_JUDGE_MODEL` — the graded-eval lane's default, re-pinned to
+    # DeepSeek by the #8486 owner ruling of 2026-10-27. So the pre-flight
+    # checked the OFFICIAL judge's key while the judge that actually graded was
+    # a different model: on a box holding only `OPENAI_API_KEY` the missing-key
+    # check passed and the run died on an uncaught ValueError, and on a
+    # both-keys box it graded with a NON-official judge while printing the
+    # official key env. Both are the #2071 decision inverted, silently — which
+    # is exactly the failure mode `_require_judge_key` exists to prevent.
+    judge = build_judge(_judge_spec())
 
     results = []
     for i, q in enumerate(spotcheck):

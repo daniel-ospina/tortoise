@@ -97,10 +97,13 @@ def test_list_covers_all_three_sources_with_their_defaults(ctx):
     assert "onboarding" in out
     # The two GitHub sources must expose the SAME key set: a caller iterating
     # `sources` must not have to know which one carries the index state. Both
-    # tools are off the TARGET list (`removed` there means "not a target", never
-    # "not served") and both are STILL SERVED today: `tortoise_onboarding_state`
-    # returns the raw projection, a second reader of this state, while
-    # `tortoise_onboarding_github_status` is served but reads no index state.
+    # onboarding tools were off the TARGET list and, until #4282 Phase 3.2,
+    # still SERVED — `tortoise_onboarding_state` returned the raw projection as
+    # a second reader of this state, `tortoise_onboarding_github_status` was
+    # served but read no index state. Phase 3.2 removed both from the surface,
+    # so `tortoise_manage_sources(action="list")` is now the only SERVED reader
+    # of this projection. (`tortoise_onboarding_state`'s handler body is retained
+    # and still reads it; nothing dispatches to it.)
     issues = set(out["sources"]["github_issues"])
     documents = set(out["sources"]["github_documents"])
     assert issues == documents, (issues ^ documents)
@@ -156,7 +159,10 @@ def test_enabling_a_github_source_without_a_connection_is_refused(ctx):
     out = m.tortoise_manage_sources("enable", "github_documents")
 
     assert "error" in out
-    assert "tortoise_onboarding_github_connect" in out["error"]
+    # #4282 Phase 3.2: the recovery route, not a tool name — the OAuth
+    # handshake left the MCP surface (it never accepted credentials through
+    # the model anyway), so the refusal must name the route that survives.
+    assert "POST /v1/onboarding/github/connect" in out["error"]
     assert ctx["writes"] == [], "a refusal must not write state"
     assert ("org_test", "github_documents", "enable",
             "refused_not_connected", "source") in ctx["logs"], (

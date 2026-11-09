@@ -1635,3 +1635,89 @@ control-plane read, and a **fault** in that read is a `QuotaCheckError` → HTTP
 allowance configured** (`tortoise/allowance_gate.py`'s "INERT IS ABOUT WHAT IT REFUSES, NOT ABOUT
 WHAT IT READS"). The same line is recorded where a lane actually reads it — on `#4051` (comment
 `6613755225`) and in `docs/architecture/CONSUMPTION-MODEL.md` §6 — and the reopen is argued there.
+
+## `#10557` — §10 published a WITHDRAWN run as settled, and the base-registered re-measurement is `0.988`
+
+**Where this came from.** The review gate on `#10544` held `#10557` (P2): the `#10463` ruling moved
+the S3 hypothesis's measured log out of the checked directory, so the only in-repo PROVISIONAL note
+sat in `docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md` — a file nothing linked to — while the
+three surfaces that *publish* the result (§10, §4.2's note, and §14's "Not established" bullet) went
+on reading as settled. This changelog entry is the correction's record; the qualifiers themselves are
+in the design document, because the design document is what a reader opens.
+
+**What the surfaces did not yet know.** `#10554` (`45120abbd`) landed *after* `#10557` was filed: the
+ruling's re-measurement, run with the registration already published on the base branch, reports
+`253 → 250` — ratio **`0.988`**, not the withdrawn log's `0.870` — with both guards **met** (real
+facts 41 → 44, operator edges 141 → 166) rather than fallen, and a **`10.9 %`** drift on the
+**untreated** arm between the two runs (284 → 253). So `#10557`'s prescribed remedy (point at
+`WITHDRAWN.md` and stop) had gone stale in one direction: the ordering provenance is now whole, while
+the *magnitude* the doc published is the one the instrument cannot support. The correction therefore
+does both — the withdrawal pointer **and** the run-2 figure with its drift caveat.
+
+**Why the number did not simply replace the old one.** Both runs stay in §10. Run 1's table is what
+the withdrawn log says, its contents are untouched, and `tests/test_s3_prior_ablation.py:1002` pins
+its figures to the doc; deleting them would make the document quietly disagree with an artefact it
+still ships. What changes is which run is *quoted*: `0.988`, with the pair (`253 / 250`) and the drift
+beside it, because `0.870` reads as "priors cut creates by about a seventh" and this instrument cannot
+resolve anything below roughly 11 % between runs.
+
+**The bundle's own entry page was the fourth surface, and it had the same defect.** §10's `Bundle:`
+link lands a reader on `docs/evidence/5087-hypothesis/README.md`, which published
+`VERDICT: HYPOTHESIS-FALSIFIED (ratio 0.870)` as the settled form and mentioned the re-measurement
+nowhere — the pre-fix shape `#10557` names, one file over from the three it lists. It keeps its record of run 1, because the run
+is what it documents and its contents are not retracted; it now states that `0.870` is not the figure
+to quote, carries run 2's `253 → 250` / `0.988` with the `10.9 %` untreated-arm drift, and routes the
+reader to `REMEASUREMENT-a83c23a8.md`.
+
+**Behavioral pin.** `tests/test_s3_prior_ablation.py` gains
+`test_the_architecture_doc_quotes_the_run_whose_ordering_provenance_is_whole`, which DERIVES run 2's
+counts and ratio from `s3-ablation-a83c23a8.log` (nothing hardcoded) and reds if the doc drops the
+figure, the `withdrawn/WITHDRAWN.md` pointer or the drift sentence — or if the unqualified
+"by the margin the design assumed" reading returns. It pins the bundle README on the same three
+things. The falsifier-rule assertion names the rule's own sentence rather than testing for a `1.0`
+substring: that substring occurs in unrelated passages (a `0.0 < v <= 1.0` knob range, a
+`weight + 1.0`), so the substring form can never fail and would have let the rule be deleted with
+the pin still green.
+Measured with the qualifier removed: it fails.
+
+## `#11086` — G2's step is placed: `S6a EMBED-DECISION`, and the two premises that had to be corrected first
+
+**What changed in the design document.** §4.0's purpose table, §4.1's step list and §4.2's
+resulting-order block each gained `S6a EMBED-DECISION` — a per-row sub-step of **S6 COMMIT**, running
+**before that row's write clause is built**, asking the `EMBED` / `NO-EMBED` question of the **same
+rule set** `S2.2b` asks the `DISCARD` question of. §4.3's **G2** row now records the step instead of its
+absence, and a new subsection (*G2's step — `S6a EMBED-DECISION`*) states its position, its failure
+policy and the two corrections below. §4.3's opening paragraph moved G2 out of *"needs a step and
+nothing else"* and the summary line's G2 cell names `S6a`.
+
+**Two premises were corrected rather than implemented.** Both would have produced a placement the
+design could not honour, and `02-research.md:224` records the rule that made correcting them the
+required move — *"Stating it as an ordering constraint would invent the placement the design says is
+absent."*
+
+1. **"EMBED before `execute_embed`" is not an order that exists.** `execute_embed` performs no write:
+   it returns a `payload` dict, and the commit that reaches the seam is the SDK / projection writer
+   *after* it returns. The constraint is **EMBED before S6 COMMIT's write**, which is where the step
+   now sits.
+2. **"S2.3's kNN path silently assumes every candidate is embedded" does not hold against the tree.**
+   `KindClassifier` encodes the candidate's **own text** (`self.encoder.encode`) and matches it against
+   a **kind index** built from the pack's kind vocabulary (`kind_index.KindIndex.nearest`). It never
+   reads a stored row vector, so whether a row carries one cannot change its answer and `S6a` feeds
+   nothing into it. G2's core claim — the step list had no home for the EMBED decision — was true and
+   is what the placement closes.
+
+**The VET asymmetry, made explicit because the two gates are not the same shape.** The **`VALUE`** gate
+is subordinate to `VET` by **arming** (its flag switches the pass on; on its own it would be inert,
+which is why `vet_enabled` folds it in). The **`EMBED`** gate is subordinate by **precedence**:
+`vet_gate.apply_vet` removes a `DISCARD`ed candidate from `embed_list`, and every later step — S2.3,
+S3, S5, the commit — reads that list, so a discarded candidate is never offered to the seam. Folding
+the `EMBED` flag into `vet_enabled` would arm nothing while appearing to arm the gate.
+
+**Behavioral pins.** `tests/test_embed_decision_step_11086.py` drives a `DISCARD`ed candidate through
+the S2.2b pass and through `execute_embed`'s payload and asserts it is absent from **both** the
+list every later step reads and the payload the commit is handed — pinned as a **DELTA** against
+the predicate's kill-switch, where the candidate IS present in both, so the assertion measures
+the removal rather than this file's own input; asserts the `VET`-wins direction with **both**
+gates armed; pins that
+`execute_embed` calls no encoder; pins that `kind_classifier` reads a kind index rather than a stored
+row vector; and re-runs the rate measurement against its committed record.

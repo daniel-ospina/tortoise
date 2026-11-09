@@ -149,7 +149,7 @@ fi
 # human or a future reaper can attribute it; NO automatic reaper exists today.
 # NB: the stopped case is the one that carries the failure evidence the health
 # gate reads (`OOMKilled`/`ExitCode`), which is why `--rm` was dropped.
-## ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 9-shard
+## ⛔ GITHUB_JOB is the job_id — IDENTICAL for every matrix shard (a 10-shard
 # fast matrix is ONE GITHUB_JOB), so the run/job/attempt triple alone is NOT
 # unique among concurrent shards: keying on it made each shard's
 # `docker rm -f` (and the teardown's label sweep) destroy a PEER SHARD's live

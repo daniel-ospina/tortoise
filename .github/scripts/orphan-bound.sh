@@ -78,6 +78,37 @@
 #         retire this term as "the complement form above": the refused form has
 #         two inputs and cannot fail, this one has three and is pinned failing
 #         by `test_build_end_sweep_report_folds_the_vanished_window_into_exited`.
+#         `exited` has a THIRD measured source since #11427, by the same rule
+#         and equally NOT the complement: a candidate the sweep EXAMINED and
+#         then DECLINED to act on (a live client, an unconfirmed path-based or
+#         unattributed server, a spent kill budget, a refused provenance
+#         guard, a live owner) is in `discovered_pids`, so the #8599 term
+#         cannot claim it; it is never killed, so `reaped` cannot; and it is
+#         never re-read for liveness, so the dead-pid branch cannot either. If
+#         it then shuts itself down (redislite's fire-and-forget NOSAVE close,
+#         asynchronously) nothing accounts for it, and a run whose pytest
+#         passed reds on `before=26, reaped=0, exited=0, left=25`. So
+#         `build_end_sweep_report` folds in
+#         `|(declined_pids ∩ before_pids) - left_pids|` (`_declined_pids_gone`),
+#         MINUS the pids an iteration already accounted for — the ones it ACTED
+#         on (`reaped`) and the ones it OBSERVED as natural exits
+#         (`exited_pids`). Without that cancellation a server declined in one
+#         iteration and found DEAD at the next iteration's liveness check is
+#         claimed twice (once by `exited`, once here), which inflates `exited`
+#         — the fail-open direction this whole section is about. The
+#         intersection with `before_pids` is the population bound, and it is
+#         load-bearing for the same reason: `declined` accumulates over every
+#         iteration's DISCOVERY, which sees servers the pre-sweep probe never
+#         held (a sibling suite's server started MID-sweep is discovered and
+#         declined), and claiming such a server as one of OUR exits cancels a
+#         server this sweep genuinely lost — a false PASS on a broken sweep.
+#         With both, the fold is a measurement over ONE population (the
+#         pre-sweep probe the identity reconciles against), so a server the
+#         sweep COMMITTED to act on and then lost, or one discovery never
+#         reached, still leaves the shortfall visible. An un-instrumented or
+#         incompletely-scanned sweep reports it UNMEASURED (None, never 0),
+#         exactly as above — and so does a missing `before` reading, since
+#         without the population there is no bound to apply.
 #         Skipped only when `before` is `null` (the probe failed — a distinct
 #         state) or `0`; a report that OMITS `before` or `exited` is unusable
 #         → RED, so the

@@ -72,11 +72,23 @@ decision must be recoverable from what was kept). A text that loses its vector
 can always be re-encoded from the name/content that was written; a lost row
 cannot.
 
-**The flag (off by default)** — `TORTOISE_EMBED_GATE`, read through the
-declared truthy contract (`#4097`), matching the `TORTOISE_VALUE_GATE` /
-`TORTOISE_VET` / `TORTOISE_CLASSIFY_LATER` precedent: the rate effect is
-measurable before it is trusted, and every existing write produces the same
-graph until someone turns it on.
+**The flag (off in the code, ARMED in the shipped template)** — `TORTOISE_EMBED_GATE`, read
+through the declared truthy contract (`#4097`), matching the `TORTOISE_VET` /
+`TORTOISE_CLASSIFY_LATER` precedent. ⚠️ **Two facts, and they are not the same fact:**
+`embed_gate_enabled()` is `False` unless the flag says otherwise, so a bare checkout keeps
+every row's vector — while `.env.example` sets the flag, so a deployment built from the
+shipped template runs this gate with no operator action (and `graph-scripts/setup.py`
+step 9 merges a missing template key into an existing install's `.env`, so re-running that
+setup arms one too). The ordering `#5008` chose — *"the rate effect is measurable before it
+is trusted"* — is recorded with its outcome rather than as the intent it started as: the
+arming reached the shipped surface BEFORE the measurement was taken, so the measurement at
+`docs/evidence/11086/gate-rate.json` is **post-arming**. What it measured: over a **synthetic,
+stub-scored** nine-row corpus (a fixed hand-written list, vectors from a content-addressed stub —
+not a sample of real traffic) the gate returns no vector for exactly the four identifier-only rows
+and for nothing
+else — the prose rows, the two semantic members of the declared ephemeral class and a bare
+definite description all keep theirs. (`TORTOISE_VALUE_GATE` was the third member of that
+precedent until `#10996` made it ON by default — copy this pattern, not that one.)
 
 ⚠️ **NOT implemented here, named rather than left to be inferred:** §12.2a also
 describes a per-kind override block (`embedding.overrides: [{kind: dev:meeting,

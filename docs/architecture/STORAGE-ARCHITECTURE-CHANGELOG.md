@@ -52,7 +52,7 @@ states are as they stood on the move date. The table itself is moved verbatim.
 | §10.2 allowlist | — | a reusable correctness rule (no issue needed) |
 | §12.1b unindexed embeddings | ⭐ **`#4997`** · **`#4999`** | **only `:Point` has a vector index; `Object`/`Event` full-scan (`leg_trace.reason` remains `ok`; since PR `#5159` the entry also carries the `mechanism` — `#4999` CLOSED `COMPLETED`); 19 MB stored unindexed — and the unindexed-embeddings defect itself is still LIVE, homed on the V1/§12.1c decision** |
 | §12.2c vector vs traversal | ⭐ **`#4997`** · `#2730` | **the entity vector is an ENTRY/RESOLUTION key, never the reasoning mechanism — and our Objects have no description to embed** |
-| §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`** |
+| §9.4 source summary vector | — | **needs a ruling (V2); `Source` already carries `summary`, `topics`, `url`, `contentHash`**. ⚠️ **CORRECTED 2026-11-04 (`#10000`, `#10978`): the design document's own sentence said the vector's text IS the summary — *"we already write the summary — it is the S1 narrative (D1)"* — which conflated the two. For a session `:Source` the vector embeds the narrative from `public.session_narrative`, never that session's `:Source.summary`, which is §4.6 metadata and not the narrative (§9.1) — and what a `:Source` with no session narrative embeds (its own `summary`, its `topics`, or something else) is itself part of this V2 ruling. The same conflation was corrected at §12.1b's `:Source` footnote. The correcting PR is `#10978`, which merged the correction; `#10852` — merged as `ba87797c4` — is what makes an episodic `:Source.summary` a topic lexicon, so it is no longer a follow-up this row waits on — it is **not** a ref on this row any more, and it was never the authority for the correction** |
 | §9.6 source versioning | — | **the version must be recorded on the extraction link as `sourceVersion`**; a version costs **three timestamps + a hash** (D30 keeps content out of the graph) — **bound it: windows and hashes only, never content copies** |
 | §12.1a index shape | `#5090` · `#5331` | **the decision is the size-earned conditional index (C)** — not per-tenant partitioning, not a shared filtered index. The partition comparison is a measured *alternative*: `PARTITION BY` flat to T=500 (96.6 ms at T=2,100, unexplained), the partial-index form degrading to 83 ms at T=500 |
 | §17.2 the completeness marker | **`#7952`** ✅ **built 2026-10-12** | a read for a node outside the known-hot set returns explicit **`not-hot`** — **never empty** — and coherence is reconciled as a **number**, not a boolean. This is the input §17.3's router reads. Landed: `tortoise/residency.py` (the marker, its own `residency` field, off by default) + `tortoise/reconciliation.py` (divergence as integer counts, **refusing** when a side is unreadable) + the hosted `/v1/search` field. ⚠️ The declaration's authoritative home is §2.6's control-plane metadata (`#7971`); until then the reader takes the graph's `:Meta` marker and defaults to **complete**, under which the marker cannot fire |
@@ -1777,12 +1777,12 @@ is the record for:
   and its replay materialises no node — a `PointAdded` there re-created the turn nodes on every
   rebuild, i.e. a rebuild that undid this placement (`#10067`).
 - **The row.** The carrier states its turn rows itself — `_turn_row_statements`
-  (`tortoise/record_projection.py:3901`), one `public.point` row per snapshot at
+  (`tortoise/record_projection.py:5172`), one `public.point` row per snapshot at
   `cache_tier = 'record_only'`, the tier from the record TYPE's declaration and never from a payload.
   Doing it in the PROJECTION rather than at the writer is what keeps `record == replay(journal)`:
   the live write and a record rebuilt from the same journal run the same statement.
 - **The fold.** The carrier's graph fold is nothing (`_NO_PROJECTION_FOLD`,
-  `tortoise/projection/__init__.py:7492`), so neither replay engine can re-create a turn the graph
+  `tortoise/projection/__init__.py:7625`), so neither replay engine can re-create a turn the graph
   deliberately does not hold — the `#3316` RESURRECTION class, refused at the declaration.
 - **The change feed.** The carrier is deliberately NOT in `sdk._GRAPH_EVENT_TYPES`, so an armed
   capture's turns leave `poll_events`: a `:GraphEvent` for a turn the writer deliberately skipped
@@ -1791,14 +1791,14 @@ is the record for:
   creation row with no matching retraction — is the repair or should be accepted permanently is the
   open decision on `#10325`, not a settled one. The `EntityMutated` op=delete record the replay folds
   is kept, so a shorter re-capture is durable even though the feed is one-sided.
-- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:204`, step 7's settled answer
+- **The torn tail.** A torn carrier line is TOLERATED (`tortoise/log.py:215`, step 7's settled answer
   to `#10129`'s placeholder): `_emit_event` returns on an append failure BEFORE the record write, so
   that capture's turn rows **never reached the record either** — its transcript is already lost, and
   refusing the tail would cost the whole journal while recovering nothing. The R1 removal record
   (`EntityMutated` op=delete) stays REFUSED, because a tolerated torn delete is a resurrection.
 - **The tenant.** The store decision asks the tenant the SEAM will file under, not the ambient one:
-  `record_tenant_effective` (`tortoise/record_writer.py:842`) is **carried > scope > env pair**, and
-  `is_usable_tenant` (`tortoise/record_writer.py:875`) is the seam's own admissibility test, so the
+  `record_tenant_effective` (`tortoise/record_writer.py:889`) is **carried > scope > env pair**, and
+  `is_usable_tenant` (`tortoise/record_writer.py:922`) is the seam's own admissibility test, so the
   decision that picks the store and the write that fills it cannot disagree about who the row
   belongs to. A write the record cannot attribute keeps the turns in the graph, and a scratch buffer
   is not a journal.
@@ -1832,7 +1832,7 @@ carrying `story_arc` lands in `public.session_narrative`), whose production prod
 `SessionNarrated` carrier (`#9555`), unchanged. MEASURED live on
 a FalkorDB, one commit with a 167-char narrative: `sum(size(n.story_arc))` = **334 bytes** before the
 removal (`:Source` 167 + `:Event` 167), **0 bytes** after it, with `public.session_narrative` holding
-the same 167 chars. `summary`/`title` deliberately stay on the node (§4.4 metadata, not the prose).
+the same 167 chars. `summary`/`title` deliberately stay on the node (§4.6 metadata, not the S1 narrative — ⚠️ **refs corrected 2026-11-04 (`#10000`, `#10978`):** this entry read "§4.4" (the ontology's Document section) and "the prose" (an unnamed stand-in for §9.1's narrative, which is what the corrected text now names); `docs/ONTOLOGY.md` §4.6 is **Source**, which declares `summary`/`title`. The correcting PR is `#10978`, which merged this correction into this file and **added the CORRECTED stamp to the table's "§9.4 source summary vector" row above**, naming `#10000` and `#10852` there; `#10852` — merged as `ba87797c4` — is what makes an episodic `:Source.summary` a topic lexicon, so it is no longer a follow-up this entry waits on). *(The row's ref column names `#10978` rather than `#10852` as of PR `#11023`, which is the change that made `#10852` a landed fact rather than a pending one; `#10978` never renamed that marker.)*
 
 **The re-entry routes, and where each one stood.** The key stays DECLARED in `_SOURCE_NODE_PROPS`
 so legacy nodes read back, and the declaration is what makes a route possible at all. The list is per
@@ -1854,19 +1854,36 @@ and under no deny set, which #10389's fifth review round measured (`#10428`):
   `[[…, None, 'kept-228']]` — denied, and `#228`'s arbitrary prop still landed, so the entry is ONE
   key and not a blanket refusal. The departure is marked ON `#228` with an `OVERRIDES:` line
   (`#issuecomment-6540959107`).
-- Door 2 — the RECORD → CACHE restore — is still OPEN, filed as `#10394`. `source.story_arc` is
-  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` keeps it and
-  `restore_from_record_view` / `rebuild_from_record` writes it back onto `:Source`; the SAME route
-  carries the `:Event` half — `public.event.story_arc` is PRIMARY on the same table (`:309`, open-set
-  passthrough), `projected_columns("event")` keeps it, and `NODE_TABLES` maps `Event → event`.
-  `tests/test_9555_narrative_cache_rebuild.py:187` measures that lane and asserts the prose IS on the
-  rebuilt node — the `:Source` half only, which is why the understatement was measured rather than
+- Door 2 — the RECORD → CACHE restore — was OPEN, filed as `#10394`. ⚠️ **CORRECTED (`#10394`, closed
+  2026-11-06): SHUT** — the record's route joins the deny set through
+  `cache_projection.CACHE_FORBIDDEN_COLUMNS`, which names `story_arc` on BOTH `public.source` and
+  `public.event`, rather than through a key set. The RETIRED mechanism, kept here because it is why the
+  deny set had to name BOTH anchors and not `:Source` alone: `source.story_arc` was
+  marked **PRIMARY** on `#7879`'s placement table, so `projected_columns("source")` kept it and
+  `restore_from_record_view` / `rebuild_from_record` wrote it back onto `:Source`; the SAME route
+  carried the `:Event` half — `public.event.story_arc` was PRIMARY on the same table (`:310`, open-set
+  passthrough), `projected_columns("event")` kept it, and `NODE_TABLES` mapped `Event → event`.
+  `tests/test_9555_narrative_cache_rebuild.py:204` measures that lane — **⚠️ CORRECTED (`#10394`): the
+  assertion is INVERTED from what this entry first recorded.** It read *the prose IS on the rebuilt
+  node, the `:Source` half only*; the test now asserts the rebuilt cache is PROSE-FREE — and the
+  `:Source` anchor is STILL the only half that leg can red on, because its seed carries the capture's
+  `SourceCreated` and no `:Event` record at all, so its `story_arc` check is vacuous one label over.
+  The BOTH-anchor real-restore pin is
+  `tests/test_9555_narrative_cache_rebuild.py::test_the_record_restore_writes_no_story_arc_on_any_node`,
+  whose view holds a `:Source` AND an `:Event` node and asserts `sum(size(n.story_arc))` = 0 over every
+  node after the restore. The `:Source`-only coverage of the rebuilt-cache leg is why the understatement was measured rather than
   assumed (`#10389` review P2: the residual had described `#10394` as the `:Source` half alone, and no
   test could red on it; both anchors are now named in §9.1(b) and their premise pinned by
   `tests/test_9555_narrative_carrier.py::test_door_two_restores_the_prose_on_BOTH_anchors_and_the_residual_says_so`).
-  **So `#10017`'s destructive purge is not durable while door 2 is open** — the next
-  restore re-rents the RAM. Closing it is a PLACEMENT decision (the column's class on `#7879`'s
-  table, plus that test's premise), which is why it is filed rather than absorbed.
+  ⚠️ That pin was RENAMED by `#10394` to `test_door_two_is_DENIED_on_BOTH_anchors_and_the_residual_says_so`
+  — the name above is this entry's historical reference, and a grep for it now finds this line only.
+  **So `#10017`'s destructive purge was not durable while door 2 was open** — the next
+  restore re-rented the RAM. ⚠️ **CORRECTED (`#11325`)**: `#10017`'s purge is the legacy TURN population and never
+  matched `:Source`/`:Event`; what the next restore re-rented was `#10000`'s write of the prose. Closing it
+  took a decision wider than this entry — a **THIRD** vocabulary
+  (`cache_projection.CACHE_FORBIDDEN_COLUMNS`) beside `#7879`'s placement class, which keeps `story_arc`
+  **PRIMARY** and annotates both rows *not projected*, plus that test's premise — which is why it was
+  filed rather than absorbed (`#10394`'s own entry records that the placement class was the wrong question).
 - **The `:Event` fold — door 1's counterpart one label over, denied here (`#10428`).** `_upsert_event`
   persists extras with `skip = _META_KEYS | _EVENT_HANDLED`, and `story_arc` was in neither while
   `docs/ONTOLOGY.md` declares it on `:Source` only — an UNDECLARED key on the open passthrough, the
@@ -1927,3 +1944,286 @@ a correct line from a wrong one. §9.1(b) now names a symbol per route
 pins both directions, each measured on the pre-fix text: a `file.py:NNNN` in the section reds (all
 four converted citations named), and a symbol that no longer resolves reds (measured by renaming
 `_upsert_document`).
+
+## §12.1c's label count and §14.3's V1 row numbers — the corrected figures stayed, the change narration left (`#5090`, 2026-11-04)
+
+Two register corrections landed in the design document. Both **figures** are right and stay there; what
+did not belong there was the narration of what each passage used to say, which is this file's job.
+
+**§12.1c — the per-label index count.** The section read that indexing the objects means *"a SECOND … and
+a THIRD"* resident HNSW index. That count is not an artifact of a widening served set: it was reasoned
+from the two labels the 2026-09-24 measurement actually found vectors on — the pre-edit sentence named
+*"a SECOND HNSW index for `:Object` and a THIRD for `:Event`"* — while the vector leg already addressed
+**six** distinct labels on that date (`Point` via `operator`, plus `Event`, `Subject`, `Document`,
+`Object`, `Source`: `tortoise/security.py`'s `VALID_ENTITY_TYPES` and
+`tortoise/search_engine.py:860`'s `label = "Point" if entity_type == "operator" else
+entity_type.capitalize()`, **both read at `e083c972`** — that derivation now lives in
+`security.entity_label()`).
+The five-label set below is that six with `Document` folded into `Source`, so the served set NARROWED to
+five rather than later "reaching" it — the count was wrong on its own date, which is what
+`01-align.md:53-54` already says.
+`tortoise/security.py` `ENTITY_TYPE_LABELS` maps seven entity types onto five labels, and
+`_record_vector_index_inventory` serves exactly `{Point, Event, Object, Source, Subject}`; only `Point`
+carries a vector DDL/index (`tortoise/projection/__init__.py`, both the procedure and the Cypher form).
+So **four** served labels are unindexed today — `Event`, `Object`, `Source`, `Subject` — and the argument
+is correspondingly stronger than it read. The design document now states the four-label count and the
+four-further conclusion with no reference to the passage's previous wording. ⚠️ **The count is
+incremental, and both conclusion sentences now say so in one frame:** the four are *on top of* the one
+`Point` index that exists today, i.e. **five resident HNSW structures in total** against Postgres's one
+filtered index. The pre-edit passage was arithmetically a total (1 `Point` + a `SECOND` + a `THIRD` = three,
+stated as *"Three resident HNSW indexes vs one filtered index"*), so correcting the derivation from two
+unindexed labels to four while leaving the conclusion in the total frame would have *undercounted by one* —
+`01-align.md`, `02-research.md` and `05-decompose.md` all count *four further*, and §12.1c is the register
+a lane reads to take V1, so it is the last artifact that may carry its own arithmetic.
+
+**§14.3 — V1's numbers.** The V1 row gave the vector question's weight as *"≈50 MB of stored vectors + a
+45 MB index total, on 141 MB"*. Two independent problems: the 141/45 MB pair is the dated 2026-09-24
+reading taken on a **capped** base (the 2026-09-25 block: 24,978 quota-counted against 89,701 resident — a different reading again), so it is not a growth baseline — by **that** reading's own numbers the increase is index-driven (+52 MB total, 143 → 195 MB; +47 MB of indices, 46 → 93 MB) while the resident count **fell** 89,701 → 68,526; and the ≈50 MB payload is that same dated measurement's
+additive estimate over three labels — it was never a current payload reading either. The row now carries
+the **2026-11-04 graph reading** from `live-v4` (`#10976`): **93 MB of index total on a 195 MB graph**,
+with the 93 MB named as the TOTAL index size of which only part is HNSW; and it names the payload axis as
+§12.1a's **2026-09-24** measurement — **33,580 embeddings ≈ 51.6 MB**, of which the unindexed
+`Object`+`Event` population (**12,657 ≈ 19.4 MB, 38 % of every vector stored**) is the removable subset
+`#5090`'s 2026-10-08 arithmetic justifies. **No decision changed: V1 remains OPEN and the row says so.**
+
+**One figure of that first draft was wrong, and the correction is recorded here.** It quoted *"19.4 MB of
+stored vector payload (12,657 × 1,536 B)"* as a **2026-11-04** measurement of the live graph. It is
+neither: 12,657 is the **2026-09-24** count of the `:Object` 7,859 + `:Event` 4,798 embeddings — the
+**unindexed** population, 38 % of every vector stored — and `#5090`'s 2026-10-08 comment reaches it as a
+SCOPE correction (*"the 50 MB figure requires counting the `:Point` leg — the one leg that IS indexed and
+working …"*),
+not as a re-measurement. `#10976`'s measured block carries no vector count and no 19.4 MB line, and
+`tools/dod_5090_probe.py`'s own census docstring says the 12,657 figure *"2026-09-24 numbers and are **not to be re-quoted**"* (verbatim from `:70-71`, emphasis included — a de-bolded form does not resolve) — `--census` re-measures per label on a named graph at a timestamp. Quoting it beside a
+2026-11-04 graph reading is exactly the mixing of readings this whole correction exists to stop.
+
+**And §12.1c no longer contradicts §14.3.** Before this correction the two disagreed *inside one
+register* — §12.1c's context line and its option table quoted 50 MB / 45 MB / 141 MB while §14.3's V1
+row quoted 93 MB of indices on 195 MB, a 2× disagreement on the index quantity, in the exact section a
+lane reads to make the decision. The 2026-09-24 figures are **dated and kept** (they are a real
+measurement of a smaller graph, and deleting them would erase the evidence the $73/GiB cost argument
+rests on), with the 2026-11-04 graph reading named beside them so the two sections can no longer be read
+as disagreeing about one graph — and each figure now states WHICH reading it belongs to, including the
+payload, which only the 2026-09-24 measurement supplies.
+
+**Why the narration moved here.** The first draft wrote *"⚠️ Corrected 2026-11-04: this paragraph
+previously read …"* into both places. `tests/test_extractor_v4_citation_rot.py::test_the_design_documents_carry_no_issue_state_or_change_narration`
+reds on that shape — its `_CHANGE_NARRATION` dated-stamp arm matches `CORRECTED 20xx-`, which is exactly
+the before/after narration `#8542` moved out of the three design documents. The guard is the executable
+half of the rule stated at the top of this file: the design document states the design and the
+measurement; this file keeps the record of how it got there. Measured at the PR head: 0 `_CHANGE_NARRATION`
+hits in `STORAGE-ARCHITECTURE.md` after the move, against 2 before it (lines 1090 and 1518) — at
+`9f5a41939`, this branch's first draft, which is the ref to reproduce it at.
+
+## The rest of the register still cited the retracted figures — each now carries the date of the reading it belongs to (`#5090`, 2026-11-05)
+
+The entry above recorded the two corrected rows and dated §12.1c. Correcting those left the rest of the
+register asserting the **retracted** figures as its current basis, so one document still read 45 MB of
+indices on 141 MB in §12.1c's neighbourhood while §14.3's V1 row read 93 MB on 195 MB — a 2× disagreement
+on the index quantity and 2.6× on the payload, inside one register, in the section a lane reads to make
+the decision. This entry records the second pass that closed it, and why each figure was stale in the
+place it stood.
+
+**The figures, and what was wrong with them.** The ≈50 MB payload figure is an additive estimate from the
+2026-09-24 measurement: `Point` ~31 MB + `Object` ~11.8 MB + `Event` ~7.2 MB, at 1.5 KB each. **Every leg
+is a VECTOR COUNT × bytes-per-vector, not an attribute line** — `Object` 7,859 and `Event` 4,798 are the
+two counts the measurement found (§12.1b), and the third leg is the remainder the estimate attributed to
+`Point`, 20,923 of 33,580. At the exact `1,536 B` per vector (384 × float32 — §5.2 states that width at `:418`), those are
+12.1 / 7.4 / 32.1 MB — sum **≈51.6 MB**, which is the `33,580 embeddings ≈ 51.6 MB` §12.1a reports; the
+head-line **≈50 MB** is that same population at the rounded `1.5 KB = 1,500 B` the original estimate used,
+**not a second reading.** ⚠️ **Two things the
+legs do not say.** (1) The ≈50 MB is not §12.1's `Point` **node-attributes** line of 50 MB — that line is
+ALL attributes of the label, no leg reads it, and the numerical agreement is a **coincidence**. (2) The
+three legs are the labels the 2026-09-24 count FOUND vectors on, **not the only labels that store them** —
+a `:Source` writes an `embedding` too (§12.1's footnote), so the third leg is an inventory inference whose
+`Point` attribution only `--census` can settle, and it can. The `Object` and `Event` legs DO exist: those
+labels store 7,859 and 4,798 embeddings respectively, and the
+whole defect this epic exists for is that they store them with **no vector index behind them** (`Object`
+and `Event` carry no vector DDL — only `Point` does). The part of the ≈50 MB that is *removable* is
+therefore the unindexed `Object`+`Event` population: **12,657 vectors × 1,536 B = 19.4 MB** — **19.0 MB of
+the ≈50 MB frame above, 19.4 MB of the ≈51.6 MB one** — which is **38 % of every
+vector stored**, which is `#5090`'s 2026-10-08 SCOPE correction — not a re-measurement, and not a
+2026-11-04 figure. The 2026-11-04 reading of `live-v4` (`#10976`) is a **graph** reading:
+`indices_sz_mb` **93** on a **195 MB** graph, with per-label attribute bytes and no vector count; the
+probe's own docstring says the 12,657 count is *"2026-09-24 numbers and are **not to be re-quoted**"* — quoted **verbatim including the source's own emphasis markers**, from `tools/dod_5090_probe.py:70-71`, because de-bolding it makes the quotation unresolvable and a reader who greps the clean form finds nothing. `--census`
+re-measures it per label on a named graph at a timestamp.
+
+**The places that still cited it, all now dated** — named by their ACTUAL section, because the first
+draft of this list named six and got five of them wrong: **§2.2**'s *"45 MB of
+indices + 51.6 MB of embeddings + 16 MB of text"* line (`:175`) and the unnumbered subsection that follows
+it, *"The class that dominates our bill — measured"* (`:185`); **§12.1**'s *"Stored vector
+properties ≈ 50 MB"* sentence (`:945`); **§12.1a**'s per-node ratio (`:1030`); **§12.2**'s *"≈50 MB …
+against 141 MB"* (`:1129`); **§12.8**'s attribute-byte sentence (`:1395`); and **§13**'s V3 bullet
+(`:1476`), which still stated the 12,657 count and *"13.5 % of the graph"* with no date at all — now
+dated to the 141 MB graph it was measured on. Two cross-references that would otherwise have gone stale
+in the other direction are fixed the same way: the §0 ruling block's *"§2 and §12 state 141 MB and 45 MB"* (now
+`§12.1's 2026-09-24 table`) and the cost model's *"on a ~141 MB graph"* (kept as that date's reading,
+with the 2026-11-04 reading named beside it).
+
+**What was deliberately NOT done: no per-node ratio from the new reading.** The 2026-09-24 ratio,
+1.34 embeddings per node, is over **capped** nodes (~25,000). The 2026-11-04 reading's node base is
+68,526 **resident** nodes, a different denominator, and §0's own rule is that a per-node figure is never
+quoted without its base — deriving 0.49/ node (33,580 over 68,526) — or 0.18/ node for the 12,657 removable
+subset — would have repeated the exact error class the section exists to warn about. The ratio stays attached to the reading it was measured on.
+
+**No decision moved.** V1 remains `OPEN` and owner-owned, `#4333` remains its architecture home, and the
+correction changes the size of the question, not its answer.
+
+## §9.1(b)'s record route stops paying for the prose: a THIRD column class, and why the placement class was the wrong lever (`#10394`, 2026-11-06)
+
+The route was real and §9.1(b) named it: the RECORD → CACHE restore re-materialised the S1 narrative on
+a node. The chain had four hops and no single bug —
+
+1. `cache_projection.projected_columns("source")` / `("event")` kept `story_arc`, because the placement
+   table marks it **PRIMARY** and the set is `schema columns − refused − bookkeeping`;
+2. `_props_from_row` therefore emitted it as a property;
+3. `node_from_row` carried it on the plan;
+4. `node_statement`'s `SET n += $props` wrote it onto the node.
+
+so `record_restore.restore_from_record_view` / `rebuild_from_record` (`python -m tortoise record-restore`,
+`docs/infra-runbook.md` §9) put the prose back on every restore and `#10017`'s graph-side purge was undone
+by the next routine recovery. MEASURED at the head before this change, one call each:
+`node_from_row("Source", {…, "story_arc": "PROSE"}).props["story_arc"] == "PROSE"`, and the same on
+`Event`. The red-first pin failed at its FIRST arm with `projected_columns('source')` still keeping the key.
+
+**The placement class was the wrong question, and that is the decision this entry records.** `#10394`
+was filed as a PLACEMENT change — move the column out of PRIMARY, or refuse it — and neither is right:
+
+- the column staying **PRIMARY** is correct, because §9.1 puts the narrative in **Postgres** and forbids
+  it in the **graph**, and the record IS the Postgres half. Marking it DERIVED would have said the record
+  must not store it, which is false and would have reddened the record's own `props`-tail CHECK;
+- `_refused` means exactly that ("the record must not store this name as authority"), so reusing it would
+  have been a category error dressed as a fix.
+
+What was missing was a **third** vocabulary: *authority in the source store ≠ projectability into the
+cache*. `cache_projection.CACHE_FORBIDDEN_COLUMNS` is it (`{source, event} → {story_arc}`), subtracted
+from `projected_columns` — which is the OPERATIVE deny for a column — and filtered out of the open-set
+`props` tail in `_props_from_row`, a tail copied verbatim that would otherwise have been a back door for
+a legacy row. ⚠️ `_props_from_row` also carries a `column in forbidden` branch, and it is **defensive
+rather than operative**, measured: deleting it reds nothing (289 passed, 5 skipped across the five
+suites covering this seam), because a forbidden column is already outside `projected_columns` and would
+fall through the `placed` (DERIVED/VOLATILE) fallback anyway. It is kept for legibility — the fallback's
+meaning is a DIFFERENT statement about the same absence — and it is labelled as defensive in the code,
+because a branch three artifacts describe as load-bearing while no test can red on it is the exact
+"guard that stops guarding without reddening" the neighbouring `#10853` note refuses. The TAIL filter,
+by contrast, IS load-bearing: deleting it reds
+`test_the_record_restore_writes_no_story_arc_on_any_node`. Both placement rows now carry `not projected` beside their class and the reason, so a reader
+cannot take the drop for an omission while `#7968`'s two-way pin (PRIMARY ⇒ column) keeps holding.
+
+**Why the seam and not a sweep.** The alternative fix — purge after the restore — would rent the RAM for
+the duration of the write and would have to run on every restore forever. The write had to stop, which is
+also what makes `#10017`'s purge durable: purge → restore → `sum(size(n.story_arc))` = 0.
+
+**What a reader keeps seeing, and what a reconciler now reports.** The narrative is served to every reader
+from `public.session_narrative` (`record_text.serve_from_record` never consults the projection module), so
+nothing is lost. `record-reconcile` treats a legacy cache node still carrying the prose as a `graph_only`
+occurrence (one property the projection declines to write), NOT as a `field_mismatches` against a record
+that is correct — the third omission class beside §17.5's cache-owned scalars and the `#10853` episodic
+pair (both named `cache-held` in the rendered label, since only the first is `cache-owned`). Its repair is
+a DESTRUCTIVE CLEAR — `#10017`'s targeted graph-side purge, or a full `record-restore`, whose wipe is
+whole-graph and therefore clears a legacy copy too. ⛔ Only the NOT-PROJECTABLE class lacks a non-destructive repair (nothing writes
+the column, so no in-place route can exist); the declined pair has one, shipped —
+`session_source_prose_migration.reconcile_session_source_prose` (`#11070`/`#11152`)
+repairs it in place. The classes differ in both why and which lane.
+
+⚠️ **CORRECTED (`#11325`, review of the `#10394` follow-up)**: this entry named `#10017`'s purge as the targeted repair
+for THIS class. Measured at the tool, `tools/purge_legacy_turns.py` deletes legacy episodic turn `:Point`s — its
+single destructive statement is `MATCH (s:Session {id:$sid})-[:CONTAINS]->(t:Point) WHERE t.is_episodic = true AND t.id IN $ids DETACH DELETE t` — never matches `:Source`/`:Event`, and contains no `story_arc` token — so a copy on either anchor
+survives it, and an operator following the sentence reads the sweep's unchanged `graph_only` as "the repair did not
+work". ⚠️ This stamp scopes itself to the REPAIR claim: the entry above is left as RECORDED, because a changelog is a
+historical record — the corrected instruction is this stamp's own, and no instrument ships a targeted
+`REMOVE n.story_arc` (`#11325`). The entry's earlier DURABILITY sentences
+("`#10017`'s graph-side purge was undone by the next routine recovery", "what makes `#10017`'s purge durable") are
+left as recorded — but they carry the SAME assumption this stamp retracts, that the purge clears THIS class. What the restore undid was `#10000`'s write deletions, and the acceptance
+they name (`purge → restore → sum(size(n.story_arc))` = 0) holds because the restore now writes no
+`story_arc` on either ANCHOR and its whole-graph wipe clears a legacy copy — not because a purge ran.
+
+⚠️ **CORRECTED AGAIN (`#11325` review cycle 2)**: the ENTRY above (its "⛔ Only the NOT-PROJECTABLE class"
+sentence) says the class "lacks a non-destructive" repair. That is true on the two ANCHORS this constant keys (`source`/`event`: `update_entity(…, story_arc=None)` is
+REFUSED as server-managed on BOTH anchors — `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS`, each raising
+with the stored value untouched) and **false on a
+`:Point`**, which has a non-destructive in-place one: `update_point(<id>, story_arc=None)` clears the property and KEEPS
+the node (measured — the `None` passes `sdk._refuse_unpaired_narrative`, whose refusal is on a NON-EMPTY narrative, and
+`update_point`'s `SET n += $props` removes a `None`-valued key). ⛔ **SUPERSEDED — see "CORRECTED (review cycle 3)" below; do not act on the next sentence.** Both of its claims are retracted there: the point's own `props` tail is NOT a record home (the clear's own record write overwrites it), and "the ONLY one" is replaced by the uniquely-true "no shipped route can put it back on a production graph". ⚠️ **That route is subject to the SAME per-row test as the
+anchors** — clear only where the record still HOLDS the text for the session (`public.session_narrative.narrative`, or the
+point's own `props` tail); where neither carries it the node's copy is the ONLY one and the clear deletes it, the
+`rebuild_all` that would put it back being refused PRE-WIPE on a production name (`§17.2`). ⚠️ Its durability is JOURNAL-bound only — ⚠️ and that bound has a REACH: a `rebuild_all` asks the SAME L2 name guard as the restore (`_assert_test_graph`, refused PRE-WIPE on every production name), so on a production server graph the replay is REFUSED and the `:Point` clear IS durable there; it is defeated only on a graph a rebuild can reach (a `test_`/`tortoise_test` server name, or an embedded `path=` DB): the journal
+records the `None`, but the `PointRevised` fold has no `story_arc` clause and the creation fold's open-set passthrough
+(`projection.entities._persist_extra_props`) SKIPS a `None` value, so a `rebuild_all` over a journal whose creation
+record carried the prose re-materialises it — that replay half is `#10429`'s. ⚠️ The RECORD→CACHE rebuild is the other
+way round: the patch stores `props.story_arc = null`, `_props_from_row` returns it, and `node_statement`'s
+`SET n += $props` REMOVES the key, so a record-sourced rebuild keeps the copy clear. The same live door is bound by
+the MCP tool `tortoise_update_point`. A `:Point` carrying the
+prose whose record tail does NOT also carry it is a `graph_only` occurrence of THIS count (`:Point`'s placeable set
+omits `story_arc`, §17.2; ⚠️ where the tail DOES carry it, `_partition_cache_owned`'s `keep |= set(record_props)` makes
+it COMPARED, and `record-restore` then RESTORES it), so an UNSCOPED version of this correction — as an earlier revision of
+this change's own §17.2 stated it, *"no shipped route clears the PROPERTY while keeping the entity"*, since amended to the
+anchor-scoped wording that is live there now — would have sent that
+operator to `tortoise_delete`, which REMOVES the node and journals the delete that drops its record row, when a
+clear-and-keep route shipped. ⛔ That quotation is of the SUPERSEDED revision, not of the entry above: this `#10394` entry never
+said "the PROPERTY" and never sent an operator to `tortoise_delete`, and `STORAGE-ARCHITECTURE.md` §17.2 at the merged
+tree states the bound per row rather than quoting the superseded phrase.
+
+⛔ **CORRECTED (review cycle 3) — the per-row test's SECOND home was wrong.** Cycle 2's stamp above (and every §17.2/§9.1 mirror of it) counted the point's own `props` tail as a record home that licenses the clear. **The clear consumes it**, so it is not a home that survives: `story_arc` is no `public.point` column, so `record_projection._split_properties` sends the key to the tail (its final `else: tail[prop] = value` has no null filter), and the record patch is a RIGHT-HAND merge (`props = props || %s::jsonb`, `_patch_statement`) — so the `{"story_arc": null}` the clear journals OVERWRITES the prose the tail held. On a pre-`#10389` unpaired `create_point(…, story_arc=…)` row, whose only record home IS that tail, the "safe" clear therefore destroys the last copy the record's KEYED VIEW holds — the exact failure class this change exists to prevent, one population over. ⚠️ The clear never touches the append-only journal, so a `rebuild_all` over a creation record that carried the prose still restores it (the replay bound stated above, in cycle 2's stamp, and in §17.2) — the claim is about the view an operator and the reconciler read, not about total loss. ⛔ The same stamp also retracts cycle 2's absolute *"the node's copy is the ONLY one"* at that per-row test: for a `:Point` the creation journal holds the prose too, so what is unique is that **no shipped route can put it back on a production graph**, not that the graph copy is the only copy. Retracted at all eight sites (both code docstrings, the `entities.py` comment, §9.1(a), §17.2, the epic's cache-projection section, the test docstring that stated the guidance, and — by THIS stamp rather than by rewriting it, because a changelog is a historical record — cycle 2's sentence above, which carries a `⛔ SUPERSEDED` pointer at the sentence itself so a reader arriving by `grep` cannot take it for live guidance). The per-row test now names `public.session_narrative.narrative` ONLY, and the mechanism is pinned by `tests/test_9555_narrative_cache_rebuild.py::test_the_point_props_tail_is_not_a_record_home_for_the_prose` — a null filter added on `point`, or a left-hand merge, makes the tail a home again and reds that pin until the guidance says so. ⚠️ What is NOT claimed: that a rebuild can always put the prose back — the replay is refused PRE-WIPE on every production name (cycle 2's stamp, above) — so the guidance stops counting the tail as a home either way.
+
+**What changed in the pins, so the guard did not regress into a re-declaration of the defect.**
+`tests/test_9555_narrative_cache_rebuild.py`'s survival leg used to assert the REBUILT cache CARRIED
+`story_arc` on a `:Source` node; it now asserts the cache is prose-free while the record reader still
+serves the text — "survives the cache being deleted" measured where §9.1 says it is true. Its new sibling
+`test_the_record_restore_writes_no_story_arc_on_any_node` is the red-first pin (vocabulary, the seam on
+both anchors, and a real restore over a cache that still holds a legacy copy). `tests/test_cache_projection.py`
+gained the third-category gate: the set of PRIMARY rows that do not project must EQUAL
+`CACHE_FORBIDDEN_COLUMNS`, so any other column that stops projecting reds. And
+`tests/test_9555_narrative_carrier.py`'s door-2 pin, which certified the route OPEN on both anchors, is
+INVERTED rather than deleted: the record keeps the column, the projection does not.
+
+**§9.1(b)'s count sentence had to move with it** — the RECORD route is no longer the one route that is
+not denied, so the passage now states SEVEN denied, six by the projection's own sets (the record's
+joining them through `CACHE_FORBIDDEN_COLUMNS`) and the `:Point` route at its two SDK write doors. The
+derivation pin reads the numbers out of the rows, so a bullet added or removed still reds it.
+
+**Two route statements this change makes stale, and where each was handled.** (1) §9.1(b)'s own
+scope note said the RECORD → CACHE restore *"carries the `story_arc` column only"*; it is denied by the
+exact key now, and the note was rewritten in the same edit so the section does not state both the rule
+and its negation. (2) `tortoise/projection/entities.py`'s `_DOC_PASSTHROUGH_HANDLED` comment read *"no reader or restore
+lane reads it (door 2 restores the `story_arc` column only)"*. It was first left alone on the belief
+that `#11070`/`#11152` were still folding in that file; **a reviewer measured that belief and it was
+false** — both landed at `98df3bd4cf`, neither touches `tortoise/projection/entities.py`,
+there is no live `refs/claims/` entry for either, and `.worktrees/fix-11070` is clean for that path. The
+one-line comment correction is therefore made here, in the same change that falsifies it: a route-map
+sentence that names the wrong mechanism is exactly what this section exists to prevent, and deferring it
+on a stale hazard reading would have left the next reader of that file with the pre-fix rule.
+
+**`rebuild_all` was already on the right side of this, and is stated so the record is complete.** The
+issue's acceptance names `restore_from_record_view` **and `rebuild_all`**. The JOURNAL rebuild needed no
+change: `_SOURCE_SERVER_MANAGED_PROPS` / `_EVENT_SERVER_MANAGED_PROPS` (the `EntityMutated` replay arm)
+and `_EVENT_HANDLED` / `_DOC_PASSTHROUGH_HANDLED` (the folds) already deny the key, and
+`test_the_journal_replay_drops_the_prose_and_the_residual_says_so` plus
+`test_the_event_journal_replay_drops_the_prose` pin it. This change closes the RECORD route, which is the
+one that was open.
+
+---
+
+## 2026-11-07 — V1 RESOLVED, and §2.0's 2026-10-08 ruling SPLIT (owner)
+
+**The decision as the lane relayed it** (`#4051` comment `6713838871`, §"What is decided", items 1–3; **item 4 is
+the phase correction in comment `6714119028`**, which supersedes that comment's own *"a budget-derived window
+before launch"*): **(1)** the
+**vector index and the embedding payload move to Postgres** (`pgvector`), which **resolves V1 (`#4997`)** — the
+vector index does not live in FalkorDB; **(2)** the **text index stays** in FalkorDB, because moving it is a
+measured regression (M3 defers it); **(3)** **traversal, writes and EP stay** in the graph, so the Cypher
+surface is untouched; **(4)** the graph is **complete through private-beta** and becomes a **budget-derived
+window only after measurement** (the phase split is comment `6714119028`).
+
+**What this reverses in the design document, and what it does not.** `§12.1c` is no longer an OPEN DECISION:
+its recommendation (option 2, vectors to Postgres) is adopted, and what remains open there is the *different*
+question of whether `:Object`/`:Event` ever carry embeddings (§14.3 **V3**). **§2.0's 2026-10-08 ruling is SPLIT**,
+not reversed: its *"keep the limit in falkor high"* clause is narrowed to *complete through private-beta,
+windowed after M2*, and carries an `OVERRIDES:` line; its *"so we don't need to rush with enabling our queries
+to parse both falkor and postgres"* clause is what makes the dual-store **search** path adoptable. ⚠️ **`#7970`'s
+anchored-read cutover stays DEFERRED by §2.0** — the split does not sanction it.
+
+**The canonical document is `docs/architecture/SEARCH-ARCHITECTURE.md`**, registered in `docs/00_index.md`,
+which holds the method ruling, the executing surface of the move, the window policy and the five measurements
+(M1–M5) that gate it. Two corrections belong to this entry because the design document states the design and
+not the history: the earlier *"5.6 KB vs 1 KB"* and *"19.4 MB as a 2026-11-04 measurement"* figures recorded
+above stand as corrected there, and neither is an input to the 2026-11-07 decision.

@@ -485,6 +485,7 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 | **S2.3 CLASSIFY** | **assign each SURVIVING candidate its pack kind** — against the declared kind vocabulary | model (Jev), with a **mechanical kNN fast path** |
 | **S3 RESOLVE** | **find what already exists for these candidates**, disambiguate using **the narrative as context**, **and attach** | mechanical + model (ambiguity only) |
 | **S5 CONNECT** | (1) wire **this batch's own story**; (2) compare the batch **against the stored graph** — duplicate? lifecycle change? contradiction? | model decides, code writes |
+| **S6a EMBED-DECISION** *(sub-step of S6, per row — runs BEFORE the write it belongs to)* | decide whether **this written row** earns a vector — the shared rule set's second question, so rent is paid only for text a semantic query could want | **mechanical** |
 | **S6 COMMIT** | write entities + connections + metadata/lifecycle | **mechanical** |
 
 **The test this table applies: can you state the step's purpose in one clause that no other step shares?** That test deleted **S4** and then deleted **S1.5** entirely — see §4.1.
@@ -509,10 +510,14 @@ S3  RESOLVE    look up what exists for these candidates → disambiguate (narrat
                context) → AND ATTACH the new context to the surviving entity — and the
                FUSION a `MERGE` flag asked for is executed HERE, after the gate
 S5  CONNECT    two distinct sets: within this batch · to the graph
+S6a EMBED-DECISION   per row, INSIDE S6 and before that row's write clause is
+               built: EMBED / NO-EMBED for THIS row, asked of the SAME rule set
+               S2.2b asks the DISCARD question of (§12.2a, one rule set two
+               questions) — the second enforcement point, given a home (G2)
 S6  COMMIT     create entities + connections + metadata/lifecycle
 ```
 
-**Eight steps.** No S4 and no S1.5 — both fail the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0 and `S2.2a`/`S2.2b` sub-steps of S2.2, so a sub-step does not make a ninth step. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists; the two must never drift apart. ⚠️ **The numbering gap is deliberate for now:** the S-numbers are fixed identifiers, so **renumber only once the design settles.**
+**Eight steps.** No S4 and no S1.5 — both fail the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0, `S2.2a`/`S2.2b` sub-steps of S2.2 and `S6a` a sub-step of S6, so a sub-step does not make a ninth step. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists; the two must never drift apart. ⚠️ **The numbering gap is deliberate for now:** the S-numbers are fixed identifiers, so **renumber only once the design settles.**
 
 ### S0 — READ  *(mechanical — no LLM)*
 
@@ -611,7 +616,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 **✅ `DECIDED (narrowed)` — the owner ruled:** the lookup sits **after** extraction, and it is consumed by the salience judgment and by S3 only. **Extraction does not consume it.** This follows from D4's own stated reason — the extraction consumer was never covered by it.
 
 >
-> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO by the margin the design assumed:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. Bundle: `docs/evidence/5087-hypothesis/`.
+> ✅ **Note — the lookup bug `#4511` does not gate this design.** It bit *when the lookup sat before extraction* (`_fts_rows` read `r.get("kind")` while the callee emits `point_kind`, so every prior's type returned **blank**). **The lookup sits in S3 (§4.2), so the bug is not a dependency of this design.** ✅ **MEASURED 2026-11-01 (§10, `#10463`) — and the answer is NO:** giving extraction the neighbourhood cut created nodes **284 → 247 (−13 %)** against a pre-registered **≥ 25 %** bar, while recovering **fewer** real facts (47 → 40) and **fewer** operator edges (171 → 139) — a smaller extraction, not a leaner one. ⚠️ **That is run 1, whose log the `#10463` ruling WITHDREW from the checked set; the base-registered re-measurement (`#10554`) is `253 → 250` (ratio `0.988`) with the untreated arm drifting `10.9 %` between runs, so the effect is below what the instrument resolves.** Bundle: `docs/evidence/5087-hypothesis/` — read its *"Which run's number"* block (§10) before quoting a figure.
 
 ### S2.1 — EXTRACT
 
@@ -621,7 +626,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:10434-10437`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:16232-16235`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -693,25 +698,75 @@ unfirable (block at the top of §10).
 >
 > ⚠️ **"S2.2 VET and S2.3 CLASSIFY already exist in the code" is NOT the test that the successor
 > exists.** §4.0 gives S2.2 VET the coverage question whose answer S4's removal relies on, and both
-> stages are present in the tree (`_vet_gate.apply_vet`, `kind_classifier.classify_items`) — but both
-> are wired into `extract_session_v2` **behind flags that default OFF** (`TORTOISE_VET`,
-> `TORTOISE_CLASSIFY_LATER`), so on the default arm neither has run at all; and presence is not
-> sufficiency, because the fold's **remedy** half is unimplemented in both. VET's **coverage signal**
-> only **detects** (`check_batch`'s `coverage_suspect` — *"reported, never acted on"*, and only for a
+> stages are present in the tree (`_vet_gate.apply_vet`, `kind_classifier.classify_items`) — and
+> `classify_items` is wired into `extract_session_v2` **behind a flag that defaults OFF**
+> (`TORTOISE_CLASSIFY_LATER`), so on the default arm it has never run. `apply_vet` is a different
+> case **since `#10996`**: `TORTOISE_VET` still defaults OFF, but the S2.2 **mechanical** half
+> (`TORTOISE_VALUE_GATE`) defaults **ON**, so the VET pass — and `apply_vet` — DOES run on the
+> default arm, keeping everything the `#4899` identifier-only predicate does not fire on (measured:
+> 0 drops of 61 Objects). Judge the fold by that, not by "the flags default OFF"; and presence is not
+> sufficiency: the fold's **remedy** half IS implemented for ONE class and NOT for another (the two
+> halves are stated in the S2.2b-ADD note below). VET's **coverage signal**
+> only **detects** (`check_batch`'s `coverage_suspect` — reported by the gate, **acted on by the
+> PIPELINE** since `#11002` (which is what `in v1` used to defer), and only for a
 > narrative that produced **zero** candidates). `apply_vet` only **removes** — **except** the Layer-1
 > entity RESTORE from `prior` (`vet_gate.py` **Rule 4**), which re-emits an entity an EARLIER pass
 > discarded, needs a surviving candidate to reference it, and never sources a new candidate from the
 > narrative (`OUTCOMES` = KEEP/NOOP/DISCARD/MERGE; `MERGE` is a verdict VET records and S3 applies —
 > `#5006`). CLASSIFY
 > only **labels** (`classify_items` returns a kind per **existing** id; `_apply_classify_kinds` adds no
-> item). So **no stage the design folds S4's purpose into — and no successor stage — can emit a
-> candidate a coverage check found missing** (`run_s4` is today's gap-filler and does exactly that) —
-> removing `run_s4` today DELETES gap-filling instead of relocating it. The universal is scoped to the
+> item). So **no stage the design folds S4's purpose into can emit a candidate a coverage check found
+> missing** — the FOLD's two stages still cannot. ✅ **The successor is the bounded
+> S2.2 re-narrate (§4.4, `#11002`)** — `_renarrate_trigger` → `_arm_extract`, the `emphasis` seam in
+> `run_s1`: it fires **once**, re-extracts, and **unions both arms** with `merge_embed_lists` under
+> E4's identity-key rules, so it CAN add a candidate the coverage check found missing and it preserves
+> both arms' items (merges-not-replaces — the owner's ruling on `#11002`). The universal is scoped to the
 > FOLD on purpose: an unqualified "no shipped stage" would deny the very capability the dash clause
 > says is lost, since `run_s4` *is* a shipped stage. The pre-condition for removal is a stage
-> that can ADD; building it is the migration deliverable.
-> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
+> that can ADD; the successor above is that stage (`tests/test_selection_step.py` pins the ADD proof
+> and the union), and what still stands between it and the deletion is §4.4's **F3** measurement —
+> `_s4_merge_stats`'s `added_by_s4 > 0` **while** the FIRST (pre-retry) arm's `coverage_suspect` is
+> False **and no retry fired** (one arm, one flag, one base — see §4.4), i.e. an episode the retry
+> cannot reach. **It has been MEASURED (2026-11-08) and it FIRES** — 4/7 sessions on the
+> **`legacy` arm** (`TORTOISE_S4_DELTA=0`) in `docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json`,
+> 3/7 on that arm in the re-run, 5/7 across their union — **and 2/7 on either run of the
+> `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
+> `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
+> moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
+> two artifacts are one replay holding both arms, and the arms are different CONTRACTS (`legacy`
+> re-emits, `delta` emits only what is missing), so their `added_by_s4` counts are not the same
+> quantity. `docs/evidence/1789-s4-reeemit-tax/README.md` compares them as evidence about the gap
+> channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to
+> the real geometry is measured, so the token-saving RATIO — which is the saving — is undetermined
+> in both signs**. A count without its arm is therefore a claim about neither.
+> Not satisfiable by reasoning about the code: the artifacts are the instrument.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`, `tests/test_selection_step.py`.)
 >
+> ⛔ **WHAT `#11534` MEASURED IS THE TRIGGER, NOT THE STAGE — and it covers ONE of the two gap
+> classes.** The PR ships two pieces inside S2.2: the DETECTOR `vet_gate.partial_gaps` — the
+> statement/clause coverage detector `check_batch` now reports (a char span into the narrative, so a
+> re-extraction has an address to read; it needs no `#2684` span layer) — and its consumer `S2.2b-ADD`
+> (`extractor_v2.run_partial_gap_fill`, behind `TORTOISE_PARTIAL_GAP_FILL`, **default OFF**).
+> ⛔ **Why the `-ADD` suffix:** `S2.2b` is the VET gate of §4.1/§4.2 — a RECORDED decision ("DECIDED
+> 2026-09-25: S2.2b, i.e. HERE") and the value `tests/test_extractor_v4_step_list_consistency.py`
+> pins as `GATE_ID`. One id may not name two stages, so the ADD stage is `S2.2b-ADD` everywhere it is
+> labelled; the `S2.2b` occurrences that mean the gate are unchanged. On the
+> F3 population (the seven recorded sessions) the **trigger** flags a span whose tokens overlap **8 of
+> the 12 `points`** and **1 of the 9 `operators`** that `run_s4` adds. The operator half is not a
+> tuning problem — an operator addition GENERALISES a claim the batch already carries ("a retry path
+> that does not re-establish ownership … defeats any downstream completion check"), so no narrative
+> span is uncovered even though the item is new, and a coverage detector cannot reach it by
+> construction. **So the pre-condition above is met for ADD-from-an-uncovered-span and is NOT met for
+> ADD-by-generalisation**, and `run_s4`'s removal therefore stays gated on the second half.
+> **`S2.2b-ADD`'s own yield is NOT measured** — it depends on whether a model handed a flagged span emits
+> the right item, which needs live sessions and a key, so the coverage half is met by a *trigger*, not
+> by a demonstrated stage. The detector's own cost is measured too — 8.3% of 844 segments flagged —
+> but the flagged population is MIXED (7 genuine clause-level elisions, 4 non-claims and 3
+> structural fragments in the 14 of 35 the record enumerates), so the stage's YIELD is unmeasured;
+> that, not a claim about which class dominates, is why it is armed OFF. The flag rate and the
+> per-session read-through are `docs/evidence/11534-partial-gap/README.md` §2, and the explicit
+> bounds are its §4.
+> (Pinned: `tests/test_extractor_v4_s4_stage_claims.py`.)
 > **On the step *names*:** the code's own stages are **S1–S5** (`[S1] STORY SUMMARY` … `[S5] EMBED`, module
 > docstring), with `S2.2 VET` present in the production path. **`S0` and `S6` have no code
 > counterpart** — those two are v4 design names. ⚠️ **`S2.3` DOES have one; it is DISABLED, not absent:** the
@@ -741,7 +796,7 @@ unfirable (block at the top of §10).
 | **A closed vocabulary** — the stats counter `closed_vocab_rejects` exists | `kind_classifier.py:200` |
 | **A mechanical kNN fast path** → margin gate → `nearMisses` rerank → **batched LLM only for the low-margin tail** | `#1695` |
 | **The deferred pass** — `_collect_classify_items(embed_list)` → `classify_items` → `_apply_classify_kinds` | `extractor_v2.py:4467` / `:4492`, called at `:4803` and `:4888` |
-| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:512`, `:4656` |
+| **The flag** — `TORTOISE_CLASSIFY_LATER`, unset today = *"the LEGACY pipeline"* | `extractor_v2.py:513`, `:4656` |
 | **Jev requires an adapter, a prompt and a parser** — `llm_tail` is a **boolean** switch (`kind_classifier.py:93`), and the ambiguity tail is resolved by a hardcoded prompt plus a JSON parser — ✅ **now built, OFF by default: `s2_decision_seam.classify_decider` replaces the tail's DECISION SOURCE via `KindClassifier(tail_decider=…)`** | `kind_classifier.py:93`, `:309`; `s2_decision_seam.py` (`#5087`) |
 
 **⇒ The step is `TORTOISE_CLASSIFY_LATER=1`, off by default.** Three things are wrong with its current placement, and they are the actual work:
@@ -857,6 +912,8 @@ S2.2b VET              the gate (identifier-only DISCARD) + adversarial      [Je
 S2.3 CLASSIFY          kNN fast path → Jev tail, on SURVIVORS only            [kNN + Jev]
 S3  RESOLVE + D-d      lookup → against-priors semantic dedup
 S5  CONNECT
+S6a EMBED-DECISION     per row, before its write clause is built — the second
+                       question on the S2.2b rule set (G2, #5008)
 S6  COMMIT
 ```
 
@@ -906,19 +963,41 @@ S6  COMMIT
 
 **The step list is the SHAPE, not a complete specification.** Five requirements of this architecture have no step to carry them. They are stated here so that each is placed deliberately rather than implied by the diagram.
 
-**One carries a settled design:** G4's immutability-versus-redaction reconciliation is `§2.4.4` (R1–R4). **Two need an owner ruling:** G5's deletion/relocation half and its S4 clause — *"Which is authoritative until the migration lands?"*. **Two need a step and nothing else:** G1 and G2 — G2's rule set is settled in `STORAGE-ARCHITECTURE.md` §12.2a, so what is missing is its second enforcement point; G3's step is declared in §4.4. ⚠️ **The destructive half's DESIGN question is answered below (*G5's destructive half*) — a pass may only add, never delete, and removal-from-recall is a journaled lifecycle fold alone — but the subsection authorises nothing: whether a relocation pass may ever RUN is still the owner's ruling (`#5333` task 1).**
+**One carries a settled design:** G4's immutability-versus-redaction reconciliation is `§2.4.4` (R1–R4). **Two need an owner ruling:** G5's deletion/relocation half and its S4 clause — *"Which is authoritative until the migration lands?"*. **One needs a step and nothing else:** G1. **G2's step is placed in *G2's step — `S6a EMBED-DECISION`* below**, its rule set settled in `STORAGE-ARCHITECTURE.md` §12.2a; G3's step is declared in §4.4. ⚠️ **The destructive half's DESIGN question is answered below (*G5's destructive half*) — a pass may only add, never delete, and removal-from-recall is a journaled lifecycle fold alone — but the subsection authorises nothing: whether a relocation pass may ever RUN is still the owner's ruling (`#5333` task 1).**
 
 | # | the gap | why it matters |
 |---|---|---|
 | **G1** → `#5064` (the span schema + passthrough exist, but **`extractor_v2.py` emits no `span_start`** (the repo's *document* extractor does — `docs_miner.py:373`)) · `#4894` (narrative) | **No step PERSISTS the narrative or the raw-fact span.** S6 is *"write entities + connections + metadata/lifecycle"*. §4.0 has no persistence purpose beyond S6. | ⛔ **D1 and §2.4 are not implementable from the steps as written.** If the narrative and the span are not written by a named step, they are not written. **Needs an explicit persistence step (or an explicit S6 sub-job).** |
-| **G2** → `#5008` | **No EMBEDDING-DECISION step.** `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*) — **and this step list has no home for it.** S2.3's kNN path **silently assumes every candidate is embedded.** | ⛔ **The two documents would ship contradictory designs.** The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** (§12.2a) — so the second enforcement point needs a home in this step list. |
-| **G3** → `#8495` | **Per-step FAILURE POLICY** — **declared in §4.4:** every step states fail-open or fail-closed, the invariant that survives, and its retry/transaction boundary. | The S3 direction is the one that must be **REVERSED from the natural default**: on an unresolved lookup the candidate is `HOLD` — never asserted `new` — because the natural fail-open MANUFACTURES DUPLICATES, the exact failure S3 exists to prevent. §4.4 also gives partial S6 **one transaction boundary** (S3-attach · S5-connect · S6-commit) and the re-narrate tie-break (**keep the first unless the second is strictly better**). ⚠️ **`#5095` closed the RECORD half** — the renderer no longer says *"assume everything is new"*, the `link_before_create` record emits `found: null` for a candidate whose own query did not run, and the run reports an `identity` block. **The MINT half is still `#5087`'s**: nothing suppresses a create, and §4.4's carry-forward store does not exist. |
+| **G2** → `#5008` | **EMBEDDING-DECISION step: `S6a`** (*G2's step*, below). `STORAGE-ARCHITECTURE.md` §12.2a **decides** the `EMBED` gate exists (*"a row can be worth KEEPING but not worth EMBEDDING"*, *"the lever is what gets an embedding"*). The `EMBED` gate and the `KEEP` gate **share one rule set and enforce at TWO points** — so the second point is a named sub-step of S6, not an implicit property of the write. | Without a named home the two documents carry contradictory designs: a rule the storage doc calls its central lever, and a step list in which no step asks its question. |
+| **G3** → `#8495` | **Per-step FAILURE POLICY** — **declared in §4.4:** every step states fail-open or fail-closed, the invariant that survives, and its retry/transaction boundary. | The S3 direction is the one that must be **REVERSED from the natural default**: on an unresolved lookup the candidate is `HOLD` — never asserted `new` — because the natural fail-open MANUFACTURES DUPLICATES, the exact failure S3 exists to prevent. §4.4 also gives partial S6 **one transaction boundary** (S3-attach · S5-connect · S6-commit) and the re-narrate tie-break (**keep the first unless the second is strictly better**). ⚠️ **`#5095` closed the RECORD half** — the renderer no longer says *"assume everything is new"*, the `link_before_create` record emits `found: null` for a candidate whose own query did not run, and the run reports an `identity` block. **The MINT half is now `#10997`'s**, for the operator endpoint: an unresolved identity is HELD with its edge and drained exactly once on a run whose lookup resolved — **nothing suppresses a create for an item the MODEL emitted**, and the store is opt-in, so §4.4's carry-forward is reachable only where a caller supplies one. |
 | **G4** → `#8496` | ⛔ **No secret redaction + an append-only immutable raw layer = IMMORTAL SECRETS.** ✅ **RECONCILED IN `§2.4.4` (R1–R4): redact BEFORE the append; the already-persisted case is a retention erasure reusing the SAME marker; every clean-scan claim carries `(scanned, total)`; the layer keeps its Postgres home and its existing retention path.** | ⚠️ **`#4911` and `#8496` are one problem, not two** — §2.4.2 makes the raw layer **append-only by design**, so **a secret captured once is a secret retained forever.** Redaction must be designed *with* the layer, or the layer's immutability becomes a liability. **The control ships with the layer, which `G1` (`#5064`) still owes.** |
 | **G5** → `#5333` · `#5059` · `#8500` (the S4 clause) | **No migration or backfill for the ~25k existing nodes.** | No backfill, no re-extraction path, and **no decision AUTHORISING a relocation pass (task 1)** — the DESIGN itself is recorded below (*G5's destructive half*): a pass may only add, a physical delete is foreclosed, and the ~4,900 `the <X>` rows stay in recall behind the status predicate (the report-only ledger is `#5059`'s; the relocating half's measured state is below). Also unaddressed: **what happens to the live S4 `merge_embed_lists` when S4 leaves the step list** — the code and the design must not disagree. |
 
-**⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point.** Until G2 is closed, **the storage doc's central lever has no implementation site.**
+**⚠️ And G2 is where the two documents bind:** `STORAGE-ARCHITECTURE.md` §12.2a's decided rule (*one rule set, two enforcement points*) **requires a step to hold the second point**, and `S6a` holds it. The next subsection states the step, its position, and the two premises that had to be corrected before the position could be stated truthfully.
 
-**The five gaps and their homes:** **G1** `#5064` (the span schema + passthrough exist; what is missing is that *`extractor_v2.py` emits no `span_start`* — the repo's document extractor does (`docs_miner.py:373`), so this is scoped to the session/extraction pipeline, not the whole product) + `#4894` (narrative placement) · **G2** `#5008` · **G3** `#8495` (**declared §4.4**) · **G4** `#8496` + `#4911` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**.
+**The five gaps and their homes:** **G1** `#5064` (the span schema + passthrough exist; what is missing is that *`extractor_v2.py` emits no `span_start`* — the repo's document extractor does (`docs_miner.py:373`), so this is scoped to the session/extraction pipeline, not the whole product) + `#4894` (narrative placement) · **G2** `#5008` (**`S6a`**, below) · **G3** `#8495` (**declared §4.4**) · **G4** `#8496` + `#4911` · **G5** `#5333` + `#5059` + `#8500` (the S4 clause). The owning epic is **`#5087`** (E1 — the selective write path) under tracking **`#5086`**; end-to-end acceptance is capstone **`#7949`**.
+
+#### G2's step — `S6a EMBED-DECISION`: the decision, its position, and two premises corrected to place it
+
+**The step asks ONE question and it is not `S2.2b`'s.** `S2.2b VET` asks *"should this candidate exist at all?"* (`KEEP` / `DISCARD`). `S6a` asks *"given that this row is being written, does it carry a vector?"* (`EMBED` / `NO-EMBED`). Both ask it of the **same rule set** (`embed_gate.RULE_SET is value_gate.RULES`), which is §12.2a's decision: a second, independently-derived rule set *"would be exactly the drift that criterion exists to prevent"*.
+
+**Where it runs.** Per row, **inside `S6 COMMIT`, before that row's write clause is built** — so a `NO-EMBED` row is still written and simply carries no vector. Its implementation site is `tortoise/embeddings.py::encode_for_row`, and that is **ONE seam**, not a second enforcement point: the reads, backfills and repairs that legitimately re-encode (the re-encode tool, the batched turn writer) call the raw `encode_for_store` and are outside it, which is the boundary §12.2a asks for. The population of writers that reach the seam is `tools/dod_5090_probe.py`'s DoD row 1.
+
+**Its position, stated as three ordering facts:**
+
+| # | the fact | why it holds |
+|---|---|---|
+| 1 | **after `S2.2b VET`'s `DISCARD` is applied** | `vet_gate.apply_vet` **removes** a discarded candidate from `embed_list`, and that list is what S2.3, S3, S5 and the commit all read. So **`DISCARD` precedes `EMBED` as a consequence of the list**, not as a check inside the gate — a discard **that `apply_vet` actually applies** is never offered to `S6a`. ⚠️ *Applied*, not *verdict*: `apply_vet`'s Rule 2 **downgrades** a `DISCARD` to `KEEP` for an entity still referenced by a surviving candidate (`vet_gate.py::apply_vet`), so a downgraded candidate is kept and is therefore legitimately offered. `classify_consolidation` cannot resurrect one either: it runs inside the write pass and never re-adds a candidate to the list. |
+| 2 | **no ordering constraint against `S2.3 CLASSIFY`** | G2 was first stated as *"S2.3's kNN path silently assumes every candidate is embedded"*. Measured against the tree, that is not so: `KindClassifier` encodes the **candidate's own text** (`self.encoder.encode`) and matches it against a **kind index** built from the pack's kind vocabulary (`kind_index.KindIndex.nearest`). It never reads a stored row vector, so whether a row carries one cannot change its answer, and `S6a` feeds nothing into it. |
+| 3 | **before the row's write clause is built** | The seam returns the vector *before* the write is issued, so no row stores a vector the decision did not authorise, and a `NO-EMBED` verdict cannot be overtaken by a later pass that writes the same row. |
+
+⚠️ **And not "before `execute_embed`", which is the order that reads as equivalent and is not.** `execute_embed` **issues no graph write**: it returns a `payload` dict (`extractor_v2.py::execute_embed`), and the commit that reaches `S6a` is the SDK / projection writer, *after* it returns. (Its optional `hold_store` argument can append a durable identity-hold record — `extractor_v2.py::_hold_endpoint` calls `hold_store.hold(...)` — but a hold record is not a graph row write, and the shipped call site passes no store at all.) Stating the constraint against `execute_embed` would place the step in a pass that writes no graph row — the placement the ordering is supposed to pin, asserted about the one step where it cannot be observed.
+
+**The asymmetry between the two points, stated because it is load-bearing.** The **`VALUE`** gate is subordinate to `VET` by ARMING: its flag switches the pass on, and it runs *inside* `vet_gate.vet_candidates`, so on its own it would be inert (the `vet_enabled` local that guards that pass — its `_value_gate_enabled` term (`tortoise/extractor_v2.py::_value_gate_enabled`) — folds it in for exactly that reason). The **`EMBED`** gate is subordinate to `VET` by **PRECEDENCE**: it is read at submission, so folding it into that same `vet_enabled` local would arm nothing while appearing to arm the gate — and the precedence that actually protects it is fact 1 above, a discarded candidate being absent from the list before the seam is ever reached. Correcting the reading that both flags are "folded in" is not a re-decision; it is what the code does, and `tests/test_embed_gate_5008.py::test_the_VET_pass_folds_the_VALUE_gate_and_never_the_EMBED_gate` pins it.
+
+**Pinned by code, not by this paragraph:** `tests/test_embed_decision_step_11086.py` drives a `DISCARD`ed candidate through the pass and through `execute_embed`'s payload, and asserts it is absent from **both** — the list every later step reads, and the payload the commit is handed. It is pinned as a **DELTA**: the same pair with the predicate's kill-switch pulled, where the candidate IS present in both, so the armed-arm assertion measures the removal rather than the input. It also asserts the `VET`-wins direction with both gates armed.
+
+**Its failure policy is S6's, not a ninth declaration.** `S6a` is a sub-step of `S6 COMMIT`, so §4.4's `S6 COMMIT` row governs the transaction boundary it sits inside, and its own direction is **FAIL-OPEN**: no verdict — an unparseable candidate, a predicate that raises, an identifier merely *present* inside a longer claim — is an `EMBED`. The two mistakes are not symmetric. A false `NO-EMBED` silently destroys recall for a row nobody can re-find, while a false `EMBED` costs bytes and is recoverable from the text the node still carries, so this step may never be the reason a vector is missing. That is `tortoise/embed_gate.py::embedding_verdict`'s contract, stated here rather than left to a reader to infer from the module.
 
 #### G5's destructive half — the target and the journaling arm EXIST; the bar, the arbiter and the RULING do not (`#5333`)
 
@@ -1003,8 +1082,9 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 | **S1 NARRATE** *(model)* | **FAIL-OPEN onto the RAW** — retry once, then proceed `narrative_absent` with the raw as the coverage reference, recorded `degraded`. | D3-Option 4: the narrative is the **focus**, the raw is the **source** (§S2.1: the live call already passes `edus`). The narrative is not the transport of record, so its failure must not become the run's failure (I2). | One retry. A run NEVER proceeds with neither a narrative nor the raw; S2.2's coverage check reads whichever artifact was actually available. |
 | **S2.1 EXTRACT** *(model, per chunk)* | **FAIL-CLOSED per chunk, HOLD at the run level** — a chunk failing after its retry contributes no items and joins the run's `HOLD` set. | A failed chunk must never read as *"that chunk had nothing"* (I2). It is a **coverage gap**, and S2.2 Level 2 — not silence — is what makes it visible. | One re-prompt (the `_PARSE_RETRIES = 1` shape). Nothing is written for a held chunk. |
 | **S2.2 VET** *(Jev)* | **FAIL-OPEN** — a failed Level-1 question returns `KEEP`; a failed Level-2 verdict triggers **no** re-narrate and the batch proceeds. | *"a wrong keep is noise; a wrong drop is memory loss"* (§S2.2). | A VET failure may NEVER produce `DISCARD`. The missing verdict is recorded, so the gate's coverage is inspectable. |
+| **S2.2b RE-NARRATE** *(model, at most once)* | **FAIL-OPEN onto the FIRST ARM** — a retry that raises after the second arm has already re-bound the pipeline's state restores **every** binding it set and the first arm's capture ships unchanged. | A partial restore is worse than the raise: it would carry the second arm's list beside the first arm's narrative — a run that reports success and is internally inconsistent. The first arm's capture is complete by construction (it returned), so it is the only state safe to leave behind. | No retry of the retry (§S2.2: *once, then accept*). The failure is recorded on `stats["renarrate"]` (`fired: False`, `trigger`, `retry_failed`, both arms' metrics), on `errors`, and in `error_census` — never only in `warnings`, or the run reads clean. ⛔ **The union does NOT happen on this path**: the second arm's items are dropped rather than merged (`items`/`merged`/`decisions` are absent from the record), which is why F3's population is selected by `retry_failed` and not by `fired` alone. |
 | **S2.3 CLASSIFY** *(Jev + kNN)* | **FAIL-OPEN, never raises** — the candidate keeps `unclassified`; the run records it in its census. | A wrong kind is worse than no kind: `_find_existing_entity` uses `kind` as its exact-match discriminator, and `_select_pack_kinds` plus the chain enforcer key on kinds — so a guessed kind corrupts BOTH resolution and enforcement silently, while `unclassified` is honest. | Classification is OFF the write path: an `unclassified` candidate still resolves (on the bare-form path, §4.2 constraint 4) and still commits; the degraded exact-match coverage is recorded, because §4.2 warns that an unmatched kind is where duplicates are manufactured. |
-| **S3 RESOLVE** — the lookup *(mechanical)* | **FAIL-CLOSED on the identity assertion.** A degraded lookup returns *no priors* and must NEVER be read as *"these are new"*; the affected candidates are `HOLD`. | ⛔ **This is the whole of G3.** The natural fail-open marks every candidate `new` and **MANUFACTURES DUPLICATES** — the exact failure S3 exists to prevent. ✅ **The renderer half is closed (`#5095`): it no longer invites `new`** — it states that the lookup did not run (or did not complete), that identity is UNRESOLVED rather than absent, and that no `link_before_create` entry may report a search that did not happen. ⛔ **The MINT half is open**: nothing suppresses a create, so duplicates are still minted. | Bounded reconnect, then `HOLD`. A later pass re-runs the lookup; the candidates are neither minted nor discarded. |
+| **S3 RESOLVE** — the lookup *(mechanical)* | **FAIL-CLOSED on the identity assertion.** A degraded lookup returns *no priors* and must NEVER be read as *"these are new"*; the affected candidates are `HOLD`. | ⛔ **This is the whole of G3.** The natural fail-open marks every candidate `new` and **MANUFACTURES DUPLICATES** — the exact failure S3 exists to prevent. ✅ **The renderer half is closed (`#5095`): it no longer invites `new`** — it states that the lookup did not run (or did not complete), that identity is UNRESOLVED rather than absent, and that no `link_before_create` entry may report a search that did not happen. ⛔ **The MINT half is open, and the blanket create gate is still not enforced**: a Point or Entity the MODEL itself asserted is still created on an unresolved lookup (the S5-Job-2 half, `#10998`), so §4.4's `HOLD` is a disposition for the mint-before-wire path below, not a blanket create gate — I2's blanket suppression is deliberately NOT this mechanism's shape. That path is `#10997`'s: `_mint_endpoint` is licensed by a lookup that RESOLVED, and on `unresolved`/`partial` the ref is held with its edge and drained exactly once, so no `new` is asserted about a check that did not happen. | Bounded reconnect, then `HOLD`. A later pass re-runs the lookup; the candidates are neither minted nor discarded. |
 | **S3 RESOLVE** — the disambiguation *(Jev `Choice`)* | **FAIL-CLOSED on `new`.** A failed disambiguation `HOLD`s the candidate — unless the lookup returned exactly ONE exact-key match, which attaches mechanically with no model. | An unvalidated attach fuses two distinct entities' evidence, violating §4.2's union-merge rule (*"never lose either side's evidence"*). Neither direction is safe without a decision, so the candidate waits. | The `Choice` is re-raisable. `HOLD`, never `new`. |
 | **S3 RESOLVE** — the attach / fusion | **FAIL-CLOSED** — the run's commit fails as a whole (I3). | The fusion's write is S3's **action** but not a separate **write site**: §4.2's three-sites rule (`#5092`) says which step *decides* each operation, not that each writes in its own transaction. | Applied inside the single commit below. |
 | **S5 CONNECT** — Job 1 (this batch's own story) | **FAIL-OPEN.** The nodes still commit; the missing intra-batch edges are recorded `connections_incomplete`. | Job 1's failure is *"the batch doesn't hang together"* — a **quality** problem in the reading, and the edges are re-derivable from the same narrative. | Re-derivable on a later pass; the record, not a silent hole, is what satisfies I2. |
@@ -1019,18 +1099,99 @@ New entities + connections + **metadata**. The metadata includes **lifecycle eve
 
 > **Keep the FIRST narrative unless the second is STRICTLY better on the SAME metric that triggered the retry** — the keep-rate, computed the same way. **A tie keeps the FIRST.** Both rates are recorded, so the choice is inspectable.
 
-**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate. The losing arm's extraction is discarded **with** its narrative — the re-extraction supersedes it **inside the same run and the same transaction** (I3), so no run ever commits a mixture of the two narratives' items.
+**Why this direction:** the retry exists because the first narrative produced a poor *yield*, and *"a retry, not a loop"* means the replacement must **earn** acceptance. A tie is not an improvement, and a rule that kept the second on a tie would let the accepted keep-rate fall on a coin flip. **Invariant:** the metric and the comparison are fixed **before** the retry fires, and a re-narrate can never lower the accepted keep-rate.
+
+**The trigger, and the ONE knob that arms it.** `extractor_v2._renarrate_trigger` reads three signals, in order: `coverage_suspect` on the S2 batch (*prose in, zero candidates out* — armed by construction and, **crucially, refused when S2 raised**, because a failed call's empty list is byte-identical to a genuinely empty one and is a transport failure the stage already retried); a batch-level `RENARRATE` from an injected arbiter (the token `vet_gate.BATCH_OUTCOMES` has always carried); and a keep-rate below a hand-set threshold. That third arm is armed **only** by **`TORTOISE_RENARRATE_KEEP_RATE`** — accepted when `0.0 < v <= 1.0`, and any other spelling (unset, empty, `0`, `-1`, `1.5`, `banana`) leaves it **DISARMED**. The knob is named here because §4.2 makes that threshold a HUMAN calibration over tens of real sessions, and a switch no document declares cannot be set by the operator it is written for. What a retried run decided rides `stats["renarrate"]`: `trigger`, the pick (`items` / `narrative`), `merged` (the union's accounting — `kept_from_first` / `added_by_second` / `corrected_by_second`), `decisions` (each arm's per-item verdicts, which have no other home — see the DISCARD half of §4.4's union rule below), `emphasis`, both arms' `chunks`, and each arm's `candidates` / `discarded` / `kept` / `keep_rate` / `coverage_suspect` / `s2_failed` — ⛔ where `coverage_suspect` is **three-state**: `True`/`False` are `check_batch`'s verdict on a call that answered, and **`None` means there is no verdict because S2 raised**. A reader counting `coverage_suspect is False` (F3, below) therefore cannot count a batch that never existed — the fail-closed direction for a count whose `0` is a deletion's green light.
+
+**What the run COMMITS is the union of both arms' items — the tie-break decides the NARRATIVE only.** The shipped list is `merge_embed_lists` over the two arms (the second wins an identity-key collision, the first arm's items are preserved), so both arms' extractions reach the graph. ⛔ **This holds on a retry that COMPLETES; a FAIL-OPEN retry ships the first arm's capture alone** — the pick is discarded rather than published, so no `items`/`merged`/`decisions` ride the record and the second arm's extractions do **not** reach the graph (see the `S2.2b` row of the per-step policy above). Only ONE narrative is recorded, because exactly one `story`/`story_arc` reaches S4's prompt and `execute_embed`; which one is what the tie-break above settles. The union is re-vetted wholesale before it ships, so a first-arm **MERGE** flag on an item that SHIPS is re-derived rather than dropped — but a first-arm **DISCARD** is not: the item it removed is absent from the union, so the re-vet pass never judges it, and its verdict rides `stats["renarrate"]["decisions"]`. ⛔ Do not read the re-vet as a substitute for those verdicts; that is the `#5005` silent-discard reopened on the retried path. On the arm armed by construction (`coverage_suspect`) the first list is empty and the union IS the second arm's list; the merge is what keeps the disarmed keep-rate arm from silently dropping the losing narrative's items.
+
+> **OVERRIDES:** §4.4's earlier *"the losing arm's extraction is discarded **with** its narrative"* — **retired by the owner's ruling of 2026-11-08 on `#11002`**: *"the retry must union both attempts with the same identity-key collision rules the existing merge uses — that is what makes it a successor rather than a replacement."* E4's merges-not-replaces property (`#1536`) must survive into the successor, which is why `run_s4`'s removal is gated on a successor that **preserves** that property — **a code change, tracked at `#11534`, NOT a measurement**: F3 was run on 2026-11-08 and it FIRES, so the measurement half is discharged and `run_s4` stays (see the F3 paragraph immediately below for the numbers and the two clauses that remain inferred).
+
+**The removal's falsifier — F3, defined here because two places cite it by that name.**
+`run_s4`'s removal (the `#8500` migration deliverable, executed under `#11002`) was gated on **one**
+measurement — an eval-lane run, not a code change. **WHAT THAT INSTRUMENT ACTUALLY MEASURES, and
+what it does not** — stated because the gap matters for an irreversible deletion. The two committed
+`docs/evidence/1789-s4-reeemit-tax/` artifacts (7 real sessions each) record, per arm and per
+session, `s2_items` / `s4_items` / `merged_items` / `added_by_s4` / `corrected_by_s4` and the
+added/corrected item lists. They record **no `check_batch` block and no `stats["renarrate"]`**, and
+that is structural rather than an omission: the instrument (`tools/s4_reeemit_tax.py`) replays
+`run_s4` directly over each session's recorded S2 list and never calls `extract_session_v2`, so the
+pipeline's coverage flag and its retry counter do not exist on those rows. So of F3's three clauses
+**one is measured and two are not:** `added_by_s4 > 0` is measured — **4/7 primary, 3/7 re-run,
+5/7 across the union on the `legacy` arm** (`TORTOISE_S4_DELTA=0`), and **2/7 on either run of the
+`delta` arm**, which is DEFAULT-ON — while the flag clause is an INFERENCE from the artifacts'
+own S2 item counts (29–49 in every one of the 28 session-runs) and the retry clause is a property
+of the instrument's construction (no pipeline run ⇒ no retry). ⚠️ The inference is not free: the
+artifact stores COUNTS, and `check_batch`'s `candidates` applies a stricter predicate (a `Mapping`
+item with non-empty `name or content`), so the counts do not by themselves pin the flag. Both
+readings being above zero is what the decision rests on, so `run_s4` **stays** and the removal
+moved to **#11534** — where the pipeline-level half (`stats["renarrate"]["first"]
+["coverage_suspect"]` and `fired` over a real `extract_session_v2` run) is recorded as the
+measurement a successor owes. ⛔ **Name the arm whenever this number is quoted:** the two arms are
+DIFFERENT CONTRACTS (`legacy` re-emits, `delta` emits only what is missing), so their `added_by_s4`
+counts are not the same quantity — the evidence README compares them as evidence about the gap
+channel (12/9 legacy vs 6/6 delta gap additions) and states that **neither arm's sensitivity to the
+real geometry is measured, so the token-saving RATIO is undetermined in both signs**.
+
+On the frozen corpus, count the sessions
+where `_s4_merge_stats`'s `added_by_s4 > 0` **while the FIRST (pre-retry) arm's `coverage_suspect` is
+False** — **restricted to sessions where the retry did not fire**
+(`stats["renarrate"]["fired"]` is `False`). ⛔ **`fired: False` describes what shipped, not how
+many arms ran.** A retry whose tail raised publishes `fired: False` as well, with the arm-choosing
+`trigger` and a `retry_failed` string beside it, and its first arm's capture restored binding by
+binding — so such a run belongs in this population, but must be selected deliberately, by
+`retry_failed`, rather than by the flag alone. ⛔ **Whose flag, spelled out, because a retry makes it
+two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
+run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
+on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
+SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
+unreachable for this count is the `fired is False` RESTRICTION, not any property of the second
+arm's flag. ⛔ **But the record does NOT carry it on MOST of this population — which is why this clause is
+still an INFERENCE here.** `stats["renarrate"]` is `{"fired": False}` ALONE when the retry never
+started (`extractor_v2.py`'s `renarrate_stats`, pinned in `tests/test_selection_step.py`), so a
+no-trigger row has no `first` block and no `coverage_suspect` to read. The first arm's own
+`coverage_suspect` — `stats["renarrate"]["first"]["coverage_suspect"]` — exists whenever the retry
+STARTED: on a fired run, and equally on a fail-open run, whose `fired: False` the flag alone cannot
+separate from a no-trigger row. Measured on that path, the record is
+`{"fired": False, "trigger": "coverage_suspect", "retry_failed": …, "first": {…, "coverage_suspect":
+true}}`. F3's restriction therefore removes the FIRED rows but not the fail-open ones; those carry
+`first` and are selected by `retry_failed`, as above. The nearest substitute
+is **not** the same quantity: `vet_candidates` (`vet_gate.py`) applies `check_batch` to the list AFTER
+the `route_mentions` removal in `extractor_v2.py`, whereas the arm's flag is `check_batch` on the
+PRE-`route_mentions` S2 output — and `route_mentions` can shrink that list to zero, so a session that
+held a mention can read `False` on the arm and `True` on the substitute. Since F3 counts only
+`coverage_suspect is False` sessions, reading the substitute can only REMOVE episodes from a count
+whose `0` is the green light to delete `run_s4`. Recording the first arm's flag on the NON-FIRED
+return, so F3 reads one surface on every run, is therefore part of what **#11534** owes — and until
+it exists, this clause is quoted as an inference and never as a measurement. ⛔ **And whose BASE, which is the second half of the same trap.**
+`added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
+S4's contribution would be measured against a bigger base and understated — on precisely the
+population where a retry fired for a reason other than coverage (an injected arbiter). Restricting
+the count to non-retried sessions makes both halves unambiguous: one arm, one flag, one base. The
+population is therefore "S4 added items, the coverage check did not flag the batch, and no retry ran".
+That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
+re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
+`coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the
+total-loss case only, and the removal's pre-condition is a stage that can ADD in the cases S4
+currently rescues. `0` over the corpus is the removal's green light. ⛔ It is not satisfiable by
+reasoning about the code — the count comes from a run — so no lane may delete `run_s4` on the
+strength of this section alone. (The label **F3** is the one the `#11002` issue's risk table and the
+drift marker over the step list already use; this paragraph is its definition of record.)
 
 **⚠️ This section is a SPEC, not a description of what runs — and `#5095` closed HALF of the gap.** The load-bearing instance is S3. `search_graph` degrades instead of raising (correct, `#3679`), and its renderer used to tell the model *"no existing items available; assume everything is new"* (`_render_search_results`, `extractor_v2.py:2353` at `7d348d351` — the revision this citation has always been pinned to) — the inverse of I1, and the duplication-manufacturing direction G3 names.
 
-**What runs now (`#5095`).** The claim about a check that never happened is gone from both artefacts, and the run reports what it did not establish:
+**What runs now (`#5095` + `#10997`).** The claim about a check that never happened is gone from both artefacts, and the run reports what it did not establish:
 
 - **The lookup's state is READ, not assumed** — `tortoise/failure_policy.py` (`lookup_state`) returns `resolved` / `partial` / `unresolved` from `search_graph`'s new `query_coverage` + `query_results`, which report the queries that actually ran. `degraded` alone cannot express it: the degrade handler is reachable only from the FIRST query (so a degraded lookup has **zero** priors), while a failure on query 2..N is swallowed and returns `degraded: False` with a genuinely **partial** prior set. `partial` is the common state, not an edge case: a real S2 output derives 18 queries against the shipped budget of 15, and the legs are iterated `object → event → point`, so the leg a truncation starves is the **point** one — the dedup leg.
 - **The prompt states the truth** — `_render_search_results` renders `failure_policy.lookup_note`, which says the check did not run (or did not complete), that existence is **UNRESOLVED not absent**, that nothing may be treated as new, that no `link_before_create` entry may report a search that did not happen (omit it) — and, because this clause is read by the S4 GAP REVIEWER, it keeps the **emission** requirement: the candidates must still be emitted.
 - **The record states the truth** — `execute_embed`'s `link_before_create` uses `failure_policy.created_record`, whose `found` is `false` **only** when THAT candidate's own query ran and matched nothing; otherwise it is `None`. Per candidate, not per run: a bounded lookup leaves some candidates checked and others not.
-- **The run reports it** — `extract_session_v2` returns an always-present `identity` block (state, reason, the coverage counters, per-class candidate and unresolved counts) and warns loudly when a candidate's own identity query did not run (and, separately, when the lookup was bounded but every candidate's query ran, and when the lookup did not run at all with no candidate to check — three different facts, and each gets its own sentence **on a run that reaches this block**; the empty-conversation early return precedes it and has no candidate, so it emits no `S3 identity` line). Nothing is suppressed: **I1's *"never mint it"* is still not enforced**, and duplicates are still minted.
+- **The run reports it** — `extract_session_v2` returns an always-present `identity` block (state, reason, the coverage counters, per-class candidate and unresolved counts) and warns loudly when a candidate's own identity query did not run (and, separately, when the lookup was bounded but every candidate's query ran, and when the lookup did not run at all with no candidate to check — three different facts, and each gets its own sentence **on a run that reaches this block**; the empty-conversation early return precedes it and has no candidate, so it emits no `S3 identity` line). Nothing is suppressed.
 
-**What is still absent, and it is the whole of the remaining code half:** the `HOLD` gate itself — a **create** gate inside S5, which is *not* `execute_embed({})` (that is the sole carrier for retractions, supersessions and chain notes, so suppressing it wholesale drops memory I2 forbids dropping); and the persistence that carries a run's held set forward. `#5087` (E1) remains the code-owner of both, and `config/v4-mechanisms.yml` keeps `failure_policy` at `not-implemented` for exactly this reason. <!-- v4-mechanism: failure_policy state: not-implemented -->
+**What runs now — the MINT half (`#10997`).** Until `#10997`, the one place the run still asserted `new` was S5's mint-before-wire pre-pass (`_mint_endpoint`, `#2552`): an operator endpoint the model did not also emit was materialised as a `statement` Point **from the model's ref**, unconditionally — the pre-pass never read `lookup_state`, so on an unresolved (or `partial`) lookup it fabricated a Point asserting an identity nothing had checked, which is the duplicate manufacturer G3 names.
+
+That pre-pass is now **licensed by a lookup that RESOLVED and by nothing else**: on `unresolved`/`partial` the endpoint is **HELD** — together with its **edge** (`#2552`: holding the endpoint alone trades a duplicate for a lost operator edge, which I2 forbids) — and reported on the run (`held`, `stats.held` as an **identity** count, and one warning naming the count, the state and whether it persisted). Nothing is minted and nothing is dropped. On a later run whose lookup resolves, the hold is **drained exactly once**: `claim` is the only path to a mint, `confirm` binds the key to the id it minted and refuses a second, different one, a key is confirmed **only after the `#2552` prune** keeps its Point (otherwise the claim is released back to `pending`, so a pruned item is never resolved into nothing), a claim left behind by a process that **died** between `claim` and the settle is **reclaimed** by the next drain (an idle scan over the record's own `claimed_at`, `HOLD_CLAIM_IDLE_SECONDS` — `pending()` is the drain's entire input, so a claim nothing releases is an item no later run can see), and a RESOLVED key is never re-armed by a later ambiguous run. The store is `tortoise/identity_hold.py` — an append-only per-graph JSONL whose home is argued in its docstring: **not the graph** (a held candidate is not a belief, and a node would let the next lookup resolve the ambiguity against the held copy of itself), **not the journal** (`derived = replay(journal)` folds graph state), **not Postgres** — the `capture_spool` convention. It is **opt-in** (`hold_store=`, `open_store()`); a run with no store still reports the hold (`persisted: False`) and says so, so the limitation is loud instead of silent.
+
+**What is still absent, and it is the whole of the remaining code half:** the `HOLD` gate for a **Point or Entity the MODEL emitted** — the S5-Job-2 create gate, which is *not* `execute_embed({})` (that is the sole carrier for retractions, supersessions and chain notes, so suppressing it wholesale drops memory I2 forbids dropping); and, because the store is opt-in, a capture that never supplies one cannot carry its held set forward. `#5087` (E1) remains the code-owner of both, and `config/v4-mechanisms.yml` keeps `failure_policy` at `not-implemented` for exactly this reason. <!-- v4-mechanism: failure_policy state: not-implemented -->
 
 ---
 
@@ -1155,7 +1316,7 @@ A carve-out scoped only to **user-personal state** (personal bests, schedules, p
 | **Personal state** | *"personal best 5K = 27:12"* | retained (E2 carve-out — **`#1534`**) | retained |
 | **Operational / decision values** | *"p99 latency 480 ms at 3k rps"* | **RETAINED** | retained |
 
-**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:145-171`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:230`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:299`), and `_granularity_text()` (`:732-744`) appends `STATE_VALUE_CARVE_OUT` to S1.
+**Operational values are DURABLE.** `STATE_VALUE_CARVE_OUT` (`extractor_v2.py:325-341`) carries an operational-value paragraph — *"a concrete value that is the SUBJECT of a decision, observation, or plan is DURABLE too… Measurements, deadlines/freezes, thresholds/TTLs, versions, and counts are carried VERBATIM"* — covering *"the p95 hit 4.2 seconds"* and *"a ten minute TTL"*. The rule reaches the model: a `VALUE_FIDELITY_RULE` (`:455`) goes into the S2/S4 `{anti_routine}` slot via `_s2s4_rules()` (`:556`), and `_granularity_text()` (`:1444`) appends `STATE_VALUE_CARVE_OUT` to S1.
 
 **⇒ The design requires ENFORCEMENT BY DEFAULT — the mechanism is not the gap.** The **S2.2b** identifier-only predicate is the rule in `tortoise/value_gate.py`: `value_gate._REFERENCE` (`#\d{1,6}(?!\d)`) with `identifier_only()` as a whole-residue test, imported by `extractor_v2.py:72`, toggle `_value_gate_enabled()` (`:724`). ⛔ **THE GATE SITE IS `S2.2b`, NOT `E7`** — the `^#\d{3,}$`-style anchored pattern is not the rule. **Enforcement by default is required**, and the predicate is **subordinate to VET** (`_value_gate_enabled()` folds into `vet_enabled`). ⛔ **This is a default and a subordination — not a missing mechanism. Do not build `valueGate`.**
 
@@ -1618,7 +1779,11 @@ two-arm ablation on the frozen `tests/eval/write_path` corpus (`fixtures_hash
 sha256:dd7e8520…`, 7 sessions), pre-registration commit `a1075dfc2`, bundle
 `docs/evidence/5087-hypothesis/`.
 
-**RESULT: `HYPOTHESIS-FALSIFIED (ratio 0.870)`.**
+**RESULT: `HYPOTHESIS-FALSIFIED`.** Two runs on this corpus report **`0.870`** (run 1) and **`0.988`**
+(run 2, the run whose ordering provenance is whole); **neither clears the pre-registered `<= 0.75`
+bar.** ⛔ **Quote `0.988` — run 1's log was withdrawn from the checked set by the ruling on `#10463`,
+and the `0.870` magnitude overstates the effect.** Read *"Which run's number"* below before quoting
+either figure; the table that follows is run 1's, retained because it is what the withdrawn log says.
 
 | | S3-OFF | S3-ON | bar |
 |---|---:|---:|---|
@@ -1635,11 +1800,50 @@ created-per-real-fact moves 6.04 → 6.18 — a smaller extraction, not a leaner
 (range 0.706–1.029; 5 of 7 sessions fell, one rose, one flat), and the one session that is blind in both arms
 (`wp01`, fresh graph) still shows −13 %, which is the run-to-run noise floor at this n.
 
+### ⚠️ Which run's number — run 1's log was WITHDRAWN, and run 2's `0.988` is the figure the epic quotes
+
+**Run 1** (`s3-ablation-a1075dfc.log`, ratio `0.870`, the table above) was ruled **withdrawn from the
+checked set** (`#10463`, ruling comment `6564634454`, carried by PR `#10544` as `108cec779`): its
+pre-registration and its log landed in ONE squash commit (`cfa3de857`), so the ordering property —
+the registration strictly precedes the scored log — could not be shown from the merged history. Its
+**contents are untouched** and **no number in it is retracted**; it sits in
+`docs/evidence/5087-hypothesis/withdrawn/` beside a note,
+`docs/evidence/5087-hypothesis/withdrawn/WITHDRAWN.md`, that states exactly what is and is not
+retracted, and the guard's glob does not read that directory.
+
+**Run 2** is the re-measurement the ruling ordered — the registration already published on the base
+branch, bars read from the registration *commit* (`--prereg a1075dfc2`), corpus hash re-derived, fresh
+graph per arm (`s3-ablation-a83c23a8.log`, PR `#10554` as `45120abbd`):
+
+| | S3-OFF | S3-ON | bar |
+|---|---:|---:|---|
+| `created_new_nodes` | **253** | **250** | ratio `<= 0.75` → **0.988, NOT met** |
+| planted units recovered (of 90) | 41 | 44 | must not fall → met |
+| operator-type edges | 141 | 166 | must not fall → met |
+| model calls | 21 | 27 | `<= 2.00 ×` → 1.29 × |
+| arm integrity | 7/7 suppressed | 7/7 resolved | 14/14 |
+
+**The verdict agrees; the magnitude does not, and `0.870` overstated it.** `0.870` reads as *"priors
+cut creates by about a seventh"*; `0.988` reads as *"no measurable effect — 253 vs 250"*. The reason
+the second reading is the honest one is a fact about the INSTRUMENT, not a preference for a friendlier
+number: the **untreated** arm drifted **284 → 253** between the two runs (**31** nodes, **10.9 %**),
+about **ten times** the 3-node ON−OFF difference the second run measured, so this instrument cannot
+resolve an effect below roughly **11 %** between runs. The defensible sentence is therefore *"no
+measurable effect at ~0.99, well inside the ~11 % between-run drift this instrument shows on its
+untreated arm"* — ⛔ **not** *"priors cut creates by 1 %"*. If one number is needed, quote the pair
+(`253 / 250`) beside the drift, or quote `0.870` and `0.988` together as the range this corpus
+supports. `0.988` is the figure the epic's record quotes (`#5087`).
+
 ⚠️ **A verdict is a verdict, not a prompt for a re-run.** `#10463`'s own falsifier rule applies: a
 ratio near 1.0 closes the issue and changes the epic's plan. It is **never re-run until it agrees**.
-The epic's plan point that assumed prior-injection buys volume must now argue from something else —
-and the tension rule it registered as a guard is exactly what failed: the smaller writes were
-smaller, not better.
+The one re-run that happened after the first was ordered by the ruling on `#10463` and existed to
+repair an **ordering provenance**, not to chase a number — and it came back *worse* for the hypothesis
+(`0.988` against `0.870`), which is what a sanctioned re-measurement looks like and what an
+agreement-seeking one could not have produced. The epic's plan point that assumed prior-injection buys
+volume must now argue from something else — and the tension rule it registered as a guard is exactly
+what failed in run 1: the smaller writes were smaller, not better. **Run 2 does not reproduce even
+that**: its guards met (real facts rose 41 → 44, edges 141 → 166), so on the base-registered run the
+treatment neither bought volume nor cost it — it did nothing measurable.
 
 ⚠️ **One instrument gap this run found and did NOT fix here** (it is a follow-up, not a production
 edit in the measurement PR): the `capture_session` lane's receipt carries **no `search` block**, so
@@ -1830,7 +2034,7 @@ From migration `e9b2c7d1f3a4_drop_entity_memory_links.py` (2026-05-26):
 
 ## 14. Not established — do not treat as known
 
-- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not, by the margin the design assumed (§10, `#10463`).** Created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction, so *"extraction no longer consumes the lookup"* is now backed by a number rather than by an argument. The lookup is not load-bearing either: S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
+- **Whether the neighbourhood lookup changes extraction's output is MEASURED — it does not (§10, `#10463`).** Run 1: created nodes fell **284 → 247 (−13 %)** against the pre-registered **≥ 25 %** bar, with both guards — recovered real facts (47 → 40) and operator edges (171 → 139) — falling in the same direction. ⚠️ **Run 1's log was WITHDRAWN from the checked set by that issue's ruling; the base-registered re-measurement (`#10554`) reports `253 → 250` (ratio `0.988`), guards MET rather than fallen — an effect too small for this instrument to resolve against a `10.9 %` between-run drift on the untreated arm.** Either way *"extraction no longer consumes the lookup"* is backed by a number rather than by an argument, and the design conclusion is unchanged: the lookup is not load-bearing, S3 resolves the entity authoritatively instead (§4.2), so extraction does not need to emit *"attach to A"*. **What IS still unmeasured: whether S3's disambiguation is accurate**, and the cheap test is to replay a handful of real sessions **by hand** and show the candidates matched vs created (small-sample-first).
 - The `~8.6 Objects/session` figure is **inferred**, not directly measured — `extractedFrom` points at `:Source`, which carries no `id`, so Objects could not be grouped per session.
 - **Nothing measures how much of the surviving 2,963 non-`the` Objects is still junk** — `PR #465` proves a non-`the` Object can also be a bare reference.
 - The `^the <X>` **pattern** is a **floor**, not the whole fix.

@@ -750,42 +750,149 @@ def test_local_http_roundtrip_lands_in_team_graph(local_db, monkeypatch):
         assert r.status_code == 200
 
 
+@pytest.fixture()
+def embedded_close_cannot_stop(monkeypatch):
+    """Force the #3653 FAIL-CLOSED close arm: `close()` disconnects only.
+
+    ⛔ WHY (#10833 CI, `tests/test_cli_serve.py` key-create subprocess tests).
+    The two output tests below used to hand the subprocess the fixture's OWN
+    embedded DB, relying on `cli_sdk.close()` having STOPPED that server
+    ("redislite shuts the server down on the last connection close" — the
+    #1102 note). That is not a guarantee: `tortoise.__init__.close()` asks
+    `embedded_lifecycle.cotenant_holds_server()` first, and that guard is
+    **fail-CLOSED by design** (#3653 — the fail-open direction tore a live
+    shared server down and lost co-tenant state). Every arm it cannot
+    PROVE — a `_client_list`/socket-probe error on a loaded runner, an
+    unreadable owner record — answers "a co-tenant may be there", so close()
+    only disconnects and the daemon stays alive WITH its pidfile.
+
+    The next process to open that DB is then refused by the #942
+    single-writer probe (`EmbeddedStoreBusyError`), which is exactly the
+    CI red: `test_key_create_wildcard_bind_prints_lan_note[...]` and
+    `test_key_create_default_bind_still_prints_mirror_hint` failed with
+    "Embedded store busy: '<tmp>/t.db' is held by a live process".
+
+    Reproduction (measured on this box, forcing this one verdict): close()
+    leaves `<db>.settings` PRESENT with a LIVE pid, and a same-DB subprocess
+    exits 1 with `EmbeddedStoreBusyError`. So this fixture pins the condition
+    deterministically instead of leaving it to runner load — the output tests
+    must hold under the WORST case of the teardown guard, not only when the
+    probe happens to succeed.
+
+    Patching the module attribute is effective because `close()` imports
+    `cotenant_holds_server` at call time (inside its own body).
+    """
+    from tortoise import embedded_lifecycle
+
+    monkeypatch.setattr(embedded_lifecycle, "cotenant_holds_server",
+                        lambda *_a, **_k: True)
+
+
+def _fresh_cli_db_env(env, tmp_path):
+    """Env for a `python -m tortoise key create` subprocess on its OWN db.
+
+    The assertions these tests make (the wildcard LAN note, the default-bind
+    mirror hint) are pure CLI OUTPUT logic — they depend on `--bind`/`--port`,
+    never on the registry's contents. So the subprocess gets a fresh DB path
+    instead of the fixture's live one: the CLI bootstrap path a new user
+    runs, with no dependency on the fixture's server having been stoppable
+    (see `embedded_close_cannot_stop`).
+    """
+    return {**env, "TORTOISE_DB_PATH": str(tmp_path / "cli.db")}
+
+
+def _live_embedded_holder(db) -> int | None:
+    """The pid of the live redislite daemon holding `db`, or ``None``.
+
+    Read EXACTLY the way `TortoiseSDK._probe_embedded_busy` reads it (#942): the
+    ``<db>.settings`` registry, its recorded ``pidfile``, then a ``kill(pid, 0)``
+    liveness probe. This is the state that makes the NEXT process to open the
+    same DB fail with `EmbeddedStoreBusyError`.
+
+    ⛔ WHY A TEST HELPER AND NOT DECORATION (review P3, #10833).
+    `embedded_close_cannot_stop` used to be applied without anything ever
+    MEASURING it: the only observable effect of the patch was that a daemon kept
+    running. An assertion that this holder exists after `close()` is what turns
+    the fixture from an assumption into evidence — if the #3653 guard ever stops
+    being fail-closed (or the patch stops reaching `close()`), the daemon goes
+    away and the two output tests below say so instead of quietly passing for a
+    different reason than the one their docstrings give.
+    """
+    registry = Path(str(db)).with_name(Path(str(db)).name + ".settings")
+    if not registry.is_file():
+        return None
+    try:
+        settings = json.loads(registry.read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    pidfile = settings.get("pidfile")
+    if not pidfile or not Path(str(pidfile)).is_file():
+        return None
+    try:
+        pid = int(Path(str(pidfile)).read_text().strip())
+    except (OSError, ValueError):
+        return None
+    if pid <= 0:
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return None
+    except PermissionError:
+        pass
+    return pid
+
+
 @pytest.mark.parametrize("bind,port", [("0.0.0.0", 8000), ("::", 8000), ("0.0.0.0", 9000)])
-def test_key_create_wildcard_bind_prints_lan_note(local_db, bind, port):
+def test_key_create_wildcard_bind_prints_lan_note(
+    local_db, embedded_close_cannot_stop, tmp_path, bind, port,
+):
     """#719 P2: `key create --bind 0.0.0.0` (the documented mirror of
     'serve --http --bind 0.0.0.0') must print the LAN-address correction —
     the printed wildcard URL is unusable for clients, and the note used to
     fire only on full defaults (suppressed exactly when needed most).
     Wildcard + non-default port must also show it."""
-    db, key, env, cli_sdk = local_db  # noqa: RUF059
-    env["TORTOISE_DB_PATH"] = str(db)
-    # #1102: the subprocess opens the SAME embedded DB — close the fixture's
-    # live handle first or the #942 single-writer probe (EmbeddedStoreBusy)
-    # makes the subprocess exit 1 (redislite shuts the server down on the
-    # last connection close, so the subprocess reloads the RDB fresh).
+    _db, _key, env, cli_sdk = local_db
+    # The fixture's own embedded server is left alive on purpose (its close()
+    # cannot prove "last client" here) — the subprocess must not care, and the
+    # assertion below is what PROVES it really is still alive (review P3).
     cli_sdk.close()
+    assert _live_embedded_holder(_db) is not None, (
+        "the #3653 fail-closed arm must leave the fixture's daemon running: that "
+        "is the condition under test (a same-DB subprocess would hit "
+        "EmbeddedStoreBusyError). The fresh-DB env is then the repair, not luck"
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test",
          "--bind", bind, "--port", str(port)],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True, text=True, env=_fresh_cli_db_env(env, tmp_path),
+        timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
+    assert "Created API key:" in proc.stdout, proc.stdout
     assert f"http://{bind}:{port}/mcp" in proc.stdout
     assert "LAN address" in proc.stdout
     assert f"never {bind}" in proc.stdout
 
 
-def test_key_create_default_bind_still_prints_mirror_hint(local_db):
+def test_key_create_default_bind_still_prints_mirror_hint(
+    local_db, embedded_close_cannot_stop, tmp_path,
+):
     """The defaults case keeps the mirror hint (pass --bind/--port to match
     a custom serve setup) — regression guard for the elif branch."""
-    db, key, env, cli_sdk = local_db  # noqa: RUF059
-    env["TORTOISE_DB_PATH"] = str(db)
-    # #1102: same single-writer constraint as the wildcard-bind test — close
-    # the fixture's live handle before the subprocess.
+    _db, _key, env, cli_sdk = local_db
+    # Same contract as the wildcard test: the fixture's server stays alive
+    # (fail-closed teardown guard, MEASURED below), and the subprocess runs on
+    # its own db.
     cli_sdk.close()
+    assert _live_embedded_holder(_db) is not None, (
+        "the #3653 fail-closed arm must leave the fixture's daemon running — see "
+        "`test_key_create_wildcard_bind_prints_lan_note` for the full argument"
+    )
     proc = subprocess.run(
         [sys.executable, "-m", "tortoise", "key", "create", "--name", "test"],
-        capture_output=True, text=True, env=env, timeout=120,
+        capture_output=True, text=True, env=_fresh_cli_db_env(env, tmp_path),
+        timeout=120,
     )
     assert proc.returncode == 0, proc.stderr
     assert "assumes the default serve bind/port" in proc.stdout

@@ -87,9 +87,10 @@ from tortoise.sdk import TortoiseSDK
 SESSION_ID = "sess_5097_source_replay"
 SECRET = "ghp_" + "A" * 36
 CONV = [
-    # The credential is in the FIRST turn on purpose: `summary` is the first
-    # substantive utterance and `topics` are the most frequent content words,
-    # so a carrier built from RAW text would put the secret in both.
+    # The credential is in the FIRST turn on purpose: `topics` are the most
+    # frequent content words and `summary` is built from that lexicon (#10000 —
+    # it used to be the first substantive utterance), so a carrier built from
+    # RAW text would put the secret in both.
     {"role": "user", "content": f"Use this key {SECRET} for the weekly rebuild."},
     {"role": "assistant", "content": "Agreed, the weekly job is fine."},
     {"role": "user", "content": "Also rotate the staging key tomorrow."},
@@ -205,9 +206,29 @@ def test_the_carrier_holds_the_redacted_text_not_the_raw_turn(captured):
         assert SECRET not in text, f"{key!r} carried the credential into the journal"
         assert "ghp_" not in text, f"{key!r} carried a credential-shaped run"
     # Positive half: the carrier is the REDACTED derivation, not a copy of the
-    # raw input — the redaction marker is visible where the secret was.
-    assert "[REDACTED:github_token]" in (record.get("summary") or ""), (
-        "the carrier's summary is not the redacted transcript's first utterance")
+    # raw input — the redaction marker's KIND name is where the secret was. Since
+    # #10000 the carrier's ``summary`` is a descriptor over the session's TOPIC
+    # lexicon (§9.1/D1: the transcript's own sentences must not reach a node),
+    # so the marker is read on the field the vocabulary now travels in —
+    # ``topics``. What binds the control is unchanged: with the scrubber
+    # neutralised the raw token appears HERE instead of the marker, and the
+    # assertions above red.
+    #
+    # ⛔ ASSERTED ON ONE WORD, DELIBERATELY. The lexicon is capped at six and its
+    # ties are broken alphabetically (#10852 P1: the old first-encountered
+    # tie-break made the lexicon the transcript's words IN TRANSCRIPT ORDER, so
+    # it was a re-wording of the utterance), so the exact membership past the two
+    # most frequent words is a function of the sort order and NOT of the
+    # property under test. ``github_token`` is the load-bearing word: the raw
+    # credential is ``ghp_…``, so this word can only come from
+    # ``[REDACTED:github_token]`` — and it survives the cap on this fixture (two
+    # words lead on frequency; it is the SECOND of the count-1 ties — ``fine``
+    # sorts before it, so the margin is one word narrower than "first" would
+    # suggest).
+    topics = record.get("topics") or []
+    assert "github_token" in topics, (
+        "the carrier's topics are not the redacted transcript's vocabulary — "
+        f"{topics!r}")
     # And it describes the SAME bytes the node stores (the #4911 rule: the hash
     # is taken over the redacted transcript).
     stored = _source_props(sdk._get_proj(), SOURCE_URL)

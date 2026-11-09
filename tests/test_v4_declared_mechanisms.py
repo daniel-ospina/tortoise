@@ -990,14 +990,18 @@ def _test_node_names(path: Path) -> set[str] | None:
     resolution: each reads like a pin while no run would reach it.
 
     ⚠️ THE LIMIT OF THAT, stated because the alternative is an overclaim (review
-    cycles 4-5, extended cycle 9): the base chain is resolved IN THIS FILE, and
-    pytest's collection is a decision over the whole MRO. SIX shapes therefore
-    remain REVIEW-TIME, not gate verdicts, and they err in BOTH directions:
+    cycles 4-5, extended cycle 9, narrowed cycle 10): the base chain is resolved
+    IN THIS FILE, and pytest's collection is a decision over the whole MRO. FIVE
+    shapes therefore remain REVIEW-TIME, not gate verdicts, and they err in BOTH
+    directions:
 
       * a class defining ``__new__`` and an ABSTRACT class — pytest collects no
-        test under them, this gate accepts them; and a node marked
-        ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the pin
-        would red nowhere while reading as watched (the fail-open direction);
+        test under them, this gate accepts them (the fail-open direction); a node
+        marked ``skip``/``xfail`` — pytest COLLECTS it and never RUNS it, so the
+        pin would red nowhere while reading as watched — is NO LONGER in this
+        list: the UNCONDITIONAL forms are now detected by `_never_reds` /
+        `_pytestmark_never_reds` below (review cycles 10-11), which is why this
+        is FIVE shapes and not the earlier SIX;
       * a base imported from ANOTHER file that defines ``__init__`` — pytest
         REFUSES the subclass, this gate accepts it;
       * an imported base carrying ``__test__ = False`` — pytest collects
@@ -1165,6 +1169,315 @@ def _test_node_names(path: Path) -> set[str] | None:
             parts.append(current.id)
         return ".".join(reversed(parts))
 
+    #: Markers that leave a node COLLECTED but unable to RED. Only the
+    #: UNCONDITIONAL forms qualify, and that boundary is the whole point: an
+    #: `@pytest.mark.skip` or a non-strict `@pytest.mark.xfail` can never fail,
+    #: so citing one is a pin that watches nothing — the exact fail-open this
+    #: gate exists to close (review cycle 9, P2). `skipif`/`xfail` are CONDITIONAL
+    #: and decided by their condition's VALUE below (review cycles 10-11: presence
+    #: is not the test — `skipif(True)` and `xfail(True)` can never red either).
+    #: An in-body `pytest.skip()` still reds on the other branch and is NOT
+    #: excluded. Built from REAL imports, never seeded — seeding is what made both
+    #: `fixture_markers` import branches inert (cycle 8, P2).
+    never_red_skips: set[str] = set()
+    never_red_xfails: set[str] = set()
+    never_red_skipifs: set[str] = set()
+    for top in tree.body:
+        if isinstance(top, ast.Import):
+            for alias in top.names:
+                if alias.name != "pytest":
+                    continue
+                stem = alias.asname or alias.name
+                never_red_skips.add(f"{stem}.mark.skip")
+                never_red_xfails.add(f"{stem}.mark.xfail")
+                never_red_skipifs.add(f"{stem}.mark.skipif")
+        elif isinstance(top, ast.ImportFrom) and (top.module or "") == "pytest":
+            for alias in top.names:
+                spelled = alias.asname or alias.name
+                if alias.name == "skip":
+                    never_red_skips.add(spelled)
+                elif alias.name == "xfail":
+                    never_red_xfails.add(spelled)
+                elif alias.name == "mark":
+                    never_red_skips.add(f"{spelled}.skip")
+                    never_red_xfails.add(f"{spelled}.xfail")
+                    never_red_skipifs.add(f"{spelled}.skipif")
+
+    def _decorator_never_reds(decorator: ast.expr) -> bool:
+        """An UNCONDITIONAL skip/xfail decorator — it removes the node's red.
+
+        `xfail` has THREE ways to stay able to FAIL, and each keeps the node as
+        a pin:
+          * `xfail(strict=True)` REDS on an unexpected pass — it carries a red;
+          * `xfail(cond, …)` with a condition that may be FALSY runs the test
+            normally, so it can red: EVERY positional argument is a condition
+            (pytest applies the mark when ANY of them is true), and a
+            `condition=` keyword is one too — it REPLACES the positional args
+            rather than joining them (`_pytest/skipping.py::
+            evaluate_xfail_marks`); and
+          * `xfail(raises=…)`, which narrows only WHICH outcome becomes
+            `xfailed`: a different exception stays a true FAILURE (`_pytest/
+            skipping.py::pytest_runtest_makereport` — `if raises is None or
+            isinstance(call.excinfo.value, raises): skipped … else: failed`).
+            Measured on pytest 9.1.1: `xfail(raises=ValueError)` raising
+            `TypeError` reports **failed** (review cycle 15, P2).
+        Everything else cannot red, and is therefore not a watch: a bare `xfail()`
+        / `xfail(reason=…)` / `xfail(raises=None)` (pytest's "no restriction"
+        value, so the same bare mark); a condition that is a literal TRUTHY
+        constant, `xfail(True)` / `xfail(1)` / `xfail(condition=True)`, which
+        pytest xfails unconditionally (real pytest: `2 xfailed`); and
+        `xfail(…, run=False)` with no falsifiable condition, whose body is not
+        even run (measured: `[NOTRUN]`, exit 0).
+        ⚠️ xfail remaps the OUTCOME, it does not skip execution — the body still
+        RUNS (measured with side-effect markers); the RUN is what cannot go red.
+        That is the difference from a skip, and it is the sentence a maintainer
+        reasons from, so it is stated correctly (review cycle 12, P2).
+        A manifest can be read, not executed, so a NON-literal condition —
+        including a STRING, which pytest `eval()`s as an expression rather than
+        reading as a boolean — is unknowable here and is kept: that is this
+        gate's stated limit, and it errs toward keeping a pin (review cycle 12,
+        P2: a string `"False"` really does run the body and red).
+        """
+
+        def _literal_condition_truth(expr: ast.expr) -> bool | None:
+            """True/False when the AST alone decides it, else None.
+
+            pytest `eval()`s a STRING condition as an expression (`_pytest/
+            skipping.py`), so `skipif("True")` is skipped and `xfail("False")`
+            runs — quoting the condition must not defeat the gate. A string is
+            therefore DECODED here, without `eval`, when it parses to a literal
+            constant, and the TRUTHINESS of that literal is the answer for EVERY
+            type (a float, a list, a non-empty string all skip: measured). An
+            EXPRESSION like `"sys.platform == 'win32'"` stays unknowable (a
+            manifest is read, not executed — the stated limit).
+            """
+            if not isinstance(expr, ast.Constant):
+                return None
+            if not isinstance(expr.value, str):
+                return bool(expr.value)
+            try:
+                inner = ast.parse(expr.value, mode="eval").body
+                value = ast.literal_eval(inner)
+            except (SyntaxError, ValueError, TypeError):
+                return None
+            # `literal_eval` yields only literals, and pytest `eval`s the same
+            # text, so the TRUTHINESS of the decoded value IS pytest's answer —
+            # for every type, not just bool/int. Keeping only bool/int discarded
+            # a value already in hand, so `skipif("'x'")` / `skipif("1.5")` /
+            # `skipif("[1]")` were accepted as pins although pytest skips them
+            # (measured, review cycle 6, P1).
+            return bool(value)
+
+        def _skipif_never_reds(call: ast.expr) -> bool:
+            """`@pytest.mark.skipif(...)` — pytest skips when ANY condition is true.
+
+            `_pytest/skipping.py` takes the POSITIONAL arguments plus a
+            `condition=` keyword as conditions; a `cond=` keyword is IGNORED, so a
+            call carrying only `cond=` (or only `reason=`, or nothing) has NO
+            condition and pytest skips UNCONDITIONALLY — measured `SKIPPED` for
+            all of those. The arm is explicit in the library, not an emergent
+            consequence of the ANY-of rule: pytest 9.1.1 `_pytest/skipping.py:
+            177-180` reads `# Unconditional. / if not conditions: reason =
+            mark.kwargs.get("reason", "") / return Skip(reason)`, so an
+            `evaluate_skip_marks` reading that stopped at `any(conditions)`
+            (review @`70284375f`) would mis-predict it. Settled by execution on
+            this head: a probe file whose four nodes are
+            `skipif(reason=…)` x2, `skipif(cond=True)` and bare `skipif()` —
+            each asserting `False` where it could — reported `4 skipped`, i.e.
+            none of them ran (re-measured by the second repair lane on the same
+            pytest: `2 skipped` for `skipif(reason=…)` and `skipif(cond=False)`).
+            An older pytest without that branch leaves the node RUNNING, so the
+            floor matters, not the prose. So: no conditions at all => cannot red;
+            every condition a non-string literal => cannot red iff ANY of them is
+            truthy (pytest's ANY-of rule); anything non-literal => unknowable,
+            kept as a pin.
+            """
+            conditions: list[ast.expr] = []
+            if isinstance(call, ast.Call):
+                keyword_conditions = [
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "condition"
+                ]
+                # pytest REPLACES the positional args when `condition=` is given
+                # (measured: `skipif(True, condition=False)` RUNS and fails, while
+                # `skipif(False, condition=True)` skips), so the keyword set is
+                # used ALONE rather than unioned into one ANY-of pool (cycle 6, P2).
+                conditions.extend(keyword_conditions or call.args)
+            if not conditions:
+                return True  # no condition at all: skipped unconditionally
+            # ANY-of: one true condition skips the node (SIM103: the condition
+            # IS the answer, so it is returned directly). Everything else is a
+            # PIN: every condition decidable and falsy means pytest does not
+            # skip, so the node runs and can red; and an undecidable condition
+            # is unknowable from a manifest — the gate's stated limit, which
+            # errs toward KEEPING a pin.
+            return any(_literal_condition_truth(expr) is True for expr in conditions)
+
+        def _xfail_condition(call: ast.expr) -> tuple[bool, bool | None]:
+            """`(present, truth)` over EVERY condition pytest would apply.
+
+            truth is True/False for a literal, None if unknowable.
+
+            pytest takes ALL positional args as conditions and applies the mark
+            as soon as ANY is true (`_pytest/skipping.py::evaluate_xfail_marks`:
+            `if "condition" not in mark.kwargs: conditions = mark.args`), while a
+            `condition=` keyword REPLACES them — the same ANY-of rule the skipif
+            arm above implements. Reading only `call.args[0]` accepted
+            `xfail(False, True)` and `xfail(COND, True)` as pins although pytest
+            xfails them unconditionally, so nothing could red: the #5064/#10636
+            fail-open reached by a spelling the gate mis-modelled (review cycle
+            14, P2). Collapsed to the single truth this arm consumes: any
+            literal-TRUE condition applies the mark always; only ALL-FALSE means
+            it never applies (the body runs and can red); anything else is
+            unknowable and keeps the pin.
+            """
+            conditions: list[ast.expr] = []
+            if isinstance(call, ast.Call):
+                # `cond=` is NOT an xfail parameter: pytest ignores it, so a call
+                # carrying only `cond=` is a BARE xfail that always applies and can
+                # never red (measured, review cycle 6, P1). Only `condition=` is a
+                # condition here — the same reading the skipif arm documents.
+                keyword_conditions = [
+                    keyword.value
+                    for keyword in call.keywords
+                    if keyword.arg == "condition"
+                ]
+                conditions.extend(keyword_conditions or call.args)
+            if not conditions:
+                return (False, None)
+            truths = [_literal_condition_truth(expr) for expr in conditions]
+            if any(truth is True for truth in truths):
+                # always applied: only `strict=` / `raises=` can still red
+                return (True, True)
+            if all(truth is False for truth in truths):
+                return (True, False)  # never applied: the body runs, so it can red
+            return (True, None)  # one unknowable condition: keep the pin
+
+        def _has_raises(call: ast.expr) -> bool:
+            """Whether the mark narrows xfail by exception (`raises=`).
+
+            `raises=None` is exactly the value pytest reads as "no restriction"
+            (`mark.kwargs.get("raises", None)`), and a literal None leaves the
+            bare-`xfail()` reading intact (measured: `xfail(raises=None)` on a
+            failing body is xfailed, not failed). EVERY other spelling — an
+            exception class, a tuple, `pytest.raises(...)`, or a name this gate
+            cannot resolve — can reject the raised exception and let the failure
+            stand, so it keeps the pin.
+            """
+            if not isinstance(call, ast.Call):
+                return False
+            for keyword in call.keywords:
+                if keyword.arg != "raises":
+                    continue
+                if (
+                    isinstance(keyword.value, ast.Constant)
+                    and keyword.value.value is None
+                ):
+                    continue
+                return True
+            return False
+
+        name = _dotted_decorator(decorator)
+        if name in never_red_skips:
+            return True
+        if name in never_red_skipifs:
+            return _skipif_never_reds(decorator)
+        if name not in never_red_xfails:
+            return False
+        strict = False
+        run_false = False
+        if isinstance(decorator, ast.Call):
+            for keyword in decorator.keywords:
+                if keyword.arg == "strict" and isinstance(
+                    keyword.value, ast.Constant
+                ):
+                    strict = bool(keyword.value.value)
+                elif keyword.arg == "run" and isinstance(keyword.value, ast.Constant):
+                    run_false = keyword.value.value is False
+        present, truth = _xfail_condition(decorator)
+        # ORDER IS THE RULE. A literal-FALSE condition means the mark never
+        # applies, so the body runs and can red — it wins over everything else
+        # (measured: `xfail(False, strict=True, run=False)` FAILS).
+        if truth is False:
+            return False
+        # An UNKNOWABLE condition may be FALSY, and when it is, `evaluate_xfail_
+        # marks` returns `None` — no mark applies at all — so the body RUNS and
+        # `run=False` is inert (measured: `xfail(COND, run=False)` with `COND =
+        # False` reports **failed**). Keeping the pin here, ahead of `run=False`,
+        # is the same verdict the unknowable arm reaches below; the earlier
+        # placement refused a node that really does red (review cycle 15, P2).
+        # `present` is what separates this from a BARE `xfail()` / `xfail(raises=
+        # None)`, which `_xfail_condition` also reports as `truth=None` but which
+        # applies unconditionally and can never red.
+        if present and truth is None:
+            return False
+        # From here the mark ALWAYS applies: `truth is True`, or no condition at
+        # all (a call carrying none is applied unconditionally).
+        # `run=False` disables execution outright, so nothing can red even with
+        # `strict=True` or `raises=` (measured `[NOTRUN]`, exit 0).
+        if run_false:
+            return True
+        # `strict=True` carries a red: an unexpected PASS fails, and that includes
+        # the always-applied condition case `xfail(True, strict=True)`.
+        if strict:
+            return False
+        # `raises=` narrows WHICH outcome becomes `xfailed`: a different
+        # exception is a true failure, so a non-strict `xfail(raises=…)` CAN red
+        # and is a watch. This arm sits BELOW `run=False` because the body is not
+        # run at all there (measured `[NOTRUN]`), which is why the answer is not a
+        # blanket "raises ⇒ pin" (review cycle 15, P2).
+        if _has_raises(decorator):
+            return False
+        if not present:
+            return True  # bare `xfail()` / `xfail(reason=…)`: cannot red
+        # Always applied AND non-strict: XPASS is not a failure, so it cannot
+        # red.
+        return truth is True
+    def _never_reds(node: ast.AST) -> bool:
+        """Collected, but it can never FAIL — so it is not a watch."""
+        if _own_disabled(node):
+            return True
+        return any(
+            _decorator_never_reds(decorator)
+            for decorator in getattr(node, "decorator_list", ())
+        )
+
+    def _pytestmark_never_reds(body: list[ast.stmt]) -> bool:
+        """`pytestmark = pytest.mark.skip` in THIS statement list: nothing reds.
+
+        Takes the statement list rather than the module so the SAME rule can be
+        applied at module scope and in a class body — a class-level
+        ``pytestmark`` marks every method under it (review cycle 10, P2).
+        """
+        for top in body:
+            targets: list[ast.expr]
+            value: ast.expr | None
+            if isinstance(top, ast.Assign):
+                targets, value = list(top.targets), top.value
+            elif isinstance(top, ast.AnnAssign) and top.value is not None:
+                targets, value = [top.target], top.value
+            else:
+                continue
+            if not any(
+                isinstance(target, ast.Name) and target.id == "pytestmark"
+                for target in targets
+            ):
+                continue
+            entries = (
+                list(value.elts) if isinstance(value, (ast.List, ast.Tuple)) else [value]
+            )
+            if any(_decorator_never_reds(entry) for entry in entries):
+                return True
+        return False
+
+    def _module_never_reds() -> bool:
+        """`pytestmark = pytest.mark.skip` at module scope: nothing can red."""
+        return _pytestmark_never_reds(tree.body)
+
+    if _module_never_reds():
+        return set()  # a module-wide skip marker: no collectable node can red
+
     def _base_names(node: ast.ClassDef) -> list[str]:
         out: list[str] = []
         for base in node.bases:
@@ -1234,12 +1547,20 @@ def _test_node_names(path: Path) -> set[str] | None:
                 node.name.startswith("test")
                 and node.name not in module_plain
                 and not _is_fixture(node)
+                and not _never_reds(node)
             ):
                 nodes.add(node.name)
             continue
         if (
             not isinstance(node, ast.ClassDef)
             or _disabled(node.name)
+            # A CLASS-level unconditional skip/xfail — the class's own decorator,
+            # OR a class-body `pytestmark` — collects every method and runs none,
+            # so each reads as a pin while nothing watches it: the same fail-open
+            # as a skipped function, one hop out (review cycles 9-10, P2). ONE
+            # clause per shape; the decorator is not tested twice.
+            or _never_reds(node)
+            or _pytestmark_never_reds(node.body)
             # ... and the module-scope CLASS handle (`TestCls.__test__ = False`),
             # which pytest honours and `_member_exclusions` has already read as a
             # plain name (review cycle 7, P2).
@@ -1261,6 +1582,7 @@ def _test_node_names(path: Path) -> set[str] | None:
                 and child.name.startswith("test")
                 and child.name not in excluded
                 and not _is_fixture(child)
+                and not _never_reds(child)
             )
     return nodes
 
@@ -2958,7 +3280,7 @@ _DOC_NODES = (ast.Module, ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)
 _ASSEMBLY_ATTRS = {"format", "format_map", "join"}
 
 
-def _binding_keys(target: ast.expr) -> list[str]:
+def _binding_keys(target: ast.expr, *, final_name: bool = True) -> list[str]:
     """Every name a binding TARGET writes, in one spelling a use can be keyed by.
 
     The shapes the repo actually binds a DDL fragment with: a plain name
@@ -2971,19 +3293,39 @@ def _binding_keys(target: ast.expr) -> list[str]:
     `_D: str = "… UNIQUE NODE "` + `g.query(_D + _L)` passed the pin with the
     constraint shipping (measured; the fixtures below cover each shape).
 
+    `final_name` adds an attribute target's FINAL name (`_ddl` for `self._ddl`) —
+    the spelling a use through ANOTHER receiver writes, which is what makes the
+    cross-module TAINT test reach it. ⚠️ The JOIN must pass `final_name=False` (see
+    :func:`_join_keys`): a final name in the join's binding map collides with a
+    differently-valued name, the key becomes `rebound`, and the join loses a binding
+    the keyword-split report needs — a false PASS, measured.
+
     An empty list means the target is a shape this scan does not resolve; the
     caller treats that as UNVERIFIABLE, never as clean.
     """
     if isinstance(target, ast.Name):
         return [f"name:{target.id}"]
-    if isinstance(target, (ast.Attribute, ast.Subscript)):
+    if isinstance(target, ast.Attribute):
+        # BOTH spellings for TAINT: the receiver-qualified one (`self._ddl`, matched
+        # by a use written the same way) and the FINAL name (`_ddl`, matched by a use
+        # through ANY receiver — `OBJ._ddl`, which is how another module reaches the
+        # same object). Measured on the branch this is ported from: with only the
+        # qualified spelling, a `self._ddl` fragment completed at an `OBJ._ddl` use
+        # site read as ABSENT — the false-pass polarity this pin exists to prevent.
+        # It is keyed on the SPELLING, not the scope, so a coincident final name in
+        # an unrelated module over-refuses: fail-CLOSED (a false block on a name
+        # nobody assembled, never a false pass on one that was), and the registry
+        # row says so.
+        qualified = f"expr:{ast.unparse(target)}"
+        return [qualified, f"name:{target.attr}"] if final_name else [qualified]
+    if isinstance(target, ast.Subscript):
         return [f"expr:{ast.unparse(target)}"]
     if isinstance(target, ast.Starred):
-        return _binding_keys(target.value)
+        return _binding_keys(target.value, final_name=final_name)
     if isinstance(target, (ast.Tuple, ast.List)):
         keys: list[str] = []
         for elt in target.elts:
-            keys.extend(_binding_keys(elt))
+            keys.extend(_binding_keys(elt, final_name=final_name))
         return keys
     return []
 
@@ -3074,7 +3416,7 @@ def _class_body_keys(tree: ast.AST) -> dict[int, list[str]]:
                         elt, (ast.Name, ast.Attribute, ast.Subscript, ast.Tuple, ast.List)
                     ):
                         continue
-                    for key in _binding_keys(elt):
+                    for key in _binding_keys(elt, final_name=False):
                         keys.setdefault(id(elt), []).append(
                             f"expr:{qual}.{key.split(':', 1)[1]}"
                         )
@@ -3096,6 +3438,160 @@ def _use_key(node: ast.expr) -> str | None:
     if isinstance(node, (ast.Attribute, ast.Subscript)):
         return f"expr:{ast.unparse(node)}"
     return None
+
+
+def _join_keys(target: ast.expr) -> list[str]:
+    """The binding keys the JOIN may use — :func:`_binding_keys` minus every final name.
+
+    The assembled-text join resolves a use site to the expression a name was BOUND
+    to, so it must see exactly ONE spelling per binding. Widening it with the final
+    name made a `self._DDL` binding collide with a module-level `_DDL`, the key
+    became `rebound`, and the key was dropped — which took the keyword-split join out
+    with it, so a constraint statement reported NOTHING where the unmodified scan
+    reported the split (measured: a false PASS).
+
+    ⚠️ The flag must reach EVERY shape, not just a top-level attribute: `_binding_keys`
+    recurses into tuple/list/starred targets, and :func:`_class_body_keys` qualifies
+    the keys it builds. Measured against a wrapper that stripped only a TOP-LEVEL
+    attribute: `starred`, a `for` target and a nested tuple still lost the split
+    (tuple/list targets survive that wrapper because `_bound_pairs` pairs them
+    element-wise, so the paired target IS a top-level attribute — and the class-body
+    spelling survives it because its collision needs the qualified key). Hence one
+    flag through the recursion, plus `final_name=False` at `_class_body_keys`, rather
+    than a wrapper.
+    """
+    return _binding_keys(target, final_name=False)
+
+
+def _taint_keys(node: ast.expr) -> set[str]:
+    """Every key a USE of a tainted binding could be spelled by.
+
+    The TAINT test's counterpart of :func:`_use_key` (the JOIN's single key, scoped to
+    one file's bindings): taint is spelling-keyed and TREE-WIDE, so a use also matches
+    on its FINAL name — `OBJ._ddl` reaching a `self._ddl` binding, `carrier.Ddl.stmt`
+    reaching a class-body `stmt` — however deep the qualifier chain is. Measured: with
+    the bare `expr:` spelling alone, a cross-module use through another receiver read
+    as ABSENT.
+    """
+    keys: set[str] = set()
+    if isinstance(node, ast.Name):
+        keys.add(f"name:{node.id}")
+    elif isinstance(node, (ast.Attribute, ast.Subscript)):
+        keys.add(f"expr:{ast.unparse(node)}")
+        if isinstance(node, ast.Attribute):
+            # The FINAL name is the spelling a class-body or module binding mints
+            # (`name:X`), however deep the qualifier chain is.
+            keys.add(f"name:{node.attr}")
+    return keys
+
+
+def _taint_over_imports(
+    trees: list[tuple[str, ast.AST]],
+    file_taint: dict[str, set[str]],
+    package: str | None = None,
+) -> set[str]:
+    """Widen each file's taint set over the IMPORT graph, then return the UNION.
+
+    The union is what makes the reach TREE-WIDE and it needs no import edge at all: a
+    fragment bound in one scanned module and used in another is refused whether or not
+    the two modules import each other, because the key is a SPELLING. That is
+    deliberately fail-CLOSED — a coincident name in an unrelated module refuses too.
+
+    The import graph is then followed to a fixpoint for the spelling a RENAME hides: a
+    fragment re-exported as `from a import X as Y` and used as `Y` carries a key that
+    names `X`, so the alias inherits the taint of the name it came from, until nothing
+    changes (measured: both `from b import Y` and `import b; b.Y` read as ABSENT while
+    the same chain without the rename was refused).
+
+    ⚠️ `node.level`, not a dot in `node.module`: `from .carrier import X` carries
+    module "carrier" and level 1, `from ..pkg import y` module "pkg" and level 2 — so
+    a `module.startswith(".")` test never fires, and a level-2 import would resolve
+    as an ABSOLUTE one from the wrong file (both measured on the branch this is
+    ported from).
+    """
+    module_files: dict[str, str] = {}
+    for rel, _tree in trees:
+        mod = rel[: -len(".py")].replace("/", ".")
+        module_files[mod] = rel
+        if mod.endswith(".__init__"):
+            module_files[mod[: -len(".__init__")]] = rel
+        elif mod == "__init__" and package:
+            # The scanned ROOT's own `__init__.py`. Its id here is the bare
+            # `__init__`, so the `.__init__` strip above never fires and the root
+            # package had NO id at all — while `from tortoise import X` (82 such
+            # lines under `tortoise/`, several of them RENAMED: `from tortoise import
+            # hosted_api as _ha`) names exactly it, and a rename there is the only way
+            # that name reaches a use site at all. The suffix retry in `resolve()`
+            # cannot reach it either: the module is a SINGLE component, so there is no
+            # leading component to drop. Measured: `from pkg import Q as R` with the
+            # fragment bound in `pkg/__init__.py` read as ABSENT (`assembled == []`)
+            # while the same rename through a SUBpackage resolved via the suffix
+            # retry.
+            module_files[package] = rel
+
+    def resolve(module: str | None, level: int, rel: str) -> str | None:
+        """The file a `from … import` came from, ABSOLUTE or RELATIVE.
+
+        ⚠️ `module_files` keys are ROOT-RELATIVE (`event_store`, not
+        `tortoise.event_store`), while the repo's dominant idiom names the package
+        absolutely (`from tortoise.event_store import …` — measured: 2678 absolute
+        from-imports inside `tortoise/`, 206 of them renamed, and NOT ONE resolved
+        against a root-relative id). Exact matches are tried first, then the module
+        with its leading components dropped one at a time, longest suffix first — so
+        a package-absolute import resolves to the file the pin is actually scanning,
+        and an exact id still wins over any suffix. The one id NEITHER half reaches
+        is the root package itself (`from tortoise import X`, a single component with
+        nothing to drop), so the caller registers `package` explicitly.
+        """
+        if level:
+            pkg = rel.rsplit("/", 1)[0].replace("/", ".") if "/" in rel else ""
+            parts = pkg.split(".") if pkg else []
+            base = ".".join(parts[: len(parts) - (level - 1)]) if level > 1 else pkg
+            cand = f"{base}.{module}" if (base and module) else (base or module or "")
+            return module_files.get(cand) or None
+        if not module:
+            return None
+        exact = module_files.get(module)
+        if exact is not None:
+            return exact
+        parts = module.split(".")
+        for start in range(1, len(parts)):
+            found = module_files.get(".".join(parts[start:]))
+            if found is not None:
+                return found
+        return None
+
+    changed = True
+    while changed:
+        changed = False
+        for rel, tree in trees:
+            here = file_taint[rel]
+            before = len(here)
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.ImportFrom):
+                    continue
+                src = resolve(node.module, node.level, rel)
+                if src is None:
+                    continue
+                up = file_taint[src]
+                for alias in node.names:
+                    if alias.name == "*":
+                        # A STAR re-export carries every non-underscore name, and
+                        # `alias.name` is the literal "*" — so without this the
+                        # fixpoint propagated NOTHING and a RENAMING use of it
+                        # (`pkg/__init__.py: from .carrier import *`, then
+                        # `from pkg import P as Q`) had no Load of the original
+                        # spelling to match: measured, `assembled == []` while the
+                        # one-hop star USE (`from pkg import P`) was caught by its
+                        # own bare-name Load. Nothing here distinguishes "*" from an
+                        # explicit list, so every tainted name crosses.
+                        here.update(k for k in up if k.startswith("name:"))
+                        continue
+                    if f"name:{alias.name}" in up:
+                        here.add(f"name:{alias.asname or alias.name}")
+            if len(here) != before:
+                changed = True
+    return set().union(*file_taint.values()) if file_taint else set()
 
 
 #: "This expression STARTS a constraint statement", used to recognise a statement
@@ -3374,6 +3870,23 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
     found: list[str] = []
     unparsable: list[str] = []
     assembled: list[str] = []
+    #: Each parsed file's analysis inputs — `(rel, tree, docstrings, bindings)` — kept
+    #: so the TAINT pass can run TREE-WIDE before any file is analysed. A fragment bound
+    #: in one module and completed in another
+    #: (`POINT_UNQ = "… UNIQUE NODE "` here, `g.query(POINT_UNQ + "Point")` there) is
+    #: the same unverifiable statement as the single-file case, and the taint set used
+    #: to be built inside this loop — per FILE — so the cross-module half read as
+    #: ABSENT while the single-file half was refused (measured: two modules carrying
+    #: the two halves produced `assembled == []` and the pin stayed green). The
+    #: keyword literal IS inside the scanned tree in that shape, so it is not one of
+    #: the residual cases the registry row documents. ⚠️ Holding every AST costs ~3.3×
+    #: the pinned root's peak RSS (measured: tortoise/ 124 MB → 409 MB, ~13 s vs ~10 s)
+    #: — acceptable for a pin whose root is `tortoise/`, and the shape to revisit if it
+    #: is ever pointed at a larger tree (parse → taint → discard, then re-parse).
+    parsed: list[tuple[str, ast.AST, set[int], dict[str, ast.expr]]] = []
+    #: rel -> the keys that file's OWN bindings taint. The import fixpoint below
+    #: widens these in place, then every file is analysed against the union.
+    file_taint: dict[str, set[str]] = {}
     for path in sorted(root.rglob("*.py")):
         rel = path.relative_to(root).as_posix()
         try:
@@ -3395,9 +3908,10 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             and n.body and isinstance(n.body[0], ast.Expr)
             and isinstance(n.body[0].value, ast.Constant)
         }
-        #: Keys of names bound to an INCOMPLETE statement: whether the label is
-        #: supplied at the use site cannot be decided here, so a USE of one is
-        #: `assembled` and never an absence.
+        #: Keys of names bound to an INCOMPLETE statement IN THIS FILE: whether the
+        #: label is supplied at the use site cannot be decided here, so a USE of one
+        #: is `assembled` and never an absence. Collected per file, then widened
+        #: tree-wide over the import graph before any file is analysed.
         tainted: set[str] = set()
         class_keys = _class_body_keys(tree)
         #: Binding key -> bound expression, for the assembled-text join. A key bound
@@ -3416,7 +3930,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
         for target, value, augments in pairs:
             if value is None:
                 continue
-            for key in (*_binding_keys(target), *class_keys.get(id(target), ())):
+            for key in (*_join_keys(target), *class_keys.get(id(target), ())):
                 if augments:
                     # `k += rhs` — the accumulated expression is what a use site
                     # resolves to, so the pre-augment value is JOINED with the RHS
@@ -3445,11 +3959,30 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 # the `name:` spelling it binds under (`_class_body_keys`).
                 tainted.update(class_keys.get(id(target), ()))
             else:  # a binding shape this scan cannot key is NOT clean
+                # Reported HERE rather than carried to the analysis pass: a valid-Python
+                # assignment / `for` target is only Name/Attribute/Subscript/Tuple/List/
+                # Starred, all of which `_binding_keys` keys (measured: 0 unkeyable of
+                # 232702 bound pairs across this repo's own sources), so this arm is
+                # unreachable for valid Python today — and a report carried as state
+                # through the parse/analyse split is the one place a restructure could
+                # silently drop it. Kept for the day a target shape is added; pinned by
+                # `test_an_unkeyable_binding_shape_is_reported_not_skipped`.
                 assembled.append(
                     f"{rel}: `{ast.unparse(target)}` is bound to an incomplete "
                     "DDL statement in a shape this scan does not resolve"
                 )
+        file_taint[rel] = tainted
+        parsed.append((rel, tree, docstrings, bindings))
 
+    # ⚠️ TAINT IS TREE-WIDE, NOT PER-FILE (see `file_taint` above): the import graph
+    # is followed to a fixpoint so a fragment carried ACROSS modules — aliased,
+    # qualified, re-exported under a new name, or reached through a relative import —
+    # is refused exactly like the single-file spelling.
+    tree_taint = _taint_over_imports(
+        [(rel, tree) for rel, tree, *_ in parsed], file_taint, root.name
+    )
+
+    for rel, tree, docstrings, bindings in parsed:
         for node in ast.walk(tree):
             if isinstance(node, ast.Constant) and isinstance(node.value, str):
                 if id(node) in docstrings:
@@ -3485,17 +4018,26 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
                 # 12 found in this branch's own fix, #5064). `bindings` already
                 # holds the join; the RHS alone is the fallback for an accumulator
                 # whose earlier value is unresolvable here.
+                # ⚠️ The lookup must use the JOIN's key space (`_join_keys`), the same
+                # one `bindings` was built in. `_binding_keys` also mints an attribute
+                # target's FINAL name for the taint test, and a final name is absent
+                # from `bindings` — so `next()` walked past the real key and returned an
+                # UNRELATED same-named binding, set `assembling` to that value, and
+                # never joined the RHS at all: a keyword split accumulated through an
+                # attribute target then reported NOTHING while the unmodified scan
+                # reported the split (measured by review — the taint test on the next
+                # line is the one that belongs in the taint key space).
                 accumulated = next(
                     (
                         bindings[key]
-                        for key in _binding_keys(node.target)
+                        for key in _join_keys(node.target)
                         if key in bindings
                     ),
                     None,
                 )
                 assembling = node.value if accumulated is None else accumulated
                 fragments = _ddl_fragments(assembling)
-                if set(_binding_keys(node.target)) & tainted:
+                if set(_binding_keys(node.target)) & tree_taint:
                     assembled.append(f"{rel}: `{ast.unparse(node.target)}` += …")
             elif (
                 isinstance(node, ast.Call)
@@ -3573,7 +4115,7 @@ def ddl_scan(root: Path) -> tuple[list[str], list[str], list[str]]:
             if (
                 isinstance(node, (ast.Name, ast.Attribute, ast.Subscript))
                 and isinstance(node.ctx, ast.Load)
-                and _use_key(node) in tainted
+                and (_taint_keys(node) & tree_taint)
             ):
                 assembled.append(
                     f"{rel}: `{ast.unparse(node)}` carries an incomplete DDL "
@@ -4015,6 +4557,501 @@ def test_the_ddl_scan_sees_every_form_that_could_name_a_label(tmp_path) -> None:
     )
     found, _, assembled = ddl_scan(tmp_path)
     assert not found and not assembled, (found, assembled)
+    # ⚠️ TAINT IS TREE-WIDE: a fragment bound in one module and completed in ANOTHER
+    # is the same unverifiable statement. A per-file taint set refused only the easy
+    # half (measured: two modules carrying the two halves left `assembled == []` and
+    # the pin stayed green, so a cross-module-assembled `Point` constraint read as
+    # ABSENT — the false-pass polarity this pin exists to prevent). The keyword IS
+    # inside the scanned tree in this shape, so it is NOT one of the residual cases
+    # the registry row documents.
+    (tmp_path / "carrier.py").write_text(
+        'POINT_UNQ = "GRAPH.CONSTRAINT CREATE pt_u UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from carrier import POINT_UNQ\ng.query(POINT_UNQ + "Point PROPERTIES 1 content")\n',
+        encoding="utf-8",
+    )
+    found, _, assembled = ddl_scan(tmp_path)
+    assert assembled and "POINT_UNQ" in assembled[0], (
+        "a fragment bound in ANOTHER module and completed at the use site was not "
+        f"refused — that is the cross-file half of the same fail-open: {assembled}"
+    )
+    # EVERY import spelling of the same use: `import carrier; carrier.X`,
+    # `import carrier as c; c.X`, and `from carrier import X as Y; Y`. The bare `from
+    # carrier import X` shape above was the only one refused before the import map
+    # existed (measured: the other three shipped), because the binding is minted as
+    # `name:X` in the carrier and an imported use is spelled differently.
+    for spelling in (
+        'import carrier\ng.query(carrier.POINT_UNQ + "Point PROPERTIES 1 c")\n',
+        'import carrier as c\ng.query(c.POINT_UNQ + "Point PROPERTIES 1 c")\n',
+        'from carrier import POINT_UNQ as PU\ng.query(PU + "Point PROPERTIES 1 c")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "this import spelling of a cross-module fragment was not refused "
+            f"({spelling.splitlines()[0]!r}) — the import map is what makes an "
+            "aliased or qualified use visible"
+        )
+    # The ACCEPTING control for this whole section: a COMPLETE statement carried
+    # across modules and used through `import carrier` must NOT be refused (the
+    # refusal is about what the scan cannot resolve, not about modules). Without it,
+    # "refuse every cross-module use" would pass this test while breaking the pin.
+    (tmp_path / "carrier.py").write_text(
+        'OK = "GRAPH.CONSTRAINT CREATE ge UNIQUE NODE GraphEvent"\n', encoding="utf-8"
+    )
+    for spelling in (
+        "import carrier\ng.query(carrier.OK)\n",
+        "from carrier import OK\ng.query(OK)\n",
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled == [], (
+            f"a COMPLETE statement used cross-module was refused ({spelling!r}): {assembled}"
+        )
+    # A DEEPER qualifier chain, not only `carrier.X`: a class-body binding used
+    # through the module (`carrier.Ddl.stmt`) and a subscript target
+    # (`carrier.PARTS["k"]`). A one-level-only spelling left all of these unfused
+    # (measured: each read as absent while the single-level form was refused), which
+    # is why the taint is keyed on the FINAL attribute name as well as the full text —
+    # `carrier.Ddl.stmt` and `Ddl.stmt` both reach the class-body `name:stmt`. The
+    # subscript spelling is reported through the ATTRIBUTE it dereferences
+    # (`carrier.PARTS`), which is the node that carries the binding's spelling.
+    (tmp_path / "carrier.py").write_text(
+        'class Ddl:\n    stmt = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+        'PARTS = {"k": "CREATE CONSTRAINT pt UNIQUE NODE "}\n',
+        encoding="utf-8",
+    )
+    for spelling in (
+        'import carrier\ng.query(carrier.Ddl.stmt + "Point")\n',
+        'import carrier as c\ng.query(c.Ddl.stmt + "Point")\n',
+        'import carrier\ng.query(carrier.PARTS["k"] + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "a DEEPER-qualifier use of a cross-module fragment was not refused "
+            f"({spelling.splitlines()[-1]!r}) — the translation must walk to the "
+            "leftmost name, not stop at Name.attr"
+        )
+    # A RENAME UPSTREAM OF THE USE: `carrier` binds, `middle` re-exports as `Y`,
+    # `user` uses `Y` (and `middle.Y`). A one-hop alias map lost the taint here —
+    # measured: both spellings read as ABSENT while the un-renamed chain was refused —
+    # so the import graph is resolved to a FIXPOINT.
+    (tmp_path / "carrier.py").write_text(
+        'POINT_UNQ = "GRAPH.CONSTRAINT CREATE pt_u UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "middle.py").write_text("from carrier import POINT_UNQ as Y\n", encoding="utf-8")
+    for spelling in (
+        'from middle import Y\ng.query(Y + "Point")\n',
+        'import middle\ng.query(middle.Y + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "a fragment RE-EXPORTED under another name and used here was not "
+            f"refused ({spelling.splitlines()[-1]!r}) — the import graph has to be "
+            "followed transitively, not one hop"
+        )
+    # AN ALIASED from-import of the QUALIFIER: `from carrier import obj as O` then
+    # `O.ddl`. ⚠️ This passes WITHOUT any qualifier substitution, and what it pins is
+    # the FINAL-name taint key, NOT the import graph: `_taint_keys` mints `name:ddl`
+    # for `O.ddl` (`:3484`) exactly as it does for `obj.ddl`, and `carrier.py`'s
+    # class-body binding already put `name:ddl` into the tree-wide UNION — so
+    # deleting `_taint_over_imports` outright leaves this fixture GREEN (measured).
+    # Kept as the CROSS-MODULE statement of the final-name arm (the single-file
+    # version is the deeper-qualifier fixture above); nothing in the fixpoint
+    # translates an `expr:` key — it mints `name:` keys only.
+    (tmp_path / "carrier.py").write_text(
+        'class obj:\n    ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    for spelling in (
+        'from carrier import obj as O\ng.query(O.ddl + "Point")\n',
+        'from carrier import obj\ng.query(obj.ddl + "Point")\n',
+    ):
+        (tmp_path / "user.py").write_text(spelling, encoding="utf-8")
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "an ALIASED qualifier import of a cross-module fragment was not "
+            f"refused ({spelling.splitlines()[-1]!r})"
+        )
+    for stray in ("carrier.py", "middle.py", "user.py"):
+        (tmp_path / stray).unlink(missing_ok=True)
+    # A RELATIVE import with a rename — the repo's own idiom (`from .x import y as
+    # z`). The dots live in `node.level`, NOT in `node.module`, so a
+    # `module.startswith(".")` test never fires: measured, this shape was not refused
+    # and a level-2 import resolved as an ABSOLUTE one from the wrong file.
+    (tmp_path / "pkg").mkdir()
+    (tmp_path / "pkg" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg" / "__init__.py").write_text(
+        "from .carrier import POINT_UNQ as Q\n", encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text('from pkg import Q\ng.query(Q + "Point")\n', encoding="utf-8")
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a RELATIVE re-export with a rename was not refused — the import graph "
+        "must read `node.level`, not a dot in `node.module`"
+    )
+    # An ATTRIBUTE-target binding used through ANOTHER receiver: `self._ddl` bound in
+    # one module, `OBJ._ddl` used in another. The qualified spelling alone never
+    # matches, so the binding also mints its FINAL name.
+    (tmp_path / "pkg" / "carrier.py").write_text(
+        "class C:\n    def __init__(self):\n"
+        '        self._ddl = "CREATE CONSTRAINT pt UNIQUE NODE "\nOBJ = C()\n',
+        encoding="utf-8",
+    )
+    (tmp_path / "pkg" / "__init__.py").write_text("from .carrier import OBJ\n", encoding="utf-8")
+    (tmp_path / "user.py").write_text(
+        'from pkg import OBJ\ng.query(OBJ._ddl + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "an attribute-target binding used through another receiver was not "
+        "refused (`OBJ._ddl` vs the `self._ddl` binding)"
+    )
+    for stray in ("pkg/carrier.py", "pkg/__init__.py", "pkg", "user.py"):
+        (tmp_path / stray).unlink() if stray != "pkg" else (tmp_path / stray).rmdir()
+
+
+def test_the_cross_module_widening_does_not_disable_the_keyword_split_join(tmp_path) -> None:
+    """A final-name taint key must never reach the JOIN's binding map.
+
+    The cross-module reach needs taint keyed on an attribute's FINAL name
+    (`self._ddl` bound here, `OBJ._ddl` used there). Applying that widening to the
+    JOIN's binding map too was measured to REGRESS this pin: a `self._DDL` target then
+    collides with a module-level `_DDL`, the key is `rebound` and DROPPED, and the
+    keyword-split join that needs `_DDL`'s value reports NOTHING where the unmodified
+    scan reports the split. That is the false-pass polarity, so the two key functions
+    are separate (`_binding_keys` for taint, `_join_keys` for the join).
+
+    ⚠️ Stripping the final name from a TOP-LEVEL attribute is NOT enough: `_binding_keys`
+    recurses into tuple / list / starred targets, and `_class_body_keys` qualifies the
+    keys it builds, so the same collision reappears through those shapes. Review
+    measured a wrapper that handled only the top-level case still reporting NOTHING for
+    `starred`, a `for` target and a nested tuple (tuple/list targets survive it because
+    `_bound_pairs` pairs them element-wise, so the paired target IS a top-level
+    attribute) — this loop reds on exactly those three, and the two fixtures after it
+    cover the class-body spelling and the `+=` lookup.
+    """
+    shapes = {
+        "attribute": 'class M:\n    def __init__(self):\n'
+        '        self._DDL = "CONSTRAINT pt UNIQUE NODE Point"\n',
+        "tuple": 'class M:\n    def __init__(self):\n'
+        '        self._DDL, other = ("CONSTRAINT pt UNIQUE NODE Point", 1)\n',
+        "list": 'class M:\n    def __init__(self):\n'
+        '        [self._DDL, other] = ("CONSTRAINT pt UNIQUE NODE Point", 1)\n',
+        "starred": 'class M:\n    def __init__(self):\n'
+        '        [*self._DDL] = ["CONSTRAINT pt UNIQUE NODE Point"]\n',
+        "for": 'for _obj._DDL, other in [("CONSTRAINT pt UNIQUE NODE Point", 1)]:\n    pass\n',
+        "nested tuple": 'class M:\n    def __init__(self):\n'
+        '        (self._DDL, other), z = ("CONSTRAINT pt UNIQUE NODE Point", 1), 2\n',
+        "class-body attribute": 'class C:\n    obj._DDL = "CONSTRAINT pt UNIQUE NODE Point"\n',
+    }
+    for name, shape in shapes.items():
+        (tmp_path / "m.py").write_text(
+            '_DDL = "CREATE "\n' + shape + 'g.query(_DDL + "CONSTRAINT pt UNIQUE NODE Point")\n',
+            encoding="utf-8",
+        )
+        _, _, assembled = ddl_scan(tmp_path)
+        assert any("SPLIT across operands" in a for a in assembled), (
+            f"the {name} shape lost the keyword-split join to the final-name widening, "
+            f"so an assembled constraint statement reports nothing: {assembled}"
+        )
+        (tmp_path / "m.py").unlink()
+    # The CLASS-BODY half of the same rule: `_class_body_keys` builds the join's
+    # class-qualified spellings too, so it must also use `final_name=False` — a
+    # class-qualified final name collides with the class-body binding and drops it.
+    (tmp_path / "m.py").write_text(
+        "class C:\n"
+        '    _DDL = "CREATE "\n'
+        '    obj._DDL = "CONSTRAINT pt UNIQUE NODE Point"\n'
+        'g.query(C._DDL + "CONSTRAINT pt UNIQUE NODE Point")\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert any("SPLIT across operands" in a for a in assembled), (
+        "a class-qualified final name collided with the class-body binding and took "
+        f"the keyword-split join with it: {assembled}"
+    )
+    (tmp_path / "m.py").unlink()
+    # An ACCUMULATION whose target is an ATTRIBUTE: the `+=` branch resolves the
+    # target through the JOIN's key space, so a final name is not among the keys it
+    # searches (searching with the taint keys picked up an UNRELATED same-named
+    # binding, set `assembling` to that value, and never joined the RHS — measured).
+    (tmp_path / "m.py").write_text(
+        'X = "hello"\n'
+        "class C:\n"
+        "    def __init__(self):\n"
+        '        self.X += ("CREATE ", "CONSTRAINT pt UNIQUE NODE Point")\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert any("SPLIT across operands" in a for a in assembled), (
+        "a keyword split ACCUMULATED through an attribute target reported nothing — "
+        f"the `+=` lookup must read the join's key space: {assembled}"
+    )
+    (tmp_path / "m.py").unlink()
+
+
+def test_the_cross_module_reach_arms_are_each_load_bearing(tmp_path) -> None:
+    """One fixture per mechanism the cross-module reach depends on.
+
+    Each case below was measured to go GREEN when its arm is removed, so none of them
+    is decoration: a subscripted binding's taint, a `+=` target's taint, a package
+    `__init__` re-export, a LEVEL-2 relative import (whose dots live in `node.level`),
+    and a rename chain ordered against the filename sort (which is why the fixpoint
+    loops until nothing changes rather than making one pass).
+    """
+    # A SUBSCRIPTED binding, used by subscript: the key is `expr:D['k']`, and a
+    # `_taint_keys` that keys only Names/Attributes never matches it.
+    (tmp_path / "sub.py").write_text(
+        'D = {}\nD["k"] = "CREATE CONSTRAINT pt UNIQUE NODE "\nprint(D["k"])\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, f"a subscripted binding's use was not refused: {assembled}"
+    # An ACCUMULATED (`+=`) target: the AugAssign arm reports on the TARGET's taint.
+    (tmp_path / "sub.py").write_text(
+        '_A = "CREATE CONSTRAINT pt UNIQUE NODE "\n_A += "Point"\ng.query(_A)\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert any("+=" in a for a in assembled), (
+        f"an accumulated DDL statement was not refused: {assembled}"
+    )
+    (tmp_path / "sub.py").unlink()
+    # An ACCUMULATION ACROSS MODULES: the fragment is bound in one module and
+    # accumulated onto in another, so the `+=` arm's taint test has to read the
+    # TREE-WIDE set. With the per-file set it reports nothing (measured: removing the
+    # tree-wide reach for this one branch leaves the rest of the suite green).
+    (tmp_path / "carrier2.py").write_text(
+        "class C:\n" '    X = "CREATE CONSTRAINT pt UNIQUE NODE "\n' "OBJ = C()\n",
+        encoding="utf-8",
+    )
+    (tmp_path / "user.py").write_text(
+        'import carrier2\ncarrier2.OBJ.X += "Point"\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert any("+=" in a for a in assembled), (
+        "a fragment bound in one module and ACCUMULATED onto in another was not "
+        f"refused — the `+=` taint test must read the tree-wide set: {assembled}"
+    )
+    for stray in ("carrier2.py", "user.py"):
+        (tmp_path / stray).unlink()
+    # A PACKAGE `__init__` RE-EXPORT: `module_files` must alias `pkg` to
+    # `pkg/__init__.py`, or the fixpoint cannot follow `from pkg import X`.
+    (tmp_path / "pkg2").mkdir()
+    (tmp_path / "pkg2" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg2" / "__init__.py").write_text(
+        "from .carrier import POINT_UNQ\n", encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from pkg2 import POINT_UNQ as PU\ng.query(PU + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a fragment re-exported through a package __init__ was not refused — the "
+        f"import graph must alias the package to its __init__: {assembled}"
+    )
+    # A LEVEL-2 RELATIVE IMPORT: `from ..carrier import X` carries level 2, and
+    # reading it as an absolute `carrier` resolves to no file at all.
+    (tmp_path / "pkg2" / "sub").mkdir()
+    (tmp_path / "pkg2" / "sub" / "mid.py").write_text(
+        "from ..carrier import POINT_UNQ as Y\n", encoding="utf-8"
+    )
+    (tmp_path / "user.py").write_text(
+        'from pkg2.sub.mid import Y\ng.query(Y + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a LEVEL-2 relative re-export was not refused — the dots live in "
+        f"`node.level`, not in `node.module`: {assembled}"
+    )
+    for stray in ("user.py", "pkg2/sub/mid.py", "pkg2/sub", "pkg2/carrier.py", "pkg2/__init__.py", "pkg2"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # FINAL NAMES MINTED THROUGH A TUPLE / STARRED TARGET: the taint key for
+    # `self._A` has to reach a use through another receiver (`OBJ._A`), so the
+    # `final_name` flag must reach the recursion inside `_binding_keys` too — with it
+    # pinned to False for tuple/starred leaves the use reports nothing (measured).
+    for shape in (
+        '((self._A, other), z) = (("CREATE CONSTRAINT pt UNIQUE NODE ", 1), 2)\n',
+        '[*self._A] = ["CREATE CONSTRAINT pt UNIQUE NODE "]\n',
+    ):
+        (tmp_path / "carrier3.py").write_text(
+            "class C:\n    def __init__(self):\n        " + shape + "OBJ = C()\n",
+            encoding="utf-8",
+        )
+        (tmp_path / "user.py").write_text(
+            'import carrier3\ng.query(carrier3.OBJ._A + "Point")\n', encoding="utf-8"
+        )
+        _, _, assembled = ddl_scan(tmp_path)
+        assert assembled, (
+            "an attribute bound through a nested target and used through another "
+            f"receiver was not refused: {assembled}"
+        )
+    for stray in ("carrier3.py", "user.py"):
+        (tmp_path / stray).unlink(missing_ok=True)
+    # A CLASS-BODY SUBSCRIPT binding, used through the class: `Ddl.parts["k"]`. The
+    # class-qualified key comes from `_class_body_keys`, which the taint loop must
+    # consult — with that update removed the use reports nothing (measured).
+    (tmp_path / "m2.py").write_text(
+        "class Ddl:\n"
+        "    parts = {}\n"
+        '    parts["k"] = "CREATE CONSTRAINT pt UNIQUE NODE "\n'
+        'g.query(Ddl.parts["k"])\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        f"a class-body subscript binding used through the class was not refused: {assembled}"
+    )
+    (tmp_path / "m2.py").unlink()
+    # A STAR RE-EXPORT plus a RENAMING use: `pkg/__init__.py` re-exports everything,
+    # and the consumer renames on the way in, so no Load of the original spelling
+    # exists to catch. The fixpoint must carry every tainted name across a `*`
+    # (measured: without it `assembled == []` while the un-renamed star use was
+    # caught).
+    (tmp_path / "pkg3").mkdir()
+    (tmp_path / "pkg3" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg3" / "__init__.py").write_text("from .carrier import *\n", encoding="utf-8")
+    (tmp_path / "user.py").write_text(
+        'from pkg3 import POINT_UNQ as Q\ng.query(Q + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a fragment re-exported by a STAR import and renamed by the consumer was not "
+        f"refused: {assembled}"
+    )
+    for stray in ("user.py", "pkg3/carrier.py", "pkg3/__init__.py", "pkg3"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # A PACKAGE-ABSOLUTE import inside the scanned ROOT: the pin scans `tortoise/`,
+    # so its module ids are ROOT-RELATIVE (`event_store`) while the repo's dominant
+    # idiom names the package absolutely (`from tortoise.event_store import X as Y`
+    # — measured: 2678 absolute from-imports inside `tortoise/`, 206 renamed, NONE of
+    # which resolves against a root-relative id). Here the root IS the package dir, so
+    # this fixture reproduces the pin's own invocation rather than tmp_path's parent
+    # shape.
+    (tmp_path / "pkg4").mkdir()
+    (tmp_path / "pkg4" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg4" / "user.py").write_text(
+        'from pkg4.carrier import POINT_UNQ as _P\ng.query(_P + "Point")\n',
+        encoding="utf-8",
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg4")
+    assert assembled, (
+        "a PACKAGE-ABSOLUTE renamed import was not resolved — the scanned root's "
+        f"module ids are relative, so the resolver must retry a suffix: {assembled}"
+    )
+    for stray in ("pkg4/carrier.py", "pkg4/user.py", "pkg4"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # The ROOT package ITSELF. The pin scans `tortoise/`, so the scanned root IS a
+    # package whose own `__init__.py` is the root — and `from tortoise import X` (82
+    # such lines under `tortoise/`, several of them RENAMED: `from tortoise import
+    # hosted_api as _ha`) names a module id that is neither in the map (`__init__` is
+    # keyed, the PACKAGE name is not) nor reachable by the suffix retry above (a
+    # single component has nothing to drop). The RENAME is what makes it load-bearing:
+    # without it the use matches the union's own `name:Q`, so the missing import edge
+    # cannot show. Measured before the root-package id was registered:
+    # `assembled == []` — a fragment re-exported by the root package and renamed at
+    # the use site read as ABSENT.
+    (tmp_path / "pkg5").mkdir()
+    (tmp_path / "pkg5" / "__init__.py").write_text(
+        'Q = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg5" / "user.py").write_text(
+        'from pkg5 import Q as R\ng.query(R + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg5")
+    assert assembled, (
+        "a RENAME of a fragment bound in the scanned ROOT's own `__init__.py` was "
+        "not refused — `from pkg import Q as R` names the root package, which has "
+        f"no id of its own unless the scan root's name is registered: {assembled}"
+    )
+    for stray in ("pkg5/__init__.py", "pkg5/user.py", "pkg5"):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # The STAR twin of that shape, PACKAGE-ABSOLUTE on BOTH hops: the star re-export
+    # names its source absolutely (`from pkg6.sub.carrier import *`, which only the
+    # suffix retry resolves) and the consumer renames through the ROOT package
+    # (`from pkg6 import POINT_UNQ as Q`, which only the registered root id resolves).
+    # Both hops have to work for the alias to reach the use, and each one is
+    # load-bearing: measured RED when the star branch is removed, when the suffix
+    # retry is removed, and when the root package has no id.
+    (tmp_path / "pkg6" / "sub").mkdir(parents=True)
+    (tmp_path / "pkg6" / "__init__.py").write_text(
+        "from pkg6.sub.carrier import *\n", encoding="utf-8"
+    )
+    (tmp_path / "pkg6" / "sub" / "__init__.py").write_text("", encoding="utf-8")
+    (tmp_path / "pkg6" / "sub" / "carrier.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "pkg6" / "user.py").write_text(
+        'from pkg6 import POINT_UNQ as Q\ng.query(Q + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path / "pkg6")
+    assert assembled, (
+        "a PACKAGE-ABSOLUTE star re-export renamed through the ROOT package was not "
+        f"refused — both hops must resolve: {assembled}"
+    )
+    for stray in (
+        "pkg6/user.py",
+        "pkg6/sub/carrier.py",
+        "pkg6/sub/__init__.py",
+        "pkg6/sub",
+        "pkg6/__init__.py",
+        "pkg6",
+    ):
+        target = tmp_path / stray
+        target.rmdir() if target.is_dir() else target.unlink()
+    # A RENAME CHAIN ORDERED AGAINST THE FILENAME SORT: propagation runs files in
+    # sorted order, so a chain that runs backwards needs more than one pass.
+    (tmp_path / "zz_a.py").write_text(
+        'POINT_UNQ = "CREATE CONSTRAINT pt UNIQUE NODE "\n', encoding="utf-8"
+    )
+    (tmp_path / "z_b.py").write_text(
+        "from zz_a import POINT_UNQ as X2\n", encoding="utf-8"
+    )
+    (tmp_path / "m_c.py").write_text("from z_b import X2 as X3\n", encoding="utf-8")
+    (tmp_path / "a_use.py").write_text(
+        'from m_c import X3\ng.query(X3 + "Point")\n', encoding="utf-8"
+    )
+    _, _, assembled = ddl_scan(tmp_path)
+    assert assembled, (
+        "a reverse-ordered RENAME CHAIN was not refused — the fixpoint must run to "
+        f"convergence, not one pass in filename order: {assembled}"
+    )
+    for stray in ("zz_a.py", "z_b.py", "m_c.py", "a_use.py"):
+        (tmp_path / stray).unlink()
+
+
+def test_an_unkeyable_binding_shape_is_reported_not_skipped(tmp_path, monkeypatch) -> None:
+    """The `_binding_keys` empty-list arm must RED, not skip.
+
+    Valid-Python targets are all keyable, so this arm cannot be reached by a fixture:
+    it is exercised by forcing `_binding_keys` to key nothing, which is exactly the
+    situation a future target shape would create. Without the pin the arm could be
+    deleted — and a binding shape that ships a constraint would then read as CLEAN.
+    """
+    (tmp_path / "m.py").write_text(
+        '_A = "CREATE CONSTRAINT pt UNIQUE NODE "\ng.query(_A + "Point")\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys.modules[__name__], "_binding_keys", lambda *a, **k: [])
+    _, _, assembled = ddl_scan(tmp_path)
+    assert any("does not resolve" in a for a in assembled), (
+        f"an unkeyable binding shape was not reported — it read as clean: {assembled}"
+    )
 
 
 def test_the_ddl_scan_refuses_a_source_it_cannot_read(tmp_path) -> None:
@@ -6418,3 +7455,329 @@ def test_an_out_of_alphabet_id_is_an_id_defect_not_a_state_one(tmp_path) -> None
 
 if __name__ == "__main__":  # pragma: no cover - manual mutation aid
     raise SystemExit(pytest.main([__file__, "-q"]))
+
+
+def test_an_unconditional_skip_or_xfail_is_not_a_pin(tmp_path):
+    """A `pins:` entry must cite a test that can RED (review cycle 9, P2).
+
+    `@pytest.mark.skip` and a non-strict `@pytest.mark.xfail` leave the node
+    COLLECTED but unable to fail, so a row citing one reads "watched" while
+    nothing watches it — the exact fail-open this gate closes. The boundary is
+    the point: `skipif(cond)` and an in-body `pytest.skip()` are CONDITIONAL and
+    still red on the other branch, so both stay legitimate pins.
+
+    The condition's VALUE matters, not its presence (review cycles 11-12):
+    `xfail(False)` runs the body and can red, but `xfail(True)` / `xfail(1)` /
+    `xfail(condition=True)` is xfailed unconditionally by pytest — MEASURED,
+    `2 xfailed` — so the RUN cannot go red. ⚠️ xfail remaps the OUTCOME, it does
+    not skip execution: the body still RUNS (measured with side-effect markers);
+    only `skip`, `skipif` and `run=False` suppress it. A non-literal condition —
+    INCLUDING A STRING, which pytest `eval()`s as an expression rather than
+    reading as a boolean — is unknowable from a manifest and is kept.
+
+    The same applies to every decoded TYPE, not just bool/int (review cycle 6,
+    P1): `skipif("[1]")` and `skipif("0.0")` are decided by the truthiness of the
+    decoded literal, because that is exactly what pytest's `eval` computes. And
+    the marker's own parameter list matters: `cond=` is NOT an xfail parameter —
+    pytest ignores it, so `xfail(cond=False)` is a BARE xfail that always applies
+    and cannot red — while `skipif(condition=…)` REPLACES its positional args
+    rather than joining them (`skipif(True, condition=False)` runs and fails).
+
+    Three more shapes are the same fail-open one marker over, each MEASURED
+    against real pytest before being refused (review cycle 12): `skipif` with no
+    condition at all (`skipif(reason=…)`, and `skipif(cond=…)` — pytest IGNORES
+    `cond=`, so the mark is unconditional), `skipif(True)` and `skipif(False,
+    True)` (pytest skips when ANY condition is true), and `xfail(strict=True,
+    run=False)` (`[NOTRUN]`, exit 0). `skipif(False)` and
+    `xfail(False, strict=True, run=False)` still RUN and still fail, so both stay
+    legitimate pins.
+
+    `xfail` carries the SAME ANY-of rule as `skipif`, and it was reasoned about
+    but not measured until review cycle 14 (P2):
+    `_pytest/skipping.py::evaluate_xfail_marks` takes EVERY positional arg as a
+    condition (`conditions = mark.args`; a `condition=` keyword REPLACES them)
+    and applies the mark as soon as ANY of them is true — so `xfail(False, True)`
+    and `xfail(COND, True)` are unconditional xfails that can never red, however
+    falsy the FIRST positional is. Both are refused here, next to the `skipif`
+    ANY-of control (`test_skipif_any_of`), while
+    `test_xfail_any_of_falsy_then_unknown` stays a pin: with an unknowable second
+    condition the mark may not apply, so the body can still red — the gate's
+    documented limit, which errs toward KEEPING a pin.
+
+    ⚠️ MEASURED against real pytest 9.1.1 while adding those cases: the ANY-of
+    readings above carry `reason=` (`3 xfailed, 1 failed` on the probe). A
+    BOOLEAN condition with NO `reason=` never gets as far as the verdict —
+    `_pytest/skipping.py::evaluate_condition` fails with *"you need to specify
+    reason=STRING when using booleans as conditions"* — so `xfail(False)` and
+    `xfail(True)` both ERROR at setup. An error is a red, which is why the
+    no-reason spellings remain pins here; this arm does not model the reason
+    requirement, and it only ever refuses the spellings a working row could use.
+    """
+    module = tmp_path / "test_pinned.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "def test_plain():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='not yet')\n"
+        "def test_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail\n"
+        "def test_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(strict=True)\n"
+        "def test_strict_xfail():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail(False)\n"
+        "def test_conditionally_xfailed():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail(True, reason='always')\n"
+        "def test_literally_true_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=1, reason='always, kw')\n"
+        "def test_literally_true_xfailed_kw():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION)\n"
+        "def test_variably_xfailed():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.xfail('False')\n"
+        "def test_string_condition_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail('True')\n"
+        "def test_string_condition_true_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('True', reason='string true')\n"
+        "def test_string_condition_true_skipped():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('False', reason='string false')\n"
+        "def test_string_condition_false_skipped():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('[1]', reason='truthy list spelling')\n"
+        "def test_string_condition_truthy_other_type():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif('0.0', reason='falsy float spelling')\n"
+        "def test_string_condition_falsy_float():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(cond=False, reason='cond= is not an xfail parameter')\n"
+        "def test_xfail_cond_kw_is_ignored():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(condition=False, reason='a real xfail condition')\n"
+        "def test_xfail_condition_kw_counts():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(True, condition=False, reason='kw replaces args')\n"
+        "def test_skipif_condition_replaces_args():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(strict=True, run=False, reason='notrun')\n"
+        "def test_strict_notrun_xfailed():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, strict=True, run=False, reason='cond wins')\n"
+        "def test_falsy_wins_over_notrun():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(True, reason='literal true')\n"
+        "def test_skipif_literal_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(False, True, reason='any-of')\n"
+        "def test_skipif_any_of():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_falsy_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, True, reason='any-of: the literal decides')\n"
+        "def test_xfail_any_of_unknown_then_true():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(False, CONDITION, reason='any-of: unknowable, kept')\n"
+        "def test_xfail_any_of_falsy_then_unknown():\n"
+        "    assert True\n"
+        "\n"
+        "@pytest.mark.skipif(cond=VARIABLE, reason='cond= is ignored')\n"
+        "def test_skipif_cond_kw_only():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(reason='no condition at all')\n"
+        "def test_skipif_no_condition():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.skipif(False, reason='conditional')\n"
+        "def test_conditionally_skipped():\n"
+        "    assert True\n"
+        "\n"
+        "def test_skips_in_body():\n"
+        "    pytest.skip('conditional at runtime')\n"
+        "\n"
+        "class TestGroup:\n"
+        "    @pytest.mark.skip\n"
+        "    def test_in_class(self):\n"
+        "        assert True\n"
+        "\n"
+        "    def test_kept(self):\n"
+        "        assert True\n"
+        "\n"
+        "@pytest.mark.skip(reason='whole class')\n"
+        "class TestSkippedGroup:\n"
+        "    def test_inside(self):\n"
+        "        assert True\n"
+    )
+    assert _test_node_names(module) == {
+        "test_plain",
+        "test_strict_xfail",
+        "test_conditionally_xfailed",
+        "test_variably_xfailed",
+        "test_string_condition_xfailed",  # pytest eval()s "False"; body runs
+        "test_string_condition_false_skipped",  # "False" evals falsy: runs
+        "test_string_condition_falsy_float",  # "0.0" evals falsy: runs
+        "test_xfail_condition_kw_counts",  # condition= is a real condition
+        "test_skipif_condition_replaces_args",  # condition= replaces args
+        "test_falsy_wins_over_notrun",  # literal-falsy beats run=False
+        "test_xfail_any_of_falsy_then_unknown",  # any-of with an unknowable: kept
+        "test_conditionally_skipped",
+        "test_skips_in_body",
+        "TestGroup::test_kept",
+    }
+
+
+def test_an_xfail_raises_mark_is_a_watch_when_it_can_still_fail(tmp_path):
+    """`xfail(raises=…)` narrows the OUTCOME; it does not guarantee one.
+
+    pytest converts a call to `xfailed` only when the raised exception MATCHES
+    `raises`; anything else keeps `rep.outcome = "failed"` (`_pytest/skipping.py
+    ::pytest_runtest_makereport` — `if raises is None or isinstance(call.excinfo
+    .value, raises): skipped … else: failed`). So a non-strict `xfail(raises=
+    ValueError)` whose body raises `TypeError` reports a REAL failure — it can
+    red, so it IS a watch, and refusing a `pins:` row that cites it was wrong
+    (review cycle 15, P2).
+
+    MEASURED on pytest 9.1.1 before this arm existed, one probe node per shape,
+    which is what makes each verdict below a measurement and not a reading
+    (`4 failed, 1 xfailed` over these spellings):
+
+        xfail(raises=ValueError)           raise TypeError   -> FAILED
+        xfail(True, raises=ValueError)     raise TypeError   -> FAILED
+        xfail(raises=pytest.raises(…))     raise TypeError   -> FAILED
+        xfail(CONDITION, run=False)        CONDITION=False   -> FAILED (no mark)
+        xfail(raises=None)                 assert False      -> XFAILED
+        xfail(True, run=False, raises=…)   raise TypeError   -> [NOTRUN]
+
+    The boundary is the same one the conditional arm draws: the answer is what
+    pytest DOES with the spelling, not whether the keyword is present.
+    `raises=None` is pytest's "no restriction" value (bare-`xfail()` semantics),
+    and `run=False` disables execution outright — neither can red, so neither is
+    a pin. A falsifiable condition is the third case: when it is falsy NO mark
+    applies, so `run=False` is inert and the body runs (`review cycle 15, P2`:
+    the old order returned `run=False ⇒ cannot red` before that check).
+    """
+    module = tmp_path / "test_raises_shapes.py"
+    module.write_text(
+        "import pytest\n"
+        "CONDITION = False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError)\n"
+        "def test_raises_only():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=ValueError, reason='expected')\n"
+        "def test_raises_and_reason():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(raises=pytest.raises(ValueError))\n"
+        "def test_raises_with_abstract_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(True, raises=ValueError, reason='always applied')\n"
+        "def test_literal_true_with_raises():\n"
+        "    raise TypeError('other')\n"
+        "\n"
+        "@pytest.mark.xfail(CONDITION, run=False, reason='the condition may be falsy')\n"
+        "def test_unknown_condition_with_run_false():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(raises=None)\n"
+        "def test_raises_none_is_a_bare_xfail():\n"
+        "    assert False\n"
+        "\n"
+        "@pytest.mark.xfail(True, run=False, raises=ValueError, reason='notrun')\n"
+        "def test_notrun_wins_over_raises():\n"
+        "    raise TypeError('other')\n"
+    )
+    assert _test_node_names(module) == {
+        "test_raises_only",  # a DIFFERENT exception is a true failure
+        "test_raises_and_reason",
+        "test_raises_with_abstract_raises",  # pytest.raises(...) matches too
+        "test_literal_true_with_raises",  # always applied, but still falsifiable
+        "test_unknown_condition_with_run_false",  # falsy ⇒ no mark ⇒ the body runs
+        # NOT `test_raises_none_is_a_bare_xfail`: raises=None IS the bare xfail
+        # NOT `test_notrun_wins_over_raises`: run=False never runs the body
+    }
+
+
+def test_a_module_wide_pytestmark_skip_pins_nothing(tmp_path):
+    """`pytestmark = pytest.mark.skip` opts the whole module out of reddening."""
+    module = tmp_path / "test_all_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "pytestmark = pytest.mark.skip(reason='whole module')\n"
+        "\n"
+        "def test_a():\n"
+        "    assert True\n"
+    )
+    assert _test_node_names(module) == set()
+
+
+def test_a_class_level_skip_pins_nothing_under_it(tmp_path):
+    """A CLASS-level skip collects every method and runs none — the same
+    fail-open as a skipped function, one hop out (review cycle 10, P2).
+
+    pytest was MEASURED on these exact shapes (`1 failed, 2 skipped`): the
+    class-decorator and class-body-`pytestmark` methods are collected and can
+    never red, while the unmarked class still fails. So the same nodes must be
+    refused here, and the clean class must survive (no over-block).
+    """
+    module = tmp_path / "test_class_skipped.py"
+    module.write_text(
+        "import pytest\n"
+        "\n"
+        "@pytest.mark.skip(reason='class decorator')\n"
+        "class TestDecorated:\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarked:\n"
+        "    pytestmark = pytest.mark.skip(reason='class body')\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestMarkedList:\n"
+        "    pytestmark = [pytest.mark.xfail(reason='class body list')]\n"
+        "\n"
+        "    def test_in(self):\n"
+        "        assert False\n"
+        "\n"
+        "class TestClean:\n"
+        "    def test_kept(self):\n"
+        "        assert False\n"
+    )
+    assert _test_node_names(module) == {"TestClean::test_kept"}

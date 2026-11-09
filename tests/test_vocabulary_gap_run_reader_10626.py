@@ -78,6 +78,7 @@ lane and skip VISIBLY elsewhere.
 """
 from __future__ import annotations
 
+import ast
 import json
 import sys
 import uuid
@@ -249,6 +250,45 @@ def test_the_reading_is_this_run_not_the_process_lifetime(sdk):
         "a run reported a reading it never earned — the reading is a process "
         "lifetime total, not this run's")
     assert _gap_warnings(second) == []
+
+
+def test_a_peer_fold_outside_the_run_window_cannot_earn_it_a_reading():
+    """This is what separates a RUN-SCOPED accumulator from a SNAPSHOT DELTA.
+
+    `test_the_reading_is_this_run_not_the_process_lifetime` above only reds a
+    reader that reports an UNDELTED process total: its second run's window
+    contains no fold at all, so a `before/after` delta reader also reports
+    nothing there and passes identically (review P2). A delta reader is the
+    cheap wrong answer — it needs no propagation, no `ContextVar`, and no
+    per-run accumulator, and it *is* wrong: any fold landing on a bare worker
+    between the two snapshots is attributed to whatever run is open.
+
+    So this arm folds from a context that does NOT carry the run's scope, INSIDE
+    the window, and requires the receipt to stay empty. A delta reader inherits
+    the token and reds here; the run-scoped accumulator does not see it and
+    stays quiet.
+    """
+    from concurrent.futures import ThreadPoolExecutor
+
+    def _run() -> dict:
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            # No `contextvars.copy_context()` — this worker is a PEER of the
+            # run, exactly like the bare arm in the propagation test above.
+            pool.submit(v2.fold_allowed, GAP_CLAIM, PRIOR_CLAIM).result()
+        return {"stats": {}, "warnings": []}
+
+    out = v2._run_scoped_vocabulary_gap(_run)()
+
+    # The fold really happened, and the PROCESS census really saw it — so the
+    # silence below is the run scope, not a fold that never ran.
+    assert v2.vocabulary_gap_report().get(UNLISTED_MARKER, 0) >= 1, (
+        "fixture: the bare-worker fold must reach the process census, otherwise "
+        "this arm proves nothing")
+    assert "vocabulary_gap" not in (out.get("stats") or {}), (
+        "a peer's fold outside the run window was attributed to this run — "
+        "that is a snapshot DELTA, not a run-scoped accumulator; "
+        f"stats={out.get('stats')}")
+    assert _gap_warnings(out) == []
 
 
 def test_the_per_process_log_cap_cannot_spend_the_run_level_record(sdk, monkeypatch):
@@ -481,6 +521,42 @@ def test_the_alarm_is_never_malformed_even_for_an_empty_reading():
     assert "absorbed ;" not in warning, warning
 
 
+def test_a_truncated_sample_is_named_in_the_alarm():
+    """Review P2: past the SAMPLE cap the receipt must say its list is incomplete.
+
+    `_VOCABULARY_GAP_CAP` bounds the retained SAMPLE, not the token SIZE (that
+    is `_VOCABULARY_GAP_MAX_TOKEN`, a separate clause), and `_truncated` only
+    increments once the sample is full — so a truncated reading always still
+    carries a non-empty sample and the clause is purely ADDITIVE. Silent, a run
+    that absorbed 5,000 distinct tokens shipped "512 unlisted token(s)" with no
+    sign the rest were dropped, on a customer-visible receipt field.
+
+    Driven END TO END through the real accumulator rather than a hand-built
+    dict, so it also pins that `_truncated` reaches the alarm at all: without
+    the clause the assertion below has nothing to match (the pre-fix warning
+    names the sample and stops).
+    """
+    overflow = 3
+    acc = v2._VocabularyGapRunAccumulator()
+    # Distinct, short, bucket-free tokens: no pair-read bucket and no oversize
+    # cap, so the ONLY loss this reading records is the sample cap itself.
+    acc.absorb(f"tok{i}" for i in range(v2._VOCABULARY_GAP_CAP + overflow))
+
+    reading = acc.reading()
+    assert reading["distinct_tokens"] == v2._VOCABULARY_GAP_CAP, reading["cap"]
+    assert reading["truncated_observations"] == overflow, reading["truncated_observations"]
+    assert reading["pair_read_residual"] == 0, reading["pair_read_residual"]
+    assert reading["oversize_observations"] == 0, reading["oversize_observations"]
+
+    warning = v2._vocabulary_gap_run_warning(reading)
+    assert f"{overflow} further observation(s)" in warning, warning
+    assert f"the {v2._VOCABULARY_GAP_CAP}-distinct-token sample cap" in warning, warning
+    assert "not complete" in warning, warning
+    # Additive, not displacing: the unlisted-sample clause the predicate fires
+    # on is still there, so the reader gets BOTH facts from one alarm.
+    assert "unlisted one-sided token(s)" in warning, warning
+
+
 # ── round 7, P2 (1): the accumulator is SHARED across context-carrying threads ─
 #
 # `_VocabularyGapRunAccumulator`'s docstring used to justify having no lock with
@@ -614,3 +690,78 @@ def test_the_reader_never_replaces_a_lanes_own_receipt_fields():
     assert receipt["stats"]["vocabulary_gap"]["tokens"].get(UNLISTED_MARKER) == 1, (
         "the reading must still land on a dict `stats`; "
         f"stats={receipt['stats']!r}")
+
+# ── the wiring is LAZY, and laziness is a PIN, not prose (review note 2) ─────
+# `tortoise/sdk.py` installs the M2 capture reader as a ONE-SHOT lazy entry: the
+# first call pays the `extractor_v2` import, rebinds the class attribute, and
+# every later call goes straight there. The reason is MEASURED, not stylistic —
+# binding the real wrapper at module scope made `import tortoise.sdk` eagerly
+# import `tortoise.extractor_v2` (`value_gate`/`vet_gate`/`near_dup_merge`/
+# `failure_policy` with it), contradicting this repo's documented cold-start
+# policy for that module (#10626 review P2).
+#
+# That fix rested on a sentence in a comment, and nothing redded if the import
+# moved back out to module scope (review note 2 at #10790). A `sys.modules`
+# assertion cannot pin it here: this file imports `extractor_v2` at its own top,
+# and a shared pytest session may have imported it long before, so an
+# "is it in sys.modules" reading is a measurement of the SESSION, not of `sdk`.
+# The SOURCE is the durable carrier of the claim, so the pin reads the AST:
+# `sdk.py` must carry no module-level `extractor_v2` import, and the import must
+# live inside the nested lazy entry the wiring installs.
+
+SDK_SOURCE = Path(__file__).resolve().parent.parent / "tortoise" / "sdk.py"
+
+#: The wiring entry point in `sdk.py` — one module-level CALL, never a
+#: module-level import.
+WIRING_NAME = "_wire_vocabulary_gap_run_reader_10626"
+
+
+def _mentions_extractor_v2(node: ast.AST) -> bool:
+    return "extractor_v2" in ast.unparse(node)
+
+
+def test_the_vocabulary_gap_reader_is_wired_LAZILY_at_module_scope():
+    """The measured cold-start fix, pinned at the mechanism it rests on.
+
+    Reds if the `extractor_v2` import is hoisted back to module scope — the
+    regression that costs `import tortoise.sdk` the whole extractor stack — and
+    independently if the module-level wiring CALL is dropped, which would leave
+    the M2 lane's receipt unwrapped and the reader silently absent.
+    """
+    tree = ast.parse(SDK_SOURCE.read_text(encoding="utf-8"))
+
+    eager = [
+        ast.unparse(n) for n in tree.body
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and _mentions_extractor_v2(n)
+    ]
+    assert not eager, (
+        "tortoise/sdk.py imports `extractor_v2` at MODULE scope, so "
+        "`import tortoise.sdk` pays the extractor stack again — the measured "
+        "#10626 cold-start regression. Keep the import inside the lazy entry: "
+        f"{eager}")
+
+    wiring = next(
+        (n for n in tree.body
+         if isinstance(n, ast.FunctionDef) and n.name == WIRING_NAME), None)
+    assert wiring is not None, (
+        f"`{WIRING_NAME}` is gone from tortoise/sdk.py — the M2 capture lane "
+        "would then run UNWRAPPED, losing the #10626 reading on the one lane "
+        "that DETACH-DELETEs a duplicate")
+
+    nested = [
+        ast.unparse(n) for n in ast.walk(wiring)
+        if isinstance(n, (ast.Import, ast.ImportFrom)) and _mentions_extractor_v2(n)
+    ]
+    assert nested, (
+        f"`{WIRING_NAME}` no longer imports `extractor_v2` inside its lazy "
+        "entry — the bound name the wrapper rebinds to must come from a call-"
+        "time import, or the module-scope parsimony is a fiction")
+
+    installed = [
+        n for n in tree.body
+        if isinstance(n, ast.Expr) and isinstance(n.value, ast.Call)
+        and getattr(n.value.func, "id", None) == WIRING_NAME
+    ]
+    assert installed, (
+        f"tortoise/sdk.py defines `{WIRING_NAME}` but never CALLS it at module "
+        "scope, so the wrapper is never installed")

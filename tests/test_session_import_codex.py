@@ -921,12 +921,18 @@ def test_retryable_import_failure_is_spooled_for_the_next_drain(
     assert filed[0]["session_id"] == "sid-retry"
 
 
-@pytest.mark.parametrize("code", [400, 403])
+@pytest.mark.parametrize("code", [400, 422])
 def test_permanent_import_failure_is_not_spooled(
         tmp_path, monkeypatch, codex_jsonl, code, capsys):
     """A PERMANENT refusal keeps today's behaviour exactly: honest error, no
     receipt, and NOT parked on the spool (a malformed payload never becomes
     valid by waiting).
+
+    #5051: 403 was the other row here, and it is NOT permanent any more — it is
+    `policy` (a reversible credential/entitlement state), so it is now asserted
+    in `test_a_policy_refusal_is_spooled_for_the_next_drain` below. The pair is
+    deliberately one row each: the two classes have OPPOSITE consequences, and a
+    test that lumped them together would pass while the distinction was lost.
 
     Mutation: spool unconditionally — the spool assertions RED; mutation: drop
     the error line — the stderr assertion REDs."""
@@ -950,6 +956,63 @@ def test_permanent_import_failure_is_not_spooled(
     assert read_spool_meta(spool, "sid-perm") is None
     metas, _ = list_spool_metas(spool)
     assert metas == []
+
+
+@pytest.mark.parametrize("code", [401, 403, 407])
+def test_a_policy_refusal_is_spooled_for_the_next_drain(
+        tmp_path, monkeypatch, codex_jsonl, code, capsys):
+    """#5051 / #4895: a CREDENTIAL or ENTITLEMENT refusal is not a refusal of
+    the BYTES — `capture_outcome` calls it `policy`, so `may_keep_entry` is
+    True and the turns are parked for the next drain.
+
+    Before this, 401/403/407 were `permanent` here: `sessions import` against a
+    suspended org or a rotated key dropped the capture with exit 1 and an
+    identity-less breadcrumb as the only record — the capture was never written
+    locally at all, so nothing could ever file it.
+
+    Mutation: route `_spool_if_retryable` on the 2-class answer again (a 403 is
+    not `retry`) — the meta assertion REDs and the session is lost again."""
+    from tortoise.__main__ import _cmd_sessions_import
+    from tortoise.capture_spool import (
+        PostOutcome,
+        flush_spool,
+        read_spool_meta,
+        read_spool_turns,
+    )
+
+    spool = _import_env(tmp_path, monkeypatch)
+    args = SimpleNamespace(file=str(codex_jsonl), harness="codex",
+                           session_id="sid-policy")
+
+    def _raise(req, timeout=None):
+        raise _http_error(code, '{"detail":"Organization is suspended"}')
+
+    with mock.patch("urllib.request.urlopen", _raise):
+        rc = _cmd_sessions_import(args)
+
+    # Still an HONEST failure: exit 1 and NO receipt (the #4675 rule is
+    # untouched — a policy refusal is never papered over with a 2xx receipt).
+    assert rc == 1
+    assert not list((tmp_path / "receipts").glob("*.json")), (
+        "a failed POST must not write a receipt")
+    assert f"import failed (HTTP {code})" in capsys.readouterr().err
+
+    meta = read_spool_meta(spool, "sid-policy")
+    assert meta is not None, (
+        "a policy refusal left NO durable copy of the turns")
+    assert read_spool_turns(spool, "sid-policy") == _EXPECTED_TURNS
+
+    # ...and it is genuinely retryable-once-fixed: the drain files it.
+    filed: list[dict] = []
+
+    def _post(payload):
+        filed.append(payload)
+        return PostOutcome(ok=True, status=200,
+                           body={"session_id": payload["session_id"]})
+
+    summary = flush_spool(spool, _post)
+    assert summary.filed == 1, summary
+    assert filed and filed[0]["harness"] == "codex"
 
 
 def test_unreachable_api_is_spooled_too(tmp_path, monkeypatch, codex_jsonl):

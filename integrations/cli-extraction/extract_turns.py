@@ -955,11 +955,19 @@ warnings_seen = []
 #     `folded_onto_other_sources` is named for.
 #   * ARRAY prop — `extractedFrom` came back a LIST: the survivor was born from a
 #     ref SEQUENCE (a caller passing a list — ingest bundles do) or holds a
-#     prop-only ref no edge addresses. The point EXISTS already, no
-#     equality-matched read can see it, and the all-fold branch below would
-#     otherwise refuse the batch as "SDK drift" (the #10010 review P2 false
-#     failure: sticky, and it names the wrong component). Counted here, so
-#     `written` and `new`/`folded` still describe the same batch.
+#     prop-only ref no edge addresses. The EQUALITY filter cannot match an array
+#     property, which is why this arm exists — but post-#10063 the population
+#     read does NOT need it to: `query(extractedFrom=…)` also matches the
+#     authoritative `:Source` edge (#3263), so a sequence-born survivor IS
+#     visible and `after` > 0. What the arm buys now is the COUNT: a fold is read
+#     off the write's OWN result shape, so `new` never double-reports one
+#     (`folded_onto_other_sources` is the single place it is counted). It also
+#     keeps the all-fold branch from being reached for the wrong reason —
+#     without it a sequence-born fold read as a MINT and the batch was refused
+#     as "SDK drift" (the #10010 review P2 false failure: sticky, and it names
+#     the wrong component). The ONE sub-shape still invisible to the read door is
+#     the prop-only ref no `:Source` edge addresses; it is a fold here for the
+#     same reason, and for it alone `after` can be 0 with folds recorded.
 # A point this run MINTED carries the SCALAR this writer passed (line above) and
 # `query()` matches it, so a mint can never be mistaken for a fold here.
 # No message template involved.
@@ -973,11 +981,23 @@ _handler.setLevel(logging.WARNING)   # collect WARNING+ only: an INFO-tuned
 logging.getLogger('tortoise').addHandler(_handler)
 _WRITE_PATH_LOGGERS = ('tortoise.sdk', 'tortoise.projection', 'tortoise.ingest')
 
+def _created_by_other_source(p):
+    # `extractedFrom` is the survivor's OWN creating ref (#7704 review P1) — the
+    # folded set rides `extractedFromAll` and the `:Source` edges. So a point
+    # that is readable under this source through a FOLD carries either a SCALAR
+    # naming another source or an ARRAY (a survivor born from a ref sequence);
+    # a mint of THIS writer always carries the scalar it passed. Only the first
+    # two shapes are somebody else's point, and only they are excused from the
+    # domain assertion below. None (no ref at all) is NOT excused.
+    _ref = p.get('extractedFrom')
+    return _ref is not None and _ref != source
+
 def _source_points():
     # public door: query() filters Points by property, terminal statuses included
     return sdk.query(extractedFrom=source, include_retracted=True)
 
-before = len(_source_points())
+before_points = _source_points()
+before = len(before_points)
 _baseline = len(warnings_seen)   # warm-up read retires init-time noise
 made, non_live = [], []
 try:
@@ -1018,18 +1038,26 @@ try:
         raise RuntimeError(f'inconsistent write: before={before} after={after}')
     _noise = [f'{name}: {msg}' for name, msg in _new_warnings
               if not name.startswith(_WRITE_PATH_LOGGERS)]
-    # `new` counts points that are under this source and were not before. A
-    # survivor FOLDED from another source is NOT among them: the fold keeps the
-    # `extractedFrom` property the survivor's OWN creating source — a scalar, so
-    # `query(extractedFrom=…)`'s EQUALITY match still answers for it — and
-    # carries the folded set on `extractedFromAll` (#7704 review P1). This
-    # source's ref therefore lives on the EDGES, never in the equality-matched
-    # property. ⚠️ DEPENDS ON #10063: once a read can ask for the folded set (the
-    # edges, or `extractedFromAll`), a folded survivor WILL count as `new` here
-    # and `after - before` stops excluding folds. Until then the `:Source` EDGES
-    # are the authoritative provenance (#3263), this read sees the creating
-    # source only, and `folded_onto_other_sources` is what reports the folds.
-    receipt = {'written': len(made), 'new': after - before,
+    # `new` counts points this run MINTED under this source. It used to be the
+    # population DELTA (`after - before`) — a stand-in that worked only while
+    # `query(extractedFrom=…)` matched the property by EQUALITY and therefore
+    # could not see a folded survivor at all. #10063 fixed that read door (it
+    # now also matches the authoritative `:Source` edges, #3263), so a folded
+    # survivor IS under this source for the first time — and a plain delta would
+    # count it as NEW, double-reporting every fold in `new` AND
+    # `folded_onto_other_sources`. So `new` is the points this read can see NOW
+    # that it could not see BEFORE, minus the ones that appeared because of a
+    # FOLD (read off the WRITE'S OWN RESULT above, never off a log line):
+    #   * a genuine mint                → +1   (`new`)
+    #   * a cross-source fold           → +1 readable, −1 fold → 0, and the
+    #                                     `folded_onto_other_sources` count reports it
+    #   * an idempotent SAME-source rerun → 0 (nothing became readable: the
+    #                                     survivor's own scalar already matched)
+    _folded_ids = set(folded)
+    minted = [pid for pid in made if pid not in _folded_ids]
+    _newly_visible = ({p.get('id') for p in pts}
+                      - {p.get('id') for p in before_points})
+    receipt = {'written': len(made), 'new': len(_newly_visible - _folded_ids),
                'total_for_source': after,
                'non_live_hits': non_live, 'ids': made[:5]}
     if folded:
@@ -1037,33 +1065,36 @@ try:
     if _noise:
         receipt['env_warnings'] = {'count': len(_noise),
                                    'sample': [n[:150] for n in _noise[:2]]}
-    if after == 0:
-        # Nothing is queryable under this source after the loop. Two shapes reach
-        # here and they must not be confused:
-        #   * ALL-FOLD — every call folded onto a point that already existed under
-        #     OTHER sources, or onto a survivor whose `extractedFrom` is an ARRAY
-        #     this equality-matched read cannot see at all. The fold KEEPS the
-        #     evidence now (it wires this source onto the survivor, #7704), but a
-        #     survivor CREATED under another source keeps that source as its
-        #     scalar `extractedFrom` (deliberately equality-matchable — #7704
-        #     review P1) and carries the folded set on `extractedFromAll`, so
-        #     `query(extractedFrom=<this source>)` does not return it.
-        #     ⚠️ DEPENDS ON #10063: this branch is CORRECT only while the
-        #     population read is the equality property; a read over the folded set
-        #     would make an all-fold run report points, and this `after == 0` arm
-        #     would stop firing for it. A legitimate all-fold run today: nothing
-        #     NEW under this source, so nothing to tier or propagate. Every fold
-        #     that can reach this arm is counted above — including the array-prop
-        #     survivor — which is what keeps a healthy batch from being refused as
-        #     drift.
-        #   * DRIFT — create_point calls succeeded, the SDK reported no folds, and
-        #     the read-back still finds nothing (e.g. `extractedFrom` stopped
-        #     being a queryable property). That must fail, never exit 0.
-        if len(folded) != len(made):
-            raise RuntimeError(
-                f'inconsistent write: {len(made)} create_point calls succeeded but '
-                f'query() finds 0 points under the source with only {len(folded)} '
-                'dedup folds reported — SDK drift, not an all-fold run')
+    # DRIFT — create_point calls that MINTED (not folded) left nothing readable
+    # under this source (e.g. `extractedFrom` stopped being a queryable
+    # property). That must fail, never be reported as a healthy run.
+    if minted and after == 0:
+        raise RuntimeError(
+            f'inconsistent write: {len(made)} create_point calls succeeded ({len(minted)} '
+            f'of them MINTS) but query() finds 0 points under the source with '
+            f'{len(folded)} dedup folds reported — SDK drift, not an all-fold run')
+    if not minted:
+        # Nothing MINTED under this source by this run. Two shapes reach here
+        # and they must not be confused:
+        #   * ALL-FOLD — every call folded onto a point that already existed (under
+        #     OTHER sources, or a survivor whose `extractedFrom` is an ARRAY). The
+        #     fold KEEPS the evidence (it wires this source onto the survivor,
+        #     #7704), and since #10063 the population read SEES it — so `after` is
+        #     now > 0 here. Nothing is NEW, so there is nothing to tier or
+        #     propagate: the folds are counted above and the run exits 0.
+        #   * DRIFT is NOT refused here, and the comment must not claim it is
+        #     (#11038 review P3). The guard above the branch is
+        #     `if minted and after == 0:` — it can only fire when `minted` is
+        #     NON-empty, so the shape named above (`minted` empty AND nothing
+        #     readable) falls straight through to the exit below. That residual
+        #     is stated rather than papered over: a batch that reports only folds
+        #     and leaves nothing readable under the source exits 0. It is not a
+        #     silent failure — `total_for_source` is in the receipt and is 0
+        #     there, and the write's own result is what `folded` is derived from
+        #     — but nothing REFUSES it, and extending the guard to
+        #     `not minted and not pts` needs a decision about the legitimate
+        #     `before > 0` case (a rerun whose folds all predate this run), which
+        #     is why it is a recorded residual and not a silent widening here.
         receipt['folded_onto_existing'] = len(folded)
         print(json.dumps(receipt))
         sdk.close()
@@ -1071,10 +1102,31 @@ try:
 
     # Read-back assertion: with a **props API, only reading the write back
     # catches silent drift (a renamed kwarg becomes a stale property, not an
-    # error). Every Point currently under this source must carry this domain —
-    # new ones because this loop just wrote them, old ones because a rerun uses
-    # the same arguments.
-    _bad = [p.get('id') for p in pts if p.get('domain') != domain]
+    # error). Every Point this run MINTED under this source must carry this
+    # domain — and so must the ones an earlier run of this writer left there
+    # (a rerun uses the same arguments). ⛔ A FOLDED survivor is excluded: it is
+    # under this source because of the fold, and it carries the domain it was
+    # created with (someone else's) — asserting OUR domain on it would refuse a
+    # healthy cross-source fold, which is the defect class this writer exists to
+    # avoid, in the opposite direction.
+    #
+    # The exclusion is DURABLE — read off each row's OWN provenance, never off
+    # this run's fold list. `_folded_ids` is per-RUN, but the state it has to
+    # excuse is PERSISTENT: a survivor folded onto by an EARLIER run stays under
+    # this source, and since #10063 this read SEES it (`query(extractedFrom=…)`
+    # matches the authoritative `:Source` edge too, #3263). One rerun later it is
+    # in `pts` and NOT in `_folded_ids`, so a per-run exclusion asserted OUR
+    # domain on it and raised `read-back failed` — sticky (the survivor's claim
+    # is no longer in the batch to re-fold) and naming the wrong component (the
+    # #10010 review P2 false-failure class this guard exists to avoid). The
+    # shape that must be excused is a property of the POINT: its own creating
+    # ref is not ours.
+    #
+    # Fail closed on a missing ref: a row carrying NO `extractedFrom` is still
+    # asserted, so an upstream rename of the property reds here instead of
+    # silently emptying the guard.
+    _bad = [p.get('id') for p in pts
+            if p.get('domain') != domain and not _created_by_other_source(p)]
     if _bad:
         raise RuntimeError('read-back failed: points under source missing domain '
                            f'{domain!r} (ids {_bad[:3]}) — SDK signature drift, or '

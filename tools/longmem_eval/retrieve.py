@@ -122,6 +122,7 @@ from tortoise.retrieval import (
     _validity_marker,  # noqa: F401 — re-exported for the eval tests
     render_context,
     resolve_pool_size,
+    session_key_of,  # #10540 — the SPLICE must key the pool the same way the SEED does
 )
 from tortoise.retrieval import (
     TOKEN_ESTIMATOR as _TOKEN_ESTIMATOR,  # noqa: F401
@@ -156,6 +157,7 @@ from tortoise.session_reinjection import (  # C4 (#2517): product rules
     DEFAULT_REINJECTION_SEED_SESSIONS,
     DEFAULT_REINJECTION_SEED_WINDOW,
     DEFAULT_REINJECTION_TOTAL_ITEMS,
+    _is_real_session_id,  # #10540 R11 — the splice's ANCHOR MAP needs it
 )
 
 from . import encode_cache, evidence
@@ -391,6 +393,69 @@ DEFAULT_TR_TOP_K = 12
 #: number is produced by the unchanged path.
 TEMPORAL_LEG_PLACEMENTS = ("tail", "head")
 DEFAULT_TEMPORAL_LEG_PLACEMENT = "tail"
+
+#: #10538: the leg's NON-EVICTION guard switch — owner ruling 2026-11-07 made
+#: non-eviction a HARD CONDITION of the arm (dedupe to unique sessions, a
+#: per-session cap, never crop the anchor), so the guard is ON by default and
+#: this knob exists only to reproduce a PRE-RULING number byte-for-byte (the
+#: committed retention receipt is measured on the unguarded splice).
+#: ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0`` (or ``off``/``false``/``no``)
+#: turns it off; anything else — including an absent or unreadable value —
+#: resolves ON, because a typo in a run's env must never silently waive a
+#: ruling. The stamp lands in ``temporal_leg_stats["non_eviction"]`` and in
+#: the run fingerprint, so a guarded row and an unguarded row are never
+#: mixed in one checkpoint.
+DEFAULT_TEMPORAL_LEG_NON_EVICTION = True
+
+#: Values that turn the guard OFF. Deliberately an explicit allow-list rather
+#: than "anything not truthy": the guard's default is ON, so a fail-open
+#: parse would turn a typo into a waiver of the ruling.
+_TEMPORAL_LEG_NON_EVICTION_FALSY = frozenset({"0", "off", "false", "no"})
+
+
+def resolve_temporal_leg_non_eviction(explicit: bool | None = None,
+                                      env: str | None = None) -> bool:
+    """Resolve the #10538 non-eviction guard: explicit arg > env > ON.
+
+    Fail-safe by construction in the direction the ruling requires: only an
+    explicit falsy value turns the guard off, so an absent, empty, mistyped
+    or unreadable value leaves a hard condition of the arm ENFORCED. An
+    explicit ``True``/``False`` wins over the environment (the caller's own
+    decision), which is the same precedence
+    :func:`resolve_temporal_leg_placement` uses.
+    """
+    if explicit is not None:
+        return bool(explicit)
+    if env is None:
+        return DEFAULT_TEMPORAL_LEG_NON_EVICTION
+    return str(env).strip().lower() not in _TEMPORAL_LEG_NON_EVICTION_FALSY
+
+
+def non_eviction_applied(trace: dict | None) -> bool:
+    """Did the #10538 guard ACTUALLY run on this row? — the GUARD's own answer.
+
+    ``temporal_leg_fusion_order``'s ``guard_trace["applied"]`` is the only
+    source. Deriving it from the knobs instead ("the switch resolved ON and the
+    placement is not ``head``") reports ``True`` on two shapes where the guard
+    never ran, because the guard is scoped to the DATE-WINDOW arm's tail
+    placement and to nothing else:
+
+    * the ``#2976`` ANCHOR arm — measured AS-IS, deliberately unguarded, and the
+      trace says so (``applied: False``, ``targeting: "anchor"``);
+    * an INERT leg — no picks (or weight 0), so the guard was never reached and
+      the fusion caller stamps ``applied: False`` on that path too (the key is
+      always present; only its VALUE distinguishes "ran" from "not needed").
+
+    The receipt is the ON/OFF reconstruction surface, so a field claiming
+    ENFORCEMENT on a row where nothing was enforced is exactly the false PASS
+    the deliberate scope declaration in ``temporal_leg_fusion_order`` exists to
+    prevent — a reader would take the anchor arm's published numbers as
+    guard-clean when they are unguarded by decision.
+
+    ``on`` (the resolved switch) stays reported separately, because the two
+    facts differ: the rule can be ON and not have applied to this arm.
+    """
+    return bool((trace or {}).get("applied"))
 
 
 def resolve_temporal_leg_placement(explicit: str | None = None,
@@ -1046,15 +1111,60 @@ def _tr_complete_sessions(
         # session block is complete and contiguous; base order is otherwise
         # untouched (a session with no fetched material keeps its hits where
         # they were).
+        #
+        # #10540: keyed through the POOL AUTHORITY, never the raw snake prop.
+        # ``seeded_sessions`` above keys through ``retrieval.session_key_of``,
+        # which resolves a product turn hit from its wire ``sessionId``; a
+        # splice that read ``h.get("session_id")`` matched NOTHING on a
+        # camel-only pool, so the seed fires and the splice then matches
+        # nothing. No in-repo pool reaches that shape: BOTH eval annotators
+        # stamp ``session_id`` AND ``lme_session_index`` on every hit, and both
+        # outrank the camel leg — so this is CONSISTENCY HARDENING (a
+        # hand-built or future product-shaped pool cannot silently un-fix the
+        # seam), not a measurement of a live defect. On an eval pool the new
+        # expression adds no key that could MATCH a fetched group id — it
+        # returns the snake id where one exists, and otherwise the same
+        # ``idx:`` bucket the hit already carried (``_annotate_hits`` always
+        # stamps an index, so the camel leg is pre-empted; an Event hit's
+        # empty ``session_id`` becomes ``idx:<n>`` instead of ``""``) — so
+        # the #8713 census cannot move. ⚠️ ONE shape is exempt from that
+        # argument, which is why ``last_index`` below is gated by
+        # ``_is_real_session_id`` (#10540 R10/R11): a stored ``:Session``
+        # whose id literally starts with ``idx:`` (``_SAFE_SESSION_TAG_RE``
+        # permits ``:``, and ``ids.session_id_refusal`` refuses BLANK and
+        # non-``str`` ids while refusing nothing about ``idx:3``, so such a
+        # session is writer-producible) makes a REAL group key
+        # that a POOL hit's ``idx:<n>`` bucket can equal, so unguarded one
+        # session's chunks land inside an unrelated index-<n> hit's block and
+        # ``report["sessions"]`` counts a splice the seed never admitted. The
+        # fused POOL is what no in-repo lane produces (the colliding bucket
+        # needs an eval-stamped ``lme_session_index``), so this is defence,
+        # not a measured live defect; the guard costs the reachable path
+        # nothing (a seeded session's key is never an ``idx:`` bucket).
+        #
+        # ⛔ The GATE lives at the build loop, in ONE place (R11). The splice
+        # below needs no copy of it: ``last_index`` can only hold keys this
+        # loop admitted, so ``last_index.get(sid)`` is ``None`` for every key
+        # the guard rejects and ``None == i`` is False for every ``int i``.
+        # A copy there is not merely redundant — it is REACHED before the
+        # lookup, so a pool hit with a truthy non-``str`` snake id (the
+        # untyped-pool seam ``retrieval.session_key_of`` documents) would
+        # raise ``AttributeError`` on ``.startswith`` inside the guarded
+        # expression here and turn a completing run into the fail-open
+        # no-op this block exists to avoid. That is not hypothetical: on the
+        # round-10 tree (guard in BOTH loops) a pool hit with ``session_id:
+        # 5`` reported ``ok=False`` and completed nothing, while removing
+        # only the splice copy returned ``ok=True, sessions=1,
+        # injected=1`` (R11 mutation probe).
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
-            sid = h.get("session_id") or ""
-            if sid in added:
+            sid = session_key_of(h)
+            if sid in added and _is_real_session_id(sid):
                 last_index[sid] = i
         merged: list[dict] = []
         for i, h in enumerate(pool):
             merged.append(h)
-            sid = h.get("session_id") or ""
+            sid = session_key_of(h)
             if added and last_index.get(sid) == i:
                 merged.extend(added.pop(sid))
         report["sessions"] = len(last_index)
@@ -1091,6 +1201,48 @@ def _mark_bands(ranks: list[int]) -> dict[str, int]:
 
 
 
+def _session_recall_at_n_gold(
+    hits: list[dict], answer_sessions: set[str],
+) -> float | None:
+    """#2516 (C1) — the ADDITIVE cutoff variant ``recall_all@N_gold``'s
+    per-question FRACTION: ``|gold ∩ ranked[:len(gold)]| / len(gold)``.
+
+    ``recall_all@5`` is identically 0.0 for any question whose evidence set
+    exceeds five pieces, at ANY ranking quality: the fifth slot is a wall, so a
+    spread-evidence (multi-session) question cannot register an improvement
+    under that cutoff however well retrieval does (the arithmetic is recorded on
+    #10538, decision relay 2026-11-07T17:54Z, and that relay names #2516 as the
+    issue that seals the variant). So the SAME ranking is ALSO measured at a
+    cutoff equal to each question's own gold-session count, whose per-question
+    binary projection is ``recall_all@N_gold``. The OFFICIAL ``recall_all@5`` is
+    untouched and stays the official row; this is a DECLARED LABELLED VARIANT
+    beside it, never mixed into the official number (R12).
+
+    ONE implementation, called from BOTH arms (``_recall_metrics`` for the
+    hybrid path and ``_vector_retrieve`` for the vector path) — the two used to
+    carry the identical expression twice, so a change to one (a session-dedup,
+    a stricter guard) would have silently left the other arm measuring a
+    different quantity (#11598 review).
+
+    ``None`` when the question has no gold session: the official ``all([])``
+    edge is 1.0, and this module treats an empty denominator as NOT ELIGIBLE
+    rather than fabricating a perfect score (module docstring).
+
+    CEILING, stated because it is not obvious: ``hits`` is the arm's measured
+    surface, so the achievable value is ``min(len(gold), len(hits))/len(gold)``.
+    The vector arm fetches ``limit=max(ks)`` (20 by default) and the hybrid
+    rerank/pool-only arms truncate ``pool[:top_k]`` (20) — only the plain
+    no-rerank hybrid arm leaves the deduped pool untruncated. A question with
+    more gold sessions than its arm's depth therefore still cannot reach 1.0 at
+    its own cutoff.
+    """
+    if not answer_sessions:
+        return None
+    gold_top = hits[:len(answer_sessions)]
+    gold_retrieved = {h["session_id"] for h in gold_top if h["session_id"]}
+    return len(answer_sessions & gold_retrieved) / len(answer_sessions)
+
+
 def _recall_metrics(
     hits: list[dict],
     *,
@@ -1100,7 +1252,8 @@ def _recall_metrics(
     evidence_point_count: int,
     chunk_evidence_point_count: int,
 ) -> tuple[dict[str, float], dict[str, float | None],
-           dict[str, float | None], dict[str, float | None]]:
+           dict[str, float | None], dict[str, float | None],
+           float | None]:
     """Recall@k over a hit list (session + turn + evidence + chunk-evidence).
 
     Extracted from ``retrieve_for_question`` (R6 #1545) — identical math,
@@ -1127,6 +1280,12 @@ def _recall_metrics(
     turn_recall: dict[str, float | None] = {}
     _evidence_recall: dict[str, float | None] = {}
     chunk_evidence_recall: dict[str, float | None] = {}
+
+    # #2516 (C1): the labelled ``recall_all@N_gold`` cutoff variant's fraction —
+    # ONE implementation (``_session_recall_at_n_gold``), shared with the vector
+    # arm. See the helper for the semantics and the depth ceiling.
+    session_recall_at_n_gold = _session_recall_at_n_gold(hits, answer_sessions)
+
     for k in ks:
         top = hits[:k]
         if answer_sessions:
@@ -1170,7 +1329,8 @@ def _recall_metrics(
                 len(chunk_hits) / chunk_evidence_point_count)
         else:
             chunk_evidence_recall[str(k)] = None
-    return session_recall, turn_recall, _evidence_recall, chunk_evidence_recall
+    return (session_recall, turn_recall, _evidence_recall,
+            chunk_evidence_recall, session_recall_at_n_gold)
 
 
 def _leg_mix(hits: list[dict]) -> dict[str, int]:
@@ -1356,6 +1516,12 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
         else:
             turn_recall[str(k)] = 0.0
 
+    # ── the additive gold-cutoff variant (#2516, C1) ──
+    # ONE implementation (``_session_recall_at_n_gold``), shared with the
+    # hybrid arm; see the helper for the semantics and the depth ceiling.
+    session_recall_at_n_gold = _session_recall_at_n_gold(
+        annotated, answer_sessions)
+
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]
     question_date = question.get("question_date", "") or None
@@ -1368,6 +1534,7 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
         "retriever": "vector",
         "hits": annotated,
         "session_recall@k": session_recall,
+        "session_recall@n_gold": session_recall_at_n_gold,
         "turn_recall@k": turn_recall,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
@@ -1488,6 +1655,15 @@ def retrieve_for_question(
     temporal_leg_weight: float | None = None,
     temporal_leg_limit: int | None = None,
     temporal_leg_placement: str | None = None,
+    # ``temporal_leg_non_eviction`` (#10538, owner ruling 2026-11-07) is the
+    # arm's HARD CONDITION: the promotion may widen the set of evidence
+    # sessions the reader window holds, never trade one for another. ON by
+    # default; only an explicit falsy value (arg or
+    # ``TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION=0``) reproduces the pre-ruling
+    # splice, which is what the committed retention receipt was measured on.
+    # ``None`` = env, resolved through :func:`resolve_temporal_leg_non_eviction`
+    # (one resolver, so the run fingerprint certifies the arm that ran).
+    temporal_leg_non_eviction: bool | None = None,
     # R6 (#1545): rerank knobs — the post-fusion cross-encoder + MMR stage,
     # OFF by default (the V3 baseline path is byte-identical; no rerank keys
     # off-path, D2). ``rerank`` tri-state: True/False explicit, None = env
@@ -2120,12 +2296,25 @@ def retrieve_for_question(
         _tl_placement = resolve_temporal_leg_placement(
             temporal_leg_placement,
             os.environ.get("TORTOISE_LME_TEMPORAL_LEG_PLACEMENT"))
+        # #10538 non-eviction guard (owner ruling 2026-11-07): resolved from the
+        # SAME env the fingerprint reads (one resolver, one answer), default ON.
+        _tl_non_eviction = resolve_temporal_leg_non_eviction(
+            temporal_leg_non_eviction,
+            os.environ.get("TORTOISE_LME_TEMPORAL_LEG_NON_EVICTION"))
+        _tl_guard_trace: dict[str, Any] = {}
         _tl_order, _tl_picks = temporal_leg_fusion_order(
             annotated, anchors=tr_constraint.anchors,
             window=effective_top_k, limit=_tl_limit,
             bucket_cap=DEFAULT_TEMPORAL_LEG_BUCKET_CAP,
             weight=_tl_weight, date_window=_tl_date_window,
-            placement=_tl_placement)
+            placement=_tl_placement, non_eviction=_tl_non_eviction,
+            guard_trace=_tl_guard_trace,
+            # the guard must judge the window the READER gets, i.e. the RUN's
+            # raw-chunk cap — the same value the pool is deduped with a few
+            # dozen lines below (``_dedup_pool(annotated, …)``). Passing this
+            # module's default instead would let the guard clear a pick that
+            # deletes a session from the real window (false PASS, #10538).
+            max_chunks_per_session=max_chunks_per_session)
         _tl_dated = sum(1 for h in annotated if h.get("session_date"))
         temporal_leg_stats = {
             "on": True,
@@ -2150,6 +2339,37 @@ def retrieve_for_question(
             # carry the arm (the same reason the CLAMPED budget above is
             # reported rather than the knob value).
             "placement": _tl_placement,
+            # #10538 non-eviction guard (owner ruling 2026-11-07): whether the
+            # rule was ENFORCED on this row, and — when it was — every pick it
+            # refused, with which of the three conditions refused it. The
+            # rejection list is the guard's own evidence: an empty leg whose
+            # cause is the guard reads ``non_eviction_guard`` below, and this
+            # block is where the ids come from.
+            #
+            # The two fields answer DIFFERENT questions and must not be
+            # collapsed: ``non_eviction`` is the RESOLVED SWITCH (the rule's
+            # state — True on the ``head`` counterfactual too, because the rule
+            # is ON there as well), while ``non_eviction_applied`` is whether
+            # the rule actually RAN on this row. It is read from the guard's
+            # own trace, never re-derived from the knobs: the guard runs only
+            # on the DATE-WINDOW arm's tail placement, so a knob-derived value
+            # would claim enforcement on the unguarded ``#2976`` anchor arm and
+            # on an inert leg. See :func:`non_eviction_applied`.
+            "non_eviction": _tl_non_eviction,
+            "non_eviction_applied": non_eviction_applied(_tl_guard_trace),
+            # WHICH target selected the picks — ``"window"`` (the #10538 arm the
+            # guard governs), ``"anchor"`` (the #2976 arm, unguarded by
+            # decision) or ``"none"``. It is what makes ``applied: False``
+            # legible: without it a scoped-out row and a row whose guard ran
+            # and admitted everything look the same in the receipt.
+            # ``or "none"`` keeps the DOCUMENTED three-value domain true at this
+            # surface even if a future caller builds the trace itself without
+            # stamping the inert value (``temporal_leg_order`` now always
+            # stamps it — review cycle 4).
+            "non_eviction_targeting": (_tl_guard_trace.get("targeting")
+                                        or "none"),
+            "non_eviction_rejected": list(
+                _tl_guard_trace.get("rejected") or []),
         }
         if _tl_picks:
             _tl_by_id = {h["id"]: h for h in annotated}
@@ -2158,7 +2378,7 @@ def retrieve_for_question(
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
                          "reason": None, "count": len(_tl_picks)})
         else:
-            # honest trace reason — the six distinct empty-leg causes
+            # honest trace reason — the seven distinct empty-leg causes
             # (``no_window_candidates`` is the #10538 windowed miss)
             # (never launder a budget/anchor/weight miss as "no dates").
             legs.append({"leg": "temporal", "ran": True, "degraded": False,
@@ -2167,7 +2387,9 @@ def retrieve_for_question(
                              anchors=len(tr_constraint.anchors),
                              weight=_tl_weight,
                              budget=_tl_limit,
-                             date_window=bool(_tl_date_window)),
+                             date_window=bool(_tl_date_window),
+                            guard_rejected=len(
+                                _tl_guard_trace.get("rejected") or [])),
                          "count": 0})
 
     # ── deduped pool (the retrieval contract: ret["hits"] == pool) ──
@@ -2874,7 +3096,7 @@ def retrieve_for_question(
     # over the boosted pool" (stated in the methodology); the pre-boost
     # order rides in ``evidence_boost.pre_boost_ranked_ids``.)
     (session_recall, turn_recall, _evidence_recall,
-     chunk_evidence_recall) = _recall_metrics(
+     chunk_evidence_recall, session_recall_at_n_gold) = _recall_metrics(
         pool, ks=ks, answer_sessions=answer_sessions,
         evidence_turn_ids=evidence_turn_ids,
         evidence_point_count=evidence_point_count,
@@ -3152,6 +3374,11 @@ def retrieve_for_question(
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
         "session_recall@k": session_recall,
+        # #2516 (C1): the labelled `recall_all@N_gold` cutoff variant's
+        # per-question fraction (see ``_recall_metrics``); None when the
+        # question has no gold session. Absent on older reports → the
+        # publication layer counts it as n_missing, never as 0.0.
+        "session_recall@n_gold": session_recall_at_n_gold,
         "turn_recall@k": turn_recall,
         "evidence_recall@k": _evidence_recall,
         "chunk_evidence_recall@k": chunk_evidence_recall,

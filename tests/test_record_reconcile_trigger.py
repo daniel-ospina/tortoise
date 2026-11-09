@@ -416,6 +416,96 @@ def test_a_partial_declaration_reports_its_coverage():
     assert result.as_dict()["declaration_coverage"] == COVERAGE_PARTIAL
 
 
+def test_the_UNDECLARED_second_writer_population_is_reported_never_a_mismatch():
+    """The FOURTH population: named in ``graph_only``, never a ``field_mismatches`` entry.
+
+    ⛔ This pin feeds ONE of that population's TWO shapes — a property a SECOND
+    WRITER put on a **placed** node — and that shape's pair reads ``clean``. The
+    other shape, the same kind of property on a **node the record does not own
+    at all** ("cache-only" is not used here — it also names a different
+    population, a *property* only the cache holds on a PLACED node), is an
+    ``extra_in_cache`` divergence and reads DIVERGENT
+    (measured; the census in ``record_reconcile``'s module docstring states both,
+    and the pin name says only what is true of both: bucketed, never compared).
+
+    Three omission classes are DECLARED (§17.5's cache-owned scalars, the
+    §9.1/D1 declined pair, the NOT-PROJECTABLE columns); a property a SECOND
+    WRITER put on a node — either shape — is named by nothing, which is why the
+    census is FOUR populations. The module docstring's own wording is "THREE DECLARED
+    classes arrive here — (b) is declared by nothing", and ``graph_only_total``'s
+    is "THREE DECLARED omission classes plus one undeclared population" — each
+    quoted from its own home rather than paraphrased into one attributed to the
+    header, because a quote is only checkable where it actually is.
+
+    `_partition_cache_owned` has no class list at all — its rule is mechanical,
+    ``outside the placement AND absent from the record`` — and BOTH halves are
+    pinned HERE, one arm each:
+
+    * the undeclared name is REPORTED (not silently swallowed, and not a
+      ``field_mismatches`` entry, which would make the clean verdict unreachable
+      on a cache a second writer has touched);
+    * the CONTROL keeps the partition from amnestying real divergence: the same
+      out-of-placement name, held by the RECORD, is still COMPARED;
+    * and the THIRD arm pins the PLACEMENT half, which the first two CANNOT:
+      both of them hold with the placement term deleted, because in each the
+      outcome is decided by the record term alone (MEASURED — a mutant
+      ``keep = set(record_props)`` leaves them green). A cache property INSIDE
+      the placement that the record does not carry is a projection gap, and with
+      the placement term gone it is partitioned out as cache-held and the pair
+      reads ``clean`` — the false PASS this arm exists to red.
+    """
+    placed = {"Point:p1": frozenset({"id"})}
+
+    undeclared = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1"}},
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 1}},
+        placed=placed)
+    assert dict(undeclared.graph_only) == {"someSecondWriterProp": 1}, (
+        undeclared.graph_only)
+    assert undeclared.report.field_mismatches == 0, undeclared.report.render()
+    assert undeclared.report.divergent == 0, undeclared.report.render()
+    assert undeclared.verdict() == rr.VERDICT_CLEAN
+    assert rr.exit_code_for(undeclared) == rr.EXIT_CLEAN
+
+    # CONTROL — record-held, so compared, so divergence survives the partition.
+    held = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 1}},
+        {"Point:p1": {"id": "p1", "someSecondWriterProp": 2}},
+        placed=placed)
+    assert held.graph_only == (), held.graph_only
+    assert held.report.field_mismatches == 1, held.report.render()
+    assert held.verdict() == rr.VERDICT_DIVERGENT
+
+    # THIRD ARM — the PLACEMENT half of the two-term rule. `content` is INSIDE
+    # the record's placement for a `Point` — this arm reads the placement table
+    # ITSELF (`projected_properties` + the contract key, the same pair
+    # `scan_cache_view` fills) rather than a hand-picked name, so the scenario is
+    # one the production read can actually produce. (The earlier draft named
+    # `title`, which is a `source` column and NOT in `point`'s placement: with
+    # the shipped map that name is bucketed and reads `clean`, so the arm passed
+    # on a synthetic map only — measured, #11253's review.) `content` is ABSENT
+    # from this record row while the cache has it: a projection gap, which must
+    # stay COMPARED. Partition it out and the pair reads `clean` — measured
+    # against a mutant `keep = set(record_props)`, where THIS arm reds and the
+    # two above stay green.
+    point_placement = (cp.projected_properties(cp.NODE_TABLES["Point"])
+                       | {cp.KEY_PROPERTY["Point"]})
+    assert "content" in point_placement, (
+        "the arm's gap name must be one the placement table PLACES, or the "
+        "scenario is unreachable through `scan_cache_view`")
+    in_placement = rr.reconcile_record_and_cache(
+        {"Point:p1": {"id": "p1"}},
+        {"Point:p1": {"id": "p1", "content": "projected, record row silent"}},
+        placed={"Point:p1": point_placement})
+    assert in_placement.graph_only == (), (
+        "a cache property INSIDE the record's placement was partitioned out as "
+        "cache-held, so a projection that wrote a field the record PLACES and "
+        "does not carry now reads clean — the placement half of the two-term "
+        f"rule is gone: {in_placement.graph_only}")
+    assert in_placement.report.field_mismatches == 1, in_placement.report.render()
+    assert in_placement.verdict() == rr.VERDICT_DIVERGENT
+
+
 # ── 5. the trigger exists in production ───────────────────────────────────
 
 

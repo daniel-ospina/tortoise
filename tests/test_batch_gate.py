@@ -541,6 +541,56 @@ def test_a_mode_only_constituent_the_fold_does_not_carry_is_NOT_contained(
     assert verdict.closable is False, verdict
 
 
+@pytest.mark.parametrize("rc,stderr", [
+    (124, "git: did not finish within 300s"),
+    (127, "git: command not found"),
+    (128, "fatal: not a git repository"),
+    # ⛔ A SIGNAL-KILLED CHILD IS REPORTED BY `subprocess.run` AS A NEGATIVE rc — an
+    # OOM kill is -9 — so the arm keyed on `> 1` still folded a killed `git` into
+    # NOT-CONTAINED ("closing would destroy work") about a comparison nobody made.
+    (-9, ""),
+    (-15, ""),
+    # ⛔ AND THE `conflicting` TEST MUST NOT RUN FIRST: git-level text can contain
+    # "does not apply"/"conflict", and reading it through the conflict branch is the
+    # same wrong verdict the rc discrimination exists to refuse, reached by ORDER.
+    (128, "error: patch does not apply"),
+    (-9, "error: patch does not apply"),
+])
+def test_a_git_level_failure_is_UNMEASURABLE_not_NOT_contained(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, rc: int, stderr: str
+) -> None:
+    """⛔ rc > 1 (AND A NEGATIVE rc) IS "THE MEASUREMENT DID NOT RUN", not a verdict.
+
+    `git apply` answers rc=1 for "the patch does not apply" — that IS the
+    measurement, and NOT-CONTAINED is its honest name. Every other code means it
+    never ran: `_run` reports a missing binary as 127 and a hang as 124, git uses
+    128 for a broken repo/index, and a SIGNAL-KILLED git comes back NEGATIVE (an OOM
+    kill is -9). The old arm folded all of them into NOT-CONTAINED, so a killed or
+    timed-out `git` told the operator "REFUSED … closing would destroy work" and
+    exited 1, while the tool's own contract reserves exit 2 / UNMEASURABLE for a
+    comparison that could not be made.
+
+    Discrimination proof: revert the `returncode > 1 or returncode < 0` arm to
+    `returncode > 1` and the -9/-15 cases report NOT-CONTAINED; move that arm BELOW
+    the `conflicting` test and the two "patch does not apply" cases do the same.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\ntwo\nthree\n"}, [], "base")
+    const = _commit(scratch_repo, {"f.txt": "one\nTWO\nthree\n"}, [base], "const")
+    fold = _commit(scratch_repo, {"f.txt": "one\nTWO\nthree\n"}, [base], "fold")
+    monkeypatch.chdir(scratch_repo)
+    real_run = bo._run
+
+    def fake_run(argv, **kwargs):
+        if "--reverse" in argv:
+            return subprocess.CompletedProcess(argv, rc, "", stderr)
+        return real_run(argv, **kwargs)
+
+    monkeypatch.setattr(bo, "_run", fake_run)
+    verdict = bo.verdict_for(101, const, base, fold, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", verdict
+    assert verdict.closable is False, verdict
+
+
 def test_a_named_repo_is_threaded_into_every_gh_call(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -683,6 +733,137 @@ def test_parse_constituents_refuses_a_line_it_cannot_read_unambiguously() -> Non
         assert bo.parse_constituents(line, fold=900) == [], line
 
 
+def test_the_ARGV_fold_self_inclusion_is_dropped_before_it_can_close_the_fold(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(b2) The `--constituent <fold>` drop is a SEPARATE site from the parser guard.
+
+    `parse_constituents` excludes the fold from a `fold-constituents:` line and has
+    its own test above, but `--constituent` argv never goes through the parser: it
+    rejoins at
+
+        constituents = [n for n in dict.fromkeys(requested) if n != args.fold]
+
+    and nothing pinned that comprehension. Deleting it left this file green
+    BEFORE this pin existed. ⛔ The whole-file count is deliberately NOT restated
+    here: it is a property of the FILE, not of the arm, and it drifts with every
+    test added — a stale figure reads as "the pin is vacuous" when the arm is in
+    fact pinned. Re-derive it by deleting the arm. Without the drop, `main` closes
+    the FOLD itself: `is_ancestor(fold_head,
+    fold_head)` is vacuously true, so the fold is classified CONTAINED-ANCESTOR and
+    `apply` posts `closure_comment(fold, fold_head, fold)` ON the fold — a
+    self-referential record asserting the fold's work is contained in the fold —
+    then closes it, leaving nothing that carries the validated tree. Closing a PR
+    is the one irreversible action this tool takes, so the arm needs a pin, not
+    just the comment above it.
+
+    The second constituent is the CONTROL: it must still be closed, so this cannot
+    pass by the run refusing to do anything.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(bo, "fetch_fold", lambda n, repo=None: (0, "f" * 40, "fold-br", "body"))
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(bo, "constituent_refs", lambda n, repo=None: ("a" * 40, "b" * 40))
+    monkeypatch.setattr(
+        bo, "verdict_for", lambda n, h, b, f, cwd: _verdict(n, "CONTAINED-ANCESTOR", "")
+    )
+
+    def _gh(argv, repo=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(bo, "_gh", _gh)
+
+    rc = bo.main(["--fold", "900", "--constituent", "900", "--constituent", "101", "--apply"])
+    err = capsys.readouterr().err
+
+    assert rc == 0, f"expected a normal run, got {rc}: {err}"
+    closed = [int(argv[2]) for argv in calls if argv[:2] == ["pr", "close"]]
+    assert 900 not in closed, f"the FOLD was closed by its own run: closed={closed}"
+    assert not [a for a in calls if a[:2] == ["pr", "close"] and a[2] == "900"], calls
+    assert 101 in closed, f"the control constituent was not closed, so nothing was proven: {calls}"
+    assert not [a for a in calls if a[:2] == ["pr", "comment"] and a[2] == "900"], (
+        f"a closure comment was posted ON the fold: {calls}"
+    )
+
+
+def test_an_EMPTY_diff_is_never_a_containment_proof(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The empty-diff arm is the code's OWN statement of the invariant, so it is pinned.
+
+    Removing it is fail-closed on git 2.43.0 today — `git apply --reverse --check`
+    fed empty stdin exits 128 (`error: No valid patches in input`), so the `rc > 1`
+    arm answers UNMEASURABLE. That safety margin is a GIT IMPLEMENTATION DETAIL, not
+    a property this module asserts: `--allow-empty`, or any change to that message's
+    status, would let an empty diff reach the apply with nothing to reverse and be
+    read as `CONTAINED-CONTENT` — `closable is True` on no evidence at all, which is
+    the one unrecoverable outcome the module docstring names (the PR gets closed).
+    Deleting the arm left this file green BEFORE this pin existed, so the arm had
+    no regression detector at all. ⛔ The whole-file count is deliberately NOT
+    restated: it is a property of the FILE, not of the arm, and it drifts with
+    every test added — a stale figure here reads as "the pin is vacuous" when the
+    arm is in fact pinned. Re-derive it by deleting the arm.
+    """
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+    monkeypatch.setattr(
+        bo,
+        "_run",
+        lambda argv, *, timeout, cwd=None, stdin=None: subprocess.CompletedProcess(
+            argv, 0, "", ""
+        ),
+    )
+    state, detail = bo.content_contained("a" * 40, "b" * 40, "c" * 40, Path("."))
+    assert state == "NOT-CONTAINED", (
+        f"an empty diff is not evidence of containment — got {state!r} ({detail})"
+    )
+    assert "empty" in detail, detail
+
+
+def test_an_EMPTY_constituent_set_is_COULD_NOT_MEASURE_not_a_clean_run(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """A run that measured NOTHING must not exit 0 — 0 means "every one was contained".
+
+    `if not constituents:` prints the reason and returns 2. Nothing pinned it, so
+    deleting it left this file green while `main` fell through to the
+    verdict loop with an EMPTY list, built an empty plan and exited **0** — the code
+    its own docstring reserves for "every constituent was contained and (with
+    `--apply`) closed". With `--apply` it also issued
+    `pr edit <fold> --add-label <FOLD_LABEL>` on the strength of that empty set, so
+    the tool ACTS on a fold it never measured. Both halves are asserted: the exit
+    code and the absence of any `gh` write.
+
+    Two argv shapes reach the empty set, and the cycle-2 pin does not cover either:
+    (a) a body with no `fold-constituents:` line at all, (b) `--constituent <fold>`
+    alone, which the argv filter at :934 empties.
+    """
+    calls: list[list[str]] = []
+    monkeypatch.setattr(
+        bo,
+        "fetch_fold",
+        lambda n, repo=None: (0, "f" * 40, "fold-br", "Closes #10963, no constituents line"),
+    )
+    monkeypatch.setattr(bo, "_git", lambda argv, cwd: (0, ""))
+
+    def _gh(argv, repo=None):
+        calls.append(list(argv))
+        return 0, ""
+
+    monkeypatch.setattr(bo, "_gh", _gh)
+
+    # (a) the body declares no constituents at all
+    rc = bo.main(["--fold", "900", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, f"nothing was measured, so this is exit 2 — got {rc}: {out.out}{out.err}"
+    assert calls == [], f"a run that measured nothing issued a gh write: {calls}"
+
+    # (b) the only constituent named is the fold itself
+    calls.clear()
+    rc = bo.main(["--fold", "900", "--constituent", "900", "--apply"])
+    out = capsys.readouterr()
+    assert rc == 2, f"an empty set after the fold filter is still exit 2 — got {rc}: {out.out}{out.err}"
+    assert calls == [], f"a run whose only constituent was the fold issued a gh write: {calls}"
+
+
 def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
 ) -> None:
@@ -719,6 +900,178 @@ def test_an_unmeasurable_constituent_is_NOT_reported_as_a_refusal(
     assert rc == 2, f"an unmeasurable constituent is 'could not measure' (exit 2), got {rc}: {out}"
     assert "closing would destroy work" not in out, out
     assert "COULD NOT MEASURE" in out, out
+
+
+def test_a_constituent_head_absent_from_the_object_db_is_UNMEASURABLE(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    """(b3) NOT having fetched a PR is not evidence about the fold — and must not say it is.
+
+    `main` fetches ONLY the fold branch, so on a fresh hub or a new lane worktree a
+    constituent's head is simply absent. `merge-base --is-ancestor` on an absent commit
+    exits 128 (indistinguishable from "not an ancestor") and `git diff` then dies before
+    comparing anything, so the pre-fix order filed the constituent as `NOT-CONTAINED` and
+    the report printed
+
+        REFUSED (not contained in the fold — closing would destroy work): [101]
+
+    with exit **1**, on a run where nothing was measured. Both are contract breaches in
+    the module's own words: exit 2 is "could not measure", and the docstring says an
+    UNMEASURABLE constituent "never prints the 'closing would destroy work' line".
+
+    Discrimination proof — MEASURED, and it names which defence carries what. The fix has
+    two, and they OVERLAP on this scenario: the presence gate in `verdict_for` and the
+    tri-state return of `content_contained`. Disarming EITHER one alone stays green here,
+    because the other still classifies the run as UNMEASURABLE. The gate is the clearer
+    message (it names the absent commits and the fetch to run, and spawns no worktree on
+    a ref that cannot resolve); the tri-state is the one that covers the case the gate
+    CANNOT see — every commit present, but no merge base in a shallow clone, where only
+    the diff itself fails. That half has its own test immediately below, and reverting
+    both defences reds this one.
+    """
+    base, const, fold = _three_way_fixture(scratch_repo)
+    absent = "0" * 40  # a well-formed sha this repo has never fetched
+    assert not bo._commit_present(absent, scratch_repo), "the fixture sha must be absent"
+
+    verdict = bo.verdict_for(101, absent, base, fold, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", (
+        "a head that is not in the object DB is a failed MEASUREMENT, not a containment "
+        f"verdict — got {verdict}"
+    )
+    assert verdict.closable is False, verdict
+
+    # And it must be FILED as unmeasured, which is what decides both the printed line
+    # and the exit status (1 = refused, 2 = could not measure).
+    report = bo.Report(fold=10917, fold_head=fold)
+    bo._file_verdict(report, verdict)
+    assert report.unmeasured == [101] and report.refused == [], (
+        f"filed as a refusal, which prints the false claim: {report}"
+    )
+    bo._print_report(report, dry_run=True)
+    out = capsys.readouterr().out
+    assert "closing would destroy work" not in out, out
+    assert "COULD NOT MEASURE" in out, out
+
+    # The genuinely-measured answer is unchanged: an absent merge base measured nothing,
+    # but a PRESENT head whose diff conflicts is still a real NOT-CONTAINED.
+    conflicting = bo.verdict_for(102, const, base, fold, scratch_repo)
+    assert conflicting.state == "NOT-CONTAINED", (
+        "a present head against a conflicting fold must stay a real refusal — the fix "
+        f"must not turn every hard case into 'could not measure': {conflicting}"
+    )
+
+
+def test_content_contained_reports_an_uncomputable_diff_as_UNMEASURABLE(
+    scratch_repo: Path,
+) -> None:
+    """(b3b) The half the presence gate cannot cover: every object PRESENT, diff still fails.
+
+    A shallow clone has the objects but not the MERGE BASE, so `git diff base...head` exits
+    non-zero while `_commit_present` is true for every ref — the presence gate cannot see
+    this, and collapsing it into `NOT-CONTAINED` re-opens the defect one layer down. That
+    is why the function itself is tri-state, and this test constructs the shape for real:
+    two UNRELATED roots (`git commit-tree` with no parent) have no merge base, and all
+    three commits are present in the object DB (asserted, so the fixture cannot silently
+    degrade into the absent-object case the sibling test already covers).
+
+    Discrimination proof: with the function returning `(bool, str)` — the pre-fix shape —
+    the state is `False`/`True`, never the string `UNMEASURABLE`, and this test reds.
+    """
+    left = _commit(scratch_repo, {"a.txt": "left\n"}, [], "root-left")
+    right = _commit(scratch_repo, {"b.txt": "right\n"}, [], "root-right")
+    for sha in (left, right):
+        assert bo._commit_present(sha, scratch_repo), (
+            "the fixture must keep every object PRESENT — this test is about the diff "
+            "failing with the objects in hand, not about an absent ref"
+        )
+    assert not bo.is_ancestor(left, right, scratch_repo), "unrelated roots, by construction"
+
+    # The verdict path reaches it too: ``head`` is not an ancestor of ``fold``, and the
+    # base is present, so the CONTENT route runs and its diff cannot be computed.
+    verdict = bo.verdict_for(101, left, right, right, scratch_repo)
+    assert verdict.state == "UNMEASURABLE", (
+        f"an uncomputable diff is a failed measurement, not a containment verdict: {verdict}"
+    )
+
+    state, detail = bo.content_contained(left, right, right, scratch_repo)
+    assert state == "UNMEASURABLE", (
+        f"an uncomputable diff is a failed measurement, not a containment verdict: {state!r} ({detail})"
+    )
+    assert "could not compute the constituent diff" in detail, detail
+
+
+def test_a_fold_worktree_that_cannot_be_built_is_UNMEASURABLE(
+    scratch_repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """(b3c) The THIRD member of the tri-state's "cannot be COMPUTED" set.
+
+    `tools/batch_open.py:538-545` names three ways a diff cannot be computed: an absent
+    object, no merge base in a shallow clone, and **no scratch worktree**. The first two
+    are pinned by their own tests; this one had none. Measured at `8399b86c6`:
+    reverting `return "UNMEASURABLE", f"could not materialise the fold tree: ..."` to
+    `"NOT-CONTAINED"` left **all 57 cases collected there green**.
+
+    It is reachable without a contrived fixture: `tempfile.mkdtemp` followed by
+    `git worktree add` fails on ENOSPC, on an unwritable TMPDIR, and on a stale entry under
+    `.git/worktrees`. Collapsing that into NOT-CONTAINED restores exactly the contract
+    breach this PR exists to fix — exit 1 and "closing would destroy work" about a
+    comparison that never ran.
+
+    Discrimination proof: with the arm reverted the state is the string `NOT-CONTAINED`,
+    never `UNMEASURABLE`, and this test reds.
+    """
+    left = _commit(scratch_repo, {"a.txt": "left\n"}, [], "root-left")
+    right = _commit(scratch_repo, {"b.txt": "right\n"}, [], "root-right")
+
+    real_git = bo._git
+
+    def _git_refuses_the_worktree(argv, cwd):
+        if list(argv[:2]) == ["worktree", "add"]:
+            return 1, "fatal: could not create work tree dir: No space left on device"
+        return real_git(argv, cwd)
+
+    monkeypatch.setattr(bo, "_git", _git_refuses_the_worktree)
+
+    state, detail = bo.content_contained(left, right, right, scratch_repo)
+    assert state == "UNMEASURABLE", (
+        f"a fold tree that could not be BUILT was reported as a containment verdict: "
+        f"{state!r} ({detail})"
+    )
+    assert "could not materialise the fold tree" in detail, detail
+
+
+def test_an_absent_BASE_does_not_block_the_ANCESTRY_route(scratch_repo: Path) -> None:
+    """(b3c) The presence gate must not over-block: ancestry needs `head` and `fold_head` only.
+
+    `is_ancestor(head, fold_head)` is a graph query on two commits. It needs no diff and no
+    base, so requiring all three refs before it would convert a provable
+    `CONTAINED-ANCESTOR` into "could not measure" whenever the constituent's base is absent
+    — a fail-closed over-block that names the wrong remedy for a verdict already answered.
+    Two-stage presence is the fix; this pins the second stage down.
+
+    Discrimination proof: restore the one-stage gate (all of head/base/fold_head) and this
+    test reds with UNMEASURABLE instead of CONTAINED-ANCESTOR.
+    """
+    base = _commit(scratch_repo, {"f.txt": "one\n"}, [], "base")
+    head = _commit(scratch_repo, {"f.txt": "two\n"}, [base], "head")
+    fold = _commit(scratch_repo, {"f.txt": "two\n", "g.txt": "x\n"}, [head], "fold")
+    absent_base = "0" * 40
+    assert not bo._commit_present(absent_base, scratch_repo)
+
+    verdict = bo.verdict_for(101, head, absent_base, fold, scratch_repo)
+    assert verdict.state == "CONTAINED-ANCESTOR", (
+        "the ancestry proof needs neither the base nor a diff — an absent base must not "
+        f"downgrade it to 'could not measure': {verdict}"
+    )
+    assert verdict.closable is True, verdict
+
+    # …while the CONTENT route still refuses to guess: with no ancestry and the base
+    # absent there is nothing to reverse-apply, so it is UNMEASURABLE (exit 2), and the
+    # message names the BASE as what is missing.
+    unrelated = _commit(scratch_repo, {"h.txt": "other\n"}, [], "unrelated-root")
+    no_base = bo.verdict_for(102, head, absent_base, unrelated, scratch_repo)
+    assert no_base.state == "UNMEASURABLE", no_base
+    assert "BASE" in no_base.detail, no_base.detail
 
 
 def test_hint_constituents_still_sees_prose_but_is_never_acted_on() -> None:

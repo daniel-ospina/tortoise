@@ -139,7 +139,7 @@ Host routing lives in `website/functions/_middleware.ts`:
 | Company | `website/index.html` | Premise Labs brand page, waitlist form |
 | Product | `website/product.html` | Tortoise marketing: features, pricing (Free/Solo/Builder/Team), self-hosted section |
 | Self-hosted | `website/self-hosted.html` | Self-hosted setup guide at `/self-hosted` (install, daemon, onboarding, MCP connect, role memory); guarded by `test_harness_mcp_config.py`, crawled by `tests/e2e/test_legal_pages.py` |
-| Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (favicon, og-image) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
+| Blog | `website/functions/blog/[[path]].ts` (SSR at `/blog` + `/blog/:slug`) · `website/functions/blog/sitemap.xml.ts` (`/blog/sitemap.xml`) · `website/functions/blog/feed.xml.ts` (`/blog/feed.xml`) · `website/functions/blog/api/posts/[[path]].ts` (agent publish/edit, `/blog/api/posts`) · `website/blog/` (blog.js, the byline avatar) · the shared link-preview card is `website/assets/og-tortoise.jpg`, the same one the static pages use (#11318) | Tortoise blog: server-rendered markdown posts (Supabase `blog_posts`), agent-published with review queue, PostHog + consent |
 | Docs | `website/docs.html` | Static docs: what/how/quickstart/MCP/API |
 | FAQ | `website/faq.html` | Design-objection FAQ at `/faq`: why relationships are stored, how EP confidence is computed, and pointers to pricing/legal for the commercial questions. Defers mechanism detail to `/docs` rather than restating it |
 | Auth (single page) | `website/apps/dashboard/public/signup.html`, served at `/auth` by `website/apps/dashboard/functions/auth/index.ts` | Combined Log in / Sign up card — GitHub / Google / email+password (modal login + forgot-password) / API key; `/signin*` 301 → `/auth`; `/signup` is a redirect-free alias |
@@ -313,13 +313,23 @@ dashboard.
 
 | Asset | Host | Notes |
 | --- | --- | --- |
-| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each sitemap contains only same-host URLs (protocol requirement) |
-| `website/sitemap-company.xml` | `premiselabs.co` | single URL (`/`) — company page |
+| `website/robots.txt` | both premise-labs hosts | Google **cross-submission**: lists all four sitemap locations; each `<urlset>` sitemap contains only same-host URLs (protocol requirement) |
+| `website/sitemap.xml` | both premise-labs hosts | **the conventional `/sitemap.xml` entry point** (#11615): a `<sitemapindex>` naming the four below, so a crawler that probes the standard path finds them without reading `robots.txt` first. ⚠️ Host-agnostic on purpose — a **recorded deviation** from the protocol's same-site rule for index files; see the rule note below |
+| `website/sitemap-company.xml` | `premiselabs.co` | two URLs (`/`, `/contact`) — company page + contact form (the contact URL was added by #4705 and this row said "single URL" until 2026-11-09) |
 | `website/sitemap-product.xml` | `tortoise.premiselabs.co` | `/`, `/docs`, `/faq`, `/self-hosted`, `/security`, the 4 legal pages (note: the auth URLs are NOT in this sitemap — `/signin` 301s to `/auth`, and `/auth` itself moved to the app origin in #4054) |
-| `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `.html` dedupe for non-auth pages |
+| `website/_redirects` | both premise-labs hosts | trailing-slash 301s → extensionless canonicals; `/index.html → /`; `/sitemap_index.xml → /sitemap.xml` (the second convention tools probe, #11615); `.html` dedupe for non-auth pages |
 | `website/apps/dashboard/public/{robots.txt,sitemap.xml}` | `app.premiselabs.co` | Vite copies `public/` → `dist/` at build time; `dist/` is itself a build artifact (untracked since #3775 — built by `deploy.sh`, `deploy-pages.yml` and the `dashboard-js-tests` CI job before it is served), so `public/` is the only committed copy |
 
 Rules:
+> **OVERRIDES:** the Sitemaps protocol's same-site rule for index files (`sitemaps.org`, *Using
+> Sitemap index files*: an index "can only specify Sitemaps that are found on the same site … not on
+> … `http://yourhost.yoursite.com`" — a subdomain is the spec's own counterexample) — this project
+> publishes ONE host-agnostic `website/sitemap.xml` from both premise-labs hosts rather than a
+> per-host index, because the four sitemaps are already cross-submitted from `robots.txt` on both
+> hosts and a per-host index cannot be expressed by a single static file. Google waives the rule for
+> cross-submitted sitemaps; a strictly-enforcing crawler still finds all four through `robots.txt`.
+> Tracked as a per-host index in #11624.
+>
 > ⚠️ **Part of this SEO contract is OPEN (#3521):** `/auth` (and `/signup`) now 301 to the app
 > origin, so treating them as `tortoise.*` canonicals would hand Google a redirect. The **sitemap**
 > side is already done — `website/sitemap-product.xml` omits `/auth` — but the **canonical / robots**

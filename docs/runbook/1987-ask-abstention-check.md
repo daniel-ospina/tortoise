@@ -101,15 +101,24 @@ turns land in the assembled context (ctx@40) with A1+A4+A5 on — the
 lexical-trio class needs the vector leg (A2), a documented runtime
 prerequisite (embeddings extra), not a code defect. Acceptance fixtures:
 `tests/test_ask_retrieval_levers.py` (gold-turn-in-context on the vector
-lane; pool-membership + cap-review assertions on the degraded lane).
+lane; pool-membership + cap-review assertions on the degraded lane) — the
+dataset-backed arms in that file are **opt-in** (`TORTOISE_LME_BENCH=1`),
+because the cached LongMemEval-S file being present on the box is not a
+property of the change under test: without the opt-in they skip with a reason
+that names the variable (#11056 — an ambient `$HOME` cache used to run a
+minutes-per-question bench inline in the fast gating shard).
 
-**Strong-model 500-Q config (the toutable benchmark, ready to run):** the
+**Strong-model 500-Q config (strong-reader INTERNAL BASELINE SERIES — name the
+official judge for a number comparable to a published figure; see
+`docs/benchmarks/longmemeval-500q/run-report.md` §1.1):** the
 500-Q LongMemEval-S baseline (run_protocol step 5) with the STRONG reader
 model that reproduced the failing commits (qwen3.8-max, verified 2026-08-30
 on the #2027 evidence):
 
 ```bash
-# step 5 (full 500-Q baseline) with the strong reader + official judge:
+# step 5 (full 500-Q baseline) with the strong reader; the judge is the run's
+# default (our own pinned model — #8486 ruling 2026-10-27; name
+# TORTOISE_LME_JUDGE_MODEL=openai:gpt-4o-2024-08-06 for the official judge):
 TORTOISE_LME_READER_MODEL='openrouter:qwen/qwen3.8-max' \
   uv run python -m tools.longmem_eval.run_protocol run 5
 # or directly (same reader, explicit knobs):
@@ -122,8 +131,15 @@ Provider wiring already in place: `openrouter` is in
 `tortoise.ingest._PROVIDERS` (OpenRouter base URL + `OPENROUTER_API_KEY`),
 the spec `openrouter:qwen/qwen3.8-max` parses via `_parse_model_spec`, and
 the override records `reader_pinned=false` + warns on stderr (the M5 default
-stays `openrouter:deepseek/deepseek-v4-flash` — #1525). Requires an
-`OPENROUTER_API_KEY` (and `OPENAI_API_KEY` for the official GPT-4o judge);
+is `deepseek:deepseek-v4-flash` — #1525, with the TRANSPORT repointed off
+`openrouter:` by #8486 on 2026-11-07: the box the 2026-11-02 credential audit
+measured holds no `OPENROUTER_API_KEY`, so the openrouter-named default raised
+before loading a question there). Requires an
+`OPENROUTER_API_KEY` **for the reader override** and a `DEEPSEEK_API_KEY` **for
+the run's default judge** (the judge needs no `OPENAI_API_KEY` unless the official
+judge is named explicitly, because the run default is our own pinned model
+since the #8486 ruling of 2026-10-27, see
+`docs/benchmarks/longmemeval-500q/run-report.md` §1.1);
 no keys were present at record time, so this config is verified up to spec
 parse + mock-run only, not executed. Cost re-measure + provider routing for
 the ask lane (eval-only; deepseek-direct 400s on non-deepseek specs) remain the
@@ -307,6 +323,27 @@ the reader-model/retrieval upgrade.
 > graded eval uses); the word-overlap bar
 > (`max(2, len(gold_words)//2)` on UNIQUE words) is REMOVED from the live
 > path and demoted to the key-free CI (MockJudge) substitute only.
+>
+> **ERRATA (2026-11-08, #8486)** — the decision above stands; two of its
+> *statements of the code* no longer describe the code, and this block is an
+> annotation rather than a rewrite of the 2026-08-31 record:
+>
+> 1. **`build_judge()` → `build_judge(_judge_spec())`.** A bare `build_judge()`
+>    now resolves `judge.DEFAULT_JUDGE_MODEL`, which the #8486 owner ruling of
+>    2026-10-27 re-pinned to **DeepSeek**. A bare call is therefore precisely
+>    the defect #8486 spent a review cycle pinning: the key pre-flight checks
+>    the official judge's key while a different model grades. All three legs
+>    (`ask_spotcheck`, `ask_spotcheck_probe`, `ask_spotcheck_consistency`)
+>    pass `_judge_spec()` — ONE resolver for the pre-flight and the grader —
+>    and `tests/test_ask_spotcheck_judge.py` pins it by AST over every call
+>    site.
+> 2. **"the same judge the graded eval uses" is no longer true by default.**
+>    The graded LongMemEval run defaults to the ruled DeepSeek model
+>    (`judge.py::DEFAULT_JUDGE_MODEL`); the spot-check's judge is the official
+>    one, named explicitly via `OFFICIAL_JUDGE_MODEL`. The two lanes now
+>    diverge **deliberately**, which is why the spot-check must name its spec
+>    rather than inherit it. The I2 harness still passes **one** judge object
+>    to both legs, so its agreement-by-construction property is unchanged.
 
 **Why:** the lexical bar was structurally unreachable for rubric-style
 long-gold SSP questions — d6233ab6 (79w gold: ≥28/56-unique-word overlap),
@@ -317,8 +354,9 @@ published benchmark numbers were never produced by the broken bar).
 
 **What changed (files):**
 
-- `tools/ask_spotcheck.py::_grade` — every question routes to `build_judge()`
-  (official gpt-4o anscheck, benchmark-identical); the word-overlap bar is
+- `tools/ask_spotcheck.py::_grade` — every question routes to
+  `build_judge(_judge_spec())` (official gpt-4o anscheck, named explicitly —
+  see the 2026-11-08 ERRATA above; benchmark-identical); the word-overlap bar is
   gone from the live path; the `_abs` marker path is unchanged (precedes
   the judge call). **No-key runtime contract:** fail-fast pre-flight in
   `main()` verifies the judge provider key (default `OPENAI_API_KEY`;
@@ -684,8 +722,9 @@ PASS, (d) FAIL 0.43 < 0.8 — the merge remains BLOCKED on (d).
 
 ### Step 4 (M5 pin flip) — GATED, NOT done
 
-`tools/longmem_eval/reader.py` `READER_MODEL` stays
-`openrouter:deepseek/deepseek-v4-flash`. The flip to
+`tools/longmem_eval/reader.py` `READER_MODEL` is
+`deepseek:deepseek-v4-flash` (transport repointed off `openrouter:` by #8486,
+2026-11-07 — see Step 2's note; the MODEL is unchanged). The flip to
 `openrouter:qwen/qwen3.8-max` is gated on (i) the qwen-serves-via-OpenRouter
 test (landed + green in this change), (ii) the 500-Q/spot-check indicator
 run showing **0/7 content-error recurrences** (gpt4_8279ba02, gpt4_7a0daae1,

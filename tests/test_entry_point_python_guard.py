@@ -966,8 +966,186 @@ def test_guard_refuses_an_old_interpreter_and_passes_the_floor(
             f"package module (its relative / `tools.*` import dies): {message!r}"
         )
 
+    # ★ #11342: the refusal must not report SUCCESS. The assertions above pin
+    # what the message SAYS; without this one a guard that prints the full,
+    # attributable message and then `raise SystemExit(0)` passes every check in
+    # this file while telling every caller the tool ran clean — the fail-OPEN
+    # shape this whole census exists to prevent (measured: `SystemExit(0)`
+    # satisfied `_guard_or_fail` and every attribution assertion). Shape-generic
+    # on purpose: it stays silent about WHICH non-zero code a file chooses
+    # (`test_the_refusal_exit_code_is_the_one_the_tool_can_spare` pins it for the
+    # three files below, because which code each can spare is a per-tool contract
+    # decision). Other corpus guards still refuse with a bare
+    # `SystemExit(<message>)` — exit 1 — where 1 is also the tool's own
+    # DRIFT/failure code, `tools/bridge_table.py`, `tools/mcp_rename_table.py`
+    # and `tools/sdk_surface.py` among them; that residue predates this PR and is
+    # not pinned here.
+    #
+    # The status is DERIVED, not read off `.code`, and it is a statement about the
+    # PROCESS. `SystemExit()` and `SystemExit(None)` leave `.code` as `None` and exit
+    # 0 while `None != 0` is True, so `assert code != 0` PASSES them (measured) — that
+    # is the fail-open this derivation closes. `SystemExit(False)` also exits 0, and
+    # `assert code != 0` happens to RED it, because `False != 0` is False; but that is
+    # only because `bool` is an `int`, not because `False` is a status, so the red is
+    # an accident of comparison and not something to rely on. CPython turns
+    # `.code` into a status with `0 if code is None else (code if isinstance(code, int)
+    # else 1)` and the OS then keeps the low 8 bits — so `SystemExit(256)`, `(512)`,
+    # `(-256)` and `(768)` leave the process at **0** while the PRE-MASK value is not
+    # (measured). Both steps are applied here.
+    #
+    # Declared bound, because the derivation cannot be total: for an int outside C
+    # `long` range CPython passes -1 to exit(), so the PROCESS status is 255 whatever
+    # the derivation says (`SystemExit(2**63)` derives 0, `(2**63 + 1)` derives 1 —
+    # measured). No guard writes such a code, and the property this assertion checks
+    # survives it: a status of 0 is reachable only from `None`, `False`, 0 or an int
+    # ≡ 0 (mod 256), and every one of those derives 0.
+    # `int.__and__` rather than `&` on purpose: an `int` SUBCLASS may override
+    # `__and__`, and a guard could then leave the process at status 0 while this
+    # derivation returned non-zero — the false PASS this assertion exists to close
+    # (measured with `class Evil(int): __and__ -> 1`). The unbound call is the int
+    # arithmetic the OS will apply, whatever the subclass declares.
+    _code = refusal.value.code
+    _status = (
+        0
+        if _code is None
+        else (int.__and__(_code, 0xFF) if isinstance(_code, int) else 1)
+    )
+    assert _status != 0, (
+        f"{rel}: the guard refused but the PROCESS exits {_status} — a refusal "
+        f"that reports success is indistinguishable from the tool having run: "
+        f"{message!r}"
+    )
+
     monkeypatch.setattr(sys, "version_info", (*FLOOR, 0))
     exec(code, namespace)  # at the floor the guard must be inert
+
+
+#: The refusal code each of the three files below CHOOSES (`#4053`, `#11342`) —
+#: their guards landed in earlier PRs, and this file only PINS them — and the
+#: verdict code it spares, or reuses on purpose. `SystemExit(<message>)` exits 1 in
+#: CPython, so for two of these files an old interpreter was reported as the
+#: tool's own verdict — `gen_placement_table --check` prints `STALE` and returns
+#: 1, and `test_design_map_check` documents 1 as "violations" while reserving 2
+#: for the map that could not be read. `cache_evict` is the exception BECAUSE its 1 is
+#: already a usage code (`CACHE_EVICTION_EXIT_USAGE`), its verdicts being 2/3/4.
+#:
+#: The census above cannot assert this: which non-zero code a file picks is a
+#: per-tool contract decision, not a property of the guard shape. Pinning it here
+#: is what makes the decision survive the next rebase — #11342 was filed after a
+#: branch rewrite silently reverted this exact fix, with the whole census green.
+REFUSAL_CODES: dict[str, int] = {
+    "tools/gen_placement_table.py": 2,
+    "tools/test_design_map_check.py": 2,
+    "tools/cache_evict.py": 1,
+    "tools/ci_runner_topology.py": 4,
+    "tools/capstone_ledger.py": 1,
+    "tools/build_site_icons.py": 4,
+}
+
+#: Why THAT code is the right one for THAT file — quoted in the failure message, so
+#: a red tells a fixer which contract it is breaking. Deliberately per-entry: a
+#: single generic sentence is wrong for `cache_evict` (whose 1 IS the expected
+#: value, not the collision), and a diagnostic that argues against the correct
+#: answer sends the next fixer to undo it.
+REFUSAL_WHY: dict[str, str] = {
+    "tools/gen_placement_table.py": (
+        "1 is `--check`'s STALE (main() returns 0/1), so an environment refusal "
+        "must not wear it; 2 is never RETURNED by main() (argparse takes it for a "
+        "bad flag), so it cannot collide with a verdict"
+    ),
+    "tools/test_design_map_check.py": (
+        "1 is \"violations found\", so an environment refusal must not wear it; "
+        "2 is the tool's OWN `Refusal` code (main() returns 0/1/2), reused on purpose"
+    ),
+    "tools/cache_evict.py": (
+        "1 IS this tool's usage code (CACHE_EVICTION_EXIT_USAGE) — its verdicts are "
+        "2/3/4 — so exit 1 is CORRECT here, whatever shape the guard uses to reach "
+        "it, and it must not be normalised to 2"
+    ),
+    "tools/ci_runner_topology.py": (
+        "1/2/3 are VERDICTS a wrapper branches on (EXIT_FAILED=1 is literally \"a write "
+        "did not take, the read-back failed, … a violation survived\", EXIT_USAGE, "
+        "EXIT_OWNER_GATED), so an environment refusal must not wear any of them; the "
+        "guard takes 4, which the tool otherwise never returns"
+    ),
+    "tools/capstone_ledger.py": (
+        "the set 0-4 is CLOSED and fully spent (CLEAN/INVALID/UNCOVERED/DISABLED/"
+        "ADVISORY), so there is no spare code; 1 (EXIT_INVALID) is reused on purpose "
+        "— it is the fail-closed neighbour, and closing a row is not reaching a "
+        "verdict. Adding 5 to the tool's set would change a documented public "
+        "contract to satisfy a lint, which is the wrong trade"
+    ),
+    "tools/build_site_icons.py": (
+        "1 is this tool's OWN failure status — every OTHER refusal is `raise "
+        "SystemExit(<message>)` (CPython maps that to status 1), `main()` returns 0 "
+        "only and argparse takes 2, so an environment refusal must not wear 1 or a "
+        "caller cannot tell 'the tool refused' from 'the interpreter is too old'; "
+        "4 is never returned by anything but the guard. Deliberately stated as the "
+        "SHAPE, not as a list of line numbers — a count in this field rots silently"
+    ),
+}
+
+
+def test_every_refusal_code_carries_its_reason():
+    """★ the two tables must describe the SAME files, or the red loses its diagnostic.
+
+    `test_the_refusal_exit_code_is_the_one_the_tool_can_spare` quotes
+    ``REFUSAL_WHY[rel]`` **inside its failure message**, so an entry added to
+    ``REFUSAL_CODES`` without a matching reason turns that test's red into a bare
+    ``KeyError`` — the row still fails, and the sentence naming the contract that
+    was broken is exactly what is lost. The mirror case is a ``REFUSAL_WHY`` row
+    no code pins: a reason that reads as enforcement while nothing enforces it.
+
+    Pinned as its own row rather than an `assert` between the tables so the
+    failure is a counted FAILED test naming both directions, not a collection
+    error that takes the other 500-odd rows with it.
+    """
+    missing_reasons = sorted(set(REFUSAL_CODES) - set(REFUSAL_WHY))
+    reasons_without_a_code = sorted(set(REFUSAL_WHY) - set(REFUSAL_CODES))
+    assert not missing_reasons and not reasons_without_a_code, (
+        f"REFUSAL_CODES entries with no REFUSAL_WHY reason: {missing_reasons}; "
+        f"REFUSAL_WHY reasons for a file no code pins: {reasons_without_a_code}"
+    )
+
+
+#: Run a tool as a script under a faked pre-3.12 interpreter. `version_info` is
+#: replaced before `runpy` executes the file, so the file's OWN guard node runs
+#: and nothing below it does — no old interpreter and no real work needed.
+_FORCED_39 = (
+    "import runpy, sys\n"
+    "sys.version_info = (3, 9, 6, 'final', 0)\n"
+    "runpy.run_path(sys.argv[1], run_name='__main__')\n"
+)
+
+
+@pytest.mark.parametrize("rel", sorted(REFUSAL_CODES))
+def test_the_refusal_exit_code_is_the_one_the_tool_can_spare(rel):
+    """★ #11342: an environment refusal must not wear a VERDICT's exit code.
+
+    Measured as a real process, not by reading the guard node's `.code` alone: the
+    whole point is the status a CI step or a lane branches on. The expected code
+    is asserted exactly rather than "non-zero", because for the two drift/
+    violation gates the collision is specifically with **1** — an exact pin is
+    what reds if the `#4053` shape is ever reverted to
+    `raise SystemExit(<message>)`, whose CPython exit status is 1.
+    """
+    expected = REFUSAL_CODES[rel]
+    probe = subprocess.run(
+        [sys.executable, "-c", _FORCED_39, str(ROOT / rel)],
+        cwd=ROOT,
+        capture_output=True,
+        text=True,
+    )
+    assert probe.returncode == expected, (
+        f"{rel}: an old interpreter must exit {expected}, got {probe.returncode} "
+        f"(stderr={probe.stderr!r}) — {REFUSAL_WHY[rel]}"
+    )
+    assert ">= 3.12" in probe.stderr and rel in probe.stderr, (
+        f"{rel}: the refusal must stay attributable on stderr: {probe.stderr!r}"
+    )
+    assert "Traceback" not in probe.stderr, (
+        f"{rel}: a refusal must not be a traceback: {probe.stderr!r}"
+    )
 
 
 @pytest.mark.parametrize("path", _dash_m_corpus(), ids=_rel)
@@ -1069,3 +1247,51 @@ def test_a_named_refusal_beats_an_internal_error_under_a_real_old_interpreter():
     assert "INTERNAL ERROR" not in message
     assert "AttributeError" not in message
     assert "requires Python >= 3.12" in message
+
+
+def test_the_site_icon_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#11507 review (round 7) — the message's INVOCATION is a claim no leg read.
+
+    The census pins that a refusal names an invocation at all
+    (`test_guard_refuses_an_old_interpreter_and_passes_the_floor` asserts the
+    `uv run python <path>` prefix is present), and that prefix is satisfied by BOTH
+    the bare path and the `--help` form. Measured: reverting this tool's message to
+    the pre-fix bare path left the whole census at `536 passed, 2 skipped` — the one
+    unpinned claim of the change, and the one whose reversion ships the exact
+    SECOND unattributed error #5128 was filed for.
+
+    So it is pinned by PROVING the claim rather than by reading the string alone:
+    the form the refusal names must resolve, and the bare path must NOT — this tool
+    takes `--source` as `required=True`, so running it bare exits 2 on argparse's
+    own usage error. A future guard whose advice is a usage error reds here.
+    """
+    path = Path(__file__).resolve().parents[1] / "tools" / "build_site_icons.py"
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit):
+        exec(code, {"__name__": "__main__", "sys": sys})
+    captured = capsys.readouterr()
+    message = captured.out + captured.err
+
+    assert "tools/build_site_icons.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `--source` "
+        f"token: {message!r}")
+
+    # The claim, proved rather than asserted: run what the message names, and the
+    # form it deliberately does NOT name.
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--source` is "
+        f"required) — if it stops being one, this guard's advice is no longer the "
+        f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")

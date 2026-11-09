@@ -95,7 +95,9 @@ closes the tracked `github_documents` gap, which had no tool at all.
 
 `tortoise_onboarding_github_connect` is deliberately **not** folded in: it is the OAuth
 handshake, and the ruling's own *"credentials never pass through the model"* condition is
-what keeps it out of an agent-callable list/enable/disable operation.
+what keeps it out of an agent-callable list/enable/disable operation. **It has since left the
+MCP surface entirely (#4282 Phase 3.2)** — the handshake's only door is
+`POST /v1/onboarding/github/connect`, called from the dashboard.
 
 Permission is the condition the owner attached to the ruling and is enforced at the tool
 boundary: the entry declares `risk="admin"` (#4122 — `writes` is derived from it), so
@@ -218,7 +220,21 @@ do not: a warning that names nothing serves a caller who does not exist. The **9
 `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_onboarding_state`,
 `tortoise_onboarding_seed`, `tortoise_onboarding_demo_create`,
 `tortoise_onboarding_github_connect`, `tortoise_onboarding_github_status`, `tortoise_packs_list`,
-`tortoise_pack_install` (all nine live in `TOOL_REGISTRY`, measured 2026-10-27).
+`tortoise_pack_install` (all nine were live in `TOOL_REGISTRY` at the 2026-10-27 measurement).
+
+> ⚠️ **Measured again at #4282 Phase 3.2:** the five `run_onboarding` names in that list have
+> since been REMOVED — `tortoise_onboarding_state`, `tortoise_onboarding_seed`,
+> `tortoise_onboarding_demo_create`, `tortoise_onboarding_github_connect`,
+> `tortoise_onboarding_github_status` are no longer in `TOOL_REGISTRY` (76 live tools then). The
+> remaining four — `tortoise_analyze`, `tortoise_backfill_v25`, `tortoise_packs_list`,
+> `tortoise_pack_install` — are still live and keep their own entries here. **This branch's
+> `graph_overview` container then took the live surface 76 → 72**, so 72 is the figure at this
+> head (`uv run python tools/surface_manifest.py check` is the live count).
+> **The five REMOVED tools'** capabilities survive as hand-written REST
+> routes in `tortoise/hosted_api.py` (`POST /v1/demo`, `GET|PATCH /v1/onboarding/state`,
+> `POST /v1/onboarding/seed`, `POST /v1/onboarding/github/connect`,
+> `GET /v1/onboarding/github/status`); `tortoise/selfhost_api.py` serves only the state and
+> seed routes, so the other three are hosted-only.
 
 **What this does NOT authorise — stated because the answer was broader than the question.** The
 **18** existing `RETIRED_USE_INSTEAD` forward entries are a *different population*: every one of them
@@ -230,7 +246,7 @@ carry two recorded decisions **in this document**: the 2026-10-17 amendment (ret
 replacement"*) and the 2026-10-25 one (*"the absorbed names stay retired-forward entries"*).
 **Removing them is a separate decision** and would need its own argument naming #3540 and #9660; it
 is not done here. The end state of the epic is still **27 advertised tools**, but that is reached by
-the full 81 → 27 consolidation, **not** by this amendment — these two answers remove 0 tools and 0
+the full **72 → 27** consolidation (was 76 before this container, 81 before #4282 Phase 3.2), **not** by this amendment — these two answers remove 0 tools and 0
 methods on their own.
 
 > **OVERRIDES:** the plan item `1.4` (`#3883`) requirement that *nothing is removed from the MCP
@@ -253,6 +269,40 @@ carries the table of how each reading was produced plus the single command that 
 Any deletion PR must use **26 / 111**.
 
 status: approved · principal: daniel-ospina · PR #10187 · date: 2026-10-27.
+
+**Amended 2026-11-03** (execution record, #4282): the **first container batch has landed**, so the
+surface is now **72 advertised tools** with **23** retired-forward entries — the 18 above plus five
+more. `tortoise_graph_overview` (row 6) absorbs `tortoise_overview`, `tortoise_summarize_structure`,
+`tortoise_validate_domain`, `tortoise_audit` and `tortoise_dream_health`.
+
+Three consequences for readers of the paragraph below, which is left as written because it records
+the 2026-10-27 ruling, not the current state:
+
+1. The count there (**18**) and its `18 of 18 verified` are that day's measurement. The population is
+   **23** now, and it is still 23 of 23 verified — every pointer names a call that resolves.
+2. `tortoise_health` no longer redirects to `tortoise_overview`: that name is itself retired, and
+   `RETIRED_USE_INSTEAD` resolves ONE hop (aliases are not transitive — the same limit GitHub's own
+   `DeprecatedToolAliases` records). The pointer is `tortoise_graph_overview(section="health")`, and
+   the seven inbound pointers that named `tortoise_overview` were re-pointed in the same change so
+   none of them dead-ends. **A future container batch must do the same for every pointer that names
+   the container it retires** — a two-hop pointer resolves nowhere while the warning shim still serves
+   both names, which is why it fails silently.
+3. **Row 6 lists seven names; the batch accounts for all seven.** Five retire into the container
+   (`overview`, `summarize_structure`, `validate_domain`, `audit`, `dream_health`).
+   `tortoise_check_structure` is absorbed as the `structure_check` **section** while its own door
+   stays **live**, until the container has a **declared output envelope**: that read is the one
+   member with a wrap envelope (`-> list[dict]`) and it carries the #8482 failure repair for a
+   payload the array schema cannot otherwise express, while a `-> Any` container cannot carry it —
+   retiring the door first would move the repair off the advertised path. The section and the door
+   answer the same rows today.
+   `tortoise_issue_insight` is **not** part of this batch at all: its Phase-0.1 destination
+   (`tools/bridge_table.py` `DESTINATION`) is **`search_knowledge`**, so it retires with that
+   container. Folding it in here as a section would also have given one SDK method two different
+   `limit` defaults — the door's own `2` against a container-wide `50` — and it remains **live and
+   advertised** until `search_knowledge` lands.
+
+No SDK method is added, removed or renamed by that batch (150 public methods before and after); the
+SDK leg of this list is a separate change.
 
 ## Principle: reads and writes never share a tool
 

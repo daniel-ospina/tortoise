@@ -1036,17 +1036,31 @@ class TestExcludedTools:
 # ── Epic #888: onboarding tool retirement ────────────────────────
 
 class TestOnboardingToolGating:
-    """Epic #888 no-regret item 2: the seven tortoise_onboarding_* tools must
-    NOT appear in a team's tools/list once that team's onboarding is complete
-    (onboarding_state.onboarding_complete). The onboarding flow itself is
-    unchanged — only the steady-state listing hides them.
+    """Surface pins around the onboarding tool group.
+
+    Epic #888 item 2 retired the `run_onboarding` tools from a team's
+    `tools/list` once that team's onboarding completed (`_ONBOARDING_TOOL_NAMES`
+    + a 60s state gate). #4282 Phase 3.2 then removed those five tools from the
+    MCP surface entirely — so the hide-list is empty and the listing assertion
+    is now a REGRESSION PIN on the removal (an unregistered name can never be
+    listed, in any state).
+
+    The `_org_onboarding_complete` unit tests below (TTL cache, off-loop read,
+    single-flight, fail-open) are unaffected by the removal and keep pinning
+    that read's contract.
     """
 
-    ONBOARDING_TOOLS = {  # noqa: RUF012
+    #: The five `run_onboarding` tool names that LEFT the MCP surface in
+    #: #4282 Phase 3.2 (owner ruling 2026-09-22: `run_onboarding` dropped for
+    #: `check_connection`; each capability survives as its own REST route in
+    #: `tortoise/hosted_api.py` — see `tortoise/tool_registry.py`). They are
+    #: asserted ABSENT in every state: an unregistered name can never be
+    #: listed, so this is a regression pin on the removal itself.
+    REMOVED_ONBOARDING_TOOLS = frozenset({
         "tortoise_onboarding_demo_create", "tortoise_onboarding_state",
         "tortoise_onboarding_github_connect", "tortoise_onboarding_github_status",
-        "tortoise_onboarding_seed",  # #1999 (W3)
-    }
+        "tortoise_onboarding_seed",
+    })
 
     @staticmethod
     def _list_names(tc, key):
@@ -1072,110 +1086,38 @@ class TestOnboardingToolGating:
         app = create_http_app(allowed_origins=[], _registry_sdk=reg)
         return _mounted_test_client(app), key, team["id"]
 
-    def test_onboarding_seed_tool_files_two_subjects(self, tmp_path, monkeypatch):
-        """#1999 (W3): tortoise_onboarding_seed is listed + callable over the
-        MCP surface; explicit names file the two anchor Subjects (no
-        email on this team → the person name must be provided, never
-        invented)."""
-        from tortoise.mcp_server import create_http_app
-        db_path = str(tmp_path / "onb-seed.db")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team = reg.org_create("seedteam")
-        key = reg.apikey_create(team["id"], "t")["api_key"]
-        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
-        tc = _mounted_test_client(app)
-        with tc:
-            names = self._list_names(tc, key)
-            assert "tortoise_onboarding_seed" in names
-            r = tc.post("/mcp", headers={
-                "Authorization": f"Bearer {key}",
-                "Accept": "application/json, text/event-stream",
-                "Content-Type": "application/json",
-            }, json={"jsonrpc": "2.0", "method": "tools/call", "id": 2,
-                    "params": {"name": "tortoise_onboarding_seed",
-                                "arguments": {"org_name": "Seed Co",
-                                               "person_name": "Sam Seed"}}})
-            assert r.status_code == 200, r.text
-            body = _parse_sse_json(r)
-            text = body["result"]["content"][0]["text"]
-            import json as _json
-            payload = _json.loads(text)
-            assert payload["status"] == "seeded", payload
-            assert payload["org_subject"]["subjectKind"] == "organization"
-            assert payload["user_subject"]["subjectKind"] == "naturalPerson"
-            assert payload["member_of"]["edge"]["relation"] == "memberOf"
-            assert payload["member_of"]["created"] is True
+    def test_removed_onboarding_tools_are_never_listed(self, tmp_path,
+                                                      monkeypatch):
+        """#4282 Phase 3.2: the five `run_onboarding` tools left the MCP
+        surface entirely, so NO team state can list them — not a fresh team,
+        not one that completed onboarding. Their REST twins keep the
+        capability (asserted in `test_onboarding_selfhost_w12`), so this is a
+        surface pin, not a capability loss.
 
-    def test_onboarding_tools_hidden_after_completion(self, tmp_path, monkeypatch):
+        The #3540 pin survives the removal and is the reason it is here:
+        `tortoise_manage_sources` is the STEADY-STATE source-management
+        surface, so it must stay listed AFTER onboarding completes — it is
+        exactly why it was never in `_ONBOARDING_TOOL_NAMES`. A future lane
+        adding it to that set would hide the only source-management tool from
+        every onboarded team.
+        """
         from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
         from tortoise import mcp_server
         tc, key, org_id = self._build_client(tmp_path, monkeypatch, "onb-team")
         with tc:
-            # Onboarding incomplete → onboarding tools ARE listed
-            names = self._list_names(tc, key)
-            assert self.ONBOARDING_TOOLS <= names, (  # noqa: SIM300
-                f"missing onboarding tools before completion: "
-                f"{self.ONBOARDING_TOOLS - names}")
-            # Complete onboarding through the canonical state writer, then
-            # clear the 60s per-team gate cache so the next list re-reads.
+            assert not (self.REMOVED_ONBOARDING_TOOLS
+                        & self._list_names(tc, key)), (
+                "removed onboarding tools are still advertised")
             _update_onboarding_state(org_id, onboarding_complete=True)
             mcp_server._onboarding_state_cache.clear()
-            # Onboarding complete → onboarding tools retired from the listing
-            names2 = self._list_names(tc, key)
-            assert not (self.ONBOARDING_TOOLS & names2), (
-                f"onboarding tools still listed: {self.ONBOARDING_TOOLS & names2}")
-            # Steady-state surface unaffected
-            assert "tortoise_query" in names2
-            assert "tortoise_create_point" in names2
-            # #3540: the consolidated source-management tool is STEADY-STATE —
-            # it must stay listed after onboarding completes, which is exactly
-            # why it is NOT in `_ONBOARDING_TOOL_NAMES`. Pinning the choice: a
-            # future lane adding it to that set would hide the only source
-            # management tool from every onboarded team.
-            assert "tortoise_manage_sources" in names2
-
-    def test_onboarding_gating_is_per_team(self, tmp_path, monkeypatch):
-        """Security-adjacent negative case: team A's completed onboarding must
-        only hide A's listing — team B (incomplete) still sees the tools."""
-        from tortoise.hosted_api import _update_onboarding_state  # noqa: I001
-        from tortoise.mcp_server import create_http_app
-        from tortoise import mcp_server
-        db_path = str(tmp_path / "onb-multi.db")
-        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
-        monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
-        reg = TortoiseSDK(db_path=db_path, namespace="registry")
-        team_a = reg.org_create("team-a")
-        key_a = reg.apikey_create(team_a["id"], "t")["api_key"]
-        team_b = reg.org_create("team-b")
-        key_b = reg.apikey_create(team_b["id"], "t")["api_key"]
-        app = create_http_app(allowed_origins=[], _registry_sdk=reg)
-        tc = _mounted_test_client(app)
-        with tc:
-            _update_onboarding_state(team_a["id"], onboarding_complete=True)
-            mcp_server._onboarding_state_cache.clear()
-            names_a = self._list_names(tc, key_a)
-            names_b = self._list_names(tc, key_b)
-            assert not (self.ONBOARDING_TOOLS & names_a), (
-                f"team A still lists: {self.ONBOARDING_TOOLS & names_a}")
-            assert self.ONBOARDING_TOOLS <= names_b, (  # noqa: SIM300
-                f"team B must keep onboarding tools: "
-                f"{self.ONBOARDING_TOOLS - names_b}")
-
-    def test_fail_open_when_onboarding_state_unreadable(self, tmp_path, monkeypatch):
-        """A control-plane read failure must NOT hide onboarding tools — a
-        transient outage must not strand a team mid-onboarding (fail-open)."""
-        def _boom(org_id):
-            raise RuntimeError("control plane down")
-        monkeypatch.setattr("tortoise.hosted_api._get_onboarding_state", _boom)
-        from tortoise import mcp_server
-        mcp_server._onboarding_state_cache.clear()
-        tc, key, _ = self._build_client(tmp_path, monkeypatch, "onb-team2")
-        with tc:
             names = self._list_names(tc, key)
-            assert self.ONBOARDING_TOOLS <= names, (  # noqa: SIM300
-                f"fail-open violated: {self.ONBOARDING_TOOLS - names} hidden")
+            assert not (self.REMOVED_ONBOARDING_TOOLS & names), (
+                f"removed onboarding tools listed after completion: "
+                f"{self.REMOVED_ONBOARDING_TOOLS & names}")
+            # Steady-state surface unaffected
+            assert "tortoise_query" in names
+            assert "tortoise_create_point" in names
+            assert "tortoise_manage_sources" in names
 
     def test_gate_cache_no_refetch_within_ttl(self, monkeypatch):
         """P1-3: a second gate read within the 60s TTL must NOT re-hit the
@@ -1512,19 +1454,33 @@ class TestOnboardingToolGating:
 # Post-#2083 parity: a minted per-graph key (deleg=0, graphs:read/write)
 # must be DENIED team-level default-graph/control-plane state over MCP HTTP
 # — the REST twins reject graph-bound keys (C5 #2114 GRAPH_SCOPED_TEAM_
-# SURFACE). tortoise_onboarding_state (the MCP-vs-REST asymmetry found in
-# the post-ship review) + tortoise_onboarding_github_status (read) +
-# tortoise_onboarding_github_connect (OAuth initiation) — while team-wide /
-# legacy keys keep the flows unchanged.
+# SURFACE) — while team-wide / legacy keys keep the flows unchanged.
+#
+# HISTORICAL — read the class docstring below before trusting this paragraph:
+# the family was originally pinned on `tortoise_onboarding_state` (the
+# MCP-vs-REST asymmetry found in the post-ship review),
+# `tortoise_onboarding_github_status` (read) and
+# `tortoise_onboarding_github_connect` (OAuth initiation). All three left the
+# MCP surface in #4282 Phase 3.2, so the class now pins the SURVIVING
+# team-surface tools that still call `_reject_graph_bound_mcp_org_surface`:
+# `tortoise_manage_sources` and `tortoise_onboarding_github_index`.
 
 class TestGraphBoundKeyTeamSurfaceReject:
-    """#2300: MCP HTTP authz for the onboarding/GitHub team-surface tools.
+    """#2300: MCP HTTP authz for the team-surface tools.
 
     Deleg=0 per-graph keys resolve graph scope on the registry lane
     (sdk.apikey_verify graph_id/namespace — #2300 C5 registry-lane parity)
     and hit the tool-body graph-bound rejects; team-wide (deleg NULL) and
     legacy keys pass. The authz signal mirrors REST's GRAPH_SCOPED_TEAM_SURFACE
     family: an AuthorizationError isError result whose text names the surface.
+
+    Retargeted at #4282 Phase 3.2: the original subjects
+    (`tortoise_onboarding_state`, `..._github_status`, `..._github_connect`)
+    left the MCP surface, so the family is now pinned on the SURVIVING
+    team-surface tools that still call `_reject_graph_bound_mcp_org_surface` —
+    `tortoise_manage_sources` (the steady-state source surface, #3540) and
+    `tortoise_onboarding_github_index`. The reject itself is unchanged code, so
+    the proof moves with it rather than lapsing with the removed names.
     """
 
     @staticmethod
@@ -1583,79 +1539,80 @@ class TestGraphBoundKeyTeamSurfaceReject:
         assert f"Graph-scoped keys cannot access {surface}." in text, (
             f"{tool} denial text: {text}")
 
-    def test_graph_bound_key_cannot_read_onboarding_state(self, tmp_path,
-                                                          monkeypatch):
-        """The true MCP-vs-REST asymmetry (#2300): tortoise_onboarding_state
-        reads the team DEFAULT-graph/control-plane projection — its REST twin
-        GET /v1/onboarding/state 403s graph-bound keys (C5), the MCP twin did
-        not. A deleg=0 graphs:read per-graph key must now be denied."""
+    def test_graph_bound_key_cannot_manage_sources(self, tmp_path, monkeypatch):
+        """#2300 / #3540: tortoise_manage_sources reads + writes ORG-level
+        source state (and returns the whole onboarding projection), so its REST
+        twin 403s a graph-bound key (C5) and now so does the MCP twin. A
+        deleg=0 per-graph key must be denied BY THE TEAM-SURFACE REJECT, not
+        merely by a scope gate."""
         _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "state-gb")
-        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
+        bound_rw = self._mint_key(_reg, tid,
+                                  scopes=["graphs:read", "graphs:write"],
                                   graph_id=gid, deleg=0)
         with tc:
-            self._assert_denied(tc, bound_ro, "tortoise_onboarding_state",
-                                "onboarding state")
+            self._assert_denied(tc, bound_rw, "tortoise_manage_sources",
+                                "manage sources", {"action": "list"})
 
-    def test_graph_bound_key_cannot_read_github_status(self, tmp_path,
-                                                       monkeypatch):
-        """#2300: tortoise_onboarding_github_status reads team GitHub
-        credential state — a deleg=0 graphs:read key must be denied (REST
-        twin now rejects too — #2300 closes the REST residual)."""
+    def test_graph_bound_key_cannot_start_a_github_index(self, tmp_path,
+                                                         monkeypatch):
+        """#2300: tortoise_onboarding_github_index indexes into the team's
+        DEFAULT graph — a deleg=0 per-graph key must be denied (REST twin
+        index_github parity)."""
         _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gstatus-gb")
-        bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
-                                  graph_id=gid, deleg=0)
-        with tc:
-            self._assert_denied(tc, bound_ro,
-                                "tortoise_onboarding_github_status",
-                                "github status")
-
-    def test_graph_bound_write_key_cannot_initiate_github_connect(
-            self, tmp_path, monkeypatch):
-        """#2300: tortoise_onboarding_github_connect starts a TEAM-wide
-        OAuth — even a graphs:read+write per-graph key must be denied (the
-        write scope gate alone is not enough; the team-surface reject fires)."""
-        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gconn-gb")
         bound_rw = self._mint_key(_reg, tid,
                                   scopes=["graphs:read", "graphs:write"],
                                   graph_id=gid, deleg=0)
         with tc:
             self._assert_denied(tc, bound_rw,
-                                "tortoise_onboarding_github_connect",
-                                "github connect")
+                                "tortoise_onboarding_github_index",
+                                "github index", {"org": "acme"})
+
+    def test_graph_bound_write_key_cannot_enable_a_source(
+            self, tmp_path, monkeypatch):
+        """#2300: tortoise_manage_sources enable/disable writes TEAM-wide org
+        state — even a graphs:read+write per-graph key must be denied (the
+        write scope gate alone is not enough; the team-surface reject fires)."""
+        _reg, tid, gid, tc = self._env(tmp_path, monkeypatch, "gconn-gb")
+        bound_rw = self._mint_key(_reg, tid,
+                                  scopes=["graphs:read", "graphs:write"],
+                                  graph_id=gid, deleg=0)
+        enable = {"action": "enable", "source": "github_issues"}
+        with tc:
+            self._assert_denied(tc, bound_rw, "tortoise_manage_sources",
+                                "manage sources", enable)
             # A graphs:read-ONLY bound key hits the dispatch write gate
             # (write implies read) before the body reject — still an authz
             # denial, same failure family.
             bound_ro = self._mint_key(_reg, tid, scopes=["graphs:read"],
                                       graph_id=gid, deleg=0)
-            result, text = self._call(tc, bound_ro,
-                                      "tortoise_onboarding_github_connect")
+            result, text = self._call(tc, bound_ro, "tortoise_manage_sources",
+                                      enable)
             assert result.get("isError") is True, text
             assert "graphs:write scope" in text, text
 
     def test_team_wide_scoped_key_unchanged(self, tmp_path, monkeypatch):
-        """Positive control: a team-wide scoped key (deleg NULL, graphs:read)
-        still reads onboarding state + GitHub status over MCP HTTP — the
-        reject is narrow (graph-bound keys only)."""
+        """Positive control: a team-wide scoped key (deleg NULL) still reads
+        the source surface over MCP HTTP — the reject is narrow (graph-bound
+        keys only)."""
         _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-wide")
-        wide = self._mint_key(_reg, tid, scopes=["graphs:read"])
+        wide = self._mint_key(_reg, tid,
+                              scopes=["graphs:read", "graphs:write"])
         with tc:
-            result, text = self._call(tc, wide, "tortoise_onboarding_state")
+            result, text = self._call(tc, wide, "tortoise_manage_sources",
+                                      {"action": "list"})
             assert result.get("isError") is not True, text
-            assert "onboarding_complete" in text, text
-            result, text = self._call(tc, wide,
-                                      "tortoise_onboarding_github_status")
-            assert result.get("isError") is not True, text
-            assert "connected" in text, text
+            assert '"sources"' in text, text
 
     def test_legacy_key_unchanged(self, tmp_path, monkeypatch):
         """Positive control: a legacy full-access key (deleg NULL, no
-        scopes) keeps the onboarding-state read."""
+        scopes) keeps the source-surface read."""
         _reg, tid, _gid, tc = self._env(tmp_path, monkeypatch, "state-legacy")
         legacy = _reg.apikey_create(tid, "#2300-legacy")["api_key"]
         with tc:
-            result, text = self._call(tc, legacy, "tortoise_onboarding_state")
+            result, text = self._call(tc, legacy, "tortoise_manage_sources",
+                                      {"action": "list"})
             assert result.get("isError") is not True, text
-            assert "onboarding_complete" in text, text
+            assert '"sources"' in text, text
 
 
 # ── #2210: advertised == served ─────────────────────────────────
@@ -2711,21 +2668,48 @@ class TestToolCallAdmissionBoundary:
         assert _tools_call_rejection(self.ISSUE_REQUEST) is None
         assert self._sdk_session_verdict(self.ISSUE_REQUEST) is None
 
-    def test_a_hidden_onboarding_tool_is_not_an_admission_error(
+    def test_a_hidden_tool_is_not_an_admission_error(
             self, tmp_path, monkeypatch):
-        """#3656's third hypothesis, MEASURED: a tool that disappears from
-        ``tools/list`` once onboarding completes still dispatches -- the
-        89 -> 82 shrink is a listing change, not an admission rejection.
+        """#3656's third hypothesis, MEASURED: a tool that is absent from
+        ``tools/list`` still dispatches -- the shrink is a LISTING change, not
+        an admission rejection.
 
-        The hidden state is entered, not assumed: onboarding is completed
-        through the canonical state writer, the 60s gate cache is cleared, and
-        the listing is asserted to have dropped the tool BEFORE it is called.
+        Retargeted at #4282 Phase 3.2. The original hidden state was the
+        onboarding hide-list, which no longer has members (the five
+        `run_onboarding` tools left the surface). The hypothesis is unchanged
+        and is now measured on the OTHER filter: a registry tool outside
+        ``HTTP_ALLOWED`` is never listed over HTTP, yet its ``tools/call``
+        reaches the handler.
+
+        Retargeted a THIRD time by #4282 row 6. The witness used here was
+        ``tortoise_dream_health``, and that container RETIRED it — a retired
+        name leaves ``TOOL_REGISTRY`` entirely (it is served through the #3883
+        shim, not registered), so the old witness stopped being a registry
+        member and this test failed at its own precondition. The witness now is
+        ``tortoise_mine_conversations``, which carries the SAME transport guard
+        (`_transport_mode.get() == "http"` -> `_http_excluded_error()`, the
+        #1090 filesystem-walk exclusion) and is LIVE, so the measured property
+        is unchanged: a listing filter, not an admission rejection. The
+        witness's membership is now DERIVED and asserted rather than assumed,
+        so the next retirement fails with the live population named.
         """
-        from tortoise import mcp_server
-        from tortoise.hosted_api import _update_onboarding_state
+        from tortoise.mcp_auth import ERR_EXCLUDED
         from tortoise.mcp_server import create_http_app
+        from tortoise.tool_registry import RETIRED_USE_INSTEAD, TOOL_REGISTRY, get_http_allowed
 
-        hidden = "tortoise_onboarding_state"
+        # The hidden state is DERIVED at this head: every live registry tool the
+        # HTTP filter leaves out. The witness must be one of them (a retired or
+        # re-listed name makes the measurement vacuous, so it is refused here).
+        live_hidden = {e.name for e in TOOL_REGISTRY} - get_http_allowed()
+        hidden = "tortoise_mine_conversations"
+        assert live_hidden, (
+            "no live tool is outside HTTP_ALLOWED — the hidden state is "
+            "unreachable, so this test would measure nothing")
+        assert hidden in live_hidden, (
+            f"the witness must be a LIVE HTTP-excluded tool; the derived "
+            f"population is {sorted(live_hidden)} — did {hidden} retire?")
+        assert hidden not in RETIRED_USE_INSTEAD, (
+            f"{hidden} is retired; a retired name is not a registry member")
         db_path = str(tmp_path / "hidden.db")
         monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
         monkeypatch.setenv("TORTOISE_DB_PATH", db_path)
@@ -2741,18 +2725,26 @@ class TestToolCallAdmissionBoundary:
             "Content-Type": "application/json",
         })
         with tc:
-            assert hidden in self._list_names(tc, key)  # visible first
-            _update_onboarding_state(team["id"], onboarding_complete=True)
-            mcp_server._onboarding_state_cache.clear()
+            # The hidden state is ASSERTED, not assumed: the name is registered
+            # yet absent from the listing.
+            assert hidden in {e.name for e in TOOL_REGISTRY}
             assert hidden not in self._list_names(tc, key), (
                 "the fixture did not enter the hidden state")
             r, body = _mcp_post(tc, {
                 "jsonrpc": "2.0", "id": 1, "method": "tools/call",
                 "params": {"name": hidden, "arguments": {}}})
             assert r.status_code == 200, r.text
-            # Dispatched normally: a tool RESULT, not an admission rejection.
+            # Dispatched normally: a tool RESULT (here its own transport
+            # refusal), never an admission rejection.
             assert "result" in body, body
             assert body.get("error", {}).get("code") != -32602, body
+            # ...and the result is the HANDLER's own payload, not a substitute
+            # for a name the transport could not route: `_http_excluded_error`
+            # carries ERR_EXCLUDED, which no "tool not found" answer produces.
+            blob = json.dumps(body["result"])
+            assert str(ERR_EXCLUDED) in blob, (
+                f"the handler was not reached — expected its transport refusal "
+                f"({ERR_EXCLUDED}), got {blob[:400]}")
 
     @staticmethod
     def _list_names(tc, key):
@@ -2824,14 +2816,16 @@ class TestToolCallAdmissionBoundary:
             {"jsonrpc": "2.0", "id": 5, "method": "tools/call",
              "params": {"name": self.CHEAP_TOOL, "arguments": {},
                         "_meta": {"progressToken": "t"}}},
-            # Hidden from tools/list once onboarding completes, still callable.
-            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
-             "params": {"name": "tortoise_onboarding_state", "arguments": {}}},
             # Unregistered name: a tool outcome, not an admission rejection.
-            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
+            # (The "hidden from tools/list, still callable" shape this matrix used
+            # to carry here was `tortoise_onboarding_state`, which #4282 Phase 3.2
+            # TOOK OFF the surface — it is now unregistered, i.e. this very case.
+            # The hidden-but-callable property is pinned on a live mechanism by
+            # `test_a_hidden_tool_is_not_an_admission_error`, above.)
+            {"jsonrpc": "2.0", "id": 6, "method": "tools/call",
              "params": {"name": "tortoise_nonexistent_xyz", "arguments": {}}},
             # Tool-argument failures are FastMCP's, surfaced as isError results.
-            {"jsonrpc": "2.0", "id": 8, "method": "tools/call",
+            {"jsonrpc": "2.0", "id": 7, "method": "tools/call",
              "params": {"name": self.CHEAP_TOOL, "arguments": {"bogus": 1}}},
         ]
         with tc:

@@ -45,6 +45,8 @@ import json
 import sys
 from pathlib import Path
 
+import pytest
+
 _REPO = Path(__file__).resolve().parents[1]
 if str(_REPO) not in sys.path:
     sys.path.insert(0, str(_REPO))
@@ -70,21 +72,38 @@ e2a_value_units = _load("e2a_value_units")
 
 # ── e1_gate_drops: the two refusals, and the measurement between them ───────
 
-def _fake_census(object_names: list[str]):
-    def census(uri: str) -> dict:
+def _fake_population(**sections: list[str]):
+    """Stub the ONE graph seam: the section -> candidate-text population."""
+
+    def section_population(uri: str) -> dict[str, list[str]]:
         assert "/" in uri, f"a graph URI was expected, got {uri!r}"
-        return {"object_names": list(object_names)}
-    return census
+        return {name: list(texts) for name, texts in sections.items()}
+
+    return section_population
 
 
-def _run_gate_drops(monkeypatch, tmp_path, *, object_names: list[str],
+def _run_gate_drops(monkeypatch, tmp_path, *, object_names: list[str] | None = None,
+                    population: dict[str, list[str]] | None = None,
+                    sections: str | None = None,
                     verdict=None) -> int:
     monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
-    monkeypatch.setattr(e1_gate_drops, "census", _fake_census(object_names))
+    stub = population if population is not None else {"objects": list(object_names or [])}
+    monkeypatch.setattr(e1_gate_drops, "section_population", _fake_population(**stub))
     if verdict is not None:
         import tortoise.value_gate as value_gate
         monkeypatch.setattr(value_gate, "mechanical_verdict", verdict)
-    return e1_gate_drops.main(["--graph", "g", "--out", str(tmp_path / "o.json")])
+    argv = ["--graph", "g", "--out", str(tmp_path / "o.json")]
+    if sections is not None:
+        argv += ["--sections", sections]
+    return e1_gate_drops.main(argv)
+
+
+def _measure(monkeypatch, tmp_path, *, population: dict[str, list[str]],
+             verdict=None, sections: str | None = None) -> tuple[int, dict]:
+    """Run the instrument and return `(exit_code, record)`."""
+    exit_code = _run_gate_drops(monkeypatch, tmp_path, population=population,
+                                verdict=verdict, sections=sections)
+    return exit_code, json.loads((tmp_path / "o.json").read_text())
 
 
 def test_e1_gate_drops_refuses_when_the_positive_controls_stop_dropping(
@@ -103,13 +122,58 @@ def test_e1_gate_drops_refuses_when_the_positive_controls_stop_dropping(
 
 
 def test_e1_gate_drops_refuses_a_zero_denominator(monkeypatch, tmp_path, capsys):
-    """Zero Object names is a missing denominator, never "0 of 0 drops passed"."""
+    """No candidate text in ANY section is a missing denominator, never a pass.
+
+    Widened from Objects to the whole selection in #11201: with `points` and
+    `events` selectable, a graph that yields nothing anywhere is still the same
+    zero-denominator reading the probe has always refused.
+    """
     exit_code = _run_gate_drops(monkeypatch, tmp_path, object_names=[])
 
     assert exit_code == 2
     out = capsys.readouterr().out
-    assert "no Object names" in out
+    assert "no selected section yields candidate text" in out
     assert "objects=0" in out
+
+
+def test_e1_gate_drops_refuses_an_unknown_section_with_exit_2(monkeypatch, tmp_path):
+    """A misspelt `--sections` is a REFUSAL (2), not a traceback or a silent skip."""
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    monkeypatch.setattr(e1_gate_drops, "section_population",
+                        _fake_population(objects=["the deploy rail"], points=[],
+                                         events=[], bogus=[]))
+
+    with pytest.raises(SystemExit) as caught:
+        e1_gate_drops.main(["--graph", "g", "--sections", "objects,bogus",
+                            "--out", str(tmp_path / "o.json")])
+
+    assert caught.value.code == 2
+
+
+def test_e1_gate_drops_coverage_is_judged_over_the_pass_not_the_request(
+        monkeypatch, tmp_path):
+    """`--sections objects` must not stamp `coverage_complete: true` (#11201).
+
+    The flag exists to stop an Objects-only reading from passing as the whole
+    Step-4 condition; scoping it to the REQUEST re-introduces exactly that.
+    """
+    exit_code, record = _measure(
+        monkeypatch, tmp_path, population={"objects": ["the deploy rail"]},
+        sections="objects")
+
+    assert exit_code == 0
+    assert record["coverage_complete"] is False
+    assert record["unmeasured_sections"] == ["events", "points"]
+    assert record["sections_not_requested"] == ["events", "points"]
+    # The aggregate is NOT asserted here: with `sections="objects"` the
+    # unconditional-objects branch contributes 0 either way, so any `>=` between
+    # the aggregates holds with or without the code it would claim to pin
+    # (review cycle 6). `test_e1_gate_drops_aggregates_include_the_unconditional_
+    # objects_census` is the test that actually reds on that mutant.
+    assert record["sections"] == {"objects": record["sections"]["objects"]}, (
+        "only the requested section is measured — the rest are disclosed, not invented")
+    assert "TORTOISE_VALUE_GATE=0" in record["arm_precondition"], (
+        "the record must state that the graph has to come from a gate-OFF run")
 
 
 def test_e1_gate_drops_measures_when_both_halves_are_alive(
@@ -147,6 +211,341 @@ def test_e1_gate_drops_controls_are_the_real_predicates_behaviour():
     assert verdicts["the admin-merge rail"] is None
 
 
+# ── e1_gate_drops: the SECTIONS the pass judges, not just its Objects ───────
+
+def test_e1_gate_drops_accepts_the_sections_flag_the_eval_lane_needs(
+        monkeypatch, tmp_path, capsys):
+    """`--sections` is the Step-4 pass condition's own switch (#10996, #11201).
+
+    Without it the instrument can only census `:Object` names, so the scope's
+    "0 drops over points+events, or each named and accepted" is not evaluable —
+    the precise gap a default-on flip must never ship with.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["the deploy rail"],
+                    "points": ["#4118", "timeout is not on macOS"],
+                    "events": ["the lease landed"]},
+        sections="objects,points,events")
+
+    assert exit_code == 0
+    record = json.loads((tmp_path / "o.json").read_text())
+    assert set(record["sections"]) == {"objects", "points", "events"}
+    assert record["sections"]["points"]["candidates"] == 2
+    assert record["sections"]["points"]["drops_total"] == 1
+    assert set(record["sections"]["points"]["drops"]) == {"#4118"}
+    assert record["sections"]["objects"]["drops_total"] == 0
+    assert record["sections"]["events"]["drops_total"] == 0
+    assert record["coverage_complete"] is True
+    out = capsys.readouterr().out
+    assert "points=2" in out, "the per-section population must be printed, not only Objects"
+
+
+def test_e1_gate_drops_defaults_to_every_section_the_pass_judges(
+        monkeypatch, tmp_path):
+    """The DEFAULT must be the pass's coverage — Objects-only is the bug (#11201).
+
+    Pinned to `vet_gate.SECTIONS`, which is the authority for what the pass
+    iterates: if a section is added there and not here, this reds instead of the
+    instrument silently measuring less than the pass judges.
+    """
+    from tortoise import vet_gate
+
+    pass_sections = {section for section, _f, _k, _fam in vet_gate.SECTIONS}
+    assert pass_sections == {"entities", "events", "points"}, (
+        "the pass's section table moved — re-derive the instrument's coverage")
+
+    _, recorded = _measure(monkeypatch, tmp_path, population={
+        "objects": ["the deploy rail"], "points": ["the lease fix"], "events": ["the retro"]})
+
+    assert set(recorded["sections"]) == set(e1_gate_drops.DEFAULT_SECTIONS)
+    assert set(e1_gate_drops.DEFAULT_SECTIONS) == set(e1_gate_drops.SECTION_LABELS)
+    assert (set(e1_gate_drops.PASS_SECTION_OF.values())
+            == pass_sections), (
+        "every section the pass judges needs an instrument section mapped to it — "
+        "an unmapped pass section is the blind spot #11201 exists to close")
+
+
+def test_e1_gate_drops_discloses_an_empty_section_instead_of_zero(monkeypatch, tmp_path,
+                                                                  capsys):
+    """A section with no candidates is UNMEASURED, never "0 drops" (#11201).
+
+    `points+events` on a graph that wrote no events is not a clean pass
+    condition; it is a zero denominator, and printing `0` over it is the same
+    class of false PASS the probe's Object-side refusal already forbids.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["the deploy rail"], "points": ["#4118"], "events": []})
+
+    assert exit_code == 0
+    record = json.loads((tmp_path / "o.json").read_text())
+    assert record["sections"]["events"]["measured"] is False
+    assert record["sections"]["events"]["drops"] is None, (
+        "an unmeasured section must carry NO drop dict — a `{}` is a zero result")
+    assert record["sections"]["events"]["drops_total"] is None, (
+        "an unmeasured section must carry NO drop count, in the artifact as "
+        "well as on the console")
+    assert record["coverage_complete"] is False
+    assert record["unmeasured_sections"] == ["events"]
+    assert record["step4_points_events_drops"] is None, (
+        "a missing half makes the Step-4 number UNTAKEN (null), never 0 — a "
+        "sum's default is the same false zero one level up")
+    assert record["drops_across_sections"] is None, (
+        "the same rule one field over: `drops_total or 0` folds an unmeasured "
+        "section into a pickable 0 (review cycle 6)")
+    out = capsys.readouterr().out
+    assert "events=0/UNMEASURED" in out
+
+
+def test_e1_gate_drops_publishes_the_pass_conditions_own_number(monkeypatch, tmp_path):
+    """The Step-4 number is points+events, in its OWN field (#11201).
+
+    `drops_total` is the LEGACY Objects-only count. A reader who takes it for the
+    pass condition reads a false PASS — coverage complete, `drops_total: 0`,
+    while the `points` the condition is written over dropped N.
+    """
+    exit_code, record = _measure(monkeypatch, tmp_path, population={
+        "objects": ["the deploy rail"],
+        "points": ["#4118", "the lease fix"],
+        "events": ["closes #4118"],
+    })
+
+    assert exit_code == 0
+    assert record["sections"]["points"]["drops_total"] == 1
+    assert record["sections"]["events"]["drops_total"] == 1
+    assert record["step4_points_events_drops"] == 2, (
+        "the pass condition's number is points+events drops, published as its own "
+        "field so the Objects-only count cannot be read for it")
+    assert record["drops_total"] == 0, (
+        "the legacy Objects-only field keeps its meaning (and its name)")
+
+
+def test_e1_gate_drops_still_refuses_a_graph_with_no_objects(monkeypatch, tmp_path,
+                                                             capsys):
+    """Widening the denominator must not drop the Objects guard.
+
+    The legacy census keys are published on EVERY run and `e1_e2_scores.py` reads
+    them as a census, so a candidate-bearing graph with no `:Object` name would
+    publish "0 of 0 Objects" — the reading this probe has always refused. A
+    refusal writes NO artifact: an `--out` file beside a `REFUSED` line is what a
+    later reader scores, and this record's `step4_points_events_drops` would be a
+    measured-looking `0` for the pass condition (#11242 review round 1).
+    """
+    exit_code = _run_gate_drops(monkeypatch, tmp_path, population={
+        "objects": [], "points": ["the lease fix"], "events": ["the retro"]})
+
+    assert exit_code == 2
+    out = capsys.readouterr().out
+    assert "no Object names" in out
+    assert "value_gate drops: UNMEASURED" in out
+    assert not (tmp_path / "o.json").exists(), (
+        "a refused run measured nothing — leaving `--out` on disk publishes "
+        "`step4_points_events_drops: 0` for a run that refused")
+
+
+def test_e1_gate_drops_measure_keeps_the_legacy_keys_null_on_an_empty_objects_census(
+        monkeypatch):
+    """The None-not-0 rule, pinned at `measure()` — where no refusal hides it.
+
+    `main()` now refuses a graph with no `:Object` name, so the legacy keys'
+    `None` state is unreachable THROUGH it. It is still reachable through
+    `measure()` (a caller, or a future main), and that is where the rule that an
+    empty census publishes NO drop number has to hold: `drops if names else None`
+    becoming `len(drops) if names else 0` reds this and nothing else.
+    """
+    monkeypatch.setenv("TORTOISE_DB_URI", "docker://:@127.0.0.1:1/tortoise_test")
+    monkeypatch.setattr(
+        e1_gate_drops, "section_population",
+        _fake_population(objects=[], points=["the lease fix"],
+                         events=["the retro landed"]))
+    record = e1_gate_drops.measure("g", ("objects", "points", "events"))
+
+    assert record["value_gate_drops"] is None
+    assert record["drops_total"] is None
+    assert record["drops_among_bare_definite"] is None
+    assert record["unmeasured_sections"] == ["objects"]
+    assert record["coverage_complete"] is False
+
+
+def test_e1_gate_drops_point_drops_come_from_the_predicate_not_a_constant(
+        monkeypatch, tmp_path):
+    """MUTATION PROOF, taken at `measure()` — where no refusal can mask it.
+
+    A per-section counter that does not read `mechanical_verdict` would report
+    the same numbers whatever the predicate does — the shape this whole issue is
+    about. Through `main()` a dead predicate now REFUSES (exit 2) and writes no
+    record, so the count can only be pinned one layer down: `measure()` has no
+    refusal, and there the same population yields **0** drops under a dead
+    predicate and **2** under the live one. Measured at #11242 review round 2: a
+    counter hard-coded to `2` reds the `== 0` assertion, and a counter that
+    counts candidates instead of drops reds it too (2 candidates vs 0 drops).
+    """
+    population = {"objects": ["the deploy rail"], "points": ["#4118", "a/b/c.py"],
+                  "events": ["the retro"]}
+
+    _, live = _measure(monkeypatch, tmp_path, population=population)
+    assert live["sections"]["points"]["drops_total"] == 2
+
+    monkeypatch.setattr(e1_gate_drops, "section_population",
+                        _fake_population(**population))
+    import tortoise.value_gate as value_gate
+    monkeypatch.setattr(value_gate, "mechanical_verdict", lambda text: None)
+    dead = e1_gate_drops.measure("g", ("objects", "points", "events"))
+    assert dead["sections"]["points"]["drops_total"] == 0, (
+        "the point counter did not follow the predicate — it is a constant or a "
+        "candidate count, not a drop count")
+
+    # …and the refusal `main()` performs on that same dead predicate is a pin of
+    # its own: a dead predicate must exit 2, never report 0 through a counter
+    # that never read it.
+    dead_exit = _run_gate_drops(monkeypatch, tmp_path, population=population,
+                                verdict=lambda text: None)
+    assert dead_exit == 2, (
+        "a dead predicate must refuse, not report 0 through a counter that "
+        "never read it")
+
+
+def _vet_and_apply(embed: dict) -> tuple[dict, dict, dict, list[str]]:
+    """Run the real S2.2 pass and apply its verdicts; DB-free, model-free."""
+    from tortoise import vet_gate
+
+    armed = vet_gate.vet_candidates(embed)
+    kept, warnings = vet_gate.apply_vet(embed, armed["decisions"])
+    return armed, kept, armed["stats"]["mechanical"], warnings
+
+
+def test_the_mechanical_predicate_drops_a_claim_and_its_entity_together(monkeypatch):
+    """THE BLIND SPOT, reproduced — and its counterfactual, so the shield is real.
+
+    `apply_vet` Rule 2 keeps a discarded entity only while a SURVIVING candidate
+    references it, and the reference surfaces are `about_entities`/`slots` — NOT
+    the claim's `content` (`vet_gate._referenced_entity_names`). So when the only
+    candidate that references an entity is an identifier-only *claim*, that claim
+    is discarded, nothing surviving references the entity, and the entity goes
+    with it. Two nodes leave the payload for one session; an Objects-only census
+    counts one of them, which is `#11201`'s gap.
+
+    The second half is the CONTROL, and it is what makes the first half a
+    mechanism rather than a coincidence: swap in a claim that survives and still
+    references the entity and Rule 2 keeps it (`referential integrity`). Without
+    that pair, a fixture whose claim referenced nothing would assert the same
+    "entity gone" for the wrong reason — the defect this test shipped with, caught
+    in review.
+    """
+    # PINNED, not ambient: `TORTOISE_VALUE_GATE=0` is a documented value a lane
+    # may have exported, and this test exists BECAUSE the default arms the gate.
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "1")
+
+    # A — the ONLY referrer is an identifier-only claim, which the predicate drops.
+    armed, kept, mechanical, warnings = _vet_and_apply({
+        "entities": [{"name": "#4118"}],
+        "points": [{"content": "closes #4118", "about_entities": ["#4118"]},
+                   {"content": "the lease fix"}],
+        "events": [],
+    })
+    assert mechanical["fired"] == 2, mechanical
+    assert sorted(d["text"] for d in armed["decisions"].values()
+                  if d["outcome"] == "DISCARD") == ["#4118", "closes #4118"]
+    assert [e["name"] for e in kept["entities"]] == [], (
+        "the entity the discarded claim alone referenced must be gone — that is "
+        "the memory-loss direction the point/event rate measures")
+    assert [p["content"] for p in kept["points"]] == ["the lease fix"]
+    assert not any("referential integrity" in w for w in warnings), (
+        "Rule 2 must NOT fire: the only referrer was discarded with it")
+
+    # B — the control: a SURVIVING referrer shields the same entity.
+    _, kept_b, mechanical_b, warnings_b = _vet_and_apply({
+        "entities": [{"name": "#4118"}],
+        "points": [{"content": "the lease-batch fix", "about_entities": ["#4118"]}],
+        "events": [],
+    })
+    assert mechanical_b["fired"] == 1, mechanical_b
+    assert [e["name"] for e in kept_b["entities"]] == ["#4118"], (
+        "Rule 2 keeps a discarded entity that a surviving candidate references")
+    assert any("referential integrity" in w for w in warnings_b), (
+        "the downgrade must be recorded, not silent")
+
+
+def test_e1_gate_drops_aggregates_include_the_unconditional_objects_census(
+        monkeypatch, tmp_path):
+    """`--sections points,events` must NOT publish aggregates that omit objects.
+
+    The objects half is censused whether or not it is requested (its legacy keys
+    are), so it is part of `candidates_total`/`drops_across_sections` too —
+    otherwise `coverage_complete: true` could sit beside a
+    `drops_across_sections` smaller than the `drops_total` on the same line, and
+    the `else` branch that fixes it would have no test at all.
+    """
+    exit_code, record = _measure(
+        monkeypatch, tmp_path,
+        population={"objects": ["#4118", "a/b/c.py", "the deploy rail"],
+                    "points": ["closes #4118", "the lease fix"],
+                    "events": ["the retro", "#99"]},
+        sections="points,events")
+
+    assert exit_code == 0
+    assert set(record["sections"]) == {"points", "events"}, (
+        "only the requested sections are censused")
+    assert record["candidates_total"] == 7, record["candidates_total"]
+    assert record["drops_across_sections"] == 4, record["drops_across_sections"]
+    assert record["drops_across_sections"] > record["drops_total"]
+
+
+def test_e1_gate_drops_refuses_a_request_that_yields_no_candidates(
+        monkeypatch, tmp_path, capsys):
+    """A selected-empty request is a zero denominator even when objects exist.
+
+    `candidates_total` counts the unconditional objects census, so guarding the
+    refusal on it would let `--sections points,events` exit 0 over two empty
+    sections — "measured" for exactly the reading Step 4 is written over.
+    """
+    exit_code = _run_gate_drops(
+        monkeypatch, tmp_path,
+        population={"objects": ["#4118", "the deploy rail"],
+                    "points": [], "events": []},
+        sections="points,events")
+
+    assert exit_code == 2
+    assert "no selected section yields candidate text" in capsys.readouterr().out
+
+
+def test_the_points_census_excludes_the_classes_the_pass_never_saw():
+    """A `:Point` is not automatically a VET candidate — the query must say so.
+
+    Turn rows (`is_episodic`) and operator Points (`is_operator`) are written
+    outside selection, so without the filter a graph whose extraction produced
+    NO claims still stamps `points.measured: true` and `coverage_complete: true`
+    — a completeness claim over a section the pass never populated. Pinned at the
+    query, because that is where the composition decision lives.
+    """
+    point_cypher = " ".join(e1_gate_drops.CANDIDATE_CYPHER["Point"].split())
+
+    assert ("WHERE NOT coalesce(n.is_episodic, false) "
+            "AND NOT coalesce(n.is_operator, false)") in point_cypher, (
+        "the conjunction is the pin: an `OR` re-admits every turn row, and a "
+        "token-presence assertion cannot tell the filter from its negation")
+
+
+def test_the_probe_reads_the_candidate_text_per_node_class():
+    """`_text_of` is the probe's own MIRROR rule, and it had no pin at all.
+
+    `:Object` carries its identity in `name` (the census reads `n.name` and an
+    empty name is skipped), while `:Point`/`:Event` carry the claim in `content`.
+    The order differs by node class; that is a graph fact, not the pass's
+    `_item_text` rule, and this test exists so the difference is stated rather
+    than claimed in a docstring.
+    """
+    text_of = e1_gate_drops._text_of
+
+    assert text_of("Object", "the deploy rail", None) == "the deploy rail"
+    assert text_of("Object", None, "the lease fix") == "", (
+        "a nameless Object must not put claim text into `object_names`")
+    assert text_of("Point", "ignored", "the lease fix") == "the lease fix"
+    assert text_of("Event", None, "the retro landed") == "the retro landed"
+    assert text_of("Point", None, None) == ""
+
+
 # ── e1_paired_arm: a mislabelled arm must be worse than no arm ──────────────
 
 def test_the_off_arm_refuses_every_switch_that_arms_the_passes(monkeypatch):
@@ -163,14 +562,48 @@ def test_the_off_arm_refuses_every_switch_that_arms_the_passes(monkeypatch):
 
 
 def test_the_off_arm_reads_back_all_four_switches(monkeypatch):
-    """The record must NAME every switch, so a reader sees what was consulted."""
+    """The record must NAME every switch, so a reader sees what was consulted.
+
+    `#10996`: the OFF arm sets ``TORTOISE_VALUE_GATE=0`` EXPLICITLY — the other
+    three stay absent, whose unset value is still OFF. The value gate is the one
+    switch whose ABSENT value is the ON arm, so it is asserted here as ``"0"``
+    and not as ``None``; the pin below is what keeps that distinction alive.
+    """
     for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
         monkeypatch.delenv(key, raising=False)
+    monkeypatch.setenv("TORTOISE_VALUE_GATE", "0")
 
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm) == {*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY}
-    assert set(arm.values()) == {None}
+    assert arm["TORTOISE_VALUE_GATE"] == "0"
+    assert {k: v for k, v in arm.items() if k != "TORTOISE_VALUE_GATE"} == \
+        dict.fromkeys([k for k in arm if k != "TORTOISE_VALUE_GATE"])
+
+
+def test_the_off_arm_PINS_a_DEFAULT_ON_switch_left_unset(monkeypatch):
+    """`#10996` review P1: an unset default-ON switch read as the OFF arm.
+
+    Measured before the fix: with only the four keys cleared,
+    ``value_gate.value_gate_enabled()`` was ``True`` inside an arm this driver
+    labelled OFF, so the pre-registered CONTROL was scored with the `#4899`
+    predicate armed — a fabricated before/after pair, silently. The driver now
+    PINS the switch to `0` and reads it back (a set, truthy value is still
+    refused above), so the label matches the resolved state.
+    """
+    from tortoise import value_gate
+
+    assert e1_paired_arm.DEFAULT_ON_KEYS == ("TORTOISE_VALUE_GATE",)
+    for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+        monkeypatch.delenv(key, raising=False)
+    assert value_gate.value_gate_enabled() is True  # the default we must pin away
+
+    arm = e1_paired_arm.off_arm_readback()
+
+    assert arm["TORTOISE_VALUE_GATE"] == "0", arm
+    assert value_gate.value_gate_enabled() is False, (
+        "the arm is labelled OFF while the resolved predicate is ON — the "
+        "fabricated-pair defect this pin exists for")
 
 
 def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
@@ -181,6 +614,39 @@ def test_the_off_arm_accepts_an_explicit_zero(monkeypatch):
     arm = e1_paired_arm.off_arm_readback()
 
     assert set(arm.values()) == {"0"}
+
+
+def test_the_off_arm_accepts_every_OFF_spelling_the_pipeline_honours(monkeypatch):
+    """The refusal is an ALLOW-LIST, not a deny-list of the spellings I typed.
+
+    Pre-fix, `off_arm_readback` computed "is this switch armed?" as
+    ``v not in (None, "", "0")``, so every OTHER OFF spelling the pipeline
+    honours — `false`, `no`, `off`, `FALSE` — was REFUSED as "the shell armed
+    this arm" and the run could not be taken at all. That is the deny-list class
+    `#10610` removed from the scorer (`_ARM_OFF_STATES` -> `_TRUTHY`), surviving
+    in the driver that PRODUCES the arm the scorer reads.
+
+    Asserted on the RESOLVED predicate as well as the spelling: the claim is that
+    these values are the OFF arm, and only `value_gate` can confirm it.
+    """
+    from tortoise import value_gate
+
+    off_spellings = ("0", "false", "no", "off", "FALSE", "Off", " ", "")
+    for spelled in off_spellings:
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, spelled)
+        arm = e1_paired_arm.off_arm_readback()
+        assert value_gate.value_gate_enabled() is False, (
+            f"{spelled!r} is an OFF spelling the pipeline honours, so the arm is "
+            f"OFF and the driver must not refuse it: {arm}")
+
+    # …and the other direction still fires: a truthy value IS refused.
+    for truthy in ("1", "true", "yes", "on", "TRUE"):
+        for key in (*e1_paired_arm.ARM_KEYS, e1_paired_arm.SEAM_KEY):
+            monkeypatch.setenv(key, "0")
+        monkeypatch.setenv("TORTOISE_VALUE_GATE", truthy)
+        with pytest.raises(SystemExit, match="REFUSED"):
+            e1_paired_arm.off_arm_readback()
 
 
 # ── e1_paired_arm: the before-share is refused when E1's own record refuses it ─
@@ -394,8 +860,20 @@ def test_the_min_before_share_is_read_out_of_the_frozen_record_not_typed(
         "the share floor must MOVE with the record")
 
 
-def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch):
-    """Absent/unreadable is REFUSED, never "no floor stated" (#9513)."""
+def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch, tmp_path):
+    """Absent/unreadable is REFUSED, never "no floor stated" (#9513) — in `main()` too.
+
+    #10610 review at `2d9e8608` (P3): this case drove the HELPER only, and the
+    production path refused one helper earlier. `parse_bars` reads
+    `e1_min_before_share` too (this PR added it), so `main()`'s map-backed
+    `object_floor()` raised a bare `ValueError` for exactly the shapes the
+    `REFUSED:` message below exists for — leaving that message dead code in
+    `main()` and the run an operator saw indistinguishable from a crash. A pin
+    whose stated subject is the production path has to RUN it.
+
+    Non-vacuity: at the pre-fix head `main()` propagates `ValueError` out of
+    `object_floor` (measured), so the `SystemExit` expectation on the run reds.
+    """
     import pytest
 
     monkeypatch.setattr(e1_paired_arm, "read_preregistration",
@@ -406,6 +884,18 @@ def test_the_min_before_share_refuses_an_unreadable_floor(monkeypatch):
         e1_paired_arm.min_before_share()
 
     assert "e1_min_before_share" in str(caught.value)
+
+    # …and the RUN prints it, because a refusal a caller cannot read off the
+    # invocation is not the refusal this probe documents.
+    with pytest.raises(SystemExit) as refused:
+        _run_paired_arm(monkeypatch, tmp_path, share_floor="0.20",
+                        object_names=["the rail 1"])
+    assert refused.value.code, refused.value
+    assert "REFUSED" in str(refused.value), refused.value
+    assert "e1_min_before_share" in str(refused.value), refused.value
+    assert not (tmp_path / "off.json").exists(), (
+        "a refused run writes no record — the record's presence is what tells a "
+        "refusal apart from a failed session")
 
 
 def test_the_paired_arm_still_reports_a_failed_session(monkeypatch, tmp_path):
@@ -779,3 +1269,31 @@ def test_the_section_the_e1_probe_cites_really_carries_the_sentence_it_quotes():
     assert " ".join(quote.split()) in " ".join(doc.split()), (
         "the probe's quoted refusal must be the one §3.2 states, not a paraphrase of it"
     )
+
+
+def test_the_arm_drivers_truthiness_copy_is_the_repos_contract():
+    """The mirrored vocabulary in the PRODUCER must be `tortoise.env_truthy`'s.
+
+    Review cycle 4 (P3), measured not asserted: `off_arm_readback`'s refusal now
+    runs on `_is_truthy`, and widening the repo's `TRUTHY` by `"y"` left the
+    scorer's pinned mirror RED but this file's copy GREEN — the driver then
+    accepted `TORTOISE_VALUE_GATE=y` as the OFF arm (`_is_truthy("y")` False in
+    the copy, `is_truthy("y")` True in the pipeline). For
+    `TORTOISE_S2_DECISION_SEAM` that is a billable call inside an arm this file
+    declares OFF, which is the exact concern `DEFAULT_ON_KEYS`' comment raises.
+
+    `tests/test_7949_capstone_measure.py::test_the_arm_vocabulary_is_the_repos_
+    truthiness_contract` holds the SCORER's copy to the contract; this holds the
+    DRIVER's, because a second unpinned mirror is how the two directions of one
+    comparison drift apart.
+    """
+    from tortoise.env_truthy import FALSY, TRUTHY, is_truthy
+
+    assert set(e1_paired_arm._TRUTHY) == set(TRUTHY), (
+        e1_paired_arm._TRUTHY, sorted(TRUTHY))
+    for sample in [*sorted(TRUTHY), *sorted(FALSY), "off", "OFF", " off ", "",
+                   "  ", None, "disabled", "true", "TRUE", "1", "0", 1, 0]:
+        assert e1_paired_arm._is_truthy(sample) == is_truthy(sample), (
+            f"the arm driver reads {sample!r} as truthy="
+            f"{e1_paired_arm._is_truthy(sample)} but the repo's contract says "
+            f"{is_truthy(sample)}")

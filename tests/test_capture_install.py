@@ -39,6 +39,10 @@ from tortoise.capture_install import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HOOKS_DIR = _REPO_ROOT / "tortoise" / "claude-hooks"
 _PI_SRC = _REPO_ROOT / "tortoise" / "pi-hooks" / capture_install.PI_EXTENSION_NAME
+#: The READ half of the Pi seam (#2119), resolved off the contract rather than a
+#: second hand-written path — a path list copied out of the contract is exactly
+#: what drifts (the `ARTIFACT_CONTRACTS` / #5351 lesson).
+_PI_READ_SEAM_SRC = hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source
 _DASHBOARD = _REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
 _PY = sys.executable
 
@@ -2963,6 +2967,8 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_ide_only_limit(
     assert entry["command"].endswith(capture_install.CURSOR_SCRIPT_NAME)
     assert "hooks" not in entry, "the entry must be flat (#3819)"
     # cursor has no read seam — nothing may be written to a project cline path
+    # (both the live `.clinerules/hooks` seam and the pre-#2124 `.cline/hooks`)
+    assert not (root / ".clinerules").exists(), r.stdout
     assert not (root / ".cline").exists(), r.stdout
     # the IDE-only disclosure is on the install surface
     assert "IDE-ONLY" in r.stdout, r.stdout
@@ -3009,6 +3015,7 @@ def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
         assert spec.name in r.stdout, (spec.name, r.stdout)
         assert spec.event in r.stdout, (spec.event, r.stdout)
     # it never inspected/rewrote a cline registration as if it were cursor's
+    assert not (root / ".clinerules").exists(), r.stdout
     assert not (root / ".cline").exists(), r.stdout
 
 
@@ -3064,7 +3071,7 @@ def test_cli_install_claude_second_run_is_reported_as_a_no_op(cli):
 def test_cli_install_pi_writes_the_extension_into_the_temp_home(cli):
     """Mutation: add "pi" to the parser choices without handling it — the
     request falls into the cline branch and writes a bogus
-    `.cline/hooks/UserPromptSubmit` instead of the capture extension."""
+    `.clinerules/hooks/UserPromptSubmit` instead of the capture extension."""
     run, root, home = cli
 
     r = run("install", "pi")
@@ -3072,6 +3079,7 @@ def test_cli_install_pi_writes_the_extension_into_the_temp_home(cli):
     assert r.returncode == 0, r.stderr
     assert (home / ".pi" / "agent" / "extensions"
             / capture_install.PI_EXTENSION_NAME).read_bytes() == _PI
+    assert not (root / ".clinerules").exists(), "pi was mis-routed to the cline seam"
     assert not (root / ".cline").exists(), "pi was mis-routed to the cline seam"
 
 
@@ -3315,8 +3323,22 @@ def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
     """A ``.codex`` symlink loop must be a populated error, never an uncaught
     ``RuntimeError`` traceback (``Path.resolve()`` raises on a cycle).
 
-    Mutation: drop the ``(OSError, RuntimeError)`` boundary — a traceback
-    escapes instead of ``Install failed``."""
+    The refusal is the ESCAPE GUARD's, not the read half's boundary: since
+    #11588 review cycle 10 the guard refuses a path whose destination cannot
+    be established (it is not PROVEN to be inside the root), so the guard's
+    ``Refusing:`` line is what the user sees and the ``RuntimeError`` never
+    reaches the boundary. That is strictly better — the same rc 1, no
+    traceback, plus the remedy — and it fires in the write-free dry run too.
+
+    The assertion is the OBSERVABLE contract and the LABEL of the component
+    that owns it (one refusal vocabulary per guard), not the exception class
+    name: pinning ``RuntimeError`` here would RED the day the guard speaks,
+    which is exactly what happened (#4001 R32).
+
+    Mutation: drop the ``try/except (RuntimeError, OSError)`` around
+    ``cp.resolve()`` in ``_escape_refusal`` — the exception escapes to the
+    boundary and renders as ``Install failed: RuntimeError: Symlink loop``, so
+    ``Refusing`` is absent and this REDs."""
     run, root, _home = cli
     (root / ".codex").symlink_to(".codex")  # self-loop
 
@@ -3324,7 +3346,8 @@ def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
 
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
-    assert "Install failed" in r.stderr, r.stderr
+    assert "Refusing" in r.stderr, r.stderr
+    assert "symlink that cannot be resolved" in r.stderr, r.stderr
 
 
 def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
@@ -3383,14 +3406,28 @@ def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
 
 
 def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
-    """`pi` has no read hook — `--uninstall` must not fall through to the
-    cline target and rewrite `.cline/hooks/UserPromptSubmit`.
+    """`pi --uninstall` takes the PI branch — it must never fall through to the
+    cline target and rewrite `<dir>/.clinerules/hooks/UserPromptSubmit`.
 
     Mutation: route every `--uninstall` to `_install_read_hook` before the pi
     check (pi lands in that function's cline `else` branch, reads the cline
-    file as if it were a pi registration, and prints a misleading path)."""
+    file as if it were a pi registration, and prints a misleading path).
+
+    #2119: pi NOW has a read seam — the second extension file `install pi`
+    writes — so the branch no longer prints the "pi has no shell-hook read
+    seam" no-op sentence this test used to pin; it removes
+    `~/.pi/agent/extensions/tortoise-volunteer.ts` or says it is absent. The
+    invariant under test is unchanged (the PI branch, not the cline one), so
+    the stdout assertion pins THAT: the pi artifact is named, the cline
+    target is not.
+
+    The cline target is `.clinerules/hooks/UserPromptSubmit` — the path every
+    Cline surface reads since #2124/#11588. The pre-#2124 `.cline/hooks` path
+    this test used to name is the legacy one, so pinning the legacy path left
+    the assertion looking at a file the cline branch no longer writes.
+    """
     run, root, _home = cli
-    cline = root / ".cline" / "hooks" / "UserPromptSubmit"
+    cline = root / ".clinerules" / "hooks" / "UserPromptSubmit"
     cline.parent.mkdir(parents=True)
     original = json.dumps({"hooks": {"UserPromptSubmit": [
         {"hooks": [{"type": "command", "command": "someone-elses.sh"}]}]}})
@@ -3399,8 +3436,347 @@ def test_cli_install_pi_uninstall_never_touches_a_cline_file(cli):
     r = run("install", "pi", "--uninstall")
 
     assert r.returncode == 0, r.stderr
-    assert "pi has no shell-hook read seam" in r.stdout
+    assert capture_install.PI_VOLUNTEER_EXTENSION_NAME in r.stdout, r.stdout
+    assert ".clinerules" not in r.stdout, r.stdout
     assert cline.read_text() == original, "the cline hook file was modified"
+
+
+def test_cli_install_pi_uninstall_refuses_a_lookalike_it_did_not_write(cli):
+    """`pi --uninstall` DELETES a file, so it must require PROOF of authorship.
+
+    Review finding 2 (P2). The ownership gate used to be
+    `hook_install._looks_like_our_script`, whose own docstring says it is
+    FAIL-OPEN toward "ours" and "not a security boundary" — the bare
+    identifier `TORTOISE_API_KEY` matches it. The two verbs do not carry the
+    same cost when it is wrong: `install pi` on such a file keeps a `.bak`
+    (measured: `backed up … → ….bak`, recoverable), while `--uninstall` deleted
+    it outright, rc 0, no backup (measured, irrecoverable). So the destructive
+    verb now requires byte-identity with the shipped source or the canonical
+    version marker — neither of which a hand-written lookalike has.
+
+    Mutation: revert the gate to `_looks_like_our_script` — the lookalike is
+    deleted and this REDs on the return code and the survival assert.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    mine = (
+        "// My own Pi extension, not Tortoise's.\n"
+        "import { helper } from './mine.ts';\n"
+        "const key = process.env.TORTOISE_API_KEY;\n"
+        "export default { name: 'mine', key, helper };\n"
+    )
+    ext.write_text(mine, encoding="utf-8")
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
+    assert "Refusing" in r.stderr, r.stderr
+    assert ext.exists(), "a file this installer cannot prove it wrote is never deleted"
+    assert ext.read_text(encoding="utf-8") == mine, "the bytes are untouched"
+
+
+def test_cli_install_pi_uninstall_removes_an_older_generation_it_did_write(cli):
+    """The proof must not be OVER-broad: an artefact of OURS that is merely a
+    different generation (the canonical marker, not the shipped bytes) is
+    still removable — otherwise the fix for finding 2 strands every install
+    that predates the current source.
+
+    Mutation: require byte-identity ALONE — a marked older generation is kept
+    and this REDs on the removal assert.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    # The marker every generation of this artefact carries; the BODY is not the
+    # current shipped one, so this is the stale-generation shape.
+    ext.write_text(
+        "// tortoise-hook-version: 17\n// an older read seam\n",
+        encoding="utf-8",
+    )
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists(), "a marked artefact of ours is removable"
+
+
+def test_cli_install_pi_uninstall_proves_ownership_without_the_shipped_source(
+        cli, monkeypatch):
+    """The SHIPPED SOURCE being unavailable is a fact about the PACKAGE, not
+    about the target — and it must not turn a marked artefact of ours into
+    an unprovable one (#11584 review finding 3).
+
+    The bug: one `try` wrapped BOTH byte comparisons, so the `OSError` from
+    `Path(source).read_bytes()` in a partially-extracted wheel (or after a
+    downgrade) returned False before the marker fallback below it was ever
+    consulted. `--uninstall` then printed "is not a Tortoise artifact this
+    installer wrote" — a false accusation — about the user's own seam and
+    refused the delete.
+
+    Mutation: put both reads back in one `try` — this REDs on the verdict.
+    """
+    from dataclasses import replace
+
+    _run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+    ext.parent.mkdir(parents=True)
+    ext.write_text(
+        "// tortoise-hook-version: 17\n// an older read seam\n",
+        encoding="utf-8",
+    )
+
+    contracts = dict(hook_install.ARTIFACT_CONTRACTS)
+    contracts["pi"] = replace(contracts["pi"],
+                              volunteer_source=home / "no-such-source.ts")
+    monkeypatch.setattr(hook_install, "ARTIFACT_CONTRACTS", contracts)
+
+    from tortoise.__main__ import _pi_volunteer_is_provably_ours
+
+    assert _pi_volunteer_is_provably_ours(ext) is True, (
+        "the canonical marker is proof on its own — an unavailable shipped "
+        "source must fall through to it, not short-circuit to 'not ours'")
+
+
+def test_cli_install_pi_names_only_the_half_it_actually_installed(cli):
+    """The summary sentence must name a half that was WRITTEN, not the union
+    (#11584 review finding 1).
+
+    `capture_install._install_pi` writes TWO artifacts (capture + read seam)
+    and unions their change into `InstallResult.changed`, so the old
+    `claim = "Pi capture extension installed. " if result.changed` printed the
+    capture sentence for a run that wrote ONLY the read seam — the #3808 R13
+    over-claim the function's own docstring forbids. Reproduced on both
+    shapes below.
+
+    Mutation: gate `claim` on `result.changed` again — both assertions RED.
+    """
+    run, _root, home = cli
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    read_seam = ext_dir / capture_install.PI_VOLUNTEER_EXTENSION_NAME
+
+    first = run("install", "pi")
+    assert first.returncode == 0, first.stderr
+    assert "Pi capture extension installed" in first.stdout, first.stdout
+
+    # (a) capture byte-identical; ONLY the read seam is stale.
+    read_seam.write_text("// tortoise-hook-version: 17\n// stale read seam\n",
+                         encoding="utf-8")
+    stale = run("install", "pi")
+    assert stale.returncode == 0, stale.stderr
+    assert "per-turn read seam" in stale.stdout, stale.stdout
+    assert "Pi capture extension installed" not in stale.stdout, (
+        "the capture half was byte-identical, so naming it is a claim about a "
+        "file this run never touched:\n" + stale.stdout)
+
+    # (b) the same after a read-seam uninstall: the capture half is untouched
+    #     and only the read seam is written back.
+    gone = run("install", "pi", "--uninstall")
+    assert gone.returncode == 0, gone.stderr
+    assert not read_seam.exists(), gone.stdout
+    again = run("install", "pi")
+    assert again.returncode == 0, again.stderr
+    assert "per-turn read seam" in again.stdout, again.stdout
+    assert "Pi capture extension installed" not in again.stdout, again.stdout
+
+
+def test_cli_install_pi_disabling_a_legacy_extension_is_not_a_capture_install(cli):
+    """Disabling a legacy extension MUTATES behaviour but writes neither
+    artifact — so it must not be reported as installing the capture one
+    (#11584 review round 8).
+
+    The round-7 fix keyed the capture flag off `changed`, which unions THREE
+    things: the legacy disable, the capture write, and the read-seam write.
+    On this shape the capture file is byte-identical and never written, yet
+    `changed` is True from the legacy rename — so the old gate printed "Pi
+    capture extension installed.", the same #3808 R13 over-claim one level
+    down. The action line below still reports the disable truthfully.
+
+    Mutation: set the capture flag from `changed` again (rather than at the
+    write) — this REDs.
+    """
+    run, _root, home = cli
+    ext_dir = home / ".pi" / "agent" / "extensions"
+    capture = ext_dir / capture_install.PI_EXTENSION_NAME
+
+    first = run("install", "pi")
+    assert first.returncode == 0, first.stderr
+    before = capture.stat().st_mtime_ns
+
+    # A legacy agent-infra extension at the directory form Pi also loads
+    # (#3713): the installer renames it aside and writes neither artifact.
+    (ext_dir / "tortoise-capture").mkdir(parents=True)
+    second = run("install", "pi")
+
+    assert second.returncode == 0, second.stderr
+    assert "disabled legacy capture extension" in second.stdout, second.stdout
+    assert capture.stat().st_mtime_ns == before, "the capture file was rewritten"
+    assert "Pi capture extension installed" not in second.stdout, (
+        "the capture artifact was byte-identical and untouched; only a legacy "
+        "extension was disabled:\n" + second.stdout)
+
+
+def test_a_failed_read_seam_still_reports_the_capture_half_it_wrote(
+        cli, monkeypatch):
+    """`changed_artifacts` must be true on the ERROR returns too (#11584
+    review round 8).
+
+    Its docstring tells callers to ask it which artifacts a run changed rather
+    than the union `changed`; left empty on an error return, a caller that
+    follows that instruction reports "nothing was installed" for exactly the
+    runs where a user most needs to be told what landed — here the capture
+    half, written before the read seam failed.
+
+    Mutation: omit `changed_artifacts` from the read-seam error return — REDs.
+    """
+    _run_cli, root, home = cli
+
+    def boom(ext_dir, home_, dry_run=False):
+        return False, [], "the read seam could not be written (injected)"
+
+    monkeypatch.setattr(capture_install, "_install_pi_volunteer_artifact", boom)
+
+    result = capture_install.install_capture("pi", root=root, home=home)
+
+    assert not result.ok, result
+    assert result.changed is True, "the capture half was written"
+    assert result.changed_artifacts == (capture_install.PI_EXTENSION_NAME,), (
+        "the error return must still name the artifact that DID land, or the "
+        "field's own contract is false on exactly the failure paths")
+
+
+def test_a_dry_run_reports_no_artifact_as_written(cli):
+    """`changed` keeps its would-change meaning under `--dry-run`, but
+    `changed_artifacts` answers "what did this run WRITE" — nothing
+    (#11584 review round 9).
+
+    The round-8 fix set the flags at the write sites, but `capture_written` was
+    still set OUTSIDE the non-dry-run arm and `read_seam_written` was plain
+    `v_changed`, so a virgin `HOME` reported BOTH artifacts as written while
+    the extensions directory did not exist on disk. The field's docstring, the
+    `_written()` docstring and that commit's own comment all said otherwise, and
+    a caller keying its "installed" sentence on the field would claim an
+    install over a documented no-write run — the #3808 R13 class again.
+
+    Mutation: set `capture_written` outside the `else:` arm (or drop the
+    `and not dry_run` from the read seam) — this REDs.
+    """
+    _run_cli, root, home = cli
+
+    result = capture_install.install_capture("pi", root=root, home=home,
+                                             dry_run=True)
+
+    assert result.ok, result
+    assert result.changed is True, (
+        "a dry run still reports what it WOULD change")
+    assert result.changed_artifacts == (), (
+        "a dry run writes nothing, so no artifact may be named as written")
+    assert not (home / ".pi" / "agent" / "extensions").exists(), (
+        "the dry run created the extensions directory")
+
+
+def test_cli_install_pi_uninstall_preserves_a_locally_edited_seam(cli):
+    """A locally-edited read seam is provably OURS and provably NOT what we
+    shipped — so the deleting verb must preserve it (#11584 review round 9).
+
+    `_pi_volunteer_is_provably_ours` proves authorship (bytes OR the canonical
+    marker), and a user edit keeps the marker, so `--uninstall` deleted the
+    edit with no copy while the sibling verb on the same file (`install pi`)
+    backed it up. That is the unrecoverable-delete hazard this verb's own
+    docstring names, applied to our own edited artifact.
+
+    Mutation: drop the `_pi_volunteer_local_edit_backup` call — the `.bak`
+    assert REDs and the edit is lost.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    edited = ext.read_text(encoding="utf-8") + "// my local tweak\n"
+    ext.write_text(edited, encoding="utf-8")
+
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists(), "the seam itself is removed"
+    backup = ext.with_suffix(ext.suffix + ".bak")
+    assert backup.is_file(), (
+        "a locally edited seam must be preserved before it is deleted:\n"
+        + r.stdout)
+    assert backup.read_text(encoding="utf-8") == edited, (
+        "the backup must hold the EDITED bytes, not the shipped ones")
+
+
+def test_cli_install_pi_uninstall_refuses_to_delete_when_the_edit_cannot_be_preserved(
+        cli):
+    """The backup is what makes this delete recoverable, so a backup that cannot
+    be WRITTEN must abort the delete with a message (#11584 review round 10).
+
+    The round-9 fix put the backup call in `_uninstall_pi_volunteer` OUTSIDE any
+    `try`, while every sibling failure path in the same verb catches `OSError`
+    and prints a sentence. On an unwritable extensions directory (a read-only
+    mount, a root-owned dir) the user got a raw `PermissionError` traceback out
+    of `python -m tortoise`, on the verb whose own docstring says a delete has
+    no undo — and no message saying the edit could not be preserved.
+
+    The polarity matters as much as the message: this must FAIL CLOSED. A
+    helper that reported "nothing to preserve" would send the caller on to
+    `unlink()`, destroying exactly the edit the backup exists for.
+
+    Mutation: drop the `except OSError` guard around the backup call — the
+    stderr assertion REDs with a traceback (verified), and the seam survives
+    only because the raise happens to precede the unlink.
+    """
+    if os.geteuid() == 0:  # pragma: no cover - CI runs unprivileged
+        pytest.skip("root ignores directory permissions, so the backup lands")
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    edited = ext.read_text(encoding="utf-8") + "// my local tweak\n"
+    ext.write_text(edited, encoding="utf-8")
+    os.chmod(ext.parent, 0o500)
+    try:
+        r = run("install", "pi", "--uninstall")
+    finally:
+        os.chmod(ext.parent, 0o755)
+
+    assert r.returncode != 0, (
+        "an un-preservable local edit must not report success:\n" + r.stdout)
+    assert "Traceback" not in r.stderr, (
+        "a documented refusal, not a crash:\n" + r.stderr)
+    assert "Cannot preserve" in r.stderr, (
+        "the refusal must say the backup could not be written:\n" + r.stderr)
+    assert str(ext) in r.stderr, (
+        "the refusal must name the seam:\n" + r.stderr)
+    assert "Nothing was removed" in r.stderr, (
+        "the user must be told the delete did not happen:\n" + r.stderr)
+    assert ext.is_file(), "the edited seam was deleted without a backup"
+    assert ext.read_text(encoding="utf-8") == edited, "the edit is gone"
+    assert not ext.with_suffix(ext.suffix + ".bak").exists(), (
+        "no partial backup may be left behind")
+
+
+def test_cli_install_pi_uninstall_writes_no_backup_for_an_unedited_seam(cli):
+    """The backup is for LOCAL EDITS only: the ordinary uninstall must not
+    litter the extensions directory with a `.bak` of a file it can rewrite.
+    """
+    run, _root, home = cli
+    ext = (home / ".pi" / "agent" / "extensions"
+           / capture_install.PI_VOLUNTEER_EXTENSION_NAME)
+
+    assert run("install", "pi").returncode == 0
+    r = run("install", "pi", "--uninstall")
+
+    assert r.returncode == 0, (r.returncode, r.stdout, r.stderr)
+    assert not ext.exists()
+    assert not ext.with_suffix(ext.suffix + ".bak").exists(), (
+        "an unedited seam is a copy this installer can rewrite — no .bak")
 
 
 def test_cli_install_pi_rerun_does_not_claim_installed(cli):
@@ -4103,6 +4479,26 @@ def test_every_capture_artifact_ships_in_the_wheel():
         assert (_REPO_ROOT / "tortoise" / rel).is_file(), (
             f"{rel} is declared as package data but does not exist")
 
+    # #2119 review finding 1 (BLOCKING): the read seam is the SECOND artifact an
+    # installer copies, and the seam loop above iterates `CAPTURE_SEAM`, which
+    # names one artifact per harness — so a wheel missing
+    # `tortoise-volunteer.ts` failed the install on a USER's machine ("shipped
+    # Pi read seam not found … broken package?") after already writing the
+    # capture artifact, and NOTHING in this repo redded. The registry is the one
+    # declaration of every shipped artifact, so the guard iterates IT rather
+    # than a second hand-written list (a list is what missed them).
+    for harness, contract in hook_install.ARTIFACT_CONTRACTS.items():
+        if contract.volunteer_source is None:
+            continue
+        rel = str(contract.volunteer_source.relative_to(_REPO_ROOT / "tortoise"))
+        assert covered(rel), (
+            f"{harness}: {contract.volunteer_source} is not matched by any "
+            f"package-data pattern {patterns} — `tortoise install {harness}` "
+            "would fail resolving the read seam on a wheel install")
+        assert contract.volunteer_source.is_file(), (
+            f"{harness}: {contract.volunteer_source} is declared as the read "
+            "seam but does not exist")
+
 
 # The shipped install-contract generations, one per wizard-offered harness.
 # The marker is what makes a stale installed seam detectable, so it MUST be
@@ -4416,6 +4812,47 @@ _GENERATION_DIGESTS = {
     18: "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648",
 }
 
+#: The READ half of the same Pi seam (#2119) — a SECOND shipped artifact of the
+#: SAME generation, graded as one seam by
+#: :func:`tortoise.hook_install.contract_version_for` — so "bytes changed,
+#: generation left alone" has to be catchable for BOTH halves.  Without an entry
+#: here it is not: ``_GENERATION_DIGESTS`` above hashes only
+#: ``tortoise-capture.ts``, so a volunteer-only byte edit stays green in this
+#: suite and every already-installed copy reads ``modified-artifact`` ("local
+#: edit") the moment it is graded (`_grade_optional_artifact`'s byte compare) —
+#: the user is told they hand-edited a file they never touched.  Same never-rewrite
+#: rule as its sibling: a byte set needs a NEW generation and a NEW entry, and an
+#: existing entry is never rewritten.
+_READ_SEAM_GENERATION_DIGESTS = {
+    # Generation 18: the read seam ships in the wheel at the generation that
+    # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
+    # here rather than rewritten.
+    #
+    # ⛔ RE-PINNED IN PLACE, NOT BUMPED — repeatedly, all inside the review of the
+    # PR that CREATES this generation (the hosted `catch` was bare; `describeError`
+    # had to render `cause`; the seam had to supply `prior_context`; a mangled
+    # line was re-split).  That is legitimate ONLY because of the sentence above:
+    # generation 18 of the READ half has never shipped — `tortoise-volunteer.ts`
+    # has never been reachable from `main` — so there is no installed copy whose
+    # "local edit" verdict a re-pin could falsify.  The entry is still being
+    # CREATED, not rewritten.  (The count is deliberately not stated: a
+    # hand-written count re-stales on the next commit, which this file has
+    # already done twice.)
+    #
+    # ⛔ THE TEST FOR WHEN THAT STOPS BEING TRUE, stated explicitly: if generation
+    # 18 HAS shipped by the time this is read, every re-pin above is a defect,
+    # and the correct fix is a BUMP (19 in BOTH Pi artifacts, a new entry here,
+    # and the paired pin below moved with it) — a SHIPPED generation's digest
+    # must never be rewritten.
+    18: "4b78646fbf63a30ce7d4b27107f86a51413273d8548dfb92e56d33aa7a60a2a0",
+}
+
+#: The paired pin for the read half, mirroring
+#: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
+#: asserted by the test below: one seam, one contract).
+_PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
+    18, "4b78646fbf63a30ce7d4b27107f86a51413273d8548dfb92e56d33aa7a60a2a0")
+
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     """A shipped-artifact edit that leaves the generation alone is a regression.
@@ -4461,6 +4898,64 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
         "read as `modified-artifact` (\"local edit\") by every install made "
         "from the previous bytes, so move the generation (tortoise-hook-version) "
         "and update _EXPECTED_INSTALL_CONTRACT + this pair in the same commit.")
+
+
+def test_a_shipped_pi_read_seam_byte_change_moves_the_generation():
+    """#2119 review finding 2: the READ half's bytes are pinned too.
+
+    ``contract_version_for("pi")`` grades the pair as ONE seam, but every byte
+    pin in this file hashed only ``tortoise-capture.ts``.  So a volunteer-only
+    edit under an unchanged marker stayed green here while every installed copy
+    of the read seam read ``modified-artifact`` — "marker matches (18) but its
+    bytes differ from the shipped read seam (local edit)" — on the next
+    ``doctor`` / ``hooks status``: the user is told they hand-edited a file they
+    never touched, which is verbatim the shape the sibling test above exists to
+    prevent for the capture half.
+
+    Three coupled facts, because any one alone is certifiable by editing one
+    constant:
+
+    * the shipped bytes hash to the recorded digest for the shipped generation;
+    * ``(generation, digest)`` equals the paired pin; and
+    * the pin's generation is the capture half's — the pair declares ONE
+      contract number, which is what `contract_version_for` resolves.
+
+    Mutation (executed, not asserted): append one comment line to
+    ``tortoise/pi-hooks/tortoise-volunteer.ts`` with the marker untouched — this
+    REDs on the digest while the rest of this suite and
+    ``tests/test_pi_volunteer_seam.py`` stay green, which was the gap.
+    """
+    src = _PI_READ_SEAM_SRC
+    assert src is not None and src.is_file(), (
+        "the Pi contract's `volunteer_source` must resolve to the shipped read "
+        f"seam (got {src}) — `tortoise install pi` reads it from the package")
+    generation, digest = _PINNED_PI_READ_SEAM_INSTALL_CONTRACT
+    shipped = hook_install.read_hook_version(src)
+    actual = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert actual == _READ_SEAM_GENERATION_DIGESTS.get(shipped), (
+        f"generation {shipped} of the Pi READ seam has no recorded digest, or "
+        f"its bytes have changed: shipped bytes hash to {actual}, recorded "
+        f"{_READ_SEAM_GENERATION_DIGESTS.get(shipped)}.  A byte change belongs "
+        "in a NEW generation — bump `tortoise-hook-version` in BOTH Pi artifacts, "
+        "add its digest to _READ_SEAM_GENERATION_DIGESTS, and update the pair "
+        "below; never rewrite an existing generation's entry.")
+    assert (shipped, actual) == (generation, digest), (
+        "the shipped Pi READ seam's install contract moved: "
+        f"(generation, sha256) is {(shipped, actual)}, pinned "
+        f"{(generation, digest)}.  A BYTE change at an unchanged generation is "
+        "read as `modified-artifact` (\"local edit\") by every install made from "
+        "the previous bytes, so move the generation and update this pair in the "
+        "same commit.")
+    assert shipped == _PINNED_PI_SEAM_INSTALL_CONTRACT[0], (
+        "the two halves of the Pi seam must declare ONE generation — the read "
+        f"seam is pinned at {shipped}, the capture half at "
+        f"{_PINNED_PI_SEAM_INSTALL_CONTRACT[0]}.  `contract_version_for('pi')` "
+        "returns None when they disagree, which turns every installed pair into "
+        "an ungradable one.")
+    assert hook_install.contract_version_for("pi") == shipped, (
+        "the generation this pin records is not the one the installer/doctor "
+        "actually grade — `contract_version_for('pi')` reads BOTH artifacts and "
+        "is what `hooks status` prints and `doctor` step 7 compares against")
 
 
 def test_a_same_generation_header_edit_reads_as_a_local_edit(tmp_path):

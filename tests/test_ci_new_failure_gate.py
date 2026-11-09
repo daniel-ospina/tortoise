@@ -208,6 +208,16 @@ NEW_LOG = _api_capture(_BARE_NEW_LOG)
 MAIN_RATES = "tests/test_cache_projection_live.py::test_a\t8\t10\n"
 MAIN_SIGS = "tests/test_cache_projection_live.py::test_a\tKeyError: 'id'\n"
 
+#: A PYTHON-PATH PARAMETER — the shape the rate door EXCLUDED (agent-infra#3690).
+#: `tests/test_entry_point_python_guard.py` is parametrised over `tools/*.py`, so its
+#: failure ids carry `/` and `.` INSIDE the `[...]`. This id is the one measured on
+#: PR #11508: main itself red on it (1/20), an unrelated diff on the PR, and the
+#: predicate reporting main's own red as "introduced by this PR".
+PATH_PARAM_ID = (
+    "tests/test_entry_point_python_guard.py::"
+    "test_entry_point_guards_the_interpreter_before_its_imports[tools/build_site_icons.py]"
+)
+
 
 def _jobs(*rows: tuple[int, str, str]) -> str:
     """A recorded jobs listing, in the `gh api --paginate --jq '.jobs[]'` JSONL shape."""
@@ -928,6 +938,66 @@ def test_the_rail_and_the_gate_agree_on_the_same_fixture(tmp_path):
     assert "tests/test_other.py::test_brand_new" in rail.stdout
     assert "tests/test_other.py::test_brand_new" in gate.stdout
 
+
+@pytest.mark.skipif(not RAIL_AVAILABLE, reason=RAIL_ABSENT_REASON)
+def test_the_rate_door_admits_a_PATH_inside_the_pytest_parameter_space(tmp_path):
+    r"""A main-red on a PATH-PARAMETRISED id must exempt, not read as PR-introduced.
+
+    The measured false BLOCK (PR #11508, agent-infra#3690): `_NODEID_RE`'s `rest`
+    class spelled the parameter-SYNTAX characters `[A-Za-z0-9_\[\]\-.:]` and carried
+    no `/`, so main's union-rate row for `…[tools/build_site_icons.py]` matched the
+    row shape, then was DROPPED as malformed. With the row gone, `decide` saw the id
+    absent from `main_rates` and said *"absent from main's failure set … introduced
+    by this PR"* — blocking a failure on a file the PR never touched, for every
+    path-parametrised id.
+
+    ⛔ THIS PINS ONE CHARACTER, NOT COMPLETENESS. `rest` is an allowlist of parameter
+    SYNTAX, not the whole parameter space: a SPACE-bearing param
+    (`[chromium-Claude Desktop]`), a `\`, or a non-ASCII test name is still dropped
+    upstream and still yields the identical BLOCK (agent-infra#3691, open). So a red
+    here naming some OTHER character is that residual, not a regression of this case.
+
+    ⛔ THE ASYMMETRY IS WHAT HID IT: main's SIGNATURE row for the same id parses
+    through `is_failure_key_loose`, which always admitted the path — so the signature
+    gate passed and only the presence gate refused. A signature-only fixery would not
+    have moved this, which is why the assertion is on the composed VERDICT.
+
+    ⛔ THIS CASE OBSERVES THE RAIL THE POINTER RESOLVES, NOT THE WORKFLOW'S PIN, and
+    no CI job runs it (see `RAIL_ABSENT_REASON`) — so it cannot by itself keep the pin
+    ahead of `agent-infra@cb7de2572`. What it does is make the SHAPE executable: a
+    checkout at or after that commit must pass it, and one before it fails here naming
+    the cause instead of leaving the next lane to re-derive it from a CI log.
+    """
+    #: ONE signature on both sides: the shape is the ID's parameter space, not
+    #: a signature difference. Identical text means the overlap gate passes and the
+    #: PRESENCE gate is the only thing under test — the gate that actually misfired.
+    SIG = "AssertionError: the #5128 interpreter guard is not the first statement"
+    pr_rows = tmp_path / "pr-rows.tsv"
+    pr_rows.write_text(f"{PATH_PARAM_ID}\t1\t1\t{SIG}\n", encoding="utf-8")
+    rates = tmp_path / "rates.tsv"
+    rates.write_text(f"{PATH_PARAM_ID}\t1\t20\n", encoding="utf-8")
+    sigs = tmp_path / "sigs.tsv"
+    sigs.write_text(f"{PATH_PARAM_ID}\t{SIG}\n", encoding="utf-8")
+    rail = subprocess.run(
+        [sys.executable, str(EXEMPTION_PY), "decide",
+         "--pr-failures", str(pr_rows), "--main-rates", str(rates),
+         "--main-signatures", str(sigs)],
+        capture_output=True, text=True, timeout=120,
+    )
+    assert "VERDICT\tCLEAN" in rail.stdout, (
+        "the shared decision did not exempt a main-red whose pytest parameter is a "
+        "PATH. Only ONE thing can cause this: the `scripts/ci_exemption.py` this box "
+        "resolves PREDATES agent-infra@cb7de2572 (#3690), or `rest` regressed again. "
+        "⛔ The workflow's `.ci-predicate` pin is NOT a candidate — this case never "
+        "reads it (see the docstring), so inspecting or moving that pin cannot change "
+        "this assertion. Fix the thing that ran: update the agent-infra checkout this "
+        "`scripts/` pointer resolves (`tools/link_agent_infra_scripts.py`).\n"
+        + rail.stdout + rail.stderr
+    )
+    assert PATH_PARAM_ID in rail.stdout, (
+        "the verdict must still NAME the id it exempted, not swallow it\n" + rail.stdout
+    )
+
 # ── the wiring contract: the verdict job and the aggregate cannot drift ─────
 
 def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
@@ -979,6 +1049,75 @@ def test_the_deferrable_arms_are_exactly_the_verdict_jobs_needs():
                             legs_failed=True), (
         "the verdict job must RUN on exactly the red runs it exists for, or the "
         "predicate is never asked (default `success()` skips the red ones)")
+
+
+def test_the_docs_point_the_aggregates_needs_citation_at_the_needs_line():
+    """Two docs cite the required aggregate's `needs:` BY LINE; both must land on it.
+
+    `needs:` here IS the required-check surface (#5215 I5): a lane editing that list
+    from a doc's anchor edits whatever line the anchor names. PR #11429 inserted 24
+    lines above the aggregate, and only ONE of the two cites was re-cut —
+    `docs/ops/ci-runner-x64.md` moved to `:4975`, while `docs/00_index.md`'s #5215 row
+    stayed on `:4951`, which is the `python-ci-gate:` JOB HEADER. Nothing parses that
+    row's number, so no check red, and the next reader is landed 24 lines early.
+
+    Both cites are therefore pinned against the workflow itself — and against EACH
+    OTHER, since one re-cut without the other is exactly how this went stale.
+
+    Non-vacuity (measured at the pre-fix head, #11429 review cycle 5): the index row
+    cited `:4951`, whose content is `python-ci-gate:` rather than `needs:` — the
+    landing check reds on that line alone, before agreement is even considered.
+
+    Mutation: add or remove a line above the aggregate in `python-ci.yml` without
+    re-cutting the docs -> RED, naming each doc, the line it cites, what is actually
+    there, and where the list really is.
+    """
+    import re
+
+    workflow_lines = (REPO / ".github" / "workflows" / "python-ci.yml").read_text(
+        encoding="utf-8").splitlines()
+
+    # Located by CONTENT, not by a literal: a pin that knew the number already could
+    # agree with a stale doc by accident, which is the defect this test exists for.
+    header = next((i for i, line in enumerate(workflow_lines)
+                   if re.fullmatch(r"\s*python-ci-gate:\s*", line)), None)
+    assert header is not None, (
+        "`python-ci-gate` is no longer a job in python-ci.yml — this pin's anchor is "
+        "gone, so re-anchor it rather than deleting it")
+    needs_at = next((i + 1 for i, line in enumerate(workflow_lines[header:], start=header)
+                     if re.match(r"\s+needs:", line)), None)
+    assert needs_at is not None, (
+        "the aggregate carries no `needs:` under its header — the required-check "
+        "surface this test locates no longer exists in the shape it reads")
+
+    # doc -> a phrase on the SAME line that the cited number is there to support.
+    claims = {
+        "docs/00_index.md": r"python-ci-gate\.needs",
+        "docs/ops/ci-runner-x64.md": r"required aggregate's `needs:`",
+    }
+    cite = re.compile(r"python-ci\.yml:(\d+)")
+    wrong: list[str] = []
+    for rel, claim in claims.items():
+        lines = (REPO / rel).read_text(encoding="utf-8").splitlines()
+        found = [(n, int(m.group(1)))
+                 for n, line in enumerate(lines, start=1) if re.search(claim, line)
+                 for m in cite.finditer(line)]
+        assert found, (
+            f"{rel} no longer carries the claim this pin anchors ({claim!r}) — re-anchor "
+            "the pin onto wherever the claim moved; deleting it leaves the number "
+            "unchecked, which is the staleness #11429 review cycle 5 found")
+        for doc_line, cited in found:
+            landed = (workflow_lines[cited - 1].strip()
+                      if 1 <= cited <= len(workflow_lines) else "")
+            if not landed.startswith("needs:"):
+                wrong.append(f"{rel}:{doc_line} cites python-ci.yml:{cited} "
+                             f"({landed or 'past EOF'!r})")
+
+    assert not wrong, (
+        "the required aggregate's `needs:` list is at "
+        f"python-ci.yml:{needs_at} on this head, but " + "; ".join(wrong) +
+        f". Re-cut every cite to :{needs_at} — `needs:` is the required-check surface, "
+        "so a lane editing the list from a stale anchor edits the wrong line (#11429).")
 
 
 # --- #10911: the cancelled-run wedge, and why the obvious fix is a FALSE PASS ----

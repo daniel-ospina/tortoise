@@ -483,21 +483,24 @@ def _client(monkeypatch, tmp_path):
 
 class TestRestSurface:
     def test_registry_paths_are_served_by_the_selfhost_router(self):
-        """The self-hosted routes ARE the registry's RestSpec paths for the
-        two onboarding tools — no new client contract for a self-hosted
-        deployment."""
+        """The self-hosted router serves the onboarding routes — the client contract.
+
+        #4282 Phase 3.2 removed `tortoise_onboarding_state` / `_seed` from the MCP
+        registry (the dropped `run_onboarding` container, owner ruling 2026-09-22),
+        so the registry can no longer be the source of this assertion. That is a
+        change of INSTRUMENT, not of contract: `tortoise/selfhost_api.py` declares
+        its routes by hand (it imports neither `TOOL_REGISTRY` nor `RestSpec`), so
+        the client-facing paths are asserted directly here. Asserting them by
+        registry lookup was always the weaker form — it proved the registry agreed
+        with the router, not that the router serves anything.
+        """
         from tortoise.selfhost_api import router
-        from tortoise.tool_registry import TOOL_REGISTRY
-        spec = {t.name: (t.rest_spec.method, t.rest_spec.path)
-                for t in TOOL_REGISTRY if t.rest_spec}
+
         routes = {(sorted(r.methods)[0], r.path)
                   for r in router.routes if getattr(r, "path", None)}
-        assert spec["tortoise_onboarding_state"] == ("GET",
-                                                     "/v1/onboarding/state")
-        assert spec["tortoise_onboarding_seed"] == ("POST",
-                                                    "/v1/onboarding/seed")
-        for key in ("tortoise_onboarding_state", "tortoise_onboarding_seed"):
-            assert spec[key] in routes, (spec[key], sorted(routes))
+        for expected in (("GET", "/v1/onboarding/state"),
+                         ("POST", "/v1/onboarding/seed")):
+            assert expected in routes, (expected, sorted(routes))
 
     def test_rest_state_read_inits_then_reports_fork_self(
             self, monkeypatch, tmp_path):

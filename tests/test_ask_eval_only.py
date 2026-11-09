@@ -172,6 +172,7 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     registry-only restore)."""
     from tests.test_mcp_server_auth_modes import _mcp_post, _mounted_test_client
     from tortoise.mcp_server import create_http_app
+    from tortoise.tool_registry import get_http_allowed
 
     app = create_http_app(allowed_origins=["http://localhost:8000"],
                           auth_mode="none")
@@ -185,8 +186,34 @@ def test_n2_mcp_tools_list_serves_no_ask_tool(monkeypatch):
     # The floor guards against SILENT shrinkage, so it moves only with a recorded
     # reason: #3540 consolidated two per-source switches (github_index,
     # session_recording) into `tortoise_manage_sources`, which is a net -1 on
-    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 now.
-    assert len(names) >= 74, f"default surface shrank to {len(names)}"
+    # the LISTED surface (2 retired, 1 added) — 75 listed before, 74 then.
+    # TWO recorded moves land on this floor together, and 66 is the only figure both
+    # imply:
+    #   #4282 (this change) — `graph_overview` absorbs four LISTED names
+    #   (`tortoise_overview`, `tortoise_audit`, `tortoise_validate_domain`,
+    #   `tortoise_summarize_structure`) and adds itself, a net -3. The fifth absorbed
+    #   member, `tortoise_dream_health`, is declared `http_policy=False` (stdio-only),
+    #   so it was NEVER in this listing and contributes nothing here — counting it
+    #   would under-read the floor by one.
+    #   #4282 Phase 3.2 (main) — the five `run_onboarding` tools the owner ruled OFF the MCP
+    #   (`docs/product/canonical-mcp-tools.md`, settled 2026-09-22, amendment (b) waiving the
+    #   replacement warning) were all `http_policy=True`, so every one was in this listing:
+    #   74 - 5 = 69 measured there, and 69 - 3 = 66 here.
+    # Anything BELOW 66 is still unexplained shrinkage and this arm still reds on it;
+    # lowering the floor again needs the same kind of recorded reason, never a green run.
+    assert len(names) >= 66, f"default surface shrank to {len(names)}"
+    # The floor is a proxy for the real invariant, and a proxy cannot tell a
+    # recorded consolidation from a silent drop. Pin the invariant itself: the
+    # default HTTP listing serves EXACTLY the registry's `http_policy` population
+    # — the same `get_http_allowed()` the `_HTTPToolFilter` reads (#454) — so a
+    # name the listing drops while the registry still allows it reds here, and so
+    # does an http-excluded tool leaking onto the tenant surface. The floor stays
+    # as the separate signal that the POPULATION shrank (both sides shrink
+    # together when an entry leaves the registry), which this equality cannot see.
+    assert set(names) == set(get_http_allowed()), (
+        "the default HTTP listing must be exactly the registry's http_policy "
+        f"population; listed-but-not-allowed={sorted(set(names) - set(get_http_allowed()))}, "
+        f"allowed-but-unlisted={sorted(set(get_http_allowed()) - set(names))}")
     assert _ASK_TOOL not in names
 
 

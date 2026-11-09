@@ -49,6 +49,12 @@ O8_SEMANTICS_VOCABULARY = {
     "mutuallyExclusive",
     "hasPart",
     "causes",
+    # #11083 — `produces` is a MEANING, not a label: production is not causation
+    # and the machine acts on the direction (`<-`, target→source). Owner ruling
+    # 2026-11-05, recorded as an `OVERRIDES:` on #7848. `funds` is deliberately
+    # ABSENT — #7848's 2026-11-08 correction withdrew it to Layer 3 on #2766's
+    # "does the machine have to ACT on it?" test.
+    "produces",
     "dependsOn",
     "transacts",
     "related",
@@ -185,6 +191,30 @@ class TestWritePathDeclaredness:
         a, b = pair
         out = sdk.create_operator("IMPL", a, [b], label="MITIGATES")
         assert self._codes(out) == ["undeclared_relation"], out.get("warnings")
+
+    def test_the_write_path_reads_the_ONE_declaration_home(self, sdk, pair,
+                                                          monkeypatch):
+        """#10999 review (P2): the write path must READ
+        `pack_registry.declared_relation_predicates()`, not derive the set for
+        itself — the #2766 defect, whose whole shape is two derivations drifting
+        apart silently.
+
+        Discriminating by construction: widening the ONE home must publish the
+        verb through `create_operator`. A private re-derivation in the write
+        path ignores this monkeypatch, still finds the verb undeclared, and
+        reds. The offline companion
+        (`test_10999_batch_story_relations.test_the_declared_vocabulary_has_one_home`)
+        pins S5's gate to the same call; neither half alone covers both readers.
+        """
+        from tortoise import pack_registry
+
+        monkeypatch.setattr(
+            pack_registry, "declared_relation_predicates",
+            lambda: frozenset({"IMPL", UNDECLARED_NAME}))
+        a, b = pair
+        out = sdk.create_operator("IMPL", a, [b], label=UNDECLARED_NAME)
+        assert self._codes(out) == [], out.get("warnings")
+        assert out.get("id"), "the write must still land"
 
 
 if __name__ == "__main__":  # pragma: no cover

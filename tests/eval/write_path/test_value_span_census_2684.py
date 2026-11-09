@@ -23,15 +23,15 @@ The T's per-question leg is *"the value-bearing evidence is verbatim-present"*
   ``_value_verbatim_span``, called in the SHIPPED ORDER (resolve, then stamp
   against the resolved turn). **The two stamp-side inputs are the ones
   production hands it** — content cut to ``_MAX_CONTENT`` and the quote to
-  ``_MAX_QUOTE``, both at a TOKEN boundary (``extractor_v2.py:8940`` /
-  ``:9008``), while the resolver gets the raw point (``:9223``). See
+  ``_MAX_QUOTE``, both at a TOKEN boundary (``extractor_v2.py:10051`` /
+  ``:10119``), while the resolver gets the raw point (``:10342``). See
   ``_stamp_inputs``.
 
 ⛔ **The resolver is not optional in this census.** The receipt's
 ``source_turn_id`` is the model's ADVISORY index; the write path resolves the
 turn from the quote first and never lets a wrong model index win
-(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:9223`` →
-``:9239``). Passing the receipt field straight through measures a population
+(``_resolve_source_turn`` docstring; call site ``extractor_v2.py:10342`` →
+``:10367``). Passing the receipt field straight through measures a population
 production never produces *and* never fires the resolver's own E3 anchor
 warning — it under-counts ``no_turn`` and over-counts ``band`` (measured: 3
 points, all ``wp06_quarry_rollout``/``narrative``, which the resolver reports
@@ -43,8 +43,8 @@ observation: it answers *"what would the shipped mechanism stamp on these
 committed points?"*. The structural reason is that the measuring harness
 persists the S2 *model* output (``tests/eval/write_path/raw_vs_narrative.py`` →
 ``ev2.run_s2(...)``), which is pre-``pt_entry``; the span is stamped later, when
-``pt_entry`` is built (``extractor_v2.py:9224-9231``, stamped at
-``:9239-9242``). It is NOT a question of
+``pt_entry`` is built (``extractor_v2.py:10343-10350``, stamped at
+``:10367-10370``). It is NOT a question of
 dates — the receipts (committed 2026-10-19, ``ecc7bc8ca8``) postdate #8659
 (``2312845b6``, 2026-10-14) — so no re-ingest through that harness can ever put
 a span key in a receipt.
@@ -65,10 +65,13 @@ an environment failure is never read as a broken cite).
 
 from __future__ import annotations
 
+import ast
+import io
 import itertools
 import json
 import re
 import subprocess
+import tokenize
 from pathlib import Path
 
 from tortoise import extractor_v2 as v2
@@ -204,7 +207,7 @@ def _edus(session: str) -> list[dict]:
     ``_resolve_source_turn`` — "position and value can diverge"). A hand-rolled
     copy keeps the empty turns, so its list is LONGER and the divergence lands
     on the resolver's in-range bound, ``0 <= model_idx < len(edus)``
-    (``extractor_v2.py:8407``): a model index that fell inside the hand-rolled
+    (``extractor_v2.py:9027``): a model index that fell inside the hand-rolled
     list can fall outside production's, so the resolved ``turn_idx`` differs for
     exactly those points. That flips them between ``no_turn`` (``turn_idx is
     None``) and ``band``/``valuefree_quote``, changes which warning variant an
@@ -228,9 +231,9 @@ def _stamp_inputs(point: dict) -> tuple[str, str]:
     write path clamps them.
 
     ⛔ Not the receipt's raw strings. ``extractor_v2`` trims the content to
-    ``_MAX_CONTENT`` (``:8940``) and the quote to ``_MAX_QUOTE`` (``:9008``)
-    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:9239``);
-    only ``_resolve_source_turn`` gets the raw point (``:9223``, deliberately).
+    ``_MAX_CONTENT`` (``:10051``) and the quote to ``_MAX_QUOTE`` (``:10119``)
+    BEFORE ``_value_verbatim_span(content, quote, ...)`` is called (``:10367``);
+    only ``_resolve_source_turn`` gets the raw point (``:10342``, deliberately).
     A census on the raw strings therefore answers a question production never
     asks: a >``_MAX_QUOTE``-char quote gets an address production cannot stamp.
     Measured over the sealed corpus: 3 of the 217 points carry a
@@ -275,9 +278,9 @@ def _stamp_quote(point: dict) -> str:
     """The ``quote`` production COMMITS for this point — ``_stamp_inputs``' quote half.
 
     The dedupe half reads quotes too, and ``retrieval._same_fact`` compares the
-    COMMITTED hit (``retrieval.py:3070``: ``qa = str(a.get("quote") or "")``),
+    COMMITTED hit (``retrieval.py:3292``: ``qa = str(a.get("quote") or "")``),
     i.e. after ``extractor_v2`` rewrote the field to the ``_MAX_QUOTE`` span at
-    the point's own commit (``:9008``). Reading the raw
+    the point's own commit (``:10119``). Reading the raw
     receipt string here would measure a population no package holds — the same
     defect §2.1 and §2.3 each corrected once already (advisory turn index, raw
     span inputs), one field over.
@@ -398,7 +401,7 @@ def test_the_census_stamps_on_the_inputs_production_hands_it():
 
     ``_stamp_inputs`` trims the content to ``_MAX_CONTENT`` and the quote to
     ``_MAX_QUOTE`` because that is what ``extractor_v2`` hands
-    ``_value_verbatim_span`` (``:8940`` / ``:9008`` -> ``:9239``). Measured at
+    ``_value_verbatim_span`` (``:10051`` / ``:10119`` -> ``:10367``). Measured at
     this head: 3 points in the population carry a >``_MAX_QUOTE``-char quote and
     exactly ONE of them is value-bearing AND spanned — ``wp04_aurora_perf``/``raw``
     — and it is the only place the two readings differ, ``(0, 201)`` raw vs
@@ -468,7 +471,7 @@ def test_the_census_resolves_the_turn_the_way_the_write_path_does():
     """The census must not measure a population production never produces.
 
     The write path resolves the source turn from the quote BEFORE stamping
-    (``extractor_v2.py:9223`` → ``:9239``), and the receipt's
+    (``extractor_v2.py:10342`` → ``:10367``), and the receipt's
     ``source_turn_id`` is only the model's ADVISORY index. Reading that field
     straight through puts three ``wp06_quarry_rollout``/``narrative`` points on
     turns the resolver refuses (quote-overlap < 0.6), which (a) hides the
@@ -773,9 +776,9 @@ def _resolved_turn_key(point: dict, edus: list[dict]) -> str:
 
     ⛔ Not the receipt's own ``source_turn_id``. That field is the S2 model's
     ADVISORY index; production overwrites it with ``_resolve_source_turn``'s
-    answer before the point is committed (``extractor_v2.py:9223`` → ``:9230``),
+    answer before the point is committed (``extractor_v2.py:10342`` → ``:10349``),
     and ``_same_fact`` groups on the committed field
-    (``retrieval.py:3066-3068`` — the ``_pkg_turn_key`` pair and its equality
+    (``retrieval.py:3288-3290`` — the ``_pkg_turn_key`` pair and its equality
     test). Same defect class as §2.1's, one leg over —
     grouping by the advisory index counts pairs production never forms."""
     warnings: list[str] = []
@@ -795,7 +798,7 @@ def _same_turn_route(acc: dict, a: dict, b: dict, edus: list[dict]) -> None:
 
     ⛔ Both quotes are the ones production COMMITS (``_stamp_quote``), not the
     receipt's raw strings: ``_same_fact`` compares the committed hit
-    (``retrieval.py:3070-3071``), which the write path already rewrote to
+    (``retrieval.py:3292-3293``), which the write path already rewrote to
     ``[:_MAX_QUOTE]``. On the sealed corpus the published counts are
     clamp-invariant (3 points carry a longer quote, none of them moves a
     counter), so a corpus-shaped pin cannot tell the two readings apart — this
@@ -982,7 +985,7 @@ def test_the_dedupe_leg_reads_the_COMMITTED_quote_not_the_raw_receipt(monkeypatc
     assert committed == {"consulted": 1, "value_flagged": 0,
                          "value_guard_decisive": 0, "collapsed": 1}, (
         f"the route did not read the COMMITTED quote: {committed} — production "
-        f"commits the _MAX_QUOTE span (extractor_v2.py:9008), so the pair is a "
+        f"commits the _MAX_QUOTE span (extractor_v2.py:10119), so the pair is a "
         "collapse, not a value conflict")
 
     # … and the SAME pair read the way this file used to read it, to show the
@@ -1127,27 +1130,30 @@ def _longest_quote_run(turn: str, quote: str):
 # lines reds until the numbers are re-derived, and a cite edited without
 # re-deriving reds too. That is the contract, not an inconvenience.
 _PUBLISHED_CITES = {
-    8940: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+    10051: ("content = _write_span(_raw_content, _MAX_CONTENT)",
            "the content clamp"),
-    9008: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+    10119: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
            "the quote clamp, at the point's own commit"),
-    8407: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
+    9027: ("if type(model_idx) is int and 0 <= model_idx < len(edus):",
            "the resolver's in-range bound"),
-    9223: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    10342: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    9224: ("pt_entry = {", "the point entry the span is stamped into"),
-    9230: ('"source_turn_id": turn_idx,',
+    10343: ("pt_entry = {", "the point entry the span is stamped into"),
+    10349: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    9231: ("}", "the end of the point entry"),
-    9239: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    10350: ("}", "the end of the point entry"),
+    10367: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
 }
 
 #: The value-free gate `_value_verbatim_span` applies, published by the two
-#: artifacts this PR adds (they disagreed about it: the index row said
-#: `:3603-3604`, which is prose INSIDE the same docstring, while the runbook said
-#: `:3613-3614`). One site, three readers — so all three are pinned together.
-_VALUE_FREE_GATE = (5042, "if not _carries_value(content, quote):")
+#: artifacts this PR adds (they disagreed about it: the index row pointed at
+#: prose INSIDE the gate's docstring, while the runbook pointed at the gate
+#: itself). One site, three readers — so all three are pinned together.
+#: ⛔ No concrete line number is spelled in this comment: the two examples that
+#: used to sit here went stale in the very drift this PR repairs, and an example
+#: that rots is the defect restated in the guidance (#10848 review P2).
+_VALUE_FREE_GATE = (5582, "if not _carries_value(content, quote):")
 
 #: The same contract, for the RUNBOOK — the doc half of the census (#10742).
 #: The runbook `publishes the same numbers` as this file, so when the file's
@@ -1156,32 +1162,32 @@ _VALUE_FREE_GATE = (5042, "if not _carries_value(content, quote):")
 #: asserted ONE number, and the other seven went stale unread. This mapping is
 #: keyed the same way so the two halves can never drift apart again.
 _RUNBOOK_CITES = {
-    8940: ("content = _write_span(_raw_content, _MAX_CONTENT)",
+    10051: ("content = _write_span(_raw_content, _MAX_CONTENT)",
            "the content clamp"),
-    9008: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
+    10119: ('quote = _write_span(str(p.get("quote") or "").strip(), _MAX_QUOTE)',
            "the quote clamp, at the point's own commit"),
-    9223: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
+    10342: ("turn_idx = _resolve_source_turn(p, edus, warnings=warnings)",
            "the resolver call"),
-    9224: ("pt_entry = {", "the point entry the span is stamped into"),
-    9231: ("}", "the end of the point entry"),
-    9239: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
+    10343: ("pt_entry = {", "the point entry the span is stamped into"),
+    10350: ("}", "the end of the point entry"),
+    10367: ("_span = _value_verbatim_span(content, quote, turn_idx, edus,",
            "the stamp itself"),
-    4000: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:",
+    4472: ("def _verbatim_span_in_turn(turn_text: str, quote: str) -> tuple[int, int] | None:",
            "`_verbatim_span_in_turn`'s definition"),
-    4028: ("def _carries_value(*texts: object) -> bool:",
+    4500: ("def _carries_value(*texts: object) -> bool:",
            "`_carries_value`'s definition"),
-    5002: ("def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,",
+    5542: ("def _value_verbatim_span(content: str, quote: str, turn_idx: int | None,",
            "`_value_verbatim_span`'s definition"),
-    8389: ("if not edus:", "the resolver's empty-edus silent bound"),
-    8390: ("return None", "the resolver's silent early return"),
-    5042: ("if not _carries_value(content, quote):",
+    9009: ("if not edus:", "the resolver's empty-edus silent bound"),
+    9010: ("return None", "the resolver's silent early return"),
+    5582: ("if not _carries_value(content, quote):",
            "the value-free gate (`_VALUE_FREE_GATE`)"),
-    5043: ("return None", "the value-free gate's refusal"),
-    9228: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
+    5583: ("return None", "the value-free gate's refusal"),
+    10347: ('"source_ref": "session.md", "quote": quote, "status": "draft",',
            "the committed quote inside `pt_entry`"),
-    9230: ('"source_turn_id": turn_idx,',
+    10349: ('"source_turn_id": turn_idx,',
            "the resolved turn the point COMMITS"),
-    9242: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
+    10370: ('pt_entry["span_start"], pt_entry["span_end"] = _span',
            "the span assignment"),
 }
 
@@ -1208,45 +1214,45 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tortoise/commit_schema.py", 445):
         ("def validate_span(span_start: object, span_end: object) -> None:",
          "`validate_span`'s definition"),
-    ("tortoise/commit_schema.py", 589):
+    ("tortoise/commit_schema.py", 678):
         ("span_start: int | None = Field(default=None, ge=0, le=SPAN_OFFSET_MAX)",
          "the `span_start` field"),
-    ("tortoise/commit_schema.py", 609):
+    ("tortoise/commit_schema.py", 705):
         ("return self", "the end of `_span_is_an_address`"),
-    ("tools/longmem_eval/retrieve.py", 939):
+    ("tools/longmem_eval/retrieve.py", 1004):
         ('if p.get("span_start") is not None and p.get("span_end") is not None:',
          "the eval lane's offset annotation"),
-    ("tools/longmem_eval/retrieve.py", 941):
+    ("tools/longmem_eval/retrieve.py", 1006):
         ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
-    ("tortoise/sdk.py", 37859):
+    ("tortoise/sdk.py", 39000):
         ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 37865):
+    ("tortoise/sdk.py", 39006):
         ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
          "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 37826):
+    ("tortoise/sdk.py", 38967):
         ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
          "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 37842):
+    ("tortoise/sdk.py", 38983):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/retrieval.py", 3066):
+    ("tortoise/retrieval.py", 3288):
         ("at = _pkg_turn_key(a)",
          "the same-source-turn route's entry"),
-    ("tortoise/retrieval.py", 3068):
+    ("tortoise/retrieval.py", 3290):
         ("if not (at and at == bt):",
          "the same-turn GROUPING test `_same_fact` keys on"),
-    ("tortoise/retrieval.py", 3070):
+    ("tortoise/retrieval.py", 3292):
         ('qa = str(a.get("quote") or "")',
          "the COMMITTED quote read (`_same_fact`)"),
-    ("tortoise/retrieval.py", 3071):
+    ("tortoise/retrieval.py", 3293):
         ('qb = str(b.get("quote") or "")',
          "the COMMITTED quote read, partner half"),
-    ("tortoise/retrieval.py", 3074):
+    ("tortoise/retrieval.py", 3296):
         ("if _pkg_differ_value_critical(qa, qb):",
          "the quote-value guard"),
-    ("tortoise/retrieval.py", 3075):
+    ("tortoise/retrieval.py", 3297):
         ("return False", "the quote-value guard's refusal"),
-    ("tortoise/retrieval.py", 3076):
+    ("tortoise/retrieval.py", 3298):
         ("return _pkg_overlap(qa, qb) >= DEFAULT_PACKAGE_SAME_TURN_OVERLAP",
          "the same-turn overlap gate"),
 }
@@ -1258,7 +1264,7 @@ _CITE_RE = re.compile(r"([\w][\w./-]*\.py):(\d+)(?:-(\d+))?")
 def _resolve_cite_path(spelled: str) -> str | None:
     """The repo-relative path a cite spells, or None if it does not resolve.
 
-    A doc writes both `retrieval.py:3070` and `tortoise/retrieval.py:3070`; the
+    A doc writes both `retrieval.py:3292` and `tortoise/retrieval.py:3292`; the
     mapping is keyed repo-relative so the two spellings share one entry (and a
     spelling that resolves to NOTHING is itself reported, rather than silently
     filtered out of the sweep).
@@ -1401,9 +1407,12 @@ def test_every_extractor_v2_cite_this_file_publishes_resolves_at_this_head():
     lines = _extractor_lines()
 
     published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
-    # … and any bare continuation (``→ `:7495` ``, or a range end like
-    # ``:7489-7496``) counts as PUBLISHED, so a mapped number is not orphaned
-    # merely because its file is named once.
+    # … and any bare continuation (``→ `:NNNN` ``, or a range end whose start is
+    # a file-qualified cite) counts as PUBLISHED, so a mapped number is not
+    # orphaned merely because its file is named once. ⛔ No concrete number is
+    # spelled in this comment: an example that rots is the defect restated in
+    # the guidance, and `test_guidance_prose_quotes_only_numbers_the_pins_hold`
+    # now reds on one.
     for start, end in re.findall(r":(\d{4,5})(?:-(\d{4,5}))?", text):
         published.add(int(start))
         if end:
@@ -1445,11 +1454,13 @@ def test_every_extractor_v2_cite_THE_RUNBOOK_publishes_resolves_at_this_head():
     lines = _extractor_lines()
 
     # ⛔ TOTAL over the runbook's numbers, not just its file-qualified ones
-    # (#10742 review). The runbook continues a cite with a bare `:9228`, and
-    # prints range ENDS (`:5042-5043`, `:8389-8390`, `:9239-9242`) whose second
-    # number a lane renumbering the doc can leave pointing at unrelated code —
-    # the "one file, two answers, and no leg reading either" shape, one level
-    # down. Every number the runbook prints is in `published`.
+    # (#10742 review). The runbook continues a cite with a bare `:NNNN`, and
+    # prints range ENDS whose second number a lane renumbering the doc can leave
+    # pointing at unrelated code — the "one file, two answers, and no leg
+    # reading either" shape, one level down. Every number the runbook prints is
+    # in `published`. ⛔ No concrete line number is spelled in this comment: the
+    # examples that used to sit here went stale in the very drift this PR
+    # repairs, and an example that rots is the defect restated in the guidance.
     published = {int(n) for n in re.findall(r"extractor_v2\.py:(\d+)", text)}
     for start, end in re.findall(r":(\d{4,5})(?:-(\d{4,5}))?", text):
         published.add(int(start))
@@ -1458,7 +1469,7 @@ def test_every_extractor_v2_cite_THE_RUNBOOK_publishes_resolves_at_this_head():
 
     # A number that belongs to a CROSS-FILE cite is not an `extractor_v2.py`
     # number — `_CROSS_FILE_CITES` verifies those and this map must not claim
-    # them (the bare-continuation regex cannot tell whose `:3070` it found).
+    # them (the bare-continuation regex cannot tell whose bare number it found).
     published -= {n for (_p, n) in _CROSS_FILE_CITES}
 
     unswept = sorted(published - set(_RUNBOOK_CITES))
@@ -1601,14 +1612,20 @@ def test_the_census_clamps_with_the_writes_own_cut():
 def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
     """The index row and the runbook must publish the SAME line for one gate.
 
-    They did not: `docs/00_index.md`'s `#2684` row said `:3603-3604` (prose in
-    the docstring) while §6 of the runbook said `:3613-3614` (the gate). A
+    They did not: `docs/00_index.md`'s `#2684` row pointed at prose INSIDE the
+    gate's docstring while §6 of the runbook pointed at the gate's own line. A
     summary that contradicts the document it summarises is the failure mode the
     bundle's cite convention exists to prevent, and nothing read either.
 
     #10742: this test covered ONE number while the file published nine, so
     eight rotted unread. It now emits the corrected pair too, and the other
     eight are held by `_PUBLISHED_CITES` / `_RUNBOOK_CITES` above.
+
+    ⛔ The two disagreeing numbers are described, not spelled: they were stale
+    the moment the gate moved, and spelling them here restated the very defect
+    (they pointed at unrelated code — one at a template slot's value, the other
+    at two blank lines). `test_guidance_prose_quotes_only_numbers_the_pins_hold`
+    is the guard that keeps a number out of this prose unless a pin holds it.
     """
     number, expected = _VALUE_FREE_GATE
     lines = _extractor_lines()
@@ -1626,3 +1643,105 @@ def test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook():
             f"{name} no longer publishes `{cite}` for the value-free gate — "
             "the two artifacts must name the same site, and a stale number here "
             "is a number nothing can self-detect")
+
+
+def _prose_of(src: str) -> list[tuple[int, str]]:
+    """(line, text) for every COMMENT and every DOCSTRING in `src`.
+
+    The class this guards is prose-only: a bare `:NNNN` written in guidance is
+    read by no sweep (the file arm of `_cites` is file-qualified-only), so it
+    rots silently the moment code moves above it. Docstrings come from the AST
+    (so a string that merely LOOKS like a docstring is not one) and comments
+    from `tokenize` (so a `#` inside a string is not one); both are used rather
+    than a line regex, which would flag the maps themselves — they are the pins,
+    not guidance.
+    """
+    prose: list[tuple[int, str]] = []
+    for node in ast.walk(ast.parse(src)):
+        if not isinstance(
+                node, (ast.Module, ast.ClassDef, ast.FunctionDef,
+                       ast.AsyncFunctionDef)):
+            continue
+        doc = ast.get_docstring(node, clean=False)
+        if doc is not None and node.body and isinstance(node.body[0], ast.Expr):
+            prose.append((node.body[0].lineno, doc))
+    for tok in tokenize.generate_tokens(io.StringIO(src).readline):
+        if tok.type == tokenize.COMMENT:
+            prose.append((tok.start[0], tok.string))
+    return prose
+
+
+def _prose_cites(prose: list[tuple[int, str]]) -> list[tuple[int, int]]:
+    """(line, number) for every `:NNNN` / `:NNNN-NNNN` spelled in `prose`."""
+    cite_re = re.compile(r":(\d{4,5})(?:-(\d{4,5}))?")
+    out: list[tuple[int, int]] = []
+    for line_no, text in prose:
+        for m in cite_re.finditer(text):
+            for spelled in (m.group(1), m.group(2)):
+                if spelled:
+                    out.append((line_no, int(spelled)))
+    return out
+
+
+def test_the_prose_extractor_sees_both_a_comment_and_a_docstring():
+    """FAILS IF `_prose_of` stops finding prose, which would make the guard vacuous.
+
+    A guard over an extraction that silently returns nothing passes on every rot
+    it exists to catch — the `#8175` shape (a tool that holds the datum and does
+    not read it). Driven on a SYNTHETIC module so this check cannot rot with
+    this file's own prose.
+    """
+    sample = '''"""A module docstring with `:1111`."""
+
+
+def f():
+    """A function docstring with `:2222-3333`."""
+    x = "a # that is not a comment, and :9999 inside a string"
+    # a real comment with `:4444`
+    return x
+'''
+    found = _prose_cites(_prose_of(sample))
+    assert [n for _ln, n in found] == [1111, 2222, 3333, 4444], (
+        f"the prose extractor saw {found} — expected the module docstring, the "
+        "function docstring and the comment, and NOT the `:9999` inside the "
+        "string literal. A guard whose extraction is broken passes silently")
+
+
+def test_guidance_prose_quotes_only_numbers_the_pins_hold():
+    """FAILS IF this file's own guidance spells a `:NNNN` no pin verifies.
+
+    Twice now the file has repaired a cite while leaving the OLD number spelled
+    in the prose beside it (`_VALUE_FREE_GATE`'s comment, and the docstring of
+    `test_the_value_free_gate_cite_agrees_across_the_index_row_and_the_runbook`
+    which kept the twin of the same two numbers), and twice the example was
+    already wrong — pointing at a template slot's value and at two blank lines.
+    A number in guidance is a citation nobody re-checks, so the file's own rule
+    ("an example that rots is the defect restated in the guidance") can only be
+    enforced mechanically.
+
+    The contract it enforces is the one `#10742` established one level up: a
+    number may appear in this module's prose ONLY if one of the four maps
+    already pins it — in which case the sweeps above red when it rots, and the
+    example cannot go stale on its own. A live cite that is not yet pinned is
+    therefore reported with its fix: pin it, or drop it from the prose.
+    """
+    pinned = (
+        set(_PUBLISHED_CITES)
+        | set(_RUNBOOK_CITES)
+        | {n for _spelled, n in _CROSS_FILE_CITES}
+        | {_VALUE_FREE_GATE[0]}
+    )
+    bad = [
+        f"  line {line_no}: `:{number}` — not a key of "
+        f"_PUBLISHED_CITES / _RUNBOOK_CITES / _CROSS_FILE_CITES / "
+        f"_VALUE_FREE_GATE"
+        for line_no, number in _prose_cites(_prose_of(Path(__file__).read_text(
+            encoding="utf-8")))
+        if number not in pinned
+    ]
+    assert not bad, (
+        "this file's guidance spells `:NNNN` numbers no pin verifies, so they "
+        "rot unread — nothing in this module's sweeps reads an unqualified "
+        "number, and an example that rots is the defect restated in the "
+        "guidance. Either pin the number (add it to the map for its file) or "
+        "describe it without spelling it:\n" + "\n".join(bad))

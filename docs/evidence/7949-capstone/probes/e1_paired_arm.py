@@ -80,13 +80,40 @@ from capstone_measure import (  # noqa: E402
     run_corpus,
 )
 
-#: The three flags the measured arm pins. OFF means: absent, empty, or "0".
+#: The three flags the measured arm pins. OFF means: present and falsy ("0",
+#: empty) — NOT "absent". ⛔ Since `#10996` an ABSENT ``TORTOISE_VALUE_GATE`` is
+#: the ON arm (the S2.2 mechanical half defaults ON), so the key is listed in
+#: :data:`DEFAULT_ON_KEYS` and an unset value is REFUSED rather than read as OFF.
 ARM_KEYS = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER", "TORTOISE_VALUE_GATE")
+
+#: Switches whose UNSET value is ON. For these, "absent" is not an OFF spelling:
+#: :func:`off_arm_readback` PINS them to a falsy value and READS IT BACK, so the
+#: record shows the arm was produced rather than inherited. `TORTOISE_VALUE_GATE` joined the set in
+#: `#10996` (the `#4899` mechanical predicate defaults ON); the other two still
+#: default OFF. Measured before the fix: with only the four keys cleared,
+#: ``value_gate.value_gate_enabled()`` was True inside an arm this file labelled
+#: OFF — i.e. the pre-registered CONTROL was scored with the predicate armed.
+DEFAULT_ON_KEYS = ("TORTOISE_VALUE_GATE",)
+
+#: The repo's declared env-truthiness vocabulary, MIRRORED rather than imported.
+#:
+#: `tortoise/env_truthy.py` is the ONE contract ("unset/blank/falsy/garbage ->
+#: False"), and `e1_e2_scores.py` carries the same mirror for the same reason: this
+#: driver runs before any DB is up and must stay stdlib-only. The pipeline decides
+#: with an ALLOW-LIST, so the readback below must too — a hand-typed list of OFF
+#: spellings is how `off`/`no`/`false` came to be refused as ON (see
+#: `off_arm_readback`).
+_TRUTHY = ("1", "true", "yes", "on")
+
+
+def _is_truthy(raw) -> bool:
+    """`tortoise.env_truthy.is_truthy`, mirrored: unset/blank/falsy/garbage -> False."""
+    return ("" if raw is None else str(raw).strip().lower()) in _TRUTHY
 
 #: A FOURTH switch for the same pass, and the reason it is checked beside the
 #: three: `TORTOISE_S2_DECISION_SEAM` arms S2.2 *through the arbiter*, so
 #: `_vet_enabled` reads True even against an explicit `TORTOISE_VET=0`
-#: (`capstone_measure.ARM_OFF` pins it UNSET for exactly this, and #5087 is the
+#: (`capstone_measure.ARM_OFF` pins it falsy for exactly this, and #5087 is the
 #: flag). Leaving it out would let this driver print `OFF` while the seam ran
 #: the very pass the label denies — the mislabelled arm the refusal above exists
 #: to prevent, arriving through the one key the acceptance list does not name.
@@ -94,15 +121,39 @@ SEAM_KEY = "TORTOISE_S2_DECISION_SEAM"
 
 
 def off_arm_readback() -> dict[str, str | None]:
-    """The arm actually in force, READ BACK — never a literal this file types."""
+    """The arm actually in force, READ BACK — never a literal this file types.
+
+    Two arms, because "unset" is not one state (`#10996`): a switch SET to a
+    truthy value is REFUSED (the shell armed something this arm denies), and a
+    switch in :data:`DEFAULT_ON_KEYS` left UNSET is PINNED to ``"0"`` and read
+    back (absence reads OFF by the old rule while the resolver reports ON). Both
+    are the same defect — a mislabelled arm — arriving through different
+    spellings: the first is the operator's to fix, the second is this file's.
+    """
     held = {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
-    on = {k: v for k, v in held.items() if v not in (None, "", "0")}
+    # ⛔ AN ALLOW-LIST, not a deny-list of OFF spellings (`#10610` fixed the same
+    # class in `e1_e2_scores._ARM_OFF_STATES`). The old form here was
+    # `v not in (None, "", "0")`, which REFUSED four values the pipeline honours
+    # as OFF — `false`, `no`, `off`, `FALSE` — as "the shell armed this arm", so a
+    # genuine before arm spelled that way could not be measured at all. Truthy is
+    # `tortoise.env_truthy.is_truthy`'s rule, mirrored here for the same reason
+    # `e1_e2_scores.py` mirrors it: this driver is stdlib-only by design.
+    on = {k: v for k, v in held.items() if _is_truthy(v)}
     if on:
         raise SystemExit(
             f"REFUSED: {on!r} is set — this driver measures the OFF arm; a run "
             "that prints OFF while the shell holds the passes ON measures the "
             "wrong population under the right label")
-    return held
+    # PIN the default-ON switches to their OFF value, then read them back. An
+    # ABSENT switch from :data:`DEFAULT_ON_KEYS` is the ON arm, so leaving it
+    # unset would label a treated run OFF; setting it here makes the arm a fact
+    # this file produced rather than a claim about the operator's shell (the
+    # `capstone_measure.measured_arm` precedent). The refusal above still fires
+    # for a switch the shell EXPLICITLY armed.
+    for key in DEFAULT_ON_KEYS:
+        if held.get(key) is None or held.get(key) == "":
+            os.environ[key] = "0"
+    return {key: os.environ.get(key) for key in (*ARM_KEYS, SEAM_KEY)}
 
 
 def _frozen_record(prereg: dict | None) -> dict:
@@ -226,8 +277,18 @@ def main(argv: list[str] | None = None) -> int:
     head = resolve_head()
     prereg = read_preregistration(head)
     corpus_sha = corpus_pin(prereg)
-    floor = object_floor(prereg)
+    # ⛔ `min_before_share` FIRST — the two reads are not interchangeable. This
+    # driver refuses a malformed `e1_min_before_share` with its OWN `REFUSED:`
+    # message, but `object_floor` reads the same key through `parse_bars`, which
+    # raises a bare `ValueError` for the very shapes `min_before_share` exists to
+    # refuse (absent, non-numeric, `bool`). Reading the map-backed floor first
+    # made that ValueError an escaping helper exception and left the message below
+    # unreachable from `main()` — a run an operator cannot tell from a crash is
+    # not a refusal (`sysexits`: malformed INPUT is `EX_DATAERR`, not an internal
+    # error, #10610 review at `2d9e8608`). `object_floor` stays the bar READER for
+    # the count floor; it is simply no longer the first thing to touch the share.
     share_floor = min_before_share(prereg)
+    floor = object_floor(prereg)
     print(f"corpus fixtures_hash={corpus_sha} head={head}", flush=True)
     base = os.environ["TORTOISE_DB_URI"]
 

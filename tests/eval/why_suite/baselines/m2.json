@@ -1,5 +1,6 @@
 {
   "config": {
+    "corpus": "why_suite",
     "extractor_posture": "m2",
     "holdout_excluded": false,
     "mode": "full",

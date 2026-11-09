@@ -2,10 +2,11 @@
 
 Runs the official **LongMemEval-S** benchmark (500 questions, ~40-session
 histories) against Tortoise as an external comparability measurement: ingest
-each question's chat history into the graph → hybrid retrieval (graph points
-
-+ raw session transcripts) → reader LLM answers from retrieved context →
-official GPT-4o answer-check judge. Reports overall + per-category accuracy,
+each question's chat history into the graph → hybrid retrieval (graph points +
+raw session transcripts) → reader LLM answers from retrieved context →
+answer-check judge (our own pinned model by default since the #8486 owner
+ruling of 2026-10-27; the **official GPT-4o** judge is one explicit override
+away — see the env table below). Reports overall + per-category accuracy,
 retrieval recall@k, context tokens and latency, with the full methodology in
 a provenance JSON. **No "#1" claims — published numbers carry their
 methodology** (design-locked 2026-08-15, issue #1144 axis 2).
@@ -75,16 +76,8 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | Var | Purpose | Default |
 |---|---|---|
 | `OPENROUTER_API_KEY` / `OPENAI_API_KEY` / `DEEPSEEK_API_KEY` / `GEMINI_API_KEY` | provider keys (existing repo pattern, `tortoise.ingest._PROVIDERS`) | required for non-mock runs |
-| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `openrouter:deepseek/deepseek-v4-flash` (M5 pinned — #1525) |
-| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `openai:gpt-4o-2024-08-06` (the official judge model) |
-
-> **Judge via OpenRouter (no OpenAI key needed).** The official judge is
-> OpenAI's `gpt-4o-2024-08-06` — the model id is what makes it official
-> (external comparability), and the SAME model is served by other
-> configured providers. With only `OPENROUTER_API_KEY` set, run the sealed
-> benchmark with:
-> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
-> (provider resolution order: openrouter → deepseek → openai → gemini).
+| `TORTOISE_LME_READER_MODEL` | reader model spec `<provider>:<model>` or bare | `deepseek:deepseek-v4-flash` (M5 pinned — #1525; transport repointed by #8486 — see "Reader pinning" below) |
+| `TORTOISE_LME_JUDGE_MODEL` | judge model spec | `deepseek:deepseek-v4-flash` (#8486 owner ruling 2026-10-27 — internal baseline series; the receipt records `unpinned:<model>` + `inconclusive` by design) |
 | `TORTOISE_LME_CACHE_DIR` | dataset cache dir (outside the repo) | `~/.cache/tortoise-longmemeval` |
 | `TORTOISE_LME_CHUNK_TURNS` | turns per raw-chunk window (R1 #1540) | `2` (the run protocol step-2 sweep selects the pilot/500-Q value) |
 | `TORTOISE_LME_CONTEXT_CAP` | reader context token budget — rank-interleaved (C1 #1745: points + chunks in true RRF order, the R1 points-first tiering deliberately reversed) bounded by the item cap | `8000` |
@@ -98,6 +91,18 @@ the `[embeddings]` extra does not need it either (R3 #1542 D6).
 | `TORTOISE_LME_RERANK_POOL` | rerank pool depth (R6; the knob can only RAISE the depth — applied pool = `max(pool, baseline, max(k))` with baseline = `TORTOISE_LME_POOL_SIZE` when set (default 120), itself floored at `max(k)`; only read while rerank is on) | `40` |
 | `TORTOISE_LME_RERANK_CAP` | per-session MMR cap (R6; ≥ 1) | `2` |
 | `TORTOISE_LME_RERANK_LAMBDA` | MMR λ in [0,1] (R6; 1.0 = pure rerank, 0.0 = pure similarity; boundary values accepted) | `0.7` |
+
+> **The OFFICIAL judge (external comparability) is a configuration, not the
+> default.** `gpt-4o-2024-08-06` is the model the benchmark's own
+> `evaluate_qa.py` baseline ran, and the model id is what makes a number
+> comparable to a published figure — the SAME model is served by other
+> configured providers, so it needs no OpenAI key. Name it explicitly:
+> `export TORTOISE_LME_JUDGE_MODEL='openrouter:openai/gpt-4o-2024-08-06'`
+> (provider resolution order: openrouter → deepseek → openai → gemini).
+> The #8486 owner ruling of 2026-10-27 replaced it as the run's *default* —
+> progress against ourselves, not comparability with vendors — and recorded
+> the `OVERRIDES:` line; `judge.OFFICIAL_JUDGE_MODEL` keeps the identity
+> named so this path cannot rot.
 
 CLI flags: `--split s|m|oracle`, `--limit N`, `--data <local json/jsonl>`,
 `--k 5,10,20`, `--top-k 20`, `--mock`, `--output <report.json>`,
@@ -396,12 +401,68 @@ count surfaced (`report['dropped']`), never silently counted as recall 0.
 
 Encode cache (`encode_cache.py`): model-keyed
 (`sha256(model_id + prompt_name + text)`), disk-persisted, namespaced per
-(model, prompt) under the cache dir — the cross-question haystack redundancy
-is 5-10×, and the cache is what makes the 12-45h burn feasible. Active when
-`--model` is set. Concurrency model: **sequential workers** (one question at
-a time) — the simplest correct choice; per-question isolated graphs + the
-shared encode cache make parallelism a coordination cost with no correctness
-benefit.
+(model, prompt) under the cache dir. The haystack redundancy across a pass is
+**measured** (#1779, `haystack_overlap.py`): **1.299×** — 371,095 encode units
+over the 500-Q S split, 285,608 distinct, i.e. **23.0%** of units are hits in
+one pass (the dataset-derivable units — turn Points + raw chunks; a `v2` run's
+LLM-derived extraction texts are outside the census, which cannot see them)
+— and the cache is what makes the 12-45h burn feasible (it also serves
+REPEAT passes with the same `(model, prompt)` ~entirely, and survives a crash).
+Active when `--model` is set. Concurrency model: **sequential workers** (one
+question at a time) — the simplest correct choice; per-question isolated graphs
+and the shared encode cache make parallelism a coordination cost with no
+correctness benefit.
+
+### Cross-question overlap — measured, and what it does NOT buy (#1779)
+
+`python -m tools.longmem_eval.haystack_overlap` re-derives the census from the
+dataset alone (no DB, no LLM, no keys) and reports the granularity verdict.
+It **refuses with exit 2 and prints no census** when the read population has
+nothing to measure — 0 instances, 0 session slots, or 0 encode units (sessions
+present but carrying no turns). A verdict computed over zero units is not a
+measurement: the empty-transcript identity repeats, so it would publish an
+avenue as `REALIZABLE` on no text at all.
+
+| avenue | reuse | realizable? |
+|---|---|---|
+| text→embedding (`encode_cache.py`, built) | **1.299×** (23.0% of units) | yes |
+| session-level extraction reuse | **1.000×** | **no** |
+| prompt-level response cache | **1.0002×** (27 of 124,345 S1 chunk prompts = 0.02%) | **no** |
+
+The **23.0% is a HIT share, not a strictly cross-question rate** — both cells are published. Of the
+85,487 repeat units, **1,064 repeat inside a single question's own haystack** (965 turn + 99 chunk),
+so the strict cross-question reuse is **84,423 units = 22.75%**. Deriving that from the turn leg's
+count alone would publish 22.78% and quietly count 99 chunk repeats as cross-question (#1779's own
+question), so the split is a measured, pinned cell (`within_question_hit_slots` /
+`cross_question_hit_slots`) rather than prose.
+
+Cross-question *sessions* do repeat — 5,403 of 23,867 slots repeat another
+slot's content (1.293×, and all 500 questions hold at least one repeat) — but
+**0 of the 6,660 repeated pairs share a session date**. The date is
+prompt-visible (`extractor_v2._date_anchor` injects "today is `<session_date>`"
+into the S1/S2/S4 system prompt), so a session-level extraction cache has
+nothing to hit.
+
+The **response cache is a finer unit than the session**, and it is measured as
+its own cell rather than inferred from the session one: `extract_session_v2`
+splits a session into EDU chunks and calls `run_s1` **per chunk** with the
+session date, so the identity is `(chunk text, session date)` — 124,318
+distinct over 124,345 chunk prompts, **27 repeats**. `realizable` therefore
+requires the reuse to be *material* (`MATERIAL_HIT_SHARE`, 1% of the avenue's
+own unit population), not merely > 1.0: 27 of 124,345 is a rounding error of
+the LLM work. The numbers are pinned by
+`tests/test_haystack_overlap_1779.py::test_census_on_real_s_split`
+(@slow; skipped in CI, which has no dataset), so a dataset refresh reds the pin
+instead of silently re-basing them.
+
+**Recorded residual — NOT reducible by dedup:** the chunk leg is 124,345 of the 371,095 encode
+units (33.5%) and **no chunk text is ever a turn text** (`distinct` per leg sums to `distinct` for
+the total: 189,522 + 96,086 = 285,608), because a chunk renders `_session_transcript(window)` while
+its turn Points render `_turn_text` (`[role] content`). Those units therefore cannot be served from
+the turn Points' cache entries. The cache still serves **28,259 of them** (22.7% of the leg — 33.1%
+of every cross-unit cache hit in the corpus); what a cache cannot do is remove the **96,086 distinct
+chunk texts**, which is a chunking/rendering decision (retrieval semantics — the `chunk_turns` knob
+of #1540).
 
 ## Dataset
 
@@ -474,10 +535,20 @@ path via `--data` skips the download. Split S = `longmemeval_s_cleaned.json`
    (verbatim from LongMemEval `evaluate_qa.py`: contains-answer, temporal
    off-by-one exemption, knowledge-update updated-answer, preference rubric,
    abstention), label = `'yes' in response.lower()`; default
-   `gpt-4o-2024-08-06` at temperature 0. The judge API call replicates
+   `deepseek-v4-flash` at temperature 0 (the #8486 owner ruling of 2026-10-27;
+   `OFFICIAL_JUDGE_MODEL` = `openai:gpt-4o-2024-08-06` remains the named,
+   servable comparability configuration). The judge API call replicates
    `evaluate_qa.py` exactly: a single user message (no system message),
    `n=1, temperature=0, max_tokens=10`, no `response_format` (JSON mode
-   would deviate from the official protocol). `--mock` = containment/
+   would deviate from the official protocol). ⚠️ ONE deliberate deviation
+   under the shipped default: the judge shares the reader's transport
+   declaration (`judge.py` → `disables_thinking = api_key_env in
+   reader.THINKING_BY_DEFAULT_KEY_ENVS`), so a `deepseek:` spec — which is
+   what the default is — adds a top-level `thinking: {"type": "disabled"}`
+   to each grading call. Without it the 10-token budget is spent on hidden
+   reasoning and `content` returns empty, which the label rule grades as
+   "no". It is **always absent for the OFFICIAL judge**, whose request stays
+   byte-identical to `evaluate_qa.py`. `--mock` = containment/
    abstention keyword judge.
 5. **Report** (`report.py`) — overall + task-averaged accuracy, the five
    paper categories (Information Extraction, Multi-Session Reasoning,
@@ -661,8 +732,12 @@ uv run python -m tools.longmem_eval.run_protocol smoke --mock
 
 - The dataset (~tens of MB; auto-downloaded to the cache dir — needs
   network) and
-- provider keys (reader: e.g. `OPENROUTER_API_KEY`; official judge:
-  `OPENAI_API_KEY`).
+- provider keys. **A default run needs `DEEPSEEK_API_KEY` and nothing else** —
+  the reader (`READER_MODEL`) and the judge (`DEFAULT_JUDGE_MODEL`) are both
+  `deepseek-v4-flash` under the #8486 ruling. An override needs its OWN
+  provider's key (`OPENROUTER_API_KEY`, `OPENAI_API_KEY`, …), and
+  `OPENAI_API_KEY` alone selects nothing: name `OFFICIAL_JUDGE_MODEL`
+  explicitly to grade with the official judge.
 
 The full 500-question run is `@pytest.mark.slow` (never in CI); the
 committed mini fixture + `--mock --skip-preflight` exercises the entire
@@ -832,8 +907,24 @@ the gate health of the (possibly cached) graph it retrieved from.
 
 The reader model + prompt are **pinned constants for the run**: the code
 default (`READER_MODEL` in `tools/longmem_eval/reader.py`) is
-`openrouter:deepseek/deepseek-v4-flash` — the model the V2 runs actually
-used — so a default-config run is a pinned run. The prompt constants
+`deepseek:deepseek-v4-flash` — the model the V2 runs actually used, on the
+transport the #8486 ruling names — so a default-config run is a pinned run.
+(#8486, 2026-11-07: the pin named `openrouter:deepseek/…`, and the box the
+credential audit was taken on had no `OPENROUTER_API_KEY`, so the *default*
+raised at the named-provider check before loading a question and a run there
+needed an override — which records
+`reader_pinned: false`. The model is unchanged; the transport moved, and with it
+the request shape: the direct DeepSeek lane is served by
+`_ThinkingDisabledTransport`, so every default request also carries
+`thinking:{"type":"disabled"}`. ⛔ That is selected by the ROUTED PROVIDER'S KEY
+ENV, not by the model id (`THINKING_BY_DEFAULT_KEY_ENVS = {"DEEPSEEK_API_KEY"}`):
+re-pointing the SAME model at `openrouter:` drops the guard, so the request no
+longer carries the field. Whether an empty answer follows depends on that route
+reasoning by default — the starved-answer measurement (11,352 prompt tokens, 500
+completion tokens, `content=''`, recorded `valid: True`, scored 0) is on
+`api.deepseek.com`, NOT on OpenRouter, and that difference is exactly why this
+pin names the transport as well as the model.)
+The prompt constants
 (`_SYSTEM_PROMPT`, `_TYPE_FRAGMENTS`) live in the same module. Every report
 records the reader's resolved identity + the verbatim prompt in its
 methodology (`reader_model_spec`, `reader_provider`, `reader_pinned`,

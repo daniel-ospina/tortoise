@@ -1385,10 +1385,19 @@ BRIDGE_DETERMINATION: dict[str, str] = {
                           "`promote_point`; beta names the starting belief a FIELD on "\
                           "`update_knowledge`. The bridge's `refresh_confidence` recomputes "\
                           "confidence, which is a different operation.",
-    "query": "**Part A is right; the bridge is wrong.** beta: \u201c`query`, "
-             "`paginated_query`, `query_points_by_tag` | 3 | → `list_knowledge`\u201d, and "
-             "canonical R2 (`list_knowledge`) lists all three. beta row 4 is explicit "
-             "that `list_knowledge` is the browse-and-filter method.",
+    # NOTE (#10602): there is deliberately no `"query"` entry here any more. The record
+    # was not resolved — it became UNOBSERVABLE to this comparison. §9 compares the map
+    # against the bridge's Part B rows, and Part B maps TOOLS, so a method no tool binds
+    # has no row to disagree with. `tortoise_query` used to bind `query`, which made the
+    # `query`↔`list_knowledge` disagreement visible THROUGH it; #10602 corrected that
+    # tool's declared `sdk_method` to the accessor its handler actually reaches
+    # (`paginated_query`), so `query` lost its only binding and the key went stale. The
+    # substantive claim is unchanged and is still recorded twice — under
+    # `paginated_query` and `query_points_by_tag`, the other two members of the same
+    # `→ list_knowledge` collapse group — and restated in prose by bridge-table.md itself
+    # ("map says `search_knowledge`; citation names `list_knowledge`", "**refuted**").
+    # Re-binding `query` to a tool would re-surface the divergence and §9 would demand a
+    # determination again, which is the correct behaviour.
     "paginated_query": "**Part A is right; the bridge is wrong.** beta: \u201c`query`, "
                        "`paginated_query`, `query_points_by_tag` | 3 | → "
                        "`list_knowledge`\u201d, and canonical R2 (`list_knowledge`) lists "

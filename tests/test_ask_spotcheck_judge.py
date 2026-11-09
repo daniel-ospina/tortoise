@@ -7,7 +7,8 @@ docs/planning/2026-08-31-2071-scoping-package.md):
   1. the 21-question composition is COMMITTED (reproducibility gap closed)
      with the 0a995998 int-answer quirk cleaned;
   2. ``ask_spotcheck._grade`` routes EVERY question to the semantic judge
-     (``build_judge()`` — the official gpt-4o anscheck, benchmark-identical
+     (``build_judge(_judge_spec())`` — the official gpt-4o anscheck, the spec
+     named explicitly and never inherited from the run default; benchmark-identical
      to the graded eval); the word-overlap bar is REMOVED from the live
      path (no callers remain — pinned both behaviorally and in source);
   3. the no-key runtime contract: fail-fast pre-flight names the judge
@@ -28,6 +29,7 @@ composed fixture ships in-repo).
 """
 from __future__ import annotations
 
+import ast
 import json
 import os
 import re
@@ -323,6 +325,179 @@ def test_fail_fast_passes_with_key(monkeypatch):
     monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     assert _require_judge_key() == "OPENAI_API_KEY"
+
+
+def test_one_judge_spec_serves_the_preflight_and_the_judge(monkeypatch):
+    """#8486: the pre-flight and ``build_judge`` must resolve from ONE spec.
+
+    The pre-flight names the OFFICIAL judge; ``build_judge()`` called with no
+    spec resolves ``DEFAULT_JUDGE_MODEL``, which the #8486 owner ruling of
+    2026-10-27 re-pinned to DeepSeek. With the two unlinked they disagreed
+    about which model was about to grade — measured as two silent failures, both
+    the #2071 decision inverted: a box holding only ``OPENAI_API_KEY`` passed
+    the key check and then died on an uncaught ``ValueError``, and a both-keys
+    box graded with a NON-official judge while printing the official key env.
+    So the fallback is pinned to the OFFICIAL constant, and NO call site may
+    build a judge without it — pinned in SOURCE, because the behavioural path
+    needs a live key to observe.
+    """
+    import tools.ask_spotcheck as _mod
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL
+
+    monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
+    assert _mod._judge_spec() == OFFICIAL_JUDGE_MODEL
+    assert _mod._judge_spec() != DEFAULT_JUDGE_MODEL
+
+    src = Path(_mod.__file__).read_text(encoding="utf-8")
+
+    # ⛔ AST, NOT A REGEX (review finding): a regex keyed on `=`/`return` sees
+    # only the call shapes someone happened to write. This walks every CALL to
+    # `build_judge` in the module and requires the spec it passes to BE
+    # `_judge_spec()` — the single owner the pre-flight and the grader both read
+    # — or a literal `mock=True`. Two blank spots closed together here:
+    #
+    #   • SHAPES THAT LOOK LIKE AN ARGUMENT BUT ARE NOT (#8486 review):
+    #     `build_judge(None)` passes a positional `None` and
+    #     `build_judge(mock=False)` passes a FALSY `mock` — both fall through to
+    #     ``judge.DEFAULT_JUDGE_MODEL`` (`build_judge`'s `raw_spec = spec or env
+    #     or DEFAULT_JUDGE_MODEL`, and its MockJudge branch needs a TRUTHY
+    #     `mock`), so skipping on "has an arg" or "has a mock kwarg" re-created
+    #     the exact split this pin exists to stop.
+    #   • A SPEC THAT IS NOT THE OWNER'S (#8486 review):
+    #     `build_judge(OFFICIAL_JUDGE_MODEL)` — or any other literal — passes an
+    #     EXPLICIT spec, so a "has an argument ⇒ explicit" rule waved it
+    #     through while the pre-flight checked the env-resolved spec and the
+    #     grader graded another. Same defect one step along: the pin has to
+    #     check WHO decides the spec, not that somebody did.
+    def _bare_build_judge_calls(source: str, where: str) -> list[str]:
+        tree = ast.parse(source)
+        bad = []
+        for node in ast.walk(tree):
+            if not isinstance(node, ast.Call):
+                continue
+            fn = node.func
+            name = (fn.attr if isinstance(fn, ast.Attribute)
+                    else getattr(fn, "id", None))
+            if name != "build_judge":
+                continue
+            # The spec must BE the owner's: the `spec` argument — positional,
+            # or the keyword form `spec=_judge_spec()` — has to be a CALL to
+            # `_judge_spec()`, not a literal, a name, or `None`.
+            spec_arg = node.args[0] if node.args else None
+            if spec_arg is None:
+                for k in node.keywords:
+                    if k.arg == "spec":
+                        spec_arg = k.value
+            if (isinstance(spec_arg, ast.Call)
+                    and getattr(spec_arg.func, "id", None) == "_judge_spec"):
+                continue
+            # `mock=True` is the one other explicit form; `mock=False` is the
+            # default judged by a real model, so it still has to name its spec.
+            if any(k.arg == "mock"
+                   and isinstance(k.value, ast.Constant)
+                   and k.value.value is True
+                   for k in node.keywords):
+                continue
+            bad.append(f"{where}:{node.lineno}")
+        return bad
+
+    assert _bare_build_judge_calls(src, "ask_spotcheck.py") == []
+
+    # ⛔ THE #2071 LANE IS THREE MODULES, NOT ONE. The scan originally read
+    # `tools/ask_spotcheck.py` alone while the claim was "NO call site may build
+    # a judge without it" — so the two SIBLING legs kept the split (pre-flight
+    # on the official key, judge on the DeepSeek default) and the suite stayed
+    # green over it (caught in review, #8486).
+    #
+    # The set is ENUMERATED HERE, not derived from the tree, and that is what the
+    # assertion below pins: it is the two modules that import the pre-flight
+    # today (verified: `_require_judge_key`/`_judge_spec` importers in `tools/`
+    # are exactly these), so a rename cannot silently shrink the scan to an
+    # empty set. ⛔ A FOURTH IMPORTER WOULD NOT BE SCANNED — if one appears,
+    # extend this tuple; the comment says what is checked rather than claiming
+    # "every module", which is the over-claim a previous round shipped.
+    import tools.ask_spotcheck_consistency as _consistency
+    import tools.ask_spotcheck_probe as _probe
+
+    siblings = {Path(m.__file__).name: m for m in (_probe, _consistency)}
+    assert set(siblings) == {"ask_spotcheck_probe.py",
+                             "ask_spotcheck_consistency.py"}, siblings
+    for name, mod in siblings.items():
+        sibling_src = Path(mod.__file__).read_text(encoding="utf-8")
+        assert _bare_build_judge_calls(sibling_src, name) == [], (
+            f"{name} builds a judge without `_judge_spec()` as its spec: its "
+            f"pre-flight checks one judge's key while a different model grades "
+            f"(#8486)")
+        # ⛔ NO SUBSTRING CHECK HERE (review finding): `assert "_judge_spec" in
+        # sibling_src` was TRUE for a module whose only mention was a docstring
+        # or an import, so it stayed green over a call site that re-derived its
+        # own spec — a claim satisfied by prose is not a check. The AST scan
+        # above is now the load-bearing half for BOTH defects (a missing spec
+        # and a spec that is not the owner's), so a second, weaker assertion
+        # would only invite the same false confidence back.
+
+    # ⛔ THE GUARD'S OWN COVERAGE (#8486 review). A source pin whose scope is
+    # narrower than its claim is how the #2071 split survived two rounds, so
+    # the shapes that INHERIT the default — or that pass a spec the pre-flight
+    # did not resolve — are asserted directly.
+    #
+    # ⛔ AND THE ASSERTION PINS THE SET, NOT ITS SIZE (review finding): asserting
+    # `!= []` only asked that SOME shape be flagged, so a helper mutated back to
+    # "any argument counts as explicit" still passed on the argument-less shapes
+    # while silently losing the four "who decides the spec" cases. Every shape is
+    # on its own line and every line number is required, so a rule that stops
+    # firing is a red row naming the shape it stopped firing on.
+    inheriting = [
+        "build_judge()",                      # 1 — no spec at all
+        "build_judge(None)",                  # 2 — falsy positional
+        "build_judge('')",                    # 3 — falsy constant
+        "build_judge(mock=False)",            # 4 — falsy `mock` judges for real
+        "build_judge(spec=None)",             # 5 — falsy keyword spec
+        "build_judge(OFFICIAL_JUDGE_MODEL)",  # 6 — a spec that is not the owner's
+        "build_judge(spec)",                  # 7 — a name, not the owner's call
+        "build_judge(other_spec())",          # 8 — some OTHER resolver
+    ]
+    assert _bare_build_judge_calls("\n".join(inheriting) + "\n", "mutant") == [
+        f"mutant:{i}" for i in range(1, len(inheriting) + 1)], (
+        "the guard stopped flagging an inheriting shape — see the list above; a "
+        "narrower helper passes `!= []` and re-opens the #8486 split")
+    explicit = [
+        "build_judge(_judge_spec())",
+        "build_judge(spec=_judge_spec())",
+        "build_judge(mock=True)",
+    ]
+    assert _bare_build_judge_calls("\n".join(explicit) + "\n", "explicit") == [], (
+        "the guard flags a call that DOES name its spec through the owner")
+
+
+def test_probe_live_path_builds_the_judge_it_preflighted(monkeypatch, capsys):
+    """The I1 probe's live path must grade with the spec its pre-flight checked.
+
+    The source pin above is structural; this is the behavioural half, and it
+    needs no network: `build_judge` is replaced by a recorder, so the test sees
+    the SPEC ARGUMENT the tool actually passes. With only the official key set
+    (the box shape the split broke), the recorded spec must still be the
+    OFFICIAL one — before this fix it was whatever `DEFAULT_JUDGE_MODEL`
+    happened to be.
+    """
+    import tools.ask_spotcheck_probe as _probe
+    from tools.longmem_eval.judge import OFFICIAL_JUDGE_MODEL, ScriptedSemanticJudge
+
+    monkeypatch.delenv("TORTOISE_LME_JUDGE_MODEL", raising=False)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    for k in ("DEEPSEEK_API_KEY", "OPENROUTER_API_KEY", "GEMINI_API_KEY"):
+        monkeypatch.delenv(k, raising=False)
+
+    seen = []
+
+    def _recorder(spec=None, **kw):
+        seen.append(spec)
+        return ScriptedSemanticJudge(rules=OFFLINE_RULES)
+
+    monkeypatch.setattr(_probe, "build_judge", _recorder)
+    rc = _probe.main(["--fixture", str(FIXTURE)])
+    assert seen == [OFFICIAL_JUDGE_MODEL], seen
+    assert rc == 0
 
 
 def test_fail_fast_honors_judge_model_provider(monkeypatch):

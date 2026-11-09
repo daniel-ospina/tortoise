@@ -3743,20 +3743,138 @@ def test_the_version_pin_comments_do_not_deny_the_mitigation_they_cite():
     )
 
 
+#: Files OUTSIDE the two runbooks that cite `python-ci.yml:<line>` for the `test-slow` header's
+#: refusal-cost paragraph. The number those two files carried landed on the `Do NOT change it back`
+#: prohibition — ~30 lines BELOW the paragraph's OPENER, which is the line the pin below requires —
+#: and #6744's insert in the `test` job's `strategy` block then moved the whole block on top of
+#: that, so a reader (or a fixer) sent there never found the refusal it was sent to read. NOTHING
+#: read either file, so the drift shipped green. ⛔ No current number is restated here on purpose:
+#: every insert above the paragraph, in either direction, moves it, and the anchor the pin requires
+#: is not the prohibition; three attempts to keep a live number in this note went stale on the next
+#: merge. The pin reads the citation from the FILE and resolves it against the workflow — trust a
+#: red, not this note.
+_REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml")
+
+#: `docs/ops/ci-wall-clock.md`'s own `python-ci.yml:<n>` citations, each paired with the text its
+#: sentence is about. Separate from `_REFUSAL_CITATION_SITES` because the anchor differs: these
+#: point at install/cache STEPS, not at the `test-slow` cost paragraph's opener, so one anchor cannot
+#: serve both. (The postgres-extra install row, the falkor/torch install row, the arm-1 cache-key
+#: row, the save-arm note — added with the `test-track-b` launch, whose save surface is a
+#: `setup-python cache: pip` argument rather than an `actions/cache` step of its own — and the three
+#: cache steps #11273's correction started citing: falkor's restore-only pip step, and the HF-cache
+#: POSTs on falkor and the carve-out.)
+#: ⚠ Named by ROW, not by section: every one sits in §2 today, and a §-number would re-stale on the
+#: next section this doc gains — the same failure mode as the citations themselves.
+#: ⚠ The four numbers the register STARTED with were re-anchored TWICE: once when #10962's merge
+#: first brought the workflow forward, and again after `origin/main`'s 113 further commits moved
+#: every one of them (the falkor/torch row by −59, the three `test-record-postgres`-era rows by
+#: +48…+56 — measured, not guessed). ⛔ NOT "every number": the three cache-step spans #11273
+#: registered were ADDED by this correction in post-`origin/main` coordinates, so they were never
+#: re-anchored at all (round-3 review, P3). The doc ALSO names the same constructs in prose (`Install package + the postgres extra`,
+#: the `Cache pip dependency caches (#7612)` step's `with:` block, `install-cpu-torch` in the
+#: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
+#: number — the number is the checkable claim, the construct name is the map.
+_WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("python-ci.yml:4672", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4664-4666", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3230", ("cache: pip",)),
+    # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
+    # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
+    # adding it here is what puts a new citation under the pin instead of beside it. Each span is
+    # anchored on `path:` as well as `uses:`, so a bare `uses: actions/cache@v4` line (there are
+    # several in this workflow) cannot satisfy it from the wrong step.
+    ("python-ci.yml:2942-2946", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
+    ("python-ci.yml:2985-2987", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:3547-3549", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+)
+
+#: The citation shape the completeness arm below reads — a line number or a line RANGE.
+_WALL_CLOCK_CITATION_RE = r"python-ci\.yml:\d+(?:-\d+)?"
+
+#: A BARE handle — `` `:226` ``, no filename — is the spelling #11273's P2 was WRITTEN in, and
+#: `_WALL_CLOCK_CITATION_RE` cannot see it (that regex requires the `python-ci.yml:` prefix), so the
+#: completeness arm is blind to it by construction. That is why the P2 was a defect at all: by this
+#: doc's own convention an unqualified `:NNN` resolves to `python-ci.yml:<NNN>`, so `` `:226` ``
+#: pointed at an unrelated comment in the `changes` job. ⛔ Scoped to the BACKTICKED form on
+#: purpose: the doc is full of clock times (`23:11`, `04:04:04`), and a bare `\d:\d` over the whole
+#: text would red on those instead of on a citation.
+_WALL_CLOCK_BARE_HANDLE_RE = r"`:\d"
+
+
+#: The numbers those three carried before this round — the non-vacuity population. Each has moved to a
+#: DIFFERENT step since: they were ALREADY stale on `main` (the workflow has grown by thousands of
+#: lines since — measured 4071 the week #6744 opened — so no count belongs in this note), which is why
+#: nothing read them. The pin catches drift from ANY insert above the cited step, not from this
+#: branch's.
+_WALL_CLOCK_STALE_CITATIONS = ("python-ci.yml:3635", "python-ci.yml:2268-2273", "python-ci.yml:3624-3631")
+
+
+def _unregistered_wall_clock_citations(
+    text: str,
+    anchors: tuple[tuple[str, tuple[str, ...]], ...] = _WALL_CLOCK_CITATION_ANCHORS,
+) -> set:
+    """Every `python-ci.yml:<n>` `text` quotes that `anchors` does not pin.
+
+    The anchor loop in the pin below runs in ONE direction: it resolves each REGISTERED citation, so
+    a citation the doc GAINS is an unchecked claim and reds nothing. That is how #11273 — the PR
+    whose whole purpose was to correct stale citations — added three citations outside the register
+    and took coverage from 4 of 4 to 4 of 7 with every arm still green. This helper is the reverse
+    direction, so an unregistered citation is a red instead of a silent gap.
+    """
+    return set(re.findall(_WALL_CLOCK_CITATION_RE, text)) - {citation for citation, _ in anchors}
+
+#: The sentence such a citation must land on — the FIRST line of the `test-slow` header's cost
+#: paragraph (`# Cost when GitHub-hosted is healthy: none — the pool only wins these jobs while`). The
+#: paragraph's own body states the outage consequence, and the refusal this pin ultimately serves is
+#: the `test-slow` header's `Do NOT change it back to ubuntu-latest` line 30 further down; anchoring
+#: the OPENER is deliberate, so a fixer who re-derives the number lands on the paragraph they mean
+#: rather than on a line in the middle of it. Pinned by SENTENCE, like the refs in the runbook pin
+#: below, so a number that keeps passing `1 <= n <= EOF` while landing elsewhere reds instead.
+_REFUSAL_ANCHOR = "Cost when GitHub-hosted is healthy"
+
+
+def _refusal_citation_problems(text: str, workflow: list[str]) -> list[str]:
+    """Every `python-ci.yml:<n>` in `text` that misses the `test-slow` refusal-cost paragraph.
+
+    The anchor is that paragraph's FIRST line — the one that states the outage consequence the
+    refusal rests on. The literal prohibition (`Do NOT change it back …`) is a SEPARATE line 30
+    further down, and it is pinned by its own reference in the runbook; a citation of the
+    prohibition is therefore a miss here. The message says so plainly instead of calling the
+    prohibition "not the refusal paragraph", which the tree would contradict.
+    """
+    problems: list[str] = []
+    for m in re.finditer(r"python-ci\.yml:(\d+)", text):
+        n = int(m.group(1))
+        if not 1 <= n <= len(workflow):
+            problems.append(f"cites python-ci.yml:{n}, past EOF ({len(workflow)} lines)")
+            continue
+        if _REFUSAL_ANCHOR not in workflow[n - 1]:
+            problems.append(
+                f"cites python-ci.yml:{n}, which is {workflow[n - 1].strip()!r} — not the first "
+                f"line of the `test-slow` header's refusal-cost paragraph"
+            )
+    return problems
+
+
 # ── 8. a missing installer is a FAIL, not a silent skip ─────────────────────────────────────
 def test_the_runbooks_cross_file_refs_land_on_what_they_name():
     """Refs OUTSIDE the installer map were only range-checked, so they drifted silently.
 
     The runbook cites `.github/workflows/*.yml`, `scripts/ci_runner_gate.sh` and `config.sh` by line
-    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured at
-    this head: `mirror-images.yml:92` cited the arm64 comment while the file had moved it to `:104`
-    (this PR adds 12 net lines above it), and `python-ci.yml:1556` / `:1544-1546` were ALREADY stale
-    on `main` (the cited comment sits at `:1761`). Each still passed the only check they had — `1 <=
-    n <= EOF` — which an offset-shifted number always passes.
+    number, and the installer map pin above can only see refs INSIDE its own bullet. Measured when
+    this pin was written: `mirror-images.yml` cited the arm64 comment at `:92` while the file had
+    moved it to `:104` (this PR adds 12 net lines above it), and two `python-ci.yml` refs were
+    ALREADY stale on `main` — the cited comment sat ~200 lines below the number. Each still passed
+    the only check they had — `1 <= n <= EOF` — which an offset-shifted number always passes.
 
-    Mutation: revert any of the four refs to its pre-fix number -> RED with the line it actually
+    Mutation: revert any of the five refs to its pre-fix number -> RED with the line it actually
     hit. A ref that lands two files away is worse than none: a fixer sent there edits workflow
     routing or a shell script the sentence never named.
+
+    The pin reads TWO runbooks. `docs/ops/ci-runner-x64.md` carries the refs above; #6744 drifted
+    the two `python-ci.yml` refs in `docs/ops/batch-integration.md`, which no gate read, so that
+    file is pinned here too rather than in a second test that could be deleted independently.
     """
     runbook = (REPO_ROOT / "docs" / "ops" / "ci-runner-x64.md").read_text()
 
@@ -3801,10 +3919,30 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"(pending-not-answered instead of a false red): {span!r}"
     )
 
+    # The fourth ref, and the one that had NO pin: "Absence from the required aggregate's
+    # `needs:`". It cited `:4441` — a comment three jobs above the list — so every commit above the
+    # list silently moved it further away while the citation still passed the only check it had
+    # (`1 <= n <= EOF`). Measured at the head that re-anchored it: #6744's `max-parallel` comments
+    # shifted the list to `:4578`, i.e. 137 lines past the citation, and nothing red.
+    #
+    # Pinned by SHAPE, not by contents: the assertion requires the citation to land on the
+    # aggregate's own `needs:` LIST, so extending or reordering that list (a workflow change, not a
+    # doc change) does not red this — while an offset-shifted number does, which is the whole point.
+    m = re.search(r"required aggregate's `needs:` \(`python-ci\.yml:(\d+)`\)", runbook)
+    assert m is not None, (
+        "the runbook no longer cites the required aggregate's `needs:` by line — re-anchor this pin "
+        "rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert at(".github/workflows/python-ci.yml", n).lstrip().startswith("needs: ["), (
+        f"the runbook cites python-ci.yml:{n} as the required aggregate's `needs:`, but that line "
+        f"is {at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
     # The provisioner invocation — a ref into a file THIS PR edits, and one the first pass missed.
     # `tools/runner_autoscale.py` gained ~96 lines above it, so the number that was correct on
     # `main` (`:965`, the installer invocation) landed on a systemd unit-name f-string here and
-    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the three
+    # still passed the only check it had (`1 <= n <= EOF`). Pinned by SENTENCE, like the four
     # above, so a sibling-bullet ref drifts red instead of passing a range check.
     m = re.search(r"`tools/runner_autoscale\.py:(\d+)` invokes the installer", runbook)
     assert m is not None, (
@@ -3818,6 +3956,164 @@ def test_the_runbooks_cross_file_refs_land_on_what_they_name():
         f"the runbook cites tools/runner_autoscale.py:{n} as the installer invocation, but that "
         f"line is {at('tools/runner_autoscale.py', n)!r}"
     )
+
+    # ── The SECOND runbook, which this pin never read (#6744) ───────────────────────────────────
+    # `docs/ops/batch-integration.md` cites `python-ci.yml` by line twice, for the two sentences
+    # below. The pair was ALREADY offset-shifted by ~6 lines on the `main` it was written against,
+    # and #6744's insert into the `test` job's `strategy` block (plus two smaller ones further down)
+    # moved both anchors again — so the two numbers then landed on unrelated comments, and NOTHING
+    # red, because the only cross-file-ref gate in the repo read `ci-runner-x64.md` alone.
+    # ⚠ No line number is restated in this note: every pair it has carried went stale on the next
+    # merge, which is the whole point. The pin reads the citation from the FILE and resolves it
+    # against the workflow, so a fixer re-anchoring should trust the red, not this note.
+    # Both sentences are load-bearing there: the first carries the "ARM64 VMs resolve
+    # `ubuntu-latest` to a ~2x slower class" premise, the second the "killed the canary at 32m12s
+    # of a 30m budget" measurement the section argues a fold-routing decision on.
+    #
+    # Pinned by SENTENCE, like the refs above, so an offset-shifted number reds here instead of
+    # passing the `1 <= n <= EOF` range check that let it ship.
+    # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
+    batch = (REPO_ROOT / "docs" / "ops" / "batch-integration.md").read_text()
+
+    m = re.search(
+        r"resolve `ubuntu-latest` to a \*\*~2\u00d7 slower\*\* class \(`python-ci\.yml:(\d+)`\)", batch
+    )
+    assert m is not None, (
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the ARM64 ~2x-slower "
+        "class — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "~2x slower class" in at(".github/workflows/python-ci.yml", n), (
+        f"batch-integration.md cites python-ci.yml:{n} for the ARM64 ~2x-slower class, but that "
+        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
+    m = re.search(
+        r"killed the canary at \*\*32m12s of a 30m budget\*\* \(`python-ci\.yml:(\d+)`\)", batch
+    )
+    assert m is not None, (
+        "batch-integration.md no longer cites `python-ci.yml:<line>` for the canary killed at "
+        "32m12s of a 30m budget — re-anchor this pin rather than deleting it"
+    )
+    n = int(m.group(1))
+    assert "32m12s of a 30m budget" in at(".github/workflows/python-ci.yml", n), (
+        f"batch-integration.md cites python-ci.yml:{n} for the canary killed at 32m12s, but that "
+        f"line is {at('.github/workflows/python-ci.yml', n)!r}"
+    )
+
+    # ── The TWO CITING FILES this pin never read (#11032 review) ───────────────────────────────
+    # `.github/workflows/ci.yml:1506` and `.github/actionlint.yaml:32` both cite the same refusal
+    # paragraph, and neither file is read by any gate — the identical "no gate reads it, so it drifts
+    # green" hole that put `batch-integration.md` in this pin one round earlier. When that citation
+    # was written the number landed on the `Do NOT change it back` prohibition, ~30 lines past the
+    # paragraph's OPENER that the checker requires — written from a remembered offset, not derived —
+    # and every insert above it since has moved it further. Both sentences are load-bearing:
+    # `ci.yml:1506` is why the #10237 canary exists at all (the required legs CANNOT be routed to
+    # the pool), and `actionlint.yaml:32` is the only record of why declaring a label is not a way
+    # to make a required leg schedulable.
+    #
+    # Mutation: revert either number to its pre-#6744 value -> RED naming the line it actually hit.
+    # No line number is restated in this note on purpose: the checker below resolves the citation
+    # from the FILE and compares it to the sentence, so trust the red rather than this prose.
+    workflow_lines = (REPO_ROOT / ".github" / "workflows" / "python-ci.yml").read_text().splitlines()
+    for rel in _REFUSAL_CITATION_SITES:
+        text = (REPO_ROOT / rel).read_text()
+        assert re.search(r"python-ci\.yml:\d+", text), (
+            f"{rel} no longer cites `python-ci.yml:<line>` for the `test-slow` refusal — re-anchor "
+            "this pin rather than deleting it"
+        )
+        problems = _refusal_citation_problems(text, workflow_lines)
+        assert not problems, f"{rel} sends the reader past the sentence it means: " + "; ".join(problems)
+
+    # Non-vacuity, executable: the SAME checker must reject the pre-fix citation, so a pass on the
+    # real files cannot be it matching nothing. `:1891` is one of the numbers those two files
+    # carried before this round corrected them; the control only needs it to NOT be the opener.
+    assert _refusal_citation_problems(
+        "The required legs CANNOT be routed here: `python-ci.yml:1891` — refused.", workflow_lines
+    ), "the checker no longer sees the pre-#6744 citation it exists for — it would pass the drift"
+
+    # ── `docs/ops/ci-wall-clock.md` — the SAME hole, in the file #6744 grew most ───────────────
+    # This doc cites `python-ci.yml:<n>` for its cost arguments (the postgres-extra install row,
+    # the falkor/torch install row, the save-arm note, the arm-1 cache-key row, plus the cache steps
+    # #11273 added — all in §2; named by row rather than by section, see the note on
+    # `_WALL_CLOCK_CITATION_ANCHORS`). ⛔ NOT ONE of the original four was correct in the commit that
+    # wrote it, so "they drifted" is the wrong diagnosis:
+    # in `cd2835e59` the postgres row's `:4312` was 43 lines above the install (`:4355`), the falkor
+    # row's `:2734-2739` 21 above `install-cpu-torch` (`:2755`), and the arm-1 row's `:4304-4306`
+    # pointed at the `test-record-postgres:` JOB HEADER, 43 lines above its cache step (`:4347`); in
+    # `fea87bf88e` the save-arm note's `:3015` was 21 above `cache: pip` (`:3036`). All four were
+    # carried over from an earlier head instead of derived — a citation written from a remembered
+    # measurement is stale on arrival — and they drifted further before anything read them. That is
+    # why the pin resolves the line instead of trusting the number. `_REFUSAL_CITATION_SITES` above
+    # cannot cover them, because its anchor is the `test-slow` cost paragraph's opener and these cite
+    # other steps.
+    # Nothing read this file either, so its drift shipped green exactly like ci.yml's and
+    # actionlint.yaml's did. Pinned by SENTENCE inside the cited range, so a number that lands
+    # elsewhere reds here.
+    wall_clock = (REPO_ROOT / "docs" / "ops" / "ci-wall-clock.md").read_text()
+    for citation, anchors in _WALL_CLOCK_CITATION_ANCHORS:
+        assert citation in wall_clock, (
+            f"ci-wall-clock.md no longer cites `{citation}` — re-anchor this pin rather than "
+            "deleting it, so the sentence it points at stays checkable"
+        )
+        lo, _, hi = citation.split(":", 1)[1].partition("-")
+        span = workflow_lines[int(lo) - 1: int(hi or lo)]
+        for anchor in anchors:
+            assert any(anchor in line for line in span), (
+                f"ci-wall-clock.md cites `{citation}` for {anchor!r}, and that text is not in "
+                f"python-ci.yml:{lo}-{hi or lo} (which reads {span[0].strip()!r} …)"
+            )
+    # Non-vacuity, executable: the checker must reject the three citations this round corrected, so
+    # a pass on the real file cannot be it matching nothing — each of those numbers is what the doc
+    # carried before. ⛔ The property the control needs is only that a stale number does NOT land on
+    # any anchored line; do not restate what it DOES land on, because that changes with every
+    # insert above the step (⛔ and do not name a register SIZE here — a count in prose re-stales
+    # exactly like the citations this test exists to catch, round-3 review P3).
+    for stale in _WALL_CLOCK_STALE_CITATIONS:
+        lo, _, hi = stale.split(":", 1)[1].partition("-")
+        assert not any(
+            anchor in line
+            for line in workflow_lines[int(lo) - 1: int(hi or lo)]
+            for _, anchors in _WALL_CLOCK_CITATION_ANCHORS
+            for anchor in anchors
+        ), f"the stale citation `{stale}` still resolves — the non-vacuity control is matching nothing"
+
+    # ── COMPLETENESS: a citation the doc GAINS must join the register (#11273 review, P1) ──────
+    # The loop above is one-directional — it resolves each REGISTERED citation — so a
+    # `python-ci.yml:<n>` this doc newly quotes used to be an unchecked claim that reds nothing.
+    # That is not hypothetical: the PR whose whole purpose was correcting stale citations ADDED
+    # three (the falkor restore-only pip step, and the HF-cache POSTs on falkor and the carve-out)
+    # and left every arm green, while the register stayed at its old size. So the register is
+    # asserted COMPLETE over the doc, not merely consistent with it.
+    unregistered = _unregistered_wall_clock_citations(wall_clock)
+    assert not unregistered, (
+        f"ci-wall-clock.md cites {sorted(unregistered)}, which `_WALL_CLOCK_CITATION_ANCHORS` does "
+        "not pin. An unregistered citation is an unchecked claim: a later insert above the step it "
+        "names re-stales it silently and not one arm below reds. Add the span — anchored on `path:` "
+        "as well as `uses:`, never a bare `uses:` line — to the tuple, and cite that exact span in "
+        "the doc.")
+    # Non-vacuity, executable: remove ONE register entry and the arm must name exactly that
+    # citation, so a green on the real file cannot be this arm matching nothing.
+    dropped = _WALL_CLOCK_CITATION_ANCHORS[-1][0]
+    without = tuple(a for a in _WALL_CLOCK_CITATION_ANCHORS if a[0] != dropped)
+    assert _unregistered_wall_clock_citations(wall_clock, without) == {dropped}, (
+        f"the completeness arm does not see `{dropped}` once its register entry is removed — it "
+        "would stay green on an unregistered citation, which is the hole it exists to close")
+
+    # ── the BARE-handle spelling the completeness arm cannot see (#11273 round-3 review, P2) ───
+    # `_unregistered_wall_clock_citations` matches `python-ci.yml:<n>` only, so the P2 this round
+    # fixed — `test-track-b`'s save arm written as a bare `` `:226` `` — was reachable AGAIN with
+    # every arm green: measured by the reviewer, restoring that line verbatim left this test at
+    # `1 passed`. The register can never pin a handle it cannot see, so pin the SHAPE.
+    bare = re.search(_WALL_CLOCK_BARE_HANDLE_RE, wall_clock)
+    assert bare is None, (
+        f"ci-wall-clock.md carries the bare handle {bare.group(0)!r} at offset {bare.start()}. "
+        "By this doc's own convention an unqualified `:NNN` resolves to `python-ci.yml:<NNN>`, and "
+        "the register cannot pin it — write `python-ci.yml:<NNN>` (or a registered span) instead.")
+    # Non-vacuity, executable: the pin must see the EXACT spelling the P2 was written in, so a
+    # green on the real file cannot be this arm matching nothing.
+    assert re.search(_WALL_CLOCK_BARE_HANDLE_RE, "`test-track-b`'s save arm at `:226`"), (
+        "the bare-handle pin no longer sees `:226` — the spelling #11273's P2 was written in")
 
 
 # ── 8. the accepted-cost inventory is the MEASURED set, not the remembered one ─────────────────
@@ -4610,12 +4906,20 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
     while the address can never go stale. ⛔ What is NOT asserted is that the citing paragraph still
     points at the target — the block below records why that check was written, measured DEAD and
     removed rather than shipped; read it before adding that clause back.
+
+    ⛔ A CITE INTO A GROWING IMPORT BLOCK IS THE SAME SHAPE EVEN IN A FILE THIS BRANCH DOES NOT
+    EDIT, and that is not hypothetical: the /docs guard's import citation moved under this pin
+    because ANOTHER merge (#11623) appended one import line to the top of that file, so the cited
+    line started pointing at a sibling import and this pin redded on `main` with nothing in the
+    citing file touched. The one anchor this pin puts INSIDE that file is a symbol now — the
+    address of an import is a function of every branch that ever added one above it.
     """
     # (target file, cited line) -> a regex the CITED LINE ITSELF must match
     anchors: dict[tuple[str, int], str] = {
-        # the /docs guard's import of the schema types the citing paragraph names
-        ("tests/test_website_docs_consistency.py", 56):
-            r"from tortoise\.commit_schema import Point, point_content_id",
+        # ⛔ the /docs guard's import used to be anchored here, at
+        # ("tests/test_website_docs_consistency.py", 56). It is a SYMBOL citation now: the measured
+        # reason is in this test's docstring and in `symbol_citations` below, where the sentinel
+        # that replaced the number lives.
         # the reference-surface relay that drifted: the runbook sentence naming the test
         # ⛔ 869, not 866: this merge took `main`'s CORRECTED prose in that bullet (#10237's
         # canary really does name the class, `ci.yml:1473 repo-harnesses`) and this branch's
@@ -4677,6 +4981,17 @@ def test_the_relays_a_sibling_test_file_makes_land_on_what_they_name():
             _CITING_TEST_FILE,
             "docs/ops/ci-runner-x64.md",
             r"`test \(i\)` \(\*\*the canary\*\*\) was taken by `pi-runner-vm-5` \(ARM64\) and killed at 32 m 12 s",
+        ),
+        (
+            # the /docs guard's import of the schema types the citing paragraph names (#9607).
+            # Cited by SYMBOL for the reason the capstone row above gives, measured a second time
+            # and harder: no edit by THIS branch was needed for the number to go stale — another
+            # merge (#11623) inserted ONE import line at the top of that file and the cited line
+            # started pointing at a sibling import. The sentinel is the import statement itself,
+            # so the relay reds if the guard stops importing the types its paragraph names.
+            _CITING_TEST_FILE,
+            "tests/test_website_docs_consistency.py",
+            r"from tortoise\.commit_schema import Point, point_content_id",
         ),
     ]
 

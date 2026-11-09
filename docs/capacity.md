@@ -15,6 +15,10 @@ related:
     note: "The root this page belongs to: a written claim must stay bound to the system it describes. Every measured row below is pinned by tests/test_capacity_page.py."
   - issue: 6211
     note: "The measured belief-propagation failure threshold recorded in §7."
+  - issue: 10175
+    note: "The owner ruling that one tenant is deliberately HELD at this cap: the refusal is the correct state, and clearing it is refused. §4 carries the clause so the lane holding a 402 meets it here, at the cap, not only on that issue."
+  - issue: 11469
+    note: "The curation workstream for the held graph: select the signal out of the old extractor's output, re-file it through the packs into a clean graph, and retire the old one rather than carry it forward."
 ---
 
 # Capacity and limits
@@ -81,11 +85,11 @@ single-writer-plus-many-readers pattern that is verified.
 |---|---|---|
 | Hosted REST and MCP, per API key | **100 req/min** | `tortoise/hosted_api.py` |
 | Hosted `POST /v1/sessions/commit`, per key | **300 req/min**, on its own bucket | `tortoise/hosted_api.py` |
-| Hosted `POST /v1/sessions/commit`, **per team (org)**, per process | **10 MiB of writes per rolling 60 s** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, nodes it will write × 1024)`; over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`) | `tortoise/quota.py` (`commit_ingest_admit`) |
+| Hosted `POST /v1/sessions/commit` **and** `POST /v1/sessions`, **per team (org)**, per process | **10 MiB of writes per rolling 60 s, ONE shared window** (`TORTOISE_COMMIT_INGEST_BYTES_PER_MIN`) — a request is charged `max(payload bytes, declared write chain × 1024)`: the commit lane declares every node its payload writes, the capture lane only the session chain it mints (`:Session` + the `sessionCaptured` `:Event` + the transcript `:Source` + two nodes per turn — the Points/entities a capture extracts are bounded by `max_points`, not here) (commit: `commit_schema.commit_ingest_charge_bytes`; capture: `hosted_api.capture_ingest_charge_bytes`); over the allowance is `429` + `Retry-After` (`detail.code = ingest_rate_limited`). ⚠️ A SINGLE request larger than the whole allowance is admitted once while the window is EMPTY (refusing it would order a retry that can never fit), so the per-request ceiling on the capture lane is its 16 MiB body cap, once per window — above the 10 MiB default (#11218) | `tortoise/quota.py` (`commit_ingest_admit`) |
 | Hosted, unauthenticated or malformed key | **100 req/min per client IP** | `tortoise/hosted_api.py` |
 | Self-hosted daemon | **100 req/min** (`TORTOISE_RATE_LIMIT`) — per API key when one is presented, otherwise per client IP | `tortoise/selfhost.py`, `README.md` |
 | Rate-limit bucket store (hosted) | **10,000 buckets** per process (`MAX_BUCKETS`) | `tortoise/hosted_api.py` |
-| Commit ingest-budget store | **10,000 team buckets** per process + one shared overflow bucket | `tortoise/quota.py` |
+| Ingest-budget store | **10,000 team buckets** per process + one shared overflow bucket | `tortoise/quota.py` |
 
 The commit endpoint is deliberately exempt from the general key bucket and gets
 its own 300/min bucket, so catch-up commits after offline capture neither consume
@@ -93,12 +97,14 @@ nor are consumed by the 100/min general budget. The limiter charges **once per
 request** in `RateLimitMiddleware.dispatch`; the unit is called "points/minute"
 in its own docstring and in the 429 body, and it is one charge per request.
 
-The **second** commit bound is per TEAM, not per key: the 300/min bucket above
-multiplies with the number of API keys a team may mint (20 on Team), so it does
-not bound a tenant. The team-level ingest budget in `tortoise/quota.py` does —
-it is measured in BYTES (the ruled storage unit, #4495/#5331), it is a rolling
-60-second window rather than a fixed minute, and it is a **throttle**, not a
-cap: the refusal is a transient `429` whose `Retry-After` self-heals, so it
+The **second** bound is per TEAM, not per key: the per-key buckets above
+(100/min general, 300/min on the commit path) multiply with the number of API
+keys a team may mint (20 on Team), so they do not bound a tenant. The team-level ingest budget in `tortoise/quota.py` does —
+it is one window covering **both** session write lanes (`POST /v1/sessions` and
+`POST /v1/sessions/commit`), so alternating endpoints cannot buy a second
+allowance; it is measured in BYTES (the ruled storage unit, #4495/#5331), it is
+a rolling 60-second window rather than a fixed minute, and it is a **throttle**,
+not a cap: the refusal is a transient `429` whose `Retry-After` self-heals, so it
 delays a capture and never refuses the customer's data (#4051 §3.1, #5425).
 The window is module-global **process** state (`tortoise/quota._commit_ingest_budget`),
 like the bucket stores above: `Dockerfile.hosted` runs a single `uvicorn` worker,
@@ -151,6 +157,72 @@ Two properties of the cap matter more than its value:
 
 Self-hosted and embedded deployments have **no node cap applied** — there the
 bound is the host's own FalkorDB sizing.
+
+### A held cap is not a defect — one tenant is refused on purpose
+
+⚠️ **Before clearing a 402 from this cap, read this.** At least one org is
+**deliberately held at its cap** by owner ruling: the nodes
+`count_org_usage(org_id, "points")` counts are the *old* extractor's output, and
+headroom would only accumulate more of it. The refusal is the correct state, not
+an outage to remediate.
+
+**OVERRIDES:** the default engineering reflex to treat a 402 refusal as a bug and
+clear it — a `max_points` override, a refill of the capped graph, or "unblocking"
+the tenant — is **refused** (owner ruling 2026-10-27 on `#10175`, which carries
+the full record and its amendments). Three properties bind whoever meets the
+refusal:
+
+- **It is a stock, not a flow — so the refusal is terminal.** A rate limit
+  answers `429` with a `Retry-After` and clears on its own (§3). This cap answers
+  `402` — `count + est > max_points` in
+  `tortoise/hosted_api.py::_capture_session_impl` — and the counted set only
+  grows, so backoff is not a remedy and a retry cannot succeed. The two must not
+  share a retry branch: a client that backs off on this 402 retries forever.
+- **The capped graph stays, on the ruling's own terms.** It is the only sample of
+  what the *old* extractor produced. The owner's 2026-11-02 amendment permits
+  removing that one graph **only** after a count-verified export to durable local
+  storage, and with a journalled delete; no journalled whole-graph delete path
+  exists yet, so the graph stays. What the amendment leaves unchanged is the
+  prohibition: no `max_points` override, no backfill of the old graph, and no
+  reading of its 402 as a defect. `#11469` is the workstream that curates the
+  signal out of this graph rather than carrying it forward.
+- **An override is reachable, and that is why it is refused.** The field is not
+  out of an operator's hands: a stored `max_points` override column exists
+  (migration `20260817000001`) and is honoured *with precedence over*
+  `graph_size_cap`, and `tortoise/sdk.py::org_update` accepts the field. The
+  sanctioned lever is the **plan** — `tortoise/billing.py::apply_limits` sets
+  the cap from the tier, `max_points := tier_limits(tier)["max_graph_nodes"]`,
+  or `graph_size_cap` on the Supabase control plane — and it is sanctioned only
+  on a **new org** (or the switchover's **new** graph), **never** on the held
+  one: a tier change on this org *in place* is refused for the same reason an
+  override is, because it puts the new headroom on the graph that must stay the
+  old extractor's sample (owner answer 2026-11-07 on `#10175`: raising *this*
+  org's tier in place is "the exact move the prohibition names", and a new org
+  on Pro is the recommended shape). Nothing else is sanctioned, however easy it
+  is to reach.
+
+What lifts the hold is a conjunction, not a fix: the new extractor live
+(`#5087`, `#7949`), the storage half of the switchover deployed, and a plan with
+unlimited graphs (`#9341`), after which the switchover runs as a **new graph**
+promoted to default (`#10180`, the verb now exists) and is then *measured* —
+extractor signal-vs-noise, and hosting cost in **bytes**, never nodes (`#4051`).
+
+The storage limb is the one limb that **is** satisfied today, and it is written
+that way on purpose: a limb stated as an unowned prerequisite makes "is the
+conjunction false?" unanswerable from this page. The issue that owned it,
+`#10017`, closed *not planned* on 2026-11-06 because the local half was a no-op
+on the local deployment; the hosted record it deferred to is armed and writing —
+`GET /health` reports `record.armed=true`, `record.ok=true`, `degraded=false` on
+2026-11-07, and `record_writes_applied=3` on 2026-11-09 (up from `0`). No open
+issue owns it because none is needed: it is not a missing prerequisite.
+
+The hold stands because the **other** limbs are false — today `#5087`, `#7949`,
+`#9341` and `#4051` are all open.
+
+The full record, including the 2026-11-02 amendment, stays on `#10175`, which is
+currently open. An `OVERRIDES:` line on a closed issue is invisible to the lane
+that meets the 402, so this page carries the clause wherever that record's state
+goes.
 
 ## 5. Retrieval latency
 

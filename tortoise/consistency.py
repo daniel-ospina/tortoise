@@ -4110,6 +4110,18 @@ def recover_from_log(events_dir: str, projection) -> dict:
     # counted as one. Never raises (post-wipe: #2943).
     from tortoise.session_source_migration import reconcile_after_replay
     reconcile_after_replay(projection, engine="recover_from_log")
+    # #11070: rebuild-DETECTED, not repaired (see `projection.rebuild`'s call).
+    # With no record handle the hook is PLAN-ONLY and writes nothing, so a
+    # recovery replay does not restore the repair — re-run the CLI with
+    # `--graph <the cache graph>` and `--record-dsn` (without `--graph` it
+    # addresses the URI's default graph, not the one this replay wrote). The
+    # pre-#10852 `SourceCreated` record carries the utterance, so this replay
+    # re-mints the `summary`/`_searchText` prose pair. PLAN-ONLY here (no record
+    # handle): the clear arm is destructive and not self-correcting, so it never
+    # runs without the record — see the hook's docstring. Never raises.
+    from tortoise import session_source_prose_migration as sspm
+
+    sspm.reconcile_after_replay(projection, engine="recover_from_log")
     after = _node_count()
     # #8840 review P1/P2: NO `max(identity_skipped, len(_id_skips))` fallback.
     # Every entry a TRAILING sweep records (`fold_deferred_entity_links`) is a

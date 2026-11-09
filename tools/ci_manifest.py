@@ -41,7 +41,7 @@ is the ONE composition, and it carries every manifest-level check the two
 entry points used to call loose — the three duration checks plus
 ``fast_shard_issues`` (#6135) and ``duplicate_entries`` (#2913/#5373), which
 landed on main beside this change and must therefore run here rather than at a
-call site.
+call site, plus this module's own ``floor_issues``.
 
 CLI::
 
@@ -68,6 +68,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 import argparse
 import datetime as dt
 import math
+from collections.abc import Mapping
 from pathlib import Path
 
 REPO = Path(__file__).resolve().parent.parent
@@ -173,10 +174,15 @@ def _load(path: Path) -> dict:
     ``surfaces`` directly, is what makes this validator see the same manifest
     the selector gates — a hand-reading of the raw YAML could disagree with the
     gate about which files a leg holds.
-    """
-    import yaml
 
-    return _ci_selection()._normalize_surfaces(yaml.safe_load(path.read_text()))
+    The PARSE is the selector's own too, and that matters for one more reason
+    (#10790): ``ci_selection.parse_manifest_text`` refuses a duplicate mapping
+    key, which ``yaml.safe_load`` silently collapses to its last value. A
+    validator reading through a plain ``safe_load`` would therefore validate a
+    manifest with a DIFFERENT weight than the one the selector packs by.
+    """
+    return _ci_selection()._normalize_surfaces(
+        _ci_selection().parse_manifest_text(path.read_text()))
 
 
 # ── staleness / age ──────────────────────────────────────────────────────
@@ -384,6 +390,179 @@ def plausibility_issues(manifest: dict) -> list[str]:
 # ── the composed contract ────────────────────────────────────────────────
 
 
+def floor_issues(manifest: dict) -> list[str]:
+    """``durations_floors`` must name a row that EXISTS and that is INSIDE its declaration.
+
+    Some weights in this map are not what the file cost, they are what the pack
+    SHALL assume — deliberately high, because understating a weight "can red
+    ``python-ci-gate`` with zero test failures" (#3395). ``test_lane_stash.py``
+    states that in prose directly above its own row ("⛔ 355.0 IS A DELIBERATE CAP,
+    NOT A READING … a CI-budget decision recorded on #9172");
+    ``test_calibration.py`` and ``eval/write_path/test_write_path_operator_lane.py``
+    hold the same cap. ``ci_timing._declared_floors`` makes such a declaration
+    binding on the writer, and this is the read side that keeps it HONEST.
+
+    Two ways a floor can be declared and mean nothing, both silent without this:
+
+    * a key with no ``durations`` row — the floor guards a weight the map does not
+      carry, so the file packs at the flat default and the floor never applies.
+      That is the #3400/#4348 trap ("a row must EXIST, not merely default") applied
+      to the mechanism meant to make a declared cap binding;
+    * a row that contradicts its own declaration — BELOW a floor, or ABOVE a CAP.
+      The map then says "this weight is a declared minimum" (or maximum) and
+      writes a number on the wrong side of it, which is the state that makes a
+      reader distrust both halves. The writer keeps a row inside its declaration
+      in both cases, so reaching it means someone hand-edited one of the two and
+      left the other behind.
+
+    A DECLARATION IS EITHER A FLOOR OR A CAP (``{value: 355.0, pinned: true}``).
+    A bare number is a minimum only, so a row above it is legitimate; a ``pinned``
+    one is the weight in BOTH directions, because the rows that carry it record a
+    weighing choice rather than a reading (#6133/#9172) and their own notes say a
+    sweep must not turn the measurement they cite into the weight.
+
+    Composed in :func:`map_issues` rather than at a call site: both enforcing
+    entry points (``ci_selection --integrity`` and ``ci_timing.integrity_problems``)
+    reach it there, so it cannot be half-wired — and the writer's pre-write gate
+    refuses a map whose floor it could not honour instead of shipping it.
+    """
+    floors = manifest.get("durations_floors")
+    if isinstance(floors, dict) and not floors:
+        # The EMPTY MAPPING is the third face of the same container, and the one a
+        # YAML-aware editor or a `safe_dump` round-trip actually produces when a
+        # block is emptied. It parsed to no declarations, so it is the same silent
+        # revert the `null` face was fixed for: "a declaration block that parses to
+        # no declarations means no row in this map is declared at all, so every cap
+        # it states silently reverts" — that sentence applies to `{}` verbatim
+        # (#10704 review round 2).
+        return [
+            "``durations_floors`` is present but declares nothing (an empty "
+            "mapping) — a declaration block that parses to no declarations means "
+            "no row in this map is declared at all, so every cap it states "
+            "silently reverts; state the declaration or drop the key (#9172)"
+        ]
+    if floors is None:
+        # ABSENT is legal (a fixture manifest declares no floors); PRESENT but NULL is
+        # not. `durations_floors:` written with its entries deleted — a plausible
+        # merge-resolution "tidy", and exactly how duplicate twins get dropped in this
+        # repo — used to read as "no declarations" on BOTH sides at once (this check
+        # and the writer's `_declared_floors`), so every declared cap reverted on the
+        # next sweep with nothing red anywhere. That is the same silent revert the
+        # non-mapping container was fixed for (#10575 review, F2); the container shape
+        # must fail closed on EITHER face (#10575 review, P3).
+        if "durations_floors" in manifest:
+            return [
+                "``durations_floors`` is present but declares nothing (`null`) — a "
+                "declaration block that parses to no declarations means no row in "
+                "this map is declared at all, so every cap it states silently "
+                "reverts; state the declaration or drop the key (#9172)"
+            ]
+        return []
+    if not isinstance(floors, dict):
+        return [
+            f"``durations_floors`` is a {type(floors).__name__}, not a mapping — a "
+            f"declaration block no reader can parse means no row in this map is "
+            f"declared at all, so every cap it states silently reverts (#10575 "
+            f"review, F2)"
+        ]
+    durations = _durations(manifest)
+    if not durations:
+        # An ABSENT (or empty) map is `check()`'s UNKNOWN, not this check's red:
+        # there is no map here for a floor to be inconsistent WITH, and reporting
+        # one red per declared floor would turn that UNKNOWN into a wall of reds
+        # (the module's own "red outranks unknown" rule is about a red this check
+        # can actually observe). A malformed `durations` value is a red already,
+        # named by `duration_issues`.
+        return []
+    issues: list[str] = []
+    for name, declaration in sorted(floors.items(), key=lambda kv: str(kv[0])):
+        # The CONTAINER shape fails closed on both sides: `{name: [355.0]}` (or any
+        # mapping this reader cannot fully honour) must not silently mean "no
+        # declaration", which would revert every cap on the next sweep with no
+        # signal anywhere.
+        nested = isinstance(declaration, Mapping)
+        if nested:
+            unknown = sorted(set(declaration) - {"value", "pinned"})
+            if unknown:
+                issues.append(
+                    f"``durations_floors`` declares {name} with the unknown key(s) "
+                    f"{', '.join(map(repr, unknown))} — the accepted keys are "
+                    f"``value`` and ``pinned``, and a declaration no reader can "
+                    f"fully honour is not a declaration"
+                )
+                continue
+            pinned = declaration.get("pinned", False)
+            if not isinstance(pinned, bool):
+                issues.append(
+                    f"``durations_floors`` declares {name} with ``pinned: "
+                    f"{pinned!r}`` — not a boolean, so no reader can tell whether "
+                    f"the row is capped or merely floored"
+                )
+                continue
+            floor = declaration.get("value")
+        else:
+            pinned = False
+            floor = declaration
+        if isinstance(floor, bool) or not isinstance(floor, (int, float)) \
+                or not math.isfinite(float(floor)):
+            issues.append(
+                f"``durations_floors`` declares {floor!r} for {name} — not a "
+                f"number. A floor the writer cannot compare against is a floor "
+                f"the writer would silently ignore, which is the state this "
+                f"declaration exists to end"
+            )
+            continue
+        if name not in durations:
+            issues.append(
+                f"``durations_floors`` declares a floor of {float(floor):.1f} for "
+                f"{name}, which has no ``durations`` row — a floor can only guard "
+                f"a weight the map actually carries (#3400/#4348: a row must "
+                f"EXIST, not merely default)"
+            )
+            continue
+        value = durations[name]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue  # the wrong TYPE is `duration_issues`' diagnostic, not this one
+        if float(value) < float(floor):
+            # The DECLARATION decides the sentence, not the direction of the
+            # disagreement (the reader-side mirror of the writer's
+            # `kept_at_declared_cap` vs `kept_as_lower_bound`). A `pinned` row is a
+            # CAP: the writer holds it AT the declared value in BOTH directions, and
+            # the key's own header forbids "lower the declared floor" as a repair —
+            # raising or lowering a cap is a CI-budget decision recorded on #9172,
+            # never a sweep's side effect. Naming the wrong mechanism sent a reader
+            # to the one action the declaration forbids (#10575 review, P3).
+            if pinned:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` CAP of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"holds a capped row AT its declared value in both directions, "
+                    f"so this map states both that the weight is a declared weighing "
+                    f"choice and that it is a measurement below it; correcting the "
+                    f"row (or the declaration itself) is a CI-budget decision "
+                    f"(#9172), never a side effect of a sweep"
+                )
+            else:
+                issues.append(
+                    f"{name} is declared with a ``durations_floors`` FLOOR of "
+                    f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                    f"keeps a row at or above its floor, so this map states both that "
+                    f"the value is a declared minimum and that it is below it; raise "
+                    f"the row, or lower the declared floor"
+                )
+        elif pinned and float(value) > float(floor):
+            issues.append(
+                f"{name} is declared with a ``durations_floors`` CAP of "
+                f"{float(floor):.1f} but its row carries {value!r} — the writer "
+                f"keeps a capped row AT its declared value in both directions, so "
+                f"this map states both that the weight is a declared weighing "
+                f"choice and that it is a measurement above it; a raise of the "
+                f"declaration is a CI-budget decision (#9172), never a side effect "
+                f"of a sweep"
+            )
+    return issues
+
+
 def map_issues(manifest: dict) -> list[str]:
     """The manifest checks that already exist, composed in the #3407 order.
 
@@ -395,19 +574,22 @@ def map_issues(manifest: dict) -> list[str]:
     This is the ONE composition both enforcing entry points reach
     (``ci_selection --integrity`` and ``ci_timing.integrity_problems``, via
     :func:`check`), so a check added here cannot be half-wired. ``#6135``'s
-    ``fast_shard_issues`` and ``#2913/#5373``'s ``duplicate_entries`` are
-    carried here for exactly that reason: both landed on main beside the
-    #5050 validator, and leaving them at a call site would have made them
-    reachable from one entry point only — the half-wired state this
-    composition exists to prevent. Order follows main's own composition
-    (``fast_shard_issues`` first, ``duplicate_entries`` last) so a diagnostic
-    list reads the same on either entry point.
+    ``fast_shard_issues``, ``#2913/#5373``'s ``duplicate_entries`` and
+    ``#10575``'s ``floor_issues`` are carried here for exactly that reason: the
+    first two landed on main beside the #5050 validator, the third landed on main
+    through #10704, and leaving any of them at a call site would have made it
+    reachable from one entry point only — the half-wired state this composition
+    exists to prevent. Order follows main's own composition (``fast_shard_issues``
+    first, ``duplicate_entries`` last, and ``floor_issues`` between
+    ``duration_coverage_issues`` and ``duplicate_entries`` exactly as the body
+    composes it) so a diagnostic list reads the same on either entry point.
     """
     cs = _ci_selection()
     return (cs.fast_shard_issues(manifest)
             + cs.duration_issues(manifest)
             + cs.leg_coverage_issues(manifest)
             + cs.duration_coverage_issues(manifest)
+            + floor_issues(manifest)
             + cs.duplicate_entries(manifest))
 
 
@@ -458,6 +640,14 @@ def main(argv: list[str] | None = None) -> int:
     try:
         manifest = _load(path)
         red, unknown = check(manifest)
+    except _ci_selection().DuplicateManifestKeyError as exc:
+        # #10790: a duplicate mapping key is an OBSERVED defect, so it is RED
+        # (exit 1) — not UNKNOWN (exit 2), the code for "could not evaluate".
+        # Falling through to the generic arm below would mislabel it, and that
+        # mislabel is what let a collapsed map read as merely unobservable.
+        for issue in exc.issues:
+            print(f"x {issue}", file=sys.stderr)
+        return 1
     except Exception as exc:
         # Never a traceback and never 0: the exit code has to carry the same
         # meaning as the report does, or a caller reads "could not look" as

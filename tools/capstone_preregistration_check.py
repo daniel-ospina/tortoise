@@ -368,6 +368,13 @@ CROSS_CHECKED_CORPUS_KEYS = (
 #: in for a deleted ``E1`` — the epic's central criterion gone while its guard kept the check green
 #: (#9075 review r3 P2).
 REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The ONLY rows the record registers as bar-less (`UNMEASURED(...)`, §3.1's A4). Pinned here so the
+#: completeness gate can tell a registered non-bar from a required row that declares itself one —
+#: the branch also skips both numeric arms, so an unscoped version was a false PASS (#10982).
+#: Asserted disjoint from `REQUIRED_CRITERIA` at import: the two sets can never overlap.
+REGISTERED_NON_BAR_ROWS = frozenset({"A4"})
+assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA)), (
+    "a required row can never be a registered non-bar")
 
 #: The one required id that may be carried by sub-rows.
 SUB_ROW_CRITERIA = ("E2",)
@@ -381,6 +388,179 @@ PLACEHOLDER_CELLS = frozenset(
 
 #: A threshold must carry a comparator AND a number. Prose without both is not a threshold.
 COMPARATORS = ("<=", ">=", "<", ">", "=", "≤", "≥")
+#: A threshold that declares itself a REGISTERED NON-BAR (`UNMEASURED(<ground>)`, §3.1's A4 row).
+#: Such a cell is complete only when its ground names an issue (`#NNNN`) that gates the row — and the
+#: floor clause beside it may never be what satisfies the numeric arm (see `check_completeness`).
+#: ⛔ WHITESPACE-TOLERANT (`\s*`), because the prose spelling `UNMEASURED (ground)` is the natural
+#: one and a literal `UNMEASURED(` let it FALL THROUGH to the numeric arms, where the floor clause
+#: beside it supplied both comparator and number — so a REQUIRED row (`E1`) reading
+#: `UNMEASURED (…) above the floor of `>= 30`…` left the gate at OK with no bar at all. Measured
+#: on a copied evidence dir at #11331 review round 6: exit 0/OK with the space, exit 1 without it.
+#: The ONE definition, so every reader of this cell agrees with the branch that decides it.
+REGISTERED_NO_BAR = re.compile(r"\bUNMEASURED\s*\(")
+#: The `… above the floor of `` >= 30 `` …` clause a threshold cell may carry *beside* its bar.
+#: STRIPPED before the comparator test on a registered non-bar, because a floor is a refusal
+#: boundary and not a bar (§3.7, §7 item 1). ⛔ It strips the COMPARATOR THE FLOOR OWNS, not a run of
+#: characters: an earlier `floor of[^;]*` ate everything to the next `;`, so a cell that declared its
+#: real bar AFTER the floor clause read as bar-less — the arm could not fail on the property it names
+#: (#10982 review round 3). ⛔ The alternation is BUILT FROM `COMPARATORS`, never re-typed: the hand
+#: -written one omitted `≤`/`≥`, so a floor written `` `≥ 30` `` — the spelling the pinned record
+#: itself uses at :268,:271,:272 — read as a bar and the row was refused as a false RED
+#: (#10982 review round 4).
+#: ⛔ GROUP 1 IS THE NUMBER, and it is what `_strip_the_rows_own_floor` binds on. The pattern alone
+#: cannot tell a floor from a bar: the two words install ANY `comparator number`, so
+#: `UNMEASURED(#10988) floor of >= 0.5 typed_share` left A4 — the one row whose registration is that
+#: it has NO bar — with a bar and no finding, while the same comparator without the words was
+#: refused. A RECORD-ONLY edit, which §7 item 1 says is impossible (#11331 review round 8).
+FLOOR_CLAUSE = re.compile(
+    "floor(?:\\s+of)?\\s*(?:"
+    + "|".join(re.escape(c) for c in sorted(COMPARATORS, key=len, reverse=True))
+    + r")\s*(\d+(?:\.\d+)?)",
+    re.IGNORECASE,
+)
+
+
+#: The ONLY thing that may follow a row's floor UNIT: closing punctuation / whitespace, running to the
+#: END of the cell. ⛔ AN ALLOWLIST OF DELIMITERS, NEVER A DENYLIST OF RATE SPELLINGS (#11331 review
+#: round 11). A rate's denominator phrase can be ANY word after the unit (`per claim`, `share`,
+#: `ratio`, `over claims`, …), and a denylist is bypassed by the spelling it does not list — OWASP's
+#: input-validation control (C5) names that as the reason allowlisting is the required minimum. This
+#: arm is what keeps §7 item 1's "a record-only edit cannot give `A4` a bar" true, so the safe
+#: direction is to accept ONLY closing punctuation and refuse every word: over-blocking here costs a
+#: re-punctuated cell (the pinned `A4` cell is written so its clause ends it, §10.13), while failing
+#: open settles the owner-gated `A4`-vs-`D3` decision (§3.7, §10.11).
+FLOOR_CLAUSE_END = re.compile("[" + r"\s)\]}>.,;:!?—–\-" + "\"'" + "]*" + r"\Z")
+
+
+def _floor_unit(key: str) -> str:
+    """The denominator phrase a floor is expressed in, derived from its record KEY.
+
+    `a4_typed_statements` -> `"typed statements"`. The row id prefix (`a<digits>_`) carries no
+    meaning for the unit, so it is stripped.
+    """
+    return re.sub(r"^a\d+_", "", key).replace("_", " ").strip()
+
+
+class FloorMap(dict):
+    """`{row_id: pinned_value}` that ALSO carries each row's floor UNIT (`units[row_id]`).
+
+    ⛔ THE VALUE ALONE CANNOT TELL A FLOOR FROM A BAR (#11331 review round 10). `>= 30` typed
+    statements is `A4`'s registered floor — a population count. `>= 30 %` typed is a RATE bar that
+    reuses the same number, and binding only on the number excused it: measured, `A4`'s cell
+    rewritten to `floor of >= 30 % typed and compared to no bar` left the gate at `exit=0` with
+    `criteria[A4].floor` untouched, while the identical bar with the words `floor of` removed was
+    refused at `exit=1`. `A4` is the row the record registers as having NO bar, and this is the
+    owner-gated `A4`-vs-`D3` decision (`#10988` BLOCKED, `#1022` carries it), so excusing it
+    settles an owner decision this registration has no authority over (§3.7, §10.11).
+
+    A plain `dict` still works, but it carries no units, so its floor clauses cannot be classified
+    and are NOT exempted — fail CLOSED.
+    """
+
+    def __init__(self, values=None, units=None) -> None:
+        super().__init__(values or {})
+        self.units: dict[str, str] = dict(units or {})
+
+
+def _strip_the_rows_own_floor(text: str, value: float | None, unit: str | None = None) -> str:
+    """`text` with the row's OWN registered floor clause removed — and NOTHING when it has no pin.
+
+    ⛔ THE CLAUSE IS IDENTIFIED BY ITS VALUE **AND ITS UNIT**, not by the words in front of it.
+    Only a number the record PINS, expressed in the row's own denominator, is a floor (a refusal
+    boundary, §3.7); anything else is a bar however it is spelled, and it stays in the cell and
+    reds the arm.
+
+    ⛔ `value is None` STRIPS NOTHING — that is the absent-row case, and it must fail CLOSED.
+    An earlier cut stripped unconditionally on `None`, which put the ABSENT-row path back on the
+    laundering branch: measured at #11331 review round 9, deleting `criteria[A4].floor` while
+    writing a bar into A4's cell left the gate at exit 0, while the identical cell with the
+    pointer kept exited 1 — i.e. a record-only edit REMOVED the refusal, and both this function
+    and `_registered_floor_values` documented the opposite.
+
+    ⛔ `unit` IS PART OF THE BINDING, NOT DECORATION (round 10). Binding on the bare number excused
+    `floor of >= 30 % typed`, which reuses `A4`'s pinned 30 as a RATE — the bar the owner has not
+    ruled on. A clause is therefore exempted only when the text following its number names the
+    row's own floor denominator (`a4_typed_statements` -> "typed statements"). No unit ⇒ strip
+    nothing ⇒ the comparator reds.
+
+    ⛔ AND THE WHOLE UNIT PHRASE, NOT A PREFIX OF ONE (round 11). `typed statements per claim`,
+    `typed statements share` and `typed statements ratio` all START with the row's own unit, so the
+    round-10 prefix test exempted a RATE that reuses the floor's pinned 30 — measured, `floor of
+    >= 30 typed statements per claim, and compared to no bar` left the gate at exit 0 while the
+    identical cell with `%` after the number was refused. The clause must END at the unit: only
+    closing punctuation (`FLOOR_CLAUSE_END`) may follow it, to the end of the cell, because any
+    word there can re-scope the number into a rate and that is the `A4`-vs-`D3` bar `#10988`/`#1022`
+    have not ruled on. `, per claim` is refused for the same reason as ` per claim`: the delimiter
+    does not license a following denominator phrase. The pinned record's own `A4` cell is written so
+    its floor clause ends it (`#11331` §10.13).
+
+    The no-record caller (a unit test on a bare row list) is the CHECKER's concern, not this
+    function's: `check_completeness` strips by shape alone only when it was handed no map at all.
+    The gate always hands it one (`check()` reads the map from the same record it validates), so
+    the value+unit binding is what runs on every real check — and an unreadable record yields `{}`,
+    which strips nothing, which fails CLOSED.
+    """
+    if value is None or not unit:
+        return text
+
+    wanted = unit.strip().lower()
+
+    def _drop(match: re.Match[str]) -> str:
+        try:
+            if abs(float(match.group(1)) - value) >= 1e-9:
+                return match.group(0)
+        except (TypeError, ValueError):
+            return match.group(0)
+        # The denominator the floor is expressed in must FOLLOW the number, ignoring the markdown
+        # that usually wraps the value (`` `>= 30` typed statements ``).
+        tail = re.sub(r"[`*_\s]+", " ", text[match.end():]).strip().lower()
+        if not tail.startswith(wanted):
+            return match.group(0)
+        # …and it must be the WHOLE phrase, at the END of the cell: only closing punctuation may
+        # follow it, so a rate spelled after the unit — `typed statements per claim`, and
+        # `typed statements, per claim` alike — is NOT the floor (#11331 r11).
+        rest = tail[len(wanted):]
+        return "" if FLOOR_CLAUSE_END.match(rest) else match.group(0)
+
+    return FLOOR_CLAUSE.sub(_drop, text)
+
+
+def _registered_floor_values(directory: Path) -> FloorMap | None:
+    """Row id → the PINNED value of the floor that row's own registration names.
+
+    One direction only: `criteria[].floor` names a key in `denominator_floors`, and the pair is
+    what makes a floor clause identifiable. A row with no floor, or a floor key the record does
+    not pin, is simply ABSENT from the result — and an absent row strips nothing at the caller
+    (`_strip_the_rows_own_floor` returns the cell untouched for `None`), which fails CLOSED.
+    Unreadable or malformed records yield `{}` for the same reason: nothing is pinned, so no
+    clause is a floor, so no comparator can be excused by the phrase in front of it.
+    """
+    try:
+        record = json.loads((directory / MACHINE_RECORD).read_text())
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(record, dict):
+        return {}
+    floors = record.get("denominator_floors")
+    if not isinstance(floors, dict):
+        return {}
+    out: FloorMap = FloorMap()
+    for crit in record.get("criteria") or []:
+        if not isinstance(crit, dict):
+            continue
+        key, row_id = crit.get("floor"), crit.get("id")
+        if not isinstance(key, str) or not isinstance(row_id, str) or key not in floors:
+            continue
+        value = floors[key]
+        if isinstance(value, bool) or not isinstance(value, (int, float)):
+            continue
+        out[row_id] = float(value)
+        out.units[row_id] = _floor_unit(key)
+    return out
+#: A registered non-bar must name WHO gates it. ⛔ The check is `#\d+` — "names an issue" — NOT "names
+#: the row's registered decision": the record's cells and §7 item 1 were restated to claim exactly
+#: what this tests, because the stronger sentence would be a claim the code does not perform.
+OWNER_DECISION = re.compile(r"#\d+")
 
 #: The four-edge denominator as a RATE: ``\\d+ / 4`` — and never ``4 / 40``, hence the trailing
 #: guard. A count in words (``2 of 4``) is deliberately NOT matched: §1.4 states the history that
@@ -3724,7 +3904,8 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
     return failures
 
 
-def check_completeness(rows: list[dict[str, str]]) -> list[str]:
+def check_completeness(rows: list[dict[str, str]],
+                       row_floors: dict[str, float] | None = None) -> list[str]:
     failures: list[str] = []
     if not rows:
         return [
@@ -3756,6 +3937,87 @@ def check_completeness(rows: list[dict[str, str]]) -> list[str]:
         if is_placeholder(row["threshold"]):
             continue  # already reported above
         plain = _plain(row["threshold"])
+        if REGISTERED_NO_BAR.search(plain):
+            # ⛔ SCOPED TO THE ROWS THE RECORD REGISTERS AS NON-BARS — never "any row that says
+            # UNMEASURED". The branch below `continue`s past BOTH numeric arms, so an unscoped
+            # branch let a REQUIRED row (`E1`–`E5`) declare itself bar-less and still leave the gate
+            # at OK, contradicting §7 item 1's "every criteria row names a numeric threshold" — a
+            # false PASS added by the very arm meant to close one (#10982 review round 5). The
+            # allowed set is pinned and asserted DISJOINT from REQUIRED_CRITERIA, so a required row
+            # cannot enter it by editing the record alone.
+            if row["id"] not in REGISTERED_NON_BAR_ROWS:
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    f"declares UNMEASURED(...) but this row is not one the record registers as a "
+                    f"non-bar (registered: {sorted(REGISTERED_NON_BAR_ROWS)}) — either give it a "
+                    "numeric threshold or add it to REGISTERED_NON_BAR_ROWS in this tool (§7 item 1)"
+                )
+                continue
+            # ⛔ A REGISTERED non-bar is not a bar, and its FLOOR clause may never stand in for one.
+            # Before this arm, a threshold cell declaring `UNMEASURED(...)` passed the numeric test
+            # on the `>= 30` its own floor clause happened to contain — so a row the record says has
+            # NO bar satisfied the "has a bar" check, i.e. a false PASS in the completeness gate
+            # (§7 item 1; #10982 review round 2). A floor is a REFUSAL boundary (§3.7), so:
+            #   * the cell must name the OWNER DECISION that gates the row, and
+            #   * no comparator may survive outside the floor clause.
+            if not OWNER_DECISION.search(plain):
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    "declares UNMEASURED(...) but names no issue (#NNNN) that gates it — "
+                    "a registered non-bar must state who decides it"
+                )
+            # INDEPENDENT of the arm above, never `elif`: a cell can name its owner decision and
+            # STILL smuggle a comparator out of the floor clause, and that is the mutation this
+            # half exists to catch.
+            # ⛔ THE WHOLE CELL, minus the row's OWN floor clause — never the substring AFTER the
+            # marker, and never an arbitrary `floor of …`.
+            # `REGISTERED_NO_BAR.split(text, 1)[-1]` is everything to the right of `UNMEASURED(`,
+            # so a bar written FIRST (`>= 0.006` typed_share — UNMEASURED(…)) was in the PREFIX
+            # and never scanned: measured at #11331 review round 7, that cell exited OK with an
+            # empty finding list while the same bar placed after the marker was refused. A4 is
+            # the one row whose registration is that it has NO bar, and its threshold cell is
+            # what the run/scoring child reads, so a bar surviving here is the owner-decision
+            # bypass this arm exists to close (§7 item 1, §3.7, §10.11).
+            # ⛔ AND THE EXEMPTION IS THE PINNED VALUE **AND ITS UNIT**, not the phrase (#11331
+            # review rounds 8 and 10): stripping any `floor of <comparator> <number>` let the two
+            # words launder a bar (`floor of >= 0.5 typed_share` exited OK), and binding on the
+            # bare NUMBER still excused `floor of >= 30 % typed` — the same 30 as `A4`'s count
+            # floor, spent as a RATE. `A4` is the row whose registration is that it has NO bar, so
+            # either variant is an owner-decision bypass (§7 item 1, §3.7, §10.11).
+            remainder = (
+                # ⛔ NO MAP AT ALL is a unit test on a bare row list: strip by shape, the legacy
+                # behaviour. A map that is PRESENT but does not name this row is the absent-row
+                # case and strips nothing, so the comparator reds — the fail-closed direction the
+                # docstring promises. The gate always supplies a map, so `None` never reaches here
+                # on a real check (#11331 review round 9: `{}` used to fall into `None`).
+                FLOOR_CLAUSE.sub("", plain) if row_floors is None
+                else _strip_the_rows_own_floor(
+                    plain,
+                    row_floors.get(row["id"]),
+                    getattr(row_floors, "units", {}).get(row["id"]),
+                )
+            )
+            if any(c in remainder for c in COMPARATORS):
+                failures.append(
+                    f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} "
+                    "declares UNMEASURED(...) and still carries a comparator outside its floor "
+                    "clause — a registered non-bar cannot also be a bar. A floor clause is "
+                    "exempted only where the row's own floor unit is followed by closing "
+                    "punctuation to the END of the cell: a rate spelled after the unit "
+                    "(`typed statements per claim`) re-scopes the number and is refused, so move "
+                    "the floor clause to the end of the cell"
+                )
+            continue
+        if row["id"] in REGISTERED_NON_BAR_ROWS:
+            # …and the REVERSE direction: a row the code lets declare itself bar-less must still BE
+            # bar-less in the record. Without this, deleting `UNMEASURED(...)` from A4's cell while
+            # leaving the pin alone would silently turn the exemption into a numeric bar.
+            failures.append(
+                f"row {row['id']!r} (line {row['line']}): this row is registered as a non-bar but "
+                f"its threshold {row['threshold']!r} carries a real bar — drop it from "
+                "REGISTERED_NON_BAR_ROWS or restore UNMEASURED(...)"
+            )
+            continue
         if not re.search(r"\d", plain):
             failures.append(
                 f"row {row['id']!r} (line {row['line']}): threshold {row['threshold']!r} carries "
@@ -3906,7 +4168,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
         "checks": {},
     }
     failures: list[str] = []
-    failures += check_completeness(rows)
+    failures += check_completeness(rows, _registered_floor_values(directory))
     failures += check_e4_denominator(rows, text, pins)
     registry_scopes: list[str] = []
     failures += check_registry_contradictions(directory, rows, pins, registry_scopes)

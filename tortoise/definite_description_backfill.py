@@ -138,8 +138,10 @@ from .env_truthy import is_truthy
 
 #: The call-time toggle. Unset/0 ⇒ the planner does not run and returns an empty
 #: plan with a zeroed ``enabled`` stats key, so the report's shape and count are
-#: measurable before the plan is trusted — the ``TORTOISE_VALUE_GATE`` (#4899),
-#: ``TORTOISE_VET`` (#5005) and ``TORTOISE_CLASSIFY_LATER`` (#1695) precedent.
+#: measurable before the plan is trusted — the ``TORTOISE_VET`` (#5005) and
+#: ``TORTOISE_CLASSIFY_LATER`` (#1695) precedent. (``TORTOISE_VALUE_GATE``
+#: (#4899) was the third member until ``#10996`` flipped it ON by default, so
+#: it is no longer an example of this pattern.)
 #:
 #: ⚠️ **The flag can never enable a destructive action** — there is none to
 #: enable. It only decides whether the ledger is produced.

@@ -20,11 +20,33 @@
 # hand:
 #     gh workflow run finding-provenance.yml -f issue_number=<N>
 #
-# ISSUE SCOPE — a `Measured at:` line is gated FIRST, whatever the labels: an
-# issue that claims a measurement never escapes validation. An issue with NO
-# line is then a finding only if it is `bug`-labeled. `beta-feedback` reports
-# (external, about a released version, no checkout to emit from) are exempt
-# from the REQUIRED case; features, epics and process issues are untouched.
+# ISSUE SCOPE — a provenance CLAIM is gated FIRST, whatever the labels: an
+# issue that claims a measurement never escapes validation. The claim is read
+# by the repo's own `--is-finding` classifier — the SAME predicate as the
+# comment arm (#10146 F2) — never by a `grep` for a column-0 `Measured at:`,
+# which missed every bulleted, quoted, indented or backtick-wrapped claim and
+# so skipped those findings entirely. An issue with NO claim is then a finding
+# if it is `bug`-labeled, or if it WAS FILED THROUGH THE AGENT-FINDING FORM —
+# in which case it is REFUSED by the gate rather than skipped (#10146).
+# ⛔ WHAT ACTUALLY DECIDES THAT LAST ARM — and two keys that did NOT (#10146
+# F1, twice). (a) `labels: ["internal"]`: `internal` is not a label in this
+# repo (measured 2026-11-05: `gh api .../labels?per_page=100` → 78 labels, none
+# named `internal`), and GitHub SILENTLY DROPS a template label that does not
+# exist — the branch never fired and the fail-open it was written to close
+# stayed open in production while its own tests passed on an injected label.
+# (b) a `<!-- finding -->` marker inside the form's `type: markdown` element:
+# GitHub's form schema says a `markdown` element is "displayed in the form …
+# but is not submitted", so that token never reached ANY real issue body.
+# A label is repo STATE that diverged; a `markdown` element is UI text the
+# platform drops at filing. The key is therefore a SUBMITTED, REQUIRED field of
+# the form whose `### <label>` heading the claim parser selects — `### Measured
+# at (paste the --emit line)` — which is the `0` arm above, plus the form's
+# editable `title: "[finding]: "` prefix as a weaker second key (below).
+# ⚠️ Do not put a label, or anything inside a `markdown` element, back in front
+# of this decision: neither survives filing.
+# `beta-feedback` reports (external, about a released version, no checkout to
+# emit from) are exempt from the REQUIRED case; features, epics and process
+# issues are untouched.
 #
 # COMMENT SCOPE (#4732) — the issue body is written once, usually at filing,
 # BEFORE the investigation that produces the findings; the findings arrive in
@@ -54,9 +76,11 @@
 # finding. Both jobs carry an explicit `timeout-minutes`, so a wedged clone can
 # no longer hold a runner for the 360-minute default.
 #
-# ⛔ The classification is still the repo's OWN tool, never a shell `grep` in
-# front of the checkout: a second copy of the predicate drifts, and then the
-# cheap copy decides silently. The split saves the CONE, not the predicate.
+# ⛔ The classification is the repo's OWN tool, never a shell `grep` in front
+# of the checkout: a second copy of the predicate drifts, and then the cheap
+# copy decides silently. That is not advice — it had ALREADY happened on the
+# issue-body arm, and that drift is #10146's actual root cause (see the
+# `decide` step below). The split saves the CONE, not the predicate.
 #
 # ⛔ There is deliberately NO `paths:`/`paths-ignore:` filter here. The triggers
 # are `issues`/`issue_comment`, which carry no path, and a path-filtered GATE
@@ -252,42 +276,141 @@ jobs:
           else
             echo "kind=issue" >> "$GITHUB_OUTPUT"
             gh issue view "$N" --json body -q .body > "$RUNNER_TEMP/body.md"
+            # THE FORM'S OWN TITLE PREFIX (#10146 F1) — the SECOND key, read
+            # only by the `decide` step's fallback arm. It is weaker than the
+            # form's required provenance field (whose `### Measured at …`
+            # heading the claim parser selects directly): `title:` is
+            # PRE-POPULATED, so a filer can overwrite it. Never rest this
+            # decision on it alone.
+            gh issue view "$N" --json title -q .title > "$RUNNER_TEMP/title.txt"
           fi
           gh issue view "$N" --json labels -q '.labels[].name' > "$RUNNER_TEMP/labels.txt"
 
+      # ── ONE PREDICATE, BOTH ARMS (#10146 F2) ──────────────────────────────
+      # The ISSUE-BODY arm used to classify with `grep -qE '^Measured at:'` — a
+      # SECOND COPY of the predicate, which this file's header forbids with the
+      # reason attached: a second copy drifts, and then the cheap copy decides
+      # silently. It had already drifted. `PROVENANCE_CLAIM_RE` tolerates a
+      # leading markdown marker (`# > * _ ` ~ -`), leading whitespace, and the
+      # bolded `**Measured at:**` form; a column-0 `grep` sees none of them. So
+      # a body whose line was bulleted, quoted, indented or backtick-wrapped
+      # fell through the grep AND both label fallbacks to `is_finding=false`:
+      # a finding that was never gated at all. That is not hypothetical — the
+      # form's own `### Measured at …` heading is exactly such a line, so the
+      # `#10146` shape was a SILENT SKIP on this arm, never the FAIL the issue
+      # reported (the claim parser never decided an issue body; it is reached
+      # only from `--is-finding`, which only the comment arm called).
+      #
+      # There is now ONE call site for the predicate, ahead of every label
+      # exemption, so neither arm can skip a body the other would gate.
       - name: Decide whether this issue is a finding
         id: decide
         env:
           KIND: ${{ steps.issue.outputs.kind }}
         run: |
-          if [ "$KIND" = "comment" ]; then
-            # A COMMENT is gated ONLY when it CLAIMS to be a finding — a
-            # `Measured at:` provenance claim of any form, or the explicit
-            # `<!-- finding -->` marker. Discussion comments pass untouched:
-            # a comment gate that fires on everything is noise, and a gate
-            # that is ignored is its own silent failure (#4732). The
-            # classifier is a separate step-level rc from the gate's.
-            rc=0
-            python3 tools/finding_provenance.py --is-finding \
-              "$RUNNER_TEMP/body.md" || rc=$?
-            case "$rc" in
-              0) echo "is_finding=true" >> "$GITHUB_OUTPUT" ;;
-              1) echo "is_finding=false" >> "$GITHUB_OUTPUT"
-                 echo "ordinary discussion comment (no finding claim) — skipping" ;;
-              *) echo "finding-provenance: classifier failed (exit $rc)"
-                 exit "$rc" ;;
-            esac
-          elif grep -qE '^Measured at:' "$RUNNER_TEMP/body.md"; then
-            echo "is_finding=true" >> "$GITHUB_OUTPUT"
-          elif grep -qx 'beta-feedback' "$RUNNER_TEMP/labels.txt"; then
-            echo "is_finding=false" >> "$GITHUB_OUTPUT"
-            echo "beta-feedback report with no measured commit — skipping"
-          elif grep -qx 'bug' "$RUNNER_TEMP/labels.txt"; then
-            echo "is_finding=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "is_finding=false" >> "$GITHUB_OUTPUT"
-            echo "not a finding (no provenance line, not an internal bug) — skipping"
-          fi
+          rc=0
+          python3 tools/finding_provenance.py --is-finding \
+            "$RUNNER_TEMP/body.md" || rc=$?
+          case "$rc" in
+            0)
+              # The body CLAIMS to be a finding, in whatever form it wrote it —
+              # a `Measured at:` line of ANY shape. It is gated — never
+              # exempted, whatever its labels (#4732).
+              #
+              # THIS IS THE FORM-FILED PATH (#10146 F1), and it is reached by
+              # the form's REQUIRED `measured_at` field, whose label the form
+              # renders as `### Measured at (paste the --emit line)` — a claim
+              # the parser above selects. It is delivered by a SUBMITTED field,
+              # so it arrives with NO label (all a form-filed issue gets) and
+              # survives a filer who rewrites the title. The gate then refuses
+              # an unparseable answer as FAIL UNKNOWN_PROVENANCE — REFUSED, not
+              # skipped. ⛔ It used to key on a `<!-- finding -->` marker inside
+              # the form's `type: markdown` element, which GitHub does not
+              # submit, so this arm was dead for every real filing; do not key
+              # this decision on anything a `markdown` element carries.
+              echo "is_finding=true" >> "$GITHUB_OUTPUT"
+              echo "the body claims to be a finding (the repo's own"
+              echo "classifier selected it) — gating it"
+              ;;
+            1)
+              # No claim. Whether that is a SKIP or a REFUSAL depends on what
+              # the body IS; the branches below are the whole of this
+              # workflow's remaining judgement.
+              if [ "$KIND" = "comment" ]; then
+                # COMMENT ARM (#4732): no claim is ordinary discussion, and
+                # skipping it is the DESIGN. A comment gate that fires on all
+                # chatter is noise, and a gate that is ignored is its own
+                # silent failure.
+                echo "is_finding=false" >> "$GITHUB_OUTPUT"
+                echo "ordinary discussion comment (no finding claim) — skipping"
+              elif grep -qx 'beta-feedback' "$RUNNER_TEMP/labels.txt"; then
+                # EXEMPT BY NAME (#4732 round 2): an external report against a
+                # released version, filed through bug_report.yml, with no
+                # checkout to emit a line from. It reaches here ONLY with no
+                # claim — the `0` arm above is unconditional, which is why
+                # bug_report.yml's provenance field label must stay neutral
+                # (`Provenance (if you have a checkout)`, NOT `Measured at …`):
+                # a field's `### <label>` heading IS submitted, so a claim-shaped
+                # label made every blank-filed beta report a "finding" and put
+                # this arm out of reach in production.
+                echo "is_finding=false" >> "$GITHUB_OUTPUT"
+                echo "beta-feedback report with no measured commit — skipping"
+              elif grep -qE '^\[finding\]' "$RUNNER_TEMP/title.txt" 2>/dev/null; then
+                # ⛔ REFUSED, NOT SKIPPED (#10146 F2), keyed on the form's own
+                # `title: "[finding]: "`. This branch used to test for an
+                # `internal` LABEL — and `internal` is not a label in this
+                # repo, so GitHub dropped it at filing and this branch never
+                # ran for the path it was written for.
+                #
+                # THIS IS THE FALLBACK, not the primary key: it fires only when
+                # the body carries no claim at all, which for a form-filed issue
+                # means the required provenance field's `### Measured at …`
+                # heading was deleted or renamed. The title is pre-populated and
+                # the filer can overwrite it, so it is the weaker of the two and
+                # a body that ALSO lost its title lands in the final `else`.
+                #
+                # Such a body IS a finding by construction: its one required
+                # substantive field is the provenance line. The claim parser
+                # found nothing in it — and `required: true` makes that field
+                # NON-EMPTY, not PARSEABLE, so "required" is not a substitute
+                # for this check (#10146).
+                #
+                # It is routed to the GATE, not to a green. `--validate`
+                # refuses a body with no parseable line as FAIL
+                # UNKNOWN_PROVENANCE (exit 1), which labels the issue
+                # `provenance-stale` and replies with the repair — a loud
+                # refusal that names the finding. Deliberately NOT `exit 2`:
+                # in this workflow's own contract exit 2 means "could not
+                # measure — an ENVIRONMENT fault" and leaves the label alone,
+                # so reporting a broken filing as infrastructure breakage
+                # would be the same reports-about-the-wrong-object defect this
+                # branch exists to stop.
+                echo "is_finding=true" >> "$GITHUB_OUTPUT"
+                echo "finding-provenance: REFUSED, NOT SKIPPED — this issue was"
+                echo "filed through the agent-finding form (its '[finding]: '"
+                echo "title, the fallback key), whose required provenance field"
+                echo "carries no line the claim parser can"
+                echo "select (missing, or hand-typed prose). Routing it to the"
+                echo "gate to be refused as UNKNOWN_PROVENANCE (#10146)."
+                echo
+                echo "    uv run python tools/finding_provenance.py --emit"
+              elif grep -qx 'bug' "$RUNNER_TEMP/labels.txt"; then
+                echo "is_finding=true" >> "$GITHUB_OUTPUT"
+              else
+                # Genuinely not a finding: a feature, epic or process issue,
+                # which this gate was never written about. Named here so the
+                # log says WHICH test declined, not just "skipping".
+                echo "is_finding=false" >> "$GITHUB_OUTPUT"
+                echo "not a finding (no provenance claim, no agent-finding"
+                echo "form provenance, and neither the 'bug' nor the"
+                echo "'beta-feedback' label) — skipping"
+              fi
+              ;;
+            *)
+              echo "finding-provenance: classifier failed (exit $rc)"
+              exit "$rc"
+              ;;
+          esac
 
   # THE EXPENSIVE HALF — full history, and it only runs for a body that IS a
   # finding. Everything that posts (label, annotation, reply) lives here.

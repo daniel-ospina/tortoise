@@ -141,7 +141,7 @@ Design contract
    targeted `gh pr view` on EVERY run, which is a fleet-shared GraphQL cost this
    change does not add.
 
-Surfaces (8 rows, ALL hit-capable)
+Surfaces (9 rows, ALL hit-capable)
 ----------------------------------------------------------------------------
   issue landed              issue state (gh issue view);     (CLOSED issue —
                             /issues/N/timeline when OPEN     the ONLY source
@@ -175,6 +175,16 @@ Surfaces (8 rows, ALL hit-capable)
                                                            applies to a record
                                                            whose branch is 0
                                                            ahead, #6108)
+  live lane processes       ps -Ao pid=,ppid=,command= for   (a RUNNING lane:
+                            `pi` + its cwd (/proc on Linux,  attributed by a
+                            lsof on macOS) + EVERY harness  boundary-exact
+                            queue root that exists, from     #N in its command
+                            `$O/bg`, `~/orchestrator/bg`,   line or in a cwd
+                            `$CELL_HOME/orchestrator/bg`    INSIDE this repo,
+                            and the fleet literal           or a live queue
+                            /home/cmux/orchestrator/bg      entry for a PR this
+                            (`prd-<owner>-<repo>-<PR>.pid`) run attributed to
+                                                           #N — #1233)
   issue assignee/holder     gh issue view N (assignee) +  (a lane MECHANICALLY
                             the FLEET BOARD's lane->issue  attributed to #N whose
                             attribution + holder liveness  holder has NOT stopped;
@@ -183,22 +193,33 @@ Surfaces (8 rows, ALL hit-capable)
                                                            #8175)
 
 The `issue keywords` row was removed with the lexical arm (#3504): a row that
-can only report a guess does not become honest by being listed. The eighth row
-today is a DIFFERENT one — `merged PRs naming an OPEN issue` (#8625), the
+can only report a guess does not become honest by being listed. The row that
+replaced it is a DIFFERENT one — `merged PRs naming an OPEN issue` (#8625), the
 advisory home of the title-reference arm that used to be an authoritative source
-of `LANDED` — so do not read "8 rows" as the deleted keyword row returning, and
-do not read this ADVISORY row as a landing.
+of `LANDED` — so do not read the count above as the deleted keyword row
+returning, and do not read this ADVISORY row as a landing.
 
-NOT PRESENT: a fleet-session surface. #1233 asked for one wired to
-`map-sessions.py`, and it was built and measured for this change — then left
-out, because the prescribed discipline (issue number + >= 2 distinctive title
-keywords) does not identify a session that HOLDS an issue; it identifies every
-session that has READ it. On #3827 the surface attributed 13 sessions, 11 of
-them sessions holding a pasted copy of the fleet board (a mailer-daemon
+NOT PRESENT: a fleet-session surface that matches SESSION TEXT. #1233 asked for
+one wired to `map-sessions.py`, and it was built and measured for this change —
+then left out, because the prescribed discipline (issue number + >= 2 distinctive
+title keywords) does not identify a session that HOLDS an issue; it identifies
+every session that has READ it. On #3827 the surface attributed 13 sessions, 11
+of them sessions holding a pasted copy of the fleet board (a mailer-daemon
 session, a marketing session, ...). Every one of them is fail-closed noise, and
 blocking dispatch on 13 phantom holders would reproduce the exact
 "a gate that always fires is a gate that gets worked around" corrosion this
-change fixes for claim comments. The mechanism that CAN tell a holder from a
+change fixes for claim comments.
+
+⛔ WHAT #1233 GOT INSTEAD IS A DIFFERENT MECHANISM, AND IT IS PRESENT: the ninth
+row, `live lane processes`. It reads a PROCESS TABLE, not session text — the
+lane's own argv/cwd and the harness queue — so it needs no cooperation (which
+session-text matching, and any lock, would), and it names a number only where a
+number is a property of the artifact (a worktree path, a brief, a queue key). The
+noise that killed the session-text arm does not arise here because "a session
+mentioned the issue" and "a process IS the lane" are different facts: the first
+is unfalsifiable, the second is measurable. Self is excluded by pid ancestry
+(#10684), and the row ABSTAINS (INCOMPLETE) rather than reading a blind scan as
+CLEAN. The mechanism that CAN tell a holder from a
 reader — the board's lane->issue attribution — now exists and is exactly what the
 claim gate reads (below). The standalone `fleet-session surface` ROW is still
 absent: keyword attribution is not a substitute for it, and the board's
@@ -273,9 +294,12 @@ STOPPED; the *rule* is pinned by the synthetic test
 `test_a_terminal_holder_whose_process_is_alive_still_blocks`, not by that
 observation, which is evidence of the shape rather than a current reading.
 
-Fail-closed, and NO dismissal switch. A board that cannot be read, rebuilt, or
-attributed marks this surface INCOMPLETE — never CLEAN, and never a downgrade of
-a blocking holder. Six unmeasured cases in particular: the board's live-session
+Fail-closed, and NO dismissal switch in prose or issue text. (Self-identity is
+the one declared input: the caller's own pid/ancestors are exempt unfalsifiably,
+while `--self-pid` is a caller DECLARATION with the same trust model as
+`--self-branch` — see `Identity.self_pids`.) A board that cannot be read,
+rebuilt, or attributed marks this surface INCOMPLETE — never CLEAN, and never a
+downgrade of a blocking holder. Six unmeasured cases in particular: the board's live-session
 store could not be read (its `liveness-unmeasured` orphan); a lane carries no
 `pid_alive` reading at all; a lane carries `pid_alive: false` **as a default**,
 because the board keeps no session record for it (`liveness_measured` is False —
@@ -449,7 +473,10 @@ Exit codes
                         from the FILE itself; `fleet_state.py build` cannot
                         create or repair it), or the board is unreadable / the
                         attribution is ambiguous (remedy: rebuild the board,
-                        `uv run python tools/fleet_state.py build`). A surface
+                        `uv run python tools/fleet_state.py build`), or the board's
+                        GitHub read was KILLED at its bound because it is SLOW, not
+                        unauthorised (remedy: re-run the pre-flight — `gh auth` is
+                        fine and a rebuild only re-runs the killed read; #11202). A surface
                         that can never
                         produce a blocking hit is EXEMPT and its failure is only
                         REPORTED: it has no ability to prevent a duplicate, so its
@@ -506,6 +533,18 @@ Env seams (tests point these at stubs; production defaults are the real tools)
                                           (default: 300, clamped to
                                           fleet_state.STATE_FRESH_S; <= 0
                                           disables the cache)
+    FLEET_STATE_GH_READ_BOUND            read by `tools/fleet_state.py`, NOT here,
+                                          because it governs the OPEN-ISSUE read
+                                          this gate's board rebuild pays for
+                                          (#11202): unset => the bound is DERIVED
+                                          from the read's declared row count
+                                          (100 s at 2000 rows) and a timeout is
+                                          retried once; `fixed` => the
+                                          pre-#11202 path — flat 60 s, one
+                                          attempt, so a read that contention slowed
+                                          past 60 s is killed and the board answers
+                                          INCOMPLETE (fail-closed). It selects no
+                                          path and no target.
 The claim gate reads the fleet board at ``fleet_state.DEFAULT_OUT``, the user's
 state dir (``$HOME/.pi/agent/state/fleet-state.json``). The gate adds NO override
 of its own: no flag selects the board, no environment variable names it, and it
@@ -558,6 +597,7 @@ import json
 import math
 import os
 import re
+import stat
 import subprocess
 import time
 from collections.abc import Mapping
@@ -680,6 +720,13 @@ SURFACE_CLOSED_PRS = "recently-closed PRs"
 SURFACE_LOCAL_BRANCHES = "local branches"
 SURFACE_REMOTE_BRANCHES = "remote branches"
 SURFACE_WORKTREES = "local worktrees"
+# #1233: the surface that actually collided. Every surface above reads a STATIC
+# artifact — a ref, a worktree record, a PR, an issue field, a board row — and a
+# lane in its first hour holds an issue with a RUNNING PROCESS and no artifact
+# yet. Two measured instances (2026-11-05): a `pr-doctor` lane
+# `prd-daniel-ospina-tortoise-11067` was already on that PR while this gate
+# returned clean, and a lane in `.worktrees/combine-A` kept pushing to #10963.
+SURFACE_PROCESSES = "live lane processes"
 # `issue assignee/holder` — renamed from `issue assignee/comments` in #8175,
 # when the surface stopped reading comments. The name is what a reader uses to
 # decide whether a row covered what they care about, so a row that no longer
@@ -721,6 +768,7 @@ ALL_SURFACES = (
     SURFACE_LOCAL_BRANCHES,
     SURFACE_REMOTE_BRANCHES,
     SURFACE_WORKTREES,
+    SURFACE_PROCESSES,
     SURFACE_ISSUE,
 )
 
@@ -1076,6 +1124,25 @@ class Identity:
     login: str | None = None
     self_branches: frozenset[str] = frozenset()
     self_worktrees: frozenset[str] = frozenset()
+    #: The caller's OWN process ids (#10684, #9251). A board lane whose
+    #: `session.pi_pid` is in this set is reported as the caller's own work rather
+    #: than a competing claim.
+    #:
+    #: ⛔ TWO HALVES, TWO TRUST MODELS — do not run them together (review cycle 1).
+    #:   * AUTO-DECLARED (this process + its ANCESTORS) is the half the fix rests
+    #:     on: it is unfalsifiable, so it cannot hide a PEER. Ancestry rather than
+    #:     equality is load-bearing — a fleet lane is a three-deep chain
+    #:     (`bash -c <lane.sh>` -> `lane.sh` -> `pi`), so the pid the board records
+    #:     is the lane's `pi` while this pre-flight runs in a shell BELOW it.
+    #:   * `--self-pid` is a DECLARATION, exactly like `--self-branch` /
+    #:     `--self-worktree`: authoritative, never second-guessed, and — like them
+    #:     — it CAN name a pid that is not the caller's. That is the caller
+    #:     asserting ownership, not the tool granting a dismissal: the board
+    #:     publishes every lane's `session.pi_pid`, so a caller determined to hide
+    #:     a peer could always name it, and no automated check can tell that apart
+    #:     from a lane whose ancestry chain the tool could not read.
+    #: An UNDECLARED pid is fail-closed: it leaves the holder blocking.
+    self_pids: frozenset[int] = frozenset()
 
     def __post_init__(self) -> None:
         """Canonicalise the declared worktrees ONCE, at construction.
@@ -1127,7 +1194,6 @@ class Identity:
         if not path:
             return False
         return os.path.realpath(path) in self.self_worktrees
-
 
 @dataclass
 class RepoTarget:
@@ -1214,7 +1280,22 @@ class Surface:
 
 def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
     """Run a command and capture output. Never raises for non-zero exit;
-    returns (rc, stdout, stderr, timed_out)."""
+    returns (rc, stdout, stderr, timed_out).
+
+    ⛔ AN UNDECODABLE OUTPUT IS A NAMED FAILURE, NOT AN EXCEPTION (#8881).
+    `text=True` decodes strictly with the locale codec, so ONE non-UTF-8 byte in
+    a `git` line — a refname, a worktree path, `git remote -v` — raised
+    `UnicodeDecodeError`, which is a `ValueError`: it matched no handler on the
+    way up (`_gh_json` catches only `SurfaceError`, `run_preflight` catches only
+    `SurfaceError`, `main` catches only `NotAWorkItem`/`RuntimeError`), so it
+    escaped as a traceback with NO `VERDICT` line and **exit 1 — this tool's
+    COLLISION code**. An operator then waits for a lane that never appears.
+    Decoding stays STRICT (replacing the bytes would manufacture a slug that
+    then reads CLEAN — a wrong answer, worse than a crash); the failure is
+    merely CLASSIFIED: rc 126 is a normal non-zero exit the call sites already
+    handle, and the stderr sentence names the cause so the surface note, not a
+    traceback, is what the operator reads.
+    """
     try:
         proc = subprocess.run(
             cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env
@@ -1226,6 +1307,16 @@ def _run(cmd: list[str], cwd: str, timeout: float, env: dict | None = None):
         return 124, "", f"timeout after {timeout:g}s", True
     except OSError as exc:  # pragma: no cover - defensive
         return 126, "", f"{cmd[0]}: {exc}", False
+    except ValueError:  # UnicodeDecodeError under `text=True` (#8881)
+        # ⛔ NOT `errors="replace"`. A replacement character produces a
+        # plausible-looking ref/slug that then answers the caller (the wrong-slug
+        # path #8881 measured). Refuse the read instead of guessing at it.
+        return (
+            126, "",
+            f"{cmd[0]}: output not decodable as text "
+            "— the read is refused, not guessed (#8881)",
+            False,
+        )
 
 
 # C0/C1 control characters (ESC/CSI/OSC/BEL/DEL included) are stripped from
@@ -1593,7 +1684,19 @@ def closing_reference(text: str, issue: int) -> bool:
 
     * the ADVISORY closed-PR surface, whose payload comes from the REST `/pulls`
       endpoint and therefore carries no `closingIssuesReferences`. Every hit
-      there is already `weak`, so an imprecise regex cannot block anything;
+      there is already `weak` **as a row on THAT surface** — but "cannot block
+      anything" would be FALSE, and it was written here until the #11105 review
+      measured the contradiction: the same matched PR number is returned by
+      `_prs_serving_issue` into `attributed_prs`, and the live-lane
+      harness-queue arm renders that attribution at `strong` — the row
+      `scan_process_surface` adds in its lane-queue loop — which DECIDES the
+      verdict. So this regex CAN block through the queue arm, and it
+      does so even when the body NEGATES the phrase ("This does NOT close #N") —
+      a keyword regex cannot read negation. That over-attribution is the
+      ACCEPTED direction (a missed duplicate is worse than a false alarm); the
+      deliberate arm is `test_the_body_arm_carries_the_SURFACES_OWN_imprecision_onto_the_queue`.
+      ⛔ Do not "restore" the narrow reading by deleting the fall-through —
+      that re-opens the fail-open #11105 closed;
     * the BLOCKING open-PR surface when its list was rescued over REST (#9402):
       REST has no such field either, so on that call this regex is the ONLY
       closing test, and a non-terminal hit from it is `strong` and DECIDES the
@@ -1603,8 +1706,9 @@ def closing_reference(text: str, issue: int) -> bool:
 
     So the accurate rule for an editor is: a blocking surface uses
     `_closing_ref_numbers` as the SOURCE, and this regex only as an
-    ADDING-ONLY union (when the field was requested) or as the documented
-    REST-rescue fallback, whose hits stay `strong`.
+    ADDING-ONLY union (when the field was requested), as the documented
+    REST-rescue fallback, whose hits stay `strong`, or as the body arm of the
+    live-lane queue widening — where a hit is also `strong`.
 
     ⛔ THE GRAMMAR LIVES IN ONE PLACE (#9957). This used to spell the pattern
     inline, and `_closing_numbers_in_text` needs the SAME grammar to answer the
@@ -3754,7 +3858,11 @@ class StaleHolder:
         # non-digit (a negative collapses to `0`) and a 19+-digit value (the `[`
         # 18-digit bound exists so a full-width lease cannot wrap) are all "a claim
         # EXISTS whose lease this reader cannot parse" — i.e. LIVE, never free.
-        if not lease or not lease.isdigit() or len(lease) > 18 or lease == "0":
+        # `isascii() and isdigit()`, not `isdigit()`: `int()` requires *Decimal*
+        # digits and raises on a Unicode *Digit* such as `'²'`, which would escape
+        # as an uncaught ValueError — a crash standing in for a verdict.
+        if (not lease or not (lease.isascii() and lease.isdigit())
+                or len(lease) > 18 or lease == "0"):
             self._claim = (True, (f"`{ref}` is held with a lease this reader cannot "
                                  f"parse (lease_until={lease or 'absent'}) — treated as "
                                  "LIVE, NOT demoted"), True)
@@ -5264,6 +5372,62 @@ def _pr_ref(pr: dict) -> str:
     )
 
 
+def _prs_serving_issue(prs: list[dict], issue: int) -> set[int]:
+    """The PR NUMBERS in `prs` that this issue's own PR surface would hit.
+
+    Used only to widen the live-lane surface's harness-queue arm (#1233): a
+    `pr-doctor` lane is dispatched BY a PR number, so the queue entry names the
+    PR and never the issue. The same FOUR name-like fields the PR surface treats
+    as STRONG evidence are read here — title, head ref, the computed closing
+    reference, and the body's closing keyword — and nothing lexical is invented.
+
+    ⛔ A missing/unreadable `closingIssuesReferences` is NOT a pass and NOT an
+    answer of "not by that arm": the PR surface ALREADY reports that surface
+    INCOMPLETE (an unmeasured test is not evidence either way), and this helper
+    then falls through to the BODY keyword below. So the precise statement of
+    this helper's reach is: a MISS can only ever NARROW the queue arm, while a
+    HIT (from any of the four fields) can DECIDE the verdict, because
+    `SURFACE_PROCESSES` renders an attribution at `strong` on TWO arms — the
+    lane-queue row `scan_process_surface` adds, and `_parent_attribution`'s
+    ancestor-argv row, which reads the same `attributed_prs` set.
+
+    ⛔ BUT THE BODY IS STILL CLOSING EVIDENCE (review of #11105, P2 — fail-open).
+    The closed-PR page is REST `/pulls`, which carries NO
+    `closingIssuesReferences` at all, and `scan_pr_surface` attributes there
+    through `closing_reference(body, issue)` (`elif closing_reference(body,
+    issue):`). Reading only the computed field therefore answered "not by that
+    arm" for EVERY entry on exactly the page the closed-PR feed was added to
+    widen: a merged PR whose title/branch name neither the issue nor "Closes #N"
+    and whose BODY carries the closing keyword never entered `attributed_prs`,
+    so a live `prd-<owner>-<repo>-<PR>` lane for it was invisible and the verdict
+    could be CLEAN while a lane held the work. `closing_reference` is the SAME
+    predicate the surface itself uses — not a second owner of it — so this can
+    only add PR numbers, never invent a different attribution.
+    """
+    numbers: set[int] = set()
+    for pr in prs:
+        if not isinstance(pr, dict):
+            continue
+        number = pr.get("number")
+        if not isinstance(number, int):
+            continue
+        if (number_present(pr.get("title") or "", issue)
+                or number_present(pr.get("headRefName") or "", issue)):
+            numbers.add(number)
+            continue
+        try:
+            if issue in _closing_ref_numbers(pr):
+                numbers.add(number)
+                continue
+        except SurfaceError:
+            # The field is absent (a REST payload) or unreadable. Neither is a
+            # pass: fall through to the body keyword the surface itself uses.
+            pass
+        if closing_reference(pr.get("body") or "", issue):
+            numbers.add(number)
+    return numbers
+
+
 def scan_pr_surface(
     surface: Surface, prs: list[dict], issue: int, identity: Identity,
     use_closing_field: bool,
@@ -5611,6 +5775,12 @@ HOLDER_LIVE = "live"              # a live pi process            -> blocks
 HOLDER_STOPPED = "stopped"        # measured, no live pi process   -> reported only
 HOLDER_UNMEASURED = "unmeasured"  # no pid reading at all          -> fail closed
 HOLDER_AMBIGUOUS = "ambiguous"    # `resolve_sessions` refused     -> fail closed
+#: The holder IS the asking lane (#10684/#9251). Reported, never blocking —
+#: exactly how the branch and worktree surfaces already treat the caller's own
+#: ref (#3504 classes 1/4). The AUTOMATIC half (pid ancestry) cannot hide a peer;
+#: the `--self-pid` half is a DECLARATION with the same trust model as
+#: `--self-branch` — see `Identity.self_pids`.
+HOLDER_SELF = "self"
 
 #: The ONLY non-empty states `fleet_state.workspace_terminal` emits. A terminal
 #: workspace is NOT evidence about the PROCESS (its cmux workspace is gone — that
@@ -5688,6 +5858,15 @@ class HolderRead:
     # in provenance; both take that arm), exactly like `budget_exhausted` /
     # `truncation_widenable` on `Surface`, which exist for this same reason.
     registry_error: str | None = None
+    # WHICH STORE ANSWERED THE LIVENESS READ, and which store GROUP could not be
+    # read (#11202). `source` above is the BOARD read's provenance (rebuild vs
+    # cache), which says nothing about the liveness underneath it — on a cell the
+    # board answers from the PROCESS TABLE alone while both cmux grammars refuse,
+    # and a note that printed only `board source: rebuilt` let that CLEAN read as
+    # if every store had been read. `None` / `()` mean the board did not publish
+    # them (an older writer): no claim is printed, never "no stores unreadable".
+    liveness_source: str | None = None
+    liveness_unreadable: tuple[str, ...] = ()
 
 
 def _board_can_answer(state: dict) -> str:
@@ -5950,8 +6129,27 @@ def _read_board(slug: str | None, repo_root: str) -> tuple[dict | None, str, str
     return rebuilt, "rebuilt", ""
 
 
+def _lane_self_evidence(lane: dict, session: dict,
+                        self_pids: frozenset[int]) -> bool:
+    """Is this lane's recorded process one of the CALLER's own pids?
+
+    Reads only the board's own `session.pi_pid`. No name, slug or comment text is
+    inspected — the same rule the rest of the claim gate follows (#8175):
+    ownership comes from a DECLARED/measured identity, never from a string that a
+    lane could coincidentally share. A record with no pid cannot be proven to be
+    the caller's, so it answers False and keeps blocking (fail closed).
+    """
+    if not self_pids:
+        return False
+    pid = session.get("pi_pid")
+    if isinstance(pid, bool) or not isinstance(pid, int):
+        return False
+    return pid in self_pids
+
+
 def _holder_verdict(lane: dict, label: str, evidence: str,
-                    live: bool | None) -> Holder:
+                    live: bool | None,
+                    self_pids: frozenset[int] = frozenset()) -> Holder:
     """Classify ONE attributed lane from the board's own records.
 
     Order matters and is fail-closed: an AMBIGUOUS attribution is decided before
@@ -5961,6 +6159,29 @@ def _holder_verdict(lane: dict, label: str, evidence: str,
     """
     session = lane.get("session")
     session = session if isinstance(session, dict) else {}
+    # ── THE CALLER'S OWN LANE (#10684/#9251) ─────────────────────────────────
+    # ⛔ DECIDED FIRST, AND IT IS NOT PEER-BLIND. A lane whose recorded
+    # `session.pi_pid` is this process or one of its ANCESTORS *is* the caller:
+    # the lane's `pi` spawned the shell that is running the pre-flight, so the
+    # hit is self-evidence, not contention. Reading it as a COLLISION made the
+    # mandated pre-dispatch gate ("must exit 0") unpassable for every
+    # `p0-<N>` / `fix-<N>` / `t-<N>` lane in the fleet — i.e. for the whole
+    # naming convention — while the branch and worktree arms in the SAME run
+    # correctly demoted the same artifact to "your own … not a competing claim".
+    #
+    # Ordering: pid ancestry outranks the ambiguity heuristic below, because it
+    # is unfalsifiable evidence of identity while `guess_refused` is a guess that
+    # failed. A peer lane's pid cannot appear in the caller's AUTOMATIC ancestry
+    # chain, so that half can never suppress a peer; an explicit `--self-pid`
+    # naming a peer is the caller declaring ownership, the same trust model
+    # `--self-branch` has always had (see `Identity.self_pids`).
+    if self_pids and _lane_self_evidence(lane, session, self_pids):
+        return Holder(
+            label, evidence, HOLDER_SELF,
+            "this is the ASKING LANE's own process (its recorded pi_pid is this "
+            "process or one of its ancestors), so it is your own work — not a "
+            "competing claim",
+        )
     liveness = lane.get("liveness")
     liveness = liveness if isinstance(liveness, dict) else {}
     terminal = lane.get("terminal")
@@ -6109,7 +6330,9 @@ def _stopped_reason(terminal: dict | None) -> str:
     )
 
 
-def _holders_from_board(state: dict, issue: int) -> tuple[Holder, ...]:
+def _holders_from_board(state: dict, issue: int,
+                        self_pids: frozenset[int] = frozenset(),
+                        ) -> tuple[Holder, ...]:
     """Every lane the board attributes to `issue`, classified.
 
     Attribution is the board's own `index.issues` projection, built by
@@ -6169,7 +6392,8 @@ def _holders_from_board(state: dict, issue: int) -> tuple[Holder, ...]:
                 "so that lane's liveness cannot be read",
             ))
             continue
-        holders.append(_holder_verdict(lane, label, evidence, live_map.get(label)))
+        holders.append(_holder_verdict(lane, label, evidence, live_map.get(label),
+                                       self_pids))
     return tuple(holders)
 
 
@@ -6316,12 +6540,17 @@ def _board_registry_error(state: object) -> str | None:
     return error
 
 
-def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
+def read_holders(issue: int, *, slug: str | None, repo_root: str,
+                 self_pids: frozenset[int] = frozenset()) -> HolderRead:
     """The claim gate's answer for `issue`: who holds it, are they still there?
 
     The single entry point `run_preflight` calls. Never raises: an unobtainable
     board is a `measured=False` read, which the issue surface reports as
     INCOMPLETE (fail-closed), never as "nobody".
+
+    `self_pids` is the caller's own process/ancestry set (#10684): a lane the
+    board attributes to this issue whose `session.pi_pid` is in it is the caller,
+    not a peer, and is reported without blocking.
     """
     state, source, why = _read_board(slug, repo_root)
     if state is None:
@@ -6339,7 +6568,8 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
             measured=False, source=source, unanswerable=entry_problem,
         )
     return HolderRead(
-        measured=True, source=source, holders=_holders_from_board(state, issue),
+        measured=True, source=source,
+        holders=_holders_from_board(state, issue, self_pids),
         roster_rows=_board_count(
             state.get("reconciliation") or {}, "registry_rows"),
         workspaces_count=_board_count(
@@ -6352,7 +6582,43 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str) -> HolderRead:
         workspaces_measured=(
             (state.get("reconciliation") or {}).get("workspaces_measured")
             is True),
+        # #11202: the LIVENESS read's own provenance, read with the same strict
+        # polarity — a non-blank STRING only, so a board that recorded nothing
+        # prints nothing and a malformed one cannot become a store name.
+        liveness_source=_board_text(
+            state.get("reconciliation") or {}, "liveness_source"),
+        liveness_unreadable=_board_names(
+            state.get("reconciliation") or {}, "liveness_unreadable"),
     )
+
+
+def _board_text(rec: dict, key: str) -> str | None:
+    """One of the board's published PROVENANCE strings, or ``None`` (#11202).
+
+    ⛔ ABSENT IS NOT EMPTY AND IS NEVER A CLAIM. A board from an older writer
+    carries no key, and a malformed one may carry a non-string; both take the
+    `None` arm so the note prints nothing rather than inventing a store name. A
+    blank string is collapsed to `None` for the same reason `_board_registry_error`
+    does it: `build_state` writes `""` when nothing answered, and `""` is not a
+    fact about a store.
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def _board_names(rec: dict, key: str) -> tuple[str, ...]:
+    """A board-published LIST of NAMES (store groups), or ``()`` (#11202).
+
+    Strict, for the same reason: only a list/tuple of non-blank strings is a
+    measurement. Anything else is `()` — which prints no claim.
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if not isinstance(value, (list, tuple)):
+        return ()
+    names = tuple(v for v in value if isinstance(v, str) and v.strip())
+    return names if len(names) == len(value) else ()
 
 
 def _holder_gate_note(read: HolderRead) -> str:
@@ -6368,6 +6634,14 @@ def _holder_gate_note(read: HolderRead) -> str:
     makes a roster of one VISIBLY a roster of one. It changes no verdict — the
     gate still keys on `registry_measured` — so it is disclosure, not a
     dismissal switch.
+
+    ⛔ AND THE LIVENESS READ'S STORE, BESIDE THAT (#11202). `board source` is the
+    BOARD read; the liveness underneath it may have come from a single store while
+    another refused — measured on a cell, where the board answers from
+    `process-table` and both cmux grammars refuse, leaving a durable store that a
+    lane not run by this user would appear in unreadable. A CLEAN that rests on one
+    store must say so, or it reads as a CLEAN that read them all and an INCOMPLETE
+    is mistaken for "no lanes". Still disclosure: the verdict keys on `measured`.
     """
     counts = ""
     if read.roster_rows is not None:
@@ -6384,6 +6658,19 @@ def _holder_gate_note(read: HolderRead) -> str:
             # workspace has no roster row at all, so `N vs M` printed a
             # discrepancy in the HEALTHY case — the opposite of the intent.
             counts += f"; live cmux workspaces: {read.workspaces_count}"
+    # ⛔ AND WHICH STORE THE LIVENESS CAME FROM, BESIDE WHICH DID NOT ANSWER
+    # (#11202). `board source` is the BOARD read; a CLEAN that rests on ONE store
+    # (a cell: `process-table`, both cmux grammars refusing) looked identical to a
+    # CLEAN that read every store, so an INCOMPLETE could be mistaken for "no
+    # lanes" — and, worse, a CLEAN could be read as complete. Disclosure only: the
+    # gate still keys on `measured`, which the board's own rule decides.
+    # Kept SHORT on purpose: this clause rides a note that is already near the
+    # harness's first-cause window, and every character here is spent before the
+    # per-lane reason that decided a refusal (see `scan_issue_surface`).
+    if read.liveness_source:
+        counts += f"; liveness: {read.liveness_source}"
+    if read.liveness_unreadable:
+        counts += "; unreadable store(s): " + ", ".join(read.liveness_unreadable)
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
@@ -6396,18 +6683,20 @@ def _holder_gate_note(read: HolderRead) -> str:
             "attributed to this issue; comment prose is not read (#8175)"
         )
     counts_by_verdict = {verdict: 0 for verdict in
-              (HOLDER_LIVE, HOLDER_STOPPED, HOLDER_UNMEASURED, HOLDER_AMBIGUOUS)}
+              (HOLDER_LIVE, HOLDER_STOPPED, HOLDER_UNMEASURED, HOLDER_AMBIGUOUS,
+               HOLDER_SELF)}
     for holder in read.holders:
         counts_by_verdict[holder.verdict] = (
             counts_by_verdict.get(holder.verdict, 0) + 1
         )
     return (
         "claim gate: holder read from the FLEET BOARD (board source: "
-        f"{read.source}{counts}) — {len(read.holders)} lane(s) attributed: "
+        f"{read.source}{counts} — {len(read.holders)} lane(s) attributed: "
         f"{counts_by_verdict[HOLDER_LIVE]} still holding, "
         f"{counts_by_verdict[HOLDER_STOPPED]} stopped, "
         f"{counts_by_verdict[HOLDER_UNMEASURED]} liveness unmeasured, "
-        f"{counts_by_verdict[HOLDER_AMBIGUOUS]} ambiguous (comment prose is not "
+        f"{counts_by_verdict[HOLDER_AMBIGUOUS]} ambiguous, "
+        f"{counts_by_verdict[HOLDER_SELF]} your own lane (comment prose is not "
         "read, #8175)"
     )
 
@@ -6484,6 +6773,18 @@ def scan_issue_surface(
                 "strong",
             )
     for holder in holders.holders:
+        if holder.verdict == HOLDER_SELF:
+            # REPORTED as the caller's own work, never blocking — the same
+            # wording the branch/worktree arms use for the caller's own ref
+            # (#10684, #9251). Weak, so it cannot decide the verdict.
+            surface.add(
+                f"holder:{holder.lane}",
+                f"lane {holder.lane!r} is attributed to this issue "
+                f"({holder.evidence}) but {holder.reason} (non-blocking)",
+                "weak",
+                kind="self-holder",
+            )
+    for holder in holders.holders:
         if holder.verdict == HOLDER_STOPPED:
             # REPORTED, never blocking: the note says WHY the board read it as
             # stopped, so a demotion is auditable rather than silent.
@@ -6505,7 +6806,14 @@ def scan_issue_surface(
         detail = "; ".join(
             f"lane {holder.lane!r}: {holder.reason}" for holder in unanswered
         )
-        problem = f"{holder_note}; {detail}"
+        # ⛔ THE DECIDING ARM LEADS (#11202 review). `holder_note` carries the
+        # liveness stores' provenance now, so composing it FIRST pushed the
+        # per-lane reason past the harness's 320-char first-cause window —
+        # measured at cell values: the reason began at char 335 of a roughly
+        # 390-char note, so a bounded reader saw provenance and NO cause at all.
+        # The reason is what decided this refusal, so it comes first; the same
+        # ordering rule `fleet_state.live_sessions` applies to a poisoned store.
+        problem = f"{detail}; {holder_note}"
     if problem:
         # ⛔ NEVER CLOBBER AN EXISTING REASON. `incomplete()` OVERWRITES `note`,
         # so if a caller passes a surface that is ALREADY INCOMPLETE (today's
@@ -6929,8 +7237,24 @@ def _main_worktree_root(git_bin: str, path: str, timeout: float) -> str | None:
         path, timeout,
     )
     if rc != 0 or not out.strip():
-        return None
-    common = Path(out.strip())
+        # ⛔ `--path-format=absolute` lands in git 2.31 (2021). On an OLDER git
+        # this call fails while the rest of the scan — `git worktree list`, the
+        # branch and ref reads — still works, so the old code's `or target.path`
+        # fallback silently scoped the process arm's cwd check to the CALLER'S
+        # OWN worktree: every peer in a sibling `<hub>/.worktrees/…` became
+        # invisible while the row still claimed a complete scan (the cycle-1
+        # HIGH, re-opened by a compat gap). Retry the portable form and make the
+        # path absolute here, so the only failure left is a git that genuinely
+        # cannot answer — which the caller reports as NOT clean.
+        rc, out, _err, _to = _run(
+            [git_bin, "rev-parse", "--git-common-dir"], path, timeout)
+        if rc != 0 or not out.strip():
+            return None
+        common = Path(out.strip())
+        if not common.is_absolute():
+            common = Path(path) / common
+    else:
+        common = Path(out.strip())
     return str(common.parent) if common.name == ".git" else str(common)
 
 
@@ -7055,6 +7379,795 @@ def _classify_issue_error(exc: SurfaceError) -> str:
     return "transport"
 
 
+# ── the LIVE-LANE surface (#1233) ───────────────────────────────────────────
+#
+# ⛔ WHAT THIS IS FOR. A dispatch gate that only reads artifacts cannot see the
+# single most common collision shape: TWO LANES ON THE SAME ISSUE, neither of
+# which has pushed a branch yet. Measured 2026-11-05 — a `pr-doctor` lane
+# (`prd-daniel-ospina-tortoise-11067`, auto-dispatched by
+# `/home/cmux/orchestrator/nonblocking-dispatch.sh`) was already working that PR
+# when this gate returned CLEAN, and a lane in `.worktrees/combine-A` kept
+# pushing to #10963 through a window in which the ref/worktree surfaces read
+# free. The eighth surface answered "is anyone holding this in their head?" with
+# silence, and silence read as CLEAN.
+#
+# ⛔ THE RULE THAT MAKES IT SAFE: this surface may ABSTAIN (INCOMPLETE) but it may
+# never turn "cannot look" into CLEAN. A host with no process table, a queue
+# directory that exists but cannot be listed, or a live candidate whose cwd
+# cannot be read are all INCOMPLETE. The ONE absence that is a MEASUREMENT is a
+# queue root that does not exist at all (a macOS box with no
+# `/home/cmux/orchestrator`): that is the host telling us it runs no background
+# lane queue, and the row SAYS so rather than implying a clean scan.
+#
+# ⛔ NO LEXICAL INVENTIONS. Attribution is `number_present` — the same
+# boundary-exact test every other surface uses (`3061` never matches `30610`, and
+# never a run inside a hex digest) — applied to the process's cwd and its command
+# line. There is no keyword vocabulary here, for the reason the constants above
+# record (#3504). `SURFACE_PROCESSES` itself is declared ONCE, with the other
+# surface names (`:691`) — a second literal here was a rebind that only invited
+# the two to drift.
+#: A FILE holding `ps -ww -Ao pid=,ppid=,command=` output. The measurement seam (and
+#: the only way a test can be hermetic about a live process table).
+PROCESS_TABLE_ENV = "COLLISION_PREFLIGHT_PROCESS_TABLE"
+#: The `ps` binary. `--ps`-equivalent; mirrors `COLLISION_PREFLIGHT_GH`/`_GIT`.
+PS_ENV = "COLLISION_PREFLIGHT_PS"
+#: The harness's background-lane queue directory. Exported so a cell whose
+#: orchestrator lives elsewhere (or a test) can point it at the real one.
+LANE_QUEUE_ENV = "COLLISION_PREFLIGHT_LANE_QUEUE"
+DEFAULT_LANE_QUEUE = "/home/cmux/orchestrator/bg"
+#: Bound on the ancestor walk. A pid chain deeper than this is corrupt; stopping
+#: can only leave MORE holders blocking (fail closed).
+MAX_ANCESTOR_DEPTH = 64
+#: How far UP a live `pi` row's ancestry the ISSUE-NUMBER attribution reads (#1233
+#: cycle-2 HIGH). Measured shape on 2026-11-05: `pi` -> `fix-one.sh --argv
+#: …/argv-11023` (1 link) -> `run-fix-11023.sh` (2) -> `bash -l` (3). Three links
+#: cover the launcher chain without reaching into an orchestrator whose argv is
+#: shared by MANY lanes — attributing a peer through it would be a false
+#: COLLISION, the fail-closed-but-wrong direction this bound exists to avoid.
+MAX_PARENT_ATTRIBUTION_DEPTH = 3
+
+
+def _argv0_pi(cmd: str) -> bool:
+    """Is this row a `pi` process? (`/usr/local/bin/pi` counts; `pianola` does
+    not — the comparison is on the BASENAME, not a substring.)"""
+    argv0 = (cmd or "").split(None, 1)[0] if (cmd or "").strip() else ""
+    return os.path.basename(argv0) == "pi"
+
+
+def _process_rows(ps_bin: str, cwd: str, timeout: float
+                  ) -> tuple[list[tuple[int, int, str]] | None, str]:
+    """Every running process as `(pid, ppid, command)`, or `(None, why)`.
+
+    `None` is NOT an empty table: the caller must report INCOMPLETE. A file seam
+    (`PROCESS_TABLE_ENV`) is read first so a test drives a fixed table, and an
+    unreadable seam is a named failure rather than a silent fallback to the live
+    table (a fallback would make a test's CLEAN depend on the host).
+    """
+    seam = os.environ.get(PROCESS_TABLE_ENV)
+    if seam:
+        try:
+            with open(seam, encoding="utf-8", errors="strict") as fh:
+                text = fh.read()
+        except OSError as exc:
+            return None, f"{PROCESS_TABLE_ENV}={seam} could not be read ({exc})"
+        except ValueError as exc:
+            return None, (f"{PROCESS_TABLE_ENV}={seam} is not decodable as text "
+                          f"({type(exc).__name__})")
+    else:
+        rc, text, err, timed_out = _run(
+            [ps_bin, "-ww", "-Ao", "pid=,ppid=,command="], cwd, timeout
+        )
+        if rc != 0:
+            why = "timeout" if timed_out else f"exit {rc}"
+            return None, f"`ps -ww -Ao pid=,ppid=,command=` failed ({why}): {_one_line(err)}"
+    rows: list[tuple[int, int, str]] = []
+    for line in text.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) < 3:
+            continue
+        try:
+            pid, ppid = int(parts[0]), int(parts[1])
+        except ValueError:
+            continue
+        rows.append((pid, ppid, parts[2]))
+    if not rows:
+        # An empty TABLE is not an empty PROCESS LIST: a `ps` that printed
+        # nothing (a broken shim, a container without procfs) must not read as
+        # "no lane is running".
+        return None, ("the process table was readable but EMPTY — no pid row at "
+                      "all, which no live host produces (NOT a clean scan)")
+    return rows, ""
+
+
+def _ancestor_pids(ps_bin: str, timeout: float) -> frozenset[int]:
+    """This process and its ancestors (#10684/#9251).
+
+    Linux answers from `/proc/<pid>/stat` (one read per link, no subprocess);
+    everything else walks `ps -o ppid=`. A failure returns the set it managed to
+    build — an incomplete self set can only leave MORE holders blocking, which is
+    the fail-closed direction (`Identity.self_pids`).
+    """
+    pids: set[int] = {os.getpid()}
+    pid = os.getpid()
+    for _ in range(MAX_ANCESTOR_DEPTH):
+        try:
+            with open(f"/proc/{pid}/stat", "rb") as fh:
+                stat = fh.read()
+            # The comm field is parenthesised and may contain spaces/parens, so
+            # the fields AFTER the LAST ')' are the only ones that align.
+            fields = stat.rsplit(b")", 1)[1].split()
+            ppid = int(fields[1])          # state is fields[0], ppid fields[1]
+        except (OSError, IndexError, ValueError):
+            ppid = 0
+        if ppid <= 1 or ppid in pids:
+            break
+        pids.add(ppid)
+        pid = ppid
+    if len(pids) > 1 or os.path.isdir("/proc"):
+        return frozenset(pids)
+    # No procfs (macOS): walk with `ps -o ppid=`. One call per link, bounded.
+    cur = os.getpid()
+    for _ in range(MAX_ANCESTOR_DEPTH):
+        rc, out, _err, _to = _run(
+            [ps_bin, "-o", "ppid=", "-p", str(cur)], os.getcwd(), timeout
+        )
+        value = out.strip() if rc == 0 else ""
+        # ⛔ `str.isdigit()` IS NOT A PROMISE THAT `int()` SUCCEEDS (review cycle 3,
+        # P2): `'²'.isdigit()` is True while `int('²')` raises. The gate below is
+        # `isascii() and isdigit()` — the same predicate the queue-filename parse
+        # uses — so a non-ASCII digit breaks the walk instead of escaping as an
+        # uncaught ValueError (which would read as exit 1 = COLLISION).
+        if not (value.isascii() and value.isdigit()):
+            break
+        ppid = int(value)
+        if ppid <= 1 or ppid in pids:
+            break
+        pids.add(ppid)
+        cur = ppid
+    return frozenset(pids)
+
+
+def _process_cwd(pid: int, timeout: float) -> tuple[str | None, str]:
+    """A process's working directory, or `(None, why)`. Linux first (a symlink
+    read, no subprocess), then `lsof` — the macOS route."""
+    try:
+        return os.path.realpath(os.readlink(f"/proc/{pid}/cwd")), ""
+    except OSError:
+        pass
+    rc, out, err, _to = _run(
+        ["lsof", "-a", "-p", str(pid), "-d", "cwd", "-Fn"], os.getcwd(), timeout
+    )
+    if rc == 0:
+        for line in out.splitlines():
+            if line.startswith("n") and len(line) > 1:
+                return os.path.realpath(line[1:]), ""
+    return None, ("neither /proc/<pid>/cwd nor `lsof` could report it"
+                  + (f": {_one_line(err)}" if err.strip() else ""))
+
+
+def _lane_queue_candidates() -> list[tuple[str, bool]]:
+    """Every root the FLEET could have written the queue to, as `(path, OPTIONAL)`.
+
+    ⛔ A LITERAL PATH IS A FALSE MEASUREMENT (cycle-6 review, HIGH). Every writer
+    of this queue derives the root from the environment —
+    `nonblocking-dispatch.sh:35,100` does `O="${O:-$HOME/orchestrator}";
+    D="$O/bg"`, `pr-doctor.py` uses `O or $HOME/orchestrator`, and the harness
+    scripts use `$CELL_HOME/orchestrator` — while this module used the literal
+    `/home/cmux/orchestrator/bg`. On a cell (`HOME` is `/tmp/cell-home`) that
+    literal does not exist, so the arm reported a "measured absence — this host
+    runs no background lane queue" claim about a queue that WAS being written
+    one directory away: a `pr-doctor` lane whose only trace is its queue entry
+    was invisible, and the verdict could be CLEAN while it held the work.
+
+    ⛔ ONE GUESSED ROOT IS NOT ENOUGH EITHER (cycle-7 review, MEDIUM). `O` is
+    exported into every worker `pr-doctor` spawns but not into every shell, and
+    `ORCHESTRATOR` is set by nobody in the fleet — so picking a single root from
+    THIS process's environment and calling a missing one "absent" still produced
+    a false CLEAN while the entry sat under another candidate. The arm
+    therefore scans EVERY candidate that exists and unions the results: an
+    unreadable directory is INCOMPLETE, and only "none of the candidates
+    exists" is a measured absence (named, with the list that was checked).
+    """
+    explicit = os.environ.get(LANE_QUEUE_ENV)
+    if explicit:
+        # The explicit seam is ALWAYS required: a caller that named a root meant
+        # it, so a refusal there is a blind spot by definition.
+        return [(explicit, False)]
+    candidates: list[tuple[str, bool]] = []
+    o_root = os.environ.get("O")
+    if o_root:
+        candidates.append((os.path.join(o_root, "bg"), False))
+    candidates.append(
+        (os.path.join(os.path.expanduser("~"), "orchestrator", "bg"), False)
+    )
+    cell_home = os.environ.get("CELL_HOME")
+    if cell_home:
+        candidates.append((os.path.join(cell_home, "orchestrator", "bg"), False))
+    # ⛔ THE FLEET LITERAL IS OPTIONAL, AND THAT IS A VERDICT-CLASS DISTINCTION
+    # (review, P2). It is the ONLY candidate here derived from a hardcoded
+    # string rather than from this caller's own environment, so it is the only
+    # one whose refusal may say nothing about the caller's own lanes: a box
+    # where `/home/cmux` is another user's `0750` home answers EACCES to a
+    # caller who is not `cmux`. Once an unstatable candidate became INCOMPLETE
+    # (the fail-OPEN fix above), that made the gate PERMANENTLY INCOMPLETE for
+    # every such uid — blocked by a stranger's home directory, on every run.
+    # `_lane_queue_entries` therefore reports an unusable OPTIONAL candidate by
+    # name instead of treating it as a blind spot.
+    candidates.append((DEFAULT_LANE_QUEUE, True))
+    ordered: list[tuple[str, bool]] = []
+    for cand, optional in candidates:
+        for idx, (seen, seen_optional) in enumerate(ordered):
+            if seen != cand:
+                continue
+            # The same path reached through the caller's OWN environment is not
+            # optional, whichever spelling got there first: REQUIRED wins.
+            if not optional and seen_optional:
+                ordered[idx] = (seen, False)
+            break
+        else:
+            ordered.append((cand, optional))
+    return ordered
+
+
+def _lane_queue_root() -> str:
+    """The root to NAME in a report: the first candidate that exists.
+
+    Reporting only — the scan reads every existing candidate, so this can never
+    narrow what is actually checked.
+    """
+    candidates = _lane_queue_candidates()
+    for cand, _optional in candidates:
+        if os.path.isdir(cand):
+            return cand
+    return candidates[0][0]
+
+
+def _lane_queue_entries(slug: str | None
+                        ) -> tuple[list[dict] | None, bool, str]:
+    """The harness's background-lane queue entries for `slug`.
+
+    Returns `(entries, absent, why)`. `absent` is True ONLY when the queue root
+    does not exist — a MEASURED fact about a host that runs no background queue
+    (a mac has no `/home/cmux/orchestrator`). A root that exists but cannot be
+    listed is `(None, False, why)` — INCOMPLETE, never CLEAN.
+
+    ⛔ EVERY EXISTING CANDIDATE IS SCANNED (cycle-7 review, MEDIUM): a single
+    guessed root let an env divergence read CLEAN while the entry sat under
+    another candidate. `absent` is True ONLY when NONE of the candidates
+    exists — and then `why` NAMES every path that was checked, because "queried
+    and absent" is only a measurement when the report says WHERE.
+
+    Entry shape: `prd-<owner>-<repo>-<N>.{pid,started,log,end,rc}`. Only the
+    `-<N>.pid` file starts an entry; `<N>` is the PR the lane was dispatched for.
+    """
+    candidates = _lane_queue_candidates()
+    # ⛔ `os.path.isdir` / `os.path.exists` ANSWER False FOR EACCES — the same
+    # answer they give for "nothing is there" (review cycle 3, HIGH). So a queue
+    # root whose own stat is refused (a lane running under another uid, an NFS or
+    # `hidepid` lookup refusal, a `$HOME` whose parent is not `+x`) took the
+    # `absent` arm and printed "queried and absent — this host runs no queue"
+    # while a LIVE entry sat inside it: fail-OPEN on the one surface that decides
+    # whether a harness lane holds the issue. `os.stat` is used instead, because
+    # only it can tell "not there" (FileNotFoundError/NotADirectoryError) apart
+    # from "cannot look" (any other OSError), and the latter is INCOMPLETE.
+    existing_roots: list[str] = []
+    not_dirs: list[str] = []
+    unreadable: list[str] = []
+    # An OPTIONAL candidate that cannot be examined (see _lane_queue_candidates):
+    # named in the report, but never a blind spot for THIS caller's lanes.
+    optional_unusable: list[str] = []
+    optional_not_dirs: list[str] = []
+    for cand, optional in candidates:
+        try:
+            mode = os.stat(cand).st_mode
+        except (FileNotFoundError, NotADirectoryError):
+            continue          # a MEASURED absence of this candidate
+        except OSError as exc:
+            reason = f"{cand} could not be examined ({exc})"
+            (optional_unusable if optional else unreadable).append(reason)
+            continue
+        if stat.S_ISDIR(mode):
+            existing_roots.append(cand)
+        elif optional:
+            optional_not_dirs.append(f"{cand} exists but is not a directory")
+        else:
+            not_dirs.append(cand)
+    if unreadable:
+        # Any candidate we could not examine could be hiding the holder, so the
+        # whole surface is undecidable — never CLEAN, even if another candidate
+        # was read successfully.
+        return None, False, "; ".join(unreadable + optional_unusable)
+    if not existing_roots:
+        if not_dirs:
+            return None, False, f"{not_dirs[0]} exists but is not a directory"
+        why = "checked " + ", ".join(cand for cand, _o in candidates)
+        if optional_unusable or optional_not_dirs:
+            # ⛔ THE ONE THING "queried and absent" MUST NOT SWALLOW: a fallback
+            # root the caller could not examine. It is still a CLEAN-eligible
+            # absence for the caller's OWN queue (every candidate derived from
+            # that environment was measured), but the report has to say where
+            # it could not look — silently dropping it is the "a row must say
+            # where it looked" rule.
+            why += ("; " + "; ".join(optional_unusable + optional_not_dirs)
+                    + " — a FLEET FALLBACK, not a root derived from this "
+                      "caller's environment, so it is not a blind spot for "
+                      "the caller's own lanes")
+        return [], True, why
+    pairs: list[tuple[str, str]] = []
+    for root in existing_roots:
+        try:
+            names = os.listdir(root)
+        except OSError as exc:
+            return None, False, f"{root} could not be listed ({exc})"
+        pairs.extend((root, name) for name in names)
+    prefix = f"prd-{slug.replace('/', '-')}-" if slug else "prd-"
+    entries: list[dict] = []
+    for root, name in pairs:
+        if not name.startswith(prefix) or not name.endswith(".pid"):
+            continue
+        stem = name[:-len(".pid")]
+        # ⛔ A BARE `startswith` MATCHES A SIBLING REPO (review cycle 1): with
+        # slug `test-owner/test-repo`, the entry
+        # `prd-test-owner-test-repo-EXTRA-3061.pid` (a DIFFERENT repo whose name
+        # extends this one with a hyphen) matched the prefix and blocked a
+        # legitimate dispatch — and the hit named a queue file that does not
+        # exist. The remainder after the prefix must be EXACTLY the PR number.
+        remainder = stem[len(prefix):]
+        tail = stem.rsplit("-", 1)[-1]
+        # ⛔ `str.isdigit()` IS NOT A PROMISE THAT `int()` SUCCEEDS (review,
+        # HIGH). It accepts every character whose Unicode `Numeric_Type` is
+        # *Digit*, while `int()` requires *Decimal* — `'²'.isdigit()` is True
+        # and `int('²')` raises `ValueError`. Nothing above catches it
+        # (`run_preflight` calls this scanner with no `try`, and `main` catches
+        # only `NotAWorkItem`/`RuntimeError`), so a queue filename ending in a
+        # digit-like character escaped as a traceback with NO `VERDICT` line —
+        # and Python's exit status for an uncaught exception is 1, which is
+        # this tool's EXIT_COLLISION. A corrupt filename read as "another lane
+        # is on it" is verbatim the crash-as-verdict class (#8881) this bundle
+        # closes. `isascii()` narrows the predicate to exactly the character
+        # set `int()` accepts here, so the two can no longer disagree.
+        if not (remainder.isascii() and remainder.isdigit()):
+            continue
+        if not (tail.isascii() and tail.isdigit()):
+            continue
+        try:
+            with open(os.path.join(root, name), encoding="utf-8",
+                      errors="strict") as fh:
+                pid_txt = fh.read().strip()
+        except (OSError, ValueError) as exc:
+            # ⛔ A `.pid` THAT CANNOT BE READ IS NOT A DEAD LANE (review cycle 1).
+            # `pid=None` used to fall through `_pid_is_alive` as False, so the
+            # write-then-flush window at dispatch time — the lane that was just
+            # started — was rendered as a decided "not live". It is undecidable,
+            # so the caller makes the row INCOMPLETE instead.
+            entries.append({"pr": int(tail), "pid": None, "unreadable": str(exc),
+                            "path": os.path.join(root, stem + ".log")})
+            continue
+        try:
+            pid = int(pid_txt)
+        except ValueError:
+            pid = None
+        entries.append({
+            "pr": int(tail),
+            "pid": pid,
+            # ⛔ AN `.end` MARKER OUTRANKS A REUSED PID. The research on this
+            # surface is explicit that "a PID alone is not identity"; the
+            # queue's own completion marker is the cheap, local half of that
+            # (start-time validation is the other half and is not available for
+            # every launcher). A finished lane is never re-read as live.
+            "ended": os.path.exists(os.path.join(root, stem + ".end")),
+            "path": os.path.join(root, stem + ".log"),
+        })
+    if optional_unusable or optional_not_dirs:
+        # Reported, not fatal: the caller's OWN candidates were readable, so a
+        # fleet-fallback root it cannot examine is disclosed rather than turned
+        # into a verdict. Never silent — see the absent arm above.
+        return entries, False, (
+            "; ".join(optional_unusable + optional_not_dirs)
+            + " — a FLEET FALLBACK, not a root derived from this caller's "
+              "environment; the roots that were read are named on this row"
+        )
+    return entries, False, ""
+
+
+def _pid_is_alive(pid: int | None) -> bool | None:
+    """Alive / decided-dead / UNDECIDABLE (`None`).
+
+    ⛔ THREE STATES, NOT TWO (review cycle 2, MEDIUM). `os.kill()` raises
+    `OverflowError` for a value above the C `int` range, and nothing handled it:
+    a queue `.pid` holding such a value escaped every handler as a traceback with
+    no `VERDICT` line — and exit 1 is this tool's COLLISION code, so a corrupt
+    number read as "a lane is on it" (crash-as-verdict, #8881's own class). A pid
+    the kernel cannot even represent is not a DEAD lane, it is an undecidable
+    one; the caller makes the row INCOMPLETE instead of guessing.
+    """
+    if not isinstance(pid, int):
+        return False
+    if pid <= 0:
+        # ⛔ NON-POSITIVE IS UNDECIDABLE, NOT DEAD (cycle-3 review, MEDIUM).
+        # `os.kill(0, 0)` targets the whole process GROUP and a negative pid is a
+        # group selector, so neither is a lane — and neither is a DECIDED-dead
+        # one: a queue `.pid` holding `0` or `-5` used to make the row disappear
+        # and the verdict CLEAN, the same fail-open the `OverflowError` finding is
+        # about, one condition over. The caller makes the row INCOMPLETE.
+        return None
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        # A process we may not signal is a process that EXISTS (fail closed).
+        return True
+    except (OverflowError, ValueError):
+        return None
+    except OSError:  # pragma: no cover - defensive
+        return False
+    return True
+
+
+def _parent_attribution(parents: dict[int, tuple[int, str]], pid: int,
+                        issue: int,
+                        attributed_prs: frozenset[int] = frozenset()) -> str:
+    """Why a live `pi` row is attributed to `issue` through an ANCESTOR, or "".
+
+    ⛔ THE DEFECT THIS CLOSES (#1233 cycle-2 HIGH). `pi` rewrites its own argv
+    (`process.title`), so every real lane's row is exactly `pi` and its issue
+    number lives in the LAUNCHER's command line (measured 2026-11-05: `bash
+    /home/cmux/orchestrator/fix-one.sh --argv …/argv-11023`). A leaf-argv-only
+    scan returned CLEAN for the live lanes on #11023, #10726 and #11105 — the
+    surface's own cited incident shape. The row already carries `ppid`; this
+    reads up to `MAX_PARENT_ATTRIBUTION_DEPTH` links of it.
+
+    ⛔ AND IT MATCHES THE ATTRIBUTED PRs TOO (cycle-3 HIGH). GitHub shares ONE
+    number space, and `worker-terminal.sh` names a worker's launcher for the
+    number it was DISPATCHED for — `run-fix-11067.sh` / `--argv …/argv-11067`,
+    where 11067 is a PR. Matching only the ISSUE number left every such fixer
+    lane unattributed (its cwd is the hub, which names no number, and a
+    `worker-terminal` lane leaves no `prd-<owner>-<repo>-<PR>.pid`). The set is
+    the one the harness-queue arm already uses for exactly this reason, and it
+    is already computed by the open-PR surface — zero added API cost, and a PR
+    the run has NOT tied to this issue can never match.
+
+    Every match is `number_present` against each ancestor's command line — the
+    same boundary-exact predicate every other arm uses, so a DIFFERENT issue
+    number (`argv-30610`) or one beyond the bounded walk never attributes. The
+    returned sentence NAMES the ancestor so a reader can check the evidence.
+
+    ⛔ READ THE ANCESTOR'S COMMAND LINE, NOT THE FILE IT NAMES. `fix-one.sh`
+    CONSUMES its `argv-<N>` file, so by the time anyone measures it does not
+    exist (measured 2026-11-05 22:00Z: five live fixer lanes — `--argv
+    argv-11067`, `argv-10852`, `argv-11105`, `argv-11078`, `argv-10914` — and
+    NOT ONE `argv-*` file on disk, nor a `prd-*` queue entry, nor a
+    number-bearing cwd: the path fragment in the launcher's argv is the only
+    surviving trace). An implementation that opened the file would have found
+    every one of them invisible.
+    """
+    prs = sorted(pr for pr in (attributed_prs or frozenset()) if pr != issue)
+    cur = pid
+    seen = {pid}
+    for _ in range(MAX_PARENT_ATTRIBUTION_DEPTH):
+        row = parents.get(cur)
+        if row is None:
+            return ""
+        ppid = row[0]
+        if ppid <= 1 or ppid in seen:
+            return ""
+        # ⛔ THE ROW IS KEYED BY THE PROCESS, SO ITS COMMAND BELONGS TO THE KEY,
+        # NOT TO ITS `ppid`. Reading `parents[cur]` as "(the ancestor's pid, the
+        # ancestor's command)" is off by one process: it tested `pi`'s own argv
+        # (`pi`) on the first hop and then named an ancestor whose command was
+        # its CHILD's. The lookup below tests the actual ancestor's row.
+        ancestor = parents.get(ppid)
+        if ancestor is None:
+            return ""
+        seen.add(ppid)
+        if number_present(ancestor[1], issue):
+            return (
+                f"its ancestor process (pid {ppid}) names #{issue} in its "
+                f"command line ({_one_line(ancestor[1], 120)}) — pi rewrites its "
+                "own argv, so a lane's number lives in the LAUNCHER's command line"
+            )
+        for pr in prs:
+            if number_present(ancestor[1], pr):
+                return (
+                    f"its ancestor process (pid {ppid}) names PR #{pr} in its "
+                    f"command line ({_one_line(ancestor[1], 120)}) — PR #{pr} is a "
+                    f"PR this run already attributed to #{issue}, and pi rewrites "
+                    "its own argv, so a lane's number lives in the LAUNCHER's "
+                    "command line"
+                )
+        cur = ppid
+    return ""
+
+
+def _is_own_subagent(pid: int, parents: dict[int, tuple[int, str]],
+                     self_pids: frozenset[int], workdir: str | None,
+                     caller_cwd: str) -> bool:
+    """Is `pid` a sub-agent THIS lane spawned, rather than a peer lane?
+
+    ⛔ ANCESTORS ALONE RE-CREATE #10684 ONE LAYER OUT (review, MEDIUM).
+    `Identity.self_pids` is the caller and its `ppid` chain, so the exemption
+    at the process arm covered everything ABOVE the caller and nothing BELOW
+    it. A lane's `pi` dispatches a sub-agent through the `task` tool —
+    `spawn(command, args, {detached: true})`, so the child leads its OWN session
+    but its `ppid` is still the lane's `pi` — and the child INHERITS the lane's
+    working directory, which for every `fix-<N>` / `land-<N>` / `p0-<N>` lane
+    names the issue. The tool the lane then runs (`collision_preflight.py N
+    --repo .`, the form AGENTS.md mandates) saw that row, matched the cwd arm
+    and answered `COLLISION — do NOT dispatch`: the caller blocked by its own
+    sub-agent. That is #10684, the defect this bundle exists to close, one
+    layer out.
+
+    ⛔ WHY THIS IS NARROWER THAN "EVERY DESCENDANT" OR "MY PROCESS GROUP",
+    the two mechanisms the review offered. Both over-exempt, because this fleet
+    dispatches lanes ALONG THE SAME EDGES: an orchestrator agent starts its
+    lanes from its own subtree, and `nonblocking-dispatch.sh` backgrounds them
+    inside the dispatching shell's group. Exempting either set would let an
+    orchestrator's own LIVE LANE read as "mine" — a false CLEAN on the verdict
+    that exists to stop a duplicate dispatch, i.e. the direction this gate may
+    never fail in. Two conditions, both necessary, keep that out:
+
+      * PARENTAGE — `ppid` is one of my own pids. Only a direct child of me (or
+        of an ancestor of mine) is my own spawn; a harness lane is reached
+        through `bash fix-one.sh` / a subshell, never as a direct child of a
+        `pi`.
+      * LOCATION — the child's cwd is EXACTLY mine. A `task` child inherits its
+        parent's cwd; a DISPATCHED LANE IS GIVEN ITS OWN WORKTREE, so its cwd
+        names the issue while mine does not. That is the discriminator the
+        parentage test alone cannot supply, and it is the one that keeps an
+        orchestrator's own dispatched lane BLOCKING.
+
+    The exemption can therefore only ever cover a process standing in MY
+    directory that MY OWN agent spawned — nothing a peer lane can be — and it
+    is a strict subset of both mechanisms the review proposed.
+
+    A shape it deliberately does NOT cover: a sub-agent nested two levels down
+    (`task` -> `pi` -> `task` -> `pi`), whose parent is my sub-agent and not one
+    of my own pids. That stays BLOCKING, and `--self-pid <pid>` — the declared,
+    #3504-shaped escape every other ambiguous attribution already uses — is the
+    documented way through.
+    """
+    if not self_pids or not workdir or not caller_cwd:
+        return False
+    row = parents.get(pid)
+    if row is None or row[0] not in self_pids:
+        return False
+    return os.path.realpath(workdir) == os.path.realpath(caller_cwd)
+
+
+def scan_process_surface(
+    surface: Surface, issue: int, identity: Identity, *,
+    slug: str | None, cwd: str, ps_bin: str, timeout: float,
+    attributed_prs: frozenset[int] = frozenset(),
+    repo_root: str | None = None,
+) -> None:
+    """The live-lane arm of the verdict (#1233).
+
+    TWO sources, both LIVE rather than recorded:
+
+      * `pi` PROCESSES. This is the arm that sees a lane that never opted into
+        anything: it needs no lock, no registry and no consent. A candidate is
+        attributed when the issue number appears boundary-exactly in ANY of:
+        the process's own cwd, its own command line, or — walking up to
+        `MAX_PARENT_ATTRIBUTION_DEPTH` (3) `ppid` links — an ANCESTOR's command
+        line, because `pi` rewrites its own argv to `pi` (see
+        `_parent_attribution`). Attribution also accepts an ATTRIBUTED PR
+        number (`attributed_prs`) rather than only the issue number: a lane
+        dispatched by PR number names the PR, never the issue it closes.
+      * the HARNESS QUEUE (`prd-<owner>-<repo>-<N>.pid`). A `pr-doctor` lane is
+        launched BY a PR number, so it may never name the issue in argv; the
+        queue is what makes it visible. `N` counts when it is this issue OR when
+        it is a PR the OPEN-PR surface already attributed to this issue — so the
+        arm costs no extra API call and cannot fire for an unrelated lane.
+
+    ⛔ A COUNT IS NOT A VERDICT: an entry whose `.pid` cannot be read, or is not
+    a live-process pid at all (`0`, a negative group selector, a value above the
+    C `int` range), is UNDECIDABLE and makes this surface INCOMPLETE — never
+    CLEAN, and never a crash. `_pid_is_alive` carries the tri-state.
+
+    Self (`identity.self_pids`) is excluded from BOTH: a lane re-checking its own
+    issue is the case #10684 measured, and it must not collide with itself. A
+    sub-agent the caller's OWN `pi` spawned, standing in the caller's own
+    directory, is excluded too — see `_is_own_subagent` for why that has to be
+    narrower than "my descendants" or "my process group".
+    """
+    notes: list[str] = []
+    rows, why = _process_rows(ps_bin, cwd, timeout)
+    unattributable = 0
+    if rows is None:
+        surface.incomplete(
+            "process-table-unreadable: "
+            f"{why} — a live lane cannot be ruled out without reading the "
+            "process table, so this is NOT a clean scan (NOT clean)"
+        )
+    else:
+        self_pids = identity.self_pids or frozenset()
+        pi_rows = [r for r in rows if _argv0_pi(r[2])]
+        # `ppid` was parsed and then DISCARDED, which is how a real lane stayed
+        # invisible (see `_parent_attribution`). One dict, no second scan.
+        parents: dict[int, tuple[int, str]] = {
+            pid: (ppid, cmd) for pid, ppid, cmd in rows
+        }
+        named = 0
+        own_subagents = 0
+        for pid, _ppid, cmd in pi_rows:
+            if pid in self_pids:
+                continue
+            workdir, cwd_why = _process_cwd(pid, timeout)
+            if _is_own_subagent(pid, parents, self_pids, workdir, cwd):
+                # #10684 one layer out: MY OWN sub-agent, in MY OWN directory.
+                # Counted so the report says so instead of dropping it silently.
+                own_subagents += 1
+                continue
+            how = ""
+            if number_present(cmd, issue):
+                how = (f"its command line names #{issue} "
+                       f"({_one_line(os.path.basename(cmd.split()[0]) if cmd.strip() else cmd, 40)} …)")
+            elif workdir and number_present(workdir, issue) and _is_within(
+                    os.path.realpath(workdir),
+                    os.path.realpath(repo_root or cwd)):
+                # ⛔ THE CWD ARM IS REPO-SCOPED, and that scoping is what keeps it
+                # precise: a directory anywhere on the box whose NAME happens to
+                # carry the issue number (a temp clone called `scratch-1234`, a
+                # peer checkout of a DIFFERENT repo) is not evidence about THIS
+                # repository. A lane on this repo stands in this repo's
+                # `.worktrees/…`, which is inside the root — so the arm keeps the
+                # recall it exists for (a lane with no branch, no PR, no claim
+                # comment) and loses only the false positives.
+                how = f"its working directory names #{issue} ({_one_line(workdir, 120)})"
+            else:
+                how = _parent_attribution(parents, pid, issue, attributed_prs)
+            if how:
+                named += 1
+                surface.add(
+                    f"pid:{pid}",
+                    f"a live `pi` process (pid {pid}) is attributed to this issue "
+                    f"because {how} — a lane is RUNNING on it",
+                    "strong",
+                )
+            elif workdir is None:
+                unattributable += 1
+                if unattributable <= 3:
+                    notes.append(
+                        f"pid {pid}: cwd unreadable ({cwd_why})"
+                    )
+        note = (
+            f"process scan: {len(pi_rows)} live `pi` process(es) enumerated, "
+            f"{len(self_pids)} self pid(s) exempted, "
+            + (f"{own_subagents} own sub-agent(s) exempted, "
+               if own_subagents else "")
+            + f"{named} attributed to "
+            f"#{issue}"
+        )
+        if unattributable:
+            # ⛔ CANNOT LOOK IS NOT CLEAN (review cycle 1, HIGH). A live `pi`
+            # whose cwd cannot be read is a lane this surface could not
+            # attribute — and this is the NORMAL shape where `lsof` is absent or
+            # the process runs under another uid (`/proc/<pid>/cwd` -> EACCES).
+            # Reporting it only in prose left the verdict CLEAN "9/9 surfaces
+            # queried" while the row said a lane could not be ruled out: the
+            # exact fail-open this surface exists to close.
+            note += (
+                f"; ⚠ {unattributable} could not be attributed because its cwd "
+                "was unreadable — a lane among them cannot be ruled out "
+                f"({'; '.join(notes)})"
+            )
+            surface.note = note
+            surface.incomplete(
+                f"process-cwd-unreadable: {unattributable} live `pi` process(es) "
+                "could not be attributed because their working directory could "
+                "not be read — a lane among them cannot be ruled out, so this is "
+                "NOT a clean scan (NOT clean)"
+            )
+            note = surface.note
+        if pi_rows and not named:
+            note += "; no live lane names this issue"
+        if not pi_rows:
+            note += "; no `pi` process is running on this host"
+        surface.note = note
+
+    # ── the harness queue ────────────────────────────────────────────────────
+    entries, absent, qwhy = _lane_queue_entries(slug)
+    root = _lane_queue_root()
+    if entries is None:
+        # ⛔ `combined` USED TO EMBED `surface.note` and then be prefixed with it
+        # again, printing the process-table reason twice (review cycle 1, LOW).
+        tail = (
+            "lane-queue-unreadable: "
+            f"{qwhy} — the background-lane queue could not be read, so a "
+            "harness lane cannot be ruled out (NOT clean)"
+        )
+        if surface.status == STATUS_INCOMPLETE:
+            surface.note = f"{surface.note}; ALSO: {tail}"
+        else:
+            surface.incomplete(tail)
+        return
+    if absent:
+        # `qwhy` names EVERY candidate that was checked (cycle-7 review): with a
+        # single path the claim "queried and absent" hid which path it meant.
+        where = qwhy or root
+        surface.note = (surface.note + "; " if surface.note else "") + (
+            f"lane queue: NOT PRESENT — {where} — queried and absent, which is "
+            "a measuring host's own statement that it runs no background lane "
+            "queue (a macOS box has no /home/cmux); this sub-surface has nothing "
+            "to read here, not an unread one"
+        )
+        return
+    if qwhy:
+        # ⛔ A FLEET-FALLBACK ROOT THE CALLER COULD NOT EXAMINE IS DISCLOSED, not
+        # swallowed (review, P2). It does not make the surface undecidable — every
+        # candidate derived from this caller's own environment WAS read — but the
+        # row has to say where it could not look, or "CLEAN" would read as "all
+        # roots read" when one was not.
+        surface.note = (surface.note + "; " if surface.note else "") + (
+            f"lane queue: {qwhy}")
+    live_entries = 0
+    attributed = 0
+    own_entries = 0
+    undecidable = 0
+    self_pids = identity.self_pids or frozenset()
+    for entry in entries:
+        if entry.get("ended"):
+            continue
+        if entry.get("pid") is None:
+            # Live or finished cannot be decided from an unreadable `.pid`.
+            undecidable += 1
+            continue
+        alive = _pid_is_alive(entry.get("pid"))
+        if alive is None:
+            # A `.pid` the kernel cannot represent is UNDECIDABLE, never dead and
+            # never a crash (#8881 cycle-2 MEDIUM) — counted with the unreadable
+            # ones so the row is INCOMPLETE rather than CLEAN.
+            undecidable += 1
+            continue
+        if not alive:
+            continue
+        if entry.get("pid") in self_pids:
+            # ⛔ THE SAME SELF EXEMPTION AS THE PROCESS ARM (#10684). A lane that
+            # re-checks its own issue while ITS OWN background dispatch entry is
+            # live would otherwise collide with itself a second time, on a
+            # different surface — the exact defect this bundle exists to close,
+            # reproduced one layer down. The queue writes the LAUNCHER's pid, and
+            # a launcher is an ancestor of the `pi` that runs the pre-flight, so
+            # ancestor detection covers it.
+            own_entries += 1
+            continue
+        live_entries += 1
+        pr = entry.get("pr")
+        if pr == issue or (pr is not None and pr in attributed_prs):
+            attributed += 1
+            surface.add(
+                f"lane:prd-{slug.replace('/', '-') if slug else '?'}-{pr}",
+                f"a background harness lane is RUNNING for PR #{pr} "
+                f"(pid {entry.get('pid')}), which this run already attributed to "
+                f"this issue — see {_one_line(entry.get('path') or '', 120)}",
+                "strong",
+            )
+    surface.note = (surface.note + "; " if surface.note else "") + (
+        f"lane queue: {len(entries)} entr(ies) for this repo, {live_entries} "
+        f"live, {attributed} for this issue"
+        + (f", {own_entries} your own" if own_entries else "")
+        + (f", {undecidable} with an unreadable or not-a-live-process pid"
+           if undecidable else "")
+        + f" ({root})"
+    )
+    if undecidable:
+        # ⛔ `incomplete()` REPLACES the note, so a reason the process arm
+        # recorded moments earlier was silently DROPPED (cycle-5 review, LOW):
+        # a dead `pi` row plus an empty `.pid` reported only
+        # `lane-queue-pid-unreadable`, and the operator fixed one cause to
+        # re-run into the other. Mirrors the sibling `lane-queue-unreadable`
+        # branch above, which appends for exactly this reason.
+        tail = (
+            f"lane-queue-pid-unreadable: {undecidable} queue entr(ies) for this "
+            "repo carry a `.pid` that could not be read or is not a "
+            "live-process pid, so whether those lanes are RUNNING cannot be "
+            "decided — NOT a clean scan (NOT clean)"
+        )
+        prior = surface.note or ""
+        surface.incomplete(f"{prior}; ALSO: {tail}" if prior else tail)
+
+
 def run_preflight(
     issue: int,
     target: RepoTarget,
@@ -7065,6 +8178,7 @@ def run_preflight(
     closed_pr_limit: int = CLOSED_PR_LIMIT,
     closed_pr_timeout: float = CLOSED_PR_TIMEOUT,
     identity: Identity | None = None,
+    ps_bin: str = "ps",
 ) -> tuple[list[Surface], str | None, int]:
     identity = identity or Identity()
     surfaces: dict[str, Surface] = {
@@ -7306,6 +8420,9 @@ def run_preflight(
     #     refs cost several reads; never one per local branch), and note-only: a
     #     failure neither demotes nor un-demotes (see `_remote_branch_state`).
     merged_heads: dict[str, int | None] = {}
+    #: PR numbers the OPEN-PR scan attributed to this issue — the live-lane
+    #: surface's harness-queue arm consumes them (#1233).
+    attributed_prs: set[int] = set()
     #: Did the harvest actually RUN? `false` means the closed-PR sample could not be
     #: read, so predicate 1 had no witness at all — which the branch surface's note
     #: must SAY, because "no merged PR matches this tip" and "the merged-PR record
@@ -7383,6 +8500,27 @@ def run_preflight(
                 # has no `closingIssuesReferences`. Every hit here is advisory.
                 scan_pr_surface(surface, prs, issue, identity,
                                 use_closing_field=False)
+                # ⛔ A LANE OUTLIVES THE PR IT SERVES, SO THE CLOSED PRs COUNT
+                # TOO (review, MEDIUM). This feed used to run only on the OPEN
+                # page, and BOTH PR-aware arms of the live-lane surface consume
+                # this ONE set: the queue key (`prd-<owner>-<repo>-<PR>`) and
+                # the ancestor's `--argv …/argv-<PR>`. A `pr-doctor`/merge lane
+                # still running for a PR that has since MERGED (or a
+                # closed-unmerged PR whose issue stays open — the one case the
+                # verdict is not already decided by `exit 4 LANDED`) was
+                # therefore invisible to every arm, and the verdict could be
+                # CLEAN while a live lane held the work. The payload is already
+                # fetched (one REST page above), so the extra evidence costs no
+                # API call: the projection carries `number`, `title`,
+                # `headRefName` AND `body` (the jq projection in
+                # `_closed_pr_sample`), which are the four fields
+                # `_prs_serving_issue` reads; the GraphQL-only closing
+                # reference is absent here — which does NOT
+                # make that helper blind: it falls through to the SAME body
+                # predicate this page's own PR surface attributes with
+                # (`closing_reference(body, issue)`), so a body-only closing
+                # keyword still reaches `attributed_prs` (#11105 review).
+                attributed_prs.update(_prs_serving_issue(prs, issue))
                 if partial:
                     shown = (
                         f"~{approx_total}" if approx_total is not None
@@ -7547,6 +8685,16 @@ def run_preflight(
                 surface.incomplete(
                     f"closing-reference-source-unavailable: {exc}"
                 )
+            if state == "open":
+                # The PR numbers this run has ALREADY attributed to the issue —
+                # fed to the live-lane surface's harness-queue arm so a lane
+                # launched BY a PR number (`pr-doctor` →
+                # `prd-<owner>-<repo>-<PR>`) is visible without a second query.
+                # Zero added API cost: these are the payloads scanned one line
+                # above. A resolution failure inside the helper answers an empty
+                # set, which can only make the queue arm MISS (the process arm
+                # still sees the lane), never falsely hit.
+                attributed_prs.update(_prs_serving_issue(prs, issue))
             if via_rest and surface.status != STATUS_INCOMPLETE:
                 # The rescue READ the list, so the title / head-ref / number tests
                 # all ran — but the computed closing-reference test did not, and
@@ -7931,6 +9079,50 @@ def run_preflight(
         except SurfaceError as exc:
             surface.incomplete(f"git-unavailable: {exc}")
 
+    # The root the process arm's cwd check is scoped to, resolved ONCE so a
+    # failure is reported instead of silently narrowing the arm.
+    repo_root_for_scan = (
+        _main_worktree_root(git_bin, target.path, timeout)
+        if target.path else None
+    )
+
+    # 4b. The LIVE-LANE surface (#1233). Placed after the git surfaces (whose
+    #     worktree listing is not an input to it) and before the issue surface,
+    #     so a lane that exists ONLY as a running process is still reported when
+    #     the board cannot answer. It never raises: an unreadable source is a
+    #     named INCOMPLETE on the row.
+    scan_process_surface(
+        surfaces[SURFACE_PROCESSES], issue, identity,
+        slug=slug, cwd=cwd, ps_bin=ps_bin, timeout=timeout,
+        attributed_prs=frozenset(attributed_prs),
+        # ⛔ THE REPO ROOT IS THE MAIN WORKTREE, NOT `target.path` (review cycle
+        # 1, HIGH). AGENTS.md prescribes `collision_preflight.py <N> --repo .`
+        # run FROM the lane's own worktree, which makes `target.path` that
+        # worktree — so scoping the cwd arm to it excluded every PEER lane in a
+        # sibling `<hub>/.worktrees/...` directory and the arm went inert under
+        # exactly the documented invocation, while reporting a complete scan.
+        # `_main_worktree_root` is the same reader the repo already uses for
+        # sibling discovery.
+        repo_root=((repo_root_for_scan or target.path)
+                   if target.path else None),
+    )
+    if target.path and repo_root_for_scan is None:
+        # ⛔ A NARROWED cwd ARM IS NOT A CLEAN SCAN (cycle-2 residual). When the
+        # main worktree cannot be resolved, the arm above falls back to
+        # `target.path` — which under the documented `--repo .` invocation is
+        # the CALLER'S OWN worktree, so a peer lane in a sibling
+        # `.worktrees/…` cannot be seen. That is exactly the fail-open the
+        # cycle-1 fix closed, reachable again by a git that cannot answer.
+        proc_surface = surfaces[SURFACE_PROCESSES]
+        proc_surface.incomplete(
+            "repo-root-unresolved: the main worktree root could not be resolved "
+            f"for {target.path} (`git rev-parse --git-common-dir` failed), so "
+            "the process arm's working-directory check is scoped to that path "
+            "only and a peer lane in a sibling `.worktrees/…` directory cannot "
+            "be seen — NOT a clean scan (NOT clean)"
+            + (f"; {proc_surface.note}" if proc_surface.note else "")
+        )
+
     # 5. Issue surface (assignee + HOLDER). It is scanned LAST only because that
     #    is where it has always been; it no longer depends on any local git
     #    surface — the claim gate reads the FLEET BOARD, not the worktree
@@ -7941,7 +9133,8 @@ def run_preflight(
         # a rebuild of the board is a real sample window plus its own gh/cmux
         # reads. Skipping it cannot manufacture a CLEAN — it can only save the
         # cost of a question whose answer cannot change the verdict.
-        holders = read_holders(issue, slug=slug, repo_root=target.path or cwd)
+        holders = read_holders(issue, slug=slug, repo_root=target.path or cwd,
+                               self_pids=identity.self_pids)
         scan_issue_surface(surfaces[SURFACE_ISSUE], issue_data, identity, holders)
 
     ordered = [surfaces[name] for name in ALL_SURFACES]
@@ -7963,6 +9156,23 @@ def _assert_all_surfaces(ordered: list[Surface]) -> None:
 #: (#9392). It is this module's own marker, never a foreign string: the two sites
 #: are asserted to agree by `test_the_roster_marker_is_the_note_the_gate_emits`.
 _LANE_ROSTER_NOTE = "the lane roster is UNKNOWN, not empty"
+
+#: The marker `tools/fleet_state.py::gh_json` writes into a READ's cause when the command
+#: was KILLED at its bound (#11202).
+#: ⛔ MATCHED STRUCTURALLY, NOT BY A BARE PHRASE (#11202 review round 8). The surface note
+#: is NOT purely this module's composition: `_board_can_answer` writes a prefix in front
+#: of the read's cause, but on the FAILED arm that cause EMBEDS `gh`'s own bounded stderr
+#: (`_gh_said`), so a foreign line could wear the marker. Measured: with
+#: `github_error = "gh issue list FAILED (1 exit): 'proxy: HTTP 504 upstream TIMED OUT
+#: after 60s waiting for response headers'"` a bare `"TIMED OUT after "` token matched and
+#: the surface was handed the "KILLED AT ITS BOUND … `gh auth` is FINE" remedy — the same
+#: "remedy names a cause the report has disproved" defect this arm was added to remove,
+#: running in the other direction, and it suppressed the correct auth/network arm. The
+#: `(N attempt(s), X.Ys)` parenthetical below is composed ONLY by `gh_json`'s timeout arm,
+#: so no foreign string can carry it.
+_BOARD_READ_KILLED_NOTE = re.compile(
+    r"TIMED OUT after \d+(?:\.\d+)?s \(\d+ attempt\(s\), \d+(?:\.\d+)?s\)"
+)
 
 
 def _incomplete_remedy(incomplete: list[Surface]) -> str:
@@ -8032,6 +9242,49 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
         s for s in incomplete if id(s) not in both_ids and s.truncated
     ]
     generic = "fix gh auth/network (or rebuild the fleet board) and re-run"
+    # ⛔ THE LIVE-LANE SURFACE IS ITS OWN CAUSE TOO (#1233). Its two failures are
+    # `ps` and the harness queue directory — neither is a credential, a budget or
+    # a GitHub read, so the generic sentence would send the operator to
+    # re-authenticate for a cause this same report measured. Partitioned before
+    # `absent` (disjoint markers: `absent` matches issue/repo-target notes).
+    live_unread = [
+        s for s in incomplete
+        if s.name == SURFACE_PROCESSES
+        and ("process-table-unreadable:" in (s.note or "")
+             or "lane-queue-unreadable:" in (s.note or "")
+             # ⛔ THE OTHER TWO LIVE-LANE CAUSES (cycle-5 review, MEDIUM).
+             # `process-cwd-unreadable:` is the NORMAL shape of the cwd
+             # failure (`lsof` absent / another uid) and
+             # `lane-queue-pid-unreadable:` is a corrupt `.pid`; both fell
+             # through to the generic sentence and sent the operator to
+             # "fix gh auth/network (or rebuild the fleet board)" — a cause
+             # this same report contradicts. Neither is a GitHub read, so
+             # neither can be fixed by re-authenticating (#9402's own class).
+             or "process-cwd-unreadable:" in (s.note or "")
+             or "lane-queue-pid-unreadable:" in (s.note or "")
+             # ⛔ AND THE FOURTH MARKER THIS SURFACE EMITS (cycle-6 LOW): a
+             # repo root this git could not resolve narrows the cwd arm, which
+             # is not a GitHub read either.
+             or "repo-root-unresolved:" in (s.note or ""))
+    ]
+    if live_unread and len(live_unread) == len(incomplete):
+        return (
+            "the LIVE-LANE surface, which is not a GitHub read — "
+            f"{', '.join(s.name for s in live_unread)} could not enumerate "
+            "running lanes, so re-authenticating or rebuilding the fleet board "
+            "cannot change this. Check the `ps` binary (--ps / "
+            f"{PS_ENV}) and the lane queue directory ({LANE_QUEUE_ENV} or "
+            f"{_lane_queue_root()}): a lane that cannot be ruled out is not "
+            "\"no lane\""
+        )
+    if live_unread:
+        rest = _incomplete_remedy(
+            [s for s in incomplete if id(s) not in {id(x) for x in live_unread}]
+        )
+        return (
+            "PART of this is the LIVE-LANE surface (check `ps` and the lane "
+            "queue — re-authenticating cannot help), and PART is: " + rest
+        )
     # ⛔ TWO CAUSES THE GENERIC SENTENCE MISPRISES, AND THEY ARE ANSWERED FROM
     # THEIR OWN NOTES (#9423 review, P3). An `issue-absent` or
     # `repo-unresolved` surface says so in its own note — "#{issue} does not
@@ -8099,6 +9352,51 @@ def _incomplete_remedy(incomplete: list[Surface]) -> str:
             return text
         tail_cause = _incomplete_remedy(
             [s for s in incomplete if id(s) not in roster_ids]
+        )
+        return f"PART of this is {text}; PART is: {tail_cause}"
+    # ⛔ A READ KILLED AT ITS BOUND IS NOT A CREDENTIAL PROBLEM, AND IT IS PARTITIONED
+    # AT THE TOP LEVEL (#11202 review rounds 4-5). The generic sentence below is
+    # pre-existing, but BEFORE this change every failure the board read could produce
+    # looked like auth/network (they all read "returned no parsable JSON"), so it was
+    # merely vague. The read now NAMES the timeout, which makes the generic remedy a
+    # cause this same report has DISPROVED — the class this function's own docstring
+    # forbids ("a remedy that names a cause the report has disproved is the same defect
+    # class as a wrong verdict reason").
+    # ⛔ AND IT CANNOT LIVE INSIDE THE `not both and not exhausted and not truncated`
+    # BLOCK (review round 5): a run whose board read was killed AND whose PR list was
+    # truncated fell through to the composite arms, where the `remaining` tail applied
+    # `generic` to the killed surface — the row said "killed for being slow, not
+    # malformed" while the verdict remedy one line below said to re-authenticate and
+    # rebuild the board, which only re-runs the killed read. Partitioned here, the
+    # RECURSION below is what keeps every mixed shape honest: the killed surfaces are
+    # subtracted before any other arm (including the composite tails) can reach them.
+    killed = [s for s in incomplete if _BOARD_READ_KILLED_NOTE.search(s.note or "")]
+    if killed:
+        killed_ids = {id(s) for s in killed}
+        text = (
+            "the FLEET BOARD's GitHub read was KILLED AT ITS BOUND (a slow read, "
+            "not a broken credential) — `gh auth` is FINE and rebuilding the board "
+            "only re-runs the read that just timed out; re-run the pre-flight"
+            # ⛔ AND THE PARENTHETICAL IS SEAM-AWARE (#11202 review round 6). Stated
+            # unconditionally it promised a derived bound and a retry in the ONE state
+            # where neither is armed — the operator who set `fixed` to cap the wall clock
+            # is killed at the flat 60 s and then told to re-run, which is guaranteed to
+            # be killed again with byte-identical output. The remedy and the cause are
+            # composed from the SAME seam predicate, so they cannot disagree in either
+            # state (the rule this function's docstring states).
+            + (
+                " (a timeout is retried once and the bound is derived from the "
+                "read's row count, so a contended read usually succeeds on re-run)"
+                if fleet_state.gh_read_bound_enabled()
+                else f" (the bound is a flat 60 s with one attempt — "
+                f"{fleet_state.GH_READ_BOUND_ENV} is set to `fixed`; unset it to "
+                "restore the derived bound and the retry)"
+            )
+        )
+        if len(killed) == len(incomplete):
+            return text
+        tail_cause = _incomplete_remedy(
+            [s for s in incomplete if id(s) not in killed_ids]
         )
         return f"PART of this is {text}; PART is: {tail_cause}"
     if not both and not exhausted and not truncated:
@@ -8301,7 +9599,10 @@ def format_report(
         "comment prose is NOT read. A lane attributed to the issue and still "
         "holding it BLOCKS; a stopped holder is reported only; an unmeasured "
         "liveness, an ambiguous attribution, or an unreadable board is INCOMPLETE "
-        "(fail-closed). The gate offers NO dismissal switch (#8175)."
+        "(fail-closed). NO dismissal switch in TEXT (#8175): self-identity is the "
+        "one declared input — the caller's pid and ancestors automatically, and "
+        "`--self-pid` as a caller DECLARATION with the same trust model as "
+        "`--self-branch` (see the remedy below)."
     )
     lines.append("")
     surface_width = max(len("SURFACE"), *(len(s) for s in ALL_SURFACES))
@@ -8500,12 +9801,21 @@ def format_report(
         # The remedy belongs at the POINT OF REFUSAL, and it names only the
         # HOLDER hits: a refusal can also be forced by a non-holder hit (an open
         # PR, a branch), so it must not read as "clearing this holder clears the
-        # refusal". There is NO dismissal switch (no `--ignore`, no env var, no
-        # human input) — the holder read is mechanical, so the honest remedy is
-        # to name the lane and say it must be coordinated with (or verified as
-        # stopped) before dispatching. Worth stating because the OLD remedy named
-        # a comment a human could hand-edit to clear the block; that escape is
-        # deliberately gone.
+        # refusal". There is NO dismissal switch in TEXT (no `--ignore`, no env
+        # var, no human input); the holder read is mechanical, so the honest
+        # remedy is to name the lane and say it must be coordinated with (or
+        # verified as stopped) before dispatching. Worth stating because the OLD
+        # remedy named a comment a human could hand-edit to clear the block; that
+        # escape is deliberately gone.
+        # ⛔ BUT "NO DISMISSAL SWITCH" IS TRUE OF THE PROSE PATH ONLY (review,
+        # P1). Self-identity is a declared input and its `--self-pid` half is a
+        # DECLARATION with the same trust model as `--self-branch` (#3504): it
+        # can name a pid that is not the caller's, and nothing here can tell
+        # that apart from an ancestry chain it could not read. The refusal must
+        # SAY that instead of claiming a total absence of dismissal — a remedy
+        # that misdescribes the mechanism is the same "report misdescribes what
+        # it measured" class as a wrong row. Narrowing the declared half is a
+        # question for #8175/#11102, not a silent edit here.
         holder_hits = [
             h for h in strong if h.ref.startswith("holder:")
         ]
@@ -8517,12 +9827,20 @@ def format_report(
                 named += f"; … +{len(holder_hits) - MAX_HITS_SHOWN} more"
             lines.append(
                 "  REMEDY: live HOLDER(s) on the fleet board: "
-                f"{named}. There is NO dismissal switch — a lane the board "
-                "attributes to this issue and reports as still holding it blocks "
-                "by design (a missed duplicate is worse than a false alarm), and "
-                "nothing here can be hand-edited to clear it. Coordinate on the "
-                "issue with each named lane, or confirm the board's reading "
-                "(`uv run python tools/fleet_state.py who "
+                f"{named}. There is NO dismissal switch in TEXT — a lane the "
+                "board attributes to this issue and reports as still holding "
+                "it blocks by design (a missed duplicate is worse than a false "
+                "alarm), and no issue or comment body can be edited to clear "
+                "it. Self-identity is the one declared input, and it has two "
+                "halves with DIFFERENT trust models: the caller's own pid and "
+                "its ANCESTORS are exempt automatically and cannot hide a "
+                "peer, while an explicit `--self-pid PID` is a caller "
+                "DECLARATION with the same trust model as `--self-branch` — "
+                "naming a pid that is not your own is you asserting an "
+                "ownership you do not have, and this tool cannot tell that "
+                "apart from a lane whose ancestry chain it could not read. "
+                "Coordinate on the issue with each named lane, or confirm the "
+                "board's reading (`uv run python tools/fleet_state.py who "
                 f"{issue}`). This line names only the holder hits; the refusal "
                 "may also be forced by a non-holder hit above."
             )
@@ -8936,6 +10254,21 @@ def main(argv: list[str] | None = None) -> int:
                         help="gh binary (env COLLISION_PREFLIGHT_GH)")
     parser.add_argument("--git", default=os.environ.get("COLLISION_PREFLIGHT_GIT", "git"),
                         help="git binary (env COLLISION_PREFLIGHT_GIT)")
+    parser.add_argument("--ps", default=os.environ.get(PS_ENV, "ps"),
+                        help="ps binary for the live-lane surface, which reads "
+                             f"`ps -ww -Ao pid=,ppid=,command=` (env {PS_ENV})")
+    parser.add_argument(
+        "--self-pid", action="append", default=[], metavar="PID", type=int,
+        help="a process id this session OWNS (repeatable). It is a "
+             "DECLARATION with the same trust model as --self-branch: the "
+             "value is NOT verified, so a pid that is not yours is you "
+             "asserting an ownership you do not have — name only your own. A "
+             "board lane whose `session.pi_pid` is in the set is reported as "
+             "your own work and cannot block (#10684/#9251). SEPARATELY, the "
+             "caller's own pid and its ANCESTORS are added automatically, and "
+             "THAT half is unfalsifiable — the automatic half cannot hide a "
+             "peer lane; a declared one can, by construction.",
+    )
     # Deliberately NO `type=` on --timeout / --pr-limit / --closed-pr-limit, and
     # each env default is passed through RAW. A bad value must be EXIT_USAGE, and
     # neither argparse's own error path (exits 2 == EXIT_INCOMPLETE) nor an
@@ -9082,6 +10415,15 @@ def main(argv: list[str] | None = None) -> int:
         login=None,
         self_branches=frozenset(self_branches),
         self_worktrees=frozenset(self_worktrees),
+        # ⛔ THE CALLER'S OWN PID AND ITS ANCESTORS ARE AUTO-DECLARED (#10684,
+        # #9251), and this half is UNCONDITIONAL — unlike the branch/worktree
+        # auto-detection above, which is gated on `_standing_in` because a
+        # SEARCHED-FOR checkout may not be the caller's. Process identity has no
+        # such ambiguity: the ancestry chain is the caller's by construction, and
+        # declaring it can only hide the caller's OWN lane (never a peer), so
+        # there is nothing to be wrong about directionally.
+        self_pids=frozenset(_ancestor_pids(args.ps, args.timeout))
+        | frozenset(int(p) for p in args.self_pid if isinstance(p, int)),
     )
     rc, out, _err, _to = _run(
         [args.gh, "api", "user", "-q", ".login"],
@@ -9100,7 +10442,7 @@ def main(argv: list[str] | None = None) -> int:
         ordered, title, issue = run_preflight(
             number, target, args.gh, args.git, args.timeout,
             args.pr_limit, args.closed_pr_limit,
-            closed_pr_timeout, identity,
+            closed_pr_timeout, identity, ps_bin=args.ps,
         )
         return format_report(ordered, issue, target, title)
 

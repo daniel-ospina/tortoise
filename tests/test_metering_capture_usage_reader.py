@@ -21,6 +21,7 @@ degradation), not about FalkorDB.
 """
 from __future__ import annotations
 
+import ast
 from types import SimpleNamespace
 
 import pytest
@@ -89,6 +90,132 @@ _ALLOWED = {"metering.py", "supabase_control.py", "cost_dimensions.py"}
 _ENFORCEMENT_CONSUMERS = {"allowance_gate.py"}
 
 
+def _names_the_reader(path):
+    """True iff ``path`` REFERENCES ``get_capture_usage`` in CODE.
+
+    ⛔ PARSED, never grepped. A substring match also counts the COMMENT that
+    documents the reader: ``hosted_api.py`` names
+    ``metering.get_capture_usage`` in the comment explaining its own capture
+    door, and a text scan reads that prose as a second consumer — so the pin
+    reds on the very file that explains the relationship it enforces (the
+    ``#10675`` class: a pin that reads a file as TEXT also matches the prose
+    about it). Comments never reach the AST; a docstring does, and is excluded
+    here EXPLICITLY by an id-set rather than "by construction".
+
+    The detection surface is every **direct syntactic** reference in the scanned
+    package — an attribute, a bare name, an import alias (including a re-export
+    with no use site at all), or the reader's name as a string literal ANYWHERE in
+    the module whose value IS the name or a dotted path ENDING in it (a docstring
+    excepted). Those last two arms are here because a first version of
+    this helper matched only ``ast.Attribute``/``ast.Name`` and therefore read
+    ``from … import get_capture_usage as gcu`` + ``gcu(o)`` as clean — a
+    false-negative the old substring scan did not have, and house style in this
+    repo (``allowance_gate.py:196`` aliases its own import). The string arm is
+    not limited to ``getattr``/``setattr``: a name-keyed registration is the same
+    reference, and this repo carries one at ``cost_dimensions.py:534``
+    (``Binding("tortoise.metering", "get_capture_usage", READER)``) — the file
+    exempted above for exactly that reason — so a scanner that recognised only
+    the two builtins would let a SECOND such registration land without reddening
+    the pin below (#10962 review P2). A string Constant is matched ANYWHERE in the
+    module, not only inside a call: a dict-literal registration
+    (``{"get_capture_usage": READER}``) and a dotted path held in a constant
+    (``"tortoise.metering.get_capture_usage"``) are the same reference, and an arm
+    scoped to ``Call``/``Subscript`` read both as CLEAN while the text scan this
+    replaced caught them (#10962 review, P2 — a narrowing of the detection
+    surface, not a strengthening of it). The value must BE the name (``==``) or be
+    the dotted ``metering.get_capture_usage`` path: a bare ``endswith`` matched
+    prose that merely ENDS in the name — an error message
+    (``"… could not be resolved: metering.get_capture_usage"``) and a
+    ``"%s.get_capture_usage"`` log placeholder — which is a false RED on the
+    required scan, the mirror of the fail-open the arm was widened to close, so
+    the suffix arm also requires the ``metering`` segment. Prose that mentions or
+    ends in the path any other way stays invisible; a docstring is excluded
+    explicitly and a comment never reaches the AST at all, which are what this
+    helper exists to exclude. (A name built at
+    RUNTIME, e.g. ``getattr(m, some_variable)`` or ``eval``, is out of scope:
+    no static pin can resolve it, and demanding it is demanding an interpreter.
+    Declared residual: a dotted path through an ALIAS of the module
+    (``"m.get_capture_usage"`` where ``m`` is ``tortoise.metering``) is not
+    matched, because the segment check names ``metering``.)
+
+    It cannot see TRANSITIVE wiring: a door that runs the gate inherits the
+    reader without naming it (the declared residual on ``#10949``). "No offender"
+    therefore means "no direct reference in this package", never "no consumer".
+    """
+    try:
+        # ⛔ ``read_bytes``, not ``read_text``: decoding first makes two kinds of
+        # VALID module unparsable — a UTF-8 BOM (``read_text`` leaves a ``\ufeff``
+        # the tokenizer rejects) and a non-UTF-8 file with a coding cookie. Both
+        # compile and import fine, so raising on them would be a false red that
+        # MISREPORTS itself as "could not be parsed". ``ast.parse`` on bytes
+        # honours the BOM and the cookie itself, and still raises ``SyntaxError``
+        # for a genuinely broken file.
+        tree = ast.parse(path.read_bytes())
+    except SyntaxError as exc:
+        # ⛔ NOT a silent clean: the file is in ``scanned``, so returning False
+        # would satisfy the >100 floor while this module was never examined —
+        # a guard that checked nothing reading exactly like one that found
+        # nothing (the failure the floor's own docstring exists to prevent).
+        raise AssertionError(
+            f"{path} could not be parsed, so the scope scan never examined it — "
+            "an UNREADABLE module must not read as a CLEAN one"
+        ) from exc
+    # Docstring constants are PROSE and are collected up front, because the string
+    # arm below matches a Constant ANYWHERE in the module (see it for why). The one
+    # shape it must still refuse is a docstring that happens to BE the dotted path.
+    docstrings: set[int] = set()
+    for node in ast.walk(tree):
+        if isinstance(
+            node, (ast.Module, ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)
+        ):
+            body = getattr(node, "body", [])
+            if (
+                body
+                and isinstance(body[0], ast.Expr)
+                and isinstance(body[0].value, ast.Constant)
+                and isinstance(body[0].value.value, str)
+            ):
+                docstrings.add(id(body[0].value))
+
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Attribute) and node.attr == "get_capture_usage":
+            return True
+        if isinstance(node, ast.Name) and node.id == "get_capture_usage":
+            return True
+        if isinstance(node, (ast.Import, ast.ImportFrom)):
+            for alias in node.names:
+                if "get_capture_usage" in (alias.name, alias.asname):
+                    return True
+        if (
+            isinstance(node, ast.Constant)
+            and isinstance(node.value, str)
+            and id(node) not in docstrings
+            and (
+                node.value == "get_capture_usage"
+                or (
+                    node.value.endswith(".get_capture_usage")
+                    and node.value.rsplit(".", 2)[-2] == "metering"
+                )
+            )
+        ):
+            # ⛔ A string Constant ANYWHERE in the module, not only as a call
+            # argument or a subscript key. A name-keyed registration is a reference
+            # whatever spelling it takes — ``Binding("tortoise.metering",
+            # "get_capture_usage", READER)`` (``cost_dimensions.py``),
+            # ``{"get_capture_usage": READER}``, or a dotted path held in a
+            # constant. Scoping this arm to ``Call``/``Subscript`` read the last two
+            # as CLEAN while the text scan it replaced caught them — a narrowing,
+            # not the strengthening the docstring claimed (#10962 review P2).
+            # ``endswith`` covers the dotted path, and it is CONSTRAINED to the
+            # ``metering`` segment: a bare ``endswith`` also matched an error MESSAGE
+            # (``"… could not be resolved: metering.get_capture_usage"``) and a
+            # ``"%s.get_capture_usage"`` placeholder, both of which are prose and
+            # would FALSE-RED the required scan. ``id(node) not in docstrings``
+            # keeps a docstring that IS the path from reading as a consumer.
+            return True
+    return False
+
+
 def _scan_capture_call_sites(root):
     """Return ``(offending relative paths, every relative path actually read)``.
 
@@ -102,7 +229,7 @@ def _scan_capture_call_sites(root):
             continue
         rel = str(path.relative_to(root))
         scanned.append(rel)
-        if "get_capture_usage" in path.read_text(encoding="utf-8", errors="replace"):
+        if _names_the_reader(path):
             offenders.append(rel)
     return offenders, scanned
 
@@ -166,6 +293,204 @@ def test_the_scope_scan_flags_a_wired_call_site(tmp_path):
     offenders, scanned = _scan_capture_call_sites(tmp_path)
     assert offenders == ["hosted_api.py"]
     assert scanned == ["clean.py", "hosted_api.py"]
+
+
+def test_a_comment_naming_the_reader_is_not_a_consumer(tmp_path):
+    """The false-POSITIVE direction: prose about the reader is not a consumer.
+
+    ``hosted_api.py`` documents its capture door as *"its meter is
+    `metering.get_capture_usage`"*. A substring scan reads that comment as a
+    second consumer and reds the tree on the file that explains the
+    relationship (the ``#10675`` class). Pinned so the scanner cannot regress
+    to text matching: a module mentioning the reader ONLY in a comment and a
+    docstring must stay OFF the offender list, while a bare name reference in
+    code must still be caught.
+    """
+    (tmp_path / "documents_it.py").write_text(
+        '"""Why the door is metered: see get_capture_usage."""\n'
+        "# and its meter is `metering.get_capture_usage`,\n"
+        "X = 1  # get_capture_usage\n",
+        encoding="utf-8")
+    (tmp_path / "calls_it.py").write_text(
+        "from tortoise.metering import get_capture_usage\n"
+        "Y = get_capture_usage\n",
+        encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == ["calls_it.py", "documents_it.py"]
+    assert offenders == ["calls_it.py"], (
+        "prose naming the reader must not read as a consumer; a bare name "
+        "reference in code must still be one"
+    )
+
+
+def test_the_scan_catches_a_renamed_or_dynamically_named_consumer(tmp_path):
+    """The false-NEGATIVE direction: renaming the reader must not hide a consumer.
+
+    A first version of ``_names_the_reader`` matched only ``ast.Attribute`` /
+    ``ast.Name``, and so read all of these as CLEAN — a narrowing the substring
+    scan it replaced did not have (found in review). Aliasing an import is house
+    style here (``allowance_gate.py:196``), so a second consumer written that way
+    would have cleared the pin silently. ``setattr`` is paired with ``getattr``
+    because both take the name as a literal argument, and the cost of missing
+    one is the same fail-open — each gets its own fixture, because an arm that
+    is never exercised can be deleted without reddening anything. The
+    star-import case is here for the ``ast.Name`` arm specifically: every other
+    fixture reaches the reader through an ``Import``/``Attribute`` node, so
+    without it that arm could be replaced by ``if False:`` and the file would
+    stay green (found in review).
+    """
+    (tmp_path / "aliased.py").write_text(
+        "from tortoise.metering import get_capture_usage as gcu\nX = gcu(1)\n",
+        encoding="utf-8")
+    (tmp_path / "reexported.py").write_text(
+        "from tortoise.metering import get_capture_usage  # noqa: F401\n",
+        encoding="utf-8")
+    (tmp_path / "dynamically.py").write_text(
+        'X = getattr(metering, "get_capture_usage")(1)\n', encoding="utf-8")
+    (tmp_path / "dynamically_set.py").write_text(
+        'setattr(metering, "get_capture_usage", None)\n', encoding="utf-8")
+    (tmp_path / "starimported.py").write_text(
+        "from tortoise.metering import *\nX = get_capture_usage\n", encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == [
+        "aliased.py", "dynamically.py", "dynamically_set.py", "reexported.py",
+        "starimported.py",
+    ], f"every module must have been examined; read: {scanned}"
+    assert sorted(offenders) == [
+        "aliased.py", "dynamically.py", "dynamically_set.py", "reexported.py",
+        "starimported.py",
+    ], (
+        "an aliased import, a bare re-export, getattr/setattr by literal name, and a "
+        f"star-imported bare name are all consumers; only these were found: {offenders}"
+    )
+
+
+def test_the_scan_catches_the_reader_named_as_a_string_in_ANY_call(tmp_path):
+    """The gap the ``getattr``/``setattr``-only arm left open (#10962 review P2).
+
+    A consumer can name the reader as a string literal of a call the scanner does
+    not know: this repo does exactly that at ``tortoise/cost_dimensions.py:534``
+    — ``Binding("tortoise.metering", "get_capture_usage", READER)`` — and the
+    ``_ALLOWED`` exemption for that file exists *because* a name-in-a-call counts
+    as a reference. The pre-merge text scan (main's ``_text_without_comments``)
+    flagged it; an arm that recognised only ``getattr``/``setattr`` read it as
+    CLEAN, so a SECOND ``Binding``-style registration (or a ``registry[...]``
+    lookup) would have landed without reddening the "the gate, and NOTHING else"
+    pin — the fail-open direction the pin exists to prevent.
+
+    Prose stays invisible because the value must BE the name or END WITH it: a
+    log message that merely mentions the dotted path is not a consumer, and
+    neither is a docstring. The arm is not limited to call arguments — the other
+    two spellings have their own leg below
+    (``test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call``).
+    """
+    (tmp_path / "registered.py").write_text(
+        'from tortoise.cost_dimensions import Binding, READER\n'
+        'X = Binding("tortoise.metering", "get_capture_usage", READER)\n',
+        encoding="utf-8")
+    (tmp_path / "registered_as_keyword.py").write_text(
+        'X = register(name="get_capture_usage")\n', encoding="utf-8")
+    (tmp_path / "subscripted.py").write_text(
+        'X = REGISTRY["get_capture_usage"]\n', encoding="utf-8")
+    (tmp_path / "logs_it.py").write_text(
+        'logger.info("metering.get_capture_usage is the reader")  # prose, not a call site\n',
+        encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == [
+        "logs_it.py", "registered.py", "registered_as_keyword.py", "subscripted.py",
+    ]
+    assert sorted(offenders) == [
+        "registered.py", "registered_as_keyword.py", "subscripted.py",
+    ], (
+        "the reader named as a string literal of ANY call (a ``Binding`` registration, "
+        "a keyword argument) or looked up as a subscript key is a consumer; only "
+        f"these were found: {offenders}"
+    )
+
+
+def test_the_scan_catches_the_reader_named_as_a_string_OUTSIDE_a_call(tmp_path):
+    """The shapes a ``Call``/``Subscript``-scoped arm read as CLEAN (#10962 review P2).
+
+    The sibling leg above pins the call shapes. These two spellings reach the
+    same reader and were caught by main's pre-merge text scan, so an AST arm
+    scoped to ``Call``/``Subscript`` NARROWED what it replaced rather than
+    strengthening it: a dict-literal registration
+    (``{"get_capture_usage": READER}``) is the ``Binding``-style registration in
+    another spelling, and a dotted path held in a constant is what an
+    ``importlib``/plugin loader is handed. Each gets its own fixture, because an
+    arm that is never exercised can be deleted without reddening anything.
+
+    ⛔ The remaining three fixtures are the false-POSITIVE half, and they are
+    pinned HERE rather than left implicit: once the arm matches any string
+    Constant, a docstring whose entire body IS the dotted path, an error MESSAGE
+    that ends in the path, and a log FORMAT placeholder that ends in it must all
+    stay off the offender list. The last two red on an unconstrained
+    ``endswith`` (measured) — a false RED on the required scan.
+    """
+    (tmp_path / "dict_registered.py").write_text(
+        'from tortoise.cost_dimensions import READER\n'
+        'REGISTRY = {"get_capture_usage": READER}\n',
+        encoding="utf-8")
+    (tmp_path / "dotted_path.py").write_text(
+        'PATH = "tortoise.metering.get_capture_usage"\n',
+        encoding="utf-8")
+    (tmp_path / "docstring_is_the_path.py").write_text(
+        '"""tortoise.metering.get_capture_usage"""\nX = 1\n',
+        encoding="utf-8")
+    (tmp_path / "error_message.py").write_text(
+        'raise RuntimeError('
+        '"meter could not be resolved: metering.get_capture_usage")\n',
+        encoding="utf-8")
+    (tmp_path / "format_placeholder.py").write_text(
+        'logger.info("%s.get_capture_usage", mod)\n', encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert scanned == [
+        "dict_registered.py", "docstring_is_the_path.py", "dotted_path.py",
+        "error_message.py", "format_placeholder.py",
+    ]
+    assert sorted(offenders) == ["dict_registered.py", "dotted_path.py"], (
+        "a dict-literal registration and a dotted path in a constant are both "
+        "consumers, while a docstring that IS the path, an error message ending "
+        "in it and a ``%s`` format placeholder ending in it are prose; found: "
+        f"{offenders}"
+    )
+
+
+def test_an_unparsable_module_reds_instead_of_reading_as_clean(tmp_path):
+    """Unreadable must never equal clean — the floor cannot catch this.
+
+    An unparsable file is still appended to ``scanned``, so it satisfies the
+    ``>100`` floor while never being examined. Returning False there would make
+    a guard that checked nothing indistinguishable from one that found nothing.
+    """
+    (tmp_path / "broken.py").write_text("def f(:\n", encoding="utf-8")
+    try:
+        _scan_capture_call_sites(tmp_path)
+    except AssertionError as exc:
+        assert "UNREADABLE" in str(exc)
+    else:  # pragma: no cover - the assertion below is the failure
+        raise AssertionError("an unparsable module was read as CLEAN")
+
+
+def test_the_scope_scan_still_flags_a_dynamic_reference_in_a_string(tmp_path):
+    """The AST must not become an identifier-only scan.
+
+    Main's pre-merge ``_text_without_comments`` repair (``71832318b``, landed
+    with #10935) stripped COMMENT tokens and kept STRING tokens in scope, and
+    this leg is the half of that repair worth keeping: a reference assembled as
+    a literal string (``getattr(metering, "get_capture_usage")``) is still a
+    wiring of the reader. The comment-stripping half is subsumed rather than
+    dropped — ``test_a_comment_naming_the_reader_is_not_a_consumer`` above
+    excludes a comment AND a docstring AND still catches a real code reference,
+    which is strictly stronger than a comment strip alone. Kept as a distinct
+    fixture shape because the string-in-a-call arm is the one an
+    identifier-only scanner silently loses.
+    """
+    (tmp_path / "tool_registry.py").write_text(
+        'READER = getattr(metering, "get_capture_usage")\n', encoding="utf-8")
+    offenders, scanned = _scan_capture_call_sites(tmp_path)
+    assert offenders == ["tool_registry.py"]
+    assert scanned == ["tool_registry.py"]
 
 
 def test_the_scope_scan_exempts_only_the_defining_modules(tmp_path):

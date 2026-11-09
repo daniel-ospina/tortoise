@@ -109,14 +109,30 @@ def _probe_payload() -> dict:
     up" and does not pretend to. Declare an endpoint (even the default) to move a
     down daemon into the can't-reach-it state.
 
-    The rewritten payload drops `url` (the driver filled in the UNCONFIGURED
-    default, so keeping it would advertise an endpoint the probe just said was
-    never configured) and adds `configured: false`.
+    ⛔ The rewrite applies to a word OUTSIDE the recorded term set
+    (`CLIENT_STATUS_TERMS`) — in practice the `tortoise_unavailable` outage word
+    and the flat legacy `not_configured` (both resolve to `unconfigured` and
+    neither can be translated without the configuration fact). It is NOT keyed on
+    `LEGACY_WORDS_NEEDING_CONFIGURATION`, which is narrower and would pass
+    `not_configured` through verbatim. A word the DRIVER already reports inside the recorded
+    term set passes through VERBATIM, url included (#10605 review, P1): the
+    credential-less refusal arrives as the recorded `unconfigured` carrying the
+    endpoint it actually resolved and contacted, and rewriting THAT to
+    `{url: None, configured: false}` told a caller to declare an endpoint it
+    already had — the misattribution #10605 exists to remove, and the opposite of
+    what the paragraph above promises.
+
+    The rewritten payload (legacy word + no declared endpoint) drops `url` (the
+    driver filled in the UNCONFIGURED default, so keeping it would advertise an
+    endpoint the probe just said was never configured) and adds
+    `configured: false`.
     """
     payload = status()
+    raw = payload.get("status")
     configured = endpoint_declared()
-    term = vocab.resolve(payload.get("status"), configured=configured)
-    if term == vocab.STATUS_UNCONFIGURED and not configured:
+    term = vocab.resolve(raw, configured=configured)
+    if (term == vocab.STATUS_UNCONFIGURED and not configured
+            and raw not in vocab.CLIENT_STATUS_TERMS):
         return {**payload, "status": term, "configured": False, "url": None}
     return {**payload, "status": term}
 

@@ -24,6 +24,9 @@
 #      R2_DOWN is WATCHER-owned (#3147), so the driver can never self-close it
 #  14. lock held + stale last_sweep → SWEEP_NO_COVERAGE + RED
 #  15. lock held + fresh last_sweep → healthy, silent
+# 14b-14e. lock held + FUTURE-dated last_sweep → corruption, never healthy;
+#      the +300s skew grace is symmetric and bounded on this arm too, and the
+#      corruption red does not depend on the pool (#10234 r20)
 #  16. no_work + empty R2 pool → silent (pre-beta)
 #  17. missing/non-JSON .enabled → SWEEP_NO_COVERAGE (fail CLOSED) + RED
 #  18. watcher.running=false → WATCHER_DOWN filed (jq `//` false bug, #2843)
@@ -119,10 +122,44 @@
 #  77. #5028: the ride-along skip names the ACTUAL status — already_running is
 #      the lock case; a non-lock skip (driver_timeout/empty_response) must
 #      never assert a held lock
-#  78. #5028: a sweep --max-time timeout (curl rc 28) names driver_timeout and
-#      reports the elapsed seconds in the log line AND the filed incident body;
-#      the ride-along stays skipped
-#  79. #5028: an empty sweep body names empty_response (not a held lock)
+#  78. #5028/#10234: a sweep --max-time timeout (curl rc 28) names
+#      driver_timeout and reports the elapsed seconds AND the completion age it
+#      gated on; a timeout over a FRESH last COMPLETED sweep is NOT red; the
+#      ride-along stays skipped
+#  78b. #10234: a timeout over a STALE last COMPLETED sweep (> driver-down) IS
+#      red, and the filed body carries the age rather than a bare timeout claim
+#  78c. #10234: a timeout with NO usable last_sweep_at and a pool holding team
+#      prefixes IS red — unknown is not healthy (#2790)
+#  78d. #10234: the sweep ceiling is an overridable knob (default derived from
+#      the job timeout); the 600s literal that killed healthy sweeps is gone.
+#      d-ii refuses a non-numeric value; d-iii refuses 0, an over-budget value,
+#      and a value too WIDE for `[ -gt ]` to compare (which would otherwise skip
+#      the validator entirely)
+#  78e. #10234: `curl rc=56` is a TRANSPORT failure, not a budget timeout — it
+#      stays red even over a fresh completion, and names curl's own rc
+#  78f. #10234: a future-dated last_sweep_at is corruption — it reds regardless
+#      of the pool (f-ii pins the measured-empty-pool case, where round 1 had it
+#      silently green)
+#  78g. #10234: a fresh stamp does NOT prove the pool is servable — an
+#      unparseable archive timestamp reds AND files POOL_STALE (never a silent red)
+#  78h. #10234: an archive-LESS team (the custom-only shape this leg cannot see,
+#      #2375) does NOT red — round 3's broader guard would have red every run
+#  78c-ii. #10234: a rc=0 `empty_response` with no completion evidence reds with a
+#      title that says "no report body", never "timed out"
+#  78j. #10234: no report + ABSENT stamp + measured-EMPTY pool is the pre-beta
+#      envelope — silent, no filing (an edit that reds it would recreate #10234)
+#  78k. #10234: the unparseable COUNT is real (two teams => "2 team(s)"), not a
+#      hardcoded 1
+#  78l. #10234: an UNMEASURABLE pool never reads as measured-empty
+#  78m/78n. #10234: the arm's bound is DRIVER_DOWN_MIN (150m green, red at 120m)
+#  78o. #10234: a 2-minute-old stamp is USABLE — pins the skew grace's lower side
+#  78p. #10234: a stamp 120s AHEAD is usable (the grace's tolerated band), and the
+#      run reports 0m instead of an impossible negative age
+#  78i. #10234: a MIXED pool (one stale team AND one unparseable timestamp) files
+#      a POOL_STALE whose body names the corrupt stamp and whose title covers both
+#      causes — the placeholder bullet must not be gated on the stale count
+#  79. #5028: an empty sweep body names empty_response (not a held lock); it is
+#      judged on the same completion gate as a timeout
 #  80. #5028: the sweep OUTCOME is logged untruncated even when `per_team`
 #      (the org census) precedes it in the payload
 #  81. #5028: the outcome's org census is `unknown` (never blank) when /status
@@ -527,7 +564,12 @@ export STUB_LOG="$LOG"
 # ── fixture timestamps ──────────────────────────────────────────────────────
 TS_RECENT="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=5)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
 TS_STALE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=500)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
-export TS_RECENT TS_STALE
+# #10234 review P2 (round 14): an age strictly BETWEEN STALE_MIN (90) and
+# DRIVER_DOWN_MIN (240). Without one, the arm's central comparison could be
+# mutated to STALE_MIN — or to a hardcoded literal — and every case stayed green.
+TS_MID="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=150)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+
+export TS_RECENT TS_STALE TS_MID
 
 # ── driver env ──────────────────────────────────────────────────────────────
 export INTERNAL_API_URL="https://api.example.test"
@@ -738,6 +780,13 @@ export STUB_SWEEP_BODY='{"status":"already_running"}'
 run_driver
 assert_eq "$RC" 1 "14. stuck lock exits RED (1)"
 assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "14. stuck lock files SWEEP_NO_COVERAGE"
+# Round 21 (fresh-context re-review): the terminal line is BEHAVIOUR and was
+# unpinned — reverting `already_running` out of the no-report case arm left the
+# suite fully green (610/0), so a revert would re-make "sweep backed up nothing"
+# for a held lock, the exact claim this change exists to stop. Every sibling
+# shape in that arm is pinned (78c, 78c-ii, 78e); pin this one the same way.
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14. the exit line names the missing report, not a coverage failure"
+assert_not_contains "$OUT" "sweep backed up nothing" "14. (control) a held lock never claims the sweep backed up nothing"
 
 # ── 15. 202 lock held + fresh last_sweep → healthy ──────────────────────────
 reset_case
@@ -748,6 +797,79 @@ export STUB_SWEEP_BODY='{"status":"already_running"}'
 run_driver
 assert_eq "$RC" 0 "15. healthy lock exits 0"
 assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "15. healthy lock files nothing"
+
+# ── 14b. #10234 review P2 (round 20): the held-lock arm must not read a ─────
+# FUTURE-dated last_sweep_at as HEALTHY. Cases 14/15 drove this arm with a
+# past-dated stamp only, so the round-2 future-stamp guard (which lives in the
+# driver_timeout/empty_response arm) had no equivalent here and deleting every
+# future-stamp handling from THIS arm left the suite green. A negative age is
+# never `> DRIVER_DOWN_MIN`, so a corrupt ops/state.json took the `healthy`
+# else, filed nothing and exited 0 — while printing an age that cannot be true.
+# Stamp it INLINE (as 78f/78o do): a suite-start fixture drifts under load.
+LOCK_FUTURE_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$LOCK_FUTURE_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "14b. a held lock with a future-dated last_sweep_at fails CLOSED, not open"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "14b. the corrupt stamp files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "dated in the FUTURE" "14b. the future stamp is reported as corruption"
+assert_not_contains "$OUT" "— healthy" "14b. a corrupt stamp is NEVER called healthy"
+assert_contains "$(cat "$LOG")" 'last_sweep_at is in the future' "14b. the TITLE names the corrupt stamp"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "14b. (control) no budget claim on corruption"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14b. the exit line names the missing report, not a coverage failure"
+
+# ── 14c. the 300s skew grace is the SAME on this arm, and clamps the age ────
+# A stamp 120s AHEAD is ordinary app<->runner skew: it must stay healthy (or
+# every skewed-but-fine run reds), and the green line must report a real age —
+# never the impossible `-2m`.
+LOCK_AHEAD_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=120)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$LOCK_AHEAD_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 0 "14c. a stamp 120s AHEAD (inside the grace) is usable, not corruption"
+assert_not_contains "$(cat "$LOG")" "in the future" "14c. it does NOT file a future-stamp incident"
+assert_not_match "$OUT" 'last real sweep -[0-9]+m' "14c. the green line does NOT publish a negative age"
+assert_contains "$OUT" "inside the 300s skew grace" "14c. it names the skew instead"
+assert_contains "$OUT" "0m ago" "14c. the age is clamped to 0m"
+assert_contains "$OUT" "— healthy" "14c. a skewed-but-inside-grace lock is still healthy"
+
+# ── 14d. the grace is BOUNDED on this arm too (300s, not "any future") ──────
+# Without this, tightening 300 -> 30 survives here (14b only pins a +6h stamp)
+# and a 400s skew would silently read healthy.
+LOCK_NEAR_FUTURE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=400)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$LOCK_NEAR_FUTURE")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "14d. a stamp 400s in the future is already corruption on the held-lock arm"
+assert_not_contains "$OUT" "— healthy" "14d. a bounded grace: 400s ahead is not healthy"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14d. the exit line names the missing report, not a coverage failure"
+
+# ── 14e. the corruption red does NOT depend on the pool ────────────────────
+# 78f-ii pins this for the timeout arm: round 1 routed a future stamp into the
+# benign pre-beta envelope, so corrupt state went SILENT whenever the pool
+# happened to be measured empty. The held-lock arm's guard must not be gated on
+# pool state either — its neighbouring `elif` reads R2_TEAMS/R2_LIST_OK, so an
+# edit that moved the corruption check inside that arm would look correct on
+# 14b (fresh pool) and green here. (Reuses 14b's inline stamp: +6h, drift-safe.)
+reset_case
+export R2_TEAMS=""                    # a measured-EMPTY pool
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$LOCK_FUTURE_TS")"
+export STUB_SWEEP_BODY='{"status":"already_running"}'
+run_driver
+assert_eq "$RC" 1 "14e. a future-dated stamp reds on a held lock even when the pool is measured empty"
+assert_contains "$OUT" "dated in the FUTURE" "14e. the corruption is named, not swallowed as pre-beta"
+assert_not_contains "$OUT" "— healthy" "14e. a measured-empty pool never makes corruption healthy"
+assert_contains "$OUT" "no sweep report was read (status=already_running)" "14e. the exit line names the missing report, not a coverage failure"
 
 # ── 16. no_work + empty R2 pool → silent (pre-beta) ─────────────────────────
 reset_case
@@ -1873,21 +1995,510 @@ assert_contains "$OUT" "sweep skipped (status=already_running)" "77. a held lock
 assert_not_contains "$OUT" "already_running (lock held)" "77. the false lock-held claim is gone"
 assert_not_contains "$OUT" "ride-along OK" "77. already_running still skips the purge/reconcile ride-along"
 
-# ── 78. #5028: a sweep timeout names the status AND the elapsed time ───────
+# ── 78. #5028/#10234: a sweep timeout names the status AND the elapsed time,
+#        and a timeout with a HEALTHY completion history is NOT a red ───────
+# #10234: this case used to assert RED on ANY timeout. That is the defect: the
+# arm's own body said the sweep might still be running, yet the verdict claimed
+# a coverage outage. Measured on `main` 2026-11-05: six consecutive hourly runs
+# hit the 600s ceiling (rc=28) while `/status` on the NEXT run showed each
+# abandoned sweep had COMPLETED (last_sweep_at advanced one hour at a time,
+# graph_totals attempted=84/backed_up=4/errors=0) — 127 false recurrences on
+# #10234 and a red trunk from at least 08:26Z. The naming #5028 added is kept
+# verbatim; only the verdict changes, and only when completion is PROVEN fresh.
 reset_case
 export R2_TEAMS=$'backups/teamA/'
 export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export STUB_SWEEP_RC=28
 run_driver
-assert_eq "$RC" 1 "78. a sweep timeout stays RED (1)"
+assert_eq "$RC" 0 "78. a timeout with a fresh last COMPLETED sweep is NOT red"
 assert_contains "$OUT" "sweep skipped (status=driver_timeout)" "78. a timeout names driver_timeout"
 assert_not_contains "$OUT" "lock held" "78. a timeout is NOT reported as a held lock"
 assert_match "$OUT" "curl rc=28, took [0-9]+s" "78. the timeout reports rc 28 and the elapsed seconds"
-# #5028: the elapsed is carried in the FILED body too, not only the log line —
-# the incident is what a human reads weeks later, when the run's stdout is gone.
-assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78. the filed incident body carries the elapsed seconds"
+assert_contains "$OUT" "the driver's own ceiling was hit" "78. the verdict names the driver's patience, not a coverage outage"
+assert_contains "$OUT" "this says nothing about whether the pipeline stopped" "78. the verdict does NOT claim the pipeline is fine"
+assert_contains "$OUT" "the last COMPLETED sweep was" "78. the verdict carries the completion age it gated on"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78. no SWEEP_NO_COVERAGE incident is filed"
 assert_not_contains "$OUT" "ride-along OK" "78. a timeout still skips the purge/reconcile ride-along"
+assert_contains "$OUT" "ride-alongs are SKIPPED for this run" "78. the green line WARNS that erasure/revocation were not attempted"
+
+# ── 78b. #10234: a timeout PLUS a stale last COMPLETED sweep IS red ────────
+# The fail-closed half. A budget timeout proves nothing on its own, but no
+# completed sweep inside the declared driver-down window IS coverage evidence:
+# sweeps have stopped landing. The bound is `DRIVER_DOWN_MIN` (240 default),
+# the SAME one the held-lock arm and the direct-R2 leg use — so this fix
+# cannot widen the outage blind spot.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_STALE")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78b. a timeout with a stale last COMPLETED sweep stays RED"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78b. a stale completion files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "the last COMPLETED sweep was" "78b. the red names the completion age"
+assert_match "$(cat "$LOG")" 'COMPLETED sweep is [0-9]+m old' "78b. the filed body carries the age, not just a timeout claim"
+# #5028 guard, restored (review P2 finding 6): the elapsed seconds must survive
+# into the FILED body, not only the log — the incident is what a human reads
+# weeks later, when the run's stdout is gone.
+assert_match "$(cat "$LOG")" 'after [0-9]+s \(curl exit 28' "78b. the filed body still carries the elapsed seconds (#5028)"
+assert_contains "$(cat "$LOG")" 'no sweep has completed within the driver-down window' "78b. the TITLE names the driver-down window, not a bare timeout"
+
+# ── 78c. #10234: a timeout with NO usable completion evidence IS red ───────
+# Unknown is not healthy (#2790). With no `last_sweep` at all the driver has no
+# completion evidence, and a pool holding team prefixes means this is not the
+# chronic pre-beta empty state.
+# Review P1 (round 2): the fixture must express an ABSENT stamp. `status_body … ""`
+# does NOT — the helper's `${6:-<default>}` substitutes a concrete STALE date, so
+# this case silently re-tested 78b's stale branch and the fail-closed `elif` was
+# never reached (deleting it left the suite green). Build the body explicitly and
+# assert the branch's OWN log line.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78c. a timeout with no usable last_sweep_at stays RED"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78c. unverifiable completion files SWEEP_NO_COVERAGE"
+assert_contains "$OUT" "no usable last_sweep_at" "78c. the fail-closed branch is the one that ran (not the stale-age branch)"
+assert_not_contains "$OUT" "the last COMPLETED sweep was" "78c. (control) the stale-age branch did NOT run"
+assert_contains "$OUT" "no sweep report was read (status=driver_timeout)" "78c. the exit line names the missing report, not a coverage failure"
+# Round 9: the incident TITLE must name the cause the SHAPE had. Phrase occurs only
+# in the title, never in the body, so this pins the title specifically.
+assert_contains "$(cat "$LOG")" 'sweep timed out and completion cannot be verified' "78c. the TITLE names the budget ceiling for rc=28"
+
+# ── 78c-ii. #10234 review P2 (round 8): a rc=0 completion is NOT "timed out" ──
+# The fail-closed arm's incident TITLE said "sweep timed out" even for
+# `empty_response`, where curl exited 0 and the exchange completed. A title that
+# contradicts its own body is the #5114 class this PR closes, and no case reached
+# this branch (78c uses rc=28, 79 uses a fresh stamp).
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=0
+run_driver
+assert_eq "$RC" 1 "78c-ii. an empty body with no completion evidence stays RED"
+assert_contains "$OUT" "no usable last_sweep_at" "78c-ii. the fail-closed branch is the one that ran"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78c-ii. the incident TITLE does not claim a budget timeout for an rc=0 completion"
+assert_contains "$(cat "$LOG")" 'returned no report body' "78c-ii. the title names the real shape"
+assert_contains "$OUT" "no sweep report was read (status=empty_response)" "78c-ii. the exit line names the missing report for THIS shape too"
+
+# ── 78d. #10234: the ceiling knob exists and its default exceeds the 600s ──
+# The 600s literal WAS the defect: the sweep needs longer than its client was
+# willing to wait, so the driver killed a healthy sweep every run. The default
+# is derived from the job's own timeout (45 min) minus the driver's other work;
+# the knob exists so ops can retune without a code change.
+assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S="\$\{SWEEP_TIMEOUT_S:-1500\}"' "78d. the sweep ceiling is an overridable knob with the documented default"
+# Round 13: the SHAPE alone let 1500 -> 200 (below the measured 19-34 min sweep,
+# i.e. #10234 itself) ship green. Pin the magnitude against the documented floor.
+assert_file_match "$DRIVER" 'SWEEP_TIMEOUT_S:-1[0-9]{3}' "78d. the default is at least four digits (a 200s default would recreate #10234)"
+assert_file_match "$DRIVER" 'curl -sS -m "\$SWEEP_TIMEOUT_S"' "78d. the sweep POST uses the knob, not a literal"
+# Review P2 finding 2: the pre-fix assertion grepped only lines containing
+# `backups/sweep`, but the URL and the ceiling sit on DIFFERENT physical lines of
+# one continued command — so it passed against the code it was meant to disprove.
+# Assert on the whole file instead.
+assert_not_match "$(cat "$DRIVER")" 'curl[^|]*-m 600' "78d. no literal 600s ceiling survives anywhere in the driver"
+# #10234 review P2 (round 5): the knob is only reachable because the WORKFLOW
+# binds it — Actions passes only what `env:` enumerates (the #3146 lesson this
+# same workflow documents). Nothing else asserts that line exists, so a later
+# workflow edit could silently disconnect ops' documented variable.
+assert_file_match "$SCRIPT_DIR/../workflows/registry-backup-cron.yml" 'SWEEP_TIMEOUT_S: \$\{\{ vars\.SWEEP_TIMEOUT_S \}\}' "78d. the workflow BINDS the knob (Actions passes only what env: enumerates)"
+assert_file_match "$SCRIPT_DIR/../workflows/registry-backup-cron.yml" 'timeout-minutes: 45' "78d. the job ceiling is 45 min (the knob's 1800s upper bound fits inside it)"
+
+# ── 78d-ii. #10234 review P2: a non-numeric knob must not go green ─────────
+# A bad value reaches `curl -m` and curl rejects the option (rc=2) with NO
+# request sent. It is still refused here, and for a reason that survived the
+# classifier change: a legible "SWEEP_TIMEOUT_S must be whole seconds" beats a
+# confusing transport fault. (Round 20 note: the ORIGINAL justification — "the
+# classifier would read rc=2 as an empty body and go green" — is stale, because
+# this same PR maps ANY non-28 non-zero rc to `transport_error`, which reds.
+# The refusal is right; only the reason changed, and it is no longer load-bearing
+# for fail-closedness.)
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=abc
+run_driver
+assert_eq "$RC" 1 "78d-ii. a non-numeric SWEEP_TIMEOUT_S is refused RED, not silently green"
+assert_contains "$OUT" "SWEEP_TIMEOUT_S must be whole seconds" "78d-ii. the refusal names the variable"
+
+# ── 78d-iii. #10234 review P2 (round 2): 0 and out-of-range are refused ────
+# `curl -m 0` means NO CEILING (verified against a black-hole server), so 0
+# reinstates the unbounded POST this change exists to remove; and a value above
+# the job ceiling gets the driver killed mid-leg, which the workflow comment
+# says must not happen.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=0
+run_driver
+assert_eq "$RC" 1 "78d-iii. SWEEP_TIMEOUT_S=0 is refused (it means no ceiling to curl)"
+assert_contains "$OUT" "between 60 and 1800" "78d-iii. the refusal names the accepted range"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=3000
+run_driver
+assert_eq "$RC" 1 "78d-iii. a ceiling above the job budget is refused"
+# Round 13: the COMPARISON constants were unpinned — widening 1800 to 2400 (which
+# overruns the 45-min job ceiling) or lowering the 60 floor shipped green, while
+# the refusal message still promised "between 60 and 1800".
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=59
+run_driver
+assert_eq "$RC" 1 "78d-iii. 59s is below the floor and refused"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export SWEEP_TIMEOUT_S=60
+run_driver
+assert_eq "$RC" 0 "78d-iii. 60s is accepted (the floor boundary)"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_BODY='{"status":"backed_up","teams_backed_up":1}'
+export SWEEP_TIMEOUT_S=1800
+run_driver
+assert_eq "$RC" 0 "78d-iii. 1800s is accepted (the ceiling boundary)"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=1801
+run_driver
+assert_eq "$RC" 1 "78d-iii. 1801s is refused (the ceiling boundary)"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export SWEEP_TIMEOUT_S=99999999999999999999
+run_driver
+assert_eq "$RC" 1 "78d-iii. a value too wide to compare is refused, not passed to curl"
+unset SWEEP_TIMEOUT_S
+
+# ── 78g. #10234 review P1 (round 3) / P2 (round 4): a fresh stamp does not prove
+#         the pool is servable — but ONLY the unparseable-timestamp cause reds ──
+# `last_sweep_at` is written unconditionally at the end of the roll-up, BEFORE the
+# outcome is computed, so it proves the roll-up finished, not that the pool is
+# servable. Of the three direct-R2 stale causes only "a stale archive" files
+# anything, so an UNPARSEABLE archive timestamp would otherwise leave the run
+# green. It reds — and FILES POOL_STALE, because a detectable, fileable condition
+# is never allowed to be silent.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST='not-a-timestamp'   # newest archive timestamp unparseable
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78g. a fresh stamp over an UNMEASURABLE pool is NOT green"
+assert_contains "$OUT" "could not read an archive timestamp" "78g. the red names the pool evidence, not a coverage claim"
+# Round 10: the PURE unparseable case has its own POOL_STALE title — pin it, or a
+# wrong-shape summary ("0 team default archive(s) older than 90m") passes CI.
+assert_file_match "$LOG" 'POOL_STALE — an archive timestamp could not be parsed \(pool age UNMEASURABLE, 1 team\(s\)\)' "78g. the TITLE names the unparseable stamp AND its count, not a zero-count stale claim"
+assert_file_match "$LOG" 'this zero is NOT a healthy reading' "78g. the BODY says the zero is not a healthy measurement"
+# "Filed" can take two shapes: a create POST, or a dedup adoption of an already
+# open POOL_STALE. Both record the condition; silence records nothing. Accept
+# either, and fail only on silence.
+if grep -qE "GH POST .*/issues .*POOL_STALE" <<<"$(cat "$LOG")" \
+   || grep -qF "dedup: POOL_STALE" <<<"$OUT"; then
+  ok "78g. the condition is FILED or adopted, never a silent red"
+else
+  bad "78g. the condition is FILED or adopted, never a silent red (neither a POST nor a dedup adoption)"
+fi
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78g. it does NOT resurrect the false SWEEP_NO_COVERAGE claim"
+
+# ── 78h. #10234 review P2 (round 4): an archive-LESS team does NOT red ──────
+# "team prefix present but no default archive" is exactly what a team whose
+# DEFAULT graph is legitimately empty looks like while a CUSTOM graph archives —
+# this leg is DEFAULT-only by design (#2375), and the driver's own no_teams/no_work
+# arm RESOLVES SWEEP_NO_COVERAGE on that reading. Reding it (round 3's guard did)
+# would red every timeout run forever for a healthy custom-only team.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST=""                  # prefix present, NO default archive
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78h. an archive-less (custom-only) team does not red a budget timeout"
+assert_not_contains "$OUT" "could not read an archive timestamp" "78h. (control) the unparseable branch did not run"
+
+# ── 78i. #10234 review P2 (round 6): a MIXED pool still names the corrupt stamp ──
+# Gating the placeholder bullet on STALE_TEAM_COUNT=0 hid the unparseable cause
+# whenever another team was also stale, so an operator fixed the named tenants
+# and the incident stayed open with nothing in its body saying why.
+reset_case
+export R2_TEAMS=$'backups/teamA/	backups/teamZ/'
+export R2_DEFAULT_LIST_A="$TS_STALE"       # teamA: stale by age
+export R2_DEFAULT_LIST_Z="not-a-timestamp" # teamZ: unparseable
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78i. a mixed pool stays red"
+assert_contains "$OUT" "could not read an archive timestamp" "78i. the unparseable cause is not masked by the stale count"
+# Round 7: the create POST logs {title, body}, and round 6 added the phrase to
+# BOTH — so a single needle matched either half and the case proved nothing.
+# Assert one phrase unique to each.
+assert_file_match "$LOG" 'AGE UNMEASURABLE, see the log for the specific team' "78i. the FILED body bullet names the corrupt stamp"
+assert_file_match "$LOG" 'and an archive timestamp could not be parsed \(1 team\(s\) age UNMEASURABLE\)' "78i. the TITLE covers both causes and COUNTS the unparseable teams"
+assert_file_match "$LOG" "teamZ — newest archive timestamp 'not-a-timestamp' could not be parsed" "78i. the BODY names the offending tenant and its value (#4994)"
+# Round 20 (fresh-context review): the caveat's NEGATIVE side was unpinned.
+# Deleting the `STALE_TEAM_COUNT = 0` half of the POOL_AGE_CAVEAT condition made a
+# MIXED pool emit "this zero is NOT a healthy reading" beside a measured 1 in the
+# SAME public body — and the whole suite shipped green (589/0). The caveat is true
+# only when there is no stale team to count; a mixed pool must not claim a zero.
+assert_not_match "$(cat "$LOG")" 'this zero is NOT a healthy reading' "78i. a MIXED pool does not claim the count is a zero"
+
+# ── 78e. #10234 review P1: a TRANSPORT failure is not a budget timeout ─────
+# rc=56 (connection reset) was measured in production at 201s and 480s of a
+# 600s budget — the driver still had patience left, so folding it into the
+# timeout arm's softening would call it a budget artifact it is not, and would
+# make the entire sweep-outcome surface go dark on a green run.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=56
+run_driver
+assert_eq "$RC" 1 "78e. a transport failure stays RED even with a fresh completion"
+assert_contains "$OUT" "sweep transport_error" "78e. the shape is named transport_error, not driver_timeout"
+assert_not_contains "$OUT" "budget timeout" "78e. a transport fault is NOT called a budget timeout"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78e. a transport fault files SWEEP_NO_COVERAGE"
+assert_match "$(cat "$LOG")" 'curl exit 56' "78e. the filed body names curl's own rc"
+# Round 7: deleting the `transport_error` clause from the ride-along guard survived
+# the whole suite. A reset connection says NOTHING about whether the server stopped
+# the sweep and released its per-org locks, so the skip is load-bearing.
+assert_contains "$OUT" "sweep skipped (status=transport_error)" "78e. a transport fault skips the purge/reconcile ride-alongs"
+assert_not_contains "$OUT" "ride-along OK" "78e. (control) neither ride-along ran"
+# and the terminal line must not make a coverage claim it cannot measure
+assert_contains "$OUT" "no sweep report was read (status=transport_error)" "78e. the exit line names the missing report, not a coverage failure"
+assert_contains "$(cat "$LOG")" 'the sweep call failed in transport' "78e. the TITLE names the transport fault, not a timeout"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78e. (control) no budget claim on a transport fault"
+
+# ── 78f. #10234 review P2: a FUTURE-dated last_sweep_at is unusable, not fresh ──
+# A skewed/corrupt ops/state.json makes the age negative, and a negative age is
+# never `> DRIVER_DOWN_MIN` — so without a clamp the run reads fresh forever.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+FUTURE_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(hours=6)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f. a future-dated last_sweep_at fails CLOSED, not open"
+assert_contains "$OUT" "dated in the FUTURE" "78f. the future stamp is reported as corruption"
+# Round 14 note: the 300s grace was pinned only against a +6h stamp, so any grace
+# under 6h survived. A +400s stamp must still be corruption.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+NEAR_FUTURE="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=400)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$NEAR_FUTURE")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f-iii. a stamp 400s in the future is already corruption (the 300s grace is bounded)"
+# Round 10: the TITLE of this arm's own incident must name corruption, not a
+# timeout (the phrase occurs only in the title).
+assert_contains "$(cat "$LOG")" 'last_sweep_at is in the future' "78f. the TITLE names the corrupt stamp"
+assert_not_contains "$(cat "$LOG")" 'sweep timed out' "78f. (control) no budget claim on corruption"
+
+# ── 78f-ii. #10234 review P2 (round 2): future stamp + MEASURED-EMPTY pool ──
+# Round 1 routed a future stamp into the same `else` as the benign pre-beta
+# envelope, so a corrupt ops/state.json went SILENT whenever the pool happened
+# to be measured empty — the exact failure the clamp was added for. Corruption
+# must red regardless of the pool.
+reset_case
+export R2_TEAMS=""                    # a measured-EMPTY pool
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FUTURE_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78f-ii. a future-dated stamp reds even when the pool is measured empty"
+assert_contains "$OUT" "dated in the FUTURE" "78f-ii. the corruption is named, not swallowed as pre-beta"
+
+# ── 78j. #10234 review P2 (round 12): the PRE-BETA envelope must stay silent ──
+# A no-report shape with an ABSENT stamp AND a measured-EMPTY pool is the
+# documented chronic pre-beta envelope. Nothing tested it, so an edit that made
+# it RED (filing SWEEP_NO_COVERAGE every hour for a pre-beta deployment) shipped
+# green — the #10234 defect one layer down.
+reset_case
+export R2_TEAMS=""
+export R2_DEFAULT_LIST=""
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78j. no report + absent stamp + measured-empty pool is the pre-beta envelope, not a red"
+assert_contains "$OUT" "chronic pre-beta envelope" "78j. the run names the envelope it used"
+assert_not_contains "$(cat "$LOG")" "SWEEP_NO_COVERAGE" "78j. it files nothing"
+
+# ── 78k. #10234 review P3 (round 12): the unparseable COUNT, not a hardcoded 1 ──
+# Both existing fixtures have exactly ONE unparseable team, so `1` could be
+# hardcoded and the title would then contradict the body's own tenant bullets.
+reset_case
+export R2_TEAMS=$'backups/teamA/\tbackups/teamZ/'
+export R2_DEFAULT_LIST_A="not-a-timestamp"
+export R2_DEFAULT_LIST_Z="also-not-a-timestamp"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78k. two unparseable teams red"
+assert_file_match "$LOG" 'pool age UNMEASURABLE, 2 team\(s\)' "78k. the TITLE counts BOTH unparseable teams"
+
+# ── 78l. #10234 review P2 (round 13): an UNMEASURABLE pool is never "empty" ──
+# The `R2_LIST_OK != 1` term of the timeout arm's fail-closed branch was unpinned:
+# deleting it made the run log "the pool is measured empty — leaving silent" from
+# a listing that never answered — a pool claim the leg did not measure, which is
+# the class this PR closes. The sibling held-lock arm has the same condition
+# pinned by case 38; this is the mirror.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export STUB_LIST_FAIL=1
+export STUB_STATUS_BODY='{"enabled":true,"config_error":null,"storage_error":null,"per_team":{},"last_sweep":null,"watcher":{"running":true,"age_minutes":1}}'
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78l. an unmeasurable pool with no completion evidence reds"
+assert_not_contains "$OUT" "leaving silent" "78l. it does NOT call the pool measured-empty"
+assert_filed "$(cat "$LOG")" SWEEP_NO_COVERAGE "78l. it files SWEEP_NO_COVERAGE"
+
+# ── 78m. #10234 review P2 (round 14): the arm's bound is DRIVER_DOWN_MIN ────
+# The comparison that decides this arm was unpinned: mutating it to STALE_MIN
+# (90) left every case green, so a sweep that completed 150 min ago would have
+# red a healthy pipeline with a title ("no sweep has completed within the
+# driver-down window") its own body contradicts ("150m old (> 90m)").
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_MID")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78m. a completion 150m old is INSIDE the driver-down window (green)"
+assert_contains "$OUT" "the last COMPLETED sweep was 1" "78m. the green line carries the real age"
+
+# ── 78n. #10234 review P2 (round 14): the bound follows the KNOB ───────────
+# Same 150m age, but the declared window is 120m: now it IS outside, so the arm
+# must red. This pins the linkage — a hardcoded literal would pass 78m and fail here.
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_MID")"
+export STUB_SWEEP_RC=28
+export BACKUP_DRIVER_DOWN_THRESHOLD_MIN=120
+run_driver
+assert_eq "$RC" 1 "78n. the same age reds when the declared window is narrower (the bound follows the knob)"
+assert_contains "$OUT" "> 120m" "78n. the red names the effective bound, not a literal"
+unset BACKUP_DRIVER_DOWN_THRESHOLD_MIN
+
+# ── 78o. #10234 review P2 (round 15): a 2-minute-old stamp is USABLE ────────
+# The grace was pinned only from above, so its sign could be inverted (+300 ->
+# -300): any stamp minutes old would then read as corruption, filing
+# "last_sweep_at is in the future" against a healthy pipeline. This pins the
+# lower side — a recent stamp must be usable, and the green line must carry it.
+# Round 16: stamp it INLINE, here, exactly as 78f does for FUTURE_TS. An earlier
+# revision captured the stamp once at suite start while this case runs ~54s in, and
+# asserted an EXACT minute — so the case crossed 2m -> 3m at 60s of elapsed suite
+# time and red a CORRECT driver on a slightly slower or loaded runner (measured:
+# 91s under load). The age's SHAPE is pinned instead of its integer.
+reset_case
+FRESH_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)-datetime.timedelta(minutes=2)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$FRESH_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78o. a 2-minute-old completion stamp is usable, not corruption"
+assert_not_contains "$(cat "$LOG")" "in the future" "78o. it does NOT file a future-stamp incident"
+assert_match "$OUT" 'the last COMPLETED sweep was [0-9]+m ago' "78o. the green line carries an age (shape, not an exact integer)"
+
+# ── 78p. #10234 review P2 (round 17): the skew grace's TOLERATED band ──────
+# Nothing stamped a `last_sweep` in the future but INSIDE the grace, so tightening
+# 300s to 30s shipped green — and would then red a healthy driver on ordinary
+# app<->runner skew ("dated in the FUTURE ... corrupt state"), the #10234 class one
+# layer down. It also printed an impossible age ("was -2m ago") on a green run.
+reset_case
+AHEAD_TS="$(python3 -c "import datetime;print((datetime.datetime.now(datetime.timezone.utc)+datetime.timedelta(seconds=120)).strftime('%Y-%m-%dT%H:%M:%SZ'))")"
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$TS_RECENT"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$AHEAD_TS")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 0 "78p. a stamp 120s AHEAD (inside the grace) is usable, not corruption"
+assert_not_contains "$(cat "$LOG")" "in the future" "78p. it does NOT file a future-stamp incident"
+assert_not_match "$OUT" 'was -[0-9]+m ago' "78p. the run does NOT publish an impossible negative age"
+assert_contains "$OUT" "inside the 300s skew grace" "78p. it names the skew instead"
+# the exact second count carries fixture->NOW drift, so pin the SIGN and shape
+assert_not_match "$OUT" '-[0-9]+s AHEAD' "78p. the magnitude is never NEGATIVE (a flipped sign would print -120s AHEAD)"
+assert_match "$OUT" '[1-9][0-9]*s AHEAD' "78p. the magnitude is a positive count"
+assert_contains "$OUT" "0m ago" "78p. the age is clamped to 0m"
+
+# ── 78q. #10234 review P2 (round 18): the published value is SCRUBBED and BOUND ──
+# Round 13 added `redact_truncate "$newest" 80` because that value is app-controlled
+# and reaches a PUBLIC issue body — but 78i's fixture ("not-a-timestamp", 15 chars,
+# no credential shape) is byte-identical before and after redaction, so replacing
+# `$(redact_truncate "$newest" 80)` with `${newest}` shipped green (mutation M11).
+# A secret-SHAPED, over-long value pins both halves: scrubbed AND truncated.
+SECRET_TS="ghp_$(python3 -c 'print("A"*100)')"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$SECRET_TS"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78q. an unparseable secret-shaped timestamp reds"
+# the raw 100-char token must NOT be republished
+if grep -qF "$SECRET_TS" "$LOG" 2>/dev/null; then bad "78q. the raw secret-shaped value reached the issue body"; else ok "78q. the raw value does not reach the issue body"; fi
+assert_file_match "$LOG" 'could not be parsed' "78q. the cause is still reported"
+
+# ── 78r. #10234 review P3 (round 19): BOTH published channels are BOUNDED ──
+# 78q pinned the REDACTION of the filed body, not the WIDTH of the `80`, and
+# not the Actions log at all. `redact` leaves a non-secret shape intact, so
+# raising the width (or dropping the truncation) shipped green while an
+# app-controlled LastModified ran unbounded into a PUBLIC body; and the raw
+# value reached the Actions log through the sibling `treating pool as stale`
+# line whatever the body did. `a@`x50 survives every redact rule (no 20-char
+# alnum run, no quotes, no path shape) and is unparseable as a date, so this
+# case measures the WIDTH and the CHANNEL, not the scrubber.
+LONG_NONSECRET_TS="$(python3 -c 'print("a@"*50)')"   # 100 chars
+LONG_TS_PREFIX="${LONG_NONSECRET_TS:0:80}"
+reset_case
+export R2_TEAMS=$'backups/teamA/'
+export R2_DEFAULT_LIST="$LONG_NONSECRET_TS"
+export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
+export STUB_SWEEP_RC=28
+run_driver
+assert_eq "$RC" 1 "78r. an over-long unparseable timestamp still reds"
+assert_not_contains "$OUT" "$LONG_NONSECRET_TS" "78r. the ACTIONS LOG does not publish the whole value"
+# The prefix assertion pins the width from BELOW (it fails if the bound is
+# lowered). The not-contains only fails if the value is published WHOLE, so it
+# does NOT catch a WIDENED bound — the `[^']{81}` legs below are what do. (Round
+# 21: this comment used to claim the not-contains caught a raised bound; measured,
+# it did not — a 90- or 99-char prefix still leaves the whole 100-char value
+# absent.)
+assert_contains "$OUT" "$LONG_TS_PREFIX" "78r. the Actions log keeps the first 80 chars, so the bound is 80 and not merely some bound"
+# Round 20 (fresh-context review): the width's UPPER side was not pinned on EITHER
+# channel. The fixture is 100 chars, so a bound of 81-99 still satisfied both
+# "the whole value is absent" and "the 80-char prefix is present" — measured
+# GREEN at 90 and at 99, i.e. the comment above claimed a guarantee the case did
+# not have (the class rounds 4-19 kept closing). `[^']{81}` matches 81 chars
+# between the quotes, so it fails for ANY bound above 80 and passes exactly at 80.
+assert_not_match "$OUT" "unparseable archive timestamp '[^']{81}" "78r. the Actions log's bound is exactly 80 (an 81st char fails this)"
+if grep -qF "$LONG_NONSECRET_TS" "$LOG" 2>/dev/null; then bad "78r. the whole value reached the filed body"; else ok "78r. the filed body does not carry the whole value"; fi
+# Round 20: the BODY channel was pinned from above only, so narrowing ITS bound
+# (redact_truncate "$newest" 80 -> 40) shipped fully green — and an operator
+# holding the incident then sees half the diagnostic prefix the commit message
+# says is kept. Pin the body's lower side too.
+assert_not_match "$(cat "$LOG")" "newest archive timestamp '[^']{81}" "78r. the filed body's bound is exactly 80 (an 81st char fails this)"
+if grep -qF "$LONG_TS_PREFIX" "$LOG" 2>/dev/null; then ok "78r. the filed body keeps the first 80 chars of the value"; else bad "78r. the filed body does NOT keep the first 80 chars (its bound is not 80)"; fi
+assert_file_match "$LOG" 'could not be parsed' "78r. the cause is still reported in the body"
 
 # ── 79. #5028: an empty sweep body names empty_response, not a lock ────────
 reset_case
@@ -1896,9 +2507,15 @@ export R2_DEFAULT_LIST="$TS_RECENT"
 export STUB_STATUS_BODY="$(status_body true null null true 1 "$TS_RECENT")"
 export STUB_SWEEP_RC=0
 run_driver
-assert_eq "$RC" 1 "79. an empty response stays RED (1)"
+assert_eq "$RC" 0 "79. an empty response with a fresh completion is NOT red"
 assert_contains "$OUT" "sweep skipped (status=empty_response)" "79. an empty response names empty_response"
 assert_not_contains "$OUT" "lock held" "79. an empty response is NOT reported as a held lock"
+# Round 7: on `empty_response` curl COMPLETED (rc=0) — "patience ran out" is a
+# cause the leg never observed, and on a green run this line is the only record.
+assert_contains "$OUT" "the exchange COMPLETED (curl rc=0) but carried no report body" "79. an empty body names the REAL cause (no report), not a budget expiry"
+assert_not_contains "$OUT" "ceiling was hit" "79. (control) no budget claim on a completed exchange"
+assert_contains "$OUT" "not a budget artifact" "79. the verdict says the shape is NOT a budget artifact"
+assert_contains "$OUT" "ride-alongs are SKIPPED for this run" "79. the green line WARNS that erasure/revocation were not attempted"
 
 # ── 80. #5028: the sweep OUTCOME is never truncated away ───────────────────
 # `per_team` (the org census) is serialized BEFORE `last_sweep`, so the old

@@ -344,7 +344,8 @@ async def test_internal_cron_route_is_exempt(fast_bound):
     second instance of the `/v1/context` exemption. The ruling is about what a
     USER experiences; every route under this prefix is an operator/cron endpoint
     behind `_check_internal`, and its CRON callers publish their own patience
-    (`registry-cron.sh` posts the sweep with `curl -m 600`; the operator runbook
+    (`registry-cron.sh` posts the sweep with `curl -m $SWEEP_TIMEOUT_S` — a
+    default of 1500 s, bounded 60-1800 s by #10234; the operator runbook
     curls carry an explicit `--max-time` for the same reason). A user-patience
     bound bounds no user there — it only turns a 600 s batch job into a 10 s
     failure, which is how the DR sweep refused on every hourly run for 12 days

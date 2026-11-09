@@ -12,6 +12,7 @@ import os
 import shutil
 import sys
 import tempfile
+import time
 import uuid
 from urllib.parse import urlparse
 
@@ -855,6 +856,126 @@ def test_docker_lane_index_shape():
         with contextlib.suppress(Exception):  # tidy (epic #1647 review P2):
             # this from_uri mint is not journaled in URI-unset sessions —
             # drop it explicitly
+            proj.db.select_graph(proj.graph_name).delete()
+        proj.close()
+
+
+#: The pads the DOCKER engine's ``:Point(key)`` RANGE index trims, measured
+#: per character on ``falkordb-server:v4.20.6`` (2026-11-06): a node stored
+#: under ``f"{c}KEY{c}"`` is served by the TRIMMED term and NOT by the raw one
+#: for every character below, while NBSP (U+00A0), U+2003, U+3000 and U+001F are
+#: served by the RAW term.
+#:
+#: ⛔ A LITERAL on purpose — never derived from ``_KEY_INDEX_TRIM_SET`` (the
+#: same trap `test_6110_key_identity.py::_ENGINE_TRIMMED_PADS` guards against):
+#: iterating the constant would make a NARROWED set drop its own cases and stay
+#: green, which is the direction that turns a padded key unfindable. The
+#: equality assertion below reds instead.
+_ENGINE_TRIMMED_PADS = (" ", "\t", "\n", "\v", "\f", "\r")
+
+
+@pytest.mark.skipif(not FALKORDB_AVAILABLE,
+                    reason="FalkorDB not available")
+def test_docker_lane_key_index_serves_the_SDK_seek_term():
+    """#10481 (PR #11043): on the DOCKER engine, the term ``_key_seek_term``
+    sends is the term the ``:Point(key)`` RANGE index actually serves.
+
+    #10481's fix narrows the key-identity seek term from the caller's raw
+    spelling to the ENGINE-trimmed one, and `tests/test_6110_key_identity.py`
+    — where that fix is pinned — is declared hermetic (embedded store) in
+    `config/ci-surfaces.yml`. So nothing in CI pinned the premise on the engine
+    the docker lane actually runs (`falkordb-server:v4.20.6`,
+    `tests/_live_utils`). That gap matters in exactly one direction: if the
+    docker engine kept the RAW term in the index, normalising the seek would
+    make a padded key unfindable by BOTH spellings — the #6110 duplicate
+    inverted into a regression — while the embedded suite stayed green.
+
+    Measured 2026-11-06 against that image: for every character in
+    ``_KEY_INDEX_TRIM_SET`` the index holds the TRIMMED term (the raw seek
+    misses it, the trimmed one hits); for NBSP / U+2003 / U+3000 / U+001F it
+    holds the raw term (a ``str.strip()`` seek — Python's wider
+    ``str.isspace()`` class — would miss), which is why the fix carries the
+    engine's six-character set rather than Python's.
+
+    Both halves are asserted per character, so this reds on EITHER a wider
+    trim set (a non-ASCII pad rewritten to a term the index does not hold) or
+    a narrower one (an ASCII pad left raw where the index holds only the
+    trimmed term).
+    """
+    from urllib.parse import urlparse
+
+    from tortoise.sdk import _KEY_INDEX_TRIM_SET, _key_seek_term
+
+    uri = _current_uri()
+    # Same guard as the siblings above: the probe may resolve to a LIVE graph —
+    # skip rather than DETACH a real DB.
+    if not urlparse(uri).path.lstrip("/").startswith(("test_", "tortoise_test")):
+        pytest.skip(f"resolved URI {uri!r} is not a test graph "
+                    "(graph name must start with 'test_'/'tortoise_test_')")
+
+    def holders(key: str) -> list[str]:
+        return [r[0] for r in proj.g.query(
+            "MATCH (n:Point) WHERE n.key = $k RETURN n.id",
+            params={"k": key}).result_set]
+
+    proj = FalkorProjection.from_uri(
+        uri, graph_name=f"test_indexes_keytrim_{os.urandom(4).hex()}")
+    try:
+        proj.g.query("MATCH (n) DETACH DELETE n")
+        proj._ensure_indexes()
+        # The premise is about an index that has gone OPERATIONAL; a bounded
+        # wait keeps this from turning a DDL race into a false red.
+        for _ in range(20):
+            catalogue = str(proj.g.query("CALL db.indexes()").result_set)
+            if "OPERATIONAL" in catalogue:
+                break
+            time.sleep(0.25)
+
+        # (1) The six ASCII pads: the index serves the TRIMMED term only, so
+        #     the raw spelling (pre-#10481's seek) misses and the trimmed one
+        #     (the fix's seek) hits.
+        assert "".join(_ENGINE_TRIMMED_PADS) == _KEY_INDEX_TRIM_SET, (
+            f"_KEY_INDEX_TRIM_SET is {_KEY_INDEX_TRIM_SET!r}; the docker "
+            f"engine's measured set is "
+            f"{' '.join(repr(c) for c in _ENGINE_TRIMMED_PADS)}. Changing it "
+            f"needs a fresh per-character measurement, and the cases below "
+            f"must move with it (#10481)")
+        for i, pad in enumerate(_ENGINE_TRIMMED_PADS):
+            raw = f"{pad}KTRIM{i}{pad}"
+            trimmed = _key_seek_term(raw)
+            assert trimmed == f"KTRIM{i}", (
+                f"_key_seek_term({raw!r}) returned {trimmed!r} — the seek must "
+                f"send the engine-trimmed term for {pad!r}")
+            nid = f"ktrim-{i}"
+            proj.g.query("CREATE (n:Point {id:$id, key:$k})",
+                         params={"id": nid, "k": raw})
+            assert holders(raw) == [], (
+                f"the docker engine served the RAW term for {pad!r} — if that "
+                f"is the engine's behaviour, #10481's seek term is wrong for "
+                f"this pad (raw={raw!r}, trimmed={trimmed!r})")
+            assert holders(trimmed) == [nid], (
+                f"the docker engine did not serve the TRIMMED term for "
+                f"{pad!r} — a padded key would be unfindable by BOTH spellings "
+                f"(raw={raw!r}, trimmed={trimmed!r})")
+
+        # (2) Pads the engine does NOT trim: the fix must keep the raw term.
+        #     `str.strip()` would rewrite these and lose the holder.
+        for i, pad in enumerate(("\u00a0", "\u2003", "\u3000", "\x1f")):
+            raw = f"{pad}KRAW{i}{pad}"
+            assert _key_seek_term(raw) == raw, (
+                f"_key_seek_term rewrote the non-ASCII pad {pad!r} to "
+                f"{_key_seek_term(raw)!r}; the docker engine indexes this pad "
+                f"VERBATIM, so that term is one the index does not hold "
+                f"(str.strip() uses Python's wider str.isspace() class)")
+            nid = f"kraw-{i}"
+            proj.g.query("CREATE (n:Point {id:$id, key:$k})",
+                         params={"id": nid, "k": raw})
+            assert holders(raw) == [nid], (
+                f"the docker engine did not serve the raw term for {pad!r} — "
+                f"the premise this fix rests on differs on this engine "
+                f"(raw={raw!r})")
+    finally:
+        with contextlib.suppress(Exception):
             proj.db.select_graph(proj.graph_name).delete()
         proj.close()
 

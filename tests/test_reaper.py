@@ -6481,6 +6481,344 @@ def test_build_end_sweep_report_folds_the_vanished_window_into_exited():
     )
 
 
+def test_declined_pids_gone_measures_a_declined_server_against_left():
+    """#11427: the THIRD window — examined, DECLINED, then gone.
+
+    A declined candidate is in `discovered_pids` (so #8599's vanished term
+    cannot claim it), is never killed (so `reaped` cannot) and is never re-read
+    for liveness (so #6984's dead-pid branch cannot). Its self-shutdown was
+    therefore in no bucket at all, and the gate red the run.
+    """
+    from tortoise.embedded_reaper import _declined_pids_gone
+
+    # pid 7 was declined and is gone at `left`; 8 was declined and is still
+    # alive there — `left` already counts 8, so claiming it would DOUBLE-count
+    # and mask a genuine shortfall.
+    assert _declined_pids_gone({7, 8}, [8, 9], {7, 8}) == 1
+    assert _declined_pids_gone({7, 8}, [7, 8], {7, 8}) == 0
+    # No declines at all is a measured 0, not an unmeasured None.
+    assert _declined_pids_gone(set(), [8], {8}) == 0
+    # Any observation missing = UNMEASURED, never a confident 0 (#10255 A).
+    assert _declined_pids_gone(None, [8], {8}) is None
+    assert _declined_pids_gone({7}, None, {7}) is None
+    assert _declined_pids_gone({7}, [8], None) is None, (
+        "without the pre-sweep population the declined set cannot be bounded "
+        "to it, so the term is UNMEASURED rather than unbounded"
+    )
+
+
+def test_declined_pids_gone_is_bounded_to_the_before_population():
+    """#11427 round 5 (P2, fail-open): the declined term must not claim a
+    server that `before` never held.
+
+    `declined` is accumulated over every iteration's DISCOVERY, and discovery
+    sees servers the pre-sweep probe did not contain: a sibling suite's server
+    started MID-sweep is discovered, and `only_safe=True` declines every live
+    ephemeral candidate. If that server then shuts itself down before the
+    post-sweep probe, an unbounded term claims it as one of OUR natural exits
+    — and `exited` is an addend in `reaped + exited + left >= before`, so the
+    claim cancels exactly one server this sweep genuinely lost. That is a
+    FALSE PASS on a broken sweep, the direction the term's own docstring
+    refuses.
+
+    The sibling term `_vanished_before_discovery` is bounded to `before` by
+    construction (a set difference FROM it); this one had the bound only in
+    prose (#10757 P2: one population per reconciliation).
+    """
+    from tortoise.embedded_reaper import _declined_pids_gone
+
+    # pid 99 appeared after the pre-sweep probe: it is not ours to claim.
+    assert _declined_pids_gone({99}, [], {5}) == 0, (
+        "a server `before` never held must never be claimed as our exit"
+    )
+    # The same disappearance, with the pid inside the measured population.
+    assert _declined_pids_gone({5}, [], {5}) == 1, (
+        "within the bound the term must still fire, or the fix has replaced "
+        "a fail-open term with a dead one"
+    )
+    # Mixed: only the in-population half counts.
+    assert _declined_pids_gone({5, 99}, [], {5}) == 1
+    # `left` still wins inside the bound — an alive server is counted by
+    # `left`, and claiming it too would double-count.
+    assert _declined_pids_gone({5, 99}, [5], {5}) == 0
+
+
+def test_build_end_sweep_report_folds_the_declined_window_into_exited():
+    """End-to-end on the measured CI shape: before=26, reaped=0, exited=0,
+    left=25 (`pytest rc 0`) — the false red this lane was dispatched for.
+
+    The population is 26 servers all of which the sweep DECLINED (it killed
+    none), one of which shut itself down. The identity is asserted as the
+    inequality the gate evaluates, and the SAME shape is re-run with the pid
+    NOT declined: then the shortfall must come back, or the term has become the
+    complement #6984 refused.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    pre = list(range(1, 27))
+    post = list(range(2, 27))
+
+    def report(declined):
+        sweep = _scan_aware([])
+        sweep.discovered_pids = set(pre)
+        sweep.declined_pids = declined
+        sweep.exited_pids = set()
+        return build_end_sweep_report(
+            iter([sweep]).__next__, deadline=1030.0,
+            probe=iter([pre, post]).__next__, clock=lambda: 1000.0)
+
+    healed = report(set(pre))
+    assert (healed["before"], healed["reaped"], healed["left"]) == (26, 0, 25)
+    assert healed["exited"] == 1, (
+        "the declined server that shut itself down is accounted as a natural "
+        "exit, not read as a broken sweep"
+    )
+    assert (healed["reaped"] + healed["exited"] + healed["left"]) >= healed["before"], (
+        "the gate's accounting identity must hold on this shape — it is the "
+        "false red of #11427"
+    )
+
+    lost = report(set())
+    assert lost["exited"] == 0, (
+        "a server this sweep did NOT decline must never be claimed by the "
+        "declined term"
+    )
+    assert (lost["reaped"] + lost["exited"] + lost["left"]) < lost["before"], (
+        "with the same before/left and no decline, the shortfall must survive "
+        "— otherwise the term is a tautology"
+    )
+
+    unmeasured = report(None)
+    assert unmeasured["exited"] == 0, (
+        "an un-instrumented sweep (no declined reading) must not invent the "
+        "missing pid as a natural exit"
+    )
+
+
+def test_build_end_sweep_report_does_not_claim_a_server_that_appeared_mid_sweep():
+    """#11427 round 5 (P2, fail-open) — end-to-end on the concurrent-suite shape.
+
+    `before_pids = {5}` (ours, and this sweep is about to lose it). A sibling
+    suite starts pid 99 mid-sweep, so discovery examines `{5, 99}` and declines
+    99 (a live client). 99 then shuts itself down; 5 is genuinely lost. An
+    unbounded declined term claims 99 as a natural exit, `exited` becomes 1 and
+    `0 + 1 + 0 >= 1` PASSES — the broken sweep is never reported.
+
+    Same shape with 99 inside `before` must still heal, or the bound has
+    swallowed the term it was meant to scope.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    def report(pre, post):
+        sweep = _scan_aware([])
+        sweep.discovered_pids = {5, 99}
+        sweep.declined_pids = {99}
+        sweep.exited_pids = set()
+        return build_end_sweep_report(
+            iter([sweep]).__next__, deadline=1030.0,
+            probe=iter([pre, post]).__next__, clock=lambda: 1000.0)
+
+    stranger = report([5], [])
+    assert (stranger["before"], stranger["reaped"], stranger["left"]) == (1, 0, 0)
+    assert stranger["exited"] == 0, (
+        "pid 99 was never in `before` — claiming its self-shutdown as OUR "
+        "natural exit buys the gate the slack that hides the lost pid 5"
+    )
+    assert (stranger["reaped"] + stranger["exited"] + stranger["left"]) < stranger["before"], (
+        "fail-closed: the genuine shortfall must survive, which is exactly "
+        "what an unbounded declined term erased"
+    )
+
+    ours = report([5, 99], [5])
+    assert ours["exited"] == 1, (
+        "a declined server that WAS in `before` and is gone at `left` is "
+        "still a natural exit — the bound must not disarm the #11427 term"
+    )
+    assert (ours["reaped"] + ours["exited"] + ours["left"]) >= ours["before"], (
+        "the healed shape's identity must still hold"
+    )
+
+
+def test_reap_reports_the_pids_it_declined_but_not_the_ones_it_killed_or_saw_dead():
+    """#11427: `declined_pids` is the sweep's OWN skip decisions, per record.
+
+    It must be a measurement of what `reap()` decided not to touch: a record
+    that was killed (here: dry-run, which takes the same action path) and one
+    whose pid was already dead (#6984's observed natural exit, counted by
+    `exited`) are NOT declined — claiming either would let the declined term
+    launder a server this sweep was responsible for.
+    """
+    from tortoise.embedded_reaper import reap
+
+    # A live pid, an unattributed/path-based server: the provenance-bearing
+    # branch declines it in every mode, without any probe.
+    declined_rec = {"classification": "candidate", "pid": os.getpid(),
+                    "socket_path": "/tmp/nonexistent-11427-declined.sock",
+                    "path_based": True}
+
+    acted = reap([declined_rec], dry_run=True)
+    assert declined_rec["pid"] in (acted.declined_pids or set()), (
+        "a server the sweep declined must be recorded, or its later "
+        "self-shutdown lands in no bucket at all"
+    )
+
+    dead = {"classification": "candidate", "pid": 99999999,
+            "socket_path": "/tmp/nonexistent-11427-dead.sock"}
+    acted_dead = reap([dead], dry_run=False)
+    assert acted_dead.exited == 1
+    assert 99999999 not in (acted_dead.declined_pids or set()), (
+        "an OBSERVED natural exit is already counted by `exited`; counting it "
+        "here too would double-count and mask a genuine shortfall"
+    )
+
+
+def test_reap_reports_the_PIDS_its_exited_count_names():
+    """#11427 review P2: `exited` is a COUNT; the declined term is a pid SET.
+
+    Reconciling them needs the identities, or a pid declined in one iteration
+    and observed dead in a later one is claimed twice — once by `exited`'s
+    #6984 branch and again by `_declined_pids_gone`. `exited_pids` is that
+    reading, and without it the builder cannot cancel the overlap at all.
+    """
+    from tortoise.embedded_reaper import reap
+
+    dead = {"classification": "candidate", "pid": 99999998,
+            "socket_path": "/tmp/nonexistent-11427-exitpids.sock"}
+    # A second, DEAD-at-discovery candidate whose pid is absent: not a server,
+    # so it is counted by neither `exited` nor `exited_pids`.
+    no_pid = {"classification": "candidate", "pid": None,
+              "socket_path": "/tmp/nonexistent-11427-exitpids-nopid.sock"}
+
+    acted = reap([dead, no_pid], dry_run=True)
+    assert acted.exited == 1
+    assert acted.exited_pids == {99999998}, (
+        "the natural exit `exited` counted must be NAMED, or the report "
+        "builder cannot tell it apart from a pid it also declined"
+    )
+    # Not measured and measured-nothing are different readings.
+    from tortoise.embedded_reaper import _ScanAwareList
+    assert _ScanAwareList().exited_pids is None, (
+        "the class default is NOT MEASURED — an un-instrumented seam must not "
+        "read as 'no exits to cancel'"
+    )
+
+
+def test_build_end_sweep_report_does_not_claim_a_pid_a_LATER_iteration_killed():
+    """#11427: a decline superseded by a kill must not be claimed twice.
+
+    The loop re-runs until an iteration acts on nothing, so a server declined in
+    iteration 1 can be KILLED in iteration 2 once whatever blocked it goes away.
+    Its disappearance is then counted by `reaped`; leaving it in the accumulated
+    declined set would let the term claim the same event a second time — an
+    inflated `exited` is exactly what masks a genuine shortfall (fail-open).
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    first = _scan_aware([{"pid": 5}])
+    first.discovered_pids = {5, 7}
+    first.declined_pids = {7}
+    first.exited_pids = set()
+    second = _scan_aware([{"pid": 7}])
+    second.discovered_pids = {7}
+    second.declined_pids = set()
+    second.exited_pids = set()
+    third = _scan_aware([])
+    third.discovered_pids = set()
+    third.declined_pids = set()
+    third.exited_pids = set()
+
+    report = build_end_sweep_report(
+        iter([first, second, third]).__next__, deadline=1030.0,
+        probe=iter([[5, 7], []]).__next__, clock=lambda: 1000.0)
+
+    assert report["reaped"] == 2, (
+        "both iterations acted, so the loop runs until the empty third one"
+    )
+    assert report["exited"] == 0, (
+        "pid 7 was declined and then KILLED — `reaped` already accounts for "
+        "it, so the declined term must not claim it again"
+    )
+
+
+def test_build_end_sweep_report_does_not_claim_an_exit_a_LATER_iteration_observed():
+    """#11427 review P2: a decline superseded by an OBSERVED DEATH is not claimed
+    twice either — the fail-open twin of the killed case above.
+
+    Each `reap()` call starts with a fresh kill budget, so a server declined in
+    iteration 1 (a live client) proceeds in iteration 2. The ordinary trigger
+    is the one #11427 is *about*: the client goes away and redislite's
+    fire-and-forget `NOSAVE` close takes the server down, so iteration 2 finds
+    it DEAD at the liveness check.
+
+    That branch (`:2746`) increments `exited` and does NOT append to `acted`,
+    so cancelling only the pids an iteration ACTED on left the pid in the
+    accumulated declined set — and `_declined_pids_gone` then claimed the same
+    disappearance again. Measured before the fix, on this exact shape:
+    `exited` 2 for ONE observed exit. `exited` is the field that makes
+    `reaped + exited + left >= before` hold, so every unit of inflation buys
+    the orphan gate one unit of slack over the only control it has on a broken
+    sweep — the fail-open direction #11427 itself names.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    # iter 1: acts on pid 5, DECLINES pid 7 (a live client).
+    first = _scan_aware([{"pid": 5}])
+    first.discovered_pids = {5, 7}
+    first.declined_pids = {7}
+    first.exited_pids = set()
+    # iter 2: pid 7 is dead at the liveness check — `exited` counts it ONCE and
+    # `acted` is empty, so the loop stops here.
+    second = _scan_aware([])
+    second.discovered_pids = {7}
+    second.declined_pids = set()
+    second.exited = 1
+    second.exited_pids = {7}
+
+    report = build_end_sweep_report(
+        iter([first, second]).__next__, deadline=1030.0,
+        probe=iter([[5, 7], []]).__next__, clock=lambda: 1000.0)
+
+    assert report["exited"] == 1, (
+        "pid 7 was observed dead ONCE — by the #6984 liveness branch in "
+        "iteration 2 — so the declined term must not also claim it from "
+        "iteration 1's decline; a second unit here masks a genuine shortfall"
+    )
+    assert report["reaped"] + report["exited"] + report["left"] == 2, (
+        "before=2 with nothing lost: the identity must hold exactly, not by "
+        "an inflated `exited` absorbing the difference"
+    )
+
+
+def test_build_end_sweep_report_drops_the_declined_term_when_exit_pids_is_unmeasured():
+    """A `declined` reading we cannot reconcile against the exits is UNMEASURED.
+
+    The declined term cancels the pids `exited` already counted. With
+    `exited_pids` absent that cancellation cannot be performed at all, so
+    claiming the term would risk folding one exit in twice — the fail-open
+    direction. Fail closed instead: the gate goes STRICTER (a genuine shortfall
+    on this shape survives), never looser.
+    """
+    from tortoise.embedded_reaper import build_end_sweep_report
+
+    sweep = _scan_aware([])
+    sweep.discovered_pids = {1, 2}
+    sweep.declined_pids = {2}  # present…
+    # …but `exited_pids` is NOT reported, so the overlap is unknown.
+
+    report = build_end_sweep_report(
+        iter([sweep]).__next__, deadline=1030.0,
+        probe=iter([[1, 2], [1]]).__next__, clock=lambda: 1000.0)
+
+    assert report["exited"] == 0, (
+        "an unreconcilable declined reading must not claim pid 2 as a natural "
+        "exit — `exited` may already have counted it"
+    )
+    assert report["reaped"] + report["exited"] + report["left"] < report["before"], (
+        "fail-closed: the shortfall survives rather than being closed by a "
+        "term whose overlap with `exited` cannot be measured"
+    )
+
+
 def test_build_end_sweep_report_leaves_exited_alone_when_the_term_is_unmeasured():
     """An un-instrumented sweep reports UNMEASURED, not zero-vanished.
 
@@ -6593,6 +6931,42 @@ def test_run_sweep_reports_the_candidate_pids_the_report_builder_reads(monkeypat
     )
 
 
+def test_run_sweep_publishes_the_pids_its_exited_count_names(monkeypatch):
+    """⛔ THE PRODUCER `build_end_sweep_report` READS, PINNED (#11427 review P2).
+
+    `reap()` sets `exited_pids` on ITS own result; `_run_sweep` builds a SECOND
+    `_ScanAwareList` around `acted` (“read before the wrap below, which copies
+    elements only”) and must carry it across — the #8599 copy this mirrors had
+    no pin at all until `test_run_sweep_reports_the_candidate_pids_the_report_
+    builder_reads`, and forcing its assignment to the class default left 14
+    tests green. Same shape, same reason: without the carried set the builder
+    cannot cancel an exit it already counted, and claims it twice.
+    """
+    from tortoise.embedded_reaper import _run_sweep
+
+    with _stale_dir_env() as (dbdir, sock):  # noqa: RUF059
+        monkeypatch.setenv("TORTOISE_INDEX_LOCK_DIR", str(dbdir.parent / "locks"))
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.discover",
+            lambda jobs=1, **kw: _scan_aware([
+                {"classification": "candidate", "pid": 99999997,
+                 "socket_path": "/tmp/nonexistent-11427-exitpids-producer.sock"},
+            ], complete=True))
+        monkeypatch.setattr(
+            "tortoise.embedded_reaper.phase1_probe", lambda record: record)
+        acted = _run_sweep(dry_run=True, batch_size=None, only_safe=False,
+                           sweep_pid_files=False)
+    assert acted.exited == 1, (
+        "the #6984 branch observed this candidate dead at the liveness check"
+    )
+    assert acted.exited_pids == {99999997}, (
+        "`_run_sweep` must publish the pids its `exited` count names — this is "
+        "the reading `build_end_sweep_report` cancels the declined term "
+        "against, and `reap()`'s identical copy is a DIFFERENT object it "
+        "never sees"
+    )
+
+
 def test_run_sweep_reports_discovered_pids_unmeasured_when_the_scan_was_short(monkeypatch):
     """A TRUNCATED discovery cannot say what it examined — it must read UNMEASURED.
 
@@ -6625,6 +6999,10 @@ def test_run_sweep_reports_discovered_pids_unmeasured_when_the_scan_was_short(mo
     assert acted.discovered_pids is None, (
         "a partial candidate scan must publish NO reading: a subset claims every "
         "unexamined live server as a natural exit and retires the identity"
+    )
+    assert acted.exited_pids is None, (
+        "same rule for the pids `exited` names: they were observed over the "
+        "SUBSET `reap()` was handed, so they are unmeasured for this report"
     )
     # …and the report leaves `exited` exactly as measured, so the gate's identity
     # still fires on the shortfall instead of being closed by the term.

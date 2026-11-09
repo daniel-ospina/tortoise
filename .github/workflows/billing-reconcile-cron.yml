@@ -191,7 +191,8 @@ jobs:
           # PREFIX-EXEMPT from the 10 s transport wait bound and has no
           # server-side ceiling (tests/test_transport_wait_bound.py: its CRON
           # callers publish their own patience — `registry-cron.sh` posts the
-          # sweep with `curl -m 600`), so without a client bound a wedged
+          # sweep with `curl -m $SWEEP_TIMEOUT_S`, default 1500s, bounded
+          # 60-1800s by #10234), so without a client bound a wedged
           # endpoint is killed by `timeout-minutes` and the log says nothing.
           # With it the driver reads the legible `curl rc=28` below.
           rc=0

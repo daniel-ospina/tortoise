@@ -4,10 +4,21 @@ description: >-
   Add as the LAST step of the job with `if: always()`, so a failed or cancelled
   job does not leave a Postgres holding memory on the runner host. Selected by
   the ownership label recorded at start — never by a guess at the name.
+inputs:
+  label_var:
+    description: >-
+      Name of the provision step's exported ownership-label variable. Defaults to
+      `TORTOISE_CI_POSTGRES_LABEL`; a job that provisioned a SECOND server passes
+      the same unique name it gave that call's `label_var`, so each teardown
+      removes exactly its own container.
+    required: false
+    default: TORTOISE_CI_POSTGRES_LABEL
 runs:
   using: composite
   steps:
     - name: Stop Postgres (#9551)
       if: always()
       shell: bash
+      env:
+        POSTGRES_LABEL_VAR: ${{ inputs.label_var }}
       run: bash ${{ github.action_path }}/cleanup.sh

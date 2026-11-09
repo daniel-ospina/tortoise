@@ -93,6 +93,12 @@ USAGE
              UNMEASURABLE constituent is NOT a containment verdict and never
              prints the "closing would destroy work" line)
 
+What "could not be read at all" COVERS, so it is not read as "containment failed":
+    a CONSTITUENT's head/base being absent from the LOCAL OBJECT DB. This tool fetches
+    only the fold branch (`main`), so on a fresh hub or a new lane worktree that has
+    never fetched the constituent's PR head, the reverse-apply cannot even compute the
+    diff. That is a failed MEASUREMENT, not evidence about the fold, and it exits 2.
+
 `--label-only` exists because the two mechanisms have different risk: applying a
 label is reversible in one command, closing a PR is not. An operator whose
 containment proof is inconclusive can still close the QUEUE, which is where the
@@ -103,8 +109,18 @@ from __future__ import annotations
 
 import sys
 
-# #5128: refuse a <3.12 interpreter before the imports below — a module-level
-# 3.11+-only import (`from datetime import UTC`) would fail first (D9 shape).
+# #5128: refuse a <3.12 interpreter BEFORE every other import. The POSITION is
+# the property this exists for, not this file's current import list: the corpus
+# rule (`tests/test_entry_point_python_guard.py`, property 1) requires `import
+# sys` + the guard to precede all other imports, because a module-level
+# 3.11+-only import — `from datetime import UTC`, present in sibling tools —
+# raises ImportError on an old interpreter before any LATER-placed guard could
+# run. This file imports no `datetime` today; the guard is hoisted anyway so the
+# rule holds uniformly instead of being re-litigated per import list.
+# ⛔ The invocation named is the SCRIPT form, which is the one that works here:
+# `tests/test_entry_point_python_guard.py` treats `tools/<x>.py` as a loose
+# script (a package module needs a directory chain under `tools/`), so
+# `-m tools.batch_open` is NOT this file's invocation.
 if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
     raise SystemExit(
         f"tools/batch_open.py requires Python >= 3.12 (got "
@@ -480,6 +496,21 @@ def _git(argv: list[str], cwd: Path) -> tuple[int, str]:
     return proc.returncode, (proc.stdout if proc.returncode == 0 else proc.stderr).strip()
 
 
+def _commit_present(sha: str, cwd: Path) -> bool:
+    """True iff `sha` resolves to a commit in THIS checkout's object DB.
+
+    ⛔ `main` fetches ONLY the fold branch, so a constituent's head is routinely absent:
+    a fresh hub, or a lane worktree that never fetched that PR, has no such object. Every
+    git call below then fails for a reason that says NOTHING about the fold (`git diff`
+    dies before it can compare), and the previous reading filed that as `NOT-CONTAINED` —
+    printing "closing would destroy work" and exiting 1 on a run where nothing was
+    measured. That is the sentence an operator acts on, and it is the same class round 5
+    fixed one door over (`constituent_refs` returning `None`).
+    """
+    code, _ = _git(["cat-file", "-e", f"{sha}^{{commit}}"], cwd)
+    return code == 0
+
+
 def is_ancestor(head: str, fold_head: str, cwd: Path) -> bool:
     """`git merge-base --is-ancestor` — the git-built fold route."""
     code, _ = _git(["merge-base", "--is-ancestor", head, fold_head], cwd)
@@ -501,8 +532,14 @@ def _reports_conflict(output: str) -> bool:
     return any(marker in lowered for marker in _CONFLICT_MARKERS)
 
 
-def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[bool, str]:
+def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[str, str]:
     """Reverse-apply the constituent's own diff inside the fold's tree.
+
+    Returns `(state, detail)` where `state` is one of `CONTAINED-CONTENT`,
+    `NOT-CONTAINED` or `UNMEASURABLE`. ⛔ THREE states, not two: a diff that cannot be
+    COMPUTED (an absent object, no merge base in a shallow clone, no scratch worktree) is
+    a failed measurement, and collapsing it into `NOT-CONTAINED` makes the report assert
+    the fold lacks work nobody ever compared.
 
     A squash-built fold has rewritten history, so `--is-ancestor` is false while
     the work is fully present. The test that DOES survive a squash is content:
@@ -556,7 +593,8 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
     try:
         code, err = _git(["worktree", "add", "--detach", str(worktree), fold_head], cwd)
         if code != 0:
-            return False, f"could not materialise the fold tree: {err[:200]}"
+            # The fold tree could not be BUILT — nothing was compared either way.
+            return "UNMEASURABLE", f"could not materialise the fold tree: {err[:200]}"
         added = True
         diff = _run(
             ["git", "-c", "core.hooksPath=/dev/null", "diff", f"{base}...{head}"],
@@ -564,12 +602,20 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
             timeout=GIT_TIMEOUT_S,
         )
         if diff.returncode != 0:
-            return False, f"could not compute the constituent diff: {diff.stderr.strip()[:200]}"
+            # ⛔ NOT a containment verdict. Reachable whenever a ref is absent from this
+            # clone (this tool fetches the fold branch only) or the merge base is missing
+            # in a shallow one; `main` fetches nothing else, so the operator's retry is a
+            # fetch, not a manual close.
+            return (
+                "UNMEASURABLE",
+                f"could not compute the constituent diff: {diff.stderr.strip()[:200]}",
+            )
         if not diff.stdout.strip():
             # An empty diff cannot be reversed into a proof — an empty PR is not
             # evidence that its work is in the fold, and treating it as contained
-            # would close a PR on no evidence at all.
-            return False, "the constituent's diff is empty — nothing to prove"
+            # would close a PR on no evidence at all. This IS a measurement: the diff
+            # was computed, and it is empty.
+            return "NOT-CONTAINED", "the constituent's diff is empty — nothing to prove"
         applied = _run(
             ["git", "-c", "core.hooksPath=/dev/null", "apply", "--reverse", "--check"],
             cwd=worktree,
@@ -579,24 +625,52 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
         noise = (applied.stdout + applied.stderr).strip()
         conflicting = _reports_conflict(noise)
         if applied.returncode == 0 and not conflicting and not noise:
-            return True, "reverse-apply of the constituent diff is clean"
+            return "CONTAINED-CONTENT", "reverse-apply of the constituent diff is clean"
         if applied.returncode == 0 and noise and not conflicting:
             # rc=0 is NOT the proof — silence is. Measured: a mode-only
             # constituent reversed against a tree without the chmod exits 0 and
             # prints "warning: <file> has type 100644, expected 100755" while
             # applying nothing, so the exec bit is not in the fold.
-            return False, (
+            return "NOT-CONTAINED", (
                 "reverse-apply exited 0 but was NOT silent — the fold tree does not "
                 f"carry this change: {noise[:300]}"
             )
+        if applied.returncode > 1 or applied.returncode < 0:
+            # ⛔ rc > 1 (OR A SIGNAL, WHICH PYTHON REPORTS AS A NEGATIVE rc) IS "THE
+            # MEASUREMENT DID NOT HAPPEN", NOT A VERDICT (#10941 review).
+            # `git apply` uses rc=1 for "the patch does not apply", and THAT is the
+            # measurement answering NOT-CONTAINED. Every other code means the
+            # comparison never ran: `_run` reports a missing binary as 127 and a hang
+            # as 124, git itself uses 128 for a broken repo/index, and `subprocess.run`
+            # reports a SIGNAL-KILLED child as a NEGATIVE code (an OOM kill is -9) —
+            # so `> 1` alone still folded a killed `git` into NOT-CONTAINED. Folding
+            # those into NOT-CONTAINED told the operator "REFUSED … closing would
+            # destroy work" and exited 1 ("at least one NOT contained") about a
+            # comparison that was never made — contradicting the tool's own contract,
+            # which reserves exit 2 / UNMEASURABLE for exactly this. Reproduced with a
+            # monkeypatched rc=124: the operator was told a timed-out `git` meant the
+            # work was missing.
+            # ⛔ THIS ARM RUNS BEFORE THE `conflicting` ONE. Tested the other way round, a
+            # git-level failure whose output happened to contain "conflict" (or git's
+            # own "patch does not apply") was still read as a containment verdict
+            # through the conflict branch, leaving the class this arm fixes alive by
+            # ORDER. Not reachable through `_run`'s own shapes today (124/127/128 carry
+            # no such text), which is exactly why it is closed structurally.
+            return "UNMEASURABLE", (
+                "reverse-apply did not run: "
+                f"git exited {applied.returncode} — "
+                f"{(applied.stderr or applied.stdout).strip()[:200]}"
+            )
         if conflicting:
-            # Reached only if a three-way apply is reintroduced: a conflict means
-            # the fold tree does NOT carry this change, whatever the status says.
-            return False, (
+            # Reached for rc=0 (a three-way apply reporting a conflict) and for rc=1,
+            # whose `error: … patch does not apply` is git's own way of saying the fold
+            # tree does NOT carry this change, whatever the status says. A git-level
+            # failure is classified ABOVE, so it can never be read as a verdict here.
+            return "NOT-CONTAINED", (
                 "reverse-apply reported a CONFLICT in the fold tree — the change is "
                 f"not contained: {(applied.stderr or applied.stdout).strip()[:300]}"
             )
-        return False, f"reverse-apply failed: {applied.stderr.strip()[:300]}"
+        return "NOT-CONTAINED", f"reverse-apply failed: {applied.stderr.strip()[:300]}"
     finally:
         if added:
             _git(["worktree", "remove", "--force", str(worktree)], cwd)
@@ -604,13 +678,44 @@ def content_contained(head: str, base: str, fold_head: str, cwd: Path) -> tuple[
 
 
 def verdict_for(number: int, head: str, base: str, fold_head: str, cwd: Path) -> Verdict:
-    """Classify one constituent. Ancestry first (cheap), then content."""
+    """Classify one constituent. Presence first, then ancestry (cheap), then content.
+
+    ⛔ PRESENCE COMES FIRST because every later step answers a question that needs the
+    objects. `merge-base --is-ancestor` on an absent commit exits 128 and reads exactly
+    like "not an ancestor", and `git diff` then dies before comparing anything — so the
+    old order turned "this clone has not fetched that PR" into "the fold does not carry
+    this work", which `_print_report` renders as "closing would destroy work" and
+    `main` exits 1 (refused) for, instead of 2 (could not measure).
+    ⛔ PRESENCE IS CHECKED IN TWO STAGES, because the two routes need different
+    objects. ANCESTRY needs `head` and `fold_head` only; the content route needs
+    `base` as well (it computes `base...head`). Requiring all three up front would
+    turn a perfectly provable `CONTAINED-ANCESTOR` into "could not measure"
+    whenever the base is absent — an over-block, and the wrong remedy for a
+    verdict the ancestry proof already answers.
+    """
+    missing_refs = [sha for sha in (head, fold_head) if not _commit_present(sha, cwd)]
+    if missing_refs:
+        return Verdict(
+            number,
+            "UNMEASURABLE",
+            "commit(s) absent from this checkout, so containment was never measured: "
+            + ", ".join(sha[:12] for sha in missing_refs)
+            + " — fetch the constituent's head and the fold head (this tool fetches the "
+            "fold branch only) and re-run",
+        )
     if is_ancestor(head, fold_head, cwd):
         return Verdict(number, "CONTAINED-ANCESTOR", f"{head[:12]} is an ancestor of the fold")
-    ok, detail = content_contained(head, base, fold_head, cwd)
-    if ok:
-        return Verdict(number, "CONTAINED-CONTENT", detail)
-    return Verdict(number, "NOT-CONTAINED", detail)
+    # The CONTENT route needs the base too: it reverse-applies `base...head`.
+    if not _commit_present(base, cwd):
+        return Verdict(
+            number,
+            "UNMEASURABLE",
+            f"the constituent's BASE ({base[:12]}) is absent from this checkout, so its "
+            "diff could not be computed — the head is not an ancestor of the fold, and "
+            "a content proof needs the base. Fetch it and re-run",
+        )
+    state, detail = content_contained(head, base, fold_head, cwd)
+    return Verdict(number, state, detail)
 
 
 # ---------------------------------------------------------------------------

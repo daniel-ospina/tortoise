@@ -2280,6 +2280,46 @@ def test_capture_session_deepseek_direct_route_recorded(
     assert all("api.deepseek.com" in u for u in requests_log)
 
 
+def test_capture_session_venice_only_receipt_reports_extraction(
+        sdk, monkeypatch, no_provider_keys):
+    """#8133 Targets: a venice-only capture RECEIPT reports extraction, not
+    ``no-provider``.
+
+    The gate-level pin
+    (``test_session_extraction_modes.test_a_venice_only_deployment_extracts``)
+    proves the three readings agree — resolver, lane gate, session extractor.
+    It does NOT prove the receipt the caller actually sees, and the receipt is
+    the shape #8133 reported: on the pre-fix tree a venice-only capture stored
+    its turns and answered ``extraction_mode: "no-provider"``. Those are two
+    different surfaces: the door reads ``hosted_api._llm_provider_available()``
+    while ``sdk.capture_session`` keys on ``extractor is None``, so a fix that
+    opened one and not the other would pass the gate pin and still return the
+    reported receipt.
+
+    Hermetic provider env (``no_provider_keys`` — #3695/#5477): VENICE is the
+    ONLY key present, which is the deployment shape #8133 is about. The fake
+    provider records every request URL, so the receipt's route is confirmed on
+    the wire, not just in the response dict.
+    """
+    from tortoise.model_adapters import _reset_failover_cooldown
+    _reset_failover_cooldown()
+    requests_log = []
+    _install_fake_provider(monkeypatch, requests_log)
+    monkeypatch.delenv("TORTOISE_EXTRACTOR_PROVIDER", raising=False)
+    monkeypatch.setenv("VENICE_API_KEY", "vz-key")
+    res = sdk.capture_session([{"role": "user", "content": "x"},
+                               {"role": "assistant", "content": "we decided"}])
+    assert res["extraction_mode"] == "llm:venice", (
+        "a venice-only capture reported "
+        f"{res['extraction_mode']!r} — the #8133 receipt, blamed on a key the "
+        "operator DID configure")
+    assert res["extraction_provider"] == "venice"
+    assert res["extracted"] >= 1
+    # every LLM call went to venice (no fallback hop on a single-key box)
+    assert requests_log
+    assert all("api.venice.ai" in u for u in requests_log), requests_log
+
+
 def test_capture_session_failover_records_fallback_route(
         sdk, monkeypatch, no_provider_keys):
     """E2E-8 failover variant: the primary (deepseek-direct) fails its first
@@ -6899,15 +6939,20 @@ def test_session_capture_tool_honours_capture_extract_off_4288(tmp_path, monkeyp
 
 
 def test_onboarding_state_tool_reads_capture_extract_4288(tmp_path, monkeypatch):
-    """#4288, READ half: the setting is ALREADY readable on the agent-facing
-    surface — ``tortoise_onboarding_state`` (the ``onboarding`` family, bound to
-    GET /v1/onboarding/state) returns ``capture_extract`` for the org.
+    """#4288, READ half: the setting is readable on an AGENT surface, but not
+    through a dedicated read tool any more.
 
-    This pins the half of #4288's outcome that needs NO frozen-baseline re-cut:
-    an agent can already discover whether this org's captures will be extracted,
-    before it decides how to report a capture's outcome. The WRITE half (a
-    parameter on the capture tool, or a state-PATCH tool) is the owner-gated
-    remainder tracked on #4288.
+    ``tortoise_onboarding_state`` was the reader this test was written against;
+    it left the MCP surface in #4282 Phase 3.2. The SURVIVING reader is
+    ``tortoise_manage_sources(action="list")``, whose ``onboarding`` key returns
+    this projection verbatim — and note it is admin-tier, so a ``graphs:read``
+    key is refused and must use ``GET /v1/onboarding/state`` instead. The test
+    below still drives the HANDLER directly (its body is unchanged and still
+    shipped), which is what makes the polarity claim measurable; it no longer
+    proves the MCP surface advertises a dedicated read.
+
+    The WRITE half (a parameter on the capture tool, or a state-PATCH tool) is
+    the owner-gated remainder tracked on #4288.
 
     Polarity (#4258): an older stored state with the key ABSENT must read ON,
     never OFF — so the first read happens on a team whose stored state is ``{}``.

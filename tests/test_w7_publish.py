@@ -8,12 +8,15 @@ run_status / verdict / failure_origin / commit / corpus hash / judge pin).
 """
 from __future__ import annotations
 
+import hashlib
 import json
+from pathlib import Path
 
 import pytest
 
 from tools.longmem_eval import measurement_posture
 from tools.longmem_eval.w7_publish import (
+    GOLD_CUTOFF_ROW,
     JUDGE_PIN,
     MOCK_JUDGE_PIN,
     OFFICIAL_JUDGE_MODEL_ID,
@@ -26,6 +29,16 @@ from tools.longmem_eval.w7_publish import (
     validate_receipt,
     variant_rows,
 )
+
+
+def _dataset_digest(path) -> str:
+    """The corpus hash ``w7_publish`` DERIVES from the sealed dataset.
+
+    #2105: the receipt's corpus hash is no longer an unchecked operator
+    string — the CLI binds it to ``--dataset``, so every fixture here passes
+    the digest of the file it actually sealed.
+    """
+    return "sha256:" + hashlib.sha256(Path(path).read_bytes()).hexdigest()
 
 
 def _outcome(qid: str, session5: float | None) -> dict:
@@ -95,6 +108,129 @@ def test_missing_outcome_fraction_is_excluded_not_zero():
     assert rows["official_recall_all@5"]["value"] == 1.0
     assert rows["official_recall_all@5"]["n"] == 2
     assert rows["official_recall_all@5"]["n_excluded"] == 1
+
+
+def _gold_outcome(qid: str, session5: float | None,
+                  gold_fraction: float | None,
+                  qtype: str | None = None) -> dict:
+    """An outcome carrying BOTH cutoffs: ``session_recall@k["5"]`` (the
+    official one) and ``session_recall@n_gold`` (the #10538 variant's
+    per-question fraction)."""
+    out = _outcome(qid, session5)
+    if gold_fraction is not None:
+        out["session_recall@n_gold"] = gold_fraction
+    if qtype is not None:
+        out["question_type"] = qtype
+    return out
+
+
+def test_recall_all_at_5_is_blind_to_a_spread_question_and_n_gold_sees_it():
+    """#2516 (C1) seals the #10538 variant: ``recall_all@5`` is identically
+    0.0 for a question whose evidence set exceeds five, at ANY ranking
+    quality, so the multi-session class this gate exists for cannot register
+    an improvement under it. ``recall_all@N_gold`` measures the SAME official
+    all-or-nothing binary at a cutoff equal to the question's own gold count,
+    so it can. RED mutation: drop the variant row and the blind-spot
+    assertion stops being observable.
+
+    The official row is NOT replaced or re-derived (R12): it still reports
+    its own blinded number beside the variant.
+    """
+    # 6 gold sessions, all six retrieved: 5/6 in top-5 → official 0.0;
+    # 6/6 at the question's own cutoff → the variant reads 1.0.
+    spread = _gold_outcome("q_spread", 5 / 6, 1.0)
+    single = _gold_outcome("q_single", 1.0, 1.0)
+    rows = variant_rows([spread, single], k=5)
+    assert rows["official_recall_all@5"]["value"] == 0.5   # blinded
+    assert rows[GOLD_CUTOFF_ROW]["value"] == 1.0           # can see it
+    # both aggregations ran over the same population
+    assert rows["official_recall_all@5"]["n"] == 2
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 2
+    # the label must say what it is — an unlabelled row is an R12 trap
+    assert "NOT official" in rows[GOLD_CUTOFF_ROW]["label"]
+    assert "n_gold" in rows[GOLD_CUTOFF_ROW]["semantics"]
+
+
+def test_gold_cutoff_variant_counts_absence_rather_than_zero():
+    """A report that predates the variant (or a question with no gold
+    session → ``None``) must not read as a 0.0 miss: absent is counted in
+    ``n_excluded``, exactly like a missing ``@k`` record."""
+    rows = variant_rows([_outcome("q_older_report", 1.0)], k=5)
+    assert rows[GOLD_CUTOFF_ROW]["value"] is None
+    assert rows[GOLD_CUTOFF_ROW]["n"] == 0
+    assert rows[GOLD_CUTOFF_ROW]["n_excluded"] == 1
+    # …and a mixture averages over the ones that DO carry it
+    rows2 = variant_rows([_gold_outcome("q1", 1.0, 1.0),
+                          _gold_outcome("q2", 1.0, 0.0),
+                          _outcome("q3", 1.0)], k=5)
+    assert rows2[GOLD_CUTOFF_ROW]["value"] == 0.5
+    assert rows2[GOLD_CUTOFF_ROW]["n"] == 2
+    assert rows2[GOLD_CUTOFF_ROW]["n_excluded"] == 1
+
+
+def test_category_rows_carry_the_gold_variant_per_class():
+    """The per-category gate surface carries the variant too — a per-class
+    breakdown is what the #10538 relay asks for, and the OFFICIAL coverage
+    arithmetic is unchanged (a gate category with no questions stays
+    legitimate, pinned by
+    ``test_receipt_completed_requires_the_per_category_rows``)."""
+    outcomes = [
+        _gold_outcome("m1", 5 / 6, 1.0, "multi-session"),
+        _gold_outcome("m2", 0.0, 0.0, "multi-session"),
+        _gold_outcome("p1", 1.0, 1.0, "single-session-preference"),
+    ]
+    block = category_variant_rows(outcomes, 5)
+    msr = block["rows"]["multi-session"]
+    # both questions are spread-sensitive: the official row reads 0.0 for
+    # the pair (5/6 is still a miss at k=5, and 0.0 is a miss anywhere)
+    # while the gold cutoff credits the one that WAS complete.
+    assert msr["official_recall_all@5"] == 0.0
+    assert msr[GOLD_CUTOFF_ROW] == 0.5      # (1.0 + 0.0)/2
+    assert msr["n"] == 2 and msr["n_gold"] == 2
+    # an ABSENT gate category reads n == 0 for BOTH rows, never fabricated
+    ku = block["rows"]["knowledge-update"]
+    assert ku["n"] == 0 and ku[GOLD_CUTOFF_ROW] is None
+    assert ku["n_gold"] == 0
+    # coverage still reads off the OFFICIAL rows only
+    assert block["coverage"]["gate_categories_with_questions"] == 2
+    assert block["coverage"]["coverage"] == 2 / 3
+    assert "NOT official" in block["variant_semantics"]
+
+
+def test_recall_metrics_computes_the_gold_cutoff_on_the_same_ranking():
+    """The fraction feeding the variant is computed by the retrieval layer at
+    a cutoff equal to ``len(answer_sessions)`` — the SAME ranking the official
+    ``@5`` fraction is measured on, so the two cutoffs are comparable
+    question-for-question.
+
+    Imported lazily: ``retrieve`` pulls the tortoise SDK (seconds), and this
+    module is deliberately a publication-layer unit suite.
+    """
+    from tools.longmem_eval.retrieve import _recall_metrics
+
+    hits = [{"id": f"p{i}", "session_id": f"s{i}", "has_answer": False}
+            for i in range(6)]
+    # 6 gold sessions, all of them retrieved: 5/6 at the fixed cutoff 5,
+    # 6/6 at the question's own cutoff 6.
+    sr, _tr, _er, _cer, at_gold = _recall_metrics(
+        hits, ks=(5,), answer_sessions={f"s{i}" for i in range(6)},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert sr["5"] == 5 / 6
+    assert at_gold == 1.0
+    # a spread question that MISSES one piece is below 1.0 at its own cutoff
+    # too — the variant is a wider cutoff, never a cheaper bar
+    sr2, _t2, _e2, _c2, at_gold2 = _recall_metrics(
+        hits[:2], ks=(5,), answer_sessions={"s0", "s9"},
+        evidence_turn_ids=set(), evidence_point_count=0,
+        chunk_evidence_point_count=0)
+    assert sr2["5"] == 0.5
+    assert at_gold2 == 0.5
+    # no gold session → NOT ELIGIBLE (None), never a fabricated 1.0 from the
+    # official ``all([]) == 1.0`` edge
+    assert _recall_metrics(
+        hits, ks=(5,), answer_sessions=set(), evidence_turn_ids=set(),
+        evidence_point_count=0, chunk_evidence_point_count=0)[4] is None
 
 
 def test_fraction_at_k_rejects_malformed_shapes():
@@ -306,7 +442,7 @@ def _cli_artifact(tmp_path, judge_model: str) -> dict:
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
            "--out", str(out)])
     return json.loads(out.read_text(encoding="utf-8"))
 
@@ -398,7 +534,7 @@ def test_retrieval_only_run_records_partial_not_failed(tmp_path):
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "0.0",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "0.0",
            "--out", str(out)])
     receipt = json.loads(out.read_text(encoding="utf-8"))["receipt"]
     assert receipt["run_status"] == "partial"
@@ -488,15 +624,27 @@ def test_partial_receipt_naming_no_judge_cannot_carry_a_pin(judge_pin):
 
 def test_official_judge_model_id_matches_the_judge_module():
     """``OFFICIAL_JUDGE_MODEL_ID`` is a second copy of the identity
-    ``judge.DEFAULT_JUDGE_MODEL`` owns (that module is not imported here: it
+    ``judge.OFFICIAL_JUDGE_MODEL`` owns (that module is not imported here: it
     pulls ``tortoise.ingest``/``reader``, ~2.5 s, into a publication tool).
     This test is what stops the copy drifting: a judge-model bump applied to
     one file only would otherwise refuse the NEW official judge while still
-    minting ``JUDGE_PIN`` for the OLD one."""
-    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL
+    minting ``JUDGE_PIN`` for the OLD one.
 
-    assert OFFICIAL_JUDGE_MODEL_ID in DEFAULT_JUDGE_MODEL
-    assert judge_pin_for(DEFAULT_JUDGE_MODEL) == JUDGE_PIN
+    It is pinned to the OFFICIAL constant, not to ``DEFAULT_JUDGE_MODEL``
+    (#8486, 2026-11-07). The run's default judge was re-pinned to DeepSeek by
+    the owner ruling of 2026-10-27, so binding the anti-drift check to the
+    default would have made it either fail on every tree or, worse, tempt a
+    reader into pointing ``JUDGE_PIN`` at whatever the default happens to be —
+    which is the R12 fail-open ``#9992`` closed.
+    """
+    from tools.longmem_eval.judge import DEFAULT_JUDGE_MODEL, OFFICIAL_JUDGE_MODEL
+
+    assert OFFICIAL_JUDGE_MODEL_ID in OFFICIAL_JUDGE_MODEL
+    assert judge_pin_for(OFFICIAL_JUDGE_MODEL) == JUDGE_PIN
+
+    # …and the re-pinned RUN default never collects the official pin.
+    assert judge_pin_for(DEFAULT_JUDGE_MODEL) == "unpinned:deepseek-v4-flash"
+    assert judge_pin_for(DEFAULT_JUDGE_MODEL) != JUDGE_PIN
 
 
 def test_cli_keeps_the_official_pin_for_the_official_judge(tmp_path):
@@ -537,11 +685,13 @@ def test_cli_emits_valid_artifact(tmp_path):
           "answer_session_ids": ["s1"]}]), encoding="utf-8")
     out = tmp_path / "artifact.json"
     _main(["--report", str(rp), "--dataset", str(ds), "--commit", "abc123",
-           "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+           "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
            "--out", str(out)])
     artifact = json.loads(out.read_text(encoding="utf-8"))
     assert artifact["receipt_valid"] is True
-    assert artifact["receipt"]["corpus_hash"] == "sha256:" + "0" * 64
+    # #2105: the recorded corpus hash is the digest of the SEALED dataset, not
+    # the flag echoed back — the two are bound at the producer boundary.
+    assert artifact["receipt"]["corpus_hash"] == _dataset_digest(ds)
     assert artifact["receipt"]["metrics"]["official_recall_all@5"] == 0.5
     assert artifact["seal"]["n_questions"] == 1
     assert artifact["variants"]["official_recall_all@5"]["n"] == 2
@@ -555,6 +705,54 @@ def test_cli_emits_valid_artifact(tmp_path):
     for cat in ("multi-session", "knowledge-update",
                 "single-session-preference"):
         assert cat in by_cat["rows"]
+
+
+def test_cli_refuses_a_corpus_hash_that_is_not_the_sealed_dataset(tmp_path):
+    """#2105 (indicator 3) — the receipt's corpus hash is the comparability
+    claim, so it must name the corpus the command SEALED.
+
+    The defect this pins, measured before the fix: ``--corpus-hash`` was an
+    operator string that ``validate_receipt`` only shape-checks
+    (``sha256:…``), so a receipt could record a corpus nobody sealed and still
+    print ``receipt valid: True`` / exit 0. Nothing tied the flag to
+    ``--dataset`` — the artifact was sealed from one file while the receipt
+    named another.
+
+    RED mutation: delete the ``declared_corpus_hash != sealed_corpus_hash``
+    refusal in ``_main`` → this test fails (no SystemExit, artifact written).
+    """
+    from tools.longmem_eval.w7_publish import _main
+    rp = tmp_path / "report.json"
+    rp.write_text(json.dumps({
+        "outcomes": [_outcome("q1", 1.0)],
+        "retrieval": {"session_recall_paper@k": {"5": 1.0},
+                      "session_recall@k": {"5": 1.0}},
+        "methodology": {
+            "judge_model": "openai/gpt-4o-2024-08-06",
+            "judge_rubric_id_hash": "hash",
+            "reader_model_spec": "openrouter:deepseek/deepseek-v4-flash",
+            "reader_pinned": True, "ingest_mode": "deterministic",
+            "run_at_utc": "2026-09-04T12:00:00Z",
+            "measurement_posture": _posture("deterministic"),
+            "dataset_semantics_audit": {"verdict": "trusted"}},
+        "integrity": {"valid": True}, "accuracy": {"overall": 1.0},
+        "split": "s", "updated_at_utc": "2026-09-04T12:00:00Z",
+    }), encoding="utf-8")
+    ds = tmp_path / "data.json"
+    ds.write_text(json.dumps([{"question_id": "q1", "answer": "a",
+                               "answer_session_ids": ["s1"]}]),
+                  encoding="utf-8")
+    out = tmp_path / "artifact.json"
+    with pytest.raises(SystemExit) as exc:
+        _main(["--report", str(rp), "--dataset", str(ds),
+               "--commit", "abc123",
+               # a well-formed sha256 that is NOT this dataset's
+               "--corpus-hash", "sha256:" + "a" * 64,
+               "--cost-usd", "1.5", "--out", str(out)])
+    assert exc.value.code != 0
+    # fail-closed BEFORE the write: no artifact may claim a corpus it did not
+    # seal (unlike the receipt-issue gate, where the artifact is the evidence)
+    assert not out.exists()
 
 
 def _invalid_report_and_dataset(tmp_path) -> tuple[str, str, str]:
@@ -608,7 +806,7 @@ def test_cli_fails_the_process_when_the_receipt_is_invalid(tmp_path):
     rp, ds, out = _invalid_report_and_dataset(tmp_path)
     with pytest.raises(SystemExit) as exc:
         _main(["--report", rp, "--dataset", ds, "--commit", "abc123",
-               "--corpus-hash", "sha256:" + "0" * 64, "--cost-usd", "1.5",
+               "--corpus-hash", _dataset_digest(ds), "--cost-usd", "1.5",
                "--out", out])
     assert exc.value.code == 1
     artifact = json.loads((tmp_path / "artifact.json").read_text(
@@ -662,9 +860,13 @@ def test_category_rows_report_absent_categories_as_covered_zero():
     outcomes = [dict(_outcome("m1", 1.0), question_type="multi-session")]
     block = category_variant_rows(outcomes, 5)
     for cat in ("knowledge-update", "single-session-preference"):
+        # both cutoff rows are present-and-empty: the official one and the
+        # #10538 gold-cutoff variant (#2516), each with its own counts
         assert block["rows"][cat] == {"official_recall_all@5": None,
                                       "fraction_paper@5": None,
-                                      "n": 0, "n_excluded": 0}
+                                      GOLD_CUTOFF_ROW: None,
+                                      "n": 0, "n_excluded": 0,
+                                      "n_gold": 0, "n_excluded_gold": 0}
     assert block["coverage"] == {"gate_categories_total": 3,
                                  "gate_categories_with_questions": 1,
                                  "coverage": pytest.approx(1 / 3)}

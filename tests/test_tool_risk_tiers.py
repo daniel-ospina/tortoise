@@ -107,8 +107,17 @@ class TestTheRiskAxis:
         only thing this test may assert is a figure no code path can recompute.
         """
         reading = {e.name for e in served() if e.risk in ("read", MAINTENANCE_TIER)}
-        assert len(reading) == 51, sorted(reading)   # 48 read + 3 maintenance
-        assert len(served()) == 99, sorted(e.name for e in served())
+        # Two recorded moves land on this pin together, and the merged figure is the
+        # only one both of them imply:
+        #   #4282 (this change) — `tortoise_graph_overview` joins as a `read` (+1) while
+        #   the FIVE names it absorbed retire, so the SERVED set (live + retired shims)
+        #   grows by exactly the one new entry: 99 -> 100, reading-eligible 51 -> 52.
+        #   #4282 Phase 3.2 (main) — removed TWO reading tools (`tortoise_onboarding_state`
+        #   and `tortoise_onboarding_github_status`, the tenant-visible reads the owner's
+        #   2026-09-22 ruling rehomed) without adding a name: 100 -> 95 served, 52 -> 50.
+        # Neither side's own figure is the answer: 95 and 50 is.
+        assert len(reading) == 50, sorted(reading)   # 47 read + 3 maintenance
+        assert len(served()) == 95, sorted(e.name for e in served())
 
     def test_the_destructive_set_is_pinned_by_name(self):
         """`destructive` means "removes or overwrites user-authored state".
@@ -166,7 +175,6 @@ class TestTheRiskAxis:
             "tortoise_org_create",            # org provisioning
             "tortoise_pack_install",          # installs code
             "tortoise_onboarding_session_recording",  # org-wide recording
-            "tortoise_onboarding_github_connect",     # credential handshake
             "tortoise_graph_set_recording",   # per-graph recording override
             "tortoise_manage_sources",        # enable/disable sources
         }, sorted(admin)
@@ -203,8 +211,7 @@ class TestTheRiskAxis:
             "tortoise_file_decision", "tortoise_file_human_approval",
             "tortoise_get_source_reliability",
             "tortoise_ingest",
-            "tortoise_onboarding_demo_create",
-            "tortoise_onboarding_github_index", "tortoise_onboarding_seed",
+            "tortoise_onboarding_github_index",
             "tortoise_session_capture",
         }, sorted(writes)
 
@@ -362,9 +369,17 @@ class TestHintsCannotDrift:
             # The bundle's key space is open-ended → no finite predicate proves
             # it (#10849 reviews).
             ("tortoise_ingest", False),
-            # ⛔ `onboarding_demo_create` is pinned FALSE below: its SEED is
-            # sentinel-gated but its onboarding RECEIPT CAS-writes on every call.
-            ("tortoise_onboarding_demo_create", False),
+            # ⛔ `onboarding_demo_create` is NOT pinned here, and its absence is
+            # deliberate rather than an omission: its SEED is sentinel-gated but its
+            # onboarding RECEIPT CAS-writes on every call (#10849 review), so it was
+            # pinned False — until #4282 Phase 3.2 REMOVED the tool from the registry
+            # altogether. It is now in neither `TOOL_REGISTRY` nor
+            # `RETIRED_TOOL_REGISTRY`, and deliberately NOT in
+            # `RETIRED_USE_INSTEAD` either (that map REDIRECTS a caller to a
+            # replacement name; the owner's 2026-09-22 ruling DROPPED this container
+            # rather than rehoming it, so there is no name to redirect to — the
+            # hosted route is `POST /v1/demo` in `hosted_api.py`). A pin naming a
+            # tool `served()` cannot resolve would assert nothing and red this set.
             # ⛔ `tortoise_mitigate_operator` is pinned FALSE below, not omitted — its own description
             # says a re-assertion after withdrawal MINTS A NEW mitigation Point,
             # so convergence is conditional on the mitigation's current STATE —
@@ -390,7 +405,10 @@ class TestHintsCannotDrift:
         # calls `_enforce_mcp_tool_scope` per name) and the served-vs-registry
         # comparison in `TestTheReadThroughToolsRegressionPin`.
         assert get_write_tool_names() == expected == WRITE_TOOL_NAMES
-        assert len(expected) == 48, sorted(expected)  # census, hard-coded
+        # 48 -> 45: #4282 Phase 3.2 removed three writing tools from the served
+        # registry (`tortoise_onboarding_github_connect` (admin),
+        # `tortoise_onboarding_seed` and `tortoise_onboarding_demo_create`).
+        assert len(expected) == 45, sorted(expected)  # census, hard-coded
 
 
 class TestTheMitigationWriteIsNeverAdvertisedAsRepeatable:
@@ -634,10 +652,15 @@ class TestReadTierCannotHideAnOutOfBoundaryWrite:
     def test_an_undeclared_read_tool_reaching_one_fails(self, monkeypatch):
         import tool_surface_capabilities as tsc
 
-        # Pretend `query` were an out-of-boundary mutator: the read tools that
-        # reach it are not declared, so the arm must fire for them.
+        # Pretend the accessor `tortoise_query` reaches were an out-of-boundary
+        # mutator: it is NOT declared, so the arm must fire for it. #10602 moved
+        # that tool off `sdk.query` (no LIMIT in its Cypher) onto
+        # `paginated_query`, which is the accessor its handler actually reaches now
+        # — probing `query` tests a binding that no longer exists and passes
+        # vacuously. This is the third copy of the probe (two live in
+        # test_tool_registry.py); the key must move in ALL of them.
         monkeypatch.setitem(
-            tsc.OUT_OF_BOUNDARY_MUTATORS, "query",
+            tsc.OUT_OF_BOUNDARY_MUTATORS, "paginated_query",
             "probe: pretend a mutation lives outside sdk.py")
         violations = tsc.write_classification_violations(tsc.served_registry())
         assert any("out-of-boundary mutation" in v and "tortoise_query" in v

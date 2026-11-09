@@ -7,6 +7,11 @@ import re
 import sys
 from pathlib import Path
 
+# The ONE definition of the per-attempt outcome contract and of the recorded
+# local-receipt refusal set (#5051). `capture_receipts` is dependency-free, so
+# importing it at module load costs nothing and keeps the two rules in one home.
+from tortoise.capture_receipts import REFUSAL_STATUSES
+
 # #2201: single source of truth for markdown discovery. The "Found N markdown
 # files" count announced during `tortoise init` and `tortoise onboard` (whose
 # step-3 index runs the REAL indexer, so the indexer's own line is the one
@@ -22,18 +27,19 @@ from pathlib import Path
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
 
-# The RECORDED local-receipt refusal set: a refusal in this set must never be
-# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
-# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
-# error, NO receipt) … that rule is correct and must not be weakened"*).
+# The RECORDED local-receipt refusal set — defined ONCE in
+# `tortoise/capture_receipts.py` (`REFUSAL_STATUSES`) beside the outcome
+# contract it must NOT be derived from, and imported under this name because
+# the receipt gates read it and `tests/test_session_confirm.py` pins it here.
 #
-# Named EXPLICITLY rather than derived from `classify_failure`, because the two
-# answer DIFFERENT questions, and both answers are correct:
+# It is deliberately INDEPENDENT of the outcome class (#5051), and both answers
+# are correct:
 #
-#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
-#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
-#     capture KEPT in the spool (its `est` is computed from the incoming
-#     capture, so the identical capture succeeds once a node is freed).
+#   * the class answers *"what does this attempt mean, and what may happen to
+#     the entry?"* — and 402 is RETRYABLE there, deliberately: #4614's
+#     data-loss fix needs a quota-refused capture KEPT in the spool (its `est`
+#     is computed from the incoming capture, so the identical capture succeeds
+#     once a node is freed).
 #   * this set answers *"is this a refusal the user must be shown?"* — and 402
 #     is.
 #
@@ -41,7 +47,7 @@ _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycac
 # weaken the receipt rule: the receipt gates stopped excluding it, so a 402
 # whose session happened to be durable minted a receipt for a refusal.
 # `tests/test_session_confirm.py` pins the two rules as independent.
-_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
+_NO_RECEIPT_REFUSAL_STATUSES = REFUSAL_STATUSES
 
 
 def _markdown_files(root: Path | str) -> list[Path]:
@@ -651,7 +657,10 @@ def _cmd_record_reconcile(args):
     """
     import json as _json
 
-    from tortoise.cache_projection import read_record_view
+    from tortoise.cache_projection import (
+        PlacementTableUnavailable,
+        read_record_view,
+    )
     from tortoise.reconciliation import ReconciliationUnavailable
     from tortoise.record_reconcile import (
         CACHE_READ_TIMEOUT_MS,
@@ -730,6 +739,11 @@ def _cmd_record_reconcile(args):
                 options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
             )
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except PlacementTableUnavailable:
+            # A fault in the INSTALL, not in the record (#10663). Collapsing it
+            # into "record is unreadable" sent an operator to Postgres
+            # credentials for a file the image never shipped.
+            raise
         except Exception as e:
             raise ReconciliationUnavailable(
                 f"record is unreadable ({type(e).__name__}) — divergence is "
@@ -757,6 +771,13 @@ def _cmd_record_reconcile(args):
         )
     except ReconciliationUnavailable as e:
         print(f"Record↔cache reconciliation UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except PlacementTableUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("  Nothing was compared, so divergence is UNKNOWN, not zero. Fix "
+              "the INSTALL (ship/regenerate the table) — this is not a record "
+              "fault, so no DSN or credential change will clear it.",
+              file=sys.stderr)
         return EXIT_UNAVAILABLE
     finally:
         if proj is not None:
@@ -1113,7 +1134,10 @@ def _cmd_record_restore(args):
     """
     import json as _json
 
-    from tortoise.cache_projection import read_record_view
+    from tortoise.cache_projection import (
+        PlacementTableUnavailable,
+        read_record_view,
+    )
     from tortoise.record_reconcile import (
         RECORD_CONNECT_TIMEOUT_S,
         RECORD_STATEMENT_TIMEOUT_MS,
@@ -1188,6 +1212,10 @@ def _cmd_record_restore(args):
                 options=f"-c statement_timeout={RECORD_STATEMENT_TIMEOUT_MS}",
             )
             view = read_record_view(conn, org_id=args.org, graph_id=args.graph)
+        except PlacementTableUnavailable:
+            # As in `record-reconcile` (#10663): a packaging fault, not a
+            # record fault — never collapsed into "the record is unreadable".
+            raise
         except Exception as e:
             raise RestoreUnavailable(
                 f"the record is unreadable ({type(e).__name__}) — nothing was "
@@ -1235,6 +1263,13 @@ def _cmd_record_restore(args):
         return EXIT_REFUSED
     except RestoreUnavailable as e:
         print(f"Restore UNAVAILABLE: {e}", file=sys.stderr)
+        return EXIT_UNAVAILABLE
+    except PlacementTableUnavailable as e:
+        print(f"Error: {e}", file=sys.stderr)
+        print("  Nothing was restored and the cache's state is UNCHANGED. Fix "
+              "the INSTALL (ship/regenerate the table) — this is not a record "
+              "fault, so no DSN or credential change will clear it.",
+              file=sys.stderr)
         return EXIT_UNAVAILABLE
     finally:
         # The verb OWNS both handles (the `record-reconcile` rule): an operator
@@ -5291,6 +5326,11 @@ def _cmd_volunteer(args) -> int:
     both share tortoise/volunteer.py), and prints the injected block text
     (default) or the full response contract (--json).
 
+    Continuity (cross-turn re-mention suppression) rides ``--prior-context``
+    (or the same key in the JSON contract): the block this seam injected on an
+    earlier turn. It is the reflex's ONLY suppression input — ``--session-id``
+    is carried, not consulted (#2120).
+
     Hook ergonomics: clean silence (no pointers above the gate) prints
     nothing and exits 0 — never an error. Failures are honest: text mode
     prints to stderr and exits 1; --json mode emits {status: error, ...} on
@@ -5337,6 +5377,12 @@ def _cmd_volunteer(args) -> int:
         payload = None
     window = None
     session_id = args.session_id
+    # #2120: the reflex's re-mention suppression reads `prior_context` (the
+    # block a seam injected on an earlier turn) — never `session_id`, which is
+    # carried but not consulted by the decision. Without this input a per-turn
+    # seam re-fires a pointer it already surfaced, which is the false-fire the
+    # W3 harness scores as passing (it feeds prior_context through the SDK).
+    prior_context = getattr(args, "prior_context", None)
     # #2383: honor the advertised payload knobs when the window came in as a
     # {window, session_id, min_confidence, max_pointers, why} contract dict
     # (previously only window/session_id were read and the rest silently
@@ -5349,6 +5395,8 @@ def _cmd_volunteer(args) -> int:
             and all(isinstance(t, dict) for t in payload["window"])):
         window = payload["window"]
         session_id = payload.get("session_id") or args.session_id
+        if isinstance(payload.get("prior_context"), str):
+            prior_context = payload["prior_context"]
         if isinstance(payload.get("min_confidence"), (int, float)):
             payload_min_c = min(1.0, max(0.0, float(payload["min_confidence"])))
         if isinstance(payload.get("max_pointers"), int):
@@ -5397,6 +5445,7 @@ def _cmd_volunteer(args) -> int:
     body = {
         "window": window,
         "session_id": session_id,
+        "prior_context": prior_context,
         "min_confidence": (payload_min_c
                            if payload_min_c is not None
                            else getattr(args, "min_confidence", 0.7)),
@@ -5433,6 +5482,7 @@ def _cmd_volunteer(args) -> int:
             data = sdk.volunteer_context(
                 window=window,
                 session_id=session_id,
+                prior_context=prior_context,
                 min_confidence=body["min_confidence"],
                 max_pointers=body["max_pointers"],
                 why=body["why"],
@@ -5455,13 +5505,24 @@ def _cmd_install_hooks(args) -> int:
     Two independent halves:
 
     * the per-turn READ hook (``volunteer-turn.sh``) — codex / claude /
-      cline / devin;
+      cline / devin — and, for pi, the in-repo ``tortoise-volunteer.ts``
+      EXTENSION (#2119), for openclaw the native plugin DIRECTORY
+      (``~/.openclaw/extensions/tortoise/``, #2120) and, for hermes, the
+      in-repo Python plugin DIRECTORY (``<dir>/.hermes/plugins/
+      tortoise-volunteer/``, the ``pre_llm_call`` surface, #2121) — none of
+      which is a shell hook at all;
     * the per-session CAPTURE seam (``tortoise.capture_install``) — claude
-      (SessionStart/SessionEnd scripts + merged ``settings.json`` entry),
+      (``session-start.sh`` / ``session-end.sh`` / ``session-turn.sh``, the
+      per-turn spool added by #3963 so a killed session still files, plus
+      their merged ``settings.json`` entries at timeouts 60 / 60 / 30),
       codex (the SessionEnd capture hook + its merged ``$CODEX_HOME/
       hooks.json`` registration), cursor (the sessionEnd capture hook PLUS the
-      sessionStart cold-context injection hook, #2122) and pi (the in-repo
-      capture extension).
+      sessionStart cold-context injection hook, #2122), pi (the in-repo
+      capture extension, written in the SAME run as the per-turn read
+      extension, and the pair is graded as ONE contract number, #2119) and
+      openclaw (the plugin DIRECTORY above plus its
+      ``plugins.entries.tortoise.enabled`` enablement — discovered is not
+      loaded, #2120).
 
     Capture used to be a copy-paste block in the dashboard: the installer gave
     a user the read path and nothing that files a session — and because the
@@ -5482,18 +5543,17 @@ def _cmd_install_hooks(args) -> int:
     # `pi` has NO read-hook registration, so it must not fall through to
     # `_install_read_hook`'s cline target (a non-codex/claude harness lands in
     # that `else` branch): `tortoise install pi --uninstall` would otherwise
-    # inspect — and could rewrite — `<dir>/.cline/hooks/UserPromptSubmit`.
+    # inspect — and could rewrite — `<dir>/.clinerules/hooks/UserPromptSubmit`
+    # (the cline target since #2124; the pre-#2124 `.cline/hooks` path is the
+    # legacy one, removed by cline's own uninstall).
     if uninstall and harness == "pi":
-        # Derived from the install contract, never retyped (#3502). The
-        # `cursor` and `openclaw` sibling branches below already interpolate
-        # their layout; a literal here names a file the installer no longer
-        # writes the moment the contract's `install_name` moves — the exact
-        # hardcoded-copy drift class #3502 exists to close.
-        print("pi has no shell-hook read seam — nothing for --uninstall to "
-              "remove. The pi capture extension (~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()}) is left in place; delete that "
-              "file to uninstall it.")
-        return 0
+        # #2119: Pi's read seam is NOT a shell-hook registration — it is the
+        # second extension file `tortoise install pi` writes beside the capture
+        # artifact, so `--uninstall` (documented as "the read-hook
+        # registration only, never the capture scripts") removes exactly that
+        # file and leaves capture alone. Before #2119 there was no read seam to
+        # remove and this branch printed a no-op sentence instead.
+        return _uninstall_pi_volunteer(args)
     # `cursor` has no shell-hook read seam either: routing `--uninstall` to
     # `_install_read_hook` exited 1 with "no shell-hook read seam" while the
     # HOME-scoped capture hook stayed live — the opposite of what a user
@@ -5564,8 +5624,8 @@ def _cmd_install_hooks(args) -> int:
     # root, a foreign cline hook) the command must fail with NOTHING written,
     # not leave a project with capture installed and the read registration
     # refused.  The read half's own dry run performs the exact checks the real
-    # run does and writes nothing.  ``pi`` has no read hook; ``cline`` no
-    # capture.
+    # run does and writes nothing.  ``pi`` has no *shell-hook* read
+    # registration (its read half is the extension); ``cline`` no capture.
     if harness in ("claude", "codex"):
         refusal = _read_hook_refusal(args)
         if refusal != 0:
@@ -5580,9 +5640,11 @@ def _cmd_install_hooks(args) -> int:
         if rc != 0:
             return rc
     if harness == "pi":
-        # Pi has no shell-hook read seam — its only seam is the capture
-        # extension; `_install_capture_seam` already reported the install,
-        # the no-op, and the MCP/restart guidance.
+        # Pi's seam is TWO extension files, not a shell-hook registration —
+        # `_install_capture_seam` wrote both (the capture artifact and the
+        # per-turn read seam, #2119) and reported them. Falling through to
+        # `_install_read_hook` would inspect (and could rewrite) a CLINE
+        # registration via that helper's `else` branch.
         return 0
     # `openclaw` (#2120) has no shell-hook read seam either: its per-turn
     # injection IS the native plugin, so the capture installer's report is the
@@ -5641,15 +5703,221 @@ def _pi_capture_extension_name() -> str:
     never existed anywhere in this repo or in agent-infra — and promise a
     per-turn context injection the SHIPPED extension does not do. Pi's
     extension API does have that seam (``before_agent_start`` can inject a
-    message, and our own extensions use it); what is missing is Tortoise's
-    wiring of it (#2119, still open). Saying otherwise is a false claim about
-    the harness, not honest copy. Nothing failed when the prose drifted from
-    the artifact because nothing coupled the two; deriving it here is that
-    coupling.
+    message, and our own extensions use it) — Tortoise's wiring of it is
+    ``_pi_volunteer_extension_name()`` below, shipped by #2119. Saying
+    otherwise was a false claim about the harness, not honest copy. Nothing
+    failed when the prose drifted from the artifact because nothing coupled the
+    two; deriving it here is that coupling.
     """
     from tortoise.capture_install import PI_EXTENSION_NAME
 
     return PI_EXTENSION_NAME
+
+
+def _pi_volunteer_extension_name() -> str:
+    """The Pi READ seam's real install name, derived from the contract (#2119).
+
+    A literal here would be the same hardcoded-prose drift #3502 closed for the
+    capture extension: the sentence a user acts on must name the file the
+    installer writes.
+    """
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    return PI_VOLUNTEER_EXTENSION_NAME
+
+
+def _pi_volunteer_is_provably_ours(target: Path) -> bool:
+    """True only when ``target`` is provably the artifact THIS installer writes.
+
+    ⛔ NOT ``_looks_like_our_script`` (review finding 2). That sniff is the
+    *doctor*'s install signal and its own docstring says it is FAIL-OPEN toward
+    "ours" — the bare identifier ``TORTOISE_API_KEY`` matches — and that it is
+    "not a security boundary". An INSTALL may rely on it because a false
+    positive is repaired by a replace that keeps a ``.bak`` copy; an UNINSTALL
+    DELETES, so a false positive is unrecoverable (measured: a 4-line
+    hand-written ``~/.pi/agent/extensions/tortoise-volunteer.ts`` that merely
+    referenced ``process.env.TORTOISE_API_KEY`` was deleted, rc 0, no backup).
+    The destructive path therefore requires proof — either
+
+      * byte-identity with the shipped source (exactly what ``install pi``
+        copies), or
+      * the canonical ``// tortoise-hook-version: N`` marker, which every
+        generation of this artifact carries,
+
+    and refuses anything else as the user's own file.
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    # ⛔ THE TWO READS ARE SEPARATE ON PURPOSE (#11584 review finding 3). One
+    # `try` around BOTH comparisons made an unavailable SHIPPED SOURCE read as
+    # "the target is not provable": the `OSError` from `Path(source).read_bytes()`
+    # returned False before the marker fallback was ever consulted, so a
+    # partially-extracted wheel (or a downgrade) made `--uninstall` print
+    # "is not a Tortoise artifact this installer wrote" about the user's own
+    # marked seam and refuse the delete. A missing source is a fact about the
+    # PACKAGE; the marker fallback below is exactly the evidence that survives
+    # it, and it is consulted because every generation carries the marker.
+    try:
+        installed = target.read_bytes() if target.is_file() else None
+    except OSError:  # pragma: no cover - an unreadable target is not provable
+        return False
+    if installed is not None and source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+        if shipped is not None and installed == shipped:
+            return True
+    return _hook_install.read_hook_version(target) is not None
+
+
+def _pi_volunteer_local_edit_backup(target: Path) -> tuple[Path, str] | None:
+    """Preserve a locally-edited read seam before ``--uninstall`` deletes it.
+
+    Returns ``(backup_path, why)`` — the copy written and the sentence telling
+    the operator why it was kept — or ``None`` when the bytes on disk are
+    PROVABLY the shipped ones (the ordinary case, where deleting loses nothing
+    but a copy this installer can rewrite).
+
+    A user edit KEEPS the ``// tortoise-hook-version: N`` marker, so it stays
+    "provably ours" while no longer being what we shipped: `hooks status` names
+    that shape ``modified-artifact`` ("local edit"), and it is the one seam a
+    delete can destroy unrecoverably (#11584 review round 9).
+
+    ⛔ THE COMPARISON IS ONLY SKIPPED WHEN IT PROVES EQUALITY — never when it
+    merely fails to run (#11584 review finding 1). One `try` around BOTH reads
+    made an unreadable SHIPPED SOURCE return ``None`` here, which the caller
+    reads as "nothing to preserve", so a partially-extracted wheel (or a
+    downgrade) silently deleted a locally-edited seam with no backup and rc 0 —
+    the same unrecoverable-delete hazard as round 9, re-opened through the
+    source side instead of the write side. It is reachable precisely because
+    :func:`_pi_volunteer_is_provably_ours` is DELIBERATELY built to pass when the
+    shipped source is missing (its marker fallback): on that path "provably
+    ours" no longer implies "we can read what we shipped", so the round-9
+    docstring's justification ("the ownership check has already run") does not
+    hold. An unavailable source makes equality UNPROVABLE, which is not the same
+    as PROVEN EQUAL, so the target is preserved.
+    """
+    from tortoise import hook_install as _hook_install
+
+    contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
+    source = getattr(contract, "volunteer_source", None)
+    # The two reads are SEPARATE (as in `_pi_volunteer_is_provably_ours`) so an
+    # unreadable TARGET cannot be confused with an unreadable SOURCE.
+    try:
+        installed = target.read_bytes()
+    except OSError:  # pragma: no cover - `_pi_volunteer_is_provably_ours` refuses this
+        # Nothing to copy, so nothing can be preserved: defence in depth only —
+        # the ownership check already returned False for an unreadable target.
+        return None
+    shipped: bytes | None = None
+    if source is not None:
+        try:
+            shipped = Path(source).read_bytes()
+        except OSError:  # an unavailable source says nothing about `target`
+            shipped = None
+    if shipped is not None and installed == shipped:
+        return None
+    from tortoise.capture_install import _atomic_bytes, _backup_path
+
+    # `_atomic_bytes` (not `write_bytes`) for the same reasons `_install_pi`
+    # uses it: it replaces the directory entry rather than writing through a
+    # planted symlink or hard link, and mode 0o600 matches the sibling backup.
+    backup = _backup_path(target)
+    _atomic_bytes(backup, installed, 0o600)
+    why = ("local edits are preserved" if shipped is not None else
+           "the shipped source could not be read, so local edits cannot be "
+           "ruled out — the copy is kept")
+    return backup, why
+
+
+def _uninstall_pi_volunteer(args) -> int:
+    """`tortoise install pi --uninstall` — remove the per-turn READ seam.
+
+    Scoped exactly like the shell-hook harnesses' ``--uninstall``: it removes
+    the READ half and says what it left behind. Pi's read half is a file
+    (``tortoise-volunteer.ts``) rather than a settings.json entry, so removing
+    it is a delete of one path — and only a path PROVABLY ours
+    (:func:`_pi_volunteer_is_provably_ours`), because the extensions directory
+    is shared with every other extension the user installed. A delete has no
+    undo, so this is the one place in the family where the weakest ownership
+    evidence is not good enough.
+    """
+    from tortoise import hook_install as _hook_install
+    from tortoise.capture_install import PI_VOLUNTEER_EXTENSION_NAME
+
+    root = _hook_install.artifact_root("pi", Path.home())
+    target = (root / PI_VOLUNTEER_EXTENSION_NAME) if root is not None else None
+    if target is None:  # pragma: no cover - "pi" is a registered contract
+        print("pi has no registered artifact contract — nothing to remove.")
+        return 1
+    capture = _pi_capture_extension_name()
+    if not target.exists() and not target.is_symlink():
+        print(f"Pi per-turn memory injection is not installed ({target} is "
+              f"absent) — nothing to remove. The capture extension "
+              f"({capture}) is untouched.")
+        return 0
+    if not _pi_volunteer_is_provably_ours(target):
+        print(f"Refusing: {target} exists but is not a Tortoise artifact this "
+              "installer wrote — nothing was removed. Move it aside yourself "
+              "if you are sure it is not another extension.", file=sys.stderr)
+        return 1
+    # ⛔ `--dry-run` MEANS "without writing", and this branch is the one place
+    # in the family where the read seam is a FILE: before #2119 the `pi
+    # --uninstall` arm printed a sentence and touched nothing, so the dry-run
+    # contract could not be violated here. A delete is the strongest write the
+    # verb performs (there is no undo — the file was a copy, not a link), so it
+    # is printed and skipped, never performed (review finding 2).
+    if getattr(args, "dry_run", False):
+        print(f"[dry-run] would remove {target} (per-turn read seam)")
+        print(f"Note: the capture extension ({capture}) would be left in place.")
+        return 0
+    # ⛔ BACK UP A LOCALLY-EDITED SEAM BEFORE DELETING IT (#11584 review round
+    # 9). `_pi_volunteer_is_provably_ours` proves AUTHORSHIP, not that the bytes
+    # on disk are still the shipped ones — a user's edit to our file keeps the
+    # `// tortoise-hook-version: N` marker, so it is provably ours AND provably
+    # not what we shipped. `hooks status` calls that shape `modified-artifact`
+    # ("local edit"); deleting it with no copy is unrecoverable, which is the
+    # exact hazard this verb's own docstring names one level up ("an UNINSTALL
+    # DELETES, so a false positive is unrecoverable"). The sibling verb on the
+    # same file — `install pi` over a differing copy — already preserves it, so
+    # the two halves of the family disagreed about the same edit. A backup is
+    # written only when the bytes DIFFER from the shipped source; the ordinary
+    # unedited case still just removes the file.
+    try:
+        backup = _pi_volunteer_local_edit_backup(target)
+    except OSError as e:
+        # ⛔ FAIL CLOSED, AND FAIL WITH A SENTENCE (#11584 review round 10). The
+        # backup exists to make this delete recoverable, so a backup that cannot
+        # be WRITTEN must abort the delete rather than proceed without one — and
+        # it must not escape as a traceback. Before this guard the write was the
+        # one statement in this verb outside a `try`, so an unwritable extensions
+        # directory (a read-only mount, a root-owned dir) cost the user a raw
+        # `PermissionError` stack with no message, on the same verb whose sibling
+        # failure paths all name the path and say what happened.
+        print(f"Cannot preserve the local edits in {target} before removing "
+              f"it: {e.__class__.__name__}: {e}", file=sys.stderr)
+        print(f"Nothing was removed. Move {target} aside yourself, or re-run "
+              f"once {target.parent} is writable.", file=sys.stderr)
+        return 1
+    if backup is not None:
+        kept, why = backup
+        print(f"backed up {target} → {kept} ({why})")
+    try:
+        target.unlink()
+    except OSError as e:
+        print(f"Cannot remove {target}: {e.__class__.__name__}: {e}",
+              file=sys.stderr)
+        return 1
+    print(f"removed {target} — per-turn memory injection is uninstalled.")
+    # The accounting rule (#3963/#3808 R14): a user who asked to uninstall must
+    # not conclude the whole seam is gone when capture is still live.
+    print(f"Note: `--uninstall` removes only the per-turn read seam. The "
+          f"capture extension ({capture}) is left in place and still files "
+          "sessions; delete that file to uninstall it.")
+    return 0
 
 
 def _install_capture_seam(args, install_capture) -> int:
@@ -5686,8 +5954,32 @@ def _install_capture_seam(args, install_capture) -> int:
     if args.harness == "pi" and not getattr(args, "dry_run", False):
         # Under `--dry-run` nothing was written, so the success sentence would
         # be a lie (the action lines already said what WOULD happen).
-        claim = "Pi capture extension installed. " if result.changed else ""
+        # ⛔ THE CLAIM NAMES THE CAPTURE HALF, SO IT IS GATED ON THE CAPTURE
+        # HALF (#11584 review finding 1). `result.changed` is the UNION of the
+        # two artifacts `install_capture("pi", ...)` writes, so keying this
+        # sentence off it made the run that wrote ONLY the read seam — a stale
+        # read seam, or `install pi` after `--uninstall` — print "Pi capture
+        # extension installed." about a capture artifact it never touched. The
+        # action lines above stay truthful either way; this is the one sentence
+        # an operator uses to answer "did capture get reinstalled?", which is
+        # the #3808 R13 over-claim this function's docstring forbids.
+        from tortoise.capture_install import PI_EXTENSION_NAME
+
+        capture_installed = PI_EXTENSION_NAME in result.changed_artifacts
+        claim = "Pi capture extension installed. " if capture_installed else ""
         print(f"{claim}{_PI_MCP_GUIDANCE}")
+        # #2119: name the READ half too. It is a separate extension file, and
+        # an injection seam that is silent by default (empty graph) is
+        # indistinguishable from one that never loaded — so the install says
+        # which file carries it and which switch turns on the visible surface.
+        print(f"Per-turn memory injection is installed as "
+              f"~/.pi/agent/extensions/{_pi_volunteer_extension_name()}: "
+              "`before_agent_start` runs the shared reflex over your prompt and "
+              "injects the why-context block silently. Set "
+              '`{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json to render it (with the "
+              "surfaced-pointer marker) instead; TORTOISE_VOLUNTEER_DISABLE=1 "
+              "switches the seam off.")
     if args.harness == "codex" and not getattr(args, "dry_run", False):
         # #3818 P1-3: the capture registration is HOME-scoped ($CODEX_HOME/
         # hooks.json — the ONE hook source Codex 0.154.0 reads). Codex refuses
@@ -5844,6 +6136,16 @@ def _install_read_hook_impl(args) -> int:
       mention, another product's LIVE volunteer-turn.sh at a different path,
       and malformed commands are NOT ours and are left untouched: an
       uninstall must never delete config it cannot prove it created (#2383).
+      THE ONE EXCEPTION is cline's LEGACY path
+      (``<dir>/.cline/hooks/UserPromptSubmit``), which is judged by
+      PROVENANCE: any ``…/volunteer-turn.sh <harness>`` invocation there is
+      ours whether its script path is live or dead, because a pre-#2124
+      marker names the script path of the release that wrote it and that path
+      still exists whenever the old install does. Strict identity there read
+      our OWN old file as foreign, left two hooks live — Cline's SDK/CLI
+      reads BOTH dirs, so the reflex injected twice — and let ``--uninstall``
+      exit 0 over a survivor (#11588 review cycle 2). The LIVE target keeps
+      the strict rule above, so a user's own wrapper is never overwritten.
     - Symlinked targets that resolve OUTSIDE the install dir are refused
       (a repo .codex/.claude/.cline symlink must not write through to
       ~/.claude/settings.json or any other real file).
@@ -5886,10 +6188,11 @@ def _install_read_hook_impl(args) -> int:
               "SessionEnd entry in <codex-home>/hooks.json")
         print("  tortoise install claude  → <dir>/.claude/settings.json "
               "(UserPromptSubmit → volunteer-turn.sh claude) + capture: "
-              "session-start.sh / session-end.sh into <dir>/.claude/hooks "
-              "with a merged SessionStart/SessionEnd entry (timeout 60)")
-        print("  tortoise install cline   → <dir>/.cline/hooks/UserPromptSubmit "
-              "(→ volunteer-turn.sh cline)")
+              "session-start.sh / session-end.sh / session-turn.sh into "
+              "<dir>/.claude/hooks with merged SessionStart/SessionEnd/"
+              "UserPromptSubmit entries (timeout 60 / 60 / 30)")
+        print("  tortoise install cline   → <dir>/.clinerules/hooks/"
+              "UserPromptSubmit (→ volunteer-turn.sh cline)")
         # Devin's file is the ONE JSON seam with no ``"hooks"`` wrapper: the
         # hooks object IS the file (docs.devin.ai/cli/extensibility/hooks —
         # "In .devin/hooks.v1.json, the hooks object is the entire file (no
@@ -5901,8 +6204,11 @@ def _install_read_hook_impl(args) -> int:
               "(UserPromptSubmit → volunteer-turn.sh devin; Claude-hooks "
               "output contract)")
         print("  tortoise install pi      → ~/.pi/agent/extensions/"
-              f"{_pi_capture_extension_name()} (the capture extension; Pi has "
-              "no shell-hook read seam)")
+              f"{_pi_capture_extension_name()} (capture) + "
+              f"{_pi_volunteer_extension_name()} (the per-turn READ seam: "
+              "`before_agent_start` → the shared reflex → an injected "
+              "message). Pi's hooks ARE extensions, so there is no shell-hook "
+              "registration to merge)")
         print("  tortoise install cursor  → ~/.cursor/hooks.json "
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
@@ -5915,6 +6221,11 @@ def _install_read_hook_impl(args) -> int:
               "install needs HERMES_ENABLE_PROJECT_PLUGINS=1 AND "
               "`hermes plugins enable tortoise-volunteer` — Hermes plugins "
               "are opt-in, so the directory alone injects nothing)")
+        print("  tortoise install openclaw → ~/.openclaw/extensions/"
+              "tortoise/ (the plugin DIRECTORY: its before_prompt_build hook "
+              "is the per-turn READ seam and its llm_output hook the capture "
+              "seam) + plugins.entries.tortoise.enabled in "
+              "~/.openclaw/openclaw.json — discovered is not loaded (#2120)")
         print("Other seams (docs/matrix only, this wave): "
               "gemini, opencode — see "
               "docs/research/2026-09-01-gbrain-learnings/platform-seams.md")
@@ -5942,7 +6253,17 @@ def _install_read_hook_impl(args) -> int:
     # in {"hooks": [{type, command}]} — a flat {type, command} under the
     # event key is silently ignored by codex's parser (hook_config.rs
     # deserializes events as Vec<MatcherGroup>). Cline hooks are executable
-    # files at .cline/hooks/<EventName>.
+    # files named <EventName>, in a hooks DIRECTORY — and WHICH directory is
+    # the trap: the VS Code extension discovers workspace hooks ONLY under
+    # <ws>/.clinerules/hooks (apps/vscode/src/core/storage/disk.ts ships
+    # ``hooksDir: ".clinerules/hooks"`` in GlobalFileNames, consumed by
+    # getWorkspaceHooksDirs → getAllHooksDirs → hook-factory), while the
+    # newer SDK/CLI loader reads BOTH <ws>/.clinerules/hooks (its
+    # DEPRECATED_CONFIG_DIR) and <ws>/.cline/hooks (CLINE_CONFIG_DIR) —
+    # sdk/packages/shared/src/storage/paths.ts resolveHooksConfigSearchPaths.
+    # .clinerules/hooks is therefore the ONE path every Cline surface reads;
+    # .cline/hooks is read by the SDK/CLI only. This installer wrote
+    # .cline/hooks until #2124, so an extension user got no hook at all.
     #
     # Devin's file is the one JSON seam with NO wrapper key (see the
     # `wrapped` flag below): ``.devin/hooks.v1.json`` IS the hooks object.
@@ -5951,6 +6272,12 @@ def _install_read_hook_impl(args) -> int:
     # script already emits for the ``devin`` harness arg (verified against
     # docs.devin.ai/cli/extensibility/hooks + /hooks/lifecycle-hooks, the
     # re-fetch the wave-1 matrix row left pending).
+    #
+    # ``legacy_target`` is a path an EARLIER release of this installer wrote
+    # for the same seam. It is never written; it is migrated away on install
+    # and removed on uninstall, both behind the same ownership check as the
+    # live target (#2124).
+    legacy_target = None
     if harness == "codex":
         target = root / ".codex" / "hooks.json"
         # Nested matcher-group shape (verified against codex primary docs).
@@ -5970,7 +6297,10 @@ def _install_read_hook_impl(args) -> int:
         registration = [{"hooks": [{"type": "command",
                                     "command": f"{quoted_script} devin"}]}]
     elif harness == "cline":
-        target = root / ".cline" / "hooks" / "UserPromptSubmit"
+        # .clinerules/hooks is read by EVERY Cline surface; .cline/hooks only
+        # by the SDK/CLI (see the path note above the chain).
+        target = root / ".clinerules" / "hooks" / "UserPromptSubmit"
+        legacy_target = root / ".cline" / "hooks" / "UserPromptSubmit"
         registration = None
     elif harness == "hermes":
         # Hermes' per-turn surface is the ``pre_llm_call`` PLUGIN hook — a
@@ -6041,31 +6371,104 @@ def _install_read_hook_impl(args) -> int:
 
     # ── Symlink-escape guard: refuse when ANY existing component between the
     #    install root and the target (including the leaf AND intermediate
-    #    dirs like .claude/ or .cline/hooks/) resolves OUTSIDE the resolved
-    #    root — a repo symlink must not write through to a real user file
-    #    (e.g. .claude/settings.json → ~/.claude/settings.json, or
-    #    .cline/ → a shared hooks dir). Resolution compares resolved paths on
-    #    both sides, so a root reached via a symlinked alias (macOS /tmp →
-    #    /private/tmp, worktrees) is NOT a false positive. ───────────────
+    #    dirs like .claude/ or .clinerules/hooks/) resolves OUTSIDE the
+    #    resolved root — a repo symlink must not write through to a real user
+    #    file (e.g. .claude/settings.json → ~/.claude/settings.json, or
+    #    .clinerules/ → a shared hooks dir). Resolution compares resolved
+    #    paths on both sides, so a root reached via a symlinked alias (macOS
+    #    /tmp → /private/tmp, worktrees) is NOT a false positive. The LEGACY
+    #    path is guarded too: it is never written, but it IS unlinked when it
+    #    holds our registration, and a delete through a symlinked `.cline/`
+    #    would reach outside the root just as a write would (#2124). ─────
+    # Only a path this operation actually WRITES or DELETES is guarded —
+    # and only a delete that will really happen counts (#11588 review cycles
+    # 5 and 8). A path the run cannot touch must not block it: guarding
+    # `.clinerules` on an `--uninstall` whose registration sits in-root at
+    # `.cline/hooks` refused the removal of OUR OWN hook (measured: rc 1, hook
+    # left in place, where the base removed it); guarding a non-existent
+    # `.cline` refused an install that never writes there; and guarding a
+    # FOREIGN file behind an out-of-root `.cline` refused both operations over
+    # a file the run only ever READS (it is never unlinked — ownership fails).
+    # Every real write and every real delete stays guarded, which is what
+    # `test_install_refuses_symlinked_intermediate_dir` and the four
+    # escape-scope tests pin.
     root_r = root.resolve()
-    try:
-        rel_parts = target.relative_to(root).parts
-    except ValueError:
-        rel_parts = target.parts  # target outside root — fall back to leaf
-    cur = root
-    check_paths = [root]
-    for part in rel_parts:
-        cur = cur / part
-        check_paths.append(cur)
-    for cp in check_paths:
-        if cp.is_symlink():
-            resolved = cp.resolve()
-            if resolved != root_r and root_r not in resolved.parents:
-                print(f"Refusing: {cp} resolves to {resolved} — outside the "
-                      f"install dir {root_r}. Symlinked harness configs are "
-                      "not touched (unlink the symlink first or pass --dir "
-                      "explicitly).", file=_sys.stderr)
-                return 1
+
+    def _escape_refusal(candidates) -> bool:
+        """True (having printed the refusal) if any candidate escapes root."""
+        for candidate in candidates:
+            try:
+                rel_parts = candidate.relative_to(root).parts
+            except ValueError:
+                rel_parts = candidate.parts  # outside root — fall back to leaf
+            cur = root
+            check_paths = [root]
+            for part in rel_parts:
+                cur = cur / part
+                check_paths.append(cur)
+            for cp in check_paths:
+                if cp.is_symlink():
+                    try:
+                        resolved = cp.resolve()
+                    except (RuntimeError, OSError):
+                        # `resolve()` raises RuntimeError — NOT OSError — on a
+                        # symlink LOOP, and OSError on a component it cannot
+                        # read (#11588 review cycle 9). Letting it escape
+                        # turned `tortoise install cline --dir <proj>` into
+                        # `Install failed: RuntimeError: Symlink loop` (exit 1,
+                        # an internal type name instead of a refusal) whenever
+                        # this PR's PRIMARY target was the loop — measured:
+                        # `ln -s .clinerules .clinerules`, or
+                        # `ln -s hooks .clinerules/hooks`. Cycle 7 closed this
+                        # class for `.cline` only, and that fix cannot reach
+                        # here: `exists()` is False for a loop, so the legacy
+                        # guard is never even called in that shape. Fail
+                        # CLOSED — a path whose destination cannot be
+                        # established is not PROVEN to be inside the root, so
+                        # it is refused like any escape, with a remedy the
+                        # user can act on rather than a traceback.
+                        print(f"Refusing: {cp} is a symlink that cannot be "
+                              "resolved (a symlink loop, or an unreadable "
+                              "target), so whether it stays inside the "
+                              f"install dir {root_r} cannot be established. "
+                              "Nothing was written or deleted. Remove the "
+                              "symlink first, or pass --dir explicitly.",
+                              file=_sys.stderr)
+                        return True
+                    if resolved != root_r and root_r not in resolved.parents:
+                        print(f"Refusing: {cp} resolves to {resolved} — "
+                              f"outside the install dir {root_r}. Symlinked "
+                              "harness configs are not touched (unlink the "
+                              "symlink first or pass --dir explicitly).",
+                              file=_sys.stderr)
+                        return True
+        return False
+
+    # `target` is WRITTEN by an install, so it is always guarded there. On an
+    # uninstall it is guarded only where the run would really touch it, which
+    # means EVERY branch that deletes must carry its own call:
+    #
+    #   * codex / claude / devin — at the WRITE itself, inside their uninstall
+    #     branch and after `deletable` is established;
+    #   * cline — target and legacy through `_uninstall_verdict`, where
+    #     ownership is known;
+    #   * hermes — before its dry-run report, where it unlinks the bundled
+    #     files, `rmtree`s `__pycache__` and `rmdir`s the plugin directory.
+    #
+    # (#11588 review cycles 5, 8, 9, 10, 11, 12.) A guard placed HERE cannot see
+    # whether the run will write: two reachable uninstall branches only READ
+    # `target` — `No … registration in {target} — nothing to remove` (rc 0) and
+    # `… that this installer did not write — refusing to remove them` (rc 1) —
+    # so pre-guarding it turned #2383's promised clean no-op into a misleading
+    # `Refusing: …` with rc 1 (measured, cycle 11).
+    #
+    # ⛔ Guard a path iff the run WRITES or DELETES it — and when this call is
+    # removed from a SHARED pre-check, enumerate EVERY branch that deletes. The
+    # cycle-11 edit removed `harness != "cline"` from here and re-planted the
+    # guard in two branches only; `hermes` was silently left with none and
+    # deleted a shared plugin OUTSIDE the install dir at rc 0 (cycle 12).
+    if not uninstall and _escape_refusal([target]):
+        return 1
 
     # #2383: uninstall with NO registration present must be a clean no-op —
     # never fall through to the fresh-install write below (a double
@@ -6074,11 +6477,15 @@ def _install_read_hook_impl(args) -> int:
     # out: a DANGLING in-root symlink (exists() False) must also no-op —
     # the R1 carve-out let it fall through and re-invert. Live symlinks
     # (exists() True) take the normal branch below (read-through + write).
-    if uninstall and not target.exists():
+    # A LEGACY registration also counts as "something to remove" (#2124): it
+    # is where an earlier release wrote, so a user who installed then has
+    # exactly that file to clean up.
+    if uninstall and not target.exists() and not (
+            legacy_target is not None and legacy_target.exists()):
         print(f"No {harness} registration at {target} — nothing to remove.")
         return 0
 
-    def _cline_marker_owns(text: str) -> bool:
+    def _cline_marker_owns(text: str, *, relocated_ok: bool = False) -> bool:
         """True iff ``text`` carries OUR registration LINE — ``exec
         <…volunteer-turn.sh> cline`` — not merely a mention of the script.
 
@@ -6087,6 +6494,19 @@ def _install_read_hook_impl(args) -> int:
         exact shipped path OR a DEAD path (a stale marker from a relocated
         install — cline's self-heal rewrites it). A comment/echo mention, a
         different product's LIVE hook, and malformed lines are NOT ours.
+
+        ``relocated_ok`` loosens ONLY the liveness clause, and ONLY for the
+        LEGACY path (#11588 review cycle 2). A pre-#2124 registration names the
+        script path of the release that wrote it, and that path still EXISTS
+        whenever the old install does (an upgrade that recreates the venv, a
+        second checkout, a retained `uv tool` environment). Strict identity
+        then reads OUR OWN old file as foreign, which leaves it live ALONGSIDE
+        the new one — the SDK/CLI reads both dirs, so the reflex injects twice
+        — and lets ``--uninstall`` exit 0 over a hook that still fires. For a
+        path we are RETIRING the right question is provenance, not identity:
+        any ``…/volunteer-turn.sh <harness>`` invocation is this installer's
+        registration, wherever it points. The LIVE target keeps the strict
+        rule, because there a user's own wrapper must never be overwritten.
         """
         for raw_line in text.splitlines():
             line = raw_line.strip()
@@ -6098,22 +6518,44 @@ def _install_read_hook_impl(args) -> int:
                 continue
             if toks and toks[0] == "exec":
                 toks = toks[1:]
-            if (len(toks) == 2 and toks[1] == harness
-                    and toks[0].endswith("volunteer-turn.sh")
-                    and (toks[0] == str(script)
-                         or not Path(toks[0]).exists())):
+            if not (len(toks) == 2 and toks[1] == harness
+                    and toks[0].endswith("volunteer-turn.sh")):
+                continue
+            if relocated_ok or toks[0] == str(script):
+                return True
+            # A DEAD path: a stale marker from a relocated install.
+            if not Path(toks[0]).exists():
                 return True
         return False
 
     if harness == "cline":
-        # Cline hooks are files at .cline/hooks/<EventName> (project) or
-        # ~/.cline/hooks (global); hooks must also be enabled in settings.
+        # Cline hooks are executable FILES named <EventName> inside a hooks
+        # DIRECTORY. `<dir>/.clinerules/hooks` is read by EVERY Cline surface
+        # (the VS Code extension's GlobalFileNames.hooksDir, and the SDK/CLI's
+        # DEPRECATED_CONFIG_DIR leg); `<dir>/.cline/hooks` — ``legacy_target``,
+        # what this installer wrote before #2124 — is read by the SDK/CLI ONLY.
+        # Hooks must also be enabled in Cline settings.
         marker_content = f"#!/usr/bin/env bash\nexec {quoted_script} cline\n"
-        if target.exists() and target.is_dir():
+        cline_paths = [p for p in (target, legacy_target) if p is not None]
+        # A directory where the REGISTRATION belongs is a refusal for a path
+        # this operation WRITES or UNLINKS — not for one it merely inspects.
+        # The legacy path is unlinked by an uninstall and only REPORTED by an
+        # install, so a directory there must not block an install that never
+        # touches it; before #2124 the legacy path was not an install input at
+        # all, and refusing over it regressed such a project (#11588 review
+        # cycle 2 — measured: rc=1 with a directory at `.cline/hooks/
+        # UserPromptSubmit` and an otherwise perfect `.clinerules/hooks`).
+        # An INSTALL refuses a directory sitting where it must WRITE. An
+        # UNINSTALL classifies each candidate itself (`_uninstall_verdict`
+        # below), because a refusal there must be PER CANDIDATE: a blocked path
+        # used to abort the whole run and strand OUR registration at the other
+        # one — still installed, still fired, while the message named only the
+        # culprit (#11588 review cycle 10).
+        if not uninstall and target.exists() and target.is_dir():
             print(f"{target} is a directory — refusing to touch it.",
                   file=_sys.stderr)
             return 1
-        if target.exists():
+        if not uninstall and target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
             # #2383: ownership is the registration LINE, not a substring.
@@ -6123,21 +6565,273 @@ def _install_read_hook_impl(args) -> int:
             # install / DELETE it on uninstall. A marker-line match cannot
             # fire on a mention.
             if not _cline_marker_owns(existing_text):
-                if uninstall:
-                    print(f"{target} is not our volunteer-turn.sh hook — "
-                          "refusing to delete it.", file=_sys.stderr)
-                else:
-                    print(f"{target} already exists and is not our "
-                          "volunteer-turn.sh hook — refusing to overwrite it. "
-                          "Remove it manually or install into another dir.",
-                          file=_sys.stderr)
+                print(f"{target} already exists and is not our "
+                      "volunteer-turn.sh hook — refusing to overwrite it. "
+                      "Remove it manually or install into another dir.",
+                      file=_sys.stderr)
                 return 1
+
+        def _cline_owns_path(p: Path) -> bool:
+            """Ownership of the registration at ``p`` (unreadable → not ours).
+
+            The LIVE target is judged strictly (identity, or a dead path); the
+            LEGACY path by PROVENANCE, so a registration written by an older
+            release whose script path still exists is still OURS (#11588 review
+            cycle 2 — otherwise the migration skips it, both files stay live
+            and the reflex injects twice).
+            """
+            try:
+                return _cline_marker_owns(
+                    p.read_text(encoding="utf-8", errors="replace"),
+                    relocated_ok=(p == legacy_target))
+            except OSError:
+                return False
+
+        def _legacy_is_live_target(after_write: bool = False) -> bool:
+            """True when ``.cline`` and ``.clinerules`` are the SAME path.
+
+            A user may symlink one to the other — the natural workaround for
+            the old ``.cline/hooks`` blindness, since it gives both Cline
+            surfaces one hooks dir. Then ``legacy_target`` IS ``target``, and
+            "retiring" it deletes the registration this very run wrote: a
+            FALSE PASS that prints ``Installed`` AND ``Removed the legacy
+            registration``, exits 0, and leaves NO hook on any path (#11588
+            review cycle 3, measured with ``.cline -> .clinerules``: rc 0,
+            ``.clinerules/hooks/`` empty). Nothing is retired in that shape —
+            the one file IS the live registration.
+            """
+            if legacy_target is None:
+                return False
+            # A legacy path that is ITSELF a symlink is its own directory
+            # entry: unlinking it removes only the link, never the
+            # registration it points at — so it is ALWAYS retirable, and
+            # calling it "the same file" left `.cline/hooks` holding a live
+            # link into `.clinerules/hooks` while the note claimed there was
+            # nothing to retire (#11588 review cycle 12 — the SDK/CLI reads
+            # both dirs, so the reflex still injected twice).
+            if legacy_target.is_symlink():
+                return False
+            try:
+                # `after_write` is what the DRY RUN must ask: the atomic write
+                # REPLACES a leaf symlink at `target` (#3918), so afterwards
+                # `target` resolves to itself instead of through a link into
+                # the legacy file. Evaluating the pre-write state in the dry
+                # arm made it UNDER-REPORT an unlink the real run performs
+                # (#11588 review cycle 11 — measured with
+                # `.clinerules/hooks/UserPromptSubmit -> ../../.cline/hooks/
+                # UserPromptSubmit`: dry said only `would write`, the real run
+                # also removed the legacy registration).
+                live = (target.parent.resolve() / target.name
+                        if after_write else target.resolve())
+                return legacy_target.resolve() == live
+            except (RuntimeError, OSError):
+                # `resolve()` raises RuntimeError (NOT OSError) on a symlink
+                # LOOP, and this predicate is consulted AFTER the write. A
+                # loopy `<dir>/.cline` (a classic `ln -s .cline .cline`
+                # mistake) therefore turned a COMPLETED install into
+                # `Install failed: RuntimeError: Symlink loop` + exit 1, with
+                # the hook already on disk — the "working install reported as
+                # a failure" class R10 declares closed (#11588 review cycle 7).
+                # "Not the same file" is the honest answer here: the migration
+                # is skipped (the legacy path is not a usable file anyway) and
+                # the escape guard has already had its say before any write.
+                return False
+
+        def _live_after_write() -> Path:
+            """Where `target` will resolve once the atomic write replaced it."""
+            return target.parent.resolve() / target.name
+
+        def _legacy_will_be_retired() -> bool:
+            """PREDICT, for the dry run, whether the migration will unlink.
+
+            Evaluated on the POST-write state, because that is when the real
+            migration decides — and a legacy SYMLINK into the live target is
+            DANGLING until the write creates it, so it reads as "not ours"
+            before the write and as ours after (#11588 review cycle 12).
+            """
+            if legacy_target is None or _legacy_is_live_target(after_write=True):
+                return False
+            if not (legacy_target.exists() or legacy_target.is_symlink()):
+                return False
+            if _cline_owns_path(legacy_target):
+                return True
+            try:
+                return (legacy_target.is_symlink()
+                        and legacy_target.resolve() == _live_after_write())
+            except (RuntimeError, OSError):
+                return False
+
+        # `.clinerules` is ALSO Cline's rules-FILE convention (the single-file
+        # form predates the `.clinerules/` directory its docs prescribe today),
+        # so a project can already hold a REGULAR FILE at that name — or a
+        # DANGLING symlink, which `exists()` reports as absent while `mkdir`
+        # below still refuses it. Then `<dir>/.clinerules/hooks` is
+        # unrepresentable and the write can only die on ``NotADirectoryError``
+        # / ``FileExistsError`` — errnos naming neither the cause nor the
+        # remedy. It also made ``--dry-run`` a FALSE PASS: it printed
+        # `would write` and exited 0 for an install that cannot happen
+        # (measured: `.clinerules` as a file → dry-run exit 0, real run
+        # NotADirectoryError; the dangling-symlink shape → dry-run exit 0,
+        # real run FileExistsError). Refuse up front, before the dry-run
+        # report, so the prediction and the real run agree. A silent fall back
+        # to the SDK/CLI-only legacy path is the very defect #2124 repairs, so
+        # the refusal says what to do instead. Uninstall is unaffected: it
+        # never creates a directory, and a legacy registration must still be
+        # removable from such a project.
+        # The LEGACY path is guarded only when this run would actually UNLINK
+        # it — i.e. when it exists AND is ours (#11588 review cycle 8). A
+        # FOREIGN file behind an out-of-root `.cline` is only ever READ (the
+        # migration and the uninstall both skip it), so letting it block the
+        # operation refused an install that writes nothing there and an
+        # uninstall that leaves OUR in-root hook installed (measured: rc 1 in
+        # both, with nothing outside the root at risk). A file that IS ours
+        # behind that symlink is still refused on both operations, because that
+        # unlink would reach outside the root.
+        if (not uninstall
+                and legacy_target is not None and legacy_target.exists()
+                and _cline_owns_path(legacy_target)
+                and _escape_refusal([legacy_target])):
+            return 1
+
+        # BOTH components the install must create are checked, not just
+        # `.clinerules` (#11588 review cycle 4): a file — or an IN-ROOT
+        # dangling symlink — at `.clinerules/hooks` left the dry run promising
+        # a write the real run refused with FileExistsError, i.e. the SAME
+        # false pass one path component lower. `target.parent` is exactly what
+        # the `mkdir` below has to create, so it is the right thing to validate.
+        clinerules = root / ".clinerules"
+        blocking = next(
+            (p for p in (clinerules, target.parent)
+             if (p.exists() or p.is_symlink()) and not p.is_dir()), None)
+        if not uninstall and blocking is not None:
+            # Name the remedy that fits the component that is blocked: a file
+            # at `.clinerules` is Cline's OTHER rules convention (convert it to
+            # the directory form); a file at `.clinerules/hooks` is simply in
+            # the way of the directory the hook needs.
+            hint = (f"A regular file at `.clinerules` is Cline's other rules "
+                    f"convention — move it to {clinerules}/rules.md. "
+                    if blocking == clinerules else "")
+            print(f"Install failed: {blocking} is not a directory, so Cline's "
+                  f"hooks directory {target.parent} cannot be created. Cline "
+                  "reads hooks only from a .clinerules/ DIRECTORY (its rules "
+                  f"live there as markdown files). {hint}A symlink must resolve "
+                  "to a directory; or point --dir at a project whose "
+                  ".clinerules is a directory.", file=_sys.stderr)
+            return 1
+
+        def _uninstall_verdict(p: Path, owned: bool) -> str:
+            """One verdict for ONE candidate: remove | skip | blocked | absent.
+
+            Per candidate on purpose (#11588 review cycle 10). A refusal used to
+            abort the whole uninstall, so a legacy DIRECTORY — or our own file
+            behind an out-of-root symlink — left the OTHER registration
+            installed and still firing while the message named only the culprit.
+            Every verdict here is a READ-ONLY decision, which is what lets
+            ``--dry-run`` mirror the real run exactly.
+            """
+            if p.exists() and p.is_dir():
+                print(f"{p} is a directory — refusing to touch it.",
+                      file=_sys.stderr)
+                return "blocked"
+            if not p.exists():
+                return "absent"
+            if not owned:
+                return "skip"
+            if _escape_refusal([p]):
+                return "blocked"  # the refusal is already printed
+            return "remove"
+
+        if uninstall:
+            # Deliberately BEFORE the install dry-run arm: `--dry-run
+            # --uninstall` is an uninstall, and it must predict the uninstall
+            # (`would remove` / `would skip` / refusal), not advertise a write
+            # it would never perform (#11588 review cycle 10).
+            # ONE verdict per directory ENTRY, not per path string.
+            #
+            # `.cline -> .clinerules` (or the reverse) makes two path strings
+            # name one file; scheduling two removals made the second `unlink`
+            # fail with ENOENT and report a SUCCESSFUL uninstall as a cleanup
+            # failure (#11588 review cycle 11). So candidates that resolve to
+            # the same entry collapse into one.
+            #
+            # ⛔ A symlink LEAF and the file it points at are NOT the same
+            # entry — unlinking the link leaves the file — so `is_symlink()`
+            # is part of the identity, or a live registration survives while
+            # the run prints `Removed` (#11588 review cycle 12, P1). And when
+            # entries DO collapse, ownership is the OR of the rules across
+            # them: a registration written by an older release is OURS by
+            # provenance at the legacy path even when the alias makes the live
+            # path the representative, and judging it by the live path's
+            # STRICT rule alone declared the same physical file foreign in the
+            # aliased shape and ours without the alias.
+            groups = []
+            for p in cline_paths:
+                try:
+                    key = (p.resolve(), p.is_symlink())
+                except (RuntimeError, OSError):
+                    key = (p, p.is_symlink())
+                for g in groups:
+                    if g[0] == key:
+                        g[1].append(p)
+                        break
+                else:
+                    groups.append((key, [p]))
+            verdicts = [
+                (members[0], _uninstall_verdict(
+                    members[0],
+                    owned=any(_cline_owns_path(m) for m in members)))
+                for _key, members in groups]
+            owned = [p for p, v in verdicts if v == "remove"]
+            removed = []
+            for p, v in verdicts:
+                if v != "remove":
+                    continue
+                if dry:
+                    print(f"[dry-run] would remove {p}")
+                    continue
+                # #2124 review P2: a delete is BEST-EFFORT, exactly like the
+                # ownership READ above (`_cline_owns_path` returns False on
+                # OSError). An unlink that cannot complete (a root-owned
+                # .cline/hooks, a read-only mount, root-squashed NFS) must not
+                # abort AFTER another path was already removed and report the
+                # run as `Install failed:` — nothing actually left behind would
+                # be named.
+                try:
+                    p.unlink()
+                except OSError as exc:
+                    print(f"Note: could not remove {p}: {exc} — remove it "
+                          "manually.", file=_sys.stderr)
+                    continue
+                removed.append(p)
+            # The summary keys on OWNERSHIP, never on `removed` (#11588 review
+            # cycle 3): an unlink that failed above left OUR OWN hook in place,
+            # and "nothing to remove" over a survivor is the same false
+            # success as reporting a failed cleanup as `Install failed:`.
+            if not owned:
+                print(f"No {harness} registration of ours at {target} — "
+                      "nothing to remove.")
+            for p in removed:
+                print(f"Removed {p}")
+            for p, v in verdicts:
+                if v == "skip":
+                    print(f"{p} is not our volunteer-turn.sh hook — "
+                          "refusing to delete it.", file=_sys.stderr)
+            # A refusal is REPORTED (#2383, pinned by pre-existing tests): a
+            # blocked candidate, or a foreign LIVE target — the shape the
+            # pre-#2124 code refused outright.
+            refused = any(v == "blocked" for _, v in verdicts) or any(
+                p == target for p, v in verdicts if v == "skip")
+            if refused and dry:
+                print("[dry-run] the real run would exit 1 for the refusal(s) "
+                      "above.", file=_sys.stderr)
+            return 1 if refused else 0
+
         if dry:
             print(f"[dry-run] would write {target}:")
             print(marker_content.rstrip())
-        elif uninstall:
-            target.unlink()
-            print(f"Removed {target}")
+            if _legacy_will_be_retired():
+                print(f"[dry-run] would remove the legacy registration at "
+                      f"{legacy_target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             # #3918: the exec bit goes on the TEMP, with the content — a
@@ -6145,8 +6839,42 @@ def _install_read_hook_impl(args) -> int:
             # exists but can never run.
             _atomic_write_text(target, marker_content, mode=0o755)
             print(f"Installed {target}")
+            # #2124 migration: a registration at the legacy path injects
+            # nothing through the extension, and would double-inject through
+            # the SDK/CLI now that the live path exists. Remove OUR OWN old
+            # file; a foreign one is left alone and merely reported.
+            #
+            # The delete is BEST-EFFORT (#2124 review P2): the live
+            # registration is already written and reported installed, so an
+            # unlink that cannot complete must not turn a working install into
+            # `Install failed:` + exit 1 while the stale file it meant to retire
+            # keeps double-injecting. Same reasoning as the ownership read above.
+            if legacy_target is not None and not _legacy_is_live_target() and legacy_target.exists():
+                if _cline_owns_path(legacy_target):
+                    try:
+                        legacy_target.unlink()
+                        print(f"Removed the legacy registration at "
+                              f"{legacy_target} — Cline's VS Code extension "
+                              "never read that path, so it injected nothing "
+                              "there.")
+                    except OSError as exc:
+                        print(f"Note: could not remove the legacy "
+                              f"registration at {legacy_target}: {exc} — it "
+                              "stays in place (Cline's SDK/CLI reads it, its "
+                              "extension does not); remove it manually.",
+                              file=_sys.stderr)
+                else:
+                    print(f"Note: {legacy_target} exists and is not a "
+                          "tortoise hook — left untouched.", file=_sys.stderr)
             print("Then enable hooks in Cline settings (Hook feature) — "
-                  "project .cline/hooks or global ~/.cline/hooks both work.")
+                  "Cline reads <dir>/.clinerules/hooks (the legacy "
+                  "<dir>/.cline/hooks is read by its SDK/CLI only).")
+            if _legacy_is_live_target():
+                print(f"Note: {legacy_target} and {target} are the SAME file "
+                      "(one is a symlink to the other), so the registration "
+                      "just installed is the one both Cline surfaces read — "
+                      "there is no separate legacy file to retire.",
+                      file=_sys.stderr)
         return 0
 
     # ── hermes: a directory PLUGIN (plugin.yaml + __init__.py), not a
@@ -6186,6 +6914,23 @@ def _install_read_hook_impl(args) -> int:
                           "Move it aside or install into another dir.",
                           file=_sys.stderr)
                 return 1
+        # A delete that would land outside the root must refuse. This branch
+        # UNLINKS files, `rmtree`s `__pycache__` and `rmdir`s the plugin dir,
+        # so the guard belongs on the UNINSTALL side — and HERE, after the
+        # ownership read and before the dry-run report, so the prediction
+        # agrees with the real run (#11588 review cycle 12).
+        #
+        # ⛔ This call was load-bearing and was nearly lost: it used to live in
+        # the shared pre-check `if uninstall and harness != "cline" and …`,
+        # which covered hermes as well as the JSON seams. Moving the JSON-seam
+        # guard to its write site left HERMES with no uninstall-side guard at
+        # all, and it deleted a shared plugin outside the install dir at rc 0
+        # (measured: `proj/.hermes -> <outside>/.hermes` → the outside plugin
+        # files GONE and `Removed …` printed). The rule stated at :6177 — guard
+        # a path iff the run WRITES or DELETES it — must enumerate EVERY branch
+        # that deletes, not only the ones under review.
+        if uninstall and _escape_refusal([target]):
+            return 1
         if dry:
             verb = "uninstall from" if uninstall else "write"
             print(f"[dry-run] would {verb} {target}:")
@@ -6385,6 +7130,17 @@ def _install_read_hook_impl(args) -> int:
             # emptied document is left as ``{}`` and the FILE is never
             # deleted — we did not necessarily create it.
             out = _json.dumps(existing_json, indent=2) + "\n"
+            # `deletable` is non-empty, so this run WILL rewrite the document —
+            # THAT is the operation the guard protects, so it lives here, after
+            # the ownership read has established the write will happen
+            # (#11588 review cycle 11). Pre-guarding `target` refused a run that
+            # only READ it — a `settings.json` symlinked into a dotfiles repo
+            # with no registration of ours got `Refusing: …` + rc 1 where #2383
+            # promises the clean no-op `nothing to remove` (measured). It sits
+            # before the dry-run report so the prediction agrees with the real
+            # run.
+            if _escape_refusal([target]):
+                return 1
             if dry:
                 print(f"[dry-run] would uninstall from {target}:")
                 print(out)
@@ -6546,6 +7302,21 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     (``<home>/<root_relpath>``), derived by the caller from ``root`` — so
     ``--dir`` is honoured rather than ignored in favour of the process HOME,
     which would install into a different tree and leave ``--dir`` untouched.
+
+    ⛔ ``introduce_read_seam=False``: repairing a capture install must never
+    TURN ON the per-turn read seam (#2119).  Until this flag existed, this
+    function called ``install_capture`` with its defaults — the same entry
+    point ``tortoise install pi`` uses — so the repair command that
+    ``hooks status`` prints reinstalled ``tortoise-volunteer.ts`` in a tree
+    where the user had explicitly run ``tortoise install pi --uninstall``
+    (which had said "per-turn memory injection is uninstalled").  The seam then
+    searched the prompt on every turn and, on a machine with no ``tortoise`` on
+    ``PATH`` but a configured key, POSTed the prompt window to the hosted
+    endpoint — after the user had opted out, and without the command's own
+    output ever saying the exposure changed.  That is a bypass of the recorded
+    W4 opt-in ("installing the extension IS the opt-in"), so the repair path
+    REFRESHES an installed seam (a stale copy is real drift, which is this
+    caller's job) and never introduces one.
     """
     import sys as _sys
 
@@ -6555,7 +7326,8 @@ def _upgrade_artifact_seam(args, root, home) -> int:
     dry_run = getattr(args, "dry_run", False)
     try:
         result = install_capture(args.harness, root=root, home=home,
-                                 dry_run=dry_run)
+                                 dry_run=dry_run,
+                                 introduce_read_seam=False)
     except MemoryError:
         raise  # resource exhaustion is not a refusal; the handler allocates
     except Exception as e:
@@ -7148,14 +7920,11 @@ def _session_post(api_key: str, api_url: str):
             alone would confirm them. Uniformity is deliberate: a reviewer must
             not have to work out why one path confirms a 402 and the other does
             not. The deferral is recoverable either way (each is `retry`, so the
-            entry is kept and re-posted); #5051 holds the question of broadening
-            both.
+            entry is kept and re-posted).
             """
-            from tortoise.capture_spool import classify_failure
-            if (outcome.ok
-                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(
-                        outcome.status, outcome.detail) != "retry"):
+            from tortoise.capture_receipts import may_mint_local_receipt
+            if outcome.ok or not may_mint_local_receipt(
+                    outcome.status, outcome.detail):
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -9375,18 +10144,27 @@ def _cmd_sessions_import(args) -> int:
         return 1
 
     def _spool_if_retryable(status: int | None, detail: str) -> None:
-        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+        """Park the turns in the DURABLE SPOOL unless the refusal is TERMINAL.
 
         The server's capture guard REFUSES rather than enqueues (its capacity
-        gate advertises `Retry-After`), and `classify_failure` already treats
-        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
-        therefore a DEFERRAL, not a rejection of the content: the POST reached
-        the server, there is no server-side copy to fall back on, and without
-        this the turns are lost. `claude` and `pi` survive the identical 504
-        because `session capture` spools BEFORE its POST; this path must too.
+        gate advertises `Retry-After`), and #5051's contract
+        (`capture_receipts.capture_outcome`) says which refusals are worth
+        keeping: `retryable` (5xx / 402 / 408 / 425 / 429 / 409 / 3xx /
+        no-status) AND `policy` (401/403/407 — a reversible credential or
+        entitlement state, #4895). A refusal is therefore a DEFERRAL, not a
+        rejection of the content: the POST reached the server, there is no
+        server-side copy to fall back on, and without this the turns are lost.
+        `claude` and `pi` survive the identical 504 because `session capture`
+        spools BEFORE its POST; this path must too.
 
-        PERMANENT failures must NOT be parked here — a malformed payload never
-        becomes valid by waiting, and it would retry forever.
+        A `policy` refusal is the case this gate used to get WRONG: 401/403/407
+        were `permanent` here, so a suspended org's 403 was never spooled at
+        all — the capture was dropped with `exit 1` and an identity-less
+        breadcrumb as the only record (the parent's trace, #5051 §3).
+
+        PERMANENT failures (400/404/405/406/413/415/422/…) must NOT be parked
+        here — a malformed payload never becomes valid by waiting, and it would
+        retry forever.
 
         Best-effort by construction: the spool is ADDITIONAL to the
         `capture-failure` breadcrumb the caller already wrote, never a
@@ -9396,13 +10174,13 @@ def _cmd_sessions_import(args) -> int:
         try:
             import time as _time
 
+            from tortoise.capture_receipts import may_keep_entry
             from tortoise.capture_spool import (
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
                 _terminal_marker,
                 capture_key,
-                classify_failure,
                 read_spool_meta,
                 spool_dir,
                 write_spool_entry,
@@ -9413,7 +10191,7 @@ def _cmd_sessions_import(args) -> int:
                 sanitize_attribution_field,
             )
 
-            if classify_failure(status, detail) != "retry":
+            if not may_keep_entry(status, detail):
                 return
             # Clamp exactly as `session capture` does — through the SDK's ONE
             # clip definition (#4897), never a bare literal: the spool's
@@ -9523,15 +10301,12 @@ def _cmd_sessions_import(args) -> int:
         never replace the honest error with a traceback (fail-open contract).
         """
         try:
-            from tortoise.capture_spool import (
-                _clear_breadcrumb_for,
-                classify_failure,
-            )
+            from tortoise.capture_receipts import may_mint_local_receipt
+            from tortoise.capture_spool import _clear_breadcrumb_for
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
-            if (status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(status, detail) != "retry"):
+            if not may_mint_local_receipt(status, detail):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:
@@ -9593,9 +10368,13 @@ def _cmd_sessions_import(args) -> int:
             # Deliberately broad: reading a DIAGNOSTIC body must never replace
             # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
-        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
-        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
-        # later drain (#4714) but still exits 1 above with no receipt.
+        # A refusal that can still succeed later is SPOOLED for the next drain
+        # (#4714) and still exits 1 above with no receipt: `retryable`
+        # (402/408/409/425/429/5xx, INCLUDING 503) AND `policy` (401/403/407 —
+        # a suspended org or a rotated key, #5051/#4895). A `permanent` refusal
+        # (400/404/405/406/413/415/422/…) is NOT parked: a malformed payload
+        # never becomes valid by waiting. The 2xx-only LOCAL receipt rule is a
+        # separate question and is untouched (Task 15 acceptance, #4675).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         if _confirm_already_captured(e.code, body):
             return 0
@@ -11043,6 +11822,29 @@ def _cmd_pack_validate(args) -> int:
     for rel in relations:
         verdict_counts[rel["write_verdict"]] = (
             verdict_counts.get(rel["write_verdict"], 0) + 1)
+    # #11001: the pack's DECLARED business hierarchy, resolved. Until #11001
+    # this list was shape-checked at load and then dropped, so a pack could
+    # declare a map of the business and no surface could report it — let alone
+    # produce it. Reported here (not enforced): a declared entry that binds no
+    # write path is the same warn-not-block state as a `predicate-not-in-
+    # allowlist` relation (#2766), so it does not move `ok`. It is named, which
+    # is the whole point — an entry that produces nothing must not be silent.
+    from tortoise.pack_hierarchy import (
+        declared_hierarchy,
+        hierarchy_diagnostics,
+    )
+    hierarchy = [
+        {
+            "pack": e.pack,
+            "path": e.path,
+            "predicate": e.predicate,
+            "from_kind": e.from_kind,
+            "to_kind": e.to_kind,
+            "write_path": e.write_path,
+        }
+        for e in declared_hierarchy(reg)
+    ]
+    hierarchy_issues = [dict(d) for d in hierarchy_diagnostics(reg)]
     n_errors = sum(len(v) for v in errors.values())
     n_unresolved = sum(len(v) for v in unresolved.values())
     # An unresolved reference is NOT clean: the pack loaded, but what it
@@ -11059,6 +11861,10 @@ def _cmd_pack_validate(args) -> int:
             "relation_verdicts": {
                 "counts": verdict_counts,
                 "relations": relations,
+            },
+            "hierarchies": {
+                "declared": hierarchy,
+                "unbound": hierarchy_issues,
             },
         }, indent=2))
     else:
@@ -11086,6 +11892,17 @@ def _cmd_pack_validate(args) -> int:
                 paths = f" [{', '.join(rel['write_paths'])}]" if rel["write_paths"] else ""
                 print(f"    {mark} {rel['write_verdict']:28s} "
                       f"{rel['pack']}.{rel['predicate']}{paths}")
+        if hierarchy:
+            print("  declared hierarchies (ontology.hierarchies, #11001):")
+            for h in sorted(hierarchy, key=lambda r: (r["pack"], r["from_kind"],
+                                                      r["to_kind"])):
+                print(f"    ✓ {h['pack']}: {h['from_kind']} → "
+                      f"{h['to_kind']} "
+                      f"[{h['predicate']} via {h['write_path']}]")
+        if hierarchy_issues:
+            print("  ⚠ declared hierarchies that produce NO edge:")
+            for d in hierarchy_issues:
+                print(f"    {d['pack']}: {d.get('path')!r} — {d['reason']}")
         if ok:
             print("✓ Clean — pack(s) validate")
         else:
@@ -11417,19 +12234,29 @@ def _print_harness_instructions(harness: str) -> None:
         # activate it, contradicting both the install report and the dashboard's
         # Pi setup.
         #
-        # The replacement says what the extension DOES, and scopes the gap to
+        # The replacement says what the extensions DO, and scopes the gap to
         # Tortoise's wiring, NOT to Pi: Pi's extension API has a per-turn
         # injection seam (``before_agent_start`` injects a message, and our own
         # `skill-enforcer`/`loop-enforcer`/`cmux-session` extensions use it), so
         # "Pi cannot inject" would be a false impossibility claim of the same
-        # class as the promise it replaces. What is missing is Tortoise's use of
-        # that seam (#2119, still open).
+        # class as the promise it replaces.
+        #
+        # #2119 landed the wiring, so the honest copy changed again: BOTH
+        # artifacts are named (each derived from the install contract), and the
+        # sentence that said Pi injects nothing is GONE — keeping it would now
+        # be the same false claim in the other direction, and it is the one a
+        # user would act on by reaching for the MCP tools instead.
         _pi_ext = _pi_capture_extension_name()
+        _pi_vol = _pi_volunteer_extension_name()
         print(f"  ✅ {_pi_ext} extension captures your sessions into Tortoise.")
+        print(f"  ✅ {_pi_vol} extension injects graph context per turn: Pi's")
+        print("  `before_agent_start` runs the shared reflex over your prompt and")
+        print("  adds the why-context block to the turn (silent unless you set")
+        print('  `{"volunteer": {"display": true}}` in '
+              "~/.pi/agent/tortoise-config.json).")
         print(f"  {_PI_RESTART_GUIDANCE}")
-        print("  It files your sessions; it does not inject context per turn yet")
-        print("  (#2119). Call tortoise_help() or the Tortoise MCP tools when you")
-        print("  want graph context.")
+        print("  Call tortoise_help() or the Tortoise MCP tools when you want to")
+        print("  query the graph yourself.")
         print("  Add tortoise MCP to your .mcp.json:")
         print("    " + _json.dumps(_harness_stdio_config("pi"), indent=4).replace("\n", "\n    "))
     if harness == "claude" or harness == "multiple":
@@ -14367,7 +15194,13 @@ def main(argv: list[str] | None = None) -> int:
         help="JSON window file (list of {role, content} turns, a bare string "
              "prompt, or {window, session_id, ...}) — default: read stdin")
     vol.add_argument("--session-id", default=None,
-                     help="Session continuity id (re-mention suppression)")
+                     help="Session id sent with the reflex request (continuity "
+                          "/ telemetry; the re-mention suppression SET comes "
+                          "from --prior-context, not from this id)")
+    vol.add_argument("--prior-context", default=None,
+                     help="The block this seam injected on an earlier turn: the "
+                          "reflex then suppresses pointers already surfaced in "
+                          "it (cross-turn re-mention dedupe). Omit on turn 1")
     vol.add_argument("--min-confidence", type=float, default=0.7,
                      help="Confidence gate (default 0.7)")
     vol.add_argument("--max-pointers", type=int, default=3,

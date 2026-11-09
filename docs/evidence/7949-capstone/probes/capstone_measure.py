@@ -57,18 +57,20 @@ the measured arm — IN PROCESS, with the previous values restored in a ``finall
 and the set values READ BACK from ``os.environ`` before the pass, the way
 ``e1_e2_probe.run_arm`` does it (they default OFF in the deployed config), so
 S2.2/S2.3 are ON-PATH for this pass — the convention #9076's E1/E2 run used ("the
-gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned
-UNSET for the same reason: it also switches S2.2 on, so an ambient value would
-silently change the arm. The ``arm:`` line is that read-back, never a typed
+gate is measured with its flags forced ON"). ``TORTOISE_VALUE_GATE`` is pinned to an
+EXPLICIT ``"0"`` (``ARM_OFF``, NOT popped) for the same reason: it also switches
+S2.2 on, so an ambient value would silently change the arm — and since ``#10996``
+an ABSENT ``TORTOISE_VALUE_GATE`` IS the ON arm, so popping it would arm the
+predicate this arm declares OFF. The ``arm:`` line is that read-back, never a typed
 literal — a run that cannot read a flag back as set REFUSES rather than printing a
 claim nothing supports. **The seam has since LANDED (#9116), so this module no
 longer reports them as unobservable-by-construction.** Pre-seam, ``capture_session``'s
 receipt could not carry them and the failure was ONE LAYER UP from where it was
 first attributed: ``extract_session_v2`` built the surfaces
-(``result["classify_later"]`` at ``tortoise/extractor_v2.py:10743-10749`` and
-``result["vet"]`` at ``:10753-10757``) while the meta fold dropped them with
+(``result["classify_later"]`` at ``tortoise/extractor_v2.py:14105-14111`` and
+``result["vet"]`` at ``:14115-14119``) while the meta fold dropped them with
 ``"stats": out.get("stats") or {}``. The fold now calls
-``_capture_stats_with_step_witness`` (``tortoise/sdk.py:16449``), which copies each
+``_capture_stats_with_step_witness`` (``tortoise/sdk.py:17243``), which copies each
 stage's own counts onto ``stats["step_witness"]`` and drops no candidate text — so
 this module READS that seam (:func:`_witness_block`) instead of citing the gap. A
 run measured at a stamp BEFORE the seam still reports S2.2/S2.3 unobserved, and
@@ -276,7 +278,7 @@ ANCHOR_OUT = ("extractedFrom",)
 #: ->(Event|Document)``, written by ``_EdgeHandlers.link_source_to_event``
 #: (``tortoise/projection/edges.py:2832-2857``, ``MERGE (s)-[r:references]->(e)
 #: ON CREATE SET r.sourceVersion = s.contentHash``) and reached from the capture
-#: path at ``tortoise/sdk.py:16730`` (``proj.link_source_to_event(source_key,
+#: path at ``tortoise/sdk.py:17637`` (``proj.link_source_to_event(source_key,
 #: event_id)`` — ``(Source)-[:references]->(sessionCaptured Event)``). The anchor
 #: is on the same link, but the DERIVED node is its TARGET.
 #: ⚠️ Counting this one in the ``extractedFrom`` direction counts SOURCES.
@@ -309,18 +311,249 @@ E3_RULE = (
 #: the probe printed an ON arm while measuring the default OFF one.
 ARM_ON = ("TORTOISE_VET", "TORTOISE_CLASSIFY_LATER")
 
-#: A flag the arm PINS OFF so the measured population is a function of THIS file,
-#: not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
+#: The flags the arm PINS OFF so the measured population is a function of THIS
+#: file, not of whatever the operator's shell held. ``TORTOISE_VALUE_GATE`` also
 #: switches S2.2 on (``extractor_v2._value_gate_enabled``), so an ambient value
 #: would silently change the arm between two runs of the same probe — and
 #: ``TORTOISE_S2_DECISION_SEAM`` (#5087) is a THIRD switch for S2.2 (it arms the
 #: arbiter, so ``_vet_enabled`` is True), which would arm a network call and a
 #: spend inside an arm this file declares OFF.
+#:
+#: ⛔ These are pinned to ``"0"``, NOT popped (`#10996` review): popping produced
+#: an OFF arm only while the flag defaulted OFF, and an ABSENT
+#: ``TORTOISE_VALUE_GATE`` is now the ON arm (the S2.2 mechanical half defaults
+#: ON). Measured at the review head: inside ``measured_arm()`` the header printed
+#: ``TORTOISE_VALUE_GATE=<unset>`` while ``value_gate.value_gate_enabled()`` was
+#: True — a re-take of a committed log would have measured a population that
+#: includes the predicate, at a header claiming it was pinned off.
 ARM_OFF = ("TORTOISE_VALUE_GATE", "TORTOISE_S2_DECISION_SEAM")
+
+# ── the DOOR (#10983 / C2) ────────────────────────────────────────────────
+#
+# "Which code path produced this number" is a SEPARATE question from "which arm
+# was it run under", and this probe answered only the second one. The extraction
+# LANE is selected by an ordinary environment variable that ``measured_arm`` did
+# not touch:
+#
+#   * ``tortoise/sdk.py`` — ``TORTOISE_SESSION_EXTRACTOR == "m2"`` routes
+#     ``capture_session`` to ``_extract_session_llm``; everything else routes to
+#     ``_extract_session_v2`` (the v4 door).
+#   * ``tortoise/hosted_api.py::_capture_lane`` — the hosted endpoint's mirror of
+#     the SAME predicate, so the two entry points select ONE lane, not two.
+#
+# An ambient ``TORTOISE_SESSION_EXTRACTOR=m2`` on the operator's box therefore
+# rerouted all seven acceptance captures to the OTHER extractor while the log
+# still printed an ``arm:`` line that said nothing about it — the silent seam
+# #10983 exists to close. The lane, plus every switch on this path that changes
+# what the run MEASURES through it, is pinned here and READ BACK like every other
+# switch (the ``arm:`` rule, applied to the door).
+#
+# ⛔ The set below is CLOSED over the **measurement modules the path renders
+# with**, and what is enforced MECHANICALLY is the CENSUS over that list, not the
+# list's membership: `path_modules` is a HAND-MAINTAINED tuple, and every
+# ``TORTOISE_*`` read inside those modules must be classified, or the suite reds.
+# The module names are NOT restated here on purpose — a count in this comment is a
+# transcription that rots: it said "``extractor_v2.py`` plus the three modules it
+# reaches one call down" for three review rounds while the list had already grown
+# past it (cycle 9 measured the comment at four modules against eight in
+# `tests/test_7949_c2_door.py::path_modules`). The authority is `path_modules` in
+# that test. ⚠️ Membership is hand-kept, so a read added to a module OUTSIDE that
+# tuple is NOT caught by it — the ``sdk``/``hosted_api`` helpers the two hops call
+# are the measured gap, tracked as #11410. Every ``TORTOISE_*`` those modules
+# read is accounted for,
+# either as an arm seam in ``SEAM_LEDGER`` (``TORTOISE_VET``,
+# ``TORTOISE_CLASSIFY_LATER``, ``TORTOISE_S4_DELTA``), or as a pin below, or as
+# an INPUT rather than a setting (``TORTOISE_DB_URI`` the graph it writes,
+# ``TORTOISE_API_URL`` a backend label), or as a declared not-a-measurement-seam
+# read with its reason (`acknowledged_not_a_measurement_seam`).
+#
+# ⚠️ The claim is scoped to what it can enforce. The same call chain also reads
+# INFRASTRUCTURE variables (record DSN, packs dir, embedding gates, store
+# connection). Those are what a run needs in order to happen at all, not settings
+# that move the measured population, and the door neither pins nor partitions
+# them. Adding another derived module is a one-line change to `path_modules` in
+# the test (the arm-seam modules are already there). An earlier revision of this comment called the whole path "closed" over
+# "exactly ten" variables and then partitioned 3 arm seams + 6 pins + 2 inputs =
+# 11; the #10983 review (cycle 5) measured both halves of that false —
+# ``TORTOISE_REFERENTIALITY`` is read on every v2 capture through
+# ``referentiality.ENV_FLAG`` and was accounted for by nothing.
+#
+# ⚠️ The set below is what the #10983 reviews widened, in TWO rounds. The first
+# revision pinned the lane and the two render switches and called that "the seam
+# set"; round 1 found ``TORTOISE_SESSION_LLM_MOCK`` (decisive: it swaps the model
+# for ``_V2SessionMock`` — ``sdk._session_llm_mock_enabled`` — AND short-circuits
+# the provider-key check, so ``backend_ready()`` still passes on a real key and a
+# fully mocked run is byte-indistinguishable in the log from a real one), the
+# prompt render and the model selector; round 2 found the two TRUNCATION BUDGETS
+# (``_stage_cap`` / ``_extractor_escalation_tokens``, both read at call time),
+# which decide how much of each stage's output survives. A pin set that stops at
+# "the pipeline" and leaves "what the pipeline reads" ambient is the same
+# declaration-versus-control defect, one layer down.
+#
+# The provider ROUTE is deliberately NOT pinned: ``TORTOISE_EXTRACTOR_PROVIDER``
+# only chooses among routes the box already has a key for, and the route is
+# OBSERVED rather than forced — the receipt reports it as ``extraction_mode``
+# (``llm:<route>``, ``sdk.py``), which ``run_corpus`` records and ``render_log``
+# prints per session. Named here so the set below is not read as an exhaustive
+# list of every ``TORTOISE_`` variable in the process.
+
+#: The env var that selects the extraction lane.
+DOOR_LANE_ENV = "TORTOISE_SESSION_EXTRACTOR"
+
+#: The lane the acceptance runs when that var is unset — and the one the run is
+#: PINNED to (``_capture_lane()``'s default, ``hosted_api.py``).
+DOOR_LANE = "v2"
+
+#: Unset (not ``"0"``) is the correct pin for each of these: every one selects a
+#: DIFFERENT behaviour when PRESENT, and none is an on/off switch whose absent
+#: state is the risky one.
+#:
+#: * ``TORTOISE_SESSION_EXTRACTOR`` — ``m2`` is the OTHER extractor; only
+#:   ``unset`` is the default the fleet runs, and the log must state which one
+#:   this was.
+#: * ``TORTOISE_EXTRACTOR=v1`` — read by ``sdk.commit_session`` (``sdk.py``), NOT
+#:   by ``capture_session``: the acceptance path dispatches on
+#:   ``TORTOISE_SESSION_EXTRACTOR`` alone, so this pin is DEFENSIVE for any
+#:   commit the probe performs, not a route off the capture door. Said plainly
+#:   because the #10983 review found the earlier "a route off this door"
+#:   rationale claimed a reach this variable does not have on this path.
+#: * ``TORTOISE_LABEL_ORDER=shuffle`` — NOT a behaviour seam (#10983): it is a
+#:   render DIAGNOSTIC that reorders the kind lists per call, i.e. it makes two
+#:   runs of this probe differ for a reason that is not the arm. Pinned off.
+#: * ``TORTOISE_SESSION_LLM_MOCK`` — the offline model seam. It replaces the
+#:   model with ``_V2SessionMock`` AND short-circuits the provider-key check, so
+#:   an ambient ``=1`` makes every capture canned output while
+#:   ``backend_ready()`` still passes and the log still claims a real run. The
+#:   acceptance is scored on a REAL provider; a mock is only ever an explicit
+#:   arm, never an inherited one (#10983 review).
+#: * ``TORTOISE_EXTRACTOR_PROMPT=compact`` — a third render switch beside
+#:   ``TORTOISE_LABEL_ORDER`` (``extractor_v2.py`` renders a different master
+#:   under it, and that render is explicitly NOT byte-identical to the default
+#:   since #9733), so it changes what the run measures without changing the arm.
+#: * ``TORTOISE_EXTRACT_MODEL`` — selects the extractor's MODEL (the producer the
+#:   acceptance's numbers come from). It does NOT by itself move the output bound:
+#:   every stage passes ``max_tokens=_stage_cap(...)`` per call, which beats the
+#:   adapter's constructor default — measured at this head, an explicit model id
+#:   with ``TORTOISE_EXTRACTOR_MAX_TOKENS`` unset still caps S2/S4 at 16000. The
+#:   bound has its own switch, pinned below (#10983 review round 2 corrected this
+#:   bullet, which had credited the model selector with the bound).
+#: * ``TORTOISE_EXTRACTOR_MAX_TOKENS`` — the stage output cap (``_stage_cap``, read
+#:   at CALL time): pinned unset ⇒ the shipped 1500/16000 stage defaults. An
+#:   ambient value (the documented lever an operator raises after a timeout
+#:   spike) shrinks how much of each stage survives truncation, i.e. it changes
+#:   the population being measured, under a header that would still claim the
+#:   door held (#10983 review round 2).
+#: * ``TORTOISE_EXTRACTOR_ESCALATION_TOKENS`` — the length-truncation RETRY budget
+#:   (``_extractor_escalation_tokens``): the same class, pinned unset.
+#: * ``TORTOISE_REFERENTIALITY`` — the S2.2 mention-selection arm
+#:   (``referentiality.enabled()``, reached through ``referentiality.ENV_FLAG``
+#:   from ``extractor_v2``'s prompt/mention path): armed, the prompt contract and
+#:   the entity mentions a run yields change without changing the lane. Found in
+#:   the #10983 review (cycle 5) as the one measurement switch the set missed,
+#:   because it is read one module away from the file the closure test derived
+#:   from.
+#: * ``TORTOISE_LABEL_ORDER_SEED`` — inert while ``TORTOISE_LABEL_ORDER`` is off,
+#:   and pinned anyway so the pair cannot be split: setting the seed without the
+#:   render switch is a no-op today, and a future edit that reads the seed
+#:   independently must not inherit one from the operator's shell.
+DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
+                   "TORTOISE_LABEL_ORDER", "TORTOISE_LABEL_ORDER_SEED",
+                   "TORTOISE_SESSION_LLM_MOCK", "TORTOISE_EXTRACTOR_PROMPT",
+                   "TORTOISE_EXTRACT_MODEL", "TORTOISE_EXTRACTOR_MAX_TOKENS",
+                   "TORTOISE_EXTRACTOR_ESCALATION_TOKENS",
+                   "TORTOISE_REFERENTIALITY", "TORTOISE_CONTEXT_ENRICH",
+                   # cycle 8, dropped by the peer head and restored here: an
+                   # ambient =1 ADDS a :GraphEvent to the graph the run writes
+                   # (change_feed.py:182 via sdk._change_feed_enabled) and the
+                   # probe's S6 witness prints that count (measured: 2 vs 3).
+                   "TORTOISE_CHANGE_FEED",
+                   # cycle 10: read through a PARAMETER (`_pick(tau_hi,
+                   # "TORTOISE_SUBJECT_TAU_HI", ...)` -> `os.environ.get(env_name)`)
+                   # from the write path, and it decides whether the
+                   # `:aboutSubject`/`:aboutObject` edge is written at all
+                   # (measured: 0.90 -> bound at the defaults, suspected with
+                   # TORTOISE_SUBJECT_TAU_HI=0.99). Absent is the shipped
+                   # default, so pinning them UNSET matches today's behaviour.
+                   "TORTOISE_SUBJECT_TAU_HI", "TORTOISE_SUBJECT_TAU_LO",
+                   # `#11002`: the bounded re-narrate's KEEP-RATE arm
+                   # (`extractor_v2._renarrate_threshold`). UNSET is the shipped
+                   # default and the only state the registered corpus was scored
+                   # under: unset/blank/non-numeric/out-of-range all read as
+                   # DISARMED by construction, while an armed value (0 < v <= 1)
+                   # fires the retry — an EXTRA S1+S2 band whose union can add
+                   # candidates — on any session whose batch keep-rate falls under
+                   # it. So an ambient value changes both the population and the
+                   # cost of what a run measures, under a header that would still
+                   # claim the door held. The other trigger arm
+                   # (`coverage_suspect`) needs no threshold and is not a switch.
+                   "TORTOISE_RENARRATE_KEEP_RATE",
+                   # `#11534`: the S2.2b-ADD gap-fill stage's own arm
+                   # (`extractor_v2._partial_gap_fill_enabled`, its one `env_flag`
+                   # read). UNSET is the shipped default and the only state the
+                   # registered corpus was scored under; an armed `=1` spends a
+                   # bounded model call ADDING items to the embed list before S3,
+                   # i.e. it moves the population this run measures under a header
+                   # that would still claim the door held. Default-OFF, so pinning
+                   # it OFF matches today's behaviour and needs no value.
+                   "TORTOISE_PARTIAL_GAP_FILL")
+
+#: Seams pinned to an EXPLICIT value because their ABSENT state is not neutral.
+#: ``TORTOISE_S4_DELTA`` is DEFAULT-ON (``env_flag(..., True)``); an ambient
+#: ``=0`` silently swaps S4's output contract for the legacy complete-list one,
+#: which changes the embed list a run measures without changing the arm.
+DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
+                  # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
+                  # True)` — default-ON, read through `projection/entities.py:1208`
+                  # on the write path (`create_point` -> `point_identifier_aliases`),
+                  # so it REWRITES `search_keys` on every ``:Point`` the run writes.
+                  # Pinned to the SHIPPED default, not off: an ambient `=0` is the
+                  # non-neutral state here, and the registered corpus yields no
+                  # aliases either way (0 of 27 points, 0 turns across the 7
+                  # fixtures — measured), so the pin makes the population
+                  # insensitive to the shell without moving a number.
+                  ("TORTOISE_IDENTIFIER_TOKENS", "1"),
+                  # `#10360`, and the union that absorbed `#11449` (`91dbc9a88`):
+                  # `extractor_v2` is the ONLY module that reads this switch
+                  # (`_state_value_verbatim_enforced`, its one `env_flag` read — the
+                  # nine modules the closure test names are the path it SCANNED, not
+                  # the readers), and it reads it PER POINT at the emit site. Its
+                  # ABSENT state is NOT the neutral one to inherit: the code resolves
+                  # `env_flag(SWITCH, True)` (absent/blank/unparseable ⇒ ON), so an
+                  # ambient `=0` DISARMS the write path's verbatim-value refusal (a
+                  # rewritten value is then WRITTEN and the resurrection guard cannot
+                  # fire), which changes the population under a header that would
+                  # still claim the door held. Pinned to the SHIPPED default, exactly
+                  # as `TORTOISE_S4_DELTA`.
+                  ("TORTOISE_STATE_VALUE_VERBATIM", "1"))
+
+#: Every key a complete read-back carries — the pinned-off set plus the
+#: pinned-to set. A ``door_header``/``door_record`` handed an INCOMPLETE dict is
+#: treated as NOT MEASURED, because every pinned-off target state is ``<unset>``:
+#: rendering a partial dict would print ``KEY=<unset> … read back from os.environ``
+#: about keys nobody read (#10983 review round 11).
+DOOR_KEYS = frozenset(DOOR_PINNED_OFF) | frozenset(k for k, _ in DOOR_PINNED_ON)
+
+#: The v4 seam ledger AT THE HEAD THIS RUN MEASURED (#10983, C2's Target 3).
+#:
+#: ``(env var, module.resolver, default, is a behaviour seam)``. The DEFAULT
+#: column is the CODE's, not a document's — a ledger copied out of prose is how
+#: this one came to call ``TORTOISE_VALUE_GATE`` default-off after #10996 had
+#: already made it default-ON at ``value_gate.value_gate_enabled`` and, through
+#: ``extractor_v2``'s ``vet_enabled`` OR, armed the S2.2 pass on the fleet's
+#: default write path. ``tests/test_7949_c2_door.py`` resolves every row against
+#: the modules and reds if this table and the tree disagree.
+SEAM_LEDGER = (
+    ("TORTOISE_VET", "extractor_v2._vet_enabled", "off", True),
+    ("TORTOISE_CLASSIFY_LATER", "extractor_v2._classify_later_enabled", "off", True),
+    ("TORTOISE_S2_DECISION_SEAM", "s2_decision_seam.seam_enabled", "off", True),
+    ("TORTOISE_VALUE_GATE", "value_gate.value_gate_enabled", "on", True),
+    ("TORTOISE_S4_DELTA", "extractor_v2._s4_delta_enabled", "on", True),
+    ("TORTOISE_LABEL_ORDER", "extractor_v2._label_order_rng", "off", False),
+)
 
 #: The three Point classes E3's frozen denominator mixes, each read off a
 #: property its writer stamps (never a hand-kept list): ``is_episodic`` is set by
-#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2452`` — turn
+#: the turn writer (``_TURN_WRITE_CYPHER``, ``tortoise/sdk.py:2455`` — turn
 #: rows carry ``is_episodic=true``, ``is_operator=false`` and are wired only by
 #: ``CONTAINS``), ``is_operator`` by the operator writers, and an
 #: ``extractedFrom`` edge by the extraction projection.
@@ -399,13 +632,22 @@ def measured_arm():
     (fail closed) rather than printing a claim nothing supports.
     """
     keys = (*ARM_ON, *ARM_OFF)
-    saved = {key: os.environ.get(key) for key in keys}
+    door_off = tuple(DOOR_PINNED_OFF)
+    door_on = tuple(key for key, _ in DOOR_PINNED_ON)
+    saved = {key: os.environ.get(key) for key in (*keys, *door_off, *door_on)}
     try:
         for key in ARM_ON:
             os.environ[key] = "1"
         for key in ARM_OFF:
+            # explicit falsy, never absent — `#10996`: an unset default-ON
+            # switch is the ON arm, so a pop would be a lie in the header below.
+            os.environ[key] = "0"
+        for key in door_off:
             os.environ.pop(key, None)
-        observed = {key: os.environ.get(key) for key in keys}
+        for key, value in DOOR_PINNED_ON:
+            os.environ[key] = value
+        observed = {key: os.environ.get(key)
+                    for key in (*keys, *door_off, *door_on)}
         for key in ARM_ON:
             if observed[key] != "1":
                 raise SystemExit(
@@ -413,6 +655,37 @@ def measured_arm():
                     f"{key}=1 but os.environ reads back {observed[key]!r}; a log "
                     f"that declares an arm it did not run is a fabricated "
                     f"measurement, so this pass writes no table")
+        leaked_lane = observed.get(DOOR_LANE_ENV)
+        if leaked_lane not in (None, ""):
+            raise SystemExit(
+                f"capstone-measure: REFUSED — the run pins the {DOOR_LANE!r} "
+                f"extraction lane, but {DOOR_LANE_ENV} reads back "
+                f"{leaked_lane!r} after being unset. A capture taken under "
+                f"another lane measures a DIFFERENT door (#10983), so this pass "
+                f"writes no table")
+        # EVERY other pinned-off switch, re-read and refused on a leak. The lane
+        # has its own message above (it changes the door); these change what the
+        # run MEASURES through the same door, and the #10983 review found them
+        # popped, printed in the ``door:`` line, and never checked — so the
+        # header's "read back" claim was one var wider than the code. A pin that
+        # cannot fail is a declaration, not a control.
+        for key in door_off:
+            if key == DOOR_LANE_ENV:
+                continue
+            leaked = observed.get(key)
+            if leaked not in (None, ""):
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned UNSET, but it "
+                    f"reads back {leaked!r} after being popped. It changes what "
+                    f"this run measures through the same door, so the arm cannot "
+                    f"be declared (#10983) and this pass writes no table")
+        for key, expected in DOOR_PINNED_ON:
+            if observed.get(key) != expected:
+                raise SystemExit(
+                    f"capstone-measure: REFUSED — {key} is pinned to "
+                    f"{expected!r} but reads back {observed.get(key)!r}; that "
+                    f"seam changes what the run measures, so the arm cannot be "
+                    f"declared (#10983)")
         yield observed
     finally:
         for key, value in saved.items():
@@ -429,8 +702,9 @@ def arm_header(observed: dict[str, str | None]) -> str:
         value = observed.get(key)
         parts.append(f"{key}={value if value not in (None, '') else '<unset>'}")
     return (" ".join(parts) + " (set/pinned IN-PROCESS for this pass and read "
-            "back from os.environ after setting; the deployed config leaves "
-            "both passes OFF)")
+            "back from os.environ after setting; the deployed config sets none "
+            "of them — since #10996 the value gate defaults ON, so the pinned 0 "
+            "is what makes this arm OFF)")
 
 
 def arm_record(observed: dict[str, str | None]) -> dict:
@@ -439,6 +713,235 @@ def arm_record(observed: dict[str, str | None]) -> dict:
                                      for key in (*ARM_ON, *ARM_OFF)}
     record["source"] = "os.environ read-back after measured_arm() forced it"
     return record
+
+
+def door_header(observed: dict[str, str | None]) -> str:
+    """The ``door:`` line, DERIVED from the run's own read-back (#10983).
+
+    Names the entry point in CODE terms — the function chain and the lane
+    selector, not "the pipeline" — plus the value each pinned switch RESOLVED TO
+    on this run and the six-seam ledger with the DEFAULTS the pin suite resolves
+    against the modules. A log therefore states the seam set it ran rather than
+    the one a reader remembers (`#10983` Target 3).
+
+    ⛔ An EMPTY read-back is NOT a pinned door. For every switch here the target
+    state is ``<unset>``, so a header rendered from nothing used to print
+    byte-identical text to a header rendered from a run whose pins HELD —
+    ``render_log``'s ``door`` defaults to ``None`` and the repo's own fixtures
+    call it that way, so a fixture log asserted "read back from os.environ" about
+    a read-back that never happened (#10983 review). Absence is now said out
+    loud, on the same rule the ``arm:`` line already follows for a flag it did
+    not measure.
+    """
+    if not _door_measured(observed):
+        return ("NOT MEASURED — this render carries NO COMPLETE measured_arm() "
+                "read-back, so no lane and no pinned switch is attested. Render "
+                "the log from a run that entered ``measured_arm()`` (``main`` "
+                "does) before citing the door")
+    lane = observed.get(DOOR_LANE_ENV)
+    # The HEADLINE is the read-back, never the module constant: a read-back that
+    # disagrees with the pin must not be summarised as the pin (#10983 review).
+    # ``main`` never reaches here in that state (measured_arm refuses first), so
+    # this is the path a re-render tool or a fixture would take.
+    lane_pinned = lane in (None, "")
+    lane_word = DOOR_LANE if lane_pinned else lane
+    pins = [f"{key}=<unset>" if observed.get(key) in (None, "")
+            else f"{key}={observed.get(key)}"
+            for key in DOOR_PINNED_OFF]
+    pins += [("<unset>" if observed.get(key) in (None, "")
+              else f"{observed.get(key)}") .join([f"{key}=", ""])
+             for key, _ in DOOR_PINNED_ON]
+    seams = ", ".join(f"{env}={default}" for env, _where, default, _seam
+                      in SEAM_LEDGER)
+    return (f"{lane_word} lane (sdk.capture_session -> sdk._extract_session_v2 "
+            f"-> extractor_v2.extract_session_v2; hosted_api._capture_lane() "
+            f"mirrors the same predicate) | {DOOR_LANE_ENV}="
+            f"{'<unset>' if lane_pinned else lane} "
+            f"{'PINNED' if lane_pinned else 'LEAKED — NOT THE PINNED LANE'} "
+            f"({' '.join(pins)} read back from os.environ) | seam defaults at "
+            f"this head: {seams}")
+
+
+def _door_measured(observed: dict[str, str | None]) -> bool:
+    """Does this read-back carry EVERY pinned key? A partial one is not a pin."""
+    return bool(observed) and set(observed) >= DOOR_KEYS
+
+
+def door_record(observed: dict[str, str | None]) -> dict:
+    """The machine half of the door: lane, pins, and the six-seam ledger.
+
+    An empty (or PARTIAL) read-back records ``measured: false`` and NO pin block,
+    rather than borrowing the measured record's ``source`` sentence — a machine
+    record that says "os.environ read-back after measured_arm() forced the door"
+    about a render that never ran one is the same false claim as the log line
+    (#10983 review). ``measured`` is stated in BOTH directions so a consumer can
+    key on it instead of inferring it from an absent key.
+
+    ``lane`` follows the READ-BACK, not the module constant: a record that
+    printed ``lane: v2`` beside ``lane_read_back: m2`` would let a consumer key
+    on the wrong field (#10983 review round 11). ``lane_pinned`` says whether the
+    read-back matched the pin.
+    """
+    if not _door_measured(observed):
+        return {
+            "measured": False,
+            "lane": DOOR_LANE,
+            "lane_env": DOOR_LANE_ENV,
+            "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                            "extractor_v2.extract_session_v2"),
+            "hosted_selector": "hosted_api._capture_lane",
+            "note": ("NOT MEASURED — render_log was called without a door "
+                     "read-back, so no pin is attested for this run"),
+        }
+    return {
+        "measured": True,
+        "lane": observed.get(DOOR_LANE_ENV) or DOOR_LANE,
+        "lane_env": DOOR_LANE_ENV,
+        "lane_read_back": observed.get(DOOR_LANE_ENV),
+        "lane_pinned": observed.get(DOOR_LANE_ENV) in (None, ""),
+        "entry_point": ("sdk.capture_session -> sdk._extract_session_v2 -> "
+                        "extractor_v2.extract_session_v2"),
+        "hosted_selector": "hosted_api._capture_lane",
+        "pinned_off": {key: observed.get(key) for key in DOOR_PINNED_OFF},
+        "pinned_on": {key: observed.get(key) for key, _ in DOOR_PINNED_ON},
+        "seams": [{"env": env, "resolver": where, "default": default,
+                   "behaviour_seam": seam}
+                  for env, where, default, seam in SEAM_LEDGER],
+        "source": "os.environ read-back after measured_arm() forced the door",
+    }
+
+
+#: The ``extraction_mode`` values that mean a capture REACHED the door.
+#:
+#: ⛔ The COLON is the discriminator, not the ``llm`` — the two lanes differ by
+#: exactly that character, so do not "tidy" this into a route-agnostic ``llm``
+#: prefix (the #10983 review measured that the whole suite stays green under
+#: ``"llm"``):
+#:
+#: * the v2 lane reports ``llm:<route>`` (``sdk.capture_session`` ->
+#:   ``_extract_session_v2`` -> the adapter's own ``route``, always truthy on a
+#:   success);
+#: * the OTHER lane reports a BARE ``"llm"`` — ``_extract_session_llm`` reports it
+#:   with no route and no colon, pinned by
+#:   ``tests/test_capture_session.py::test_capture_session_zero_extraction_is_warning_not_failure``.
+#:   A prefix of ``"llm"`` would therefore admit an m2 capture as door-entered,
+#:   which is the one bypass this witness exists to refuse. The bare ``"llm"``
+#:   spelling is pinned in
+#:   `tests/test_7949_c2_door.py::test_a_capture_that_never_ENTERED_the_door_REFUSES_the_run`
+#:   so the widening cannot be made by aligning the m2 lane to this contract.
+#:
+#: ``replayed`` and ``no-provider`` mean the capture returned BEFORE the lane
+#: dispatch (#1727 replay, #3892 keyless), and ``extraction-disabled`` is the
+#: hosted endpoint's own pre-dispatch branch (the org's off switch) — it cannot
+#: arise on the probed ``sdk.capture_session`` path at all, so it is listed for
+#: completeness of the vocabulary, not as a shape this probe can meet. ``empty``
+#: has TWO origins and neither is this door: the blank session-id and
+#: blank-conversation gates in ``sdk.capture_session`` return before the dispatch,
+#: AND the other lane emits it after taking that lane. So none of the four is
+#: this door entered. (This sentence used to attach "took a lane that is not the
+#: v2 door" to all four spellings; only ``empty`` has that origin. The earlier
+#: "returned BEFORE" clause was also over-attributed to ``extraction-disabled``,
+#: which no ``sdk`` gate emits — #11298 review, source-verified both ways.)
+#:
+#: ⛔ ``error`` IS NOT ONE OF THOSE, and listing it here was a measured defect
+#: (#11298 review, round 14). ``error`` is a POST-dispatch outcome — the lane ran
+#: and REPORTED a failure (raised, or caught and appended), mode set INSIDE it: by
+#: ``sdk._extract_session_v2`` (the door itself) and by ``sdk._extract_session_llm``
+#: (the other lane), each setting ``meta["mode"]`` to ``"error"`` iff its own
+#: ``errors`` is non-empty. ``sdk.capture_session`` then maps a failed extraction
+#: onto it (``elif not ok: effective_mode = "error"``). Never by the pre-dispatch
+#: guards. Rows are cited by FUNCTION rather than by ``sdk.py:<line>``, because a
+#: line number in prose re-stales on the next insertion — the case this file
+#: already carries three times.
+#: Counting it as a bypass refused a run for a cause that was false, AFTER its
+#: full spend, and — because ``require_door_entered`` raises before the log is
+#: written — threw away the ``errors`` that would have shown what actually
+#: happened. See ``DOOR_ENTERED_THEN_FAILED``.
+DOOR_ENTERED_PREFIX = "llm:"
+
+#: The ``extraction_mode`` a capture reports when it DID enter the door and then
+#: FAILED. Treated as entered, not bypassed, for the reason above. The failure is
+#: not swallowed by that: ``run_corpus`` keeps each receipt's ``errors``,
+#: ``main`` collects the non-``ok`` sessions into ``failed``, and the log — which
+#: a bypass no longer prevents — carries them per session (``errors=[…]`` on the
+#: session's own line and in the machine record) plus a ``sessions failed: […]``
+#: line on stderr after the write.
+#:
+#: ⚠️ REPORTED, NOT SCORED — and that half is stated here rather than left to be
+#: discovered. Nothing about a failed capture stops the pass from being scored:
+#: ``main`` still exits 0 and the record's ``run.status`` is still ``"COMPLETED"``,
+#: which is the field ``tools/capstone_verdict_check.py`` V5 reads to decide the
+#: pass completed — it also reads ``run.steps_observed`` and the step-accounting
+#: keys, and none of those distinguishes a failed capture either, because the
+#: step totals are summed over sessions. So a run with a failed capture is not
+#: distinguishable from a clean one BY THE GATE (a human reading the log is).
+#: Filed as **#11414**; changing the exit or the status is a gate decision, not
+#: a comment fix.
+DOOR_ENTERED_THEN_FAILED = ("error",)
+
+
+def door_witness(runs) -> dict:
+    """How many captures actually ENTERED the door — derived from the receipts.
+
+    ⛔ Found in the #10983 review (round 11). The door was pinned and read back as
+    an ENVIRONMENT fact and nothing checked that the path was TAKEN, so a run
+    that never reached ``_extract_session_v2`` still produced a table whose
+    ``door:`` line asserted the v2 lane and whose record said ``measured: true``,
+    exit 0. Both exits are real and both return ``ok=True``:
+
+    * ``no_provider`` (``sdk.capture_session``) — no provider key resolves, so
+      the turns are stored and NOTHING is extracted (#3892);
+    * the ``#1727`` REPLAY — ``session_existed``, which a re-run against an
+      existing graph (``--graph``) reaches for all seven sessions at zero cost.
+
+    The pinned lane cannot catch either, because neither is a different lane: it
+    is no lane. ``backend_ready()``'s provider-key check narrows the first, but
+    it is a different predicate from ``_build_session_llm_extractor() is None``
+    (five provider keys vs ``DEEPSEEK_API_KEY``), so it is not the contract.
+    """
+    runs = list(runs or [])
+    entered = [run for run in runs
+               if str(run.get("extraction_mode") or "").startswith(
+                   DOOR_ENTERED_PREFIX)
+               # A post-dispatch FAILURE still took the door: ``measured_arm``
+               # pins this probe to the v2 lane and refuses a leak, so an
+               # ``error`` receipt here is a v2 receipt that raised, not another
+               # lane and not a return before the dispatch. The failure is
+               # reported by ``main``'s failed list, which a bypass would have
+               # prevented the log from ever reaching.
+               or str(run.get("extraction_mode") or "") in
+               DOOR_ENTERED_THEN_FAILED]
+    bypassed = [str(run.get("session_id")) for run in runs
+                if run not in entered]
+    return {"entered": len(entered), "sessions": len(runs),
+            "bypassed": bypassed}
+
+
+def require_door_entered(runs) -> dict:
+    """REFUSE a run in which any capture returned before the door.
+
+    A table measured on a graph this run did not write through the door is not a
+    measurement of the door, so the pass writes no table — the same posture
+    ``measured_arm`` takes for a leaked switch.
+    """
+    witness = door_witness(runs)
+    if witness["bypassed"]:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — {len(witness['bypassed'])} of "
+            f"{witness['sessions']} capture(s) did not enter "
+            f"sdk._extract_session_v2 ({witness['bypassed']}), so this pass did "
+            f"not take the door it would declare: a keyless capture extracts "
+            f"nothing (#3892), a re-capture of an existing session REPLAYS "
+            f"(#1727) — both report ok=True — and a capture on the other lane "
+            f"reports a bare ``llm`` with no route. A table measured on a graph "
+            f"they did not write is a measurement of another run (#10983). "
+            f"NOTE: a capture that ENTERED the door and FAILED (mode ``error``) "
+            f"is not refused here — its ``errors`` are carried on its own log "
+            f"line and in the machine record, with a ``sessions failed: […]`` "
+            f"line on stderr after the write, because a refusal here would "
+            f"name a false cause AND discard the errors that say what "
+            f"actually happened")
+    return witness
 
 
 # ── pure helpers (pinned by tests/test_7949_capstone_measure.py) ───────────
@@ -1156,6 +1659,21 @@ def check_corpus(prereg: dict) -> str:
     from tests.eval.write_path.corpus import compute_fixtures_hash
 
     frozen = (prereg.get("corpus") or {}).get("fixtures_hash") or ""
+    # ⛔ `A`-rows score on the SAME corpus the `E`-rows pin (`#10982` review, F3). §3.7
+    # registers ONE corpus for both row families — "the record's corpus pin is a single
+    # `fixtures_hash` and two corpora would make the two row families incomparable on one
+    # run" — and the record's own `a_corpus.pinned_by` says a different corpus is REFUSED by
+    # G1. Nothing read `a_corpus` at all, so a record whose `a_corpus.path` pointed elsewhere
+    # still passed G1 and the claim was prose. It is checked here, before any model call.
+    a_corpus = (prereg.get("a_corpus") or {}).get("path")
+    corpus = (prereg.get("corpus") or {}).get("path")
+    if a_corpus is not None and a_corpus != corpus:
+        raise SystemExit(
+            f"capstone-measure: REFUSED — the pre-registration's a_corpus.path is "
+            f"{a_corpus!r} but corpus.path is {corpus!r}. §3.7 registers ONE corpus for "
+            "both row families (a single fixtures_hash), so a second corpus makes the "
+            "A-rows and the E-rows incomparable on one run: the run is refused, never "
+            "scored")
     actual = compute_fixtures_hash()
     if not frozen:
         raise SystemExit("capstone-measure: REFUSED — the pre-registration freezes "
@@ -1271,27 +1789,27 @@ _IDLE_CITES: dict[str, str] = {
         "The extractor emits exactly this shape when the flag is ON and the list "
         "the VET pass would have worked on is empty: `vet_enabled` is computed "
         "BEFORE the `if not edus:` early return that emits {'enabled': "
-        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:10367, the "
-        "flag; :10371, the early return; :10387, its vet surface), and each VET "
-        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:10462), "
-        "`if vet_enabled and complete_list:` (:10584) — so "
+        "vet_enabled, 's2': {}, 'union': {}} (tortoise/extractor_v2.py:13307, the "
+        "flag; :13311, the early return; :13342, its vet surface), and each VET "
+        "pass is gated on the LIST — `if vet_enabled and embed_list:` (:16285), "
+        "`if vet_enabled and complete_list:` (:13891) — so "
         "a block that says enabled=true proves the FLAG, never that the pass "
         "ran. A FAILED vet pass leaves the same empty stats (`_run_vet_pass` "
-        "returns {} on its fail-open path, :10246-10249)."
+        "returns {} on its fail-open path, :13036-13039)."
     ),
     "classify_later": (
         "The extractor emits exactly this shape when the flag is ON and the "
         "CLASSIFY pass had nothing to work on: `classify_later` is computed at "
-        "tortoise/extractor_v2.py:10336 (and set False when its classifier cannot "
-        "be constructed, :10361), the `if not edus:` early return emits "
+        "tortoise/extractor_v2.py:13276 (and set False when its classifier cannot "
+        "be constructed, :13301), the `if not edus:` early return emits "
         "{'enabled': classify_later, 's2': {}, 'union': {}, "
-        "'restamp_overrides': 0, 'slot_rekeys': 0} (:10383-10386), and each "
+        "'restamp_overrides': 0, 'slot_rekeys': 0} (:13338-13341), and each "
         "classify pass is gated on the LIST and then on a NON-EMPTY item set — "
-        "`if classify_later and embed_list:` (:10474) around `if items:` "
-        "(:10477), `if classify_later and complete_list:` (:10599) around "
-        "`if items:` (:10609) — so a block that says enabled=true proves the "
+        "`if classify_later and embed_list:` (:13760) around `if items:` "
+        "(:13763), `if classify_later and complete_list:` (:13906) around "
+        "`if items:` (:13916) — so a block that says enabled=true proves the "
         "FLAG, never that the pass ran. A FAILED classify pass leaves the same "
-        "empty stats (its fail-open `except` at :10490 / :10620)."
+        "empty stats (its fail-open `except` at :13776 / :13927)."
     ),
 }
 
@@ -1303,26 +1821,26 @@ def _pass_ran(block: dict) -> bool | None:
     where the two were confused. ``extract_session_v2`` emits ``result["vet"]``
     and ``result["classify_later"]`` UNCONDITIONALLY — on the flag-OFF arm and on
     the early-return path the block is ``{"enabled": False, "s2": {}, "union":
-    {}}`` (:10383-10386, :10387, :10743-10757) — so an acceptance test of "a non-empty dict"
+    {}}`` (:13338-13341, :13342, :14105-14111, :14115-14119) — so an acceptance test of "a non-empty dict"
     reports S2.2/S2.3 WITNESSED on a run measured with the flags OFF, printing
     ``enabled=false, s2={}`` beside the word WITNESSED.
 
     ⛔ AND THE FLAG ALONE IS NOT ACTIVITY, which is the sharper half and the one
     this rule got wrong first. ``enabled`` is the FLAG value, computed BEFORE the
-    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:10367`` and
-    ``edus = _edus_from_conversation(...)`` follows at ``:10370``, whose
-    ``if not edus:`` early return (``:10371``) emits literally ``"vet": {"enabled":
-    vet_enabled, "s2": {}, "union": {}}`` (``:10387``) — with the flag ON. The
+    pass is reached: ``vet_enabled`` is set at ``extractor_v2.py:13307`` and
+    ``edus = _edus_from_conversation(...)`` follows at ``:13310``, whose
+    ``if not edus:`` early return (``:13311``) emits literally ``"vet": {"enabled":
+    vet_enabled, "s2": {}, "union": {}}`` (``:13342``) — with the flag ON. The
     passes themselves are gated on the LIST, not the flag: ``if vet_enabled and
-    embed_list:`` (``:10462``) and ``if vet_enabled and complete_list:``
-    (``:10584``). So a session whose conversation produced no list emits
+    embed_list:`` (``:16285``) and ``if vet_enabled and complete_list:``
+    (``:13891``). So a session whose conversation produced no list emits
     ``enabled: True`` with empty counters and no pass ever ran; so does a pass
     that FAILED, because ``_run_vet_pass`` returns ``{}`` stats on its fail-open
-    exception path (``extractor_v2.py:10246-10249``). ``enabled: true`` therefore
+    exception path (``extractor_v2.py:13036-13039``). ``enabled: true`` therefore
     proves the flag was read, never that the pass did anything.
 
     ⛔ The VET lines above are the VET pass's, not the rule's: the CLASSIFY pass
-    is different code (``classify_later`` at `:10336`, its own early-return
+    is different code (``classify_later`` at `:13276`, its own early-return
     block, its ``if classify_later and …`` gates around ``if items:``, its own
     fail-open ``except``), so the rule is stated pass-agnostically here and the
     CITES a reader gets are raised per surface from ``_IDLE_CITES`` — never one
@@ -1452,7 +1970,7 @@ def _summary(block: dict) -> str:
             if len(rendered) > 160:
                 rendered = rendered[:157] + "..."
             parts.append(f"{key}={rendered}")
-    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:200]
+    return ", ".join(parts) or json.dumps(block, sort_keys=True, default=str)[:201]
 
 
 def anchor_census_cypher(label: str) -> str:
@@ -2266,6 +2784,490 @@ def census(uri: str) -> dict:
     }
 
 
+# ── the A-row census (#10982) ─────────────────────────────────────────────
+#
+# The object-layer rows `#7949` was extended with on 2026-11-04 (`A1`–`A5`). They are REGISTERED
+# in the pinned record (`PRE-REGISTRATION.md` §3.7) and REPORTED here; this probe compares none of
+# them to a bar, because the bar is the record's and applying it is the gate's job, and no A-row has
+# a scored run yet (`#10984`–`#10988` own those). The point of emitting them from the ONE existing
+# instrument is that a reported number is produced by a tool and never hand-transcribed — the
+# owner's 2026-11-04 `live-v4` table was read by hand on the hosted graph, has no committed artifact
+# and is not re-derivable from this repository (`docs/epics/2026-11-05-5087-extractor-v4/01-align.md`).
+#
+# ⛔ A population this census cannot measure emits ``UNMEASURED(<what would measure it>)``, never a
+# zero: a zero is a NUMBER, it reads as a measured absence, and three of these five rows are about
+# populations no committed artifact has ever counted.
+
+#: The registered object-layer rows, in the order the record lists them.
+A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
+
+#: ⛔ `A1`'s bar is "at least one edge for EACH relation family the A-corpus's pack declares", and
+#: an unpinned set makes that bar unfalsifiable — a scorer could read 1, 2, 9 or 36 (#10982 review
+#: cycle 2, finding 6). The set is therefore PINNED to the **labels the WRITER stamps**, and that
+#: distinction is the whole point (#10982 review round 2):
+#:
+#:   ⛔ `decomposesInto` is a DECLARED PREDICATE, never a stored relationship label. The dev pack
+#:   declares two hierarchy entries — `Theme -> Epic` and `Epic -> Issue`
+#:   (`packs/dev/manifest.yaml`, `hierarchies:`) — and BOTH carry `type: hasPart`; the seam writes the
+#:   hierarchy entry's `type` (`tortoise/pack_hierarchy.py`, `_binding`: "the edge this function would
+#:   write carries ``decomposesInto``, which ``create_edge`` refuses"), and the operator writers fold
+#:   `composedOf`/`decomposesInto`/`contains`/`wraps` onto `hasPart`
+#:   (`tortoise/projection/edges.py`, the `op_type`->label map). `hasPart` IS in `create_edge`'s own
+#:   predicate set and `decomposesInto` is NOT (`edges.py`, `_VALID_EDGE_PREDICATES`).
+#:   ⚠️ Cited by SYMBOL and not by line: this bundle's own citation guard refuses a line number no
+#:   rule can verify, and an unverifiable number drifts silently (#10982 review round 3).
+#:
+#:   So a pin on `decomposesInto` names a label that occurs ZERO times on every graph this repo can
+#:   write, which made the registered bar "≥ 1 edge for EACH of the two families" **unsatisfiable** —
+#:   `#10984` (C3) would have scored A1 RED forever on a correct product. The pin is the one written
+#:   family; the declared spellings that fold onto it are named beside it so a reader can still see
+#:   which pack declarations the row is about.
+A1_RELATION_FAMILIES = ("hasPart",)
+
+#: The pack-declared predicates that are WRITTEN as the label in `A1_RELATION_FAMILIES` above. This
+#: map is documentation, not a measurement: `by_pinned_family` counts `type(r)`, and `type(r)` is
+#: never a declared spelling. A future pin that adds a written label must add its declared
+#: spellings here in the same reviewed edit.
+A1_RELATION_FAMILY_FOLD = {
+    "hasPart": ("hasPart", "decomposesInto", "composedOf", "contains", "wraps"),
+}
+
+#: The four subject-edge families (`#10987`). Counted PER FAMILY so that one wired family cannot
+#: read as "Subjects are populated" — the failure the owner's assertion exists to catch.
+SUBJECT_EDGE_FAMILIES = ("aboutSubject", "memberOf", "ownedBy", "managedBy")
+
+#: `A3`'s chain-join definition is over these two relations — the pair the owner's 2026-11-04
+#: reading counted, and the pair the registered bar names. `SUPPORTS`/`MITIGATES`/`NEGATE`/
+#: `SUPERSEDE` are claim-to-claim edges too; they are **NOT** in this count and this block emits no
+#: figure for them, because a wider relation set is a different definition and widening it silently
+#: is how a bar stops meaning what it says. Adding them is a #10986 registration question.
+CHAIN_RELATIONS = ("IMPL", "NAND")
+
+#: ⚠️ `TAGGED` is emitted WITH this annotation and is **not a target** (`#7949` plan §2 R7): it is
+#: written only by `_sync_tags` from an explicit `tags` value and no extraction path sets one, so a
+#: zero here says nothing about the run's quality.
+TAGGED_NOTE = "no carrier — no extraction path sets a `tags` value (#7949 R7); NOT a target"
+
+
+def unmeasured(what: str) -> str:
+    """The explicit non-number a population that cannot be measured emits."""
+    return f"UNMEASURED({what})"
+
+
+def census_reason(exc: BaseException) -> str:
+    """A caught exception rendered for a COMMITTED artefact (`#10982` review, F1).
+
+    ⛔ The log this block travels in is committed to a public repository, and
+    ``TORTOISE_DB_URI`` is a credential-bearing string — ``docker://:pw@host:6379/g``,
+    and for the hosted ``live-v4`` graph the URI carries host, port, user and
+    password (``from_uri`` semantics). An exception raised by a driver or a
+    projection routinely echoes the URI it failed to reach, so ``f"{exc}"`` is a
+    credential path into ``capstone-measured-<sha>.log``.
+
+    The scrub is the repo's OWN rule, not a second one: ``tortoise.security``
+    carries the URI-userinfo pattern ``://[^@\\s]*@ -> ://***@`` and
+    ``redact_error`` is its public form (class name + redacted message). It is
+    stdlib-only by design, so importing it here costs the probe nothing.
+    """
+    from tortoise.security import redact_error
+
+    return redact_error(exc)
+
+
+def _a1_object_edges(projection) -> dict:
+    """`object→object` edges BY TYPE and BY ENDPOINT KIND (`A1`)."""
+    by_type = [
+        {"relation": str(row[0]), "edges": int(row[1] or 0)}
+        for row in projection.g.query(
+            "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, count(*) AS n "
+            "ORDER BY n DESC, t").result_set
+    ]
+    by_kind = [
+        {"relation": str(row[0]),
+         "from_kind": str(row[1]) if row[1] is not None else "NULL",
+         "to_kind": str(row[2]) if row[2] is not None else "NULL",
+         "edges": int(row[3] or 0)}
+        for row in projection.g.query(
+            # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
+            # (tortoise/projection/entities.py:4699) and the pack declares `fromKind`/`toKind`
+            # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
+            # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
+            # review, finding 3).
+            "MATCH (a:Object)-[r]->(b:Object) RETURN type(r) AS t, a.objectKind AS ak, "
+            "b.objectKind AS bk, count(*) AS n ORDER BY n DESC, t, ak, bk").result_set
+    ]
+    counts = {entry["relation"]: entry["edges"] for entry in by_type}
+    # ⛔ A1's registered denominator is *"`:Object` nodes in the scored graph (floor 30)"*, and the
+    # floor `a1_objects` is pinned — so the block must CARRY that population. It did not, which
+    # left the floor consumed by no field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse. This is the rule A5's block already states for `a5_points` /
+    # `a2_candidates` (#11331 review, P2-4b), applied to the row that was left out of it.
+    objects = projection.g.query("MATCH (n:Object) RETURN count(n)").result_set
+    objects = int(objects[0][0] or 0) if objects else 0
+    return {"by_type": by_type,
+            "by_endpoint_kind": by_kind,
+            "objects": objects,
+            "edges_total": sum(entry["edges"] for entry in by_type),
+            # per PINNED family, so the logged numbers map onto the registered bar. The keys are
+            # WRITTEN labels (`type(r)`), which is what the two queries above count.
+            "by_pinned_family": {name: counts.get(name, 0)
+                                 for name in A1_RELATION_FAMILIES},
+            # the declared spellings each written family folds, so a reader can map the row onto
+            # the pack's own declarations without mistaking one for a stored label.
+            "pinned_family_declared_spellings": {
+                name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                for name in A1_RELATION_FAMILIES}}
+
+
+def _a3_chain_join(projection) -> dict:
+    """`A3`'s chain-join rate under the REGISTERED definition, with the cheap one beside it.
+
+    ⛔ The registered definition is *an incident `IMPL`/`NAND` **and** at least one such edge
+    crossing a batch boundary (a different `Event` root)*. "Member of a connected component of
+    >= 2" is NOT a third definition — any incident edge already makes a component of two — so it
+    collapses into the cheap one and is rejected for exactly the reason it looks attractive.
+
+    ⛔ The cross-batch test requires an `eventId` on **BOTH** ends. Comparing
+    ``coalesce(eventId,'')`` counted a statement with no `eventId` at all as "crossing a boundary"
+    against one that has an id — an unanchored row is not a second batch, and 170 of the committed
+    run's 354 Points carry no stamp (`capstone-measured-9152448d.log:63`), so the fail-open was not
+    theoretical (#10982 review, finding 5). Where the population carries no stamp at all, the leg
+    is ``UNMEASURED`` rather than a number nobody can reach.
+    """
+    pattern = "|".join(CHAIN_RELATIONS)
+    statements = projection.g.query(
+        "MATCH (n:Point) WHERE n.pointKind = 'statement' RETURN count(n)"
+    ).result_set
+    statements = int(statements[0][0] or 0) if statements else 0
+    # An incident edge is INCIDENT — the neighbour is any node, not only a `:Point`, because the
+    # registered definition says "at least one incident IMPL/NAND edge" and does not restrict the
+    # far end (#10982 review, finding 5).
+    cheap_rows = projection.g.query(
+        f"MATCH (n:Point)-[r:{pattern}]-() "
+        "WHERE n.pointKind = 'statement' RETURN count(DISTINCT n)").result_set
+    cheap = int(cheap_rows[0][0] or 0) if cheap_rows else 0
+    stamped_rows = projection.g.query(
+        "MATCH (n:Point) WHERE n.pointKind = 'statement' AND n.eventId IS NOT NULL "
+        "RETURN count(n)").result_set
+    stamped = int(stamped_rows[0][0] or 0) if stamped_rows else 0
+    strict = 0
+    if stamped:
+        strict_rows = projection.g.query(
+            f"MATCH (n:Point)-[r:{pattern}]-(m) WHERE n.pointKind = 'statement' "
+            "AND n.eventId IS NOT NULL AND m.eventId IS NOT NULL "
+            "AND n.eventId <> m.eventId RETURN count(DISTINCT n)").result_set
+        strict = int(strict_rows[0][0] or 0) if strict_rows else 0
+    return {
+        "statements": statements,
+        "statements_with_an_event_root": stamped,
+        "cheap_joined": cheap,
+        "cheap_rate": (cheap / statements) if statements else unmeasured(
+            "a statement population with pointKind='statement'"),
+        "cross_batch_joined": strict if stamped else unmeasured(
+            "an eventId stamp on the statement population — no statement carries one, so no "
+            "'different Event root' can be established"),
+        # ⛔ The rate's denominator is the STAMPED subpopulation, not all statements: a statement
+        # with no `eventId` can never be counted as crossing, so dividing by every statement would
+        # report "0% join chains" as a measurement of stamp coverage (#10982 review cycle 2,
+        # finding 7). The coverage is emitted beside it and the row REFUSES below its floor.
+        "event_root_coverage": (stamped / statements) if statements else unmeasured(
+            "a statement population"),
+        "cross_batch_rate": (strict / stamped) if stamped else unmeasured(
+            "a statement population carrying an eventId on both ends of an IMPL/NAND edge"),
+        "relations": list(CHAIN_RELATIONS),
+    }
+
+
+def _a4_pointkind(projection) -> dict:
+    """`A4`'s `pointKind` histogram over CLAIMS, split typed / `statement` / `NULL`.
+
+    ⛔ `NULL` is a THIRD reported state, never folded into `statement`: 19% of the owner's
+    population carried no `pointKind` at all, and folding it in reports a typing win nobody made.
+
+    ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
+    a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
+    with no kind — `tortoise/projection/__init__.py:13600-13602`, `# Ensure pointKind is present
+    (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
+    `projection/entities.py:2602`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    and **capture rows** are
+    not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
+    and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2455`)
+    inside `_write_capture_turns` — and 159 of
+    the committed run's 354 Points are turn rows (`capstone-measured-9152448d.log:73`), so counting
+    them read ~45% "typed" against the owner's 0.6% ceiling. The excluded populations are COUNTED
+    and reported, never silently dropped.
+    """
+    # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
+    # (`projection/entities.py:2740`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
+    # from the denominator while the capture count reported it as a turn row it is not. The same
+    # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
+    # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
+    # round 2).
+    capture = projection.g.query(
+        "MATCH (n:Point) WHERE coalesce(n.is_episodic, false) OR coalesce(n.is_operator, false) "
+        "RETURN count(n)").result_set
+    capture = int(capture[0][0] or 0) if capture else 0
+    rows = projection.g.query(
+        "MATCH (n:Point) WHERE NOT coalesce(n.is_episodic, false) "
+        "AND NOT coalesce(n.is_operator, false) "
+        "RETURN coalesce(n.pointKind, 'NULL') AS k, count(*) AS n "
+        "ORDER BY n DESC").result_set
+    by_kind: dict[str, int] = {}
+    for row in rows:
+        key = str(row[0])
+        # a blank kind is the ABSENT state, not a typed one — ACCUMULATED into the NULL bucket,
+        # because assigning would overwrite the real NULL row's count instead of adding to it.
+        key = "NULL" if key in ("NULL", "") else key
+        by_kind[key] = by_kind.get(key, 0) + int(row[1] or 0)
+    total = sum(by_kind.values())
+    null_count = by_kind.pop("NULL", 0)
+    statement = by_kind.pop("statement", 0)
+    typed = sum(by_kind.values())
+    return {"claim_points": total, "excluded_capture_rows": capture,
+            "statement": statement, "null": null_count,
+            "typed": typed, "typed_by_kind": dict(sorted(by_kind.items())),
+            "typed_share": (typed / total) if total else unmeasured(
+                "a claim-point population (is_episodic and is_operator both absent)")}
+
+
+def _a5_subjects(projection) -> dict:
+    """`A5`: the `:Subject` count and the four subject-edge families, PER FAMILY.
+
+    ⛔ Both queries are UNDIRECTED, but only the CARRYING leg is claim-filtered — and that is the
+    registered shape, not an oversight: §3.1 A5 pins the four subject-edge families as
+    `count(DISTINCT r)` over the graph with no claim filter, so the family count and the
+    "statements carrying one" count are NOT required to agree about the same edges, and adding a
+    filter to the family query would silently move the pinned denominator. What the direction
+    clause buys (#10982 review, finding 7) is that a forwards-only family count beside a
+    direction-agnostic point count cannot let a turn row satisfy the registered bar while zero
+    statements carried an edge.
+    """
+    subjects = projection.g.query("MATCH (n:Subject) RETURN count(n)").result_set
+    subjects = int(subjects[0][0] or 0) if subjects else 0
+    pattern = "|".join(SUBJECT_EDGE_FAMILIES)
+    # ⛔ `count(DISTINCT r)`, NOT `count(*)`: an UNDIRECTED multi-rel-type pattern is traversed in
+    # both orientations, so `count(*)` reports 2x the edges (measured on falkordb-server:v4.20.6:
+    # two `aboutSubject` edges -> count(*)=4, count(DISTINCT r)=2). `tortoise/taxonomy.py:40` already
+    # records that these patterns are unreliable across versions (#10982 review cycle 2, finding 1).
+    rows = projection.g.query(
+        f"MATCH ()-[r:{pattern}]-() RETURN type(r) AS t, count(DISTINCT r) AS n "
+        "ORDER BY t").result_set
+    families = {str(row[0]): int(row[1] or 0) for row in rows}
+    carrying = projection.g.query(
+        f"MATCH (n:Point)-[r:{pattern}]-() WHERE n.pointKind = 'statement' "
+        "RETURN count(DISTINCT n)").result_set
+    carrying = int(carrying[0][0] or 0) if carrying else 0
+    # ⛔ A5's registered denominator promises the `:Subject` count *"and the `Point` population
+    # reported beside them, never used as the actor denominator"* — so the block must carry the
+    # Point population too. It was missing, which left the pinned floors `a5_points` and
+    # `a2_candidates` consumed by NO field and no arm: a floor nothing can be checked against is a
+    # floor that cannot refuse (#11331 review round 8, P2-4b). The count is a COMPLETE enumeration,
+    # so an absent population reads as a measured 0 here — not as the `UNMEASURED` a zero
+    # denominator gets, because 0 Points is a real (and REFUSED-by-floor) measurement, not silence.
+    point_population = projection.g.query("MATCH (n:Point) RETURN count(n)").result_set
+    point_population = int(point_population[0][0] or 0) if point_population else 0
+    return {"subjects": subjects,
+            # ⛔ A5's BAR divides by the distinct actors the A-corpus NAMES, so the census must carry
+            # that population or the bar is not producible from the block (review cycle 2, finding 8).
+            # ⛔ NOT a pending landing: `#10983` (C2) CLOSED on 2026-11-07 WITHOUT registering an actor
+            # list, and the record now says so (`a_corpus.requires` — "the requirement is on the
+            # CORPUS's content, not on a pending landing"). Pointing this gap at that issue would
+            # aim a scoring child (`#10984`–`#10988`) at closed work — the stale-pointer shape V12
+            # refuses for `blocked_by`, reachable here in prose where nothing reddens.
+            "named_actors": unmeasured(
+                "the distinct actors the A-corpus names — the corpus carries no registered actor "
+                "list yet (#10983 closed without one), so this is a CORPUS-content gap; the "
+                "`:Subject` count is NOT it, or the bar would be satisfied by the run's own writes"),
+            "point_population": point_population,
+            "families": {name: int(families.get(name, 0))
+                         for name in SUBJECT_EDGE_FAMILIES},
+            "statements_with_a_subject_edge": carrying}
+
+
+def _tagged_edges(projection) -> int:
+    rows = projection.g.query(
+        "MATCH ()-[r:TAGGED]->() RETURN count(r)").result_set
+    return int(rows[0][0] or 0) if rows else 0
+
+
+def a_row_census(uri: str) -> dict:
+    """The `A1`–`A5` census, over the RUN'S OWN graph, on the ONE existing instrument.
+
+    Every number here is produced by a query; nothing is transcribed. **Each row is measured in its
+    own ``try``**, so one broken query costs that row and nothing else — the other rows still report
+    their measured numbers, and the failed one carries ``unmeasured(<the error>)``. A whole-block
+    failure was fail-closed but it discarded four measured rows for one bad query, which is the
+    opposite of what this block is for (#10982 review, finding 11).
+    """
+    from tortoise.projection import FalkorProjection
+
+    projection = FalkorProjection.from_uri(uri)
+    # ⛔ NO `uri` KEY (`#10982` review, F1). This dict is `json.dumps`-ed WHOLE into the
+    # committed machine record, and the URI carries the graph's credentials — so the
+    # block must not carry it even redacted. The E-census keeps a `uri` internally
+    # (`census()`) but the machine record PROJECTS six keys out of it and never emits
+    # it; traceability for THIS block is `run.graph`, which the record already states.
+    result: dict = {"criteria": list(A_CRITERIA)}
+
+    def row(name: str, fn, empty: dict) -> dict:
+        try:
+            return fn(projection)
+        except Exception as exc:  # the row is named; the rest of the census still reports
+            # ⛔ `census_reason`, never `{exc}`: an infra exception can echo the
+            # credential-bearing URI, and this block is committed (review F1).
+            reason = unmeasured(f"{name}'s queries could not run — {census_reason(exc)}")
+            # ⛔ NOT the zero skeleton: a numeric `0` under a key a real measurement also occupies
+            # reads as a MEASURED ABSENCE and scores the row RED on an infrastructure failure —
+            # the exact number this block exists to not print (#10982 review cycle 2, finding 2).
+            block: dict = {"error": reason}
+            for key, value in empty.items():
+                block[key] = ({name_: reason for name_ in value}
+                              if isinstance(value, dict) else reason)
+            return block
+
+    # A1 — the object→object graph, plus the rollup half.
+    result["A1"] = row("A1", _a1_object_edges,
+                       {"by_type": [], "by_endpoint_kind": [], "edges_total": 0,
+                        "objects": 0,
+                        "by_pinned_family": {name: 0 for name in A1_RELATION_FAMILIES},
+                        "pinned_family_declared_spellings": {
+                            name: list(A1_RELATION_FAMILY_FOLD.get(name, (name,)))
+                            for name in A1_RELATION_FAMILIES}})
+    # ⛔ The rollup half of A1 is NOT the edge count: A1's real criterion is a query ANSWERING, and
+    # no pack-declared rollup query is registered for this corpus yet (`#10984` owns both). An edge
+    # count with no query behind it is the shape this row exists to refuse, so it is named.
+    result["A1"]["rollup_queries"] = unmeasured(
+        "a pack-declared part-whole rollup query for this corpus — #10984 (C3) owns "
+        "registering it and asking it")
+
+    # A2 — attach vs mint. No counter exists anywhere on the write path yet.
+    # ⛔ THE BLOCK CARRIES EVERY PART THE REGISTRATION NAMES, not just the two the decision reads.
+    # The metric's THIRD arm is `held` — "each held candidate named with its reason" — and the
+    # threshold's RED leg is "a run that holds candidates without naming them is **RED**". The bar
+    # divides by DECIDED candidates, which the denominator fixes against the all-candidate count:
+    # "the all-candidate count is reported beside it, never used as the floor". Emitting only
+    # attach/mint left a consumer unable to tell "zero held" from "the held arm was never
+    # measured", so the registered RED leg could not be evaluated from the one block §3.7
+    # designates as the place a scoring child reads — the silence `a_row_census_lines` refuses
+    # everywhere else, and the exact omission the issue's Target forbids (#11331 review round 8).
+    _a2_counter = ("an S3 RESOLVE attach/mint/held counter on the run's own receipt — no writer "
+                   "stamps one today; #10985 (C4) owns it")
+    result["A2"] = {
+        "attach": unmeasured(_a2_counter),
+        "mint": unmeasured("the same counter's mint arm — #10985 (C4)"),
+        "held": unmeasured(
+            "the same counter's held arm, each held candidate NAMED with its reason — the "
+            "registration makes an unnamed held candidate RED; #10985 (C4)"),
+        "candidates": unmeasured(
+            "the all-candidate count the run decided over — reported BESIDE the floor, never "
+            "used as it; #10985 (C4)"),
+        "decided_candidates": unmeasured(
+            "the decided-candidate population A2's bar divides by — the population the pinned "
+            "floor a2_decided_candidates guards; #10985 (C4)"),
+        "attach_share": unmeasured(
+            "attach_share = attach / decided_candidates — a zero denominator is REFUSED, never "
+            "rendered as 0/0; #10985 (C4)"),
+    }
+
+    result["A3"] = row("A3", _a3_chain_join, {"statements": 0,
+                                              "statements_with_an_event_root": 0,
+                                              "event_root_coverage": unmeasured("a statement population"),
+                                              "cheap_joined": 0, "cheap_rate": unmeasured("a statement population"),
+                                              "cross_batch_joined": unmeasured("an eventId stamp"),
+                                              "cross_batch_rate": unmeasured("an eventId stamp"),
+                                              "relations": list(CHAIN_RELATIONS)})
+    result["A4"] = row("A4", _a4_pointkind,
+                       {"claim_points": 0, "excluded_capture_rows": 0, "statement": 0,
+                        "null": 0, "typed": 0, "typed_by_kind": {},
+                        "typed_share": unmeasured("a claim-point population")})
+    result["A5"] = row("A5", _a5_subjects,
+                       {"subjects": 0, "named_actors": 0, "point_population": 0,
+                        "families": {name: 0 for name in SUBJECT_EDGE_FAMILIES},
+                        "statements_with_a_subject_edge": 0})
+    tagged: dict = {"note": TAGGED_NOTE}
+    try:
+        tagged["edges"] = _tagged_edges(projection)
+    except Exception as exc:  # the row is named; the rest of the census still reports
+        tagged["edges"] = unmeasured(
+            f"TAGGED's query could not run — {census_reason(exc)}")
+    result["TAGGED"] = tagged
+    return result
+
+
+def a_row_census_lines(census_a: dict | None) -> list[str]:
+    """The rendered `A`-row block. Absent, failed or incomplete census renders a NAMED gap.
+
+    ⛔ A census that RAISED is not a census of zeros (#10982): the failure is named with its own
+    exception text, because an ``A1 edges=0`` line produced by a broken query is exactly the number
+    this block exists to not print.
+    """
+    if not census_a:
+        return ["a-rows: UNMEASURED(the A-row census did not run in this pass)"]
+    if census_a.get("error"):
+        return ["a-rows: UNMEASURED(the A-row census could not run — "
+                f"{census_a['error']})"]
+    if "A1" not in census_a:
+        return ["a-rows: UNMEASURED(the A-row census block is incomplete — no A1 entry)"]
+    lines: list[str] = []
+    add = lines.append
+    add("## A-row census — the object layer (#10982; REPORTED, not scored here)")
+    add("a-rows: registered in PRE-REGISTRATION.md §3.7; the bar is the record's and the "
+        "gate's, and no A-row has a scored run yet (#10984-#10988 own those)")
+
+    a1 = census_a["A1"]
+    add(f"a1 objects={a1['objects']} object_object_edges={a1['edges_total']} "
+        f"by_type={a1['by_type'] or '[]'} "
+        f"by_pinned_family={a1['by_pinned_family']}"
+        + (f" error={a1['error']}" if a1.get("error") else ""))
+    add(f"a1 by_endpoint_kind={a1['by_endpoint_kind'] or '[]'}")
+    # ⛔ The pinned families are WRITTEN labels (`type(r)`); the pack's declared spellings that fold
+    # onto them are named beside the counts so no reader takes `decomposesInto` for a stored label
+    # (#10982 review round 2).
+    add("a1 pinned_family_declared_spellings="
+        f"{a1.get('pinned_family_declared_spellings') or '{}'}")
+    add(f"a1 rollup_queries={a1['rollup_queries']}")
+
+    a2 = census_a["A2"]
+    # ⛔ EVERY part the registration names, in the order the decision reads them: the two arms it
+    # compares, the held arm whose silence is RED, the floor population, the count reported beside
+    # it, and the rate. A renderer that emits a subset makes the block's contents invisible in the
+    # artefact a scorer actually reads (#11331 review round 8, P2-1).
+    add(f"a2 attach={a2['attach']} mint={a2['mint']} held={a2['held']} "
+        f"candidates={a2['candidates']} decided_candidates={a2['decided_candidates']} "
+        f"attach_share={a2['attach_share']}")
+
+    a3 = census_a["A3"]
+    add(f"a3 statements={a3['statements']} "
+        f"statements_with_an_event_root={a3['statements_with_an_event_root']} "
+        f"event_root_coverage={a3['event_root_coverage']} "
+        f"cheap_joined={a3['cheap_joined']} cheap_rate={a3['cheap_rate']} "
+        f"cross_batch_joined={a3['cross_batch_joined']} "
+        f"cross_batch_rate={a3['cross_batch_rate']} relations={a3['relations']}"
+        + (f" error={a3['error']}" if a3.get("error") else ""))
+    add("a3 note: the CHEAP rate is reported for contrast and is NOT the bar; the registered "
+        "definition requires a cross-batch link with an eventId on BOTH ends (§3.7)")
+
+    a4 = census_a["A4"]
+    add(f"a4 claim_points={a4['claim_points']} "
+        f"excluded_capture_rows={a4['excluded_capture_rows']} "
+        f"typed={a4['typed']} statement={a4['statement']} null={a4['null']} "
+        f"typed_share={a4['typed_share']} typed_by_kind={a4['typed_by_kind'] or '{}'}"
+        + (f" error={a4['error']}" if a4.get("error") else ""))
+    add("a4 note: NULL (and a blank kind) is a THIRD state, never folded into statement; turn rows "
+        "and operator Points are EXCLUDED and counted, because they are capture rows and not "
+        "claims; the bar is UNMEASURED by registration (D3 fork, #10988/#1022)")
+
+    a5 = census_a["A5"]
+    add(f"a5 subjects={a5['subjects']} named_actors={a5['named_actors']} "
+        f"point_population={a5['point_population']} families={a5['families']} "
+        f"statements_with_a_subject_edge={a5['statements_with_a_subject_edge']}"
+        + (f" error={a5['error']}" if a5.get("error") else ""))
+
+    tagged = census_a["TAGGED"]
+    add(f"a-rows TAGGED_edges={tagged['edges']} note: {tagged['note']}")
+    return lines
+
+
 # ── E4 / E5 / E1+E2 ───────────────────────────────────────────────────────
 
 def _same_corpus(a: object, b: object) -> bool:
@@ -2804,10 +3806,12 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                e1b_out: dict, e2a_out: dict, e2b_out: dict, e3: dict,
                e3_out: dict, e4: dict, e4_out: dict, e5: dict, e5_out: dict,
                rows: list[dict], out_path: str,
+               a_census: dict | None = None,
                required: list[str] | None = None,
                accounts: list[dict] | None = None,
                steps_gap: str = "",
-               arm: dict | None = None) -> str:
+               arm: dict | None = None,
+               door: dict | None = None) -> str:
     """The human log with the machine table at the bottom (one artifact, one read)."""
     lines: list[str] = []
     add = lines.append
@@ -2823,6 +3827,7 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
     add(f"# graph: {graph} (fresh, disposable; every node in it was written by "
         "this run)")
     add(f"# arm: {arm_header(arm or {})}")
+    add(f"# door: {door_header(door or {})}")
     add("")
     add("## the run — one pass over the pre-registered corpus")
     for run in runs:
@@ -2992,6 +3997,13 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
         add("e5 incomplete receipts (disclosed, not silently averaged): " +
             " | ".join(e5["partial_receipts"]))
     add("")
+    # #10982: the A-row census, rendered from the SAME pass as the E-row census so a reader cannot
+    # be served two different graphs in one log, and emitted at a REAL section boundary — ⛔ it used
+    # to be spliced in right after the E3 note, which put the block INSIDE E3's section and left the
+    # `e1-aux objects_in_graph=…` line under the A-row heading, so a reader attributed an E1 floor
+    # reading to the A-row census (#10982 review round 2).
+    lines.extend(a_row_census_lines(a_census))
+    add("")
     add("## verdict table")
     add("criterion | verdict | measured | evidence | blocked_by")
     for row in rows:
@@ -3028,6 +4040,8 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
             "probe": "docs/evidence/7949-capstone/probes/capstone_measure.py",
             "graph": graph,
             "arm": arm_record(arm or {}),
+            "door": {**door_record(door or {}),
+                     "captures": door_witness(runs)},
             # #10215: V5 reads the step split from THESE two fields. A log that
             # omits them is read as the pre-#10215 "all eight required" shape,
             # which is why emitting them is the whole point of the accounting.
@@ -3048,6 +4062,9 @@ def render_log(*, head: str, prereg_sha: str, bars: dict, corpus_sha: str,
                 "relationship_anchored": census_data["relationship_anchored"],
                 "relationship_counts": census_data["relationship_counts"],
             },
+            # #10982: the A-row census travels in the machine record too, so a consumer
+            # reads the same numbers the human log prints.
+            "a_row_census": a_census,
             "e4_receipt": {
                 "numerator": e4["edge_correct"],
                 "denominator": e4["planted"],
@@ -3188,8 +4205,21 @@ def main(argv: list[str] | None = None) -> int:
     with measured_arm() as arm:
         print(f"capstone-measure: arm {arm_header(arm)}", flush=True)
         runs = run_corpus(graph, sessions)
+    # The door is a PATH, not only an environment fact (#10983 review round 11):
+    # a capture that returned before the lane dispatch — keyless (#3892) or a
+    # re-capture of an existing session (#1727 replay) — reports ok=True, so the
+    # failed-list below cannot see it and the table would be written anyway.
+    require_door_entered(runs)
     failed = [run["session_id"] for run in runs if not run["ok"]]
     census_data = census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
+    # #10982: the A-row census runs against the SAME graph and the SAME pass. A failure here must
+    # not silently vanish: a census that could not run renders as a NAMED gap, never as zeros.
+    try:
+        a_census = a_row_census(graph_uri(os.environ["TORTOISE_DB_URI"], graph))
+    except Exception as exc:  # the E-rows must still be scored and the gap named
+        # ⛔ `census_reason`, not the raw exception: `from_uri` failures quote the URI
+        # they were handed, and this string lands in the COMMITTED record (review F1).
+        a_census = {"error": census_reason(exc), "criteria": list(A_CRITERIA)}
     observed, unobserved = observe_steps(runs, census_data)
     # #10215: the same split the run probe's G5 emits, read from the SAME frozen
     # record — so a GREEN row from this probe is no longer refused for S2.3.
@@ -3322,8 +4352,9 @@ def main(argv: list[str] | None = None) -> int:
                       e2a_out=e2a_result, e2b_out=e2b_result, e3=e3,
                       e3_out=e3_result, e4=receipt, e4_out=e4_result, e5=e5,
                       e5_out=e5_result, rows=rows, out_path=out_path,
+                      a_census=a_census,
                       required=required, accounts=accounts, steps_gap=steps_gap,
-                      arm=arm)
+                      arm=arm, door=arm)
 
     destination = ROOT / out_path
     destination.parent.mkdir(parents=True, exist_ok=True)
