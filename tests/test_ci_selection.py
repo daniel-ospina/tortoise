@@ -13236,8 +13236,8 @@ def test_the_documented_slow_wall_restates_the_committed_maps_own_projection():
     restates by hand, "from the committed `durations` map". They went stale on the
     NEXT refresh — the 2026-11-09 sweep moved the map under them twice (the
     `#11605` inflated sample, then the `#11607` re-cut) and nothing read them, the
-    same rot that put a third stale copy in `python-ci.yml:1034-1038`
-    (`#11602` review, P2) and a fourth in the map's own notes.
+    same rot that put a third stale copy in `python-ci.yml`'s ARM-2 arithmetic
+    paragraph itself, and a fourth in the map's own notes (`#11602` review, P2).
 
     So the sentence is pinned to the function that produces it: the per-leg figure
     is `slow_wall_projection()[`projected_wall_min`]` and the job wall is the same
@@ -14054,7 +14054,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3125-3128`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3226-3228`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
@@ -14135,7 +14135,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
     # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
     # (`src/utils/inputs.ts:61-66`, at the **v7** ref this repo actually uses), and
-    # `python-ci.yml:790-795` records that
+    # `python-ci.yml:858-861` records that
     # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
     # the runner class the measured incident ran on. So on this repo's own pool the bare
     # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
@@ -14549,7 +14549,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "distributions\" — the dev-group registry wheels that `uv sync --frozen` "
         "re-resolves cold on every shard are what this cache exists to keep (NOT "
         "the torch set: that is `pip`'s cache, which this job restores read-only). "
-        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
+        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:1024-1031 records "
         "why this job departs from the vendor's CI recommendation; use plain "
         "`uv cache prune`.")
 
