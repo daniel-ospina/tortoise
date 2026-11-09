@@ -347,9 +347,9 @@ def test_D3_no_write_path_bypasses_the_record():
     gate exits 1 naming the call site.
 
     ⛔ This is a WIRING check, not the ordering the criterion also names
-    ("… in that order"). It cannot observe an order, which is why the three
-    `test_D3_*_order_*` / `…_ahead_…` legs below measure the same write path at
-    runtime with every door instrumented (#9567 D3, #11477).
+    ("… in that order"). It cannot observe an order, which is why the four
+    `test_D3_order_*` legs below measure the same write path at runtime with
+    every door instrumented (#9567 D3, #11477).
     """
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "tools" / "record_wiring_check.py")],
@@ -666,6 +666,11 @@ def traced(armed, tmp_path_factory):
         yield Traced(entries=entries, receipt=receipt, session_id=session_id,
                      tenant=tenant, sdk=sdk)
     finally:
+        # `undo()` is idempotent, so this second call costs nothing and covers the
+        # FAILURE path: if `capture_session` (or the census print) raises, the call
+        # before the `yield` never ran and the wrappers would otherwise stay
+        # installed for the rest of the session.
+        mp.undo()
         sdk.close()
 
 

@@ -26,7 +26,7 @@ Read that precisely. Two different claims are separated below and must not be me
 | | |
 |---|---|
 | Issue | #9567 **D3** (carrier: #11477) |
-| Head measured | §9/§9.1: `015b3dbc5e` and this commit. §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `8d3e7f13f0`, retained and banner-marked as superseded |
+| Head measured | §9/§9.1: `30068eabb0` and the commit after it, each row stating its own head where they differ. §8/§8.1: `e15a9ead22` (the head that carries the predicate they describe). §6.1: `629283eef`. §6/§7: `a32edfb17f` and earlier, each stated where it differs. §0/§1: the ORIGINAL pre-fix run at `8d3e7f13f0`, retained and banner-marked as superseded |
 | Record | `postgres:16`, throwaway container `t9567-cap-pg` on `127.0.0.1:33209`, repo record migrations applied by `_ensure_record_schema`; writer connected as `tortoise_record_app` (the RLS-scoped app role) |
 | Graph | the SDK's **embedded** backend (`TortoiseSDK(<tmp>/graph.db)`) — the same shape the armed CI job (`test-record-postgres`) runs, so this measurement is reproducible without a graph server |
 | Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the four legs |
@@ -151,7 +151,9 @@ falsifier had to be expressed against the lane the door *claims* (F3) rather tha
   nothing mutating reaches the cache before the capture's first journal append and first APPLIED record
   write. A cache write injected MID-capture (after some append and its record have landed) is green in
   every leg, **measured** (§6.2 F6), because the trace has no descriptor tying a raw `_GuardedGraph.query`
-  statement to the append it skipped. D3's falsifier is therefore satisfied for the early shape only.
+  statement to the append it skipped — and a FOLD-ATTACHED mid-capture statement has an `in_fold`
+  descriptor and is still unexamined, because leg 3 walks only ahead folds and leg 4 only the floor.
+  D3's falsifier is therefore satisfied for the early shape only.
 
   ⛔ **A CHEAPER STRENGTHENING EXISTS AND IS DELIBERATELY DECLINED, stated so no one thinks the floor is
   the ceiling.** A membership rule is checkable from this trace: *every mutating cache statement is
@@ -363,7 +365,7 @@ nested door's correct journal-first write a false one.
 Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped` (whole file), `ruff check .`
 clean, markdownlint 0 issues.
 
-## 9. Review cycle 4 — the record behind its own code, and two carried findings closed
+## 9. Review cycles 4–5 — the record behind its own code, and two carried findings closed
 
 Round 4 arrived as **two independent reviews** of the same head (`e15a9ead22`): one posted on the PR
 (`IC_kwDOToroq88AAAABkng8HA`), one dispatched. Neither found a defect in the instrument's logic — both
