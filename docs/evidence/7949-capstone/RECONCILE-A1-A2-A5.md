@@ -165,8 +165,12 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `tortoise/pack_hierarchy.py` (`:59` the module docstring, `:78` `__all__`, `:365` the definition,
    `:459` one internal call) — **no caller anywhere else in the tree**, `__main__.py` included (its
    `pack validate` reads `declared_hierarchy`/`hierarchy_diagnostics`, not the planner).
-   ⛔ **Superseded in the merged tree: `#11548` added the production caller**, `relation_write.py:631`
-   — see the fifth-landing amendment in §0. The producer is
+   ⛔ **Superseded in the merged tree — but only for the PLANNER: `#11548` added a production caller
+   of `plan_hierarchy_edges`**, at `relation_write.py:631` (`planned = plan_hierarchy_edges(…)`) — see
+   the fifth-landing amendment in §0. It did **not** add a caller of the WRITER: `apply_hierarchy_edges`
+   still has zero production callers (`git grep apply_hierarchy_edges -- tortoise/` → **two** hits,
+   the `__all__` entry and the `def`, i.e. no call at all), so this item's
+   heading stands and only the planner half of it is superseded. The producer is
    a **planner/oracle**; `#11213`'s own body says so and routes instance pairing to `#10999` (now
    **CLOSED**; its remainder is **`#11237`**, OPEN).
 2. **`extractor_v2.py` calls none of the three edge-creating verbs**, so it cannot be the producer of any
