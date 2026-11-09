@@ -1128,7 +1128,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | 90 of 90 m2 baseline | `tests/eval/write_path/baselines/m2.json` at this `fixtures_hash` |
 | 53/37, 7/8, 5/9, 21/8 split counts | the per-session sums above, partitioned by §2.1 |
 | 9 of 15 shape coverage (60%) | §1.3, `is_positively_bare_definite_description` |
-| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11189-11211` (`_collect_classify_items`, the collector's item set), `:13107` and `:13256` (the two `if items:` gates, one per classify pass) |
+| 7 unconditional / 1 conditional step (§11) | `tortoise/extractor_v2.py:11189-11211` (`_collect_classify_items`, the collector's item set), `:13177` and `:13326` (the two `if items:` gates, one per classify pass) |
 | 148 / 433 (0.34180), 148 / 383 (0.38642) | `capstone-measured-e0fc940b.log`'s `E3 census` block: `e3 label=Point nodes=338 anchored=141`, `Object 50/0`, `Event 45/7`, no `Document` written (§10.1) |
 | 141/150 (0.940000), 159 turn rows, 29 operator Points | the same census block's `point composition` line — reported, NOT adopted as E3's denominator (§10.1) |
 | 5/25 (20%) vs 13/25 (52%) recovered; 0.4800 raw absolute on n=25 | §10 @ `ecc7bc8ca` (run 1 losses 80.0%/48.0%) and `capstone-measured-e0fc940b.log`'s E5 row (§10.2) |
@@ -1807,6 +1807,33 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   touched; the values this record freezes are byte-identical. `document_sha256` is re-cut in this
   same commit, per §8's rule for *any* edit to this file.
 
+### 10.17 — the §11 cite block re-pointed for `#11569`'s fail-open guard (2026-11-08, `#11569`)
+
+- **Baseline — measured at this branch's head before the guard:** the two `if items:` gates at
+  `:13107`/`:13256`, the two fail-open `except` arms at `:13120`/`:13267`, the two result blocks at
+  `:13445`/`:13455`, and `_run_vet_pass`'s call at `:15542`.
+- **New value — measured at this head:** `:13177`/`:13326`, `:13190`/`:13337`, `:13515`/`:13525`,
+  and `:15612`.
+- **Why every number moves by the SAME delta.** The change wraps `extract_session_v2`'s S2.2
+  re-narrate block in a fail-open `try/except`: the `try:` line above the block, the block's own
+  62 lines re-indented (a column change, not a content change — all 62 pair 1:1 with new
+  lines of identical stripped text, measured), and the handler below it. The block therefore grows
+  by exactly **+70** lines, so every cite BELOW it moves +70 and every cite
+  ABOVE it (`_collect_classify_items` at `:11189`, its extent `:11189-11211`) is untouched — so
+  §10.15's and §10.16's readings of the collector still stand.
+- **The delta is a property of the final diff, not a constant.** The first cut of this guard was
+  39 lines shorter and the review that followed added a pre-bound `emphasis`, a
+  `vet_warnings` truncation mark, a per-arm `chunks` block and an `errors`/census record — which is
+  31 more lines. Every cite re-derived against the shorter guard was stale by exactly
+  that difference, which is why this entry states the delta it was measured at rather than a rule.
+- **Verified by content, not by arithmetic.** Each re-pointed number was read out of the tree and
+  compared with the symbol the document names: `:13177`/`:13326` are the two `if items:` classify
+  gates, `:13190`/`:13337` the two fail-open `except` arms, `:13515` `result["classify_later"] = {`,
+  `:13525` `result["vet"] = {`, `:15612` the `= _run_vet_pass(` call.
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this
+  file — which is why a cite move changes the digest even though no frozen value changed.
+
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 
 **Why this section exists.** `tools/capstone_verdict_check.py`'s V5 and `probes/capstone_run.py`'s G5
@@ -1819,7 +1846,7 @@ the condition; the gate reads the declaration below instead of asserting eight.
 
 `_collect_classify_items` (`tortoise/extractor_v2.py:11189-11211`) collects only candidates whose kind
 is **missing or the `unclassified` sentinel**. Both classify passes are gated on that list being
-non-empty — `if items:` at `:13107` (the S2 pass) and `:13256` (the post-S4 pass). So S2.3 has work **iff the S2 map left
+non-empty — `if items:` at `:13177` (the S2 pass) and `:13326` (the post-S4 pass). So S2.3 has work **iff the S2 map left
 something untyped** — and that is a property of the candidate set, not of the pipeline's health. A
 corpus whose map assigns a concrete kind to every candidate legitimately idles the pass.
 
@@ -1863,7 +1890,7 @@ evidence or its evidence issue.
    run log, so making a step conditional is a reviewed edit to a hash-pinned artefact rather than a
    lane's local choice. A log whose declaration the frozen record does not confirm is **refused**.
 
-**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:13120`, `classify(S2) failed` / `:13267`, `classify(union) failed`) leaves
+**Why (2) is a witness and not a loophole.** The extractor's fail-open `except` (`:13190`, `classify(S2) failed` / `:13337`, `classify(union) failed`) leaves
 the *same* empty `s2`/`union` block as an idle pass — `#9823` measured that. Accepting a bare empty
 block would therefore hand a **crashed** classify pass the same verdict as a pass with nothing to do,
 which is the fail-open shape a gate may not have. The failure is visible: the extractor appends
