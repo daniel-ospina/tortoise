@@ -56,6 +56,7 @@ if sys.version_info < (3, 12):  # noqa: UP036 — intentional RUNTIME guard
 
 import argparse
 import ast
+import copy
 import json
 import math
 import os
@@ -3890,8 +3891,49 @@ def parse_manifest_text(text: str) -> dict:
     return parsed
 
 
+#: `(path, st_mtime_ns, st_size)` + the parsed manifest. Keyed on the FILE'S
+#: IDENTITY, never on call order, so a rewrite of `config/ci-surfaces.yml` (or a
+#: `monkeypatch.setattr(cs, "MANIFEST", other_path)` in a test) is a cache MISS
+#: and never a stale read — the failure mode this cache could otherwise introduce.
+_LOAD_MANIFEST_CACHE: tuple[tuple[str, int, int], dict] | None = None
+
+
 def load_manifest() -> dict:
-    return _normalize_surfaces(parse_manifest_text(MANIFEST.read_text()))
+    """Parse `config/ci-surfaces.yml` into the normalised manifest.
+
+    CACHED on the file's identity and returned as a DEEP COPY.
+
+    WHY. The manifest is 1.18 MB and one parse costs ~0.73 s. Nothing in the tree
+    cached it, so every caller paid the full parse: MEASURED on
+    `tests/test_ci_selection.py` at the #11602 head — **632 calls in one suite
+    run**, i.e. ~460 s of a 554 s run. That is why the FILE alone projected
+    9.09 m against a slow-leg budget of 8.00 m and red the capacity pins: the
+    cost was the parse, not the tests' work. Caching it took the same suite from
+    **554.33 s to 130.21 s wall** (4.25x) with 483 passed / 2 failed — the same
+    two capacity pins, which are arithmetic on the committed map and so are
+    untouched by a runtime change.
+
+    WHY A DEEP COPY AND NOT THE CACHED OBJECT. Callers MUTATE the result — the
+    tests build poisoned variants in place (`m["surfaces"]["api"] = bad`, and
+    `tests/test_ci_selection.py` already deep-copies one call site by hand).
+    Handing back the cached dict would let one caller's edit leak into the next
+    and turn a passing pin green for the wrong reason. `deepcopy` of this
+    structure is ~1 ms, i.e. ~700x cheaper than the parse it replaces.
+
+    WHY THE KEY IS `(path, mtime_ns, size)`. A cache in a module whose input file
+    is routinely REWRITTEN must not be able to serve bytes that are no longer on
+    disk. `st_mtime_ns` moves on every write, so a rewrite invalidates; the path
+    is in the key because tests point `MANIFEST` at temp files. Only a rewrite
+    preserving BOTH `mtime_ns` and size could go stale, and that is not a state
+    this repo can produce.
+    """
+    global _LOAD_MANIFEST_CACHE
+    st = MANIFEST.stat()
+    key = (str(MANIFEST), st.st_mtime_ns, st.st_size)
+    if _LOAD_MANIFEST_CACHE is None or _LOAD_MANIFEST_CACHE[0] != key:
+        _LOAD_MANIFEST_CACHE = (
+            key, _normalize_surfaces(parse_manifest_text(MANIFEST.read_text())))
+    return copy.deepcopy(_LOAD_MANIFEST_CACHE[1])
 
 
 def classify_test_file(name: str, manifest: dict) -> str | None:
