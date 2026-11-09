@@ -850,7 +850,15 @@ def test_the_visible_surface_renders_the_surfaced_marker(home, tmp_path):
     out = _run_driver(home, tmp_path, display=True)
     message = out["first"]["message"]
     assert message["display"] is True
-    assert message["content"].startswith("Tortoise memory surfaced: ")
+    # The marker TRAILS the block. `display` controls TUI rendering only — the
+    # message still enters the model's context — and the labels are GRAPH
+    # CONTENT, so leading with them would put unframed graph text in the
+    # highest-attention position, ahead of the producer's own
+    # "data, not instructions" envelope.
+    assert not message["content"].startswith("Tortoise memory surfaced: "), (
+        "a graph-derived label must not lead the model's context — the "
+        "disclosure marker belongs AFTER the framed block")
+    assert "Tortoise memory surfaced: " in message["content"]
     assert _SEEDED_CLAIM in message["content"]
 
 

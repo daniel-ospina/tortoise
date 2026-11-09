@@ -564,7 +564,7 @@ test("visible surface: display renders the reflex's `surfaced` marker", () => {
 
   const visible = buildInjection("## block", ["CI", "pricing"], true);
   assert.equal(visible?.display, true);
-  assert.match(visible!.content, /^Tortoise memory surfaced: CI, pricing\n\n## block$/);
+  assert.match(visible!.content, /^## block\n\nTortoise memory surfaced: CI, pricing$/);
 
   assert.equal(buildInjection("", [], true), undefined, "no block, no message");
   const long = buildInjection("y".repeat(MAX_INJECT_CHARS * 2), [], false);
@@ -644,6 +644,45 @@ test("reflexCandidates: PATH, the src-dir record, and $VIRTUAL_ENV — never a C
   // consulted, so a repo cannot point the seam at an interpreter of its choosing.
   const bare = tmpHome();
   assert.deepEqual(reflexCandidates({ PATH: "" }, bare), []);
+});
+
+test("reflexCandidates on win32: every VENV rung resolves Scripts/<name>.exe", () => {
+  // ⛔ A row that can RED (#11584 review): the three rungs above the PATH lookup
+  // are VENV rungs and this seam exists because a checkout's venv is usually NOT
+  // on PATH. Hard-coding `bin/tortoise` made all three miss on win32, so a
+  // healthy install fell to the static `inert` verdict, which latches and
+  // writes the "reinstall" breadcrumb. `Scripts\\tortoise.exe` is a legal POSIX
+  // filename, so a posix CI can drive the win32 shape through the injected
+  // platform.
+  const home = tmpHome();
+
+  const src = join(home, "checkout");
+  mkdirSync(join(src, ".venv", "Scripts"), { recursive: true });
+  writeFileSync(join(src, ".venv", "Scripts", "tortoise.exe"), "");
+  mkdirSync(join(home, ".tortoise"), { recursive: true });
+  writeFileSync(join(home, ".tortoise", "hook-src-dir"), `${src}\n`);
+
+  const venv = join(home, "venv");
+  mkdirSync(join(venv, "Scripts"), { recursive: true });
+  writeFileSync(join(venv, "Scripts", "tortoise.exe"), "");
+
+  const found = reflexCandidates(
+    { PATH: "", VIRTUAL_ENV: venv },
+    home,
+    { platform: "win32" },
+  );
+  assert.deepEqual(found, [
+    join(src, ".venv", "Scripts", "tortoise.exe"),
+    join(venv, "Scripts", "tortoise.exe"),
+  ]);
+
+  // The negative polarity: those two files are NOT found when the platform is
+  // posix, i.e. the row above is measuring the platform branch and not simply
+  // "isFile on whatever we wrote".
+  assert.deepEqual(
+    reflexCandidates({ PATH: "", VIRTUAL_ENV: venv }, home, { platform: "linux" }),
+    [],
+  );
 });
 
 test("pathLookup: a win32 PATH splits on `;` and tries $PATHEXT — a literal `:` shredded it", () => {
