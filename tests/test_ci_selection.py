@@ -10509,9 +10509,23 @@ def test_the_unchanged_weight_claim_check_is_not_vacuous():
 #: ZERO rows tree-wide and the guard reported `[]` as a pass over a subject set that
 #: was EMPTY — a no-op gate, defeated inside the PR that added it. The shape that is
 #: stable across both spellings is the parenthetical's HEAD: `(` + the total + ` at
-#: this head` + `,` or `:` (the separator is required so a bare `(N at this head)` — a
-#: `--collect-only` count — is still excluded).
-_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:]")
+#: this head` + `,`, `:` or `.` (the separator is required so a bare `(N at this
+#: head)` — a `--collect-only` count — is still excluded).
+#:
+#: ⛔ AND THE SENTENCE-TERMINATING `.` IS A SEPARATOR, because it is the spelling the
+#: live map ADOPTED and this selector still could not read: the
+#: `test_7949_capstone_measure.py` row was re-spelled from main's `(229 at this head:
+#: `origin/main`'s 21…` to `(230 at this head. ⛔ Two of the terms below are HISTORY,
+#: …` — measured at `615bb14b31`, `(\d+ at this head[,:])` matched **nothing** tree-wide
+#: and `test_the_head_total_guard_has_a_live_subject` went RED in CI with exactly the
+#: message it exists to raise (`test-slow`, run 42557508872). So the no-op-gate class
+#: this guard was widened for came back through a THIRD spelling, which is the reason
+#: the pattern reads the whole separator SET rather than the two spellings that
+#: happened to be in the map when it was written: a total ending a sentence is still a
+#: total (`230 at this head.` is a claim, and it is the claim the arm beside it makes).
+#: A period cannot re-admit the `--collect-only` form the separator excludes — that
+#: one carries no `(` immediately before its number (`… 35 executions at this head)`).
+_HEAD_TOTAL_CLAIM_RE = re.compile(r"\(`?(?P<n>\d+)`? at this head[,:.]")
 
 
 def _head_total_claims(text: str) -> list[tuple[str, int]]:
@@ -10543,8 +10557,10 @@ def _durations_rows_with_a_stale_head_total(text: str, tests_dir: Path):
     bare phrase would red those correct notes; this one reads the sentence that
     asserts the very total the cite beside it asserts. What the shape requires is
     only that the claim OPENS a parenthetical with the number and CONTINUES with the
-    phrase (`(`…` at this head,` / `:`), never the tail that follows it — requiring
-    the tail is what made the first cut inert (#10610 review at `52d7173d5`, P2).
+    phrase (`(`…` at this head,` / `:` / `.`), never the tail that follows it —
+    requiring the tail is what made the first cut inert (#10610 review at
+    `52d7173d5`, P2). The `.` is the live row's own separator (measured at
+    `615bb14b31`: `(230 at this head. ⛔ Two of the terms below are HISTORY, …`).
     """
     out = []
     for key, note in _durations_row_comments(text):
@@ -10678,6 +10694,31 @@ def test_the_head_total_guard_is_not_vacuous(tmp_path):
         "the COLON spelling is what the live row uses — a guard that cannot read it "
         "is a no-op on the only row that states a prose total")
     assert _durations_rows_with_a_stale_head_total(fresh_colon, tmp_path) == []
+    # …and the PERIOD spelling, which is what the live `test_7949_capstone_measure.py`
+    # row uses at `615bb14b31` (`(230 at this head. ⛔ Two of the terms below are
+    # HISTORY, …)`). Measured at that head: the selector matched ZERO rows tree-wide,
+    # `test_the_head_total_guard_has_a_live_subject` redded in CI (`test-slow`, run
+    # 42557508872), and a stale total in the only row that states one was a clean map.
+    # The class is the same one the column tail cost, in a third spelling — a
+    # separator is required so a bare `(N at this head)` stays excluded, and `.` is a
+    # separator, not a bare tail.
+    stale_period = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(3 at this head. Two of the terms below are HISTORY, not a partition of "
+        "this head), no case counted twice.\n"
+        "surfaces: []\n")
+    fresh_period = (
+        "durations:\n"
+        "  test_two.py: 3.0  # #5086: 2 cases (`grep -c '^def test_'` = 2) ... "
+        "(2 at this head. Two of the terms below are HISTORY, not a partition of "
+        "this head), no case counted twice.\n"
+        "surfaces: []\n")
+    assert _durations_rows_with_a_stale_head_total(stale_period, tmp_path) == [
+        ("test_two.py", 3, 2)], (
+        "the live row terminates its total with a PERIOD — a guard that cannot read "
+        "it is a no-op on the only row that states a prose total")
+    assert _durations_rows_with_a_stale_head_total(fresh_period, tmp_path) == []
 
 
 #: `WATCHDOG_FLOOR_MIN` as a row NOTE states it: "`WATCHDOG_FLOOR_MIN` (19 min)".
