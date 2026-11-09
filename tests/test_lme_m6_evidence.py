@@ -1406,6 +1406,30 @@ def test_report_retrieval_by_category_is_non_abs_and_per_type():
     assert "recall_all@5" not in by_cat["full_mix"]
 
 
+def test_report_retrieval_by_category_carries_the_gold_cutoff_fraction():
+    """#2516 (C1) / #10538: the per-category block also carries the gold-cutoff
+    variant's FRACTION (``session_recall@n_gold``) — the only cutoff under
+    which a spread-evidence question is not arithmetically pinned to 0.0.
+    The BINARY projection stays in ``w7_publish`` alone, which is why the
+    official ``recall_all@5`` must remain ABSENT here (R12, pinned by
+    ``test_report_retrieval_by_category_is_non_abs_and_per_type``).
+
+    An outcome that does not carry the fraction is counted in ``n_missing``,
+    never coerced to 0.0.
+    """
+    o1 = _answer_evidence_outcome("m1", "multi-session", ae=1.0)
+    o1["session_recall@n_gold"] = 1.0
+    o2 = _answer_evidence_outcome("m2", "multi-session", ae=1.0)
+    o2["session_recall@n_gold"] = 0.0
+    o3 = _answer_evidence_outcome("m3", "multi-session", ae=1.0)
+    report = _answer_evidence_report([o1, o2, o3])
+    row = report["retrieval"]["retrieval_by_category"][
+        "Multi-Session Reasoning"]
+    assert row["session_recall@n_gold"] == {"value": 0.5, "n": 2,
+                                            "n_missing": 1}
+    assert "recall_all@n_gold" not in row
+
+
 def test_report_retrieval_by_category_counts_missing_denominators():
     """#2516: a category whose evidence denominator is PARTLY empty keeps the
     aggregate over the outcomes that have a value and reports ``n_missing``

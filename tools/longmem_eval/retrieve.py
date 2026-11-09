@@ -1210,7 +1210,8 @@ def _recall_metrics(
     evidence_point_count: int,
     chunk_evidence_point_count: int,
 ) -> tuple[dict[str, float], dict[str, float | None],
-           dict[str, float | None], dict[str, float | None]]:
+           dict[str, float | None], dict[str, float | None],
+           float | None]:
     """Recall@k over a hit list (session + turn + evidence + chunk-evidence).
 
     Extracted from ``retrieve_for_question`` (R6 #1545) — identical math,
@@ -1237,6 +1238,29 @@ def _recall_metrics(
     turn_recall: dict[str, float | None] = {}
     _evidence_recall: dict[str, float | None] = {}
     chunk_evidence_recall: dict[str, float | None] = {}
+
+    # #2516 (C1) — the ADDITIVE cutoff variant ``recall_all@N_gold``.
+    # ``recall_all@5`` is identically 0.0 for any question whose evidence set
+    # exceeds five pieces, at ANY ranking quality: the fifth slot is a wall, so
+    # a spread-evidence (multi-session) question cannot register an improvement
+    # under that cutoff however well retrieval does (the arithmetic is recorded
+    # on #10538, decision relay 2026-11-07T17:54Z, and that relay names #2516 as
+    # the issue that seals the variant). So the SAME ranking is ALSO measured at
+    # a cutoff equal to each question's own gold-session count — the fraction
+    # ``|gold ∩ top-n_gold| / n_gold``, whose per-question binary projection is
+    # ``recall_all@N_gold``. The OFFICIAL ``recall_all@5`` is untouched and
+    # stays the official row; this is a DECLARED LABELLED VARIANT beside it,
+    # never mixed into the official number (R12).
+    # ``None`` when the question has no gold session: the official ``all([])``
+    # edge is 1.0, and this module treats an empty denominator as NOT ELIGIBLE
+    # rather than fabricating a perfect score (module docstring).
+    session_recall_at_n_gold: float | None = None
+    if answer_sessions:
+        gold_top = hits[:len(answer_sessions)]
+        gold_retrieved = {h["session_id"] for h in gold_top if h["session_id"]}
+        session_recall_at_n_gold = (
+            len(answer_sessions & gold_retrieved) / len(answer_sessions))
+
     for k in ks:
         top = hits[:k]
         if answer_sessions:
@@ -1280,7 +1304,8 @@ def _recall_metrics(
                 len(chunk_hits) / chunk_evidence_point_count)
         else:
             chunk_evidence_recall[str(k)] = None
-    return session_recall, turn_recall, _evidence_recall, chunk_evidence_recall
+    return (session_recall, turn_recall, _evidence_recall,
+            chunk_evidence_recall, session_recall_at_n_gold)
 
 
 def _leg_mix(hits: list[dict]) -> dict[str, int]:
@@ -1466,6 +1491,15 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
         else:
             turn_recall[str(k)] = 0.0
 
+    # ── the additive gold-cutoff variant (#2516, C1) ──
+    session_recall_at_n_gold: float | None = None
+    if answer_sessions:
+        gold_retrieved = {h["session_id"]
+                          for h in annotated[:len(answer_sessions)]
+                          if h["session_id"]}
+        session_recall_at_n_gold = (
+            len(answer_sessions & gold_retrieved) / len(answer_sessions))
+
     # ── context handed to the reader (top_k) ──
     context_points = annotated[:top_k]
     question_date = question.get("question_date", "") or None
@@ -1478,6 +1512,7 @@ def _vector_retrieve(sdk: TortoiseSDK, question: dict, qid: str, *,
         "retriever": "vector",
         "hits": annotated,
         "session_recall@k": session_recall,
+        "session_recall@n_gold": session_recall_at_n_gold,
         "turn_recall@k": turn_recall,
         "context_tokens": context_tokens,
         "context_point_count": len(context_points),
@@ -3039,7 +3074,7 @@ def retrieve_for_question(
     # over the boosted pool" (stated in the methodology); the pre-boost
     # order rides in ``evidence_boost.pre_boost_ranked_ids``.)
     (session_recall, turn_recall, _evidence_recall,
-     chunk_evidence_recall) = _recall_metrics(
+     chunk_evidence_recall, session_recall_at_n_gold) = _recall_metrics(
         pool, ks=ks, answer_sessions=answer_sessions,
         evidence_turn_ids=evidence_turn_ids,
         evidence_point_count=evidence_point_count,
@@ -3317,6 +3352,11 @@ def retrieve_for_question(
         "question_id": qid,
         "hits": pool,  # pinned contract: the deduped pool (R1 #1540)
         "session_recall@k": session_recall,
+        # #2516 (C1): the labelled `recall_all@N_gold` cutoff variant's
+        # per-question fraction (see ``_recall_metrics``); None when the
+        # question has no gold session. Absent on older reports → the
+        # publication layer counts it as n_missing, never as 0.0.
+        "session_recall@n_gold": session_recall_at_n_gold,
         "turn_recall@k": turn_recall,
         "evidence_recall@k": _evidence_recall,
         "chunk_evidence_recall@k": chunk_evidence_recall,

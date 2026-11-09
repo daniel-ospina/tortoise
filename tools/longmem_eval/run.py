@@ -5374,6 +5374,13 @@ def run_evaluation(
                         "s4_out_tokens": (ingest_stats.get("recovery") or {}).get("s4_out_tokens", 0),
                         "s4_merge": ingest_stats.get("s4_merge", {}),
                         "session_recall@k": ret["session_recall@k"],
+                        # #2516 (C1): the labelled `recall_all@N_gold` cutoff
+                        # variant's per-question fraction (retrieve.py computes
+                        # it on the SAME ranking `session_recall@k` is measured
+                        # on). Absent on a retriever arm that does not emit it →
+                        # the publication layer counts it n_missing, never 0.0.
+                        "session_recall@n_gold": ret.get(
+                            "session_recall@n_gold"),
                         "turn_recall@k": ret["turn_recall@k"],
                         "evidence_recall@k": ret.get("evidence_recall@k"),
                         # R1 (#1540): the M6 raw-chunk containment view, wired
@@ -5631,6 +5638,11 @@ def run_evaluation(
                             "label": None,
                             "hypothesis": None,
                             "session_recall@k": {str(k): 0.0 for k in ks},
+                            # #2516 (C1): same drop convention as above —
+                            # nothing was retrieved, so the gold-cutoff
+                            # fraction is 0.0 too (mirroring recall_all@5's
+                            # 0.0 for this outcome, never a silent absence).
+                            "session_recall@n_gold": 0.0,
                             "turn_recall@k": {str(k): 0.0 for k in ks},
                             "ndcg@10": None, "p@10": None, "p@5": None,
                         }
