@@ -109,10 +109,15 @@
 -- `pgvector/pgvector:pg16` image the CI job uses. `pgvectorscale`/DiskANN is
 -- NOT available there, which is why this is HNSW and not DiskANN.
 --
--- ⛔ `SCHEMA public` IS STATED, AND THE QUALIFICATION ABOVE DEPENDS ON IT. Every
--- type/opclass reference in this file and in the converter's body is
--- `public.vector…` (that qualification is not optional — see the pg_restore
--- note at the top), so the extension MUST live in `public`:
+-- ⛔ `SCHEMA public` IS STATED, AND THE QUALIFICATION ABOVE DEPENDS ON IT.
+-- ⚠️ The qualification is mandatory in the converter's BODY (`public.vector(384)`)
+-- and in the index opclass, and it is deliberately ABSENT from the three
+-- `ADD COLUMN` type declarations: `pg_dump` re-qualifies a type with its real
+-- schema on the way out, so a RESTORE is safe either way, while an unqualified
+-- declaration is what the repo's own schema readers can recognise
+-- (`record_projection._DECLARED_TYPE_ALTERNATION` captures the column by its
+-- `vector` spelling, and `public.vector` is not matched). What the extension's
+-- schema DOES decide is that `public.vector` resolves at all:
 --   * `IF NOT EXISTS` against an install in ANOTHER schema (Supabase's
 --     documented pattern is `create extension vector with schema extensions`)
 --     is a silent no-op, after which every `public.vector(384)` below fails to

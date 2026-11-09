@@ -128,9 +128,18 @@ class ResidualScan:
 
     @property
     def verdict(self) -> str:
+        # ⛔ `None` IS NOT ZERO, EVEN HERE (#11660 review round 4, P3). The
+        # earlier spelling folded a missing count into zero via `or 0`, so a
+        # DIRECT caller constructing `ResidualScan(record_vectors=0,
+        # graph_vectors=None)` got CLEAN for a store nobody read — the exact
+        # invariant the module's own docstring states. `scan()` always appends a
+        # refusal for an unread store, so the shipped CLI was safe; the algebra
+        # must be safe on its own or the next caller inherits the hole.
         if self.refusals:
             return UNAVAILABLE
-        if (self.record_vectors or 0) > 0 or (self.graph_vectors or 0) > 0:
+        if self.record_vectors is None or self.graph_vectors is None:
+            return UNAVAILABLE
+        if self.record_vectors > 0 or self.graph_vectors > 0:
             return RESIDUE
         return CLEAN
 

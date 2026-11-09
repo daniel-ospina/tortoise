@@ -341,10 +341,14 @@ def cutover_armed() -> bool:
     """Is the dense leg's CUTOVER armed? Default NO — see :data:`ARMING_ENV`.
 
     ⛔ PUBLIC, and a separate question from :func:`armed`, because one consumer
-    outside this module must ask it: `projection.vector_index_retired()` keys
-    the `#4997` log LEVEL on whether a replacement actually answers the dense
-    read, and a DSN alone stopped being that answer when this switch was added
-    (#11660 review round 6, P1-3).
+    outside this module must ask it: `projection.vector_index_retired()` gates
+    both the `#4997` log LEVEL and the RETIREMENT itself on whether a replacement
+    actually answers the dense read. A DSN alone stopped being that answer when
+    this switch was added (#11660 review round 6, P1-3), and the retirement's
+    dependence on the same answer is round 4's P1: dropping the in-graph index
+    while nothing replaces it leaves the store with NEITHER an ANN index NOR a
+    record leg — every dense read a brute-force `:Point` scan recording
+    `scan_fallback`. One predicate, three consumers, no second opinion.
     """
     from .env_truthy import is_truthy
 

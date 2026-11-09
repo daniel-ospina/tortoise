@@ -195,9 +195,15 @@ def test_no_tenant_means_no_searcher(monkeypatch):
     a total loss of the dense leg as "no matches".
     """
     monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    # ⛔ ARM THE CUTOVER FIRST, or this pin is VACUOUS (#11660 review round 4,
+    # P3): `searcher()` returns at the cutover gate before `_resolve_scope` is
+    # ever reached, so deleting the tenant guard would leave it green.
+    monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     monkeypatch.setattr("tortoise.record_writer.record_tenant", lambda: None,
                         raising=False)
-    assert record_vector.searcher() is None
+    assert record_vector.searcher() is None, (
+        "an armed cutover with NO tenant must still refuse — an unscoped read "
+        "returns zero rows under RLS, which is a silent empty dense leg")
 
 
 def test_a_half_tenant_is_not_a_tenant():

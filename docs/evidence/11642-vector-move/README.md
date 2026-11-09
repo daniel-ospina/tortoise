@@ -227,6 +227,13 @@ docker run -d --name pgv -e POSTGRES_PASSWORD=pg -e POSTGRES_DB=record \
 The erasure half is re-runnable as an operator verb:
 
 ```bash
-uv run python tools/embedding_residual_scan.py --org <org> --graph <graph> --json
+uv run python tools/embedding_residual_scan.py \
+    --org <org> --graph-id <public.graphs.id> --graph-name <falkor graph name> \
+    --json
 # 0 CLEAN · 3 RESIDUE (a finding) · 2 NO VERDICT (a store could not be read)
+# ⛔ TWO identifiers, never one: the record's `graph_id` is a `public.graphs.id`
+# (`g_<hex>`, FK-enforced) and the FalkorDB graph NAME is that row's `namespace`
+# (`org_<ns>`). An earlier draft took one value for both, which read one store
+# under a wrong scope and — because a missing graph answers `count(n)` with 0
+# rather than raising — printed a FALSE CLEAN.
 ```

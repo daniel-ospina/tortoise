@@ -794,6 +794,10 @@ def vector_index_retired() -> bool:
     """
     if not VECTOR_INDEX_RETIRED:
         return False
+    # BOTH halves, because either alone is a false "yes" (#11660 review round 4
+    # P2 + round 6 P1-3). A DSN without the cutover is a deployment where the
+    # record is written but the dense read still goes to the graph; the cutover
+    # without a DSN cannot answer at all.
     try:
         from ..record_writer import record_dsn
     except Exception:  # noqa: BLE001, RUF100 — an unimportable arming module is "unarmed"
@@ -811,6 +815,7 @@ def vector_index_retired() -> bool:
         return bool(cutover_armed())
     except Exception:  # noqa: BLE001, RUF100 — a broken predicate is not an "armed"
         return False
+
 
 # ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
 #
@@ -20337,8 +20342,15 @@ class FalkorProjection(
         # and the `embedding` PROPERTY — writes stay here, and that is why
         # erasure has to span both stores — but the HNSW `vectorset` index is
         # retired. The reason it had to go rather than merely fall idle:
-        # FalkorDB's `vectorset` index is NOT carried in a graph dump, so every
-        # cold restore REBUILT it — **436.5 s at 20k nodes, 191.8 s tuned** —
+        # ⛔ CORRECTED: FalkorDB's `vectorset` index **IS** carried inside a graph
+        # key's serialized payload (measured — `docs/evidence/7846-indexed-graph-
+        # restore/README.md` §4a, which is why `restore_graph_key_safe` drops it
+        # BEFORE the DUMP and re-creates it after). An earlier version of this
+        # comment said it was "NOT carried in a graph dump", which the section it
+        # cites refutes. The cost is real and unchanged — an index-bearing restore
+        # pays 436.5 s at 20k nodes (191.8 s tuned) with the instance blocked
+        # (`#7846` §3) — and an index-FREE graph pays none of it, for dumps taken
+        # after this sweep. — **436.5 s at 20k nodes, 191.8 s tuned** —
         # and the rebuild DEADLOCKED the instance (`#7846`). A retired index is
         # not rebuilt, so the restore stops paying that.
         #
@@ -20403,6 +20415,21 @@ class FalkorProjection(
         except Exception as e:  # noqa: BLE001, RUF100 — fail SAFE: do not drop blind
             _log.debug("#11642: vector-index catalogue read failed (%s) — "
                        "leaving any in-graph vector index alone this sweep", e)
+            _has_vector_index = False
+        # ⛔ RETIRE ONLY WHEN THE REPLACEMENT IS ARMED (#11660 review round 4,
+        # P1). Dropping the index while `record_vector.ARMING_ENV` is unset
+        # leaves the store with NEITHER an in-graph ANN index NOR a record leg,
+        # so every dense read becomes a brute-force `:Point` scan and records
+        # `scan_fallback` — a regression dressed as a migration. So the drop and
+        # the gap report read the SAME predicate: `vector_index_retired()`.
+        if _has_vector_index and not vector_index_retired():
+            _log.info(
+                "#11642: leaving the in-graph Point.embedding vector index in "
+                "place on %s — the Postgres dense leg is NOT armed "
+                "(TORTOISE_RECORD_VECTOR_LEG unset, or no record DSN), and "
+                "retiring the index without its replacement would turn every "
+                "dense read into a full scan. Arm the record leg; the next "
+                "setup retires it.", self._graph_name)
             _has_vector_index = False
         if _has_vector_index:
             for _stmt in (

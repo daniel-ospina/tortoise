@@ -4707,6 +4707,13 @@ jobs:
         with:
           dsn_var: TEST_RECORD_SCRATCH_URI
           label_var: TORTOISE_CI_POSTGRES_LABEL_SCRATCH
+          # ⛔ THE SAME IMAGE AS THE FIRST PROVISIONER (#11660 review round 4,
+          # P1). `tests/test_9567_record_capstone.py::drilled` applies
+          # `RECORD_MIGRATIONS` to the SCRATCH server too, so
+          # `20261109000001_record_embedding_vector.sql` runs here as well — on a
+          # plain `postgres:16` that is `extension "vector" is not available` and
+          # the D8 drill reds on a required leg.
+          image: pgvector/pgvector:pg16
       - name: Run the record's Postgres legs (armed — #9551)
         run: |
           set +e

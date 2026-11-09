@@ -2253,6 +2253,18 @@ surfaces:
   # cutover off. The reason that survives is the one that stands alone — the
   # record is a journal fold with NO backfill, so arming it would drop every
   # pre-existing point out of the dense pool (`record_vector.ARMING_ENV`).
+  # ⛔ THE DB-FREE HALF (`test_11642_vector_move.py`) proves the served set, the
+  # arming gate and the residual verdict algebra; it CANNOT execute
+  # `record_vector.vector_search`, whose failure mode is `RecordVectorError` ->
+  # the NAMED graph fallback — i.e. a broken query would ship green and look like
+  # a correctly-degrading store. The LIVE half that does execute it (applying the
+  # migrations to `TEST_RECORD_DB_URI` on the `pgvector/pgvector:pg16`
+  # provisioner, writing through the production projection, and asserting the
+  # returned order and the terminal-row exclusion) is
+  # `tests/test_11642_vector_move_live.py`, registered below and run by the
+  # `test-record-postgres` job. ⚠️ An earlier draft of THIS comment said that
+  # file did not exist: it did, one arm down in the same list, and the peer lane
+  # added it — the contradiction is what #11660 review round 4 flagged.
   - test_11642_vector_move.py
   # The LIVE half: it executes `record_vector.vector_search` against a real
   # pgvector server (the SQL, the shortfall count, the status predicate, the

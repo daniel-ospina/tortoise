@@ -440,7 +440,12 @@ class TestEnsureIndexesVectorApi:
             f"the in-graph vector index was CREATED on a {vector_api!r} engine: "
             f"{creates}")
 
-    def test_an_existing_vector_index_is_dropped(self):
+    def test_an_existing_vector_index_is_dropped(self, monkeypatch):
+        # The retirement is authorised only when the Postgres dense leg is
+        # armed (#11660 review round 4): the index and its replacement are one
+        # decision, so this pin exercises the ARMED posture.
+        monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+        monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
         """The retirement's positive half: a store that HAS one loses it.
 
         This is the migration for every already-deployed graph — the one a cold

@@ -323,6 +323,41 @@ def _bare(index_rows=None, raise_on_indexes=False, *, ver=(4, 18, 3),
     return proj
 
 
+
+def _arm_the_record_leg(monkeypatch):
+    """Arm the Postgres dense leg so the RETIREMENT is authorised (#11660 R4).
+
+    The drop is gated on `projection.vector_index_retired()`, which asks whether
+    the replacement is armed — dropping the in-graph index while the record leg
+    is OFF would leave the store with neither, turning every dense read into a
+    brute-force scan. These pins exercise the ARMED posture, so they arm it; the
+    unarmed posture has its own pin below.
+    """
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.setenv("TORTOISE_RECORD_VECTOR_LEG", "1")
+
+
+def test_the_retirement_is_NOT_authorised_while_the_record_leg_is_off(monkeypatch):
+    """Unarmed: the index STAYS, and no DROP is issued (#11660 review round 4).
+
+    This is the P1's pin. The index and its replacement are one decision: retire
+    the index while `TORTOISE_RECORD_VECTOR_LEG` is unset and every dense read
+    becomes a brute-force `:Point` scan recording `scan_fallback`.
+    """
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv("TORTOISE_RECORD_VECTOR_LEG", raising=False)
+    graph = _bare([_vector_row("Point")])
+    graph._ensure_indexes()
+
+    assert not any(_is_vector_drop(c) for c in graph.g.calls), (
+        "the in-graph index was retired while nothing replaced it — every dense "
+        "read would be a full scan")
+    assert not any(
+        ("createnodeindex" in c.lower()) or ("create vector index" in c.lower())
+        for c in graph.g.calls
+    ), "the index must be left ALONE, not re-created, on an armed-retirement no-op"
+
+
 def _is_vector_drop(statement: str) -> bool:
     """Is this the #11642 retirement DROP, and not the fulltext drop→recreate?
 
@@ -1139,6 +1174,7 @@ def _indexes_reads(proj) -> int:
 
 
 def test_exactly_one_inventory_read_per_setup(monkeypatch):
+    _arm_the_record_leg(monkeypatch)
     """The steady state costs ONE catalogue round trip — and the sweep that
     RETIRES an in-graph vector index costs exactly one more (#11642).
 
@@ -1193,7 +1229,8 @@ def test_fast_path_still_measures_the_catalog(caplog):
 
 
 # (j) write-path non-interference — falsifiable, and INVERTED by #11642
-def test_report_never_gates_index_RETIREMENT():
+def test_report_never_gates_index_RETIREMENT(monkeypatch):
+    _arm_the_record_leg(monkeypatch)
     """`_record_vector_index_inventory` must not gate the retirement either.
 
     ⛔ THIS PIN IS THE OPPOSITE CLAIM TO WHAT IT MADE BEFORE #11642, on purpose.
@@ -1239,7 +1276,8 @@ def test_report_never_gates_index_RETIREMENT():
         "drop is a failing DDL round trip on every setup")
 
 
-def test_the_inventory_read_sits_AFTER_the_retirement_write():
+def test_the_inventory_read_sits_AFTER_the_retirement_write(monkeypatch):
+    _arm_the_record_leg(monkeypatch)
     """The measurement is not in front of the write (#11660 review F1).
 
     The sibling pin above proves the drop happens; this one proves WHERE the
