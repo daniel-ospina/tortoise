@@ -2885,6 +2885,24 @@ def test_sitemap_discovery_reads_the_root_element_not_the_filename(tmp_path: Pat
     assert {p.name for p in tmp_path.glob("sitemap-*.xml")} == {"sitemap-company.xml"}
     assert found == {"blog-sitemap.xml", "sitemap-company.xml"}
 
+    # ⛔ AN UNREADABLE FILE IS NOT AN ABSENT SITEMAP — pinned, because both halves of this
+    # split are one simplification away from silent regressions and NOTHING else measures it.
+    # Review of `6248131e52` found the swallow had removed the only malformed-XML tripwire
+    # over the top-level sitemaps: a truncated `sitemap-extra.xml` went from `2 failed` under
+    # the old glob to `72 passed` under root-element discovery, i.e. a corrupt sitemap that
+    # robots.txt and the index both advertise was served to crawlers with every guard green.
+    truncated = '<?xml version="1.0" encoding="UTF-8"?>\n<urlset xmlns="' + ns + '"><url>'
+    (tmp_path / "sitemap-extra.xml").write_text(truncated, encoding="utf-8")
+    (tmp_path / "feed-broken.xml").write_text(truncated, encoding="utf-8")
+
+    # A sitemap-shaped name that will not parse is a DEFECT: it must raise, not be dropped.
+    with pytest.raises(ElementTree.ParseError):
+        _is_sitemap_document(tmp_path / "sitemap-extra.xml")
+
+    # Anything else that will not parse is simply not a sitemap — the walk is every `*.xml`,
+    # which includes feeds and exports this project does not own.
+    assert _is_sitemap_document(tmp_path / "feed-broken.xml") is False
+
 
 def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
     """Every page URL in a TOP-LEVEL sitemap under `website/` must resolve — not be noindex.
