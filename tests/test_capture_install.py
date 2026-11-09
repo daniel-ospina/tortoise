@@ -3319,8 +3319,22 @@ def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
     """A ``.codex`` symlink loop must be a populated error, never an uncaught
     ``RuntimeError`` traceback (``Path.resolve()`` raises on a cycle).
 
-    Mutation: drop the ``(OSError, RuntimeError)`` boundary — a traceback
-    escapes instead of ``Install failed``."""
+    The refusal is the ESCAPE GUARD's, not the read half's boundary: since
+    #11588 review cycle 10 the guard refuses a path whose destination cannot
+    be established (it is not PROVEN to be inside the root), so the guard's
+    ``Refusing:`` line is what the user sees and the ``RuntimeError`` never
+    reaches the boundary. That is strictly better — the same rc 1, no
+    traceback, plus the remedy — and it fires in the write-free dry run too.
+
+    The assertion is the OBSERVABLE contract and the LABEL of the component
+    that owns it (one refusal vocabulary per guard), not the exception class
+    name: pinning ``RuntimeError`` here would RED the day the guard speaks,
+    which is exactly what happened (#4001 R32).
+
+    Mutation: drop the ``try/except (RuntimeError, OSError)`` around
+    ``cp.resolve()`` in ``_escape_refusal`` — the exception escapes to the
+    boundary and renders as ``Install failed: RuntimeError: Symlink loop``, so
+    ``Refusing`` is absent and this REDs."""
     run, root, _home = cli
     (root / ".codex").symlink_to(".codex")  # self-loop
 
@@ -3328,7 +3342,8 @@ def test_cli_install_codex_symlink_loop_is_a_populated_error(cli):
 
     assert r.returncode == 1, (r.returncode, r.stdout, r.stderr)
     assert "Traceback" not in r.stderr, r.stderr
-    assert "Install failed" in r.stderr, r.stderr
+    assert "Refusing" in r.stderr, r.stderr
+    assert "symlink that cannot be resolved" in r.stderr, r.stderr
 
 
 def test_cli_install_codex_non_ascii_registration_under_ascii_locale(tmp_path):
