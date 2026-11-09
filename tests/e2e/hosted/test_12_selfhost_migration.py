@@ -165,6 +165,14 @@ def _boot_selfhost(tmpdir: str):
         # contention-sensitivity: the client then only ever sees warm requests,
         # and the 30s fail-fast is left intact rather than raised (raising it
         # would hide a genuinely wedged server instead).
+        #
+        # Phase 2 gets its OWN floor rather than sharing phase 1's clock. Liveness
+        # may legally consume the whole 60s window, and before this change the
+        # write was then priced against playwright's SEPARATE 30s client budget —
+        # so one shared clock would make a slow-but-healthy boot fail where the
+        # old code passed, and would blame the write path for a clock that ran
+        # out during liveness. The outer 3-attempt boot retry still bounds this.
+        warm_deadline = max(deadline, time.time() + 30.0)
         for _attempt in range(_WARM_ATTEMPTS):
             # Re-checked here, not only in phase 1: the expensive first write is
             # now a BOOT step, so a daemon that dies inside it (OOM/segfault, the
@@ -174,14 +182,20 @@ def _boot_selfhost(tmpdir: str):
             if proc.poll() is not None:
                 tail = log_path.read_text(errors="replace")[-2000:]
                 raise RuntimeError(f"selfhost died during boot:\n{tail}")
-            warmed, last_err = _warm_write_path(base, deadline)
+            warmed, last_err = _warm_write_path(base, warm_deadline)
             if warmed:
                 return base, proc
-            if time.time() < deadline:
+            if time.time() < warm_deadline:
                 time.sleep(1.0)
+        # The loop's poll only covers a death BEFORE an attempt — the LAST attempt
+        # has no successor iteration, so a daemon that dies inside it would land in
+        # the write-path bucket below, with its log never read.
+        if proc.poll() is not None:
+            tail = log_path.read_text(errors="replace")[-2000:]
+            raise RuntimeError(f"selfhost died during boot:\n{tail}")
         raise RuntimeError(
-            "selfhost /health is live but its WRITE path is not usable in 60s "
-            f"({_WARM_ATTEMPTS} warm-up attempts): {last_err}")
+            "selfhost /health is live but its WRITE path is not usable "
+            f"({_WARM_ATTEMPTS} warm-up attempts within the boot budget): {last_err}")
     except Exception:
         if proc.poll() is None:
             proc.kill()
