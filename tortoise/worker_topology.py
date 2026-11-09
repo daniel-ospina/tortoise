@@ -294,6 +294,7 @@ RELOAD_FLAG = "--reload"
 #: a DECLARED entry ahead of the pin (`_AHEAD_OF_THE_PIN`) instead of reddening.
 UVICORN_FLAG_OPTIONS: frozenset[str] = frozenset({
     "--reload",
+    "--nope",
     "--access-log",
     "--no-access-log",
     "--use-colors",
