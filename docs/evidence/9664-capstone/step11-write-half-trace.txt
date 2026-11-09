@@ -1,0 +1,150 @@
+#9664 / #9340 — step 11 UGLY CASES, THE WRITE HALF (2026-11-08, live hosted service)
+====================================================================================
+
+WHY THIS FILE EXISTS
+--------------------
+`run-2026-10-26/step11-ugly-cases-trace.txt` attempted all three step-11 probes from the
+ChatGPT venue. The READ reached the connector (`U3`, verified); BOTH WRITES were stopped by
+OpenAI before any Tortoise code ran:
+
+    This tool call was blocked by OpenAI's safety checks. Please double check what you are sending.
+
+So U1's row recorded TWO missing things, quoted here with the splice marked (the old
+reason spliced two clauses; nothing is re-typed as contiguous that was not): "a hosted-org
+credential usable from the SDK/HTTP surface … plus a second graph to target". This file
+measures the FIRST of those and reports what the second one now costs. It does not close
+U1 — that is recorded on the row, deliberately, because #9340 makes U1 the ACCEPT arm
+(see 2 and 5).
+
+WHAT WAS DONE (and what it legitimately is)
+-------------------------------------------
+A fresh free org was minted through the product's OWN documented zero-email path — the CLI
+built for headless agents (#663):
+
+    $ uv run tortoise signup
+    Signing up for a free hosted team (anonymous, no email)…
+    ✅ Free team created: agent-a28284
+       API key: <redacted: tt_ key>
+       Config saved to /home/cmux/.tortoise/credentials.json (shown once — store it)
+       Recovery token: st_0472c48d…
+       RECOVERY TOKEN — save this: it is the only way back into this team if your key is lost.
+       Next: tortoise create-point "hello world" --kind statement
+
+(One editorial [note], not output: the recovery token is what a later pass would use to
+retake the team if the `tt_` key is lost. The `Recovery token:` line and the warning under
+it are two separate lines in `tortoise/__main__.py`; NEITHER is folded into the other here.)
+
+This is NOT a substituted target: it is a real org on the live service (api.premiselabs.co),
+and the write is delivered by the surface the product actually serves — `/mcp`, the mount a
+hosted connector uses (`tortoise/hosted_api.py` mounts it) — with the minted `tt_` key instead
+of the ChatGPT venue. The VENUE is the thing that blocked the 2026-10-26 run; changing only
+that is exactly what U1's reason asked for.
+
+REPRODUCE — the script is IN THE TREE, not on the authoring box
+---------------------------------------------------------------
+    uv run tortoise signup                                        # 2 free teams/IP/24h
+    uv run python docs/evidence/9664-capstone/probes/u1_probe.py  # the four blocks below
+
+MEASUREMENT — 1. what the org can reach
+---------------------------------------
+    == 1. tortoise_list_graphs (what this org can reach) ==
+    tortoise_list_graphs {}
+    OK ["org_a28284790cff4144b699e4b4fb"]
+
+One graph: the default, addressable by its namespace.
+
+(EVERY `name {json}` line is the script's REQUEST ECHO; every `OK`/`ERROR` line is the
+tool's response. PRESENTATION, so nothing here reads as a byte-exact capture when it is
+not: the script prints each echo on ONE line and this file WRAPS it at ~100 columns; the
+script prints responses as hard prefixes (`neg[:900]`, `pos[:300]`, `found[:700]`,
+`repr(absent[:400])`). Where a response below shows LESS than its prefix, the gap is
+marked `…` inline and the bracketed note names BOTH the script's cut and this file's
+elision — no closing bracket appears here that a prefix does not contain. The untruncated
+response is whatever the command above prints.)
+
+MEASUREMENT — 2. NEGATIVE CONTROL: the write, with an EXPLICIT NON-DEFAULT graph (U1's case)
+-------------------------------------------------------------------------------------------
+    == 2. NEGATIVE CONTROL — write with explicit non-default graph 'capstone-9664-nod' ==
+    tortoise_create_point {"kind": "statement", "content": "capstone-9664 U1 probe: explicit
+        non-default graph (must not exist)", "graph": "capstone-9664-nod"}
+    ERROR No graph 'capstone-9664-nod' is reachable from this workspace. Reachable graphs:
+          'default' (id g_dfa9a45dc4234801, graph_id 'default').
+
+REFUSED BY OUR CODE (`tortoise/mcp_auth.py`), not by the host, and the message NAMES the
+graphs that ARE reachable. The shape a caller gets here is the same one U3 recorded for a
+foreign READ — which is why this row is NOT regraded on it: a refusal proves the resolver
+refuses, and U1's accept arm (a write landing in an EXISTING second graph) is a different
+observable (see 5).
+
+MEASUREMENT — 3. POSITIVE CONTROL: is this org's write path even live?
+---------------------------------------------------------------------
+Without this, "the probe string is absent" could mean "search returns nothing on a new org".
+
+    == 3. POSITIVE CONTROL — write into 'default', then read it back ==
+    tortoise_create_point {"kind": "statement", "content": "capstone-9664 positive control: this
+        string MUST be findable"}
+    OK {"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
+        MUST be findable","pointKind":"statement","is_operator":false,"status":"live","createdAt":"2026-11-08T05:24:07.799623+00:00","updatedAt":"2026-11-08T05:24:07.799623+00:00","ep_dirty":true,"ep_dirty_at":1,"content 
+        [script prefix `pos[:300]` — the line is also wrapped by this file]
+
+    tortoise_search {"query": "positive control", "limit": 5}
+    OK [{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
+        MUST be findable","point_kind":"statement","match_source":"rrf", …
+        [this file elides ~540 more chars of a `found[:700]` prefix; `…` marks the elision]
+
+The write path is live and retrieval finds what landed.
+
+Note on the create response: on the live service it is the point JSON FOLLOWED BY an
+advisory line ("… is this workspace's default graph ('default'). If another graph was
+meant, pass `graph` with that graph's id or name."), which is why the script parses it with
+`json.JSONDecoder().raw_decode` rather than `json.loads` — and why the control is tied to
+the returned POINT ID rather than to the response's shape.
+
+MEASUREMENT — 4. the fail-open half: nothing landed from the refused write
+--------------------------------------------------------------------------
+    == 4. FAIL-OPEN HALF — the negative probe string must be absent ==
+    tortoise_search {"query": "capstone-9664 U1 probe", "limit": 5}
+    OK '[{"id":"1a1b99d2bfc-1ceb72af6103","content":"capstone-9664 positive control: this string
+        MUST be findable","point_kind":"statement","match_source":"rrf", …
+        [this file elides ~240 more chars of a `repr(absent[:400])` prefix; `…` marks the elision]
+
+    controls: refused=True pos_write=True pos_found=True neg_absent=True
+    PROBE-RESULT: REFUSED-AND-ABSENT
+    [shell] exit 0          # the exit status is the shell's, not a line the script prints
+
+The one hit is the POSITIVE CONTROL point, which shares the "capstone-9664" token — the
+NEGATIVE probe's text (`…explicit non-default graph (must not exist)`) appears in no result.
+So the refusal is not cosmetic AND the check is not vacuous: the same query space demonstrably
+returns points that exist.
+
+The verdict is mechanical and consults EVERY control — `neg_absent` requires that the search
+SUCCEEDED and returned the positive-control point, so a dead index or an error payload cannot
+be mistaken for an absence. (Review round 2 caught the first version: it checked only the
+negative half, so a stubbed failing search still printed `REFUSED-AND-ABSENT` and exited 0 —
+an unmeasured fail-open half reported as measured. Review round 3 caught the pair of
+mislabelled `status` variables that made this block self-contradicting when a search errored.)
+
+MEASUREMENT — 5. why U1's accept arm / U2 / U4 still cannot be measured (the 402, verbatim)
+-------------------------------------------------------------------------------------------
+U1's accept arm, U2 (a duplicate graph NAME) and U4 (a soft-deleted graph) each need a SECOND
+graph, and a minted free org cannot hold one. Measured, not inferred:
+
+POST /v1/organizations/<org_id>/graphs  {"name":"capstone-u2-dup"}
+    -> 402 {"detail":"Custom graphs require the Builder plan. Upgrade to create multiple graphs.
+    [wrapped here for width; the payload has no newline] Need more? Contact support@premiselabs.co."}
+
+So the missing thing on those rows is named exactly: a paid tier that permits a second graph
+(Builder), or an owner-provided org that already has two. It is NOT a credential — a credential
+exists and was used above — and it is not a defect in the resolver.
+
+REPRODUCE THE 402
+-----------------
+    curl -s -X POST -H "Authorization: Bearer <tt_ key>" -H 'Content-Type: application/json' \
+         -d '{"name":"capstone-u2-dup"}' \
+         https://api.premiselabs.co/v1/organizations/<org_id>/graphs      # expect 402
+
+NOT DONE HERE, ON PURPOSE
+-------------------------
+No graph was created, nothing was deleted, and no shared data was touched: the org is new, the
+only durable effects are one control point in its own `default`, and deleting that org would be
+a destructive drill this lane names and does not run.

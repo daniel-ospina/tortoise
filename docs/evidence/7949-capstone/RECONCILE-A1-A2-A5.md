@@ -160,7 +160,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    insertion then moved both; both now read `17630`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2736-2738`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2738-2740`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -320,9 +320,10 @@ the path matters: unscoped, both patterns also match THIS record and its quoted 
 count-of-mentions trap §0 documents). Every number this paragraph pins to one of §5's four shas is re-derived at that sha by the
 `for s in aa414b4d5 8e49ae909 80c912244 d69faaf38` sweep in §5 — a live grep cannot do it (scoped,
 `git grep -n 'vet_enabled = ' -- tortoise/extractor_v2.py` prints
-`:12929` at `a1dff7cec8` and `:12779` at `62248db88`, and the sweep covers **neither** of those two
-bases — pinned to the two shas, never to `HEAD`, because a `HEAD`-relative number is the same rot in a
-new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
+one line, and its number is a convenience printed BESIDE the symbol rather than a
+`HEAD`-relative claim: `:12929` at `a1dff7cec8`, `:12779` at `62248db88` — so the sweep
+covers **none** of those two — the numbers it re-derives are pinned to the SHAS, never to a
+`HEAD`-relative delta, which is the same rot in a new coat), which is the whole point. That is the class of defect §0 exists to catch: a number true at
 one base and false at the base the record claims. Which is why the 0.0 pp above is the **armed** result,
 not an unarmed one.
 
