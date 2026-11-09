@@ -11061,8 +11061,12 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
     #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
     `sdk.py:16414-16428`->`:16529-16543` x3 — `#11548` moved this seam +13 after that
-    re-point, and the range is read back out of the record precisely so this note cannot
-    re-type it — `probes/capstone_measure.py:2238-2243`
+    re-point. ⛔ The number printed here is a CONVENIENCE COPY, not a pin: the arm below
+    reads this range OUT OF THE RECORD and asserts both of its endpoints against
+    `tortoise/sdk.py`, so the value above is what a reader is spared from grepping for,
+    and a later drift reds the arm while leaving this sentence stale — which is the
+    #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
+    `probes/capstone_measure.py:2238-2243`
     ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it), `extractor_v2.py:1720` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9021 :9039 :9046 :9426` after the `f5c69f7478` base merge (+68 at #11449, then +15
