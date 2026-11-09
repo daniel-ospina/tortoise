@@ -39,6 +39,10 @@ from tortoise.capture_install import (
 _REPO_ROOT = Path(__file__).resolve().parent.parent
 _HOOKS_DIR = _REPO_ROOT / "tortoise" / "claude-hooks"
 _PI_SRC = _REPO_ROOT / "tortoise" / "pi-hooks" / capture_install.PI_EXTENSION_NAME
+#: The READ half of the Pi seam (#2119), resolved off the contract rather than a
+#: second hand-written path — a path list copied out of the contract is exactly
+#: what drifts (the `ARTIFACT_CONTRACTS` / #5351 lesson).
+_PI_READ_SEAM_SRC = hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source
 _DASHBOARD = _REPO_ROOT / "website" / "apps" / "dashboard" / "src" / "harnesses.js"
 _PY = sys.executable
 
@@ -4470,6 +4474,30 @@ _GENERATION_DIGESTS = {
     18: "981a7ce6b153e313197c7e276e7b0f50f2996007ac7b0f809a8788fc1b0c0648",
 }
 
+#: The READ half of the same Pi seam (#2119) — a SECOND shipped artifact of the
+#: SAME generation, graded as one seam by
+#: :func:`tortoise.hook_install.contract_version_for` — so "bytes changed,
+#: generation left alone" has to be catchable for BOTH halves.  Without an entry
+#: here it is not: ``_GENERATION_DIGESTS`` above hashes only
+#: ``tortoise-capture.ts``, so a volunteer-only byte edit stays green in this
+#: suite and every already-installed copy reads ``modified-artifact`` ("local
+#: edit") the moment it is graded (`_grade_optional_artifact`'s byte compare) —
+#: the user is told they hand-edited a file they never touched.  Same never-rewrite
+#: rule as its sibling: a byte set needs a NEW generation and a NEW entry, and an
+#: existing entry is never rewritten.
+_READ_SEAM_GENERATION_DIGESTS = {
+    # Generation 18: the read seam ships in the wheel at the generation that
+    # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
+    # here rather than rewritten.
+    18: "f2b7c10e77abff17e82b5da8b9a921a628783a72655755678ef046a69086cb5c",
+}
+
+#: The paired pin for the read half, mirroring
+#: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
+#: asserted by the test below: one seam, one contract).
+_PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
+    18, "f2b7c10e77abff17e82b5da8b9a921a628783a72655755678ef046a69086cb5c")
+
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():
     """A shipped-artifact edit that leaves the generation alone is a regression.
@@ -4515,6 +4543,64 @@ def test_a_shipped_pi_seam_byte_change_moves_the_generation():
         "read as `modified-artifact` (\"local edit\") by every install made "
         "from the previous bytes, so move the generation (tortoise-hook-version) "
         "and update _EXPECTED_INSTALL_CONTRACT + this pair in the same commit.")
+
+
+def test_a_shipped_pi_read_seam_byte_change_moves_the_generation():
+    """#2119 review finding 2: the READ half's bytes are pinned too.
+
+    ``contract_version_for("pi")`` grades the pair as ONE seam, but every byte
+    pin in this file hashed only ``tortoise-capture.ts``.  So a volunteer-only
+    edit under an unchanged marker stayed green here while every installed copy
+    of the read seam read ``modified-artifact`` — "marker matches (18) but its
+    bytes differ from the shipped read seam (local edit)" — on the next
+    ``doctor`` / ``hooks status``: the user is told they hand-edited a file they
+    never touched, which is verbatim the shape the sibling test above exists to
+    prevent for the capture half.
+
+    Three coupled facts, because any one alone is certifiable by editing one
+    constant:
+
+    * the shipped bytes hash to the recorded digest for the shipped generation;
+    * ``(generation, digest)`` equals the paired pin; and
+    * the pin's generation is the capture half's — the pair declares ONE
+      contract number, which is what `contract_version_for` resolves.
+
+    Mutation (executed, not asserted): append one comment line to
+    ``tortoise/pi-hooks/tortoise-volunteer.ts`` with the marker untouched — this
+    REDs on the digest while the rest of this suite and
+    ``tests/test_pi_volunteer_seam.py`` stay green, which was the gap.
+    """
+    src = _PI_READ_SEAM_SRC
+    assert src is not None and src.is_file(), (
+        "the Pi contract's `volunteer_source` must resolve to the shipped read "
+        f"seam (got {src}) — `tortoise install pi` reads it from the package")
+    generation, digest = _PINNED_PI_READ_SEAM_INSTALL_CONTRACT
+    shipped = hook_install.read_hook_version(src)
+    actual = hashlib.sha256(src.read_bytes()).hexdigest()
+    assert actual == _READ_SEAM_GENERATION_DIGESTS.get(shipped), (
+        f"generation {shipped} of the Pi READ seam has no recorded digest, or "
+        f"its bytes have changed: shipped bytes hash to {actual}, recorded "
+        f"{_READ_SEAM_GENERATION_DIGESTS.get(shipped)}.  A byte change belongs "
+        "in a NEW generation — bump `tortoise-hook-version` in BOTH Pi artifacts, "
+        "add its digest to _READ_SEAM_GENERATION_DIGESTS, and update the pair "
+        "below; never rewrite an existing generation's entry.")
+    assert (shipped, actual) == (generation, digest), (
+        "the shipped Pi READ seam's install contract moved: "
+        f"(generation, sha256) is {(shipped, actual)}, pinned "
+        f"{(generation, digest)}.  A BYTE change at an unchanged generation is "
+        "read as `modified-artifact` (\"local edit\") by every install made from "
+        "the previous bytes, so move the generation and update this pair in the "
+        "same commit.")
+    assert shipped == _PINNED_PI_SEAM_INSTALL_CONTRACT[0], (
+        "the two halves of the Pi seam must declare ONE generation — the read "
+        f"seam is pinned at {shipped}, the capture half at "
+        f"{_PINNED_PI_SEAM_INSTALL_CONTRACT[0]}.  `contract_version_for('pi')` "
+        "returns None when they disagree, which turns every installed pair into "
+        "an ungradable one.")
+    assert hook_install.contract_version_for("pi") == shipped, (
+        "the generation this pin records is not the one the installer/doctor "
+        "actually grade — `contract_version_for('pi')` reads BOTH artifacts and "
+        "is what `hooks status` prints and `doctor` step 7 compares against")
 
 
 def test_a_same_generation_header_edit_reads_as_a_local_edit(tmp_path):

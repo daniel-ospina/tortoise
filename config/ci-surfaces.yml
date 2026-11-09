@@ -1711,6 +1711,19 @@ surfaces:
   # CLI-wiring regression still runs the install guard. See the core entry for
   # the mechanism half.
   - test_capture_install.py
+  # #2119: the Pi per-turn READ seam is that same #3808/#3575/#3795 shape — the
+  # artifact (`tortoise/pi-hooks/tortoise-volunteer.ts`) classifies `core`, but
+  # the two behaviours this suite is the ONLY guard for live in
+  # `tortoise/__main__.py`, an exact `api` SOURCE_PATTERNS entry (so a
+  # `__main__.py`-only diff selects `api`, and nothing re-adds `core`):
+  # `_uninstall_pi_volunteer`'s `--dry-run` branch and
+  # `_upgrade_artifact_seam(..., introduce_read_seam=False)`, the W4 opt-in gate
+  # that keeps `hooks upgrade` from re-arming per-turn prompt search after
+  # `install pi --uninstall`. Without this leg a CLI-only change runs no guard
+  # for the very change it guards. Dual-registered with `core` (the mechanism
+  # half + the real-seam/node check) and `onboarding` (the install path a
+  # user's machine takes).
+  - test_pi_volunteer_seam.py
   # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
@@ -7301,6 +7314,7 @@ surfaces:
   # names this file.
   - test_provisioning_edge_function.py
   - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core`)
+  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core` + `api`; the `api` arm is the `tortoise/__main__.py` half)
   - test_store_sync_worker.py  # #3515: the store-sync backstop (spool + Pi log) and its per-file cursor
   - test_retention_promise.py  # #4179: website/privacy.html horizon + canonical-doc link
   - test_signup_form_safety.py
