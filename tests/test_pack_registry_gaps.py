@@ -1820,3 +1820,38 @@ class TestCoreHierarchy:
             "a core kind is both a hierarchy root and a child — the core rows are "
             f"no longer depth 1, so one-hop widening under-widens: "
             f"{sorted(set(CORE_SUBCLASSES) & children)}")
+
+    def test_a_cross_axis_parent_is_a_recorded_decision(self, shipped):
+        """The one declared pair whose parent is ALSO a live point kind — pinned.
+
+        `portfolio:allocationTarget` (an `objectKind`) subclasses `target`, and
+        `target` is a canonical POINT kind as well (§5; the overlap is the #7813
+        owner ruling — confidence propagates across `:Point`/`:Object`/`:Event`,
+        so the duplication is the model, not residue).
+
+        Consequence, recorded rather than discovered: `sdk.query(kind=
+        "portfolio:allocationTarget")` builds `n.pointKind IN [...]`, so after
+        the Leg A append it matches `pointKind='target'` POINTS where it used to
+        return nothing. Accepted — the declaration says an allocation target IS a
+        target — and pinned EXACTLY so it is a decision a reviewer can see, and so
+        a future second cross-axis pair has to be acknowledged here rather than
+        sliding in.
+        """
+        from tortoise.pack_registry import CANONICAL_POINT_KINDS
+
+        cross_axis = sorted(
+            f"{p.namespace}:{child}"
+            for p in shipped.packs.values()
+            for child, parent in p.kind_subclasses.items()
+            if parent in CANONICAL_POINT_KINDS
+        )
+        assert cross_axis == ["portfolio:allocationTarget"], (
+            "the set of declared subclasses whose parent is also a POINT kind "
+            f"changed: {cross_axis}")
+
+        expanded = shipped.expand_kind("portfolio:allocationTarget")
+        assert "target" in expanded and "core:target" in expanded, expanded
+        # …and the reverse direction is unchanged: `target` still reaches the
+        # child (this was already true before the fix — asserted so the two
+        # directions cannot be confused).
+        assert "portfolio:allocationTarget" in shipped.expand_kind("target")
