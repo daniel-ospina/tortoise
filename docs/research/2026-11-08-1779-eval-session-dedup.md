@@ -250,9 +250,11 @@ for this issue by its own scope guard ("Out of scope: any parse/retrieval semant
   That refusal says nothing about the graph — it is the local server's known dead binding
   (agent-infra#3253), and an earlier revision of this note generalised it into "no graph was
   reachable on this cell", which was wrong: the fleet route is the HOSTED endpoint and it answers.
-  Read at correction time (2026-11-09) from this same cell: `GET`
-  <https://api.premiselabs.co/v1/search> on three queries ("longmemeval haystack overlap
-  cross-question session dedup", "1779 eval session dedup cache granularity", "5-10x redundant
+  Read at correction time (2026-11-09) from this same cell: `GET` on the hosted search endpoint
+  (`https://api.premiselabs.co/v1/search` — bearer-token authenticated, so it is named here as code
+  rather than as a link: an anonymous fetch of it answers **401**, which is the correct refusal and
+  the reason the docs link check must not be pointed at it) with three queries ("longmemeval haystack
+  overlap cross-question session dedup", "1779 eval session dedup cache granularity", "5-10x redundant
   encodes embedder selection") → **HTTP 200** on all three, top similarity **0.024–0.036**, and no
   returned point concerns cross-question overlap, eval caching or the "5-10×" claim. So the
   graph was READ and holds no prior conclusion for this issue — nothing was re-derived, and nothing
