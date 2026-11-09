@@ -149,9 +149,32 @@ def assert_prompt_pinned() -> str:
 # ``compare_run`` consults it through ``_standing_bars_tripped`` — so this is a
 # PROTOCOL change, taken through the documented ritual rather than a silent
 # re-pin: the name bumps v3 → v4 and the prompt FILE is renamed with IDENTICAL
-# content (the four why-questions did not change).  Both committed baselines are
+# content (the four why-questions did not change — the file's own internal
+# version label was still ``judge_why_suite_v2`` at this bump, corrected in the
+# explicitly recorded v4 re-pin below).  Both committed baselines are
 # still FIRST-RUN-PENDING (``metrics: {}`` / ``judge_pin: null``), so no
 # published number is re-pinned and no ``--bless-protocol`` re-publish is owed;
 # the publish of both lanes stays deliberately deferred to a run at a clean
 # committed head (the issue's anti-gaming rule).
-PINNED_PROTOCOL_SHA256 = "06333a0d5db330a94958325aec4e061a479b84db7a8696b185828a1c8beb2e84"
+PINNED_PROTOCOL_SHA256 = "9fb9f7cdafe0786fe7f74e71e01a18ddadec4e9795b35991b8aa490f1d016d18"
+#
+# v4 RE-PIN (#2275 review, finding 1) — SAME name, explicitly recorded, never a
+# silent re-pin: the pinned prompt ARTIFACT still declared
+# ``JUDGE: judge_why_suite_v2`` on line 1 and published a
+# ``("judge_why_suite_v2:<hex>")`` pin prefix — two versions behind
+# ``judge.JUDGE_PROTOCOL``, both baselines and every receipt, which all say v4.
+# The artifact is what an auditor reads to answer "which protocol did this
+# number come from?", and the prefix it advertised is one that no baseline or
+# receipt in this design can ever carry (``bless_baseline`` requires the code's
+# pin; ``compare_run`` treats a differing pin as inconclusive).  The two label
+# strings are corrected to v4; the four why-questions and every grading rule
+# are UNCHANGED, so no grading semantic moved.  The name does not bump for this,
+# matching the recorded precedent above (a literal was re-computed once before
+# with "the protocol name stayed v3 for that one because no grading semantic
+# moved, and no baseline had been blessed at v3 yet"): a version LABEL inside
+# the artifact is not grading semantics, and no run, baseline or published
+# number exists under v4 — all four committed baselines are still
+# FIRST-RUN-PENDING (``metrics: {}`` / ``judge_pin: null``) — so there is no
+# comparability to preserve and nothing for ``--bless-protocol`` to re-bless.
+# Any FUTURE semantic edit to prompt/grading/schema/adversarial is still a new
+# protocol name + ``--bless-protocol``.

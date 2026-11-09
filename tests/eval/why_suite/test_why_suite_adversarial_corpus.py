@@ -109,9 +109,31 @@ def test_corpora_are_disjoint_and_v1_is_untouched():
     # The v1 self-manifest does not see the adversarial files as extras.
     assert corpus.verify_manifest(corpus=corpus.DEFAULT_CORPUS)["ok"] is True
     assert corpus.verify_manifest(corpus=corpus.ADVERSARIAL_CORPUS)["ok"] is True
-    # The prompt artifact is pinned by CONTENT (identical across the v2→v3
-    # protocol bump: the four why-questions did not change).
-    assert "why" in judge.judge_prompt_text().lower()
+
+
+def test_prompt_artifact_declares_the_protocol_it_is_published_under():
+    """The pinned artifact's OWN identity must match ``judge.JUDGE_PROTOCOL``.
+
+    This replaces a substring probe on the word "why" — a probe that could not
+    detect a content OR identity change, because the prompt's own title ("W3
+    why-layer suite", `why-block`) supplies the word.  Concretely it read
+    clean while the file named ``judge_why_suite_v4.txt`` declared
+    ``JUDGE: judge_why_suite_v2`` on its first line and published a
+    ``("judge_why_suite_v2:<hex>")`` pin prefix that no baseline or receipt in
+    this design can ever carry (``bless_baseline`` requires the code's pin,
+    ``compare_run`` treats a differing pin as inconclusive).
+
+    The artifact is what an auditor reads to answer "which protocol did this
+    number come from?", so every identity it states must be the one the code
+    and the baselines publish.  Non-vacuity: this FAILS on the pre-fix head
+    (body declares v2, code declares v4) in three independent assertions.
+    """
+    text = judge.judge_prompt_text()
+    assert text.splitlines()[0] == f"JUDGE: {judge.JUDGE_PROTOCOL}"
+    assert f'("{judge.JUDGE_PROTOCOL}:<hex>")' in text
+    assert judge.JUDGE_PROMPT_PATH.stem == judge.JUDGE_PROTOCOL
+    stale = [ln for ln in text.splitlines() if "judge_why_suite_v2" in ln]
+    assert stale == [], f"stale protocol label(s) in the pinned artifact: {stale}"
 
 
 def test_generator_validates_both_corpora_together():
