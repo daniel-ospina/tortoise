@@ -698,6 +698,23 @@ def _reset_falkordb_version_cache() -> None:
 _VECTOR_INDEX_GAP_WARNED: set[tuple] = set()
 _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 
+#: #11642 / #4051 V1 — the in-graph vector index is RETIRED, not missing.
+#:
+#: `_ensure_vector_index_api` no longer creates one and drops any it finds, so
+#: `_vector_indexed_labels` is empty on every store from the next setup onward.
+#: The #4997 gap warning ("those reads silently full-scan") therefore describes
+#: a state that is now the DESIGN: the dense leg is served from the Postgres
+#: record (`tortoise/record_vector.py`), and a graph full scan is the documented
+#: fallback for the labels the record does not carry (`object`/`subject`) and for
+#: a box with no record armed at all.
+#:
+#: So the pair is still MEASURED and still REPORTED (#11087), and the WARNING is
+#: replaced by one INFO naming the retirement — because a permanent WARNING on a
+#: correct store is how a real gap stops being read. Flipping this to False
+#: restores the pre-#11642 posture and the #4997 warning with it, which is what
+#: a rollback of the move is.
+VECTOR_INDEX_RETIRED = True
+
 # ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
 #
 # The positive report is an INFO on every non-embedded store setup, and that
@@ -18989,7 +19006,22 @@ class FalkorProjection(
             with _VECTOR_INDEX_GAP_LOCK:
                 first_report = key not in _VECTOR_INDEX_GAP_WARNED
                 _VECTOR_INDEX_GAP_WARNED.add(key)
-            if first_report:
+            if first_report and VECTOR_INDEX_RETIRED:
+                # #11642: the gap IS the design now — say what replaced it,
+                # once, at INFO. A permanent WARNING here would train every
+                # reader to ignore the one line that still means something on a
+                # store where the move was rolled back.
+                log.info(
+                    "#11642: %s holds no in-graph vector index for %s — "
+                    "RETIRED, not missing: the dense leg is served from the "
+                    "Postgres record (pgvector), and a graph full scan is the "
+                    "documented fallback for the labels the record does not "
+                    "carry. Set projection.VECTOR_INDEX_RETIRED = False to "
+                    "restore the #4997 posture.",
+                    self._graph_name,
+                    sorted(gap),
+                )
+            elif first_report:
                 log.warning(
                     "#4997: vector search on %s is unindexed for label(s) %s "
                     "(indexed: %s) — those reads silently full-scan. Whether "
@@ -20161,59 +20193,99 @@ class FalkorProjection(
             return
         if getattr(self, '_is_embedded', False):
             return
-        # #4194/#4280: the width is the ONE constant the STORE declares
-        # (`FalkorProjection.required_embedding_dim`), so a FRESH index
-        # creation and the write path cannot disagree — a bare literal
-        # here plus a rotated `EMBEDDING_DIM` would bless vectors the
-        # index cannot hold (the mismatched-vector trap).
-        # ⛔ This single-sources CREATION only: an EXISTING index is
-        # never reconciled (both 'already' branches below assume it is
-        # correct). A dimension change is still the documented
-        # drop-and-recreate operation, not a constant edit.
-        from ..embeddings import EMBEDDING_DIM
-        # #5434: did this call WRITE an index? If it did, `catalogue_rows` -
-        # read BEFORE the write - no longer describes the engine, and reusing it
-        # would report a false gap. The Point VECTOR index is NOT part of
-        # `_schema_is_current`'s required set, so a store with every range/FTS
-        # index but no vector index answers "schema is current" and takes the
-        # fast path, which then CREATES the index here. That is exactly the
-        # case the reviewer reproduced: the warning named `Point` as unindexed
-        # immediately after creating its index.
-        _wrote_index = False
+        # ⛔ The width constant (`embeddings.EMBEDDING_DIM`, #4194/#4280) is no
+        # longer read HERE, because this method no longer creates an index to
+        # single-source a width for. The width guarantee moved with the index:
+        # Postgres's `record_embedding_vector(jsonb) -> vector(384)` stores NULL
+        # for any other width, so a wrong-width vector is stored and not
+        # ann-indexed (see the block below).
+        # ⛔ #11642 / #4051 V1 — THIS STORE NO LONGER CREATES AN IN-GRAPH VECTOR
+        # INDEX, AND DROPS ONE IT FINDS.
+        #
+        # The owner's 2026-11-07 decision moved the vector index and its payload
+        # to Postgres (`pgvector`; `docs/architecture/SEARCH-ARCHITECTURE.md`,
+        # `STORAGE-ARCHITECTURE.md` §12.1c). The graph keeps the node, the edges
+        # and the `embedding` PROPERTY — writes stay here, and that is why
+        # erasure has to span both stores — but the HNSW `vectorset` index is
+        # retired. The reason it had to go rather than merely fall idle:
+        # FalkorDB's `vectorset` index is NOT carried in a graph dump, so every
+        # cold restore REBUILT it — **436.5 s at 20k nodes, 191.8 s tuned** —
+        # and the rebuild DEADLOCKED the instance (`#7846`). A retired index is
+        # not rebuilt, so the restore stops paying that.
+        #
+        # `DROP INDEX ON :Point(embedding)` is issued for EVERY engine version
+        # this store supports: the Cypher form is what the modern client's own
+        # `create_node_vector_index` counterpart emits, and on an engine that
+        # never had the index it raises "no such index"-class text, which is
+        # swallowed. A store that HAS one loses it here, once, on the next setup
+        # — that is the migration for every already-deployed graph, and it is
+        # idempotent because the second run finds nothing to drop.
+        #
+        # ⚠️ CONSEQUENCE, stated rather than discovered: `required_embedding_dim`
+        # is derived from `_vector_index_api`, so it now answers `None` on every
+        # lane. That is the DOCUMENTED no-index behaviour (the write path becomes
+        # width-agnostic and `run_vector_query`'s brute-force scan reads back
+        # whatever the encoder produced, #4280) — and it is now the correct
+        # answer, because a width-blessing graph index no longer exists. The
+        # dimension guarantee lives in Postgres instead:
+        # `record_embedding_vector(jsonb) -> vector(384)` stores NULL for any
+        # width but 384, so a wrong-width vector is stored and not ann-indexed
+        # rather than rejected at the write.
+        import logging
+        _log = logging.getLogger(__name__)
+        self._vector_index_api = None
+        dropped = False
+        # ⛔ THE DROP IS GATED ON THE CATALOGUE, not attempted blind. An
+        # unconditional `DROP INDEX` on an already-clean store is a FAILING DDL
+        # round trip on every single setup — and this method is reached from the
+        # hosted PER-REQUEST path, so that is a per-request cost AND it reds
+        # `tests/test_indexes.py::test_repeat_sweep_runs_no_already_satisfied_ddl`,
+        # which classifies repeated index DDL as the repeated-bootstrap defect
+        # (#4465) it is. Reading the catalogue first makes the steady state
+        # ZERO statements: one read that this method already needs.
+        _has_vector_index = False
         try:
-            self.g.query(
-                "CALL db.idx.vector.createNodeIndex('Point', 'embedding', "
-                f"{EMBEDDING_DIM}, 'HNSW')"
-            )
-            self._vector_index_api = 'procedure'
-            _wrote_index = True
-        except Exception as e:
-            msg = str(e).lower()
-            if "already" in msg:
-                # Index already exists (prior startup). Assume the
-                # procedure API — it either created it or the engine
-                # is procedure-capable (docker/server image v4.16.7).
-                self._vector_index_api = 'procedure'
-            else:
-                # Unknown procedure / not registered / invalid args →
-                # Cypher-native form (the modern falkordb client's own
-                # create_node_vector_index emits exactly this).
+            _rows = (catalogue_rows if catalogue_rows is not None
+                     else self.g.query("CALL db.indexes()").result_set)
+            for _row in (_rows or ()):
                 try:
-                    self.g.query(
-                        "CREATE VECTOR INDEX FOR (p:Point) ON (p.embedding) "
-                        f"OPTIONS {{dimension: {EMBEDDING_DIM}, "
-                        "similarityFunction: 'cosine'}"
-                    )
-                    self._vector_index_api = 'cypher'
-                    _wrote_index = True
-                except Exception as e2:
-                    msg2 = str(e2).lower()
-                    if "already" in msg2:
-                        self._vector_index_api = 'cypher'
-                    else:
-                        import logging
-                        logging.getLogger(__name__).warning(
-                            "Failed to create vector index on Point.embedding: %s", e2)
+                    if len(_row) < 3:
+                        continue
+                    _label, _types = _row[0], _row[2]
+                    if str(_label) != "Point" or not isinstance(_types, dict):
+                        continue
+                    for _type_list in _types.values():
+                        if isinstance(_type_list, (list, tuple, set)) and any(
+                                str(_t).upper() == "VECTOR" for _t in _type_list):
+                            _has_vector_index = True
+                            break
+                except Exception:  # noqa: BLE001, RUF100 — a malformed row is skipped
+                    continue
+        except Exception as e:  # noqa: BLE001, RUF100 — fail SAFE: do not drop blind
+            _log.debug("#11642: vector-index catalogue read failed (%s) — "
+                       "leaving any in-graph vector index alone this sweep", e)
+            _has_vector_index = False
+        if _has_vector_index:
+            for _stmt in (
+                "DROP INDEX ON :Point(embedding)",
+                "DROP INDEX FOR (p:Point) ON (p.embedding)",
+            ):
+                try:
+                    self.g.query(_stmt)
+                    dropped = True
+                    break
+                except Exception as e:  # noqa: BLE001, RUF100
+                    _log.debug("#11642: %r did not drop the vector index: %s",
+                               _stmt, e)
+                    continue
+        if dropped:
+            _log.info(
+                "#11642: dropped the in-graph Point.embedding vector index on %s "
+                "— the dense leg is served from the Postgres record "
+                "(pgvector), and a retired index is no longer rebuilt on a cold "
+                "restore (#7846: 436.5 s at 20k nodes, 191.8 s tuned, and it "
+                "deadlocked the instance)", self.graph_name)
+        _wrote_index = dropped
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation
         # attempt above, so a fresh graph reports post-creation state rather
@@ -20234,8 +20306,19 @@ class FalkorProjection(
     def required_embedding_dim(self) -> int | None:
         """The embedding width THIS store can hold, for the write path to declare.
 
-        #4280: the width constraint belongs to the Point HNSW INDEX, so this
-        answers "does this store have one" — ``self._vector_index_api``, set by
+        ⛔ #11642: this answers ``None`` on EVERY lane since the vector move, and
+        that is the correct answer rather than a regression. The in-graph index
+        is retired (`VECTOR_INDEX_RETIRED`; `_ensure_vector_index_api` drops one
+        it finds and never creates one), so no graph index exists to bless a
+        width — and the width guarantee moved with the index, to Postgres's
+        ``record_embedding_vector(jsonb) -> vector(384)``, which stores NULL for
+        any other width instead of rejecting the write. The consequence here is
+        the DOCUMENTED no-index behaviour: the write path becomes
+        width-agnostic and :func:`tortoise.search_engine.run_vector_query`'s
+        brute-force scan reads back whatever the encoder produced (#4280).
+
+        #4280: the width constraint belonged to the Point HNSW INDEX, so this
+        answered "does this store have one" — ``self._vector_index_api``, set by
         ``_ensure_indexes`` (called from ``__init__``) to the API that actually
         created or found the index. It stays ``None`` whenever no index exists:
 

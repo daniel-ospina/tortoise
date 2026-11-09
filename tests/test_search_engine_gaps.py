@@ -34,6 +34,8 @@ from tortoise.search_engine import (
     _breaker,
     _breaker_allow,
     MECHANISM_INDEX,
+    MECHANISM_PGVECTOR,
+    MECHANISM_SCAN_FALLBACK,
     VECTOR_MECHANISM_KEY,
 )
 
@@ -1132,81 +1134,125 @@ def test_index_branch_survives_an_id_less_row():
     )
 
 
-@pytest.mark.skipif(not FALKORDB_AVAILABLE, reason="FalkorDB not available")
-def test_6214_index_vector_leg_orders_equal_distance_rows_by_id():
-    """#6214 acceptance 3: the INDEX-accelerated vector leg returns
-    equal-distance rows in a stable, id-determined order — NON-VACUOUSLY.
+def test_6214_vector_leg_orders_equal_distance_rows_by_recency_then_id():
+    """#6214 acceptance 3 / #10121: the DENSE leg returns equal-distance rows in
+    a stable, recency-then-id-determined order — NON-VACUOUSLY.
 
-    Three Points are created in DESCENDING id order with IDENTICAL embeddings,
-    so every distance ties and the engine's own order is
-    ``[tie6214_zulu, tie6214_mike, tie6214_alpha]`` (measured on
-    falkordb-server:v4.16.7 and falkordb:latest). #10121: the tie is
-    ``recency DESC, id DESC``, and the stamps are set so recency and id DISAGREE
-    — ``alpha`` (the LOWEST id) carries the NEWEST ``createdAt`` — so
-    ``[alpha, mike, zulu]`` is reachable only through the RECENCY key, i.e. the
-    column the index signature projects. Dropping that column falls back to
-    ``''`` for every row and the id key then returns the INVERSE order, which
-    FAILS this test: that is the regression this pin exists for (a round-2
-    review measured that deleting the column from both index signatures redded
-    nothing).
+    ⛔ THIS PIN MOVED WITH THE INDEX (#11642). It used to drive the in-graph
+    ``CALL db.idx.vector.queryNodes`` path and assert ``mechanism == index``.
+    The owner's 2026-11-07 decision retired that index: the dense leg is served
+    from the Postgres record (``pgvector``), so the ordering rule is asserted
+    against THE LEG THAT NOW ANSWERS. Deleting the pin instead would have left
+    the ONE requirement it encodes — "an equal-distance tie must not fall through
+    to store row order" — with no reader at all, in the branch that now carries
+    production traffic.
 
-    WHY THIS IS THE INDEX PATH AND NOT A SUBSTITUTED SCAN: the leg trace's
-    ``mechanism`` is asserted to be ``index``, so a silent fall-through to the
-    brute-force scan fails the test rather than passing it vacuously. (The
-    scan's own ordering was already pinned by #3019.)
+    The fixture is deliberately hostile to the id key alone: ``alpha`` is the
+    LOWEST id and the NEWEST stamp, so recency and id DISAGREE and only the
+    recency key can produce ``[alpha, mike, zulu]``. A leg that dropped the
+    recency column (or that returned the store's own order) fails.
     """
-    from tortoise.embeddings import EMBEDDING_DIM
-    from tortoise.projection import FalkorProjection
+    vec = [0.0] * 8
 
-    proj = FalkorProjection.from_uri(
-        _current_uri(), graph_name=f"test_seg_vec6214_{os.urandom(4).hex()}")
-    g = proj.g
-    prefix = "tie6214_"
-    try:
-        proj._ensure_indexes()
-        assert proj._vector_index_api is not None, (
-            "FIXTURE NOT REACHED: no vector index was created, so there is no "
-            "index path to test")
-        g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
-        vec = [0.0] * EMBEDDING_DIM
-        vec[0] = 1.0
-        vec[1] = 1.0
-        # Recency OPPOSES id on purpose — see the docstring.
-        stamps = {
-            f"{prefix}zulu": "2026-01-01T00:00:00Z",
-            f"{prefix}mike": "2026-06-01T00:00:00Z",
-            f"{prefix}alpha": "2026-12-01T00:00:00Z",
-        }
-        for pid, stamp in stamps.items():
-            g.query(
-                "CREATE (n:Point {id:$id, text:$id, status:'active', "
-                "createdAt:$c, updatedAt:$c, embedding: vecf32($vec)})",
-                params={"id": pid, "vec": vec, "c": stamp})
+    def _pg(entity_type, query_vec, limit):
+        assert entity_type == "point", entity_type
+        return [
+            # (id, cosine DISTANCE, recency) — the shape the Cypher YIELD
+            # produced, and all three tie on distance.
+            ("tie6214_zulu", 0.25, "2026-01-01T00:00:00Z"),
+            ("tie6214_mike", 0.25, "2026-06-01T00:00:00Z"),
+            ("tie6214_alpha", 0.25, "2026-12-01T00:00:00Z"),
+        ]
 
-        trace: list[dict] = []
-        out = run_vector_query(
-            g, vec, limit=10, is_embedded=False,
-            vector_index_api=proj._vector_index_api,
-            excluded_statuses=(), leg_trace=trace)
-        got = [pid for pid, _ in out]
+    trace: list[dict] = []
+    out = run_vector_query(
+        SimpleMockGraph(), vec, limit=10, is_embedded=False,
+        excluded_statuses=(), leg_trace=trace, pg_vector=_pg)
+    got = [pid for pid, _ in out]
 
-        assert got, "FIXTURE NOT REACHED: the index leg returned no rows"
-        assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
-        mechanism = next(
-            (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
-            None)
-        assert mechanism == MECHANISM_INDEX, (
-            "the vector leg did not answer from the index, so the tie-order "
-            f"assertion below would not be about the index path: {trace}")
-        assert got == [f"{prefix}alpha", f"{prefix}mike", f"{prefix}zulu"], (
-            "equal-distance rows are not RECENCY-then-id ordered on the index "
-            "path (#10121) — recency and id disagree in this fixture, so the "
-            f"id key alone would return the inverse: {got}")
-    finally:
-        try:
-            g.query(f"MATCH (n:Point) WHERE n.id STARTS WITH '{prefix}' DETACH DELETE n")
-        finally:
-            proj.close()
+    assert len(got) == 3, f"FIXTURE NOT REACHED: expected 3 rows, got {got}"
+    mechanism = next(
+        (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+        None)
+    assert mechanism == MECHANISM_PGVECTOR, (
+        "the vector leg did not answer from the record, so the tie-order "
+        f"assertion below would not be about the pgvector path: {trace}")
+    assert got == ["tie6214_alpha", "tie6214_mike", "tie6214_zulu"], (
+        "equal-distance rows are not RECENCY-then-id ordered on the pgvector "
+        "path (#10121) — recency and id disagree in this fixture, so the id "
+        f"key alone would return the inverse: {got}")
+
+
+def test_11642_an_unserved_label_falls_through_to_the_graph():
+    """``object``/``subject`` are NOT served from the record, and the leg must
+    take its graph branch rather than report an empty record answer.
+
+    The searcher signals "not served" with ``None`` — the one value that cannot
+    be confused with "asked and found nothing" (``[]``). A leg that folded the
+    two would silently drop every Object and Subject candidate out of the dense
+    pool, which is the ``#5090`` Q2 class ("nothing is silently invisible").
+    """
+    class _Graph:
+        def __init__(self):
+            self.query_calls = []
+
+        def query(self, cypher, params=None, timeout=None):
+            self.query_calls.append(cypher)
+            return type("R", (), {"result_set": []})()
+
+    graph = _Graph()
+
+    def _pg(entity_type, query_vec, limit):
+        return None  # not served from the record
+
+    trace: list[dict] = []
+    run_vector_query(graph, [0.0] * 8, limit=5, is_embedded=False,
+                     entity_type="object", leg_trace=trace, pg_vector=_pg)
+    assert graph.query_calls, (
+        "the leg never consulted the graph at all for an unserved label — an "
+        "Object read would return nothing from the dense leg, because the "
+        "record has no `embedding_vec` column for it")
+    assert not any(
+        e.get("mechanism") == MECHANISM_PGVECTOR
+        for e in trace if e["leg"] == "vector"), (
+        f"an unserved label must not record a pgvector answer: {trace}")
+
+
+def test_11642_a_pgvector_failure_is_a_named_scan_fallback():
+    """A record that does not answer is the NAMED fallback, not a silent empty.
+
+    ``#4999``'s whole subject: a leg that keeps working more expensively while
+    nothing says so. The Postgres leg failing must record ``scan_fallback`` and
+    let the graph answer — the payload is still in the graph, so the rows are
+    still there to be found.
+    """
+    class _Graph:
+        """No in-graph vector index — which is a post-#11642 store's real state
+        (`_ensure_vector_index_api` retires it), so the INDEX attempt fails and
+        the brute-force scan is the branch that answers."""
+
+        result_set = [("p1", 0.9)]
+
+        def query(self, cypher, params=None, timeout=None):
+            if "CALL db.idx.vector.queryNodes" in cypher:
+                raise RuntimeError(
+                    "Procedure `db.idx.vector.queryNodes` is not registered")
+            return self
+
+    def _pg(entity_type, query_vec, limit):
+        raise RuntimeError("the record did not answer")
+
+    trace: list[dict] = []
+    out = run_vector_query(
+        _Graph(), [0.0] * 8, limit=5, is_embedded=False,
+        entity_type="point", leg_trace=trace, pg_vector=_pg)
+    assert [pid for pid, _ in out] == ["p1"], out
+    mechanism = next(
+        (e.get(VECTOR_MECHANISM_KEY) for e in trace if e["leg"] == "vector"),
+        None)
+    assert mechanism == MECHANISM_SCAN_FALLBACK, (
+        f"a failed record leg must announce the fallback, got {mechanism}: "
+        f"{trace}")
 
 
 # ── run_fts_query ───────────────────────────────────────────────────────────

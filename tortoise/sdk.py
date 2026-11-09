@@ -868,6 +868,37 @@ def _capture_redaction_warning(count: int) -> str:
     )
 
 
+def _record_vector_searcher():
+    """The dense leg's POSTGRES searcher for THIS request — or ``None``.
+
+    #11642 / #4051 V1. Two properties are the whole reason this is a function
+    and not an inline import at the call site:
+
+    * it must be called on the REQUEST's thread. ``record_vector.searcher``
+      reads the tenant ContextVar ``record_writer.record_tenant`` installs, and
+      a ThreadPoolExecutor worker does not inherit ContextVars — so resolving
+      it where the leg RUNS would find no tenant on every request and quietly
+      leave the dense leg on the graph, with nothing reporting it;
+    * ``None`` is a normal answer, not a failure: no record DSN, no installed
+      tenant, or a label the record does not serve all mean the graph branches
+      answer, which is correct rather than degraded — the move took the INDEX,
+      and the payload is still in the graph.
+
+    A broken install (an unimportable module) is ``None`` for the same reason:
+    a search must not become a 500 because a retrieval accelerator is missing.
+    """
+    try:
+        from .record_vector import searcher
+    except Exception:  # noqa: BLE001, RUF100 — an unimportable accelerator is "unarmed"
+        return None
+    try:
+        return searcher()
+    except Exception:  # noqa: BLE001, RUF100 — never let the accelerator break a read
+        _logger.debug("record dense searcher unavailable — using the graph",
+                      exc_info=True)
+        return None
+
+
 def _journal_write_failure_warning(count: int) -> str:
     """#4240 review F1: the additive warning a capture carries when a journal
     append failed on a CONFIGURED journal.
@@ -30548,7 +30579,11 @@ class TortoiseSDK:
                                     # #1359: recorded index API → skip the
                                     # failing signature attempt on Cypher engines.
                                     vector_index_api=getattr(
-                                        proj, "_vector_index_api", None))
+                                        proj, "_vector_index_api", None),
+                                    # #11642: the Postgres ANN leg when a record
+                                    # tenant is armed on this request; `None`
+                                    # keeps the graph branch unchanged.
+                                    pg_vector=_record_vector_searcher())
             for nid, _score in hits:
                 if nid == pid or nid not in pool:
                     continue
@@ -38046,6 +38081,14 @@ class TortoiseSDK:
             # shipped leg's genuine ``no_embeddings`` into ``hybrid: True``
             # (the #4199/#5287 class via a new leg).
             scope_kinds=_scope_kinds,
+            # #11642 / #4051 V1: the ANN leg from the POSTGRES RECORD.
+            # ⛔ RESOLVED HERE, ON THIS THREAD, and passed in — `searcher()` reads
+            # the request's tenant ContextVar, and a ThreadPoolExecutor worker
+            # does not inherit ContextVars, so resolving it inside the worker
+            # would find no tenant and take the graph branch on EVERY request
+            # while reporting nothing. `None` (no record DSN, or no tenant
+            # installed) keeps the graph branches byte-identically.
+            pg_vector=_record_vector_searcher(),
         )
 
         if _bm25_lexical and "vector" not in _floored_legs:
@@ -39941,6 +39984,12 @@ class TortoiseSDK:
                 # ``_vector_leg_healthy``'s docstring forbids).
                 scope_kinds=scope_kinds,
                 timeout_ms=timeout_ms,
+                # #11642: the Postgres ANN leg, when a record tenant is armed on
+                # this request. This pass runs on the request's own thread, so
+                # the tenant ContextVar is readable here — unlike the shipped
+                # leg, which runs on a pool worker and is handed the callable
+                # by `_record_vector_searcher()` at the `degradation_chain` call.
+                pg_vector=_record_vector_searcher(),
                 # ONE dense slot, ONE tally: the shipped leg already counted it
                 # (the #8488 arm's ``meter=False`` precedent — the trace still
                 # records the second pass, so a measurement can see it ran).

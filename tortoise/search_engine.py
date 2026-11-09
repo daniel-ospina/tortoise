@@ -12,7 +12,7 @@ import re
 import threading
 import time
 from collections import Counter
-from collections.abc import Iterable
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, asdict, field
 from typing import Any, Literal
 
@@ -1118,6 +1118,16 @@ MECHANISM_SCAN = "scan"
 #: fallback #4999 is about, now reportable on the trace rather than only in a
 #: log line.
 MECHANISM_SCAN_FALLBACK = "scan_fallback"
+#: The ANN leg answered from the Postgres RECORD (#11642 / #4051 V1) —
+#: ``public.<label>.embedding_vec`` over an HNSW index, reached through
+#: :mod:`tortoise.record_vector`. It is a FOURTH value rather than a reuse of
+#: :data:`MECHANISM_INDEX` on purpose: the graph's index and the record's index
+#: are different stores with different failure modes, and a measurement that
+#: cannot tell which one answered cannot price the move or detect a store
+#: silently reverting to the other. ``MECHANISM_INDEX`` still means "the
+#: in-graph ``CALL db.idx.vector.queryNodes`` answered" — which, after the
+#: in-graph index is dropped, is a store that has not been migrated.
+MECHANISM_PGVECTOR = "pgvector"
 
 # ── #2518: which PASS produced a leg entry ─────────────────────────────────
 # A leg can now be asked MORE THAN ONCE in one read: the entity/fact-augmented
@@ -2184,6 +2194,8 @@ def run_vector_query(
     scope_kinds: tuple[str, ...] | None = None,
     meter: bool = True,
     provenance: str | None = None,
+    pg_vector: Callable[[str, Sequence[float], int], list[tuple[str, float, Any]]]
+    | None = None,
 ) -> list[tuple[str, float]]:
     """Run vector similarity search via FalkorDB vector index.
 
@@ -2277,6 +2289,19 @@ def run_vector_query(
     (C2's ``#2518`` indicator-2 expansion pass uses it). The read then reports
     one vector leg — the same composition ``run_bm25_query``'s ``meter`` exists
     for (``#8488``).
+
+    pg_vector (#11642 / #4051 V1) is the ANN leg from the POSTGRES RECORD:
+    a callable ``(entity_type, query_vec, limit) -> rows | None``, normally
+    :func:`tortoise.record_vector.searcher`'s product. It is tried FIRST and
+    records :data:`MECHANISM_PGVECTOR` when it answers. ``None`` from the
+    callable means this label is not served from the record
+    (``object``/``subject`` — see ``record_vector.LABEL_SERVED``), and the call
+    falls through to the graph branches below, which is that label's real path
+    and always was. An EXCEPTION takes the same graph fallback and is recorded
+    as ``scan_fallback``, because the payload is still IN the graph — the move
+    took the INDEX, not the property. Default ``None`` = the graph branches
+    only, byte-identical to the pre-#11642 behaviour, so a box with no record
+    armed is unchanged and every existing caller is unchanged.
 
     Note: the connection-level `timeout` is passed straight to the FalkorDB
     driver (Graph.query(timeout=...)) so a slow query is killed server-side.
@@ -2452,6 +2477,73 @@ def run_vector_query(
     # failure falls through to the scan below. That distinction is what makes
     # ``scan`` and ``scan_fallback`` tellable apart.
     index_attempted = False
+
+    # ── #11642 / #4051 V1: the ANN leg, from the POSTGRES RECORD ──────────
+    # This is what the two `CALL db.idx.vector.queryNodes` sites below became.
+    # It runs FIRST and only when a searcher was supplied — i.e. when a record
+    # DSN resolves AND a record tenant is installed on this request
+    # (`record_vector.searcher`), because the record's RLS policies read the
+    # tenant GUC and an unscoped read is ZERO ROWS rather than an error. When
+    # no searcher is supplied the two graph branches below run byte-identically
+    # to what shipped before this change — they are the documented fallback, and
+    # they are CORRECT rather than degraded, because the payload is still in the
+    # graph (writes stay there; the INDEX is what moved).
+    #
+    # Three outcomes from the searcher, and each takes a different branch:
+    #   * None  -> this label is not served from the record (object/subject).
+    #             Fall THROUGH to the graph, silently: that is their real path
+    #             and always was (`#4997`: the graph holds exactly one vector
+    #             index, on `Point`).
+    #   * rows  -> record `pgvector` and return through the SAME ordering pass
+    #             the graph branches use, so the ranking cannot drift between
+    #             the two by construction (`#6214`/`#10121`).
+    #   * raise -> `scan_fallback` + the graph branches, exactly as a graph
+    #             index failure does. `RecordVectorError` is the "record did not
+    #             answer" case; `VectorShortfall` is the one where it DID answer
+    #             with fewer rows than the filter selects, and reporting that as
+    #             a healthy short list is the `#5090` Q2 defect — so it is
+    #             recorded as a failure and the graph leg (which can see the
+    #             whole label) is allowed to answer instead.
+    if pg_vector is not None:
+        try:
+            pg_rows = pg_vector(entity_type, query_vec, limit)
+        except Exception as e:  # noqa: BLE001, RUF100 — every failure takes the fallback
+            index_attempted = True
+            logger.info(
+                "record dense leg did not answer (%s: %s) — falling back to "
+                "the graph", type(e).__name__, e)
+        else:
+            if pg_rows is not None:
+                annotated_pg: list[tuple[float | None, tuple[str, str], object]] = []
+                for row in pg_rows:
+                    try:
+                        distance = float(row[1])
+                    except (IndexError, TypeError, ValueError):
+                        distance = None
+                    recency = row[2] if len(row) > 2 else None
+                    annotated_pg.append(
+                        (distance, recency_tie_key(recency, row[0]), row[0]))
+                # The SAME two stable passes, in the SAME order, as the graph
+                # index branch: (recency/id DESC) first, then (distance ASC).
+                annotated_pg.sort(key=lambda item: item[1], reverse=True)
+                annotated_pg.sort(key=lambda item: (
+                    item[0] if item[0] is not None else float("inf")))
+                out = [
+                    (pid, 0.0 if dist is None else max(0.0, min(1.0, 1.0 - dist)))
+                    for dist, _key, pid in annotated_pg
+                ]
+                _breaker_record("vector", True)
+                if min_similarity is not None and out:
+                    kept = [(pid, s) for pid, s in out if s >= min_similarity]
+                    if not kept:
+                        _record(ran=True, degraded=False,
+                                reason=BELOW_RELEVANCE_FLOOR, count=0,
+                                mechanism=MECHANISM_PGVECTOR)
+                        return []
+                    out = kept
+                _record(ran=True, degraded=False, reason="ok", count=len(out),
+                        mechanism=MECHANISM_PGVECTOR)
+                return out
 
     # Docker/server mode → try index-accelerated vector search (#7777)
     if not is_embedded:
@@ -3205,6 +3297,8 @@ def degradation_chain(
     min_vector_similarity: float | None = None,
     floored_legs: set[str] | None = None,
     scope_kinds: tuple[str, ...] | None = None,
+    pg_vector: Callable[[str, Sequence[float], int],
+                        list[tuple[str, float, Any]] | None] | None = None,
 ) -> dict[str, list[tuple[str, float]]]:
     """Run retrieval strategies in parallel with per-strategy degradation.
 
@@ -3230,6 +3324,16 @@ def degradation_chain(
         projection at index-creation time (FalkorProjection._vector_index_api,
         #1359); forwarded to run_vector_query so Cypher-native engines skip
         the failing signature-A attempt.
+
+    pg_vector (#11642): the Postgres ANN searcher, forwarded to
+        :func:`run_vector_query`. ⛔ It is resolved by the CALLER, on the
+        request's own thread, and passed in — never resolved inside the worker.
+        Every leg here runs on a ``ThreadPoolExecutor`` worker, and a new
+        thread does NOT inherit the tenant ContextVar
+        (``record_writer.record_tenant``), so resolving the scope in the worker
+        would find no tenant and silently take the graph branch on every
+        request. The same reason the two ``bind_*_context`` wrappers above
+        exist. Default None = the graph branches only.
 
     Returns:
         {strategy_name: [(id, score), ...]} — only strategies that succeeded
@@ -3340,6 +3444,12 @@ def degradation_chain(
                 # posture as ``min_similarity`` above (a default caller sees
                 # byte-identical submit kwargs).
                 _vec_kwargs["scope_kinds"] = scope_kinds
+            if pg_vector is not None:
+                # #11642: merged ONLY when supplied, and the CALLABLE itself is
+                # passed (not resolved here): the tenant scope was captured on
+                # the request thread by `record_vector.searcher()`, and this
+                # thread cannot read it (ContextVars do not cross threads).
+                _vec_kwargs["pg_vector"] = pg_vector
             futures[executor.submit(
                 bind_metering_context(_retrieval_metering.bind_worker_context(
                     run_vector_query)), graph, query_vec,
