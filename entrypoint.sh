@@ -592,7 +592,6 @@ _count_is_verifiable() {
     local LC_ALL=C
     export LC_ALL
     local _raw
-    _raw="$(_resolve_raw_requested_workers "$@")"
     _raw="$(_trim_edges "$(_resolve_raw_requested_workers "$@")")"
     case "$_raw" in
         +*) _raw="${_raw#+}" ;;
@@ -731,8 +730,24 @@ for _arg in "$@"; do
             ;;
     esac
 done
+_reload_env_undecidable=0
 case "$(printf '%s' "$(_trim_edges "${UVICORN_RELOAD:-}")" | tr '[:upper:]' '[:lower:]')" in
     1|true|yes|on|t|y) _reload_requested=1 ;;
+    *)
+        # ⛔ click reads this value with `str_to_bool`, i.e. Python's
+        # `value.strip().lower()` — and Python's `str.strip()` ALSO strips the
+        # Unicode spaces that bash's `[[:space:]]` cannot match in ANY locale
+        # (MEASURED: NBSP survives `_trim_edges` under C, C.UTF-8 and
+        # en_US.UTF-8, while `'\xa0y'.strip()` is `'y'`, so click reads TRUE).
+        # A non-ASCII value this case does not recognise may therefore still be
+        # a reloader, and asserting "MULTI-WORKER" from it is the very lie this
+        # block exists to remove. REPORT-ONLY: `_reload_requested` is unchanged,
+        # so a boot that is not PROVABLY reloading keeps the `--lifespan off`
+        # refusal — this can only weaken a claim, never permit a boot.
+        case "${UVICORN_RELOAD:-}" in
+            *[!\ -~]*) _reload_env_undecidable=1 ;;
+        esac
+        ;;
 esac
 
 # ── Will the app's LIFESPAN run at all? ─────────────────────────────────
@@ -747,12 +762,29 @@ esac
 # click `Choice` is case-SENSITIVE, and a CLI value beats the envvar — so an
 # exact `off` from either source is the only disabling value that starts.
 _app_lifespan_disabled() {
-    local _want_value=0 _arg="" _value=""
+    # ⛔ ARITY, exactly as the count and reload readers do it. `--lifespan=auto`
+    # is a lifespan FLAG only when click reaches it as a TOKEN; `--app-dir
+    # --lifespan=auto` makes it `--app-dir`'s VALUE, so uvicorn keeps the REAL
+    # `--lifespan off` while a membership scan reads "auto", concludes the
+    # lifespan runs, and skips the only gate that exists with it off.
+    # MEASURED on the pinned 0.52.1: `--lifespan off --app-dir --lifespan=auto`
+    # plus a count the shell cannot read (NBSP/Unicode digits) or an --env-file
+    # starts N server processes, runs the lifespan ZERO times, and exits 0 —
+    # N divergent embedded databases certified as "one worker".
+    local _want_value=0 _arg="" _value="" _skip=0
     for _arg in "$@"; do
         if [ "$_want_value" = "1" ]; then _value="$_arg"; _want_value=0; continue; fi
+        if [ "$_skip" = "1" ]; then _skip=0; continue; fi
         case "$_arg" in
             --lifespan=*) _value="${_arg#--lifespan=}" ;;
             --lifespan) _want_value=1 ;;
+            --*=*) : ;;
+            -*)
+                # ONE flag list, shared with the count and reload readers, so a
+                # flag can never be value-taking in one loop and a flag in
+                # another (`--no-access-log --lifespan off` must still see off).
+                _uvicorn_flag_option "$_arg" || _skip=1
+                ;;
         esac
     done
     if [ -z "$_value" ]; then _value="${UVICORN_LIFESPAN:-}"; fi
@@ -794,6 +826,8 @@ if [ "$_IS_SERVER" = "1" ]; then
         # and refuses the spawned children, so this is the REPORT being honest
         # about what it cannot see (`load_dotenv` happens after this measurement).
         echo "tortoise: uvicorn workers = UNVERIFIED — --env-file / \$UVICORN_ENV_FILE can set \$WEB_CONCURRENCY AFTER this measurement, so the count above is not the count uvicorn will run; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ] && [ "$_reload_env_undecidable" = "1" ]; then
+        echo "tortoise: uvicorn workers = UNVERIFIED — \$UVICORN_RELOAD holds a value this boot script cannot classify the way click does (click trims with Python's str.strip(), which strips Unicode spaces a shell cannot), so this may be ONE reloader child instead of ${TORTOISE_WEB_WORKERS} workers; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
     elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
         echo "tortoise: uvicorn workers = ${TORTOISE_WEB_WORKERS} — MULTI-WORKER topology, admission-gated at app startup (tortoise/worker_topology.py, #1677)"
     else

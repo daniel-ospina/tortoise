@@ -1018,6 +1018,21 @@ def test_the_shipped_block_reports_one_worker_while_reloading():
                             {"UVICORN_RELOAD": "enabled"})
     assert "MULTI-WORKER" in proc.stdout, proc.stdout
 
+    # ⛔ A value click ACCEPTS but this shell cannot CLASSIFY. click trims with
+    # Python's `str.strip()`, which strips Unicode spaces that bash's
+    # `[[:space:]]` cannot match in ANY locale (MEASURED: NBSP survives
+    # `_trim_edges` under C, C.UTF-8 and en_US.UTF-8, while `'\xa0y'.strip()`
+    # is `'y'`, so click reads TRUE and uvicorn starts ONE reloader child).
+    # The banner must degrade to UNVERIFIED — neither "1 (reload" nor a
+    # confident "MULTI-WORKER" — because asserting 4 workers here is the lie
+    # this block exists to remove. Report-only: the GATE's decision is
+    # unchanged (an unprovable reload keeps the `--lifespan off` refusal).
+    proc = _run_worker_block(("uvicorn", "app:app", "--workers", "4"),
+                            {"UVICORN_RELOAD": "\u00a0y"})
+    assert proc.returncode == 0, proc.stderr
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+    assert "MULTI-WORKER" not in proc.stdout, proc.stdout
+
 
 def test_the_shipped_block_refuses_a_multi_worker_boot_with_the_lifespan_off():
     """⛔ The gate cannot run without the lifespan — so the boot script must.
@@ -1092,6 +1107,19 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
           "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
         (("uvicorn", "app:app", "--root-path", "--workers=1",
           "--lifespan", "off"), {"WEB_CONCURRENCY": "4"}),
+        # ⛔ A MASKED *lifespan* flag — the mirror of the masked count above, and
+        # the class rounds 7-11 fixed in the other two readers only. `--app-dir
+        # --lifespan=auto` makes the second token `--app-dir`'s VALUE, so click
+        # keeps `--lifespan off`; a membership scan reads "auto" and concludes
+        # the gate runs. MEASURED on the pinned 0.52.1: N processes, lifespan
+        # entered ZERO times, exit 0. The arity walk must see `off`, so the
+        # unreadable count on top of it refuses.
+        (("uvicorn", "app:app", "--lifespan", "off", "--app-dir",
+          "--lifespan=auto"), {"WEB_CONCURRENCY": "\u00a02"}),
+        (("uvicorn", "app:app", "--lifespan", "off", "--host",
+          "--lifespan=auto"), {"WEB_CONCURRENCY": "\u0661\u0662"}),
+        (("uvicorn", "app:app", "--lifespan", "off", "--app-dir",
+          "--lifespan=auto"), {"UVICORN_ENV_FILE": "/tmp/four.env"}),
     ):
         proc = _run_worker_block(argv, environ)
         assert proc.returncode != 0, (argv, environ, proc.stdout)
@@ -1105,6 +1133,20 @@ def test_the_lifespan_off_refusal_covers_counts_the_shell_CANNOT_see():
                               "TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"]})
     assert proc.returncode == 0, proc.stderr
     assert "UNVERIFIED" in proc.stdout, proc.stdout
+
+    # ⛔ AND THE MIRROR — the arity walk must not OVER-block. `--app-dir
+    # --lifespan=off` makes the token `--app-dir`'s VALUE, so click keeps
+    # `lifespan=auto`, the app gate DOES run, and a shared+acknowledged 4-worker
+    # boot is legal. A membership scan would read "off" and refuse a boot the
+    # gate itself permits — the over-block a naive arity fix introduces.
+    proc = _run_worker_block(
+        ("uvicorn", "app:app", "--app-dir", "--lifespan=off"),
+        {"WEB_CONCURRENCY": "4", "TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"],
+         wt.ACK_ENV: "1"},
+    )
+    assert proc.returncode == 0, (proc.stderr, proc.stdout)
+    assert "REFUSING" not in proc.stderr, proc.stderr
+    assert "MULTI-WORKER" in proc.stdout, proc.stdout
 
 
 def test_the_lifespan_off_refusal_holds_under_a_COLLATING_locale():
