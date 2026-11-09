@@ -2916,9 +2916,11 @@ test("a 403 policy refusal defers and KEEPS the entry (#5051, #4895)", async () 
   // so the entry must be KEPT and retried — not quarantined behind a marker
   // nothing on this path reaches.
   //
-  // MUTATION THAT REDS THIS: classify 403 `permanent` again (or route the drain
-  // on `classifyFailure(...) === "permanent"` instead of `mayKeepEntry`) → the
-  // entry is quarantined and the only copy of the session is stranded.
+  // MUTATION THAT REDS THIS: make `captureOutcome(403)` answer `permanent`
+  // again → the entry is quarantined and the only copy of the session is
+  // stranded. (Routing the drain on `classifyFailure(...) === "permanent"`
+  // would NOT red this: the 2-class projection answers `"policy"` for 403, so
+  // the two expressions are extensionally equal by construction.)
   const spool = tmpSpool();
   writeSpoolEntry(spool, snapshot("sess-403"));
   const { fetchImpl, calls } = statusFetch(403, '{"detail":"Organization is suspended"}');
@@ -2934,7 +2936,12 @@ test("a 403 policy refusal defers and KEEPS the entry (#5051, #4895)", async () 
   const ok = statusFetch(200);
   const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 10 ** 12 });
   assert.equal(second.filed, 1, "the kept capture must file once the org is reinstated");
-  assert.ok(calls.length >= 1);
+  // Assert on the SECOND fetch's calls, not the 403 one: `calls` from the first
+  // leg cannot vary under any mutation of this fix (a deferral already implies
+  // it), so pinning it here would be dead weight. One POST on the re-file is
+  // the load-bearing half — a kept entry that silently never re-files is the
+  // same loss, one drain later.
+  assert.equal(ok.calls.length, 1, "the kept capture was not actually re-POSTed");
 });
 
 test("#8531: a non-object terminal_failure marker does not strand the entry", async () => {

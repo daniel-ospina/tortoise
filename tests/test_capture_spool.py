@@ -1534,10 +1534,12 @@ def test_a_reversible_policy_refusal_is_kept_never_terminalised(tmp_path):
     session behind a marker that nothing reached, and on the `sessions import`
     path it was not spooled at all.
 
-    MUTATION THAT REDS THIS: classify 403 `permanent` again (or route the drain
-    on `classify_failure`'s old 2-class answer instead of the class) -> the
-    entry is quarantined, `summary.discarded` is non-empty, and the capture is
-    stranded.
+    MUTATION THAT REDS THIS: make `capture_outcome(403)` answer `permanent`
+    again -> the entry is quarantined, `summary.discarded` is non-empty, and
+    the capture is stranded. (Routing the drain on `classify_failure`'s 2-class
+    answer would NOT red this: since #5051 that projection answers `"policy"`
+    for 403, so the two expressions are extensionally equal by construction —
+    both are `capture_outcome`'s table read through a different name.)
     """
     root = tmp_path / "spool"
     write_spool_entry(root, _snapshot("sess-policy"))

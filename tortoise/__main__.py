@@ -10368,9 +10368,13 @@ def _cmd_sessions_import(args) -> int:
             # Deliberately broad: reading a DIAGNOSTIC body must never replace
             # the honest failure with a traceback, whatever it raises.
             body = f"<error body unreadable: {read_exc}>"
-        # 403 ⇒ fail, NO receipt, honest error (Task 15 acceptance); a
-        # RETRYABLE refusal (402/408/425/429/5xx, INCLUDING 503) is spooled for a
-        # later drain (#4714) but still exits 1 above with no receipt.
+        # A refusal that can still succeed later is SPOOLED for the next drain
+        # (#4714) and still exits 1 above with no receipt: `retryable`
+        # (402/408/409/425/429/5xx, INCLUDING 503) AND `policy` (401/403/407 —
+        # a suspended org or a rotated key, #5051/#4895). A `permanent` refusal
+        # (400/404/405/406/413/415/422/…) is NOT parked: a malformed payload
+        # never becomes valid by waiting. The 2xx-only LOCAL receipt rule is a
+        # separate question and is untouched (Task 15 acceptance, #4675).
         print(f"import failed (HTTP {e.code}): {body}", file=_sys.stderr)
         if _confirm_already_captured(e.code, body):
             return 0
