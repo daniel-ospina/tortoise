@@ -467,6 +467,20 @@ SOURCE_PATTERNS = {
                    # billing its author for a file they never touched, exactly the
                    # failure the `logo.png` entry above describes.
                    "website/assets/premiselabs-logo.png",
+                   # #11615: the CRAWLER SURFACE — `robots.txt` and the sitemaps.
+                   # `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` drops every
+                   # non-Python path no pattern names; measured before these entries:
+                   # `select(["website/sitemap.xml"])` -> `surfaces: []` and
+                   # `test_website_docs_consistency.py` NOT selected, so a diff that
+                   # deleted the conventional `/sitemap.xml` (the 404 that opened #11615),
+                   # dropped a `Sitemap:` line from robots.txt, or added a `<loc>` for a
+                   # page that no longer exists merged with the guard ABSENT — and then
+                   # REDed the next website diff, billing its author for a file they never
+                   # touched. Same silent-drop class as the icon binaries above.
+                   "website/robots.txt",
+                   "website/sitemap.xml",
+                   "website/sitemap-company.xml",
+                   "website/sitemap-product.xml",
                    # #3673: the served skill documents and the installer belong to
                    # this surface. The parity contract between
                    # `tortoise/onboarding/SKILL.md` and its served mirror is

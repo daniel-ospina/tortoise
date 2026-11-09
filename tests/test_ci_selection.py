@@ -1383,6 +1383,42 @@ def test_the_site_icon_set_and_card_select_the_guard_that_reads_their_bytes():
         assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
 
 
+def test_the_crawler_surface_selects_the_guard_that_reads_it():
+    """#11615: `robots.txt` and the sitemaps must select the sitemap contract.
+
+    `website/` is in NON_PYTHON_PREFIXES, so `_keep_changed` drops every non-Python path
+    no `SOURCE_PATTERNS` row names. MEASURED before the entries, with the CI's own
+    selector: `select(["website/sitemap.xml"], "pull_request", load_manifest())` ->
+    `surfaces: []`, and `test_website_docs_consistency.py` was NOT in `test_files` — so
+    the diff that deletes the conventional `/sitemap.xml` (the 404 that opened #11615),
+    drops a `Sitemap:` line from robots.txt, or adds a `<loc>` for a page that no longer
+    exists would merge with the guard ABSENT, and then RED the next website diff. That is
+    the #1349/#3332/#3616 silent-drop class.
+
+    The population is derived, not hand-listed: every `Sitemap:`-bearing file and every
+    sitemap the tree actually serves. A hand-kept list here would let a NEW sitemap ship
+    with no registration while this test stayed green — the exact failure it exists for.
+    """
+    crawler = {
+        "website/robots.txt",  # the discovery file every crawler reads first
+        "website/sitemap.xml",  # the conventional index (#11615)
+    }
+    crawler |= {f"website/{p.name}" for p in (REPO / "website").glob("sitemap-*.xml")}
+    assert {"website/sitemap-company.xml", "website/sitemap-product.xml"} <= crawler, (
+        f"the sitemap population collapsed (found {sorted(crawler)}) — the glob stopped "
+        "matching the files this surface exists to cover")
+    for changed in sorted(crawler):
+        assert (REPO / changed).is_file(), f"the file this test guards is gone: {changed}"
+        r = _sel([changed])
+        assert r["surfaces"] == ["onboarding"], (
+            f"{changed} selects {r['surfaces']} — a crawler file under website/ matches "
+            "no SOURCE_PATTERNS row and falls to the docs-only early return, so the "
+            "sitemap contract never runs on the one diff that can break it (#11615)")
+        assert "test_website_docs_consistency.py" in r["test_files"], (
+            f"{changed} does not select test_website_docs_consistency.py, which holds "
+            "the sitemap/robots contract")
+        assert r["slow_run"] is False, f"{changed} must not pull a slow leg"
+
 def test_public_site_surface_change_selects_onboarding_and_skips_slow():
     """#3332: a public *site surface* change selects `onboarding`.
 
@@ -2389,8 +2425,19 @@ def test_unrelated_website_change_stays_tier1():
     A website path that owns no guard test keeps the old docs-only behavior
     (empty changed -> tier-1 smoke), so unrelated website edits do not drag the
     onboarding surface in.
+
+    The witness is `website/robots.txt` NO LONGER (#11615): its `Sitemap:` lines are the
+    discovery half of the sitemap/robots contract asserted by
+    `test_website_docs_consistency.py`, so a change to it must select that guard. When
+    this subject next gains a guard, move the witness again rather than deleting the
+    test — the property under test (an unguarded website path stays tier-1) is what keeps
+    unrelated website diffs cheap, and a file chosen because "nothing reads it" is only
+    inert until something does.
     """
-    r = _sel(["website/robots.txt"])
+    _inert = "website/assets/daniel-ospina.jpg"  # a bio photo; no guard parses its bytes
+    assert (Path(__file__).resolve().parents[1] / _inert).is_file(), (
+        f"the inert witness is gone: {_inert} — pick another unguarded website path")
+    r = _sel([_inert])
     assert r["surfaces"] == []
     assert r["full"] is False
     assert set(r["test_files"]) == _tier1()

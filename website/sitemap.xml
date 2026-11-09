@@ -1,0 +1,32 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- THE CONVENTIONAL ENTRY POINT: /sitemap.xml (#11615).
+     Nothing served this path until now, so every crawler, SEO tool and Search
+     Console "add sitemap" box that reaches for the conventional URL got a 404 —
+     while robots.txt advertised four real sitemaps under names nobody probes.
+     A sitemap INDEX is what belongs here: it advertises the four below and
+     nothing else.
+
+     Same document on both hosts, on purpose. It names sitemaps on both hosts
+     plus the app origin, which is the cross-submission pattern robots.txt
+     already documents: each SITEMAP holds only its own host's URLs, while the
+     INDEX is host-agnostic. Google reads a sitemap's <loc> as a claim by the
+     verified owner, and all of these are on the same Pages project.
+
+     The <loc> set below must equal the `Sitemap:` lines in robots.txt in BOTH
+     directions — `test_the_sitemap_index_and_robots_advertise_the_same_set`
+     holds the two files to each other, so neither can drift. blog/sitemap.xml
+     is dynamic (published posts only); the other three are in this tree. -->
+<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+  <sitemap>
+    <loc>https://premiselabs.co/sitemap-company.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://tortoise.premiselabs.co/sitemap-product.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://app.premiselabs.co/sitemap.xml</loc>
+  </sitemap>
+  <sitemap>
+    <loc>https://tortoise.premiselabs.co/blog/sitemap.xml</loc>
+  </sitemap>
+</sitemapindex>

@@ -34,6 +34,7 @@ import sys
 from html import unescape as html_unescape
 from pathlib import Path
 from urllib.parse import urlparse
+from xml.etree import ElementTree
 
 import pytest
 from pydantic import ValidationError
@@ -2562,3 +2563,212 @@ def test_faq_source_answer_states_the_capture_shaping() -> None:
     assert "every extracted claim carries the source it was drawn from" in answer, (
         "the scoped traceability claim was dropped along with the false universal"
     )
+
+
+# ── the sitemap contract: the conventional entry point, and who advertises what (#11615) ──
+#
+# The measured defect: `https://premiselabs.co/sitemap.xml` answered **404** on both hosts.
+# The site DID ship sitemaps, but under `sitemap-company.xml` / `sitemap-product.xml`, which
+# only robots.txt names — so every crawler, SEO tool and Search Console "add sitemap" box
+# that reaches for the conventional path got the 404 page instead. Nothing in the tree
+# named that path, so nothing could catch it.
+#
+# The contract below is deliberately TWO-WAY where it can be: a sitemap that exists but is
+# not advertised fails, and an advertised sitemap that is not servable fails. A one-way
+# check would let either half rot.
+
+SITEMAP_INDEX = WEBSITE / "sitemap.xml"
+ROBOTS_TXT = WEBSITE / "robots.txt"
+SITEMAP_NS = "{http://www.sitemaps.org/schemas/sitemap/0.9}"
+# The Pages project serves one tree under several hostnames; the sitemap split is per
+# host, so a <loc> is checked for its HOST as well as its path.
+SITE_HOSTS = frozenset({
+    "premiselabs.co",
+    "tortoise.premiselabs.co",
+    "app.premiselabs.co",
+})
+# The host-root rewrite in `functions/_middleware.ts`: `/` is a DIFFERENT document per
+# host, so a root <loc> cannot be resolved without it. Mirrored here rather than
+# re-derived, and pinned by `test_the_site_root_is_a_different_page_per_host`.
+HOST_ROOT_PAGE = {
+    "premiselabs.co": "index.html",
+    "tortoise.premiselabs.co": "product.html",
+}
+
+
+def _xml_locs(path: Path) -> list[str]:
+    """Every `<loc>` in a sitemap or sitemap index, PARSED rather than regexed."""
+    root = ElementTree.parse(path).getroot()
+    return [(el.text or "").strip() for el in root.iter(f"{SITEMAP_NS}loc")]
+
+
+def _sitemap_root_tag(path: Path) -> str:
+    return ElementTree.parse(path).getroot().tag
+
+
+def _robots_sitemap_urls() -> list[str]:
+    """The `Sitemap:` lines robots.txt advertises, in file order."""
+    urls = []
+    for line in _read(ROBOTS_TXT).splitlines():
+        line = line.split("#", 1)[0].strip()
+        if line.lower().startswith("sitemap:"):
+            urls.append(line.split(":", 1)[1].strip())
+    return urls
+
+
+def _sitemap_file_for(url: str) -> Path | None:
+    """The file in this tree that serves a sitemap URL, or None if nothing does.
+
+    Three shapes exist here: a static XML file under `website/`, a Pages Function under
+    `website/functions/` (the blog's sitemap is generated from published posts), and the
+    dashboard's own copy in its separate project. A sitemap URL that matches none of them
+    is advertised to a crawler and 404s.
+    """
+    parsed = urlparse(url)
+    path = parsed.path.lstrip("/")
+    if parsed.netloc == "app.premiselabs.co":
+        candidate = WEBSITE / "apps" / "dashboard" / "public" / path
+        return candidate if candidate.is_file() else None
+    if path.endswith(".xml"):
+        candidate = WEBSITE / path
+        if candidate.is_file():
+            return candidate
+        handler = WEBSITE / "functions" / f"{path}.ts"
+        if handler.is_file():
+            return handler
+        # a catch-all function above it (the blog serves /blog/sitemap.xml)
+        if _function_serves(f"/{path}"):
+            return WEBSITE / "functions" / path.split("/")[0] / "[[path]].ts"
+    return None
+
+
+def _document_for_loc(url: str) -> Path | None:
+    """The document a page <loc> points at, resolved the way Pages serves it."""
+    parsed = urlparse(url)
+    path = parsed.path
+    if path in ("", "/"):
+        name = HOST_ROOT_PAGE.get(parsed.netloc)
+        candidate = WEBSITE / name if name else None
+        return candidate if candidate and candidate.is_file() else None
+    cleaned = path.strip("/")
+    for candidate in (WEBSITE / cleaned, WEBSITE / f"{cleaned}.html"):
+        if candidate.is_file():
+            return candidate
+    return None
+
+
+def test_the_site_root_is_a_different_page_per_host() -> None:
+    """Guard the guard: the host→root mapping above must match the middleware.
+
+    `_document_for_loc` cannot resolve `/` without knowing which document the host root
+    serves, and that mapping is copied from `functions/_middleware.ts`. If the middleware
+    changes it, a stale copy here would resolve the WRONG page — and pass.
+    """
+    middleware = _read(WEBSITE / "functions" / "_middleware.ts")
+    assert "product.html" in middleware and "index.html" in middleware, (
+        "the middleware no longer names both root documents — this guard's "
+        "HOST_ROOT_PAGE mapping is stale")
+    for host, page in HOST_ROOT_PAGE.items():
+        assert (WEBSITE / page).is_file(), f"{host}'s root document {page} is missing"
+
+
+def test_the_conventional_sitemap_url_serves_a_sitemap_index() -> None:
+    """`/sitemap.xml` must be a sitemap INDEX — the 404 in #11615 was this path.
+
+    A `<urlset>` here would also "work", so the element is named explicitly: the index is
+    what lets one conventional URL advertise the per-host sitemaps without pretending one
+    host owns the other's URLs.
+    """
+    assert SITEMAP_INDEX.is_file(), (
+        "website/sitemap.xml is missing — https://premiselabs.co/sitemap.xml answers 404, "
+        "which is the first path every crawler, SEO tool and Search Console box probes "
+        "(#11615)")
+    assert _sitemap_root_tag(SITEMAP_INDEX) == f"{SITEMAP_NS}sitemapindex", (
+        f"website/sitemap.xml is a {_sitemap_root_tag(SITEMAP_INDEX)} — the conventional "
+        "entry point must be a <sitemapindex>, so it can advertise every host's sitemap")
+    locs = _xml_locs(SITEMAP_INDEX)
+    assert locs, "the sitemap index advertises nothing"
+    for loc in locs:
+        parsed = urlparse(loc)
+        assert parsed.scheme == "https", f"{loc} is not https"
+        assert parsed.netloc in SITE_HOSTS, (
+            f"{loc} is on {parsed.netloc}, which is not a host this project serves "
+            f"({sorted(SITE_HOSTS)})")
+
+
+def test_the_sitemap_index_and_robots_advertise_the_same_set() -> None:
+    """The two advertisements must agree EXACTLY, in both directions.
+
+    One-way checks rot: the index could keep advertising a sitemap that robots dropped,
+    or robots could name one that no longer exists. Both are the same defect a crawler
+    sees, so both fail here.
+    """
+    index = set(_xml_locs(SITEMAP_INDEX))
+    robots = set(_robots_sitemap_urls())
+    assert robots, "robots.txt advertises no sitemap at all"
+    assert index == robots, (
+        "website/sitemap.xml and website/robots.txt disagree about which sitemaps exist — "
+        f"only in the index: {sorted(index - robots)}; only in robots.txt: "
+        f"{sorted(robots - index)}. Update both: the index is what /sitemap.xml serves, "
+        "robots.txt is what a crawler reads first")
+
+
+def test_every_advertised_sitemap_is_servable_from_this_tree() -> None:
+    """An advertised sitemap that 404s is worse than an unadvertised one.
+
+    This is the half the tree could not see before: robots.txt named four sitemaps and
+    nothing checked that the file (or the Function) behind each one exists.
+    """
+    missing = [url for url in _robots_sitemap_urls() if _sitemap_file_for(url) is None]
+    assert not missing, (
+        f"robots.txt advertises sitemap(s) with no file or Function behind them: "
+        f"{missing}. Either add the sitemap or drop the `Sitemap:` line")
+
+
+def test_no_sitemap_advertises_a_page_that_is_deleted_or_noindex() -> None:
+    """Every page URL in a sitemap must resolve here — and must not be noindex.
+
+    Two failures in one: a `<loc>` for a page that has been deleted sends a crawler to a
+    404, and a `<loc>` for a `noindex` page tells a crawler the page exists while the page
+    tells it to ignore the page. `investors.html` and `design-partners-intro.html` are
+    noindex and their own comments assert they are absent from the sitemap — nothing
+    checked that until now.
+    """
+    problems: list[str] = []
+    for sitemap in sorted(WEBSITE.glob("sitemap-*.xml")):
+        for loc in _xml_locs(sitemap):
+            document = _document_for_loc(loc)
+            if document is None:
+                problems.append(f"{sitemap.name}: {loc} — no document in the served tree")
+                continue
+            if document.suffix == ".html" and _is_noindex(_read(document)):
+                problems.append(
+                    f"{sitemap.name}: {loc} — {document.name} declares noindex, so the "
+                    "sitemap asks a crawler to index a page that refuses indexing")
+    assert not problems, "\n".join(problems)
+
+
+def test_every_in_scope_page_appears_in_a_sitemap() -> None:
+    """...and the other direction: an indexable page with no `<loc>` is invisible.
+
+    The set is DERIVED (`_in_scope_pages`: public, served, not noindex, not redirected
+    away), so a page added later is held to this without editing a list — the same
+    derivation the blog-link guard uses.
+    """
+    advertised = {
+        _document_for_loc(loc).resolve()
+        for sitemap in sorted(WEBSITE.glob("sitemap-*.xml"))
+        for loc in _xml_locs(sitemap)
+        if _document_for_loc(loc) is not None
+    }
+    missing = [p.name for p in _in_scope_pages() if p.resolve() not in advertised]
+    assert not missing, (
+        f"indexable page(s) in no sitemap: {missing}. A crawler only finds a page that is "
+        "linked or advertised; add them to the sitemap for their host")
+
+
+def test_the_sitemap_index_alias_redirects() -> None:
+    """/sitemap_index.xml is the other convention a tool probes (Yoast, most auditors)."""
+    assert _canonical_redirect_targets().get("/sitemap_index.xml") == "/sitemap.xml", (
+        "website/_redirects must send /sitemap_index.xml to /sitemap.xml — otherwise the "
+        "second-most-probed sitemap path is a 404 (#11615)")
