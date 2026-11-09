@@ -501,10 +501,12 @@ def assert_capture_lane(sdk=None) -> None:
         sdk = TortoiseSDK
     if not hasattr(sdk, "capture_session"):
         refuse("s3-ablation: REFUSED — #4282 retired the PUBLIC TortoiseSDK.capture_session "
-               "2026-10-27), the entry point this arm drives (`sdk.capture_session` -> "
-               "`_extract_session_v2`), so no arm can be measured through it. The surviving "
-               "in-process door is the private `sdk._extract_session_v2`, which the hosted "
-               "handler still reaches; a measurement against it is a NEW instrument with its "
+               "name (owner ruling 2026-10-27), the entry point this arm drives, so no arm "
+               "can be measured through it. The surviving in-process door is the private "
+               "`TortoiseSDK._capture_session` — main's whole capture body (`:Session`, the "
+               "`(Source)-[:references]->(Event)` link, the provenance stamps), restored by "
+               "the #10226 forward-merge — NOT `_extract_session_v2`, which is only the "
+               "extractor half. A measurement re-pointed at it is a NEW instrument with its "
                "own pre-registration")
 
 

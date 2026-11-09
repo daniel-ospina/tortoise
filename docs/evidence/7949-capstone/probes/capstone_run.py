@@ -1248,11 +1248,13 @@ def main(argv: list[str] | None = None) -> int:
     # in the pass rather than as the authorised deletion it is. Name it, and name
     # the surviving door.
     if not hasattr(sdk, "capture_session"):
-        return refuse("#4282 deleted TortoiseSDK.capture_session — the entry point G4 "
-                      "drives does not exist, so no pass can be observed; the surviving "
-                      "in-process door is the private sdk._extract_session_v2, which the "
-                      "hosted handler still reaches, and a measurement against it is a "
-                      "NEW instrument with its own pre-registration",
+        return refuse("#4282 retired the PUBLIC TortoiseSDK.capture_session name — the "
+                      "entry point G4 drives — so no pass can be observed through it; the "
+                      "surviving in-process door is the private TortoiseSDK._capture_session "
+                      "(main's whole capture body, restored by the #10226 forward-merge), "
+                      "NOT sdk._extract_session_v2, which is only the extractor half, and a "
+                      "measurement re-pointed at it is a NEW instrument with its own "
+                      "pre-registration",
                       prereg_ok=True, code=4, corpus=corpus)
     session_id = f"capstone_{uuid.uuid4().hex[:12]}"
     try:
