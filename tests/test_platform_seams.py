@@ -189,6 +189,63 @@ def test_volunteer_cli_raw_prompt_that_parses_as_json(tmp_path):
         assert r.stdout.strip() == "", raw
 
 
+#: A re-mention: a substantive STATEMENT that repeats the fact the previous
+#: turn surfaced (never an explicit ask, which legitimately re-fires).
+_RE_MENTION = "So CI deploys via GitHub Actions on main merge."
+
+
+def test_volunteer_cli_prior_context_suppresses_a_re_mention(env):
+    """#2120 scope "Cross-turn dedupe" — `--prior-context` is the input.
+
+    The reflex's re-mention suppression reads ``prior_context`` and NOTHING
+    else, so a per-turn seam that cannot pass it re-fires a pointer it already
+    injected (the false fire the W3 harness scores as passing — it feeds
+    prior_context through the SDK). Two invocations pin both polarities: the
+    same window WITHOUT continuity re-fires, WITH the previously injected block
+    it is suppressed.
+    """
+    first = _run(["volunteer", "--json"], env, stdin="How is CI deploy triggered?")
+    assert first.returncode == 0, first.stderr
+    block = json.loads(first.stdout)["block"]
+    assert block.strip(), "the seeded claim must surface on the first turn"
+
+    bare = _run(["volunteer", "--json"], env, stdin=_RE_MENTION)
+    assert bare.returncode == 0, bare.stderr
+    assert json.loads(bare.stdout)["pointers"], (
+        "without continuity the pointer re-fires — this is the defect the "
+        "--prior-context input exists to remove")
+
+    with_prior = _run(
+        ["volunteer", "--json", "--prior-context", block], env, stdin=_RE_MENTION)
+    assert with_prior.returncode == 0, with_prior.stderr
+    suppressed = json.loads(with_prior.stdout)
+    # `degraded_reason is None` is load-bearing, not decoration: a
+    # ``degraded_response`` is ALSO "no pointers, empty block" (fail-open), so
+    # without it a regression that makes the --prior-context leg DEGRADE rather
+    # than suppress reports as a PASS — the assertion would prove the shape of
+    # the failure it exists to catch.
+    assert suppressed.get("degraded_reason") is None, suppressed
+    assert suppressed["pointers"] == [] and suppressed["block"] == "", (
+        f"a pointer already surfaced in prior_context must not re-inject: {suppressed}")
+
+
+def test_volunteer_cli_contract_dict_carries_prior_context(env):
+    """The same continuity input through the JSON contract dict (the shape a
+    plugin/hook pipes when it also wants the other knobs)."""
+    first = _run(["volunteer", "--json"], env, stdin="How is CI deploy triggered?")
+    block = json.loads(first.stdout)["block"]
+    payload = json.dumps({
+        "window": [{"role": "user", "content": _RE_MENTION}],
+        "session_id": "sess-2120",
+        "prior_context": block,
+    })
+    r = _run(["volunteer", "--json"], env, stdin=payload)
+    assert r.returncode == 0, r.stderr
+    contract = json.loads(r.stdout)
+    assert contract.get("degraded_reason") is None, contract  # see the note above
+    assert contract["pointers"] == [], r.stdout
+
+
 # ── 2. `tortoise install` — agent-first harness registration ────────────
 
 
@@ -1413,10 +1470,17 @@ class _RecordingStub(BaseHTTPRequestHandler):
     hits: ClassVar[list] = []
 
     def _answer(self):
+        length = int(self.headers.get("Content-Length") or 0)
+        raw = self.rfile.read(length) if length else b""
+        try:
+            body = json.loads(raw) if raw else None
+        except ValueError:
+            body = raw.decode("utf-8", "replace")
         self.hits.append({
             "path": self.path,
             "auth": self.headers.get("Authorization"),
-            "body_len": int(self.headers.get("Content-Length") or 0),
+            "body_len": length,
+            "body": body,
         })
         payload = json.dumps(self.body).encode()
         self.send_response(200)
@@ -1476,6 +1540,30 @@ def _trust_env(tmp_path: Path, home: Path | None = None) -> dict:
 
 class TestVolunteerTrustBoundary:
     """#2369 D1: the per-turn reflex identity is ONE source chain."""
+
+    def test_hosted_reflex_carries_prior_context(self, tmp_path):
+        """#2120: the HOSTED leg forwards the continuity input.
+
+        `POST /v1/context` accepts `prior_context` (the reflex's re-mention
+        suppression input); the local leg is graded end-to-end by
+        `test_volunteer_cli_prior_context_suppresses_a_re_mention`. Without
+        this half the flag would work locally and silently vanish hosted.
+        """
+        stub = type("Stub", (_RecordingStub,), {
+            "body": {"block": "hosted-block"}, "hits": []})
+        with _stub_server(stub) as url:
+            home = tmp_path / "home"
+            _write_global_credentials(home, "tt_file_key", url)
+            env = _trust_env(tmp_path, home)
+            r = _run(["volunteer", "--prior-context", "the-earlier-block"],
+                     env, stdin="How is CI deploy triggered?")
+        assert r.returncode == 0, r.stderr
+        assert "hosted-block" in r.stdout
+        body = stub.hits[0]["body"]
+        assert body["prior_context"] == "the-earlier-block"
+        assert body["window"] == [
+            {"role": "user", "content": "How is CI deploy triggered?"}
+        ]
 
     def test_poisoned_env_url_cannot_redirect_file_sourced_key(self, tmp_path):
         """(a) A poisoned TORTOISE_API_URL with a FILE-sourced key must NOT
