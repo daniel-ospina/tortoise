@@ -6267,6 +6267,16 @@ surfaces:
   # builds its store by path (the `test_update_point_content_embedding_4208.py`
   # pattern), which runs on any lane.
   - test_embed_gate_5008.py
+  # #11086: the EMBED decision's STEP (v4 §4.3 G2, now `S6a EMBED-DECISION`) and the
+  # ordering that makes it correct. Guards three source surfaces at once and none of them
+  # falls through to `core` on its own: `tortoise/extractor_v2.py` (the S2.2b pass and
+  # `execute_embed`'s payload), `tortoise/embeddings.py` (the submission seam — an `eval`
+  # SOURCE_PATTERN, hence the DUAL below) and `tortoise/kind_classifier.py`, plus the v4
+  # design document and `docs/evidence/11086/gate-rate.json`. The load-bearing pin is
+  # `test_a_discarded_candidate_is_never_offered_to_the_embed_seam`: it drives a DISCARD
+  # through the real pass and the real payload and reds if the discard stops being removed.
+  # Hermetic — no graph, no network, no model (the measurement stubs the embedder).
+  - test_embed_decision_step_11086.py
   # #11085: the embedding-writer EXEMPTION REGISTER — `tortoise/embed_writer_register.py`, a leaf
   # module reached through the `core` fallback (⛔ `tortoise/embed_writer_register.py` matches no
   # named SOURCE_PATTERNS entry — some OTHER `tortoise/*.py` paths do and REPLACE the fallback, which
@@ -8058,6 +8068,7 @@ surfaces:
   - test_journal_embedding_5004.py
   - test_update_point_content_embedding_4208.py  # #4208: dual with `core` — the fix routes through `tortoise/embeddings.py`'s `encode_for_store`, which this surface owns
   - test_embed_gate_5008.py  # #5008: dual with `core` — `encode_for_row` (the EMBED gate's submission seam) lives in `tortoise/embeddings.py`, which this surface owns; without this arm an embeddings.py-only diff would leave the gate unguarded
+  - test_embed_decision_step_11086.py  # #11086: dual with `core` — the S6a step's submission seam (`encode_for_row`) and the width/degrade path it rides live in `tortoise/embeddings.py`, which this surface owns; an embeddings.py-only diff would otherwise leave the EMBED step's ordering unguarded
   - test_env_truthy.py
   - bench/test_bench_core.py
   - bench/test_degradation_chain.py
@@ -10952,6 +10963,7 @@ durations:
   test_durability_posture.py: 9.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 8.2
   test_embed_metering.py: 2.4  # #4488: no source leg of the sweep collected it — refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.5
   test_embed_gate_5008.py: 6.0  # carried forward (not a full-file CI measurement) — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.8s) is a LOWER bound; kept 6.0
+  test_embed_decision_step_11086.py: 5.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured this turn: 11 tests in 3.5s through `tools/test_lane.py run`; declared at 5.0s so a cold leg cannot under-pack. Refresh from the first post-merge run.
   test_embedder_provision.py: 8.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (7.8s) is a LOWER bound; kept 8.6
   test_entity_delete_rebuild.py: 2.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.7
   test_env_truthy.py: 22.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 18.8

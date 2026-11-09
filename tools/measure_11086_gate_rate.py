@@ -274,10 +274,11 @@ def _table(record: dict) -> str:
     lines.append(f"## {eg['flag']} — {eg['question']}")
     lines.append(f"   enforcement point: {eg['enforcement_point']}")
     lines.append(f"   {'vector':<9} {'gate ON':>8} {'gate OFF':>9}   row")
-    for on, off in zip(eg["gate_on"]["rows"], eg["gate_off"]["rows"]):
-        lines.append(f"   {str(on['carries_vector']):<9} "
-                     f"{str(on['carries_vector']):>8} "
-                     f"{str(off['carries_vector']):>9}   "
+    for on, off in zip(eg["gate_on"]["rows"], eg["gate_off"]["rows"],
+                    strict=True):
+        lines.append(f"   {on['carries_vector']!s:<9} "
+                     f"{on['carries_vector']!s:>8} "
+                     f"{off['carries_vector']!s:>9}   "
                      f"{on['text'][:58]!r}  [{on['why']}]")
     lines.append(f"   rows carrying a vector: ON "
                  f"{eg['gate_on']['rows_carrying_a_vector']} / "
@@ -290,10 +291,11 @@ def _table(record: dict) -> str:
     lines.append(f"## {vg['flag']} — {vg['question']}")
     lines.append(f"   enforcement point: {vg['enforcement_point']}")
     lines.append(f"   {'exists':<9} {'gate ON':>8} {'gate OFF':>9}   row")
-    for on, off in zip(vg["gate_on"]["rows"], vg["gate_off"]["rows"]):
-        lines.append(f"   {str(on['still_exists']):<9} "
-                     f"{str(on['still_exists']):>8} "
-                     f"{str(off['still_exists']):>9}   "
+    for on, off in zip(vg["gate_on"]["rows"], vg["gate_off"]["rows"],
+                    strict=True):
+        lines.append(f"   {on['still_exists']!s:<9} "
+                     f"{on['still_exists']!s:>8} "
+                     f"{off['still_exists']!s:>9}   "
                      f"{on['text'][:58]!r}  [{on['why']}]")
     lines.append(f"   candidates still existing: ON "
                  f"{vg['gate_on']['candidates_still_existing']} / "
@@ -319,7 +321,7 @@ def main(argv: list[str] | None = None) -> int:
     except SystemExit as exc:  # the refusal path: no artifact written
         print(f"REFUSED — {exc}", file=sys.stderr)
         return 2
-    except Exception as exc:  # noqa: BLE001 — an instrument failure is not a verdict
+    except Exception as exc:
         print(f"REFUSED — instrument failed: {type(exc).__name__}: {exc}",
               file=sys.stderr)
         return 2
