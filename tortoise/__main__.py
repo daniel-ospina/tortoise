@@ -6263,13 +6263,17 @@ def _install_read_hook_impl(args) -> int:
         # all, and refusing over it regressed such a project (#11588 review
         # cycle 2 — measured: rc=1 with a directory at `.cline/hooks/
         # UserPromptSubmit` and an otherwise perfect `.clinerules/hooks`).
-        for p in ([target] + ([legacy_target] if uninstall else [])):
-            if p.exists() and p.is_dir():
-                print(f"{p} is a directory — refusing to touch it.",
-                      file=_sys.stderr)
-                return 1
-        refused_live = False
-        if target.exists():
+        # An INSTALL refuses a directory sitting where it must WRITE. An
+        # UNINSTALL classifies each candidate itself (`_uninstall_verdict`
+        # below), because a refusal there must be PER CANDIDATE: a blocked path
+        # used to abort the whole run and strand OUR registration at the other
+        # one — still installed, still fired, while the message named only the
+        # culprit (#11588 review cycle 10).
+        if not uninstall and target.exists() and target.is_dir():
+            print(f"{target} is a directory — refusing to touch it.",
+                  file=_sys.stderr)
+            return 1
+        if not uninstall and target.exists():
             existing_text = target.read_text(
                 encoding="utf-8", errors="replace")
             # #2383: ownership is the registration LINE, not a substring.
@@ -6278,28 +6282,12 @@ def _install_read_hook_impl(args) -> int:
             # comment or an echo — as ours, and silently OVERWROTE it on
             # install / DELETE it on uninstall. A marker-line match cannot
             # fire on a mention.
-            if _cline_marker_owns(existing_text):
-                # An uninstall DELETES this file, so a delete that would land
-                # outside the root must refuse — the same rule as the legacy
-                # candidate below (#11588 review cycle 9).
-                if uninstall and _escape_refusal([target]):
-                    return 1
-            elif not uninstall:
+            if not _cline_marker_owns(existing_text):
                 print(f"{target} already exists and is not our "
                       "volunteer-turn.sh hook — refusing to overwrite it. "
                       "Remove it manually or install into another dir.",
                       file=_sys.stderr)
                 return 1
-            else:
-                # NOT ours, and uninstalling: fall THROUGH so the loop below
-                # still runs, reporting the foreign live hook as SKIPPED and
-                # removing OUR legacy registration. The exit code stays 1 (a
-                # refusal is still a refusal — #2383's contract, which the
-                # pre-existing tests pin), but our file is no longer STRANDED
-                # while the message names only the live target — the one shape
-                # #2124 itself created, since the live and legacy paths are now
-                # different files (#11588 review cycle 9).
-                refused_live = True
 
         def _cline_owns_path(p: Path) -> bool:
             """Ownership of the registration at ``p`` (unreadable → not ours).
@@ -6373,7 +6361,8 @@ def _install_read_hook_impl(args) -> int:
         # both, with nothing outside the root at risk). A file that IS ours
         # behind that symlink is still refused on both operations, because that
         # unlink would reach outside the root.
-        if (legacy_target is not None and legacy_target.exists()
+        if (not uninstall
+                and legacy_target is not None and legacy_target.exists()
                 and _cline_owns_path(legacy_target)
                 and _escape_refusal([legacy_target])):
             return 1
@@ -6404,23 +6393,42 @@ def _install_read_hook_impl(args) -> int:
                   ".clinerules is a directory.", file=_sys.stderr)
             return 1
 
-        if dry:
-            print(f"[dry-run] would write {target}:")
-            print(marker_content.rstrip())
-            if (legacy_target is not None and not _legacy_is_live_target()
-                    and legacy_target.exists()
-                    and _cline_owns_path(legacy_target)):
-                print(f"[dry-run] would remove the legacy registration at "
-                      f"{legacy_target}")
-        elif uninstall:
-            removed, skipped, owned = [], [], []
-            for p in cline_paths:
-                if not p.exists():
+        def _uninstall_verdict(p: Path) -> str:
+            """One verdict for ONE candidate: remove | skip | blocked | absent.
+
+            Per candidate on purpose (#11588 review cycle 10). A refusal used to
+            abort the whole uninstall, so a legacy DIRECTORY — or our own file
+            behind an out-of-root symlink — left the OTHER registration
+            installed and still firing while the message named only the culprit.
+            Every verdict here is a READ-ONLY decision, which is what lets
+            ``--dry-run`` mirror the real run exactly.
+            """
+            if p.exists() and p.is_dir():
+                print(f"{p} is a directory — refusing to touch it.",
+                      file=_sys.stderr)
+                return "blocked"
+            if not p.exists():
+                return "absent"
+            if not _cline_owns_path(p):
+                return "skip"
+            if _escape_refusal([p]):
+                return "blocked"  # the refusal is already printed
+            return "remove"
+
+        if uninstall:
+            # Deliberately BEFORE the install dry-run arm: `--dry-run
+            # --uninstall` is an uninstall, and it must predict the uninstall
+            # (`would remove` / `would skip` / refusal), not advertise a write
+            # it would never perform (#11588 review cycle 10).
+            verdicts = [(p, _uninstall_verdict(p)) for p in cline_paths]
+            owned = [p for p, v in verdicts if v == "remove"]
+            removed = []
+            for p, v in verdicts:
+                if v != "remove":
                     continue
-                if not _cline_owns_path(p):
-                    skipped.append(p)
+                if dry:
+                    print(f"[dry-run] would remove {p}")
                     continue
-                owned.append(p)
                 # #2124 review P2: a delete is BEST-EFFORT, exactly like the
                 # ownership READ above (`_cline_owns_path` returns False on
                 # OSError). An unlink that cannot complete (a root-owned
@@ -6444,11 +6452,28 @@ def _install_read_hook_impl(args) -> int:
                       "nothing to remove.")
             for p in removed:
                 print(f"Removed {p}")
-            for p in skipped:
-                print(f"{p} is not our volunteer-turn.sh hook — "
-                      "refusing to delete it.", file=_sys.stderr)
-            if refused_live:
-                return 1
+            for p, v in verdicts:
+                if v == "skip":
+                    print(f"{p} is not our volunteer-turn.sh hook — "
+                          "refusing to delete it.", file=_sys.stderr)
+            # A refusal is REPORTED (#2383, pinned by pre-existing tests): a
+            # blocked candidate, or a foreign LIVE target — the shape the
+            # pre-#2124 code refused outright.
+            refused = any(v == "blocked" for _, v in verdicts) or any(
+                p == target for p, v in verdicts if v == "skip")
+            if refused and dry:
+                print("[dry-run] the real run would exit 1 for the refusal(s) "
+                      "above.", file=_sys.stderr)
+            return 1 if refused else 0
+
+        if dry:
+            print(f"[dry-run] would write {target}:")
+            print(marker_content.rstrip())
+            if (legacy_target is not None and not _legacy_is_live_target()
+                    and legacy_target.exists()
+                    and _cline_owns_path(legacy_target)):
+                print(f"[dry-run] would remove the legacy registration at "
+                      f"{legacy_target}")
         else:
             target.parent.mkdir(parents=True, exist_ok=True)
             # #3918: the exec bit goes on the TEMP, with the content — a

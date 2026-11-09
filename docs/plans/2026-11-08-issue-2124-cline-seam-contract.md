@@ -139,8 +139,10 @@ hook script as a module. No MCP tool or public SDK method is touched.
   component was added.
 - R8 A DIRECTORY at the LEGACY path refuses an install that never touches it → caught by
   `test_install_cline_ignores_a_directory_at_the_legacy_path` (install succeeds, directory untouched;
-  `--uninstall` still refuses via the explicit `is_dir` guard, which returns before any `unlink` —
-  `unlink` on a directory would raise, but the guard is what actually refuses).
+  `--uninstall` still refuses via the per-candidate verdict, which returns before any `unlink` —
+  `unlink` on a directory would raise, but the verdict is what actually refuses). A refusal is PER
+  CANDIDATE: it never aborts the run, so our registration at the other path is still removed
+  (`test_uninstall_cline_removes_our_hook_despite_a_blocked_OTHER_candidate`).
 - R9 `.cline` and `.clinerules` are the SAME path (a symlink either way), so "retiring the legacy
   registration" deletes the file the run just wrote — exit 0, `Installed` + `Removed the legacy
   registration` printed, and NO hook on any path → caught by
@@ -152,6 +154,11 @@ hook script as a module. No MCP tool or public SDK method is touched.
   also pins that the summary keys on ownership rather than on what was removed). A `resolve()` that
   RAISES after the write (a symlink loop at `.cline`) turned a completed install into `Install failed:`
   → caught by `test_install_cline_survives_a_symlink_loop_at_the_legacy_path`.
+- R11 `--dry-run --uninstall` describes an INSTALL (`would write`) instead of predicting the removal,
+  and after the legacy line moved into the install arm it also promised a legacy removal only an
+  install performs → caught by
+  `test_uninstall_cline_dry_run_predicts_the_uninstall_not_a_write`, which asserts `would remove`, no
+  `would write`, and that the predicted exit code matches the real run's refusal.
 
 **Threat classes:** (not adversarial) — not gate/enforcement code.
 

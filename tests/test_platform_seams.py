@@ -1059,6 +1059,83 @@ def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
     assert foreign.exists(), "a FOREIGN file was deleted"
 
 
+def test_uninstall_cline_removes_our_hook_despite_a_blocked_OTHER_candidate(
+        tmp_path):
+    """A refusal on ONE candidate must not strand our OTHER registration
+    (#11588 review cycle 10).
+
+    The pre-loop guards (a directory at the legacy path; our file behind an
+    out-of-root symlink) returned 1 before the uninstall loop ran, so the
+    registration that WAS removable stayed installed and still fired while the
+    message named only the blocked path. R8 keeps the refusal; what it must not
+    do is skip the rest of the work.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+
+    # (a) a DIRECTORY sits at the legacy path; ours is at the live target.
+    proj = tmp_path / "proj"
+    (proj / ".cline" / "hooks" / "UserPromptSubmit").mkdir(parents=True)
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, (r.stdout, r.stderr)
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+    assert live.is_file()
+    u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
+    assert u.returncode == 1, (u.returncode, u.stdout, u.stderr)
+    assert "is a directory" in u.stderr
+    assert not live.exists(), "our live hook was stranded by a blocked legacy path"
+
+    # (b) ours is at the legacy path; our live path sits behind an OUTSIDE
+    #     symlink, so deleting through it would escape the root.
+    outside = tmp_path / "shared"
+    (outside / "hooks").mkdir(parents=True)
+    our_outside = outside / "hooks" / "UserPromptSubmit"
+    our_outside.write_text("#!/usr/bin/env bash\n"
+                           "exec /nonexistent/volunteer-turn.sh cline\n")
+    proj2 = tmp_path / "proj2"
+    legacy = proj2 / ".cline" / "hooks" / "UserPromptSubmit"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("#!/usr/bin/env bash\n"
+                      "exec /nonexistent/volunteer-turn.sh cline\n")
+    (proj2 / ".clinerules").symlink_to(outside)
+    u2 = _run(["install", "cline", "--dir", str(proj2), "--uninstall"], env)
+    assert u2.returncode == 1, (u2.returncode, u2.stdout, u2.stderr)
+    assert "Refusing" in u2.stderr
+    assert not legacy.exists(), "our legacy hook was stranded by a blocked live path"
+    assert our_outside.exists(), "the delete escaped the install root"
+
+
+def test_uninstall_cline_dry_run_predicts_the_uninstall_not_a_write(tmp_path):
+    """`--dry-run --uninstall` must model the UNINSTALL (#11588 review cycle 10).
+
+    It used to print `[dry-run] would write <target>` — a write the operation
+    never performs — and, after the legacy line moved into the install arm, it
+    also promised a legacy removal that only an install does.
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    proj = tmp_path / "proj"
+    r = _run(["install", "cline", "--dir", str(proj)], env)
+    assert r.returncode == 0, r.stderr
+    live = proj / ".clinerules" / "hooks" / "UserPromptSubmit"
+
+    d = _run(["install", "cline", "--dir", str(proj), "--uninstall",
+              "--dry-run"], env)
+    assert d.returncode == 0, (d.returncode, d.stdout, d.stderr)
+    assert "would remove" in d.stdout
+    assert "would write" not in d.stdout
+    assert live.is_file(), "a dry run deleted the registration"
+
+    # A refusal is predicted too: foreign live hook, nothing of ours.
+    foreign = tmp_path / "foreign"
+    (foreign / ".clinerules" / "hooks").mkdir(parents=True)
+    (foreign / ".clinerules" / "hooks" / "UserPromptSubmit").write_text(
+        "#!/usr/bin/env bash\necho mine\n")
+    fd = _run(["install", "cline", "--dir", str(foreign), "--uninstall",
+               "--dry-run"], env)
+    fr = _run(["install", "cline", "--dir", str(foreign), "--uninstall"], env)
+    assert fd.returncode == fr.returncode == 1, (fd.returncode, fr.returncode)
+    assert "would write" not in fd.stdout
+
+
 def test_install_cline_refuses_directory_target(tmp_path):
     """A directory sitting at the cline hook path is a clean refusal, not a
     traceback."""
