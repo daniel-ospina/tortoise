@@ -382,14 +382,16 @@ measured_at:
 #     the finding twenty lines below.
 #     PROVENANCE, stated per number rather than as one blanket claim, because a
 #     blanket claim is what a reader cannot check:
-#       - WHAT `.worktree-report/` ACTUALLY HOLDS AT THIS HEAD, named instead of
+#       - A DIRECT INVOCATION, AND NO ARTIFACT HOLDS IT — named instead of
 #         generalised: the carve-out FOUR-file run
 #         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
 #         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
 #         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
 #         -> `1442 passed` at the MERGE head `2f9a3aaf68`, re-measured at the PR head
 #         `117a5f96bba5` (`1442 passed in 1115.94s`), and `1441 passed` at `a913fa8ec6` —
-#         one `def test_` less, which is main's own addition and not drift. ⛔ EACH READING
+#         one `def test_` less, which is main's own addition and not drift. At this head
+#         (`2f8e86c9b28c`) the same four files collect `1442` (`--collect-only`), so the
+#         count did not move with the two later docstring commits. ⛔ EACH READING
 #         IS A DIRECT INVOCATION AND NO ARTIFACT HOLDS IT: the four-file command has never
 #         been run to completion THROUGH `tools/worktree_report.py` in this lane (the
 #         export's own `not_done` says so verbatim), so `1441` must not be presented as a
