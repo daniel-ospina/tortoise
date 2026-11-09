@@ -2048,6 +2048,126 @@ def test_root_is_the_repo_root():
     assert probe.ROOT == _REPO, probe.ROOT
 
 
+# ── The entry-point (def, call) pair, and the ONE rule that reads it ──────────
+#
+# ⚠️ #4282 DELETED `TortoiseSDK.capture_session`, and with it the ONLY in-`sdk.py`
+# call (`extracted, meta = self._extract_session_v2(` was that method's own body).
+# The surviving production caller is the hosted capture lane, which passes the
+# method as a CALLABLE (`slot, sdk._extract_session_v2,` in `hosted_api.py`), so
+# the pair now spans two files.
+#
+# Both halves are derived from the TREE, by ANCHOR, and each document is then held
+# to those two numbers. The previous revision of these pins instead matched the
+# PROSE that joins them (`; called from the hosted capture lane at `). That is this
+# branch's wording for the fact; `main` states the same fact differently ("the
+# surviving call site is `hosted_api.py:N`"), so when the forward-merge took main's
+# newer capstone bundle the regex matched NOTHING and BOTH cite tests red-ed — over
+# two documents that were RIGHT, whose numbers resolved, and whose only defect was
+# that they no longer repeated one branch's sentence. A pin bound to a sentence
+# reds on a wording change and proves nothing about the numbers; a pin bound to the
+# symbols reds only when a cited line stops resolving. That is the convention the
+# bundle states for itself ("the symbol is authoritative and the line is a
+# convenience") and the one
+# `test_7949_capstone_measure.py::test_the_bare_entry_point_call_cite_resolves_to_the_call_it_names`
+# already applies to the same pair in the same two documents.
+
+#: The `def` and the surviving production CALL, as the TREE spells them.
+_ENTRY_DEF_ANCHOR = "def _extract_session_v2("
+_ENTRY_CALL_ANCHOR = "slot, sdk._extract_session_v2,"
+
+
+def _entry_point_pair() -> tuple[int, int]:
+    """(the `def` line in `sdk.py`, the surviving CALL line in `hosted_api.py`).
+
+    Derived, never typed: a number typed here would be the same unverifiable claim
+    one level up, and would go stale on the next insertion above `_extract_session_v2`.
+    """
+    sdk_lines = (_REPO / "tortoise/sdk.py").read_text(encoding="utf-8").splitlines()
+    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text(
+        encoding="utf-8").splitlines()
+    defs = [i + 1 for i, ln in enumerate(sdk_lines)
+            if ln.lstrip().startswith(_ENTRY_DEF_ANCHOR)]
+    calls = [i + 1 for i, ln in enumerate(hosted_lines)
+             if ln.strip() == _ENTRY_CALL_ANCHOR]
+    assert len(defs) == 1, (
+        f"{len(defs)} lines of tortoise/sdk.py define `_extract_session_v2` "
+        f"({defs}) — the bundle holds ONE entry point, so which def this pin means "
+        "is a guess until that is true again")
+    assert len(calls) == 1, (
+        f"{len(calls)} lines of tortoise/hosted_api.py call `sdk._extract_session_v2` "
+        f"as a callable ({calls}) — the surviving call site this pin resolves is no "
+        "longer unique; re-derive the one the entry-point paragraph means before "
+        "trusting a number here")
+    return defs[0], calls[0]
+
+
+def _assert_document_carries_the_pair(name: str, text: str, def_line: int,
+                                      call_line: int) -> None:
+    """`name` must state BOTH halves of the TREE's pair, on ONE line.
+
+    One line, because the two numbers are one claim: a document that re-derives the
+    `def` half and leaves the CALL half at an earlier revision states one fact twice,
+    differently, and both wrong — which is how this pair went stale twice on this
+    branch while every gate stayed green.
+    """
+    citing = [ln for ln in text.splitlines()
+              if re.search(rf"sdk\.py:{def_line}(?!\d)", ln)]
+    assert len(citing) == 1, (
+        f"{name} cites the `_extract_session_v2` def `sdk.py:{def_line}` on "
+        f"{len(citing)} lines — it must be exactly one, because the pair is "
+        "attributed by line. Re-derive the cite from the tree; do not drop it.")
+    assert re.search(rf"hosted_api\.py:{call_line}(?!\d)", citing[0]), (
+        f"{name} names the entry point at `sdk.py:{def_line}` but not its surviving "
+        f"call site `hosted_api.py:{call_line}` (`{_ENTRY_CALL_ANCHOR}`; the "
+        "in-`sdk.py` call died with `capture_session`, #4282). That line reads: "
+        f"{citing[0].strip()[:300]!r}")
+
+
+def test_the_entry_point_pair_pin_reds_on_a_restale_of_either_half():
+    """Non-vacuity of `_assert_document_carries_the_pair`, proved by MUTATION.
+
+    The two cite tests assert that the SHIPPED documents resolve, so a pin that
+    matched anything at all would pass on them and prove nothing. Each mutation
+    below is the edit that makes the cite wrong while leaving the paragraph
+    perfectly readable — applied to the real README text, with the tree's own pair
+    as the oracle:
+
+    * `+1` on the CALL half — the two numbers disagree with the tree. This is the
+      drift the pair went stale with TWICE on this branch (the `def` re-derived,
+      the `called at` half left alone), and under the prose-matched pin that
+      replaced these helpers it red-ed nothing, because the wording still matched;
+    * `+1` on the `def` half — no line cites the tree's def line any more;
+    * the CALL half deleted — the sentence still names the entry point, so a pin
+      keyed only on `sdk.py:N` would have called this document clean.
+    """
+    readme = (PROBE.parents[1] / "README.md").read_text()
+    def_line, call_line = _entry_point_pair()
+    citing = next(ln for ln in readme.splitlines() if f"sdk.py:{def_line}" in ln)
+
+    def mutated(old: str, new: str) -> str:
+        assert old in citing, (old, citing)
+        return readme.replace(citing, citing.replace(old, new), 1)
+
+    # The document as shipped passes — the pin is not red for its own sake.
+    _assert_document_carries_the_pair("README.md", readme, def_line, call_line)
+
+    for what, doc in (
+        ("the CALL half re-staled",
+         mutated(f"hosted_api.py:{call_line}", f"hosted_api.py:{call_line + 1}")),
+        ("the def half re-staled",
+         mutated(f"sdk.py:{def_line}", f"sdk.py:{def_line + 1}")),
+        ("the CALL half deleted",
+         mutated(f"hosted_api.py:{call_line}", "the hosted capture lane")),
+    ):
+        try:
+            _assert_document_carries_the_pair("README.md", doc, def_line, call_line)
+        except AssertionError:
+            continue
+        raise AssertionError(
+            f"the pair pin accepted a mutated README ({what}) — the pin is vacuous"
+        )
+
+
 def test_the_readme_does_not_describe_the_retired_extraction_lookup():
     """The bundle must name the LIVE call path, not a construction it deleted.
 
@@ -2085,10 +2205,14 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     Non-vacuity: at the pre-fix head `sdk.py:10341` is a comment line inside
     `_extract_session_v2`, so the `startswith("def …")` assertion reds, and
     `:9358` carries no call to it, so the call-site assertion reds too.
+
+    The pin no longer matches the SENTENCE: the pair is derived from the tree and
+    the README is held to those two numbers (see the pair helpers above), because
+    the prose-matched form red-ed on two documents that were right. Its mutation
+    coverage lives in `test_the_entry_point_pair_pin_reds_on_a_restale_of_either_half`.
     """
     readme = (PROBE.parents[1] / "README.md").read_text()
     sources = {
-        "sdk": (_REPO / "tortoise/sdk.py").read_text().splitlines(),
         "extractor_v2": (_REPO / "tortoise/extractor_v2.py").read_text().splitlines(),
     }
 
@@ -2097,19 +2221,10 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # call (`self._extract_session_v2(`). The surviving production caller is the
     # hosted capture lane, which passes the method as a CALLABLE — so the cite is
     # resolved in `hosted_api.py`, and it is still an assertion about a real call
-    # site rather than about a number nobody checks.
-    sdk_cites = re.search(
-        r"`sdk\.py:(\d+)`; called from the hosted capture lane at `hosted_api\.py:(\d+)`",
-        readme)
-    assert sdk_cites, "the sdk.py cite paragraph moved; re-derive it, do not drop the pin"
-    def_line, call_line = (int(n) for n in sdk_cites.groups())
-    assert sources["sdk"][def_line - 1].lstrip().startswith("def _extract_session_v2("), (
-        f"README cites the _extract_session_v2 def at sdk.py:{def_line}, which is "
-        f"{sources['sdk'][def_line - 1].strip()!r} — the line moved and the cite did not")
-    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
-    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
-        f"README cites the call at hosted_api.py:{call_line}, which is "
-        f"{hosted[call_line - 1].strip()!r} — the line moved and the cite did not")
+    # site rather than about a number nobody checks. The pair is derived from the
+    # TREE and the README is held to it: see the pair helpers above for why the
+    # sentence that joins the two numbers must NOT be what the pin matches.
+    _assert_document_carries_the_pair("README.md", readme, *_entry_point_pair())
     # Anchored on the entry-point SENTENCE, not on the first backticked
     # `extractor_v2.py:NNNN` anywhere in a 40 KB document: the bundle cites
     # dozens of lines in that file (the flag reads, the gates, the surfaces),
@@ -2201,24 +2316,11 @@ def test_the_readmes_line_citations_resolve_to_the_symbols_they_name():
     # already red in the README before this round; the pin now covers the second
     # site too.
     # ⚠️ #4282 DELETED `capture_session`, the only in-`sdk.py` caller, so the
-    # probe's call half is re-pointed at the surviving hosted caller exactly as
-    # the README's is above — same fact, both sites, both pinned.
-    probe_entry = re.search(
-        r"`sdk\.py:(\d+)`, called from the hosted capture lane at "
-        r"`tortoise/hosted_api\.py:(\d+)`", probe)
-    assert probe_entry, (
-        "the probe's entry-point cite moved or was reformatted; re-derive it, "
-        "do not drop the pin")
-    p_def, p_call = (int(n) for n in probe_entry.groups())
-    assert sources["sdk"][p_def - 1].lstrip().startswith("def _extract_session_v2("), (
-        f"the probe cites the _extract_session_v2 def at sdk.py:{p_def}, which "
-        f"is {sources['sdk'][p_def - 1].strip()!r} — the line moved and the "
-        "cite did not")
-    hosted_lines = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
-    assert "sdk._extract_session_v2," in hosted_lines[p_call - 1], (
-        f"the probe cites the call at hosted_api.py:{p_call}, which is "
-        f"{hosted_lines[p_call - 1].strip()!r} — the line moved and the cite "
-        "did not")
+    # probe's call half names the surviving hosted caller exactly as the README's
+    # does above — same fact, both sites, both pinned, and BOTH derived from the
+    # tree rather than from the sentence that joins the numbers.
+    _assert_document_carries_the_pair("probes/capstone_run.py", probe,
+                                      *_entry_point_pair())
 
 
 def test_the_readme_stamps_the_shipped_log_at_the_logs_own_head():
@@ -2968,24 +3070,15 @@ def test_the_probes_line_citations_resolve_too():
     both counts — the population assert (8 vs 9) and `_apply_classify_kinds` against `:8700`.
     """
     probe = PROBE.read_text()
-    sdk = (_REPO / "tortoise/sdk.py").read_text().splitlines()
     extractor = (_REPO / "tortoise/extractor_v2.py").read_text().splitlines()
 
     # ⚠️ #4282 DELETED `capture_session`, the only in-`sdk.py` caller. The cite
     # names the surviving caller — the hosted capture lane, which passes the
-    # method as a CALLABLE. Same re-pointing as the README's twin check, and
-    # still an assertion about a real call site, not a number nobody checks.
-    entry = re.search(
-        r"``sdk\.py:(\d+)``, called from the hosted capture lane at "
-        r"``tortoise/hosted_api\.py:(\d+)``", probe)
-    assert entry, "the probe's sdk.py cite moved; re-derive it, do not drop the pin"
-    def_line, call_line = (int(n) for n in entry.groups())
-    assert sdk[def_line - 1].lstrip().startswith("def _extract_session_v2("), (
-        f"probe cites the def at sdk.py:{def_line}, which is {sdk[def_line - 1].strip()!r}")
-    hosted = (_REPO / "tortoise/hosted_api.py").read_text().splitlines()
-    assert "sdk._extract_session_v2," in hosted[call_line - 1], (
-        f"probe cites the call at hosted_api.py:{call_line}, which is "
-        f"{hosted[call_line - 1].strip()!r}")
+    # method as a CALLABLE. Same pair rule as the README's twin check, derived
+    # from the tree (see the pair helpers above), so the probe's own RST
+    # double-backtick spelling does not matter to it either.
+    _assert_document_carries_the_pair("probes/capstone_run.py", probe,
+                                      *_entry_point_pair())
 
     module_cite = re.search(r"``extractor_v2\.py:(\d+)``", probe)
     assert module_cite, "the probe's extractor_v2 entry cite is gone"
