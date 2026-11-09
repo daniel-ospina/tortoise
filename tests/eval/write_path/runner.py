@@ -4,17 +4,18 @@
 used to drive each committed session through the REAL write path
 (store-file render → ``session_import`` parser round-trip →
 ``sdk.capture_session`` on a hermetic graph → dream EP pass), grade the
-written graph and publish a receipt.  #4282 deleted ``capture_session`` from
-the SDK surface. No surviving PUBLIC SDK entry point reaches an in-memory
-conversation capture (``index_sessions`` / ``reconcile_sessions`` index session
-*files*; the hosted ``POST /v1/sessions`` door is a server route, not an SDK
-method, and its async ``_capture_session_impl`` is the only door that survives
-whole). ⚠️ The PRIVATE ``_extract_session_v2`` *does* capture in-process — measured,
-four probes, in `tests/test_graph_census_7949.py`'s header — but it mints no
-``:Session`` and writes no ``(Source)-[:references]->(Event)`` link, so a fixture
-driving it reads 0 points through ``snapshot_session``; closing that gap means
-re-implementing the deleted door's ordering contract inside a fixture.  ``run_benchmark`` and the ``run`` CLI sub-command were
-therefore removed with it, and so was every probe that drove them
+written graph and publish a receipt.  #4282 retired the PUBLIC
+``TortoiseSDK.capture_session`` name. ⚠️ The in-process door is NOT unreachable: its body
+survives as the PRIVATE ``TortoiseSDK._capture_session``, and it is a WHOLE capture door —
+it mints the ``:Session``, writes ``(Source)-[:references]->(Event)``, stamps the four
+provenance fields and runs the aboutObject pass (``tests/test_8501_capture_path_anchor.py``
+runs 11 legs over exactly that; ``tests/test_capture_session.py`` runs 220, both restored
+by the #10226 forward-merge). So a replay lane CAN be driven again on the private door;
+what it needs is a re-registration of the benchmark, not a re-implementation of the door
+inside a fixture — and the earlier reading here (that ``_extract_session_v2`` alone was
+the surviving in-process door, and that it mints no ``:Session``) was measured against the
+WRONG door. ``run_benchmark`` and the ``run`` CLI sub-command are therefore RETIRED as
+their own decision, and so was every probe that drove them
 (``test_write_path_benchmark.py`` — including the #4860 rotating-key
 failover guard — and the ``run``-gate tests in
 ``test_write_path_runner.py``).  The line that produced the receipt's
@@ -59,7 +60,6 @@ import json
 import os
 import re
 import sys
-from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 # Module root helpers — this file doubles as the CLI entry

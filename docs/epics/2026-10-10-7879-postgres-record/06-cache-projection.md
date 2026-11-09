@@ -363,11 +363,8 @@ bounds, both deliberate:
   the corrected form: re-capturing an already-captured session id is the
   `#2104`/`#1727` no-op replay, so `_materialize_session_source` — whose only
   production caller sits behind the fresh-capture gate — **never runs** and the
-  stale pair survives. The arm that pinned it was deleted with the SDK
-  `capture_session` door (`#4282`; loss recorded on `#10227`), so the claim now
-  rests on the write site's own pin,
-  `tests/test_10000_source_prose.py::test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node`,
-  and on the hosted lane, which is the surviving reader.
+  stale pair survives (pinned by
+  `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`).
   THREE routes DO clear it: (1) a retry of a prior FAILED capture — that arm
   re-runs the mint for the SAME node (`url = session:<id>`), so the capture's
   `SET`s overwrite the pair (route 1); (2)
@@ -431,13 +428,10 @@ own row kept as the control); `test_the_display_summary_stays_declined_and_the_r
 `test_the_reconciler_compares_the_restored_lexicon_on_a_post_10000_row` (a restored
 `_searchText` that drifts from the record REDS instead of hiding in `graph_only`).
 
-The `#10852` prose-retraction arm that survives lives in
-`tests/test_10000_source_prose.py`:
+The `#10852` prose-retraction arms live in `tests/test_10000_source_prose.py`:
 `test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node` (the write
-site's comment). Its sibling — the replay arm that pinned the stale pair
-SURVIVING a re-capture — is gone with the SDK `capture_session` door (`#4282`),
-so this section no longer has a SECOND leg behind that claim; and the section is
-itself guarded, in both directions,
+site's comment) and `test_a_re_capture_does_not_heal_a_pre_fix_node` (the stale
+pair SURVIVES a replay); and this section is itself guarded, in both directions,
 by `tests/test_10000_cache_projection_doc_pin.py` — the doc is the fourth
 artifact to have carried the retracted premise, and its guard is DB-free and
 registered in `tier1` because a docs-only edit runs `tier1` only.

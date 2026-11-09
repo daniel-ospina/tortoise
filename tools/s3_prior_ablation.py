@@ -479,8 +479,11 @@ def assert_capture_lane(sdk=None) -> None:
     ``hasattr`` on the CLASS is the right probe: ``TortoiseSDK.__getattr__`` raises
     ``AttributeError`` for an unknown name, so a missing method cannot be masked into a pass,
     and the check has no side effects. The surviving in-process door is the private
-    ``sdk._extract_session_v2``, which the hosted handler still reaches; a measurement against it
-    is a NEW instrument with its own pre-registration over the pre-registered corpus.
+    ``TortoiseSDK._capture_session`` — main's whole capture body (``:Session``, the
+    ``(Source)-[:references]->(Event)`` link, the provenance stamps), restored by the #10226
+    forward-merge — NOT ``_extract_session_v2``, which is only the extractor half. A
+    measurement re-pointed at it is a NEW instrument with its own pre-registration over the
+    pre-registered corpus.
 
     The two call sites share this ONE predicate, so they cannot drift apart in WHICH condition
     they test. They are not bit-identical probes: the class probe checks the class attribute and
@@ -497,7 +500,7 @@ def assert_capture_lane(sdk=None) -> None:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK
     if not hasattr(sdk, "capture_session"):
-        refuse("s3-ablation: REFUSED — #4282 deleted TortoiseSDK.capture_session (owner ruling "
+        refuse("s3-ablation: REFUSED — #4282 retired the PUBLIC TortoiseSDK.capture_session "
                "2026-10-27), the entry point this arm drives (`sdk.capture_session` -> "
                "`_extract_session_v2`), so no arm can be measured through it. The surviving "
                "in-process door is the private `sdk._extract_session_v2`, which the hosted "
@@ -611,20 +614,6 @@ def run_arm(arm: str, graph: str, sessions: list[str], census, golds: dict[str, 
     """One full replay of the corpus into a fresh graph, with the arm's S3 behaviour."""
     import tortoise.extractor_v2 as ev
     from tortoise.sdk import TortoiseSDK
-
-    # ⛔ #4282 (owner ruling 2026-10-27) DELETED `TortoiseSDK.capture_session`,
-    # and this arm drove the extraction pipeline through it — the only
-    # in-process door that ran `_extract_session_v2` end to end. Refuse by name
-    # instead of dying with an `AttributeError` mid-corpus, the same posture the
-    # #7949 capstone probes take (`docs/evidence/7949-capstone/probes/`). The
-    # ablation needs a surviving door before it can run again; the reachability
-    # gap and the guards it took are recorded on #10227.
-    if not hasattr(TortoiseSDK, "capture_session"):
-        raise SystemExit(
-            "s3-prior-ablation: REFUSED — #4282 deleted "
-            "TortoiseSDK.capture_session, the door this arm drove. No surviving "
-            "in-process entry point runs the extraction pipeline end to end "
-            "(#10227 tracks the restoration).")
 
     real_search = ev.search_graph
     # ``real`` is the arm total; ``real_session`` is THIS session's calls to the REAL function, and

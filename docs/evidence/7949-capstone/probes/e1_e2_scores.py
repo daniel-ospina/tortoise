@@ -740,7 +740,7 @@ def _parse_bars(prereg: dict) -> dict:
     # it is the one shape the rest of this file already refuses. Every floor is a
     # number read out of JSON, and `json.loads` returns an UNBOUNDED Python int for
     # any integer literal — so `denominator_floors.e1_min_before_share = 10**400`
-    # reached `share_floor`'s `float(value)` (`capstone_measure.py:1022`) and raised
+    # reached `share_floor`'s `float(value)` (`capstone_measure.py:1013`) and raised
     # `OverflowError: int too large to convert to float`, i.e. exit **1** with a
     # traceback out of the one loader whose sibling `_count` converts the identical
     # value into an exit-2 refusal ("AN ARBITRARY-PRECISION INTEGER IS THE INTEGER

@@ -39,7 +39,8 @@ ONE bounded graph pass:
    **What the fetch targets (product-real by construction).** The default
    ``chunk_kind`` is :data:`TURN_POINT_KIND` — the episodic TURN points the
    product actually writes (``hosted POST /v1/sessions``; the SDK
-   ``capture_session`` writer was deleted by #4282) — NOT ``session-transcript``, which is
+   ``capture_session`` writer is now the private `TortoiseSDK._capture_session`, after
+   #4282 retired the public name) — NOT ``session-transcript``, which is
    written ONLY by the eval ingest lane and therefore made the fetch
    unreachable in any product graph.
 
@@ -243,8 +244,8 @@ DEFAULT_REINJECTION_TOTAL_ITEMS = 10
 #: accepts any registered kind — so ``pointKind='event'`` alone does not
 #: prove a node is a turn. Evidence:
 #:
-#:   * every TURN writer (``TortoiseSDK.capture_session`` `sdk.py:~3351`,
-#:     deleted by #4282;
+#:   * every TURN writer (``TortoiseSDK.capture_session`` `sdk.py:~3351`, whose
+#:     public name #4282 retired — the body survives as `_capture_session`;
 #:     the hosted turn loop `hosted_api.py:~8227`, and the eval legs
 #:     `ingest.py:~207` / `ingest_v2.py:~543`) writes ``is_episodic=true``
 #:     AND a body of the deterministic form ``f"[{role}] {content}"`` — so

@@ -125,10 +125,13 @@ REMOVED_SDK_METHODS: dict[str, str] = {
     #
     # Recorded destination, no `def` yet (Phase 2) — 15:
     "capture_session": (
-        "#4282 (2026-10-27): DELETED from the SDK surface. Recorded destination "
+        "#4282 (2026-10-27): RETIRED from the PUBLIC surface. Recorded destination "
         "`mine_knowledge_from_session`, an approved target with no `def` today, so there "
-        "is no surface name to point a hint at. The hosted lane keeps its own "
-        "`_capture_session_impl`, so the capability is not lost with the SDK name."
+        "is no surface name to point a hint at. The capability is not lost: the body "
+        "lives on as the PRIVATE `TortoiseSDK._capture_session` (surplus-and-referenced, "
+        "so it went private rather than out — it drives the journal-first capture "
+        "provenance stamp and the aboutObject pass), and the hosted lane keeps its own "
+        "`_capture_session_impl`."
     ),
     "commit_session": (
         "#4282 (2026-10-27): DELETED. Recorded destination "

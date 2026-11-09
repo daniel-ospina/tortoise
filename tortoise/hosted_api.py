@@ -252,7 +252,7 @@ from tortoise.sdk import (
     _stamp_capture_provenance,  # #9350: the journal-first capture provenance stamp door
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
-    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (the SDK capture_session caller was deleted by #4282)
+    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -17971,9 +17971,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # (`extraction_mode` "no-provider" + the additive warning). The key gates
     # EXTRACTION, not STORAGE: the stored turns are searchable with no key at
     # all (FTS is DB-side; the dense leg is a local model). The
-    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrored
-    # sdk.capture_session (PR #4014) before #4282 deleted that method — the
-    # hosted lane no longer keeps the pre-#3892 503-first refusal.
+    # TORTOISE_SESSION_LLM_MOCK=1 test seam counts as configured. Mirrors
+    # sdk.capture_session (PR #4014) — the hosted lane no longer keeps the
+    # pre-#3892 503-first refusal.
     no_provider = not _llm_provider_available()
     # #4258 (owner ruling on #3892, comment 5723832861 — user-configurable,
     # default ON; reaffirmed by 5737715963): extraction into memory is a
@@ -18055,8 +18055,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         org, session_id)
     # #5632: snapshot the LIFETIME journal-failure counter at the START of THIS
     # capture so the hosted receipt below discloses only appends that failed
-    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``,
-    # deleted by #4282).
+    # DURING it — byte-parity with the SDK lane (``sdk.capture_session``).
     _journal_failures_before = sdk._journal_write_failures
     # #1727 (review PR #1827) TOCTOU: two concurrent POSTs with the same
     # FRESH session_id can both observe session_existed=False and mint a
@@ -18463,8 +18462,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
 
     # #3086/#3551: the :Session MERGE and the episodic turn stream are written
     # by the ONE shared primitive (`sdk._write_session_and_turns`), also called
-    # by `sdk.capture_session` until #4282 deleted it — so this lane and the SDK
-    # lane could no longer drift (the #1532 duplicated-store class). The primitive delegates the
+    # by `sdk.capture_session` — so this lane and the SDK lane can no longer
+    # drift (the #1532 duplicated-store class). The primitive delegates the
     # batched turn write to `sdk._write_capture_turns`. Hosted additionally
     # adds quota/auth bounds + a pre-write estimate. NOTE the THIRD,
     # still-separate copy: tools/ask_spotcheck.py::seed_capture_turn_store
@@ -18520,8 +18519,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # store through the shared primitive. It owns the Session field list, the
     # batched `UNWIND $turns` Cypher (`_write_capture_turns`), the `CONTAINS`
     # wiring, the offset-aware turn-id derivation, the stale-turn sweep and the
-    # optional `embed_fn` — so this lane and `sdk.capture_session` (DELETED by
-    # #4282) could no
+    # optional `embed_fn` — so this lane and `sdk.capture_session` can no
     # longer drift (#1532's drift class). It computes the stored text itself
     # (the #4911 scrub) and RETURNS it, so the linker further down REUSES this
     # exact result rather than paying a second scrub of the same window. All of
@@ -18570,10 +18568,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `sourceVersionTransit` snapshot, so a post-pass re-stamp would be an
     # unjournalled second write that a rebuild drops (#9206/#9079).
     #
-    # ⚠️ The SDK lane (`capture_session`, deleted by #4282) and this one were
-    # documented byte-parity (#4014/#1727); the anchor was part of that parity,
-    # and that lane no longer exists — this host path is now the only producer,
-    # so there is no second copy left to diverge from.
+    # ⚠️ The SDK lane (`capture_session`) and this one are documented
+    # byte-parity (#4014/#1727); the anchor is part of that parity, so fixing
+    # one without the other would DIVERGE them.
     #
     # Only the MINT + MATERIALIZE half moves — the provenance STAMPS need
     # `extracted`, so they stay below and read the `event_id` bound here.
@@ -18608,9 +18605,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 "sessionCaptured Event write failed (non-fatal)")
         # #1352: materialize the typed session `:Source` (capture metadata +
         # sessionId + capturedAt + eventId) and wire
-        # (Source)-[:references]->(sessionCaptured Event) — parity with the
-        # #4282-DELETED `sdk.capture_session`, via the shared
-        # `_materialize_session_source` (which survives).
+        # (Source)-[:references]->(sessionCaptured Event) — parity with
+        # sdk.capture_session via the shared `_materialize_session_source`.
         # P1 #1529 (D4): non-fatal, surfaced as an additive warning — never a
         # 500 after writes.
         try:
@@ -18647,7 +18643,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # additive warning the assembly below reports. Placed BEFORE the
         # #1727 replay branch ON PURPOSE: a keyless call must ALWAYS be
         # reported as keyless, never as a silent "replayed" that hides the
-        # missing provider. Byte-parity with the #4282-DELETED sdk.capture_session (#4014) — for
+        # missing provider. Byte-parity with sdk.capture_session (#4014) — for
         # keyless calls this branch defines the behaviour, and keyed behaviour
         # is byte-identical (no_provider is False for a keyed call).
         if state is not None and not session_existed:
@@ -18687,8 +18683,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
             # NEVER run for it. When this deployment is on the non-convergent
             # M2 lane the re-attempt is refused, so a bare "already captured"
             # would be a FALSE statement of this state and would hide the
-            # remedy. Disclose it, in the SAME words as the #4282-DELETED
-            # sdk.capture_session.
+            # remedy. Disclose it, in the SAME words as sdk.capture_session.
             _replay_warnings.append(_CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
         elif (prior_capture_ok is False
               and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
@@ -18838,8 +18833,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # #3892: the receipt reads the meta of WHICHEVER branch ran — including
     # the keyless "no-provider" branch and a keyless RE-capture of an EXISTING
     # session (which the replay-meta block below would otherwise leave with
-    # unset warnings). Mirrors the #4282-DELETED sdk.capture_session's
-    # unconditional read.
+    # unset warnings). Mirrors sdk.capture_session's unconditional read.
     extraction_errors = list(meta.get("errors") or [])
     extraction_warnings = list(meta.get("warnings") or [])
     # #8501: the mint/materialize half now runs BEFORE extraction, so its
@@ -18905,8 +18899,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
         # materialization — a keyless attempt extracts nothing, so there is
         # nothing to stamp, while re-minting re-journals EventRecorded and
-        # refreshes startedAt on every call. Byte-parity with the
-        # #4282-DELETED sdk.capture_session.
+        # refreshes startedAt on every call. Byte-parity with
+        # sdk.capture_session.
         # #8501: the MINT and the Source MATERIALIZATION already ran in phase 1,
         # BEFORE extraction — that ordering is what lets each extracted Point
         # read the session Source's `contentHash` and record it as
@@ -18937,8 +18931,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
                 # its original ingest; re-stamping would clobber the first
                 # session's single-eventId provenance (mirror byte-parity).
                 minted_ids = _capture_minted_ids(extracted)
-                # #9350: JOURNAL-FIRST (§17.1), byte-parity with the
-                # #4282-DELETED `sdk.capture_session` — one `PointRevised` per minted id is
+                # #9350: JOURNAL-FIRST (§17.1), byte-parity with
+                # `sdk.capture_session` — one `PointRevised` per minted id is
                 # appended BEFORE the stamp reaches the write handle, and the
                 # stamp then runs inside its own `_live_write_scope` lane. A
                 # raw write here had no carrier at all, so a journal-only
@@ -19464,7 +19458,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # #3892: the keyless capture — turns stored, extraction skipped.
         # Reported under its OWN name, never folded into "llm" (which would
         # claim an extraction that did not happen) nor "replayed". Checked
-        # before `route` for parity with the #4282-DELETED sdk.capture_session.
+        # before `route` for parity with sdk.capture_session.
         effective_mode = _CAPTURE_NO_PROVIDER_MODE
     elif mode == _CAPTURE_EXTRACTION_DISABLED_MODE:
         # #4258: the team turned extraction off — turns stored, extraction
@@ -19472,9 +19466,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         # keyless case has one: the causes are different and the receipt must
         # not conflate them. Checked before `route` so an off setting is never
         # reported as an "llm" extraction that did not run. (Unlike the keyless
-        # branch this has no SDK counterpart: sdk.capture_session did not read
-        # the setting, and #4282 deleted that lane, so the deferred follow-up
-        # #4288 now applies to the hosted lane alone.)
+        # branch this has no SDK counterpart today: sdk.capture_session does
+        # not read the setting — that lane is the deferred follow-up #4288.)
         effective_mode = _CAPTURE_EXTRACTION_DISABLED_MODE
     elif meta.get("route"):
         effective_mode = f"llm:{meta['route']}"
@@ -19528,11 +19521,9 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
         #      or two HOSTED captures) could otherwise read and clear the SAME
         #      `ep_dirty` roots and interleave `warm_start` writes — the exact
         #      exclusion #3718's review made explicit for the pooled sites.
-        #      (The SDK lane's own inline `capture_session` call — deleted by
-        #      #4282 — was unchanged and took no lock: it was synchronous on its
-        #      caller's thread and could not import this module. That is now
-        #      moot; the note is kept so the lock's asymmetry is not
-        #      re-litigated.)
+        #      (The SDK lane's own inline `capture_session` call is unchanged
+        #      and takes no lock — it is synchronous on its caller's thread and
+        #      cannot import this module; that is pre-existing, not widened.)
         #      The lock is a `threading.Lock` taken INSIDE the worker, never on
         #      the loop (an `asyncio.Lock` binds to the first loop, which breaks
         #      across the per-test loops — the `_CAPTURE_IN_FLIGHT` rationale).
@@ -19676,8 +19667,7 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # the #1727 replay branch, silently extracting nothing and leaving the
     # stored session permanently points-less. False + "none" is what the #2335
     # TRUE-retry gate consumes, so the later keyed capture re-attempts and the
-    # deterministic turn ids converge. Byte-parity with the #4282-DELETED
-    # sdk.capture_session
+    # deterministic turn ids converge. Byte-parity with sdk.capture_session
     # (#4014). A keyless attempt records this ONLY when it CREATES the session:
     # a keyless RE-capture must not rewrite a prior attempt's record (a prior
     # FAILED v2 attempt's lane is the evidence the #2473 M2 exclusion reads).
@@ -19741,15 +19731,14 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # of the marker is #1976's — this is the engine data exposure only.
     surfaced = surfaced_marker(extracted, verified_ids=set(facts))
     # #4911: a capture that redacted a credential says so — byte-parity with
-    # the #4282-DELETED SDK receipt (`sdk.capture_session`), appended only when non-zero so
+    # the SDK receipt (`sdk.capture_session`), appended only when non-zero so
     # an ordinary capture's warning list is unchanged.
     if _capture_redactions:
         extraction_warnings.append(
             _capture_redaction_warning(_capture_redactions))
     # #4240 review F1: a journal append that failed during THIS capture is
     # disclosed on the HOSTED receipt too. The hosted lane builds its own
-    # receipt (it never called ``sdk.capture_session``, now DELETED by #4282),
-    # so without this the
+    # receipt (it never calls ``sdk.capture_session``), so without this the
     # customer could not see that the capture is live-only — only the operator
     # counter/ERROR log showed it. Byte-parity with the SDK lane via the shared
     # helper, and appended only when non-zero so an ordinary capture's warning
@@ -21379,9 +21368,8 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
         # repairs an unclassifiable entity to `core:other`. Writing that repair
         # as the discriminator reached the fold's
         # `ON MATCH … =coalesce($k, stored)` as a real kind, so this door — the
-        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTed
-        # here before #4282 DELETED it; this hosted route is what remains) —
-        # reset a stored `capability` on a bare re-mention. ONE
+        # PRODUCTION capture entry point (`TortoiseSDK.commit_session` POSTs
+        # here) — reset a stored `capability` on a bare re-mention. ONE
         # predicate, shared with `sdk._payload_entity_kind`
         # (`tortoise.kind_fallbacks`): a repair is not a discriminator, so it is
         # omitted and the fold's `ON CREATE` arm supplies `other`.
@@ -28549,9 +28537,8 @@ async def invite_info(token: str):
         # (#1890), so an invite that expires by the clock alone sat at
         # 'pending' — scanned on every request — until a sweep ran.
         #
-        # Stored form: BOTH writers wrote ``expires_at`` this way —
-        # ``invite_to_org`` above, and ``TortoiseSDK.invitation_create``
-        # (DELETED by #4282) — as
+        # Stored form: both writers (``invite_to_org`` above and
+        # ``TortoiseSDK.invitation_create``) write ``expires_at`` as
         # ``datetime.now(UTC).isoformat()`` — a ``+00:00``-offset ISO-8601
         # STRING — so the comparison is the same lexicographic ISO compare the
         # sibling registry predicates use (the #1890 dup-check below,
@@ -29881,8 +29868,7 @@ async def _registry_accept_by_id(sdk, invitation_id: str, user: dict) -> dict:
 async def accept_invite_by_id(invitation_id: str,
                               user: dict = Depends(get_current_user)):  # noqa: B008
     """#1875: token-less accept from the pending list (email-match authz).
-    NOT the registry sdk.invitation_accept (deleted by #4282; it lacked the
-    email guard)."""
+    NOT the registry sdk.invitation_accept (it lacks the email guard)."""
     from tortoise.supabase_control import (
         InvitationError,
         get_control_plane,
@@ -32162,8 +32148,7 @@ def _drop_org_acl_users(org_id: str) -> None:
 
 
 def _purge_registry_org(sdk, org_id: str, graph_name: str | None = None) -> None:
-    """Cascade-delete a registry org + drop its graph (as `sdk.org_delete` did
-    before #4282 deleted it)."""
+    """Cascade-delete a registry org + drop its graph (mirrors sdk.org_delete)."""
     # C4 (#2113): drop the custom graphs' ACL users BEFORE the nodes go
     # (the enumeration reads the nodes).
     _drop_org_acl_users(org_id)

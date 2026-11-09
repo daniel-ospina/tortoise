@@ -64,6 +64,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 from pathlib import Path
 
 import pytest
@@ -78,10 +79,8 @@ SEAM = REPO / "tortoise/s2_decision_seam.py"
 REFERENTIALITY = REPO / "tortoise/referentiality.py"
 #: Round 7 of the #10983 review: the closure was still short of the DOOR. Both of
 #: these are consulted on the capture path and were in no ledger, no pin and no
-#: closure — `context_enrich` via the SDK capture path's `enrich_fn` seam (it
-#: REWRITES the text each turn embeds; ⚠️ that door was `sdk.capture_session`
-#: until #4282 deleted it, and the negative-control measurement below went with
-#: it — #10227 records the loss) and `model_adapters` via
+#: closure — `context_enrich` via `sdk._capture_session(enrich_fn=_capture_enriched_
+#: texts)` (it REWRITES the text each turn embeds) and `model_adapters` via
 #: `sdk._extract_session_v2` -> `_model_adapter` (it decides the request's
 #: `response_format`). A new read inserted in `context_enrich.enrich_enabled()`
 #: left the closure pin GREEN, which is the same claim-outruns-its-derivation
@@ -316,6 +315,27 @@ def test_the_v2_arm_calls_the_sdk_extractor_entry():
         f"{EXTRACTOR.relative_to(REPO)} — the door's last hop does not exist")
 
 
+def _sdk_lane_branch() -> ast.If | None:
+    """The ``if`` in ``capture_session`` whose BODY calls the m2 extractor.
+
+    The SDK's shape is a direct call (``self._extract_session_llm(...)``), not the
+    hosted path's ``_run_capture_bounded(slot, sdk._extract_session_llm, ...)``,
+    so this resolves the branch by the CALL it makes. Module-wide matching is
+    what an earlier revision did and it was satisfied by the capture LABEL
+    (``_capture_extractor_record``), not by the dispatch (#10983 review).
+    """
+    def _calls_llm(node: ast.AST) -> bool:
+        return (isinstance(node, ast.Call)
+                and ast.unparse(node.func).endswith("_extract_session_llm"))
+
+    for node in ast.walk(_funcs(SDK)["_capture_session"]):
+        if not isinstance(node, ast.If):
+            continue
+        if any(_calls_llm(c) for stmt in node.body for c in ast.walk(stmt)):
+            return node
+    return None
+
+
 def _extraction_bindings(func: ast.AST) -> list[ast.Assign]:
     """Every assignment in ``func`` that BINDS ``extracted`` — the extractor's output.
 
@@ -529,6 +549,227 @@ def _llm_call_branch() -> ast.If | None:
                    for c in ast.walk(stmt)):
                 return node
     return None
+
+
+def test_the_sdk_lane_dispatch_and_the_hosted_mirror_agree():
+    """Two entry points, ONE predicate — so this is one door, not a fork.
+
+    #10983 leaves open "is the acceptance the hosted endpoint or the SDK path
+    it calls?". They select the lane from the SAME variable with the SAME
+    comparison, so the answer is not a decision about which door: it is a
+    decision about how much HTTP boundary to put in front of one door. Pinned
+    so a later edit cannot make them disagree.
+    """
+    # ⛔ The BRANCH that dispatches the other extractor, structurally. The
+    # previous revision read ``_capture_lane`` here — the LABEL the hosted path
+    # stamps on the capture, NOT the branch that chooses the extractor. Inverting
+    # the real branch left this test green (#10983 review, cycle 3).
+    branch = _llm_call_branch()
+    assert branch is not None, (
+        "the hosted endpoint no longer dispatches sdk._extract_session_llm from "
+        "a guarded branch — the two lanes are no longer distinguishable by "
+        "their call sites (#10983)")
+    test_src = ast.unparse(branch.test)
+    assert "os.environ.get('TORTOISE_SESSION_EXTRACTOR')" in test_src or \
+        'os.environ.get("TORTOISE_SESSION_EXTRACTOR")' in test_src, (
+        f"the m2 branch is no longer guarded by the extraction lane variable "
+        f"(#10983): {test_src!r}")
+    assert any(isinstance(op, ast.Eq) for op in branch.test.ops), (
+        f"the m2 branch now tests {test_src!r} — an inverted comparison flips "
+        f"every hosted capture to the other extractor while the log still "
+        f"declares the v2 lane (#10983)")
+    assert any(isinstance(c, ast.Constant) and c.value == "m2"
+               for c in branch.test.comparators), (
+        f"the m2 branch no longer compares against the literal 'm2' (#10983): "
+        f"{test_src!r}")
+
+    # …and the SDK's dispatch is the same comparison, so one door — resolved to
+    # the BRANCH THAT DISPATCHES the m2 extractor, not to a module-wide grep.
+    # The module-wide form was satisfied by the capture LABEL
+    # (`_capture_extractor_record` reads the same variable), and its list
+    # comprehension required only *an* `Eq`, so swapping the comparator to
+    # `"m2-legacy"` was caught by NOTHING — MEASURED in the #10983 review
+    # (cycle 5): the published test file PASSED that mutant.
+    sdk_branch = _sdk_lane_branch()
+    assert sdk_branch is not None, (
+        "nothing in sdk.capture_session dispatches _extract_session_llm from a "
+        "guarded branch — the SDK has one lane, so the hosted mirror's two-lane "
+        "predicate no longer describes it (#10983)")
+    sdk_test = ast.unparse(sdk_branch.test)
+    # ⛔ Pin the CHAIN, not the arm it resolves to. `_sdk_lane_branch()` finds the
+    # first If whose body calls the m2 extractor — the innermost arm — so an arm
+    # added ABOVE it is a PARENT If that no assertion below can see. MEASURED at
+    # the #10983 review (cycle 7): an `elif` above the m2 arm dispatching a
+    # behaviourally-identical variant rerouted every capture by ambient env while
+    # both door tests stayed green. The door is the CHAIN, so require that
+    # exactly one branch in capture_session dispatches an SDK extractor at all.
+    capture_func = _funcs(SDK)["_capture_session"]
+    capture_ifs = _lane_dispatch_ifs(capture_func)
+    assert len(capture_ifs) == 1, (
+        "sdk.capture_session dispatches an SDK extractor from "
+        f"{len(capture_ifs)} branches — a third arm is a second door, and the "
+        "acceptance pins exactly two lanes (#10983): "
+        f"{[ast.unparse(node.test) for node in capture_ifs]}")
+    # ⛔ The CALLEE SET, not a spelling. `len(capture_ifs) == 1` above is computed
+    # from the value flow (an arm that binds `extracted` from a call), so this
+    # pair is what names the two lanes the acceptance is allowed to run. A third
+    # callable that feeds the extraction reds here even if it shares no prefix
+    # with these two — a name the test cannot pronounce is a FAIL, never a pass
+    # (#10983 review, cycle 8: `self._dispatch_lane(...)` in a third arm left the
+    # previous prefix-matched predicate green).
+    bindings = _extraction_bindings(capture_func)
+    dispatched = [b for b in bindings if isinstance(b.value, ast.Call)]
+    assert {ast.unparse(b.value.func) for b in dispatched} == {
+            "self._extract_session_llm", "self._extract_session_v2"}, (
+        "sdk.capture_session feeds `extracted` from "
+        f"{sorted(ast.unparse(b.value) for b in dispatched)} — the acceptance "
+        "pins exactly two lanes (self._extract_session_llm / "
+        "self._extract_session_v2), so any other callee is a second door the "
+        "record would still declare as v2 (#10983)")
+    assert len(dispatched) == 2, (
+        f"sdk.capture_session dispatches {len(dispatched)} extractors into "
+        "`extracted` — exactly two are pinned, one per lane (#10983): "
+        f"{[ast.unparse(b.value) for b in dispatched]}")
+    indirect = [b for b in bindings if not isinstance(b.value, ast.Call)]
+    laundered = [b for b in indirect
+                 if not (isinstance(b.value, ast.List) and not b.value.elts)]
+    assert not laundered, (
+        "sdk.capture_session binds `extracted` without calling an extractor: "
+        f"{[ast.unparse(b) for b in laundered]} — only the two empty "
+        "short-circuit arms (no provider / replay) may do that; a dispatch "
+        "laundered through a temporary is still a second door (#10983)")
+    # ⛔ The door's own FUNCTION reads exactly ONE seam variable. `path_modules`
+    # closes over the modules the capture path REACHES, and `sdk.capture_session`
+    # is not one of them — so a new `TORTOISE_*` read added inside this function
+    # was invisible to the closure as well as to the geometric pins (#10983
+    # review, cycle 9). MEASURED: `if os.environ.get("TORTOISE_MUTANT_SEAM") ==
+    # "1": extraction = <other window>` as a sibling above the chain left all 19
+    # tests green while it rewrote the door's INPUT.
+    door_reads = _env_read_names_in(capture_func)
+    assert door_reads == {"TORTOISE_SESSION_EXTRACTOR"}, (
+        "sdk.capture_session reads "
+        f"{sorted(door_reads)} — the door function itself is pinned to exactly "
+        "one seam variable, the one that selects the lane; a second read either "
+        "reroutes the capture or rewrites its input, and `door_record()` would "
+        "still print lane: v2 (#10983)")
+    # ⛔ HOP 2, the middle one, not only hop 1. The door the record names is
+    # `capture_session -> _extract_session_v2 -> extractor_v2.extract_session_v2`,
+    # and only the FIRST function was pinned above; a new env-gated reroute
+    # inserted INSIDE `_extract_session_v2` kept all 19 tests green while the
+    # acceptance ran the other extractor — MEASURED at the #10983 review (cycle
+    # 10): `if os.environ.get("TORTOISE_V5_EXTRACTOR") == "1": return
+    # self._extract_session_llm(...)` inserted at `sdk.py:16324` left the suite
+    # green, `measured_arm()` ACCEPTED the run (the variable was in no pin), and
+    # the census came back as §1.6.4's m2 row while `door_record()["lane"]`
+    # still read "v2". A hop is part of the door, so it is pinned like one: ONE
+    # seam read, and exactly one return (the pair the pinned call produces).
+    hop2 = _funcs(SDK)["_extract_session_v2"]
+    hop2_reads = _env_read_names_in(hop2)
+    assert hop2_reads == {"TORTOISE_EXTRACT_MODEL"}, (
+        "sdk._extract_session_v2 reads "
+        f"{sorted(hop2_reads)} — the door's middle hop is pinned to exactly the "
+        "one seam it uses to build its model; any other read inside it can "
+        "reroute the capture while `door_record()` still prints lane: v2 "
+        "(#10983)")
+    hop2_returns = [n for n in ast.walk(hop2) if isinstance(n, ast.Return)]
+    assert len(hop2_returns) == 1 and \
+        ast.unparse(hop2_returns[0].value) == "(extracted, meta)", (
+        "sdk._extract_session_v2 has "
+        f"{len(hop2_returns)} returns "
+        f"{[ast.unparse(r.value)[:60] for r in hop2_returns]} — the middle hop "
+        "must have exactly one exit, the (extracted, meta) pair the pinned "
+        "extractor call produces; an early return is a reroute or a fabricated "
+        "payload, and the record would still declare v2 (#10983)")
+    # ⛔ The WHOLE function, not just the chain above the door. `_lane_chain_gates`
+    # walks `orelse` ancestors, so an arm placed as a SIBLING above the chain — or
+    # nested inside another arm's body — was invisible to every pin above.
+    # MEASURED at the #10983 review (cycle 9), all green: a sibling
+    # `if os.environ.get("TORTOISE_MUTANT_ARM") == "1": return {...}` above
+    # `if no_provider:`; an early return from a callee of its own choosing; a gate
+    # rewriting `extraction`; and a payload-returning gate nested in the m2 arm.
+    effectful = _effectful_gates(capture_func)
+    door_test = "os.environ.get('TORTOISE_SESSION_EXTRACTOR') == 'm2'"
+    assert set(effectful) == {
+        "_blank_session is not None",
+        "not transcript.strip()",
+        "no_provider",
+        "session_existed and (not retry_failed_capture)",
+        door_test,
+    }, (
+        "sdk.capture_session's set of arms that can change what a capture "
+        f"returns is not the five pinned (got {len(effectful)}: two early-return "
+        "gates, the two replay short-circuits, and the door). A sixth arm — above "
+        "the chain, below it, or nested inside one of them — reroutes captures "
+        "the record still declares v2 (#10983): "
+        f"{sorted(effectful)}")
+    assert effectful[door_test] == {"binds"}, (
+        f"the m2 arm's effect changed: {sorted(effectful[door_test])} — it must be "
+        "the arm that BINDS `extracted`, not one that also returns (#10983)")
+    # ⛔ The CHAIN's shape above the door. An arm woven in above the m2 branch is
+    # an ANCESTOR of it, whatever its body does, so the count is the door's own
+    # geometry: `no_provider`, then `session_existed`, then the door. A third
+    # gate here reds even if it returns a payload without binding `extracted`.
+    chain_gates = _lane_chain_gates(capture_func, capture_ifs[0])
+    assert len(chain_gates) == 2, (
+        "sdk.capture_session's lane chain has "
+        f"{len(chain_gates)} gates above the door, not the two pinned "
+        "(no_provider, session_existed) — an arm woven in ABOVE the door "
+        "reroutes captures the record still declares v2; re-derive this count "
+        "deliberately rather than bumping it (#10983): "
+        f"{[ast.unparse(g.test) for g in chain_gates]}")
+    assert ast.unparse(capture_ifs[0].test) == sdk_test, (
+        "the only lane-dispatching branch in sdk.capture_session tests "
+        f"{ast.unparse(capture_ifs[0].test)!r}, not the m2 selector "
+        f"{sdk_test!r} — an arm ABOVE the door reroutes captures the record "
+        "still declares v2 (#10983)")
+    assert "TORTOISE_SESSION_EXTRACTOR" in sdk_test, (
+        f"the SDK's m2 branch is no longer guarded by the extraction lane "
+        f"variable (#10983): {sdk_test!r}")
+    assert any(isinstance(op, ast.Eq) for op in sdk_branch.test.ops), (
+        f"the SDK's m2 branch now tests {sdk_test!r} — an inverted comparison "
+        f"moves every session to the other extractor while the log still "
+        f"declares the v2 lane (#10983)")
+    assert any(isinstance(c, ast.Constant) and c.value == "m2"
+               for c in sdk_branch.test.comparators), (
+        f"the SDK's m2 branch no longer compares against the literal 'm2' "
+        f"(#10983): {sdk_test!r}")
+    # ⛔ The FALL-THROUGH arm too. Pinning only the opt-in arm leaves the arm the
+    # acceptance ACTUALLY takes unpinned: MEASURED — adding a third `elif` off
+    # this same chain calling a behaviourally-identical variant left every door
+    # test green, and the negative control cannot see it either (the census is
+    # identical). The door is the pair.
+    fall_through = sdk_branch.orelse
+    assert len(fall_through) == 1, (
+        "the SDK's lane chain now has more than one fall-through statement "
+        f"({[ast.unparse(s) for s in fall_through]}) — a second route off the "
+        "door would run a capture the log still declares as v2 (#10983)")
+    assert not any(isinstance(s, ast.If) for s in fall_through), (
+        "the SDK's lane chain grew ANOTHER `elif` — a third arm is a second "
+        "door; the acceptance pins exactly two lanes (#10983)")
+    # …and the fall-through IS one call to that function, not an expression that
+    # happens to contain one. An `IfExp` in the else arm
+    # (`_extract_session_v2(...) if os.environ.get("TORTOISE_MUTANT_ARM") != "1"
+    # else _variant(...)`) selects a second lane with the earlier shape checks
+    # green — an `IfExp` is not an `ast.If` and the real call is still present
+    # (MEASURED, #10983 review cycle 6). One statement, one call, named.
+    assert len(fall_through) == 1 and isinstance(fall_through[0], ast.Assign), (
+        f"the fall-through is {[ast.unparse(s) for s in fall_through]} — expected "
+        f"a single assignment to the extractor pair (#10983)")
+    fall_value = fall_through[0].value
+    assert isinstance(fall_value, ast.Call) and \
+        ast.unparse(fall_value.func) == "self._extract_session_v2", (
+        f"the SDK's non-m2 arm calls {ast.unparse(fall_value)[:120]!r} — a "
+        f"conditional expression or any other callee selects a second lane "
+        f"while the door's record still declares v2 (#10983)")
+    fall_calls = [c for s in fall_through for c in ast.walk(s)
+                  if isinstance(c, ast.Call)]
+    assert any(ast.unparse(c.func).endswith("self._extract_session_v2")
+               for c in fall_calls), (
+        "the SDK's non-m2 arm no longer calls self._extract_session_v2 — the "
+        "capture would run some other path while the door's record still "
+        f"declares v2 (#10983): {[ast.unparse(c.func) for c in fall_calls]}")
+    hosted_body = _resolve(HOSTED, "_capture_lane")
+    assert re.search(r'os\.environ\.get\("TORTOISE_SESSION_EXTRACTOR"\)', hosted_body)
 
 
 def test_the_door_citation_is_derived_not_typed(tmp_path, monkeypatch):
@@ -1538,6 +1779,131 @@ def test_the_control_scrubs_every_lever_the_probe_declares(monkeypatch):
     assert not leaked, (
         f"these levers survived the scrub and would be measured under the "
         f"operator's values while the test asserts a published census: {leaked}")
+
+
+def test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE(monkeypatch):
+    """The control, run for real: the same session through both lanes.
+
+    * ``v2`` — the door (``_extract_session_v2`` → ``extract_session_v2``);
+    * ``m2`` — ``_extract_session_llm``, the non-default lane.
+
+    MEASURED at this head under the shipped offline model seam
+    (``TORTOISE_SESSION_LLM_MOCK=1``):
+
+        v2 (the door): Object=1 Point=27 Event=2 Session=1 Operator=0
+                       objects=['the strategy']
+        m2 (the other): Object=0 Point=149 Event=1 Session=1 Operator=0
+                        objects=[]
+
+    The control works, and it is the point of #10983: **the two doors build
+    different graphs**, so a number measured on the ``m2`` lane is not a number
+    about the v2 door (and vice versa). The difference is structural IN KIND —
+    the ``m2`` lane mints **no `:Object` at all** on this session — and the
+    5.5x Point count is the SIZE of that same difference, not the reason it
+    matters. (This docstring said "structural, not a matter of degree" beside the
+    5.5x figure until the #10983 review: a ratio IS a degree, and the record's own
+    ``structural_in_kind_not_only_in_size`` says so.)
+
+    ⚠️ The assertion polarity is deliberately BOTH ways: identical output would
+    mean the control had stopped being a control (the mock seam would have
+    become lane-blind, as it was believed to be during #10983's first pass), so
+    it reds too — with the measurement printed, because which way it moved is
+    the finding.
+
+    ⚠️ Isolated from the operator's shell: every lever the probe declares is
+    scrubbed before the captures (``_scrub_levers``), so the EXACT censuses
+    below describe this fixture under the shipped defaults, not under whatever
+    the box happened to export. Measured at the previous head (#10983 review
+    round 12 note): ten candidate levers — ``TORTOISE_EXTRACTOR_MAX_TOKENS``,
+    ``_SUBJECT_TAU_HI``, ``_CONTEXT_ENRICH``, ``_REFERENTIALITY``,
+    ``_CHANGE_FEED``, ``_JSON_MODE``, ``_IDENTIFIER_TOKENS``, ``_S4_DELTA``,
+    ``_EXTRACTOR_PROMPT``, ``_LABEL_ORDER`` — each exported alone left this
+    control green, because the offline mock seam does not consult them. The
+    scrub is applied anyway: the census is a published number, and a lever that
+    DOES move it later must not be able to red this with a message asserting
+    the door moved.
+    """
+    from tests.eval.write_path.corpus import load_fixture, session_ids
+    from tortoise.sdk import TortoiseSDK
+
+    probe = _load_probe()
+    _scrub_levers(monkeypatch, probe)
+
+    sid = session_ids()[0]
+    conversation = load_fixture(sid)["conversation"]
+    assert conversation, f"fixture {sid} carries no conversation"
+
+    measured: dict[str, dict] = {}
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    for lane in ("v2", "m2"):
+        monkeypatch.delenv(probe.DOOR_LANE_ENV, raising=False)
+        if lane == "m2":
+            monkeypatch.setenv(probe.DOOR_LANE_ENV, "m2")
+        sdk = TortoiseSDK(os.path.join(tempfile.mkdtemp(), "door.db"))
+        try:
+            receipt = sdk._capture_session(conversation, session_id=sid)
+            assert receipt.get("ok") is True, receipt.get("errors")
+            measured[lane] = _census(sdk)
+        finally:
+            sdk.close()
+
+    door, other = measured["v2"], measured["m2"]
+    # The PUBLISHED counts, pinned exactly. §1.6.4 of the registration and this
+    # record's door.negative_control state these numbers; until the #10983 review
+    # they appeared in the DOCUMENTS and in this docstring only, while the
+    # assertions below compared the two arms to EACH OTHER — so both published
+    # copies could drift from the measurement with the suite green. They are
+    # deterministic under the offline mock seam, so exact equality is a fact,
+    # not a flake.
+    assert door["counts"] == {"Object": 1, "Point": 27, "Event": 2,
+                              "Session": 1, "Operator": 0}, (
+        f"the door's census moved: {door['counts']} — §1.6.4 and "
+        f"door.negative_control publish Object=1 Point=27 Event=2 (#10983)")
+    assert other["counts"] == {"Object": 0, "Point": 149, "Event": 1,
+                               "Session": 1, "Operator": 0}, (
+        f"the m2 lane's census moved: {other['counts']} — door.negative_control "
+        f"publishes Object=0 Point=149 Event=1 (#10983)")
+    assert door["objects"] == ["the strategy"], (
+        f"the door's :Object names moved: {door['objects']} — the published "
+        f"control says ['the strategy'] (#10983)")
+    assert other["objects"] == [], (
+        f"the m2 lane now mints :Object names: {other['objects']} — the "
+        f"published control says it mints none (#10983)")
+    # …and the PUBLISHED string must carry those exact cells, or the record can
+    # state a census this suite never measured. The numbers below were in the
+    # documents and in the docstring only until the #10983 review.
+    published = json.loads(REGISTRATION.read_text(encoding="utf-8"))[
+        "door"]["negative_control"]["measured"]
+    for arm, census in (("v2 (the door)", door), ("m2 (the other lane)", other)):
+        cells = " ".join(f"{k}={v}" for k, v in census["counts"].items())
+        # Bind the CENSUS to the SEGMENT its label introduces. A bare
+        # `cells in published` is satisfied by either arm's numbers (they are
+        # both in one string), so swapping the two halves — inverting the
+        # control's own claim — stayed green even after the label was added to
+        # the match (#10983 review, cycles 3 and 4).
+        segment = re.search(re.escape(arm) + r": ([^;]+)", published)
+        assert segment, (
+            f"door.negative_control publishes no {arm!r} segment — the record "
+            f"no longer attributes its numbers to an arm (#10983): {published!r}")
+        assert segment.group(1).strip().startswith(cells), (
+            f"door.negative_control's {arm!r} segment reads "
+            f"{segment.group(1).strip()!r}, not the {cells!r} this run "
+            f"measured — the record and the control have drifted apart "
+            f"(#10983): {published!r}")
+    assert door["counts"]["Object"] >= 1, (
+        "the door wrote no Objects at all, so the control compares two empty "
+        f"graphs and proves nothing: {door}")
+    assert door != other, (
+        "THE NEGATIVE CONTROL SHOWS NO DIFFERENCE — the two lanes produced the "
+        "same graph, so either the lane selector has been bypassed or the "
+        "mock seam has gone lane-blind. A control that shows none is evidence "
+        "the CONTROL is wrong (#10983):\n"
+        f"  v2 (the door): {door}\n  m2 (the other): {other}")
+    # The difference must be in the GRAPH, not only in a receipt field.
+    assert door["counts"] != other["counts"], (door, other)
+    assert door["objects"] != other["objects"], (
+        "the two lanes minted the same :Object names — the control is "
+        f"measuring content, not the door: {door['objects']}")
 
 
 # ── 6. the guard's call site is UNCONDITIONAL, and only where it really is ─

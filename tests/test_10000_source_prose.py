@@ -249,6 +249,39 @@ def test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node():
 # `test_*` the doc's "### The pin" section cites.
 
 
+def _capture(sdk, session_id: str) -> dict:
+    return sdk._capture_session(
+        conversation=[
+            {"role": "user",
+             "content": f"{MARKER} the raw transcript text must not live on a "
+                        "node unless that node is the episodic turn store"},
+            {"role": "assistant",
+             "content": "Acknowledged."},
+        ],
+        session_id=session_id,
+    )
+
+
+def test_the_session_source_does_not_carry_the_transcript(sdk):
+    """§9.1/D1: only the turn store may hold a session's own words."""
+    session_id = "sess-source-prose-10000"
+    _capture(sdk, session_id)
+
+    hits = _nodes_carrying(sdk, PROSE_NEEDLE)
+    assert hits, (
+        "the fixture did not capture anything — a scan that finds nothing "
+        "anywhere proves nothing (the turn nodes must carry the marker)")
+
+    offenders = [
+        (labels, props) for labels, props, node_id in hits
+        if not _is_turn_store(labels, node_id, session_id)
+    ]
+    assert not offenders, (
+        "the transcript reached a node that is NOT the episodic turn store — "
+        "§9.1/D1 keeps the session's own words out of the graph:\n"
+        + "\n".join(f"  {labels} {props}" for labels, props in offenders))
+
+
 def _is_turn_store(labels: list[str], node_id: object, session_id: str) -> bool:
     """The episodic turn nodes are the one place a capture's text belongs.
 
@@ -281,12 +314,8 @@ def test_the_guard_reports_a_lower_casing_writer(sdk):
     ``_searchText`` and the guard reported none of them (`#10852` review, P1).
 
     The node is seeded rather than captured so this test isolates the SCAN.
-    ⛔ Do not read it as evidence that a pre-fix node heals: it does not. The
-    replay arm that used to pin that (`test_a_re_capture_does_not_heal_a_pre_fix_node`)
-    went with the SDK `capture_session` door this branch deletes — `#4282`, loss
-    recorded on `#10227` — so the claim now stands on the WRITE SITE alone, pinned
-    by `test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node` above,
-    and on the hosted lane, which is the surviving reader.
+    ⛔ Do not read it as evidence that a pre-fix node heals: it does not — see
+    `test_a_re_capture_does_not_heal_a_pre_fix_node`, which pins the replay.
     """
     prose = (f"{MARKER} the raw transcript text must not live on a node"
              .lower())
@@ -307,6 +336,234 @@ def test_the_guard_reports_a_lower_casing_writer(sdk):
     assert labels == ["Source"], hits
     assert list(props.values()) == [prose], (
         f"the offender reported is not the normalising writer: {hits}")
+
+
+def test_the_guard_reds_on_the_pre_fix_derivation(sdk, monkeypatch):
+    """NON-VACUITY against the real pre-fix code, not a hypothetical writer.
+
+    ``816b37f1876``'s ``_session_source_metadata`` returned the transcript's
+    first substantive utterance as ``summary`` — the route §9.1/D1 forbids — and
+    ``_source_search_text`` had no lexicon then (its rule was ``title or
+    summary``, and the capture passed the derived ``summary``), so **the same
+    sentence also landed in ``_searchText``**, the field the Source FTS index is
+    declared on (#3518). BOTH routes are reproduced here: patching only the
+    metadata function would leave the ``_searchText`` half — the half this
+    file's module docstring calls load-bearing — unconstructed, so the arm could
+    not show it reds.
+
+    Both are monkeypatched in (the capture path resolves the module attributes at
+    call time) so this suite proves RED-before without a second checkout: the
+    guard must report the ``:Source`` that derivation produces.
+    """
+    from tortoise import sdk as sdk_mod
+
+    #: The summaries the pre-fix derivation produced, in call order — the pre-fix
+    #: `_source_search_text` is handed `topics=` by the CURRENT call site, so the
+    #: pre-fix search text has to be recovered from here rather than recomputed.
+    derived_summaries: list[str] = []
+
+    def pre_fix_derivation(transcript: str) -> tuple[str, list[str]]:
+        # Verbatim from `git show 816b37f1876:tortoise/sdk.py`, the topic block
+        # INCLUDED: the pre-fix function returned COMPUTED topics, and a fake
+        # that returns `[]` would make the current capture derive
+        # `_search_text = None` — quietly deleting the route under test.
+        if not transcript.strip():
+            return "", []
+        summary = ""
+        for line in transcript.splitlines():
+            text = line.split(": ", 1)[1] if ": " in line else line
+            text = text.strip()
+            if len(text) >= 10:
+                summary = text[:200]
+                break
+        if not summary:
+            summary = transcript.strip()[:200]
+        from collections import Counter
+        words = re.findall(r"[A-Za-z][A-Za-z0-9_-]{2,}", transcript.lower())
+        counts = Counter(w for w in words
+                        if w not in sdk_mod._SESSION_SOURCE_STOPWORDS)
+        topics = [w for w, _ in counts.most_common(6)]
+        derived_summaries.append(summary)
+        return summary, topics
+
+    def pre_fix_source_search_text(*, title: str | None = None,
+                                   summary: str | None = None,
+                                   topics: list[str] | None = None):
+        """``816b37f1876``'s rule: ``text = title or summary; return text or None``.
+
+        The pre-fix capture passed its derived ``summary`` (there was no
+        ``topics`` kwarg), so the utterance went into ``_searchText`` as well.
+        The current call site passes ``topics=``; the pre-fix prose is therefore
+        read back from the derivation above rather than recomputed.
+        """
+        text = title or (derived_summaries[-1] if derived_summaries else None)
+        return text or None
+
+    monkeypatch.setattr(sdk_mod, "_session_source_metadata",
+                        pre_fix_derivation)
+    monkeypatch.setattr(sdk_mod, "_source_search_text",
+                        pre_fix_source_search_text)
+    session_id = "sess-source-prose-prefix-10000"
+    _capture(sdk, session_id)
+
+    offenders = [
+        (labels, props) for labels, props, node_id in _nodes_carrying(
+            sdk, PROSE_NEEDLE)
+        if not _is_turn_store(labels, node_id, session_id)
+    ]
+    assert offenders, (
+        "the guard passed the PRE-FIX derivation — a guard that cannot red on "
+        "the code it was written to police proves nothing about the fix")
+    assert any("Source" in labels for labels, _ in offenders), offenders
+    # ⛔ THE `_searchText` HALF IS ASSERTED, NOT ASSUMED. The module docstring
+    # calls the indexed copy the load-bearing one (#3518), so this arm has to
+    # show the pre-fix capture actually CONSTRUCTED it — otherwise a fake that
+    # empties `topics` would red on `summary` alone and this test would still
+    # pass while the route it exists to police went unexercised.
+    #
+    # Read the node directly rather than through `_nodes_carrying`: that helper
+    # deliberately returns ONE offending property per node (it `break`s after the
+    # first hit), so a node whose `summary` matched first would never expose its
+    # `_searchText`.
+    indexed = [
+        props
+        for _labels, props in sdk._get_proj().g.query(
+            "MATCH (n:Source) RETURN labels(n), properties(n)").result_set
+        if PROSE_NEEDLE.lower()
+        in str((props or {}).get("_searchText") or "").lower()
+    ]
+    assert indexed, (
+        "the pre-fix arm did not reproduce the `_searchText` prose route — the "
+        "fake derivation or the `_source_search_text` patch is not faithful"
+    )
+
+
+def test_the_first_capture_replaces_the_prose_a_pre_seeded_stub_left_behind(
+        sdk):
+    """A node with NO `:Session` yet is replaced by its FIRST capture.
+
+    This is a real shape and not the pre-fix one: `_link_source` MERGEs a
+    `session:<id>` Source STUB before any capture of that id has run, and the
+    first capture of the session is a genuine (non-replay) capture — so it DOES
+    reach `_materialize_session_source` and the derivation replaces whatever
+    the stub carried.
+
+    ⛔ WHAT THIS TEST DOES *NOT* PROVE, stated so nobody infers it (the earlier
+    title/name claimed the opposite, `#10852` review P1). It does **not** show
+    that a PRE-FIX node heals on re-capture: a pre-fix node coexists with the
+    `:Session` node of the capture that wrote it, so re-capturing it is the
+    #1727 no-op REPLAY — `_materialize_session_source` is never called, and the
+    stale pair survives. `test_a_re_capture_does_not_heal_a_pre_fix_node` pins
+    that state. The `_searchText` SET is also still `coalesce($st,
+    s._searchText)`, and THAT is not the mechanism here either — `coalesce`
+    already yields the new derivation whenever one exists. An earlier cut of
+    this PR rewrote the clause as an equivalent `CASE WHEN $st IS NOT NULL …`
+    and cited this test as its proof; it passes under BOTH forms (measured: 2
+    passed with the clause reverted).
+    """
+    session_id = "sess-source-prose-stub-10000"
+    url = f"session:{session_id}"
+    stale = f"{MARKER} stale prose from a pre-fix write"
+    proj = sdk._get_proj()
+    proj.g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
+        params={"u": url, "sum": stale, "st": stale})
+    assert _nodes_carrying(sdk, f"{MARKER} stale"), (
+        "the seeded pre-fix state is missing")
+    assert not proj.g.query(
+        "MATCH (n:Session {id:$sid}) RETURN count(n) AS n",
+        params={"sid": session_id},
+    ).result_set[0][0], (
+        "this fixture must stay the STUB shape (no `:Session`). With one "
+        "present the capture is a replay and this test silently becomes a "
+        "second copy of `test_a_re_capture_does_not_heal_a_pre_fix_node`, "
+        "passing green while covering nothing — the exact fixture/claim "
+        "mismatch `#10852` review P1 found in this test's earlier form")
+
+    _capture(sdk, session_id)
+
+    offenders = [(labels, props) for labels, props, node_id
+                 in _nodes_carrying(sdk, f"{MARKER} stale")
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert not offenders, (
+        "the FIRST capture left the pre-seeded stub's prose on the node — its "
+        "own derivation (a topic lexicon, non-NULL for any transcript with "
+        "content) must replace it:\n"
+        + "\n".join(f"  {labels} {props}" for labels, props in offenders))
+
+
+def test_a_re_capture_does_not_heal_a_pre_fix_node(sdk):
+    """⛔ A pre-fix node is NOT healed by a re-capture — a replay never writes.
+
+    THE CLAIM THIS REPLACES. This file and two docstrings used to say the pre-fix
+    population repairs itself: *"a pre-fix node HEALS on re-capture, and the
+    reason is the DERIVATION"*. That is false, and the mechanism is the MINT
+    GATE: `_materialize_session_source`'s only production caller sits inside
+    `if not session_existed or (retry_failed_capture and not no_provider)`, so a
+    re-capture of an ALREADY CAPTURED session id is the #1727 no-op replay and
+    never reaches the `SET`s. A node holding the pre-fix pair was written by a
+    run of that same method — i.e. one where `session_existed` was False — so it
+    coexists with the `:Session` node of its own capture (`capture_ok` True),
+    and the pair survives every later capture of that id, in the graph AND in
+    the Source FTS index (the OR-union pollution #10000 measures). Measured:
+    `#10852` review P1.
+
+    ⛔ WHAT THIS TEST IS. A PIN ON A RECORDED DECISION, not an endorsement of a
+    leak. #2104/#1727 require a re-capture of an existing session to be a TRUE
+    no-op (it must not re-SET the first capture's `capturedAt`/`contentHash`
+    either), so the repairs for a legacy node are a retry of a prior FAILED
+    capture, `session_source_prose_migration.reconcile_session_source_prose`
+    (`#11070`/`#11152`, in place) or a full `record-restore` (whose wipe is
+    whole-graph) — never a replay that writes. A capture under a NEW `session_id` and
+    a record-sourced re-projection are PREVENTION routes: they produce a
+    prose-free node where none existed and leave an existing one alone
+    (`#10852` review, P3: the earlier cut of this docstring named them as
+    repairs, which is the same misdirection the retraction removes). It
+    therefore REDS in the good direction too: if someone
+    "fixes" the healing by re-SETting on the replay arm, this fails, and the
+    replay invariant above is the argument to read first.
+    """
+    session_id = "sess-source-prose-noheal-10000"
+    url = f"session:{session_id}"
+    stale = f"{MARKER} stale prose from a pre-fix write"
+    proj = sdk._get_proj()
+    # The pre-fix state EXACTLY: the prose-carrying Source and the `:Session`
+    # node of the completed capture that wrote it. Seeding only the Source — as
+    # the stub test above does — is a DIFFERENT state (a first capture, not a
+    # replay), and that difference is the whole finding.
+    proj.g.query(
+        "MERGE (s:Source {url:$u}) SET s.summary=$sum, s._searchText=$st",
+        params={"u": url, "sum": stale, "st": stale})
+    proj.g.query(
+        "MERGE (n:Session {id:$sid}) SET n.capture_ok=true",
+        params={"sid": session_id})
+
+    receipt = _capture(sdk, session_id)
+    assert receipt["extraction_mode"] == "replayed", (
+        "the fixture is not the state under test: a re-capture of a captured "
+        f"session must REPLAY, got {receipt['extraction_mode']!r}")
+
+    survivors = [(labels, props) for labels, props, node_id
+                 in _nodes_carrying(sdk, f"{MARKER} stale")
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert survivors, (
+        "the replay HEALED the pre-fix prose. It cannot: "
+        "`_materialize_session_source` is only called behind the fresh-capture "
+        "gate, so a replay never re-derives the Source. If this arm now clears "
+        "it, the replay is WRITING — read #2104/#1727 before keeping that.")
+    assert any("summary" in props or "_searchText" in props
+               for _, props in survivors), survivors
+    # The two derived columns are one derivation and must keep together or
+    # replace together (`_source_search_text` ties them). A replay that moved
+    # only one would split the display column from the indexed column — the
+    # divergence `#10000` exists to remove, arriving by a different door.
+    stored = proj.g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.summary, s._searchText",
+        params={"u": url},
+    ).result_set[0]
+    assert list(stored) == [stale, stale], (
+        "the replay changed ONE of the two derived columns and not the other — "
+        f"they must move together or not at all: {stored!r}")
 
 
 # ── the derived metadata is still FINDABLE, and the display prefix is not ──
@@ -585,3 +842,240 @@ def test_the_lexicon_still_prefers_the_most_frequent_words():
     assert topics == ["zebra", *sorted(topics[1:])], topics
     assert len(topics) == 6, topics
 
+
+def test_a_non_latin_transcript_still_derives_and_is_findable(sdk):
+    """The presence test's word class must not be ASCII (#10852 review, P2).
+
+    The token pattern was ``[A-Za-z][A-Za-z0-9_-]*`` — an ASCII word class — so
+    a Cyrillic, Greek, Hebrew, Arabic or CJK transcript had no word tokens as
+    far as ``_session_source_metadata`` could see and took the ``("", [])``
+    arm. Since #10000 BOTH derived columns come from that one token list, so
+    such a session's ``:Source`` was written ``summary=''`` and with **no**
+    ``_searchText`` at all — unfindable through
+    ``tortoise_fts_query(entity_type='source')``, which is the #3518 regression
+    the function's own docstring says it exists to prevent.
+
+    ⛔ MEASURED PRE-FIX (`5e9bd35cb`): every shape below derives `('', [])`,
+    which is what the first assertion reds on. The fix is the word class, not a
+    special case: ``[^\\W\\d_][\\w-]*`` is a Unicode LETTER followed by word
+    characters — identical behaviour for ASCII, correct for every other script.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    shapes = {
+        "russian": "пользователь: мы решили перенести релиз на пятницу",
+        "greek": "ο χρήστης: μεταφέραμε την κυκλοφορία",
+        "arabic": "المستخدم: قررنا تأجيل الإصدار",
+        "chinese": "我们今天讨论迁移计划",
+    }
+    for script, transcript in shapes.items():
+        summary, topics = _session_source_metadata(transcript)
+        assert topics, (
+            f"a {script} transcript derived NO lexicon — the presence test's "
+            "word class is ASCII-only, so this session is written summary='' "
+            "with no _searchText and cannot be found (#3518)")
+        assert summary == DISPLAY_PREFIX + ", ".join(topics), (summary, topics)
+        # ⛔ The framing labels are still filtered, in every script: the
+        # stopword/framing sets are ASCII but they are a PRECISION filter, and
+        # the russian shape's own `пользователь` is NOT one of them — it is the
+        # word the session used, so it belongs in the lexicon.
+        assert not ({"user", "assistant", "speaker"} & set(topics)), topics
+
+    # ⛔ NEGATIVE CONTROL — the widening stops at "letters are present". A word
+    # class that matched anything (``\\S+``, say) would give the punctuation and
+    # framing-only shapes a "lexicon" built from ``"..."`` / ``"user"``, which
+    # is the same defect swapped end for end. These are unchanged by the fix and
+    # must stay silent.
+    for wordless in ("", "   ", "...", "?!", "user:\nassistant:"):
+        assert _session_source_metadata(wordless) == ("", []), wordless
+
+    # ── the live leg: the derived pair actually reaches the node and the index
+    cyrillic_turns = [
+        {"role": "user",
+         "content": "пользователь: перенеси релиз на пятницу"},
+        {"role": "assistant", "content": "договорились, пятницу"},
+    ]
+    sdk._capture_session(conversation=cyrillic_turns,
+                        session_id="sess-cyrillic-10000")
+    row = _source_rows(sdk)["session:sess-cyrillic-10000"]
+    assert row[1], (
+        "the Cyrillic session's :Source got no _searchText, so it is unfindable "
+        f"through the Source FTS index: {row!r}")
+    assert row[0].startswith(DISPLAY_PREFIX), row
+    assert row[1] in row[0], (
+        "the indexed value is not the lexicon the display value carries — the "
+        f"two derived columns split: {row!r}")
+    assert "пятниц" in row[1], row
+
+    found = [r["id"] for r in sdk.tortoise_fts_query("пятницу",
+                                                     entity_type="source")]
+    assert "session:sess-cyrillic-10000" in found, (
+        f"the Cyrillic session is not findable by a word it used: {row!r} -> {found}")
+
+
+def test_a_digit_only_transcript_still_derives_and_is_findable(sdk):
+    """A transcript whose only tokens are NUMBERS must still derive a lexicon.
+
+    ⛔ MEASURED PRE-FIX at this branch's head: ``("", [])`` for every shape
+    below, which is what the first assertion reds on. The presence test was
+    ``[^\\W\\d_][\\w-]*`` — a Unicode LETTER — so a transcript whose only
+    non-framing tokens are digits had "no word tokens", took the ``("", [])"
+    arm, and this writer (which never passes ``summary`` to
+    ``_source_search_text``) wrote ``summary=''`` and ``_searchText`` NULL. The
+    session is then absent from the Source FTS index: the #3518 unfindability
+    the function's own docstring says it exists to prevent, for the one shape
+    an ID/number-only session has.
+
+    Against ``main`` this is a REGRESSION, not only a doc inaccuracy: the
+    pre-#10000 derivation fell back to ``transcript.strip()[:200]``, so those
+    digits DID reach the index (as prose, which is the §9.1/D1 violation this
+    change removes — but the findability was real). RediSearch tokenises on
+    whitespace and punctuation, so a numeric run is an ordinary index term.
+
+    The fix is the presence class, not a special case: ``[^\\W_][\\w-]*``
+    (any word-character run that is not underscore-only, letter OR digit) for
+    PRESENCE, with the letter class kept for the CONTENT/ranking arm — so a
+    numeric token keeps the session findable through the fallback without
+    displacing a word from the six-token descriptor.
+    """
+    from tortoise.sdk import _session_source_metadata
+
+    # ── the derivation: presence is about tokens, not about letters
+    summary, topics = _session_source_metadata("User: 42\nAssistant: 100 200")
+    assert topics, (
+        "a transcript whose only tokens are DIGITS derived no lexicon — the "
+        "presence test's word class excludes numbers, so this session is "
+        "written summary='' with no _searchText and cannot be found (#3518)")
+    assert summary == DISPLAY_PREFIX + ", ".join(topics), (summary, topics)
+    assert {"42", "100", "200"} <= set(topics), topics
+    # …and the framing labels are still gone from a digit-only transcript.
+    assert not ({"user", "assistant"} & set(topics)), topics
+
+    # ⛔ THE REACHABLE TRANSCRIPT SHAPE — the live leg below depends on it, so it
+    # is pinned here rather than discovered by a failure. `_session_llm_transcript`
+    # drops a turn whose marker-free body carries no >=3-char extractable
+    # sentence, so the bare `42` turn in the capture below never reaches this
+    # function: the transcript the writer actually derives from is the second
+    # turn alone. Asserted directly so a future change to that upstream predicate
+    # shows up HERE rather than silently moving the live leg's coverage onto a
+    # shape the builder can no longer emit.
+    reachable = _session_source_metadata("Assistant: 100 200")
+    assert reachable[1] == ["100", "200"], reachable
+    assert reachable[0] == DISPLAY_PREFIX + "100, 200", reachable
+
+    # ⛔ The CONTENT arm keeps its letter class: numbers do not RANK against the
+    # session's words. Without this leg the presence fix could be "solved" by
+    # putting digits in the ranking pool, which would let an ID crowd a word
+    # out of the descriptor of an ordinary session — the ranking this function's
+    # 3-character floor exists to protect.
+    _, mixed = _session_source_metadata(
+        "user: deployed 3 servers 4 replicas 5 shards")
+    assert mixed == ["deployed", "replicas", "servers", "shards"], (
+        f"a digit ranked against the session's words: {mixed!r}")
+
+    # ── the live leg: the derived pair reaches the node AND the index
+    sdk._capture_session(
+        conversation=[{"role": "user", "content": "42"},
+                      {"role": "assistant", "content": "100 200"}],
+        session_id="sess-digits-10000")
+    row = _source_rows(sdk)["session:sess-digits-10000"]
+    assert row[1], (
+        "the digit-only session's :Source got no _searchText, so it is "
+        f"unfindable through the Source FTS index: {row!r}")
+    assert row[0].startswith(DISPLAY_PREFIX), row
+    assert row[1] in row[0], (
+        "the indexed value is not the lexicon the display value carries — the "
+        f"two derived columns split: {row!r}")
+
+    found = [r["id"] for r in sdk.tortoise_fts_query("100",
+                                                    entity_type="source")]
+    assert "session:sess-digits-10000" in found, (
+        f"the digit-only session is not findable by a number it used: {row!r} -> {found}")
+
+    # ⛔ NEGATIVE CONTROL — widening for digits must NOT reach "anything is a
+    # token". A class that admitted punctuation or a bare underscore run would
+    # give these shapes a "lexicon", which is the same defect swapped end for
+    # end (and would index `"..."` for every punctuation-only session).
+    for wordless in ("", "   ", "...", "?!", "___", "---", ": ; ,",
+                     "user:\nassistant:", "user: ...\nassistant: ---"):
+        assert _session_source_metadata(wordless) == ("", []), (
+            f"a transcript with no token of its own ({wordless!r}) derived a "
+            "descriptor — the presence test was widened past 'tokens present'")
+
+
+def test_a_text_less_recapture_keeps_the_two_derived_columns_tied(sdk, tmp_path):
+    """``summary`` and ``_searchText`` are two views of ONE derivation.
+
+    ``summary`` was written unconditionally while ``_searchText`` kept its
+    previous value when the derivation was empty, so a text-less re-capture
+    BLANKED the display column and left the indexed one — the pair the shared
+    rule ties together, diverging. They must keep together or replace together.
+    """
+    session_id = "sess-columns-tied-10000"
+    url = f"session:{session_id}"
+    _capture(sdk, session_id)
+    before_summary, before_search = _source_rows(sdk)[url]
+    assert before_summary and before_search, "the capture derived nothing"
+    assert before_search in before_summary, (before_summary, before_search)
+
+    # A text-less re-capture (no turns to derive from) must not split the pair.
+    sdk._materialize_session_source(
+        session_id, None, "2026-09-02T10:00:00+00:00", [])
+
+    summary, search = _source_rows(sdk)[url]
+    assert summary == before_summary, (
+        "a text-less re-capture blanked `summary` while `_searchText` kept its "
+        f"value: {summary!r} vs the indexed {search!r}")
+    assert search == before_search, (search, before_search)
+    assert summary == DISPLAY_PREFIX + search, (summary, search)
+
+    # ⛔ AND THE RECORD MUST STATE WHAT THE WRITE *STORED* (review round 4).
+    # The keep-arm above is live-side only unless `SourceCreated` carries the
+    # STORED columns instead of the call's derivation: journalling the call's
+    # empty derivation made `derived != replay(journal)` — a rebuild wrote `''`
+    # over the display column while `_searchText` survived, splitting this pair
+    # on the exact recovery path the carrier exists for (#5024/#5097).
+    from tortoise.log import EventLog
+
+    topics = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.topics",
+        params={"u": url}).result_set[0][0]
+    assert topics, f"the lexicon column blanked: {topics!r}"
+
+    sdk._get_proj().rebuild(
+        EventLog(str(tmp_path / "events.jsonl")), confirm_destructive=True)
+
+    replayed_summary, replayed_search = _source_rows(sdk)[url]
+    replayed_topics = sdk._get_proj().g.query(
+        "MATCH (s:Source {url:$u}) RETURN s.topics",
+        params={"u": url}).result_set[0][0]
+    assert (replayed_summary, replayed_search) == (summary, search), (
+        "replay(journal) diverged from the live node — the record carried the "
+        f"call's derivation, not the stored columns: live {(summary, search)!r} "
+        f"vs replayed {(replayed_summary, replayed_search)!r}")
+    assert replayed_topics == topics, (replayed_topics, topics)
+
+
+def test_a_point_that_is_not_a_turn_is_reported_not_exempted(sdk):
+    """The exemption is the TURN-STORE id space, never the `Point` label.
+
+    §9.1/D1 names `Point` explicitly ("not in the graph, not a `Document` node,
+    not a `Point`"), so an exemption keyed on the label alone would make this
+    guard blind to the one route the ruling writes down in bold — and the two
+    scope claims above would be false. This pins the narrow predicate: a
+    `:Point` outside `<session>_t<i>` is an OFFENDER.
+    """
+    session_id = "sess-source-prose-pointexempt-10000"
+    sdk._get_proj().g.query(
+        "MERGE (p:Point {id:'point-not-a-turn-10000'}) SET p.text=$t",
+        params={"t": MARKER})
+    _capture(sdk, session_id)
+
+    hits = _nodes_carrying(sdk, MARKER)
+    assert len(hits) >= 2, f"the seeded non-turn Point is missing: {hits}"
+    offenders = [(labels, props) for labels, props, node_id in hits
+                 if not _is_turn_store(labels, node_id, session_id)]
+    assert offenders, (
+        "a non-turn `:Point` carrying the capture's text was EXEMPTED — the "
+        "predicate must bound the exemption to the turn-store ids, because "
+        "§9.1/D1 forbids the transcript on a `Point` too")

@@ -170,16 +170,6 @@ tortoise = ["config/routing.yaml", "../tests/sample_transcript.txt",
           # not found". Named exactly (not *.ts) so the behavioural test file is
           # NOT shipped to users.
           "pi-hooks/tortoise-capture.ts",
-          # #2119: the per-turn READ extension is copied out of the PACKAGE by
-          # the same `tortoise install pi` run, so a wheel without it fails the
-          # install with "shipped Pi read seam not found ... broken package?"
-          # AFTER the capture artifact has already been written. Named exactly
-          # (not *.ts) so neither behavioural suite is shipped to users. The
-          # guard is `tests/test_capture_install.py::test_every_capture_artifact_
-          # ships_in_the_wheel`, which now iterates the artifact registry's
-          # volunteer sources too — the finding that caught this was that
-          # nothing in the repo looked at the second artifact.
-          "pi-hooks/tortoise-volunteer.ts",
           # #3515: the store-sync BACKSTOP ships too, and is named exactly for
           # the same reason (its `.test.mjs` must not reach users). It is not
           # copied by an installer — `tortoise store-sync` runs it from the

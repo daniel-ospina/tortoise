@@ -128,25 +128,43 @@ def tenant() -> tuple[str, str]:
     return _new_tenant()
 
 
-#: Journal keys whose emitted VALUE the record's declared column type could not
-#: hold — a schema/producer DISAGREEMENT, not a folding bug — and the vocabulary
-#: is now EMPTY (#10620 closed its last entry).
+#: Journal keys whose emitted VALUE the record's declared column type cannot
+#: hold — a schema/producer DISAGREEMENT, not a folding bug (`_jsonb_or_scalar`
+#: deliberately refuses to coerce, so the disagreement stays visible instead of
+#: being papered over). Derived from the RECORD ITSELF, never hard-coded by
+#: record type: the moment the schema or the producer is fixed, the record stops
+#: matching and the expectation flips to "must project cleanly" on its own — so
+#: nothing here can go stale in silence.
 #:
-#: It held ``search_keys`` (the graph's flattened STRING against
-#: `public.point.search_keys` declared `jsonb`) and, before it,
-#: ``capture_redactions`` (an integer count against a `jsonb` column, **fixed
-#: #9264** by `20261022000001_record_session_capture_redactions_integer.sql`).
-#: The ruling is the same one that closed both: the PRODUCER is authoritative
-#: about the form, so the COLUMN narrows to it. `search_keys` narrowed to `text`
-#: in `20261102000002_record_point_search_keys_text.sql` — nothing reads the
-#: record's copy as a JSON structure, and the graph's own form is the flat
-#: string (`projection/entities.py::flatten_search_keys_prop`).
+#:   * ``search_keys`` — an EXTRACTED point carries the graph's flattened string
+#:     (`_flatten_search_keys_prop`, #8006/#5482), while
+#:     `public.point.search_keys` is `jsonb`: ``invalid input syntax for type
+#:     json``. Two record types re-project the same snapshot
+#:     (``PointAdded``/``PointPromoted``), so the TYPE is not the unit.
+#:   * ``capture_redactions`` — the capture receipt's integer COUNT, while
+#:     `public.session.capture_redactions` was `jsonb`: ``column
+#:     "capture_redactions" is of type jsonb but expression is of type integer``.
+#:     **FIXED (#9264)** by the forward migration
+#:     `20261022000001_record_session_capture_redactions_integer.sql`, so the
+#:     entry and its detection are gone: every other counter on
+#:     `public.session` is `integer`, which made `jsonb` the anomaly rather than
+#:     a decision.
 #:
-#: Keeping an EMPTY dict with a live detector would be the "pin that outlives its
-#: defect" this file's own assertion message warns about, so the mechanism is
-#: gone rather than parked (and so is the dict: an assertion over an empty
-#: vocabulary is a constant `True`). Every refusal below must now be the
-#: PRE-EXISTING fold refusal (#9200), and anything else raises.
+#: Measured at #9200's head (`62ec432a8`) + this diff, against a real Postgres.
+#: Reported on #9200 (the producer-accuracy class it belongs to): the fix is a
+#: schema/placement decision, not a wiring one.
+_SCHEMA_DISAGREEMENTS = {
+    "search_keys": "invalid input syntax for type json",
+}
+
+
+def _disagreement(record: dict) -> str | None:
+    """Which declared-column disagreement this journal record carries, if any."""
+    snapshot = record.get("point") or {}
+    keys = snapshot.get("search_keys")
+    if isinstance(keys, str) and keys.strip():
+        return "search_keys"
+    return None
 
 
 #: The record migrations, read from the fold's own registry (never restated).
@@ -265,14 +283,12 @@ RECORD_REAPPLY_STEPS: list[tuple[Path, str | None]] = [
      / "20261029000001_record_point_cache_tier.sql", None),
     # #10620 — R4's remaining half: `public.point.search_keys` NARROWED from
     # `jsonb` to `text`. Same class as the 20261022 entry above (a TYPE change no
-    # re-apply of the CREATE TABLE files can make), and it is the entry that
-    # removes the row-loss failure rather than a backstop gap: on a container
-    # whose `point.search_keys` is still `jsonb`, EVERY point carrying search
-    # keys is refused `22P02` and the residue pass below would blame *"a NEW
-    # defect"* on the current tree — which is exactly what a pre-#10620 container
-    # would earn. Guarded `DO` block keyed on `information_schema`, so
-    # re-applying on a narrowed column is a no-op, and its `USING` helper
-    # function is created and dropped inside the file.
+    # re-apply of the CREATE TABLE files can make). Guarded `DO` block keyed on
+    # `information_schema`, so re-applying on a narrowed column is a no-op, and its
+    # `USING` helper function is created and dropped inside the file.
+    # ⚠️ Restored at the #10226 forward-merge: the branch had dropped this entry
+    # while reverting the region, so `test_the_reapply_set_covers_every_record_
+    # migration_after_the_base_shape` redded on a container predating #10620.
     (REPO_ROOT / "supabase" / "migrations"
      / "20261102000002_record_point_search_keys_text.sql", None),
 ]
@@ -4336,21 +4352,24 @@ def test_the_public_capture_path_writes_the_record(capture_sdk, monkeypatch,
                     # Postgres, so it cannot be judged on its values yet.
                     refused += 1
                     continue
-                # ⛔ A HARD failure, never an absorbed loss (#10620 review P1).
-                # The disagreement vocabulary is EMPTY, so an assertion over it
-                # would be a constant `True`: a NEW schema/producer
-                # disagreement (the #9264/#10620 class) would be counted into
-                # `refused` and the `lost == refused` check below would stay
-                # green — the defect this branch is supposed to catch, tolerated.
-                raise AssertionError(
+                disagreement = _disagreement(record)
+                assert disagreement is not None, (
                     f"{record.get('type')} cannot be projected and the refusal "
-                    f"is not the pre-existing fold refusal: {message}. "
-                    "_SCHEMA_DISAGREEMENTS is EMPTY (#9264 closed "
-                    "`capture_redactions`, #10620 closed `search_keys`), so a "
-                    "refusal here is a NEW schema/producer disagreement — fix "
-                    "the side the producer does not own, and keep this branch "
-                    "failing rather than tolerating it."
-                ) from exc
+                    f"is not a schema/producer disagreement: {message}. That is "
+                    "a NEW defect, not a widened allowance."
+                )
+                assert _SCHEMA_DISAGREEMENTS[disagreement] in message, (
+                    f"{record.get('type')} carries a {disagreement} "
+                    f"disagreement but the error does not name it: {message}"
+                )
+                refused += 1
+            else:
+                assert _disagreement(record) is None, (
+                    f"{record.get('type')} now projects cleanly, so its "
+                    f"{_disagreement(record)!r} disagreement is FIXED — delete "
+                    "it from _SCHEMA_DISAGREEMENTS. A pin that outlives its "
+                    "defect hides the next one."
+                )
         replay_conn.close()
         # 5. the capture lost exactly those records and nothing else
         assert lost == refused, (

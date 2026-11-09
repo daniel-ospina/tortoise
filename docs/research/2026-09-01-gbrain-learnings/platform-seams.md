@@ -30,28 +30,6 @@ have no shell-hook surface: their seam is an in-process plugin/extension, so
 framing does not apply to them. Each row below states its own mechanism; do
 not infer one from this diagram.
 
-⚠️ The Pi row said the OPPOSITE until 2026-11-08 — that Pi's extension API had
-no per-turn prompt hook, so injection was "not reachable". It was false, and it
-is why the seam went unbuilt for two months (the owner ruling of 2026-09-14 is
-in `#2119`). Re-measured evidence, both primary: the installed pi-coding-agent's
-`docs/extensions.md` (*"Fired after user submits prompt, before agent loop. Can
-inject a message and/or modify the system prompt"*, and *"A returned `message`
-is added to either kind of run"*), and its exported type
-`dist/core/extensions/types.d.ts::BeforeAgentStartEvent` /
-`BeforeAgentStartEventResult`. See the correction log below.
-
-⚠️ **Continuity is not optional on this row either.** `#2119`'s first cut passed
-only `--session-id` and its comment claimed the reflex suppresses a re-mentioned
-pointer "when it is given the session id" — the SAME false premise the `#2120`
-correction below records for Hermes. `session_id` is carried and never
-consulted; the suppression set is `pointer_ids_in_text(prior_context)`. The
-shipped seam now writes the `{window, session_id, prior_context}` contract dict
-to the CLI's stdin and sends `prior_context` in the hosted body, holding one
-turn of continuity per session (`createContinuity`, the same depth as
-`tortoise/openclaw-plugin/index.mjs`). Pinned by
-`tortoise/pi-hooks/tortoise-volunteer.test.ts` → `CONTINUITY: turn 2 hands the
-reflex turn 1's block as prior_context` and its hosted twin.
-
 For a harness whose per-turn surface is a native PLUGIN rather than a shell
 command (Hermes, #2121), the callback invokes the same `tortoise volunteer`
 CLI directly — the arrow on the left is the only part that differs.
@@ -77,7 +55,7 @@ warns when a claude registration would make the reflex fire twice per turn.
 | #2123 | Codex | `UserPromptSubmit` | `<repo>/.codex/hooks.json` (also `~/.codex/hooks.json`) | `hookSpecificOutput.additionalContext` (stdin JSON has `prompt`) | shipped (`install codex`) |
 | #2124* | Cline | `UserPromptSubmit` | `<dir>/.clinerules/hooks/UserPromptSubmit` (project — the ONE dir every Cline surface reads) or `~/Documents/Cline/Hooks` (global, extension); enable Hooks in settings | `{"cancel": false, "contextModification": "<text>"}` — **flat string**; stdin is NESTED: `{"userPromptSubmit": {"prompt": …}}` | **shipped and RE-VERIFIED 2026-11-08 against Cline's SOURCE** (indicator 2 closed): `hooks.proto` `string context_modification = 1`, `hook-factory.ts:74-84` rejects a non-string, `disk.ts` `hooksDir: ".clinerules/hooks"`. The seam was broken on three counts until #2124's repair — see the correction log |
 | #2124* | Devin | `UserPromptSubmit` | `.devin/hooks.v1.json` (also `~/.config/devin/config.json` `hooks`) | `hookSpecificOutput.additionalContext` | shipped (`install devin`); primary docs re-fetched 2026-10-11 — file IS the hooks object (no `"hooks"` wrapper), stdin carries `prompt`; `matcher` omitted (tool-events only) |
-| #2119 | Pi (pi-coding-agent) | **`before_agent_start`** — "Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt"; `messageType: "user"` carries `prompt`, a `pi.sendMessage(..., {triggerTurn:true})` run arrives as `"custom"` with no prompt | `~/.pi/agent/extensions/tortoise-volunteer.ts` (TS extension, written by `tortoise install pi` beside the capture extension; Pi loads every top-level file there as an INDEPENDENT extension) | `BeforeAgentStartEventResult.message` — `{customType, content, display}`; `display: false` = silent injection, `true` = rendered with the reflex's `surfaced` disclosure marker. Never `systemPrompt` (that REPLACES the run's prompt) | **shipped** — `tortoise install pi` writes both artifacts; the read seam is graded end to end by `tests/test_pi_volunteer_seam.py` (installed extension → real reflex → seeded graph) and its own `node --test` suite |
+| #2119 | Pi (pi-coding-agent) | session lifecycle only (no per-turn prompt hook in the extension API today) | `~/.pi/agent/extensions/` TS extension | n/a — per-turn injection not reachable via extension API | MCP pull + session-start digest (existing) + documented limitation |
 | #2122 | Cursor | `sessionStart` → `additional_context`; per-turn `beforeSubmitPrompt` is observe/block ONLY | `~/.cursor/hooks.json` (flat script entries, absolute command; project `.cursor/hooks.json` is workspace-trust-gated) | `{"additional_context": …}` (snake_case) on `sessionStart` | **shipped** — `tortoise install cursor` registers the `sessionStart` cold-context hook (contract v4) *plus* the `sessionEnd` capture hook; per-turn push stays Cursor-blocked (watch item) |
 | #2120 | OpenClaw | **native plugin** — per-turn hook `before_prompt_build` → `{prependContext}` (in-process; OpenClaw has NO shell-hook surface) | `~/.openclaw/extensions/tortoise/` (plugin dir; `openclaw.plugin.json` + entry `index.mjs`) → `before_prompt_build`; capture via the `llm_output` hook → `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl` (one file per session) → `tortoise sessions import --harness openclaw <file>` | `PluginHookBeforePromptBuildResult.prependContext` | **shipped** — `tortoise install openclaw` writes the plugin + `plugins.entries.tortoise.enabled`; injection graded by `tortoise/openclaw-plugin/index.test.mjs`, install by `tests/test_openclaw_seam.py`. Continuity: the plugin hands the reflex `prior_context` = the block it injected last turn (local: `tortoise volunteer`'s JSON contract; hosted: the documented `/v1/context` body), so the reflex's own re-mention suppression runs — see the 2026-10-13 correction below |
 | #2121 | Hermes | `pre_llm_call` (directory plugin: `register(ctx)` + `ctx.register_hook`) | `<dir>/.hermes/plugins/tortoise-volunteer/` (`plugin.yaml` + `__init__.py`, written by `tortoise install hermes`) | the callback RETURNS `{"context": "<block>"}`, injected into the current turn's user message | written by `install hermes`, but **INERT until two opt-ins** (`HERMES_ENABLE_PROJECT_PLUGINS=1` + `hermes plugins enable tortoise-volunteer`) — the installer prints both; ingestion: `tortoise sessions import --harness hermes --file <state.db>` (reads `$HERMES_HOME/state.db` read-only) |
@@ -111,30 +89,6 @@ correction log).
 > list was a sketch written before the issue was filed; the issue wins.
 
 ## Correction log
-
-### #2119's Pi row — "no per-turn prompt hook" (re-measured 2026-11-08)
-
-The row read: *"session lifecycle only (no per-turn prompt hook in the extension
-API today) | n/a — per-turn injection not reachable via extension API"*. Both
-halves were wrong, and the row is the recorded reason the seam stayed unbuilt.
-
-| Claim | Re-measurement |
-|---|---|
-| Pi's extension API has no per-turn prompt hook | **False, measured on the installed `pi-coding-agent`.** `docs/extensions.md`: *"`before_agent_start` exposes both the current prompt and its structured `systemPromptOptions`"*, *"Fired after user submits prompt, before agent loop. Can inject a message and/or modify the system prompt"*, and *"A returned `message` is added to either kind of run"*. Public mirror: `earendil-works/pi` `packages/coding-agent/docs/extensions.md` (fetched 2026-11-08) — the same text. |
-| …so per-turn injection is "not reachable" | **False.** `dist/core/extensions/types.d.ts`: `BeforeAgentStartUserEvent` (`messageType: "user"`, `prompt`, `images?`) and `BeforeAgentStartEventResult` (`{message?: Pick<CustomMessage, "customType"\|"content"\|"display"\|"details">, systemPrompt?: string}`). A returned `message` is ADDED to the run's context; `systemPrompt` REPLACES it (so a seam that wants to append must use `message`, not `systemPrompt`). |
-| One extension can carry both halves | **False, and it matters.** Pi's loader `collectAutoExtensionEntries` enumerates directory entries with **no basename dedupe** — `tortoise-capture.ts` and any sibling `.ts` are independent extensions. Folding the read half into the capture file would make a capture-only `install pi` silently start injecting; hence TWO files, one install command, one contract number. |
-| Pi fires `before_agent_start` only for user prompts | **False since upstream #10267/#5581/#10739.** It also fires for runs started by `pi.sendMessage(..., {triggerTurn:true})`, delivered as `messageType: "custom"` with a `message` and NO `prompt`. A seam that injects into those lets its own message start a second run — the shipped extension skips anything but `"user"`. |
-
-**Why this class of error is expensive.** The stale row was not a claim about
-Pi's ceiling; it was a claim about what a lane could BUILD, and #2119 therefore
-carried "documented limitation" as its status. The owner ruling of 2026-09-14
-(#2119) is the other half — `tortoise install` also told Pi users a
-`tortoise-context` extension would "auto-inject context", a file that has never
-existed (#3502 removed that) — so both the promise and the omission were
-prose with nothing coupling either to a shipped artifact. The reading that
-survives: **grade a seam by running the artifact the installer writes.** That is
-what `tests/test_pi_volunteer_seam.py` does (the installed extension, loaded
-through Pi's handler contract, against the real reflex over a seeded graph).
 
 ### #2124's Gemini / OpenCode / Cline rows (re-measured 2026-10-18)
 
@@ -386,28 +340,6 @@ receipts, provenance and REPHRASE dedup in the one existing import pipeline.
   relays to the harness log, so a future redirect is loud at run time.
   Env alone (a bare `TORTOISE_API_KEY`) still never flips the hook to
   hosted mode (#1708 D1b).
-
-  ⚠️ **The Pi read seam does not fit this bullet's key store (#2119).** It
-  keeps its OWN key, in `~/.pi/agent/tortoise-config.json` — **never**
-  `~/.tortoise/credentials.json` — because it can satisfy the reflex
-  in-process instead of only shelling out to `tortoise volunteer`: the
-  extension POSTs the window itself (`runReflexHosted`). Rotating the
-  credentials file therefore does **not** stop it. Its consent rule is
-  otherwise the STRICTER one — a file-sourced key only, no env key, and no
-  env `TORTOISE_API_URL` override — so the "env alone never flips it" clause
-  above holds here too; see the `#2119` Pi row in the table above.
-
-  The **log-loudness** clause above also does not describe it: its hosted leg
-  emits no note at all (only a `TORTOISE_VOLUNTEER_DEBUG=1` trace), and on
-  its CLI transport the child's stderr — where `tortoise: hosted-mode note:`
-  goes — is captured and dropped on success. ⛔ That gap is **not** unique to
-  this row: #2120's OpenClaw plugin (`tortoise/openclaw-plugin/index.mjs`,
-  the `execFile` callback reading only `stdout`) and #2121's Hermes plugin
-  (`tortoise/hermes-plugin/__init__.py`, `subprocess.run(...,
-  capture_output=True)` returning only `proc.stdout`) discard the note the
-  same way. So "loud at run time" is currently true of the shell-hook family
-  only — a standing audit gap on the in-process rows, not a property of this
-  seam.
 * W4 user-exposure opt-in: per-turn injection ships behind the `install`
   command — nothing auto-registers.
 
@@ -421,7 +353,7 @@ pass:
 | Claim | Re-measurement |
 |---|---|
 | The plugin's hosted leg is `POST /v1/context` (`apiKey` config, the ONLY reflex path for a user with no local CLI) | **It never worked.** `runHosted` posted `{prompt}`; `POST /v1/context` requires `window: [{role, content}]` (`VolunteerContextRequest`, `tortoise/hosted_api.py`), so every hosted turn was a 422 — and the fail-open catch turns that into an empty injection with no signal anywhere. Graded now by `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`, which executes the plugin under a stubbed `fetch` and validates the emitted body with the SERVER's own model (a hand-copy of the shape would have re-encoded the bug). |
-| "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The one-shot shell hooks have nowhere to keep a prior block, and **Hermes' `--session-id` claim is the same false premise (#8957)**. The Pi seam shipped the same false premise in `#2119`'s first cut and was corrected the same way: it writes the contract dict to stdin and sends `prior_context` in the hosted body (see the Pi row above). |
+| "Cross-turn dedupe" = the plugin's block digest | **Incomplete.** The digest only suppresses an IDENTICAL block; a block that changes by one pointer re-surfaces the rest. The reflex has a stage-5 re-mention suppression that reads `prior_context` — and no CLI seam could supply it, because `tortoise volunteer` had no `--prior-context` (only `--session-id`, which the pipeline validates and never consults). The CLI now takes `--prior-context` (and `prior_context` in its JSON contract dict), and the plugin passes the block it injected last turn. Both polarities are pinned: `tests/test_platform_seams.py::test_volunteer_cli_prior_context_suppresses_a_re_mention`. The sibling seams still do not pass it — Hermes' `--session-id` claim is the same false premise (#8957), and the one-shot shell hooks have nowhere to keep a prior block. |
 
 Note on the W3 harness row: #2120's scope item "W3 harness seam entry (ingest
 and inject graded)" is *partly* delivered. **Injection** is fully graded:

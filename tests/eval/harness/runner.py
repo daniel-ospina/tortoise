@@ -5,17 +5,18 @@ committed corpus replayed through the REAL write seam (the SDK's
 ``capture_session``), then graded on the recall and reflex surfaces, and
 published as a receipt the ``_main`` CLI could bless into a baseline.
 
-**#4282 deleted ``capture_session`` from the SDK surface, and no surviving SDK
-entry point reaches an in-memory conversation capture** (``index_sessions`` /
-``reconcile_sessions`` index session *files*; the hosted ``POST /v1/sessions``
-door is a server route, not an SDK method).  The replay leg and everything that
-fed it — ``replay_and_grade``, ``run_benchmark``, ``_bless_main`` and the CLI —
-were therefore removed with it, together with the corpus-replay probes that
-drove them (``tests/eval/harness/test_harness_benchmark.py``,
-``tests/eval/write_path/test_write_path_benchmark.py`` and the
-``write_path`` benchmark lane).  What remains is the ONE helper that never
-touched the write path: ``replay_reflex``, the graded
-``tortoise.volunteer.decide`` replay over an ALREADY-populated cell.  It is kept
+**#4282 retired the PUBLIC ``TortoiseSDK.capture_session`` name, and this replay leg was
+removed with it.** ⚠️ The reason is NOT that no SDK entry point reaches an in-memory
+capture: the body survives as the private ``TortoiseSDK._capture_session`` (the #10226
+forward-merge re-pointed 220 of its in-process tests at it), so a replay lane CAN be
+driven again. The leg and everything that fed it — ``replay_and_grade``,
+``run_benchmark``, ``_bless_main`` and the CLI — plus the corpus-replay probes that drove
+them (``tests/eval/harness/test_harness_benchmark.py``,
+``tests/eval/write_path/test_write_path_benchmark.py`` and the ``write_path`` benchmark
+lane) are therefore RETIRED as their own decision, awaiting a re-registration of the
+benchmark onto the private door. What remains is the ONE helper that never touched the
+write path: ``replay_reflex``, the graded ``tortoise.volunteer.decide`` replay over an
+ALREADY-populated cell.  It is kept
 because ``tests/test_volunteer_reflex_harness_seam.py`` grades the product's
 reflex seam against it, and that seam survives untouched.
 """

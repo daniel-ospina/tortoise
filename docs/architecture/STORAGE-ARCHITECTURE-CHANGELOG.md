@@ -875,7 +875,7 @@ deliberately rather than discovered later:
   `is_episodic` is the `#1486` discriminator), but it IS a behaviour change on
   that lane, and it is pinned rather than disclosed-away.
 
-**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` (**deleted by #4282 — it drove `TortoiseSDK.capture_session`, one of the 26 dead public SDK methods; the anchor invariant now has NO pin, see §17 and the #4282 note in `STORAGE-ARCHITECTURE.md`**) — the
+**What now prevents a repeat.** `tests/test_8501_capture_path_anchor.py` (**restored at the #10226 forward-merge — #4282 retired the public `TortoiseSDK.capture_session` name, but the body survives as the private `TortoiseSDK._capture_session`, so all 12 legs run again with that one rename; while the file was deleted the anchor invariant had NO pin**) — the
 anchor must be non-NULL, equal to the Source's stored `contentHash`, and present
 in the Point's own journaled `sourceVersionTransit`; it must survive a
 destructive `rebuild_all()`; a re-capture must neither advance nor drop it; the

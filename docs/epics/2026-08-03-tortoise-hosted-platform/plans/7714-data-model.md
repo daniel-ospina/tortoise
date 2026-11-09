@@ -4,32 +4,6 @@
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-> ⛔ **SUPERSEDED IN PART BY `#4282` (2026-10-27) — read this before following ANY task below.**
-> This plan calls SDK methods that have since been DELETED as dead public surface, and it names
-> tests that were deleted with them. Tasks 4-8 are affected, not just Task 8:
->
-> - **Deleted methods the plan calls**: `org_update` (Tasks 4, 9), `membership_list`,
->   `membership_delete`, `membership_update_role` (Task 5), `apikey_list` (Tasks 6, 8),
->   `invitation_create`, `invitation_accept`, `invitation_get_by_token`,
->   `cleanup_expired_invitations` (Tasks 7, 8). `_safe(sdk.membership_list, …)` as written raises
->   `AttributeError`.
-> - **Test names the plan's acceptance lists cite, which no longer exist**: fourteen of the fifteen
->   CRUD pins (`test_team_update_changes_mutable_fields`, `test_team_delete_cascades_to_children`,
->   `test_team_delete_requires_name_confirmation`, `test_migrate_teams_is_idempotent`,
->   `test_membership_update_role`, `test_membership_delete_is_idempotent`,
->   `test_apikey_create_returns_plaintext_once`, `test_apikey_list_excludes_plaintext`,
->   `test_invitation_create_rejects_duplicate_pending`, `test_invitation_accept_rejects_expired`,
->   `test_invitation_accept_creates_membership`, `test_invitation_accept_rejects_already_accepted`,
->   `test_invitation_get_by_token_finds_match`, `test_cleanup_expired_invitations_marks_expired`).
->   `test_membership_create_rejects_at_max_users` survives. Each was the subject of a deleted
->   method, so each went with its subject; the loss is recorded on `#10227` and in PR #10226's
->   "Coverage removed" section.
->
-> The registry access this plan describes is reachable through the surviving `team_*` /
-> `invitation_*` methods and the registry itself. **This document is the historical record of the
-> design, not an instruction to follow verbatim** — re-derive the surface from
-> `tortoise/sdk.py` before implementing any task here.
-
 **Goal:** Implement Team, Membership, APIKey, Invitation entities in a dedicated FalkorDB `control_plane` graph, plus a Postgres `audit_events` table with three-tier persistence (Postgres → JSONL fallback → replay).
 
 **Architecture:** Extend the existing `TortoiseSDK` with a `_get_registry()` method that accesses a separate FalkorDB graph (`control_plane`) via the existing `db.select_graph()` handle. No second FalkorDB connection. Postgres audit via psycopg2 sync INSERT with local JSONL fallback — no silent data loss. The SDK grows by ~300 lines in a clearly demarcated control-plane section. Postgres is an optional dependency (no-op when `TORTOISE_AUDIT_DSN` is unset).

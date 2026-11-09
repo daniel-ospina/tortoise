@@ -305,9 +305,7 @@ def test_the_doc_does_not_claim_a_re_capture_heals_a_pre_fix_node():
     it is re-captured (the capture now overwrites the pair with the lexicon)"* —
     both clauses false by the mint gate, and contradicted 150 lines earlier in the
     same repo by `tortoise/cache_projection.py` and
-    `tests/test_10000_source_prose.py::test_the_write_site_does_not_claim_a_re_capture_heals_a_pre_fix_node`
-    (the replay arm that used to sit beside it went with the SDK `capture_session`
-    door this branch deletes — `#4282`, loss recorded on `#10227`).
+    `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
     """
     costs = _section(COSTS_HEADING)
     whole = _doc_text()

@@ -30,11 +30,9 @@ the run's OWN receipt:
 * `result["stats"]["vocabulary_gap"]` — the reading, present WHEN THE RUN
   RECORDED A LOSS (a token sample, a pair-read residual, or oversize tokens) and
   ABSENT otherwise, the shape `vocabulary_gap_snapshot()` reports plus
-  `"scope": "run"`. It rides `stats` because the hosted capture fold
+  `"scope": "run"`. It rides `stats` because the SDK's capture fold
   (`sdk._capture_stats_with_step_witness`) copies `out["stats"]` wholesale, so
-  the reading reaches the product receipt (the capture receipt's `stats`; the
-  SDK's own `capture_session` door that also carried it was deleted by `#4282`,
-  so the hosted lane and the fold are the surviving readers) with no
+  the reading reaches the product receipt (`capture_session`'s `stats`) with no
   second seam — the #2335 WI-1a lesson `error_census` taught.
 * `result["warnings"]` — ONE entry naming the absorbed tokens, under the SAME
   predicate: this is the run's alarm, and unlike the process log line it cannot
@@ -45,10 +43,9 @@ through verbatim by the hosted receipt (`hosted_api` → `"stats": meta.get("sta
 or {}`) and read by the cost seam, and the M2 lane documents a genuine zero-call
 path as a clean `{}`. An always-present reading made that `{}` impossible on M2,
 which reds `tests/test_capture_cost_measurement.py::
-test_emit_call_site_writes_no_cost_row_when_props_is_none`. The hermetic arm that
-used to pin the same fact here (`test_a_zero_fold_m2_capture_leaves_stats_untouched`)
-went with the SDK `capture_session` door `#4282` deletes (loss recorded on
-`#10227`), so that fact now rests on the cost-measurement pin alone.
+test_emit_call_site_writes_no_cost_row_when_props_is_none` — the arm
+`test_a_zero_fold_m2_capture_leaves_stats_untouched` here pins the same fact
+hermetically.
 
 The SAME reader is wired onto the opt-in M2 capture lane
 (`sdk.TortoiseSDK._extract_session_llm`), because that lane does not route
@@ -311,8 +308,71 @@ def test_the_per_process_log_cap_cannot_spend_the_run_level_record(sdk, monkeypa
 
 # ── and it decides nothing (#5329 stays owner-gated) ───────────────────────
 
+def test_the_m2_capture_lane_reports_the_gap_on_its_own_receipt(tmp_path, monkeypatch):
+    """The OTHER capture lane, and the more destructive one.
+
+    `TORTOISE_SESSION_EXTRACTOR=m2` does not route through `extract_session_v2`:
+    it folds in-capture through `dedup_classify.rephrase_hit`, and the SDK then
+    DETACH-DELETEs the folded node. Hermetic — in-capture dedup needs no S3
+    search — so this arm runs on every lane, embedded included.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "m2.db"))
+    try:
+        conversation = [
+            {"role": "user", "content": PRIOR_CLAIM},
+            {"role": "assistant", "content": "noted"},
+            {"role": "user", "content": GAP_CLAIM},
+        ]
+
+        out = sdk._capture_session(conversation, session_id="gap-m2")
+    finally:
+        sdk.close()
+
+    reading = out["stats"]["vocabulary_gap"]
+    assert reading["scope"] == "run"
+    assert reading["tokens"].get(UNLISTED_MARKER, 0) >= 1, (
+        "the M2 lane folded a restatement across an unlisted marker and "
+        f"DETACH-DELETEd the duplicate; its receipt must name the token; "
+        f"reading={reading}")
+    gap = _gap_warnings(out)
+    assert len(gap) == 1 and repr(UNLISTED_MARKER) in gap[0], gap
 
 
+def test_a_zero_fold_m2_capture_leaves_stats_untouched(tmp_path, monkeypatch):
+    """ISSUE 1 (review round 4): the reader must not make `stats` non-empty on
+    EVERY M2 capture.
+
+    `sdk._extract_session_llm` documents `stats == {}` on a genuine zero-call
+    path, the hosted receipt passes `stats` through verbatim
+    (`"stats": meta.get("stats") or {}`) and
+    `tests/test_capture_cost_measurement.py::
+    test_emit_call_site_writes_no_cost_row_when_props_is_none` asserts it — so an
+    always-present reading reds a real, CI-selected test. Here the capture folds
+    NOTHING (a claim with no prior and no unlisted marker), so the reader must
+    leave `stats` exactly as the lane built it.
+    """
+    monkeypatch.setenv("TORTOISE_SESSION_EXTRACTOR", "m2")
+    monkeypatch.setenv("TORTOISE_SESSION_LLM_MOCK", "1")
+    from tortoise.sdk import TortoiseSDK
+
+    sdk = TortoiseSDK(str(tmp_path / "m2-clean.db"))
+    try:
+        out = sdk._capture_session(
+            [{"role": "user", "content": CLEAN_CLAIM},
+             {"role": "assistant", "content": "noted"}],
+            session_id="gap-m2-clean")
+    finally:
+        sdk.close()
+
+    assert "vocabulary_gap" not in out["stats"], (
+        "a run that folded nothing must not carry a fabricated reading — the "
+        "M2 lane's zero-call contract is a clean stats dict; "
+        f"stats={out['stats']}")
+    assert _gap_warnings(out) == [], out.get("warnings")
 
 
 def test_the_reader_does_not_change_the_fold_decision():

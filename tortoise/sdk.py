@@ -188,10 +188,12 @@ from .projection import _FULLTEXT_INDEX_LABEL_FIELDS
 from .projection import _ANNOTATOR_PROPS as _ANNOTATOR_PROP_NAMES
 from .projection import _ENTITY_ID_PROP  # #3998: the write's own Source predicate
 from .projection import EVIDENCE_FOLD_KEY  # #10010: the dedup fold's record flag
+from .graph_ops import counts_capture_ops  # #4282: the private capture door's
 from .graph_ops import phased  # #3359: per-capture graph-op accounting
 from .quota import (
     DOCUMENT_METER_PREDICATE,
     MAX_EXTRACTIONS_PER_TURN,
+    MAX_SESSION_TURNS,
     is_metered_document_kind,
     refuse_document_writer_demotion,  # #5140: the document writers' loud refusal
     stored_source_document_kinds,     # #5140: ONE reader of the meter key
@@ -806,7 +808,8 @@ INGEST_PROMOTION_POLICIES = ("gated", "auto")
 # the M2 two-stage LLMExtractor (tortoise/extractor.py) from the configured
 # provider and run it over a conversation; both hosted_api.capture_session and
 # TortoiseSDK.capture_session consumed them so the two copies stayed in sync — the
-# SDK half was DELETED by #4282, so the hosted lane is the only consumer now.
+# #4282 retired the public SDK name; the body survives as the private
+    # `_capture_session`, so BOTH lanes are still consumers.
 
 # Provider priority when MULTIPLE keys are set (first configured wins — the
 # deploy-time decision is which key is present; a key is only ever sent to the
@@ -8386,13 +8389,6 @@ def _capture_step_witness(out: dict, *, committed: int) -> dict:
                   "story_arc_chars": len(out.get("story_arc") or "")},
         # S2.1 — the map's candidates, counted on the PRE-S4 list (``s2_embed``
         # is S2's own output; ``embed_list`` is what S4 left of it).
-        # ⛔ ON THE ``TORTOISE_PARTIAL_GAP_FILL`` ARM THIS COUNT IS NOT S2.1's
-        # OWN OUTPUT (#11534 review, P2): S2.2b-ADD rebinds ``embed_list`` to the
-        # union of S2.1's candidates and the spans it filled BEFORE ``s2_embed``
-        # is assigned, so the count includes that stage's additions. "Pre-S4"
-        # still holds — no S4 item is in it — but a reader attributing the whole
-        # number to S2.1 over-counts on that arm; ``stats["partial_gap_fill"]``
-        # (``added_items`` / ``added_by_section``) is what separates them.
         "map": {"items": _step_embed_counts(
             out.get("s2_embed") if out.get("s2_embed") is not None
             else out.get("embed_list"))},
@@ -8805,8 +8801,9 @@ def _apply_capture_ingest_ep(sdk, claim_ids: list[str], *,
     committed capture — every failure surfaces as an additive warning via
     ``warn`` (never a raise after partial writes). Was shared by
     ``sdk.capture_session`` and hosted ``_capture_session_impl`` so the two
-    capture surfaces could never drift (byte-parity); the SDK half was DELETED
-    by #4282, so this helper now serves the hosted lane alone.
+    capture surfaces could never drift (byte-parity); #4282 retired the public SDK
+    name but its body survives as the private `_capture_session`, so this helper
+    still serves BOTH lanes.
     """
     # No-op only when there is NOTHING to do: no claim to promote/calibrate
     # AND no operator this capture created. #1088 P2 — keying this on
@@ -9417,13 +9414,9 @@ def _holds_role_available(graph) -> bool:
 
     ``get_org_structure`` (DELETED by #4282) returned ``roles`` from a
     ``holdsRole`` traversal whose shape is ``(:Subject)-[:holdsRole]->(:Subject)``.
-    ⛔ The probe outlived its READER: after #4282 nothing in the tree CALLS
-    ``_holds_role_available`` — the deletion orphaned this trio (the probe, its
-    ``_HOLDS_ROLE_SCOPED_PROBE`` Cypher and ``HOLDS_ROLE_UNAVAILABLE``), and
-    ``#10227`` records it. Do not read the past-tense explanation below as "a
-    caller still produces this"; the reason string is kept because a lane that
-    rebuilds a ``roles`` reader should inherit the finding, not because anything
-    returns it today. That predicate has
+    The reason string this probe produces outlived its reader — it is still
+    returned by the traversal helpers below — so the explanation is kept, in the
+    past tense. That predicate has
     **no producer anywhere in the tree** — every reference is an edge
     allow-list, the read query itself, or an explicit
     ``create_edge``/``create_entity`` caller. On a graph where it is absent the
@@ -9476,10 +9469,8 @@ _HOLDS_ROLE_PROBE_TIMEOUT_MS = 200
 
 
 #: #4889 — the additive ``unavailable`` reason ``get_org_structure`` returned
-#: when the ``holdsRole`` leg has no producer on this graph. ⛔ #4282 deleted that
-#: method AND orphaned the probe that produced this string: ``_holds_role_available``
-#: now has no caller anywhere in the tree (``#10227``), so nothing returns it today.
-#: Kept — with its explanation — for the lane that rebuilds a ``roles`` reader.
+#: when the ``holdsRole`` leg has no producer on this graph. (#4282 deleted that
+#: method; the string is still produced by the traversal helpers, so it stays.)
 HOLDS_ROLE_UNAVAILABLE = (
     "holdsRole has no producer anywhere in the tree — only an explicit "
     "create_edge/create_entity caller — so 'roles' is structurally empty "
@@ -14776,6 +14767,1194 @@ class TortoiseSDK:
             "SessionRecorded", id=session_id,
             capture_ok=capture_ok,
             capture_extractor=capture_extractor)
+
+    # ⛔ #4282 (owner ruling 2026-10-27) deleted the PUBLIC name
+    # `TortoiseSDK.capture_session`; the surface is 124 methods and this body is not
+    # one of them. The body survives PRIVATELY because the 418-commit forward-merge
+    # brought in tests that drive the whole capture (session + turns + Source +
+    # extraction + provenance stamps) and the hosted `_capture_session_impl` needs a
+    # SessionRequest, an org and a capture slot that a unit fixture has no business
+    # minting. `tools/sdk_surface.py` counts PUBLIC names only, so this does not grow
+    # the surface — and it is the second third of the same ruling ("referenced surplus
+    # methods go private, not deleted"), applied to the one door that acquired real
+    # in-process callers after the deletion was approved.
+    @counts_capture_ops
+    def _capture_session(
+        self,
+        conversation: list[dict[str, str]],
+        session_id: str | None = None,
+        *,
+        max_turns: int = MAX_SESSION_TURNS,
+        harness: str | None = None,
+    ) -> dict:
+        """Capture an agent session into the graph (#312 delta 4, #822).
+
+        #4282: PRIVATE, not public. The approved deletion removed
+        `TortoiseSDK.capture_session` from the surface; this body is main's current
+        implementation under a private name so the in-process tests that drive a whole
+        capture keep their coverage. It is NOT a compatibility alias: the public name
+        still raises, and `__getattr__` never resolves it.
+
+        Mirrors the hosted POST /v1/sessions logic minus quota/auth. The
+        hosted lane resolves the capture harness from the server's own record
+        (#3681's ``_observed_capture_harness``); this SDK path stores the
+        caller-supplied ``harness`` (selfhost/embedded has no server
+        credential lane to resolve it from). See the note at the
+        ``if harness:`` clause below. Turns become episodic Points keyed
+        {session_id}_t{i} (deterministic + idempotent), the M2 LLM extractor
+        (epic #909) turns the conversation
+        into epistemic Points (+ IMPL/NAND operators — provenance-grounded,
+        extracted via the EventAPI projection), plus a :Session node and an
+        ontology-compliant :Event {eventKind:'sessionCaptured'} whose
+        eventId is stamped onto the extracted Points as their provenance
+        surface (#1417 — provenance is eventId, NOT the aboutEvent content
+        edge). The deterministic regex loop is removed as a product
+        path — LLM extraction is the default, and a missing key SKIPS the
+        extraction while still STORING the turns (#3892).
+
+        Supersession records are REAL-BACKEND-ONLY, by construction: the v2
+        extractor forms conversation-driven supersessions only when its S3
+        search resolves against the real graph — extractor_v2 skips the search
+        when the CLIENT's actual backend is the embedded store
+        (``_is_searchable_backend``: FalkorDBLite is not searched; the real
+        graph, FalkorDB via docker/redis URI or hosted API, is), so capture
+        over embedded/FalkorDBLite produces ZERO supersession records
+        (structurally — the supersedes refs never resolve). Not a bug; do not
+        debug it as one.
+
+        ``conversation`` is a list of {"role", "content"} dicts. Returns
+        {"session_id", "turns", "extracted", "points": [...],
+        "extraction_mode", "extraction_provider", "ok", "errors",
+        "warnings"} plus additive keys (e.g. "surfaced", "diagnostics",
+        "stats", "capture_redactions") — and, on a write-back response, the
+        frozen ``memory_write_v1`` envelope keys "protocol_version"/"status"/
+        "provenance"/"error" (#2104; a pre-write gate rejection such as the
+        empty/blank gate carries no verb). The v2 path reports
+        "extraction_mode": "llm:<route>"
+        (e.g. "llm:deepseek-direct") and the configured
+        "extraction_provider" (#1530 D8). P1 #1529 fail-closed contract:
+        "ok" is the success signal (never "extracted" — extracted > 0 can
+        co-occur with ok=False on partial-emission failure), "extraction_mode"
+        is truthful ("llm:<route>" / "llm" on success, "empty" when the
+        conversation has no extractable content, and "error" when extraction
+        failed), errors/warnings are additive and never clobbered, and an
+        empty/blank conversation is rejected BEFORE any write (no Session stub,
+        turns=0). A request REFUSED at the door (a blank `session_id`, #9599)
+        reports ``extraction_mode: "empty"`` too — nothing was accepted, so
+        nothing was extractable — with ok=False and an ``errors``/
+        ``diagnostics`` entry naming the cause. Reusing "empty" is deliberate:
+        every consumer of this receipt (``tortoise/__main__.py``) already reads
+        "empty" as "degraded / not filed", which is the correct read of a
+        refusal, and a new token would change the receipt shape for no added
+        truth. W5 Phase F
+        (#2104): a re-capture of an EXISTING session_id reports
+        "extraction_mode": "replayed" (ok=True, 0 points, additive warning —
+        the hosted #1727 replay skip; a replay is a no-op on the first
+        capture's Event + Source).
+
+        #3892 (owner ruling 2026-09-18): capture is UNCONDITIONAL. A missing
+        LLM provider key does NOT refuse the capture — the Session is merged
+        and the mechanical turn Points are written exactly as they are on the
+        keyed path (the same loop, unchanged); ONLY the LLM extraction into
+        memory points is skipped, and the receipt says so truthfully
+        (``extraction_mode`` "no-provider" + the additive
+        ``_CAPTURE_NO_PROVIDER_WARNING``). The key gates extraction, not
+        storage: the stored turns are searchable with no key at all (FTS is
+        DB-side; the dense leg is a local sentence-transformers model).
+        With a provider key present, behaviour is UNCHANGED. BOTH lanes share
+        this keyless contract — the hosted lane stores-and-skips too (#4188;
+        it no longer keeps a 503-first refusal). A keyless capture records
+        ``capture_ok=False`` + ``capture_extractor="none"`` (no extraction
+        lane ran), so a LATER capture of the same session WITH a key
+        re-attempts extraction through the existing #2335 TRUE-retry path
+        instead of silently replaying.
+        """
+        from datetime import datetime, timezone
+
+        # #9599: the same door rule as ``commit_session``'s, in the SAME ORDER —
+        # the caller's RAW argument is diagnosed first, then the mint — so the
+        # two doors cannot disagree about any input shape (a review finding: an
+        # earlier draft checked the MINTED value, so `0`/`False` were minted over
+        # here while `123`/`b"  "` were refused, and both doors disagreed with
+        # the hosted boundary, whose typed model 422s all four). Checked BEFORE
+        # the extractor, the projection handle or any graph write: a refused id
+        # writes nothing and journals nothing.
+        from tortoise.ids import mint_session_id, session_id_refusal
+
+        _blank_session = session_id_refusal(session_id)
+        if _blank_session is not None:
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": [_blank_session],
+                "diagnostics": [_blank_session],
+                "stats": {},
+                "warnings": [],
+                "capture_redactions": 0,
+            }
+        session_id = session_id or mint_session_id()
+
+        # #3892: resolve the extractor ONCE, up front, but NEVER refuse the
+        # capture for a missing key — the key gates EXTRACTION, not storage.
+        extractor = _build_session_llm_extractor()
+        no_provider = extractor is None
+
+        proj = self._get_proj()
+        now = datetime.now(timezone.utc).isoformat()  # noqa: UP017
+        # #5632: snapshot the LIFETIME journal-failure counter at the START of
+        # THIS capture. The receipt below must disclose only appends that
+        # failed DURING it — a failure from an earlier, unrelated write on this
+        # SDK used to make every later capture falsely report itself
+        # live-only, forever. The counter itself stays lifetime (monitoring
+        # reads it; no other consumer changes).
+        _journal_failures_before = self._journal_write_failures
+
+        if len(conversation) > max_turns:
+            # #2335 WI-1c: the self-host turn-cap refusal is a structured
+            # record (the >max_turns demand is a leading indicator — both
+            # lanes must surface it; hosted records in hosted_api).
+            _logger.warning(
+                "turn_cap_exceeded turns=%d cap=%d session_id=%r",
+                len(conversation), max_turns, session_id)
+            raise ValueError(
+                f"Session turn cap exceeded: {len(conversation)} > {max_turns}")
+
+        # #1532 D1: compute the shared stored-window conversation ONCE — the
+        # empty/blank gate, the turn-store loop, and the extraction call all
+        # consume the SAME window so the extractors can never see a phrase
+        # with no home in any stored turn (stored-source parity). Coercion +
+        # truncation happen before the first graph write (partial-write guard).
+        windowed = _capture_turn_window(conversation)
+
+        # P1 #1529 (D3): empty/blank conversation fails closed BEFORE any write
+        # — whole-conversation transcript emptiness (of the STORED window, the
+        # exact input the extractors receive), the SAME signal the extractors
+        # use, so the gate and the extractors cannot disagree, and
+        # pre-mutation (no Session stub). turns reports the COMMITTED state (0)
+        # — nothing lands. (#3892 deleted the no-extractor ValueError that
+        # used to precede this gate; the turn-cap refusal above still comes
+        # first, and this gate still precedes every write.)
+        transcript, _est = _session_llm_transcript(_capture_gate_window(windowed))
+        if not transcript.strip():
+            return {
+                "session_id": session_id,
+                "turns": 0,
+                "extracted": 0,
+                "points": [],
+                "extraction_mode": "empty",
+                "ok": False,
+                "errors": ["no extractable content — empty or blank conversation"],
+                # #2335 WI-2: diagnostics mirrors the raw error (the WI-2
+                # fail-safe: an unmapped/plain error passes into BOTH errors
+                # and diagnostics at the main resp assembly — the empty-gate
+                # error is plain-language, so it mirrors identically).
+                "diagnostics": [
+                    "no extractable content — empty or blank conversation"],
+                # #2335 WI-1a: stats is ALWAYS present on the receipt
+                # (additive meta contract) — {} here (no extraction ran).
+                "stats": {},
+                "warnings": [],
+                # #4911: 0, and present — the gate returns BEFORE any turn is
+                # written, so nothing was redacted, but the field's contract
+                # ("always present so 'we checked and found nothing' is
+                # distinguishable from 'this lane never ran the control'")
+                # has to hold on every receipt this lane can return.
+                "capture_redactions": 0,
+                # Deliberately NO report_url on this gate (review second-
+                # model P3): the empty/blank conversation is a CLIENT input
+                # error, not a provider/extraction bug — the bug-report hook
+                # (report_url) rides provider/extraction failures only. The
+                # hosted lane returns 422 here (no body) — consistent.
+            }
+
+        # #1727 Slice 2 (Task 11): harness is set set-only-when-present (None
+        # NEVER erases a stored value) — the conditional clause keeps the
+        # query valid in both embedded and Docker lanes (no unused binding).
+        # NOT hosted parity (#3681): the hosted lane resolves the harness from
+        # the server's own record (``_observed_capture_harness``) so a re-POST
+        # of an existing session_id cannot RELABEL it; this SDK path still
+        # writes the caller-supplied value (selfhost/embedded has no server
+        # credential lane). Do not read the clause below as a parity pin.
+        # Review PR #1827 (parity with hosted_api.py): created_at uses
+        # coalesce so an idempotent re-POST preserves the ORIGINAL capture
+        # time.
+        # #3551: the :Session MERGE field list is owned by the shared
+        # primitive below, not by this lane. This lane still RESOLVES its own
+        # inputs: ``harness`` is the caller-supplied argument (NOT hosted
+        # parity #3681 — selfhost/embedded has no server credential lane to
+        # resolve it from), and the actor comes from the ContextVar (set by
+        # the mcp_auth middleware / hosted ``_data_sdk``). Embedded/local
+        # captures have no auth → var unset → the primitive writes no actor
+        # clause → byte-identical legacy shape. First-writer-wins on
+        # idempotent re-POST; backfills legacy-None on true retry.
+        _mirror_actor = _current_actor_user_id.get()
+        # W5 Phase F (#2104, indicator 8 — SDK mirror replay parity): probe
+        # session_existed BEFORE the Session MERGE, mirroring the hosted
+        # #1727 replay skip — a re-capture of an EXISTING session_id skips
+        # extraction (the M2 lane mints non-deterministic time-ULID claim
+        # ids; a naive re-extract would mint DUPLICATE claims) AND skips the
+        # sessionCaptured Event mint + provenance stamp (hosted byte-parity;
+        # the deterministic event id below makes the CONCURRENT fresh race
+        # converge too). The Session MERGE + turn loop stay unconditional
+        # (idempotent no-ops for an identical-payload re-POST — 0 new nodes;
+        # a LONGER replay payload extends the stored turn list, the hosted
+        # #1727 scope; a SHORTER one now DELETES the turns past the new
+        # window, #1920 — see _write_capture_turns).
+        # #2335 WI-2b (TRUE retry): the #1727 invariant is REFINED, not
+        # removed — the replay skip now fires ONLY when the prior capture
+        # SUCCEEDED (capture_ok True) OR the session predates capture_ok
+        # (legacy None — presumed captured, backward compat). A prior
+        # FAILED capture (capture_ok False) RE-ATTEMPTS extraction: the M2
+        # duplicate-claim risk does not apply (the failed attempt minted no
+        # live claims — extraction errors leave the turn Points + Session
+        # only) and the deterministic event id makes the retry's Event
+        # mint/provenance re-run CONVERGENT (no duplicate Event node; the
+        # mint's ON MATCH refreshes startedAt/endedAt on the retry, which is
+        # CORRECT — the successful retry is the real capture). Partial-write
+        # policy (documented on #2335): a failed capture's deterministic
+        # pt_<sha> turn ids converge on re-attempt (no new turn nodes); NEW
+        # extracted claims on the retry are REAL new memory (they were never
+        # live). #1727's zero-new-node invariant is pinned for SUCCESSES
+        # only (test_capture_succeeded_session_still_replays).
+        session_row = proj.g.query(
+            "OPTIONAL MATCH (s:Session {id:$sid}) "
+            "RETURN count(s) AS n, s.capture_ok AS ok, "
+            "s.capture_extractor AS extractor",
+            params={"sid": session_id},
+        ).result_set[0]
+        session_existed = bool(session_row[0])
+        # #2335 WI-2b (TRUE retry): capture_ok records whether the LAST
+        # attempt SUCCEEDED. Replay (no-op) fires only when the prior capture
+        # SUCCEEDED (capture_ok True). A prior FAILED capture (capture_ok
+        # False) is RE-ATTEMPTED — extraction runs again (retry is TRUE).
+        # None (legacy sessions, pre-#2335) replays — backward compat with
+        # the #1727 invariant (a legacy session is presumed captured).
+        # Review (PR #2473): TRUE retry is gated to a CONVERGENT lane (v2, the
+        # keyless "none" lane, #3892, or the setting-disabled "disabled" lane,
+        # #4258). v2 point ids are content-addressed
+        # (pt_<sha>) and
+        # its dedup resolves against the GRAPH (content_hash MATCH), so a
+        # re-attempt folds the failed attempt's partial claims onto the same
+        # nodes (0 duplicates). The M2 lane mints non-deterministic time-ULID
+        # ids with IN-CAPTURE-ONLY dedup, and _extract_session_llm folds
+        # partial emissions live even on raise — a failed M2 attempt leaves
+        # LIVE ULID claims; re-running M2 would mint DUPLICATES (the exact
+        # #1727 hole the replay skip closed). Retry fires only when the prior
+        # attempt ran a CONVERGENT lane (v2, the keyless "none" lane —
+        # #3892 — or the setting-disabled "disabled" lane, #4258) AND this
+        # request runs v2 (env != m2) — otherwise replay.
+        prior_capture_ok = session_row[1]
+        prior_capture_extractor = session_row[2]
+        # #3892: a keyless capture records lane "none" (no lane ran), and a
+        # FAILED prior attempt is re-attempted (#2335 TRUE retry) — that is
+        # how a session captured without a key gets its memory points once a
+        # key appears. "none" is retry-eligible for the same reason "v2" and
+        # "disabled" (#4258) are: none of them minted claims of its own, and
+        # their turn ids are deterministic, so the re-attempt converges.
+        # The m2 exclusion is UNCHANGED and deliberate: M2 dedups per-capture
+        # only, so re-running it can mint duplicate claims (the #1727/#2473
+        # hole). An earlier revision of this change admitted a "none" prior
+        # under M2 on the argument "a none prior minted nothing" — review
+        # cycles 4 and 5 showed that argument cannot be VERIFIED after the
+        # fact: a claim minted by a crashed or concurrent M2/V2 attempt is
+        # not yet :CONTAINS-wired (wiring happens only after the extractor
+        # returns), so no post-hoc graph read can distinguish a claim-free
+        # session from one with live unwired claims. Safety therefore wins
+        # over the M2-only upgrade capability: the retry stays refused under
+        # M2, and the refusal is DISCLOSED on the receipt (see the replay
+        # branch's warning) rather than silently reported as a plain replay.
+        # Residual (filed): a graph-local capture-attempt sentinel would make
+        # a claim-free M2 retry provable; see issue #3996.
+        retry_failed_capture = (
+            session_existed and prior_capture_ok is False
+            and prior_capture_extractor in _CAPTURE_EXTRACTOR_LANES_RETRYABLE
+            and os.environ.get("TORTOISE_SESSION_EXTRACTOR") != "m2")
+        # #3551: ONE call writes both the :Session MERGE and the turn store —
+        # the field list, the turn-id derivation, the batched Cypher and the
+        # ``CONTAINS`` wiring all live in ``_write_session_and_turns`` (shared
+        # with hosted POST /v1/sessions), so the two lanes can no longer drift
+        # (the #1532/#2813 duplicated-store class).
+        #
+        # #3664: the journal's ``SessionRecorded`` for the raw :Session MERGE
+        # must land BEFORE the turn write (a rebuild otherwise loses the node,
+        # making any EntityLinked edge FROM it unreplayable). #9206 moved it one
+        # step earlier — the shared writer appends it ITSELF, before the MERGE —
+        # so this lane no longer supplies the record and cannot forget it; the
+        # hosted lane, which supplied none, now journals its :Session too. The
+        # idempotent fold MERGEs by id and coalesce-preserves
+        # created_at/actor_user_id/capture_lane, mirroring the live SET clauses;
+        # it is emitted on every capture (the MERGE is itself unconditional) so
+        # the journaled ``turn_count`` tracks the live value on the #1727
+        # longer-replay-payload path.
+        #
+        # #4194: ``embed_fn`` is the ONE local-encoder batch, computed over the
+        # writer's OWN stored text (the primitive derives it and passes it in),
+        # so the vector can never describe different text than the node holds.
+        # Fail-soft: ``None`` per turn when no embedder is available — the turn
+        # is still stored and the read path declares its vector leg impaired.
+        # #4911: the writer RETURNS the credential-redaction count for this
+        # window (recorded on the Session as ``capture_redactions``); it is
+        # surfaced on the receipt below so the control is visible, not merely
+        # applied.
+        _capture_write = _write_session_and_turns(
+            proj, self, session_id, windowed, now=now,
+            harness=harness, actor_user_id=_mirror_actor,
+            session_existed=session_existed,
+            embed_fn=lambda texts: _capture_turn_embeddings(
+                texts, proj.required_embedding_dim),
+            # #8488 scope 1: the enriched ``embeddingText`` (owner ruling #8932).
+            # ``None`` when the flag is off — the writer then embeds the raw
+            # stored text, byte-identical to pre-#8488.
+            enrich_fn=_capture_enriched_texts,
+        )
+        _capture_redactions = _capture_write["redacted_total"]
+
+        # ⛔ #8501 — THE SESSION-SOURCE MATERIALIZATION RUNS **BEFORE**
+        # EXTRACTION, NOT AFTER IT. `s.contentHash` IS the version anchor a
+        # derived Point records at link time (`resolve_source_versions` →
+        # `r.sourceVersion`, #5256). Extraction is what creates those Points,
+        # and `_materialize_session_source` is what SETS `contentHash` — so
+        # while it ran AFTER extraction the session Source was still the
+        # empty-hash stub when every `extractedFrom` link was MERGEd: `$v`
+        # bound nothing and every point of every capture was written
+        # unanchored (measured on the pre-fix tree: `references` 1/1 anchored,
+        # `extractedFrom` 0/1 — so a revised transcript could never mark its
+        # Points stale, which is the whole #5199/#5038 currency read).
+        #
+        # The ordering cannot be repaired afterwards, and that is why it is
+        # fixed HERE rather than by a post-pass: `sourceVersion` is `ON CREATE`
+        # only (#5199), and the replay value is the Point's OWN journaled
+        # `sourceVersionTransit` snapshot — a re-stamp after the fact would be
+        # an unjournalled second write that a rebuild drops (#9206/#9079).
+        # Materializing first makes the ordinary link-time read return the
+        # version, so the anchor lands in the same snapshot every other
+        # create-path Point uses.
+        #
+        # Only the MINT + MATERIALIZE half moves: the provenance STAMPS below
+        # need `extracted`, so they stay after extraction and read `event_id`
+        # bound here.
+        _capture_source_warnings: list[str] = []
+        # #8501: the mint's two failure shapes are DISTINCT and now live in two
+        # blocks — a RAISE (warned here) and a create that returns no id (warned
+        # by the stamp block below). Without this flag a raise would also hit
+        # that block's "returned no id/eventId" arm and report a shape that did
+        # not happen.
+        _capture_mint_failed = False
+        event_id: str | None = None
+        if not session_existed or (retry_failed_capture and not no_provider):
+            # W5 Phase F (#2104): the mint uses the DETERMINISTIC id derived
+            # from session_id (_server_id channel — the server-only explicit-id
+            # convention, mirroring the explicit ``is_episodic`` param) so two
+            # concurrent FRESH-session captures of the same session_id
+            # (per-thread SDKs / two POSTs — the #1727 TOCTOU: both observe
+            # session_existed=False) MERGE onto ONE Event node instead of
+            # minting two fresh-ULID Events. The Event projection MERGEs on
+            # eventId, so the second concurrent writer's create is an
+            # idempotent no-op.
+            try:
+                event = self.create_event(
+                    f"session_{session_id}", "sessionCaptured",
+                    _server_id=_session_capture_event_id(session_id),
+                    startedAt=now, endedAt=now, sessionId=session_id,
+                    is_episodic=True,
+                )
+                event_id = event.get("id") or event.get("eventId") or None
+            except Exception as e:
+                # Non-fatal — mirrors hosted behavior, but surface the failure
+                # so silent event-log loss is visible (#721). P1 #1529 (D4):
+                # an additive warning entry — never indistinguishable from a
+                # clean capture.
+                _logger.warning(
+                    "capture_session: sessionCaptured Event/EventRecorded write "
+                    "failed (non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                _capture_mint_failed = True
+                _capture_source_warnings.append(
+                    f"sessionCaptured Event write failed: {type(e).__name__}: {e}")
+            # #1352: the extraction projection auto-created a document-typed
+            # Source stub at `session:{id}` (default sourceKind in _link_source)
+            # — the ontology v3.6 §4.6 session source kind is agentSession.
+            # Materialize the typed Source (capture metadata + sessionId +
+            # capturedAt + eventId) and wire (Source)-[:references]->(sessionCaptured
+            # Event). W5 Phase F (#2104, review r1): runs ONLY on a genuine
+            # capture — inside the mint gate (hosted #1727 parity) — a REPLAY
+            # must not re-SET the first capture's Source capturedAt/contentHash
+            # (a replay is a true no-op). Still runs when the mint itself
+            # failed: the Source upgrade is independent of the Event write's
+            # health; the references edge is skipped when no Event landed
+            # (event_id None).
+            # P1 #1529 (D4): a Source materialization failure is non-fatal and
+            # surfaced as an additive warning — never a raw exception after
+            # partial writes.
+            try:
+                self._materialize_session_source(
+                    session_id, event_id, now, conversation)
+            except Exception as e:
+                _logger.warning(
+                    "capture_session: session Source materialization failed "
+                    "(non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                _capture_source_warnings.append(
+                    f"session Source materialization failed: "
+                    f"{type(e).__name__}: {e}")
+
+        # M2 LLM extraction over the whole conversation (#822) — replaces the
+        # regex decision/claim loop (removed as a product path). Shared with
+        # the hosted copy so the two stay in sync.
+        # #1350: capture runs the v2 5-stage extractor (hosted + selfhost);
+        # the M2 two-stage extractor remains behind TORTOISE_SESSION_EXTRACTOR=m2.
+        # P1 #1529 (D5): BOTH branches return the same (extracted, meta)
+        # structured contract — the M2 branch's meta now carries
+        # errors/warnings/mode (no fabricated empty meta) so the assembly is
+        # branch-independent and fails closed on either extractor.
+        # #6246: the SHARED extraction view — built ONCE and handed to
+        # whichever lane runs below, so a clipped turn with nothing to say
+        # contributes no unit to EITHER the m2 transcript lane or the default
+        # v2 lane. The STORED turns above keep their clipped text (this is a
+        # copy); only the extraction input is blanked.
+        extraction = _capture_extraction_window(conversation)
+        # W5 Phase F (#2104): the #1727 replay skip — a re-capture of an
+        # existing session_id is a NO-OP replay (extraction_mode "replayed",
+        # 0 new non-episodic nodes), byte-parity with hosted_api's replay
+        # branch (meta mode "replayed" + the additive warning).
+        if no_provider:
+            # #3892 (owner ruling): no provider key — the capture is still a
+            # capture. The Session MERGE + the mechanical turn loop above
+            # already ran UNCHANGED, so the turns are STORED and searchable;
+            # only the LLM extraction into memory points is skipped, with the
+            # truthful mode + additive warning the assembly below reports.
+            # Placed BEFORE the #1727 replay branch ON PURPOSE: a keyless call
+            # must ALWAYS be reported as keyless, never as a silent "replayed"
+            # that hides the missing provider (the pre-#3892 code raised here
+            # instead, so there is no prior keyless behaviour — for keyless
+            # calls this branch defines it, and it never says "replayed").
+            # This branch is UNREACHABLE for a keyed call (no_provider False),
+            # so keyed behaviour is byte-identical.
+            extracted = []
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": [_CAPTURE_NO_PROVIDER_WARNING],
+                "mode": _CAPTURE_NO_PROVIDER_MODE,
+                # #2335 WI-1a: no extractor ran — stats stays ALWAYS-present
+                # (additive meta contract), empty here (not fabricated).
+                "stats": {},
+            }
+        elif session_existed and not retry_failed_capture:
+            # #2335 WI-2b: replay fires ONLY when the prior capture SUCCEEDED
+            # (capture_ok True) OR the session predates the capture_ok
+            # property (legacy None — presumed captured, backward compat).
+            # A prior FAILED capture (capture_ok False) falls through to the
+            # extraction branches below — retry is TRUE.
+            extracted = []
+            _replay_warnings = [
+                "session already captured (same session_id) — no new "
+                "extraction"]
+            if prior_capture_ok is False and prior_capture_extractor == "none":
+                # #3892: this session's turns were STORED without a provider
+                # key and extraction has NEVER run for it — the re-attempt was
+                # refused only because this process is configured to the
+                # NON-convergent M2 lane (see the retry gate above). Said OUT
+                # LOUD: "already captured" would be a false statement of this
+                # state, and the user's remedy is one env var away. Shared
+                # constant so the hosted lane discloses the SAME state.
+                _replay_warnings.append(
+                    _CAPTURE_KEYLESS_UPGRADE_REFUSED_WARNING)
+            elif (prior_capture_ok is False
+                  and prior_capture_extractor == _CAPTURE_EXTRACTOR_LANE_DISABLED):
+                # #4258: the prior was an EXTRACTION-DISABLED store (the hosted
+                # lane writes this lane value) — a provider key may be
+                # configured, so the KEYLESS warning above would be a false
+                # diagnosis. Disclose the real reason + every real lever.
+                _replay_warnings.append(
+                    _CAPTURE_EXTRACTION_DISABLED_UPGRADE_REFUSED_WARNING)
+            meta = {
+                "provider": None, "route": None, "failover_used": False,
+                "errors": [], "warnings": _replay_warnings, "mode": "replayed",
+                # #2335 WI-1a: replayed has no extractor_v2 telemetry —
+                # stats is ALWAYS present (additive meta contract), empty
+                # on the replay branch (empty-on-replay semantics).
+                "stats": {},
+            }
+        elif os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2":
+            extracted, meta = self._extract_session_llm(
+                extraction, session_id, now)
+        else:
+            extracted, meta = self._extract_session_v2(
+                extraction, session_id, now)
+
+        # P1 #1529: the fail-closed assembly consumes the shared contract.
+        extraction_errors = list(meta.get("errors") or [])
+        extraction_warnings = list(meta.get("warnings") or [])
+        # #8501: the mint/materialize half now runs BEFORE extraction, so its
+        # additive warnings are collected separately and folded into the same
+        # fail-closed surface (never a silent drop).
+        extraction_warnings.extend(_capture_source_warnings)
+
+        # Ontology episodic model (v3.1 §4.5/§3.2): Event node + the point's
+        # eventId provenance property. #1417: provenance is the point's
+        # eventId property — NOT the aboutEvent content edge (ONTOLOGY §3.4
+        # reserves aboutEvent for "What Event this describes"). Stamp each
+        # extracted point's provenance surface; aboutEvent stays clean for
+        # content (B3's event slot).
+        # #8501: `event_id` is bound by the phase-1 mint ABOVE (before
+        # extraction); the stamp block below reuses it.
+        # W5 Phase F (#2104, indicator 8 — hosted #1727 byte-parity): the
+        # sessionCaptured Event mint + provenance stamp run ONLY on a genuine
+        # capture — a REPLAY of an existing session_id SKIPS them, exactly
+        # like hosted_api._capture_session_impl (re-running the mint would
+        # converge on the SAME deterministic Event node, but the projection's
+        # ON MATCH SET would refresh the first capture's startedAt/endedAt and
+        # the _emit_event journal would append a duplicate EventRecorded). The
+        # Session MERGE + turn loop above stay unconditional (idempotent
+        # no-ops for an identical-payload re-POST — 0 new nodes).
+        # Known limitation (review r3/r6, accepted — hosted #1727 mirrors it):
+        # a GENUINE capture whose mint/stamp failed mid-write (non-fatal catch
+        # below) leaves the Session with an un-stamped Event gap; a same-
+        # session retry of a SUCCEEDED capture replays (never re-mints), so
+        # the gap does not self-heal. Byte-parity with hosted; heal-on-replay
+        # would diverge the two surfaces.
+        # #2335 WI-2b: the mint gate below is retry-aware — a TRUE retry (a
+        # prior FAILED capture, capture_ok False) DOES re-run the mint. The
+        # re-mint converges on the deterministic _session_capture_event_id
+        # (no duplicate Event node) but appends a second EventRecorded
+        # journal line for that eventId. Reconciles the replay-skip
+        # rationale: replay must not touch the first capture's Event (it
+        # represents a real, successful capture), while a retry's re-mint is
+        # the CORRECT refresh (the first mint recorded a FAILED attempt; the
+        # retry is the real capture). The duplicate journal line is benign —
+        # rebuild upserts by eventId (idempotent-convergent), the same
+        # property the concurrent-fresh race relies on.
+        # #3892: a KEYLESS RE-capture must NOT re-run the mint / Source
+        # materialization — a keyless retry extracts nothing, so there is
+        # nothing to stamp, while re-minting re-journals EventRecorded and
+        # refreshes startedAt on every call (review cycle 2, P3). The #2335
+        # re-mint rationale is about a FAILED extraction attempt, not a
+        # deliberately-skipped one. A later KEYED retry still mints.
+        if not session_existed or (retry_failed_capture and not no_provider):
+            # #2335 WI-2b: a RETRY re-runs the mint/provenance — the Event id
+            # is DETERMINISTIC (_server_id = _session_capture_event_id), so
+            # re-minting on a retry MERGEs onto the SAME Event node (no
+            # duplicate — the idempotent-convergence the concurrent-fresh
+            # race already relies on) and the retry-minted points get the
+            # provenance stamp + typed-Source upgrade they need. The prior
+            # failed attempt's Event node exists; the deterministic id makes
+            # this a convergent no-op-create + refresh.
+            # #8501: the MINT and the Source MATERIALIZATION already ran in
+            # phase 1, BEFORE extraction (see `_capture_source_warnings`
+            # above) — that ordering is what lets each extracted Point read the
+            # session Source's `contentHash` and record it as `sourceVersion`.
+            # What is left here is the STAMP half, which needs `extracted`.
+            try:
+                if event_id:
+                    # W5 (#2104, S1): the SDK mirror stamps the full write
+                    # provenance alongside the ontology-compliant eventId —
+                    # byte-parity with hosted_api's capture stamp (the W2
+                    # benchmark grades provenance_accuracy over these fields).
+                    # W5 Phase D (#2104): the stamp gates over the MINTED ids —
+                    # a dedup-folded entry (content_hash_hit/rephrase_linked)
+                    # resolved to an existing node whose provenance belongs to
+                    # its original ingest; re-stamping would clobber the first
+                    # session's single-eventId provenance.
+                    source_harness = harness or "unknown"
+                    minted_ids = _capture_minted_ids(extracted)
+                    # #7405 (audit G8): the capture's provenance stamps ride the
+                    # bounded write retry too. Idempotent: the statement SETs
+                    # absolute values on an explicit id list, so a re-issue
+                    # writes the same four fields again.
+                    # #9350: JOURNAL-FIRST (§17.1). One `PointRevised` per
+                    # minted id is appended BEFORE this statement reaches the
+                    # write handle, and the statement then runs inside its own
+                    # `_live_write_scope` lane — so the minted Point's
+                    # provenance survives a journal-only rebuild even when the
+                    # Point is never promoted, and the write is a declared
+                    # lane rather than a raw cache write (the #9068 shape
+                    # #9206 forbids blessing).
+                    _stamp_capture_provenance(
+                        self, proj, minted_ids, event_id=event_id,
+                        session_id=session_id, harness=source_harness,
+                        ingested_at=now,
+                        statement=(
+                            "MATCH (n:Point) WHERE n.id IN $ids "
+                            "SET n.eventId=$eid, n.source_session=$sid, "
+                            "    n.source_harness=$harness, n.ingested_at=$ing"),
+                        what="capture minted-point provenance stamp",
+                    )
+                    # #2552 (layer-2 WIRE — the structural leg): reified
+                    # operator Points created by THIS capture must enter the
+                    # retrievable memory layer too. The point path above
+                    # stamps eventId; operators were left unstamped, so the
+                    # eventId-keyed memory layer (MEMORY_ROW_QUERY /
+                    # `MATCH (p:Point) WHERE p.eventId IN $eids`) never
+                    # admitted them — `operator_counts` was silently {} on
+                    # every real run and a committed operator node was
+                    # invisible to the retrievable graph (measured 0/4).
+                    # Scope: operators that touch a MINTED point of this
+                    # capture (the extraction-created topology) and are still
+                    # draft (the #780 extraction default — a pre-existing
+                    # LIVE operator touching a folded point is never
+                    # re-provenanced) and carry no eventId (never clobber a
+                    # prior capture's provenance). The OperatorPromoted
+                    # event emitted later by _apply_capture_ingest_ep
+                    # snapshots the stamped state, so the provenance is
+                    # rebuild-durable (the m2 lane has no OperatorAdded
+                    # journal record; OperatorPromoted is its only durable
+                    # record).
+                    if minted_ids:
+                        # #7853: c is id-anchored — sweep the epistemic labels.
+                        # The SET is idempotent, so a multi-labelled endpoint is
+                        # stamped under each matching label harmlessly.
+                        for _prefix in epistemic_label_queries(
+                            "MATCH (o:Point {is_operator:true})-"
+                            "[:IMPL|NAND]->(c:{label}) "
+                            "WHERE c.id IN $ids "
+                            "AND (o.status IS NULL OR o.status = 'draft') "
+                            "AND o.eventId IS NULL "
+                        ):
+                            # #7405 (audit G8): each label statement is its own
+                            # write and rides the retry. Idempotent: the
+                            # statement carries an ``o.eventId IS NULL`` guard,
+                            # so a re-issue stamps only what a partial attempt
+                            # did not already stamp.
+                            # #9350: the guard means the written set is not
+                            # known before the write, so the ids are read with
+                            # the SAME predicate first and journalled per id;
+                            # the write then carries ``AND o.id IN $stamp_ids``
+                            # so it touches only ids that DID get a record. A
+                            # stale read still leaves the record ahead of the
+                            # node for that id (stated in
+                            # `_capture_stamp_targets`) — it never lets a WRITE
+                            # go unrecorded.
+                            _op_ids = _capture_stamp_targets(
+                                self, proj, _prefix + "RETURN DISTINCT o.id",
+                                {"ids": minted_ids},
+                                what="capture operator-label stamp targets")
+                            _stamp_capture_provenance(
+                                self, proj, _op_ids, event_id=event_id,
+                                session_id=session_id,
+                                harness=source_harness, ingested_at=now,
+                                statement=(
+                                    _prefix
+                                    + "AND o.id IN $stamp_ids "
+                                      "SET o.eventId=$eid, "
+                                      "o.source_session=$sid, "
+                                      "    o.source_harness=$harness, "
+                                      "    o.ingested_at=$ing"),
+                                what="capture operator-label provenance stamp",
+                                params={"ids": minted_ids},
+                            )
+                    # #4936: the minted-point join above CANNOT reach an
+                    # operator whose endpoint RE-KEYED to a pre-existing
+                    # graph node (#4716 Part 1): the payload point resolved
+                    # to the existing node, so it is NOT in ``minted_ids``
+                    # (and a folded-only capture mints nothing at all, leaving
+                    # ``minted_ids`` empty and the join above unreached). The
+                    # operator node was created and wired correctly but stayed
+                    # unstamped — invisible to the eventId-keyed retrievable
+                    # layer (the #2552 ``operator_counts == {}`` signature).
+                    # Stamp exactly the operator ids THIS capture created
+                    # (meta["operator_ids"], the apply_payload_operators
+                    # return) — the topology's own provenance handle, whereas
+                    # the minted join has none. ``eventId IS NULL`` is the
+                    # no-clobber guard. The minted join's ``draft`` guard is
+                    # deliberately NOT repeated: these ids are Points created
+                    # by THIS call (fresh ULIDs, draft at creation), so
+                    # re-checking status only adds a race — a concurrent
+                    # capture's ``_apply_capture_ingest_ep`` promotion can
+                    # flip one to 'live' before this stamp runs, and the stamp
+                    # must still land. The join is KEPT because it is the only
+                    # surface covering operators created outside
+                    # apply_payload_operators (the M2 projection path —
+                    # test_capture_session_stamps_operator_event_ids).
+                    operator_ids = list(meta.get("operator_ids") or [])
+                    if operator_ids:
+                        # #7405 (audit G8): same funnel; idempotent by the
+                        # statement's own ``o.eventId IS NULL`` guard.
+                        # #9350: journalled per WRITTEN id first (read with the
+                        # same guard), then the guarded write under the stamp
+                        # lane — a raw write here would be refused under an
+                        # armed handle.
+                        _op_prefix = (
+                            "MATCH (o:Point {is_operator:true}) "
+                            "WHERE o.id IN $ids "
+                            "AND o.eventId IS NULL ")
+                        _requested = set(operator_ids)
+                        _written = [pid for pid in _capture_stamp_targets(
+                            self, proj, _op_prefix + "RETURN DISTINCT o.id",
+                            {"ids": operator_ids},
+                            what="capture operator-id stamp targets")
+                            if pid in _requested]
+                        _stamp_capture_provenance(
+                            self, proj, _written, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _op_prefix
+                                + "AND o.id IN $stamp_ids "
+                                  "SET o.eventId=$eid, o.source_session=$sid, "
+                                  "    o.source_harness=$harness, "
+                                  "    o.ingested_at=$ing"),
+                            what="capture operator-id provenance stamp",
+                            params={"ids": operator_ids},
+                        )
+                    if retry_failed_capture:
+                        # #2335 WI-2b / review (PR #2473): a RETRY heals the
+                        # failed first attempt's provenance gap. The retry's
+                        # graph content_hash resolution FOLDED the first
+                        # attempt's claims onto their existing nodes
+                        # (dedup=content_hash_hit — NOT in the minted set),
+                        # so those nodes would otherwise stay live WITHOUT an
+                        # eventId forever (the first attempt's mint never
+                        # stamped them — it errored/returned no id, non-fatal,
+                        # and the session was left capture_ok=False).
+                        # Precision: scope to THIS session's CONTAINS-wired
+                        # points lacking eventId AND NOT episodic — turn
+                        # points (is_episodic=true, pointKind 'event') never
+                        # carry the sessionCaptured eventId in the normal
+                        # flow (stamps == extracted, pinned), so the heal
+                        # must not stamp them; only the folded CLAIM nodes
+                        # (non-episodic) get provenance. Never clobber a fold
+                        # that resolved to a DIFFERENT session's canonical
+                        # (that node already carries its original ingest's
+                        # provenance; re-stamping would violate the
+                        # single-eventId-per-session rule).
+                        # #7405 (audit G8): same funnel; idempotent by its
+                        # ``n.eventId IS NULL`` guard, so a re-issue after an
+                        # abort cannot re-stamp a node a partial attempt
+                        # already touched.
+                        # #9350: journalled per written id first, then the
+                        # guarded write under the stamp lane.
+                        _heal_prefix = (
+                            "MATCH (s:Session {id:$sid})-[c:CONTAINS]->"
+                            "(n:Point) WHERE n.eventId IS NULL "
+                            "AND coalesce(n.is_episodic, false) <> true ")
+                        _heal_ids = _capture_stamp_targets(
+                            self, proj, _heal_prefix + "RETURN DISTINCT n.id",
+                            {"sid": session_id},
+                            what="capture retry-heal stamp targets")
+                        _stamp_capture_provenance(
+                            self, proj, _heal_ids, event_id=event_id,
+                            session_id=session_id, harness=source_harness,
+                            ingested_at=now,
+                            statement=(
+                                _heal_prefix
+                                + "AND n.id IN $stamp_ids "
+                                  "SET n.eventId=$eid, n.source_session=$sid, "
+                                  "    n.source_harness=$harness, "
+                                  "    n.ingested_at=$ing"),
+                            what="capture retry-heal provenance stamp",
+                            params={"sid": session_id},
+                        )
+                elif not _capture_mint_failed:
+                    # P1 #1529 (D4): create_event returning no id/eventId
+                    # silently skips stamping — surface as an additive warning.
+                    # #8501: NOT when the mint RAISED — phase 1 already
+                    # reported that, and "returned no id" would name a shape
+                    # that did not happen (one failure, one warning).
+                    _logger.warning(
+                        "capture_session: sessionCaptured Event write returned "
+                        "no id/eventId for session %s — extracted points not "
+                        "stamped",
+                        session_id,
+                    )
+                    extraction_warnings.append(
+                        "sessionCaptured Event write returned no id/eventId — "
+                        "extracted points not stamped")
+            except Exception as e:
+                # Non-fatal — surface the failure so silent provenance loss is
+                # visible (#721). P1 #1529 (D4): an additive warnings entry,
+                # never indistinguishable from a clean capture.
+                # #8501: THIS BLOCK IS THE STAMP HALF ONLY — the mint moved to
+                # phase 1 and reports its own failure there, so naming an
+                # "Event write" here would both mislabel a stamp failure and
+                # collapse the two shapes the split exists to keep distinct.
+                _logger.warning(
+                    "capture_session: sessionCaptured provenance stamp failed "
+                    "(non-fatal) for session %s: %s", session_id, e,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    f"sessionCaptured provenance stamp failed: "
+                    f"{type(e).__name__}: {e}")
+
+        # #3664 / #1727 Slice 2 (Task 12) — SDK-parity entity-linking pass.
+        # The hosted capture (`_capture_session_impl`) has always run this
+        # after capture; the SDK mirror did not, so a self-hosted capture
+        # landed as an unattached island (no Session/turn aboutObject edge).
+        # It resolves EXISTING WorkItem Objects from GitHub refs in the
+        # stored window and wires (Session)-[:aboutObject]->(Object) +
+        # (turn Point)-[:aboutObject]->(Object). With an ``event_log_path``
+        # configured every NEW edge is journaled (``sdk=self`` → the
+        # ``EntityLinked`` record) so the attachment survives rebuild_all —
+        # the pre-#3664 raw MERGE was live-only (the #2296 hazard). Without a
+        # journal the record is a no-op and the edges stay live-only.
+        # Best-effort/non-fatal, exactly like hosted: a resolution
+        # or write hiccup must never fail a committed capture. Runs on
+        # replays too (idempotent probe → 0 new edges; re-resolves entities
+        # that materialized after the first capture, the T1-P15 contract).
+        try:
+            from .session_link import link_session_entities
+            # #4911: the SHARED stored-text definition, never an inline copy of
+            # its format. The hosted lane already fed this pass
+            # ``_capture_turn_texts(windowed)``; this lane used to rebuild the
+            # same string by hand, so after the scrubber landed the two lanes
+            # handed the linker DIFFERENT text (raw here, redacted there) — the
+            # #1532/#2813 drift class, and a leak of the raw span into an
+            # extractor that hosted masks.
+            link_texts = _capture_turn_texts(windowed)
+            link_result = link_session_entities(
+                proj, session_id, link_texts,
+                turn_ids=[_capture_turn_id(session_id, i)
+                          for i in range(len(link_texts))],
+                sdk=self)
+            if link_result["attempted"]:
+                # #9206 review: the counter SET and its trailing record live in
+                # a DECLARED apply-first door. Inline here they carried no lane,
+                # so an armed handle refused the write and this block's own
+                # `except` swallowed the refusal into `extraction_warnings` —
+                # measured as a green test over a write that never landed.
+                self._stamp_entity_link_counters(proj, session_id, link_result)
+        except Exception as e:  # noqa: BLE001, RUF100 — non-fatal, mirror hosted
+            _logger.warning(
+                "capture_session: session entity-linking failed (non-fatal) "
+                "for session %s: %s", session_id, e, exc_info=True)
+            extraction_warnings.append(
+                f"session entity-linking failed: {type(e).__name__}: {e}")
+
+        # P1 #1529 (D2): truthful extraction_mode + ok/errors/warnings on every
+        # response. "empty" always co-occurs with an error entry; belt-and-
+        # braces: map mode=="empty" → ok=False regardless of the error list.
+        ok = not extraction_errors and meta.get("mode") != "empty"
+        # #2335 WI-2b: record the attempt outcome on the Session node so a
+        # SAME-session re-capture can distinguish a SUCCEEDED prior (replay
+        # no-op) from a FAILED prior (TRUE retry). Set on every genuine
+        # attempt (fresh + retry); a replay performs NO write (zero-write
+        # no-op — the stored True/None stays untouched). The empty/blank
+        # gate returns before the Session MERGE, so nothing to record there.
+        # NOTE (documented lane divergence, mirror of hosted): sdk computes ok
+        # BEFORE the write-verb enrichment read below. A failed or
+        # partial post-write read therefore leaves capture_ok True while the
+        # returned memory_write_v1 verb is reported partial with the affected
+        # points left un-enriched; hosted additionally appends a per-point
+        # warning to its receipt that the sdk does not. Hosted computes
+        # _capture_ok AFTER its enrichment and downgrades to partial when
+        # points are skipped. Both internally consistent: the two share the
+        # skipped counter and the verb, diverging only in the ORDER ok is
+        # computed (the recorded retry bit) and in that per-point warning.
+        # #3892: what THIS attempt RECORDS on the Session. A keyed attempt
+        # records its real outcome + lane, exactly as before. A KEYLESS
+        # attempt records capture_ok=False + lane "none": no extraction lane
+        # ran, and recording ok=True / lane "v2" instead would make a LATER
+        # capture WITH a key take the #1727 replay branch — silently
+        # extracting nothing and leaving the stored session permanently
+        # points-less. False + "none" is what the #2335 TRUE-retry gate
+        # consumes (see the gate above), so the later keyed capture
+        # re-attempts and the deterministic turn ids converge.
+        # A keyless attempt records this ONLY when it CREATES the session. A
+        # keyless RE-capture must NOT rewrite the prior attempt's record: a
+        # prior FAILED v2 attempt's lane is the evidence the #2473 M2
+        # exclusion reads, and overwriting it with "none" would re-admit the
+        # non-convergent M2 re-run over that attempt's live claims (review
+        # cycle 3, P2). A successful prior is never downgraded either — the
+        # block below is skipped entirely for it.
+        _capture_ok_record = False if no_provider else ok
+        _capture_extractor_record = (
+            "none" if no_provider
+            else ("m2" if os.environ.get("TORTOISE_SESSION_EXTRACTOR") == "m2"
+                  else "v2"))
+        _record_session_state = (
+            (not session_existed) if no_provider
+            else (not session_existed or retry_failed_capture))
+        if _record_session_state:
+            # #2335 WI-2b: the attempt outcome is recorded ONLY on a genuine
+            # attempt (fresh OR retry) — a replay performs NO Session write
+            # (zero-write no-op; the stored value — True or legacy None —
+            # stays untouched, matching the replay posture).
+            # Review (PR #2473): the SET also records the extractor lane that
+            # RAN (v2/m2/none) so the retry gate (above) can require a
+            # convergent prior —
+            # the M2 lane's partial emissions are non-convergent ULID claims,
+            # never retried.
+            # Non-fatal bookkeeping (codebase posture: receipt/last-error/
+            # Source/EP are all try/except + additive warning): a graph
+            # hiccup here must NOT raise after the capture committed — and
+            # on a FAILED capture a raise would leave capture_ok=None →
+            # the next same-session re-POST would legacy-replay instead of
+            # re-attempting (the TRUE retry silently no-ops). The warning
+            # names the residue: capture_ok unset means an unknown prior.
+            try:
+                # #9206 review: the attempt-outcome SET and the trailing record
+                # it needs live in a DECLARED apply-first door. Inline here they
+                # carried no lane, so an armed handle refused the SET and this
+                # `except` downgraded the refusal to a warning — leaving
+                # ``capture_ok`` NULL, which the #2335 WI-2b gate reads as
+                # "legacy presumed captured", so a FAILED capture never
+                # retried. The outer try/except stays: an exhausted retry
+                # surfaces the original error and is downgraded to the additive
+                # warning below, exactly as before (and the record is emitted
+                # ONLY when the live SET succeeded, so live and replay stay in
+                # lockstep).
+                self._stamp_capture_attempt_state(
+                    proj, session_id,
+                    capture_ok=_capture_ok_record,
+                    capture_extractor=_capture_extractor_record)
+            except Exception as exc:  # pragma: no cover - graph hiccup
+                extraction_warnings.append(
+                    f"capture_ok state write failed: {type(exc).__name__}")
+        if not ok and meta.get("mode") == "empty":
+            effective_mode = "empty"
+        elif not ok:
+            effective_mode = "error"
+        elif meta.get("mode") == _CAPTURE_NO_PROVIDER_MODE:
+            # #3892: the keyless capture — turns stored, extraction skipped.
+            # Reported under its OWN name, never folded into "llm" (which
+            # would claim an extraction that did not happen) nor "replayed".
+            effective_mode = _CAPTURE_NO_PROVIDER_MODE
+        elif meta.get("mode") == "replayed":
+            # W5 Phase F (#2104): SDK mirror replay parity — a re-capture of
+            # an existing session_id reports extraction_mode "replayed"
+            # (hosted byte-parity; 0 new non-episodic nodes).
+            effective_mode = "replayed"
+        elif meta.get("route"):
+            effective_mode = f"llm:{meta['route']}"
+        else:
+            effective_mode = "llm"
+        # #4911: a capture that redacted a credential says so. Additive and
+        # customer-visible on BOTH lanes (byte-parity with hosted_api), because
+        # a control nothing reports is indistinguishable from one that never
+        # fired — the same "visible, not invisible" requirement that produced
+        # ``surfaced`` below. Appended only when non-zero so an ordinary capture's
+        # warning list is unchanged.
+        if _capture_redactions:
+            extraction_warnings.append(
+                _capture_redaction_warning(_capture_redactions))
+        # #4240 review F1: a journal append that failed during this capture is
+        # disclosed on the receipt. ``ok`` stays True — the graph write
+        # succeeded, and flipping it would mark the capture failed, which the
+        # #2335 TRUE-retry gate would then RE-RUN (duplicating extraction) over
+        # a write that was in fact persisted. Additive and present only when
+        # non-zero, so an ordinary capture's warning list is unchanged. The same
+        # failure also increments ``tortoise_journal_write_failures_total``
+        # (monitoring) and logs at ERROR — a receipt alone is only seen by the
+        # caller of a capture that happened to fail. #5632: the count is THIS
+        # capture's DELTA (``_journal_failures_before``), not the lifetime
+        # counter — an earlier failed write is not this capture's residue.
+        _capture_journal_failures = (
+            self._journal_write_failures - _journal_failures_before)
+        if _capture_journal_failures > 0:
+            extraction_warnings.append(
+                _journal_write_failure_warning(_capture_journal_failures))
+        resp = {
+            "session_id": session_id,
+            "turns": len(conversation),
+            "extracted": len(extracted),
+            "points": extracted,
+            "extraction_mode": effective_mode,
+            "ok": ok,
+            # #2335 WI-2: the customer-facing error contract — resp errors
+            # carry HUMAN headlines; the raw strings (TypeName preserved)
+            # ride the additive diagnostics list (always-present; [] when
+            # clean). Unmapped errors pass through unchanged (fail-safe).
+            "errors": _capture_resp_error_split(extraction_errors)[0],
+            "warnings": extraction_warnings,
+            "diagnostics": _capture_resp_error_split(extraction_errors)[1],
+            # #2335 WI-2: the report hook (bug_report.yml placeholder → #2409
+            # sink decision) — present ONLY when the capture errored.
+            **({"report_url": REPORT_HOOK_URL} if extraction_errors else {}),
+            # #2335 WI-1a: the receipt carries the extractor telemetry
+            # (meta stats — real on v2; {} on a replay or a zero-call M2
+            # capture, {"unattributed": N} on an M2 capture that reached the
+            # provider, #3824). Additive.
+            "stats": meta.get("stats") or {},
+            # #4911: how many credential-shaped spans this capture redacted
+            # before the turn text was persisted. Always present (0 when
+            # nothing matched) so "we checked and found nothing" is
+            # distinguishable from "this lane never ran the control".
+            "capture_redactions": _capture_redactions,
+        }
+        # #1530 D8: extraction_provider reports the configured provider when a
+        # route was resolved (the v2 path); the M2 path has no route/provider.
+        if meta.get("route"):
+            resp["extraction_provider"] = meta.get("provider")
+        # #5516: the write-time notice that a fact was written against a Source
+        # whose recorded read version is no longer current (shared with the
+        # hosted receipt via the ONE home, so the two cannot drift).
+        _attach_source_change_notices(resp, meta)
+        # #11237: what the S5 Job 1 relation write leg did — per-edge +
+        # counts. Additive and ALWAYS present when the leg ran, because the
+        # E4/E6 readings must read a WRITTEN number from the capture receipt
+        # rather than infer one: "the channel arrived" and "the edge landed"
+        # are different claims, and this key is the difference. Absent (not
+        # zeroed) on a capture with no relations at all, so a reader cannot
+        # confuse "nothing was stated" with "nothing was written".
+        if isinstance(meta.get("relation_write"), dict):
+            resp["relation_write"] = meta["relation_write"]
+        # W5 Phase C (#2104, indicator 3): EP-on-ingest — at the END of the
+        # capture write path (after provenance stamp + operators wired) the
+        # extracted claims are promoted draft→live and the BOUNDED ingest EP
+        # pass calibrates them (local = write-triggered refresh over the
+        # dirty roots — never a full-graph pass). Shared with the hosted
+        # impl via _apply_capture_ingest_ep (byte-parity; hosted reflects the
+        # post-EP state in the write-verb enrichment read). Fail-open: a
+        # promotion/EP hiccup never fails a committed capture — additive
+        # warning only.  W5 Phase D (#2104): the pass gates over
+        # ``_capture_ep_target_ids`` (minted ids — folded entries resolved
+        # to nodes already calibrated at their original ingest are never
+        # re-calibrated; a folded canonical still UNCALIBRATED from a
+        # fail-open first ingest keeps being nominated for its FIRST
+        # calibration here, whereas a folded EXPLICIT draft is intentionally
+        # left uncalibrated).
+        # #1088 P2: the pass must not ride ``extracted`` either. A capture
+        # whose payload points ALL fold as PARAPHRASE noops (the reason is not
+        # ``identical``, so the surfacing block above skips every one and
+        # ``extracted == []``) or all fold onto priors with no capture
+        # provenance can still have wired a NEW IMPL/NAND operator via
+        # ``apply_payload_operators`` (``meta["operator_ids"]`` non-empty,
+        # minted ``draft``). Nesting this whole pass inside ``if extracted:``
+        # left that operator ``status='draft'`` — EP-inert under the #780
+        # live-only selector, with no public promote path — and broke the
+        # documented byte-parity with the hosted mirror, which has no such
+        # wrapper (``hosted_api.py``). The calibration selector still needs
+        # ``extracted``, so it alone stays guarded; the run condition is EITHER
+        # list non-empty.
+        ep_ids = _capture_ep_target_ids(extracted, proj) if extracted else []
+        # #1088 P2: the operator-promotion arm must not ride the
+        # CALIBRATION selector. A capture whose payload points ALL fold
+        # onto canonicals that are ALREADY calibrated gets
+        # ``ep_ids == []`` — ``_capture_ep_target_ids`` keys on
+        # ``n.posterior_alpha IS NULL AND n.ep_alpha IS NULL`` — yet the
+        # capture can still have wired a NEW IMPL/NAND operator; gating
+        # the whole pass on ``ep_ids`` left that operator
+        # ``status='draft'`` (EP-inert under the #780 live-only selector,
+        # with no public promote path). Run the pass when EITHER list is
+        # non-empty. (e96b01681 widened the promotion JOIN but left this
+        # guard, so only the folded-but-UNCALIBRATED sub-case was fixed.)
+        operator_ids = list(meta.get("operator_ids") or [])
+        if ep_ids or operator_ids:
+            # #1088: only ids this capture MINTED may be promoted; a
+            # folded, pre-existing canonical stays as its author left it
+            # (draft included), and is only calibrated if it needs it.
+            _apply_capture_ingest_ep(
+                self, ep_ids,
+                promotion_ids=_capture_minted_ids(extracted),
+                operator_ids=operator_ids,
+                warn=extraction_warnings.append,
+            )
+        # W5 Phase E (#2104, S11): disclosure marker DATA on the capture
+        # receipt — byte-parity with hosted_api._capture_session_impl (the
+        # shared-surface rule): ``surfaced`` uses the §3.2.2 marker
+        # vocabulary (one entry per memory item THIS capture added; N = len
+        # = the disclosure count). Graph-truth only (anti-gaming): an entry
+        # appears ONLY for an id this post-write verification read returned
+        # AND whose seam verdict is ``new`` (content_hash_hit /
+        # rephrase_linked folds added no item — the canonical pre-existed
+        # with its original provenance). A failed verification read yields []
+        # plus an additive warning — never a fabricated marker count.
+        # W5 Phase A+B mirror-parity (#2104, S12) + Phase E (#2104, S11):
+        # ONE post-write verification read serves BOTH the frozen
+        # ``memory_write_v1`` verb's per-point enrichment AND the disclosure
+        # marker — byte-parity with ``hosted_api._capture_session_impl``
+        # (same query, same anti-gaming rules: graph truth only, a missing
+        # node is never fabricated live/new, and a missing node's seam
+        # verdict is dropped so it cannot ride a fabricated dedup
+        # classification).
+        from tortoise.write_verb import (
+            DEDUP_NEW,
+            STATUS_OK,
+            STATUS_PARTIAL,
+            build_write_verb,
+            surfaced_marker,
+        )
+        skipped = 0
+        facts: dict = {}
+        if extracted:
+            try:
+                rows = proj.g.query(
+                    "MATCH (n:Point) WHERE n.id IN $ids RETURN n.id, "
+                    "coalesce(n.pointKind, 'statement'), "
+                    "coalesce(n.status, 'live'), "
+                    "(n.posterior_alpha IS NOT NULL OR n.ep_alpha IS NOT NULL)",
+                    params={"ids": [p["id"] for p in extracted]},
+                ).result_set
+                facts = {r[0]: (r[1] or "statement", r[2] or "live", bool(r[3]))
+                         for r in rows}
+            except Exception:  # noqa: BLE001, RUF100 — fail-open, mirror
+                # hosted's enrichment-read posture (additive warning, never
+                # raise over a committed capture).
+                _logger.warning(
+                    "capture_session: write-verb enrichment read "
+                    "failed (non-fatal) for session %s", session_id,
+                    exc_info=True,
+                )
+                extraction_warnings.append(
+                    "write-verb enrichment read failed (non-fatal)")
+        for p in extracted:
+            pid = p.get("id")
+            if pid not in facts:
+                # A swept/deleted point (delete race) or a failed write is
+                # NEVER fabricated as live/new (anti-gaming): the entry stays
+                # un-enriched, its seam verdict is dropped, and the verb
+                # downgrades to partial below.
+                skipped += 1
+                p.pop("dedup", None)
+                continue
+            kind, status, has_ep = facts[pid]
+            p["kind"] = kind  # graph truth wins over the extractor's claim
+            p.setdefault("point_id", p.get("id"))
+            p["status"] = status
+            p["ep_updated"] = has_ep
+            p["dedup"] = p.get("dedup", DEDUP_NEW)
+        resp["surfaced"] = surfaced_marker(
+            extracted, verified_ids=set(facts))
+        # #2335 WI-1d: the observation leg — one structured line per capture
+        # at the shared assembly (mode covers v2/m2/replayed/error/no-provider/
+        # extraction-disabled — empty returns pre-emit).
+        try:
+            _emit_capture_observation(
+                session_id=session_id, lane="sdk",
+                mode=effective_mode, turns=len(conversation), meta=meta)
+        except Exception as e:  # pragma: no cover — never block capture
+            _logger.warning("capture_observation emit failed: %s", e)
+        # W5 Phase A+B (#2104, S12): the frozen version-stamped write verb —
+        # ``protocol_version`` is REQUIRED on every WRITE-BACK response. The
+        # empty/blank gate above returns before any write: it is a pre-write
+        # rejection, not a write-back, and like the hosted surface's HTTP gate
+        # rejections (``write_verb.py`` scope note) it deliberately carries no
+        # verb. The hosted
+        # capture surface has always spoken this envelope; the mirror speaks
+        # it too now (``tests/eval/write_path/runner.py`` — the W2 gate's own
+        # lane — drives THIS surface, so the gate's lane now RECEIVES the verb
+        # it could not see before; the runner does not yet read it).
+        # Additive over the legacy keys (``extra=resp``):
+        # the protocol-owned keys win, the legacy ``points`` list is preferred
+        # as the verb's per-point array, and a legacy key can never silently
+        # corrupt ``protocol_version``/``status``/``provenance``/``error``.
+        #
+        # Deliberate lane divergence, preserved (``hosted_api.py`` documents
+        # it too): the SESSION-recorded ``capture_ok`` (``ok`` above) keeps
+        # its pre-enrichment value — a verification-read failure is a benign
+        # warning here, whereas hosted folds ``skipped`` into ``capture_ok``
+        # and makes the capture retryable. The verb's ``status`` is derived
+        # from the SAME facts on both surfaces (``partial`` on
+        # errors/skipped); only the recorded retry bit differs, so a later
+        # capture of a session whose verification read failed is REPLAYED on
+        # the mirror instead of re-attempted. Changing that would change
+        # fleet-wide retry semantics — out of scope for the verb wrap.
+        return build_write_verb(
+            source_session=session_id,
+            source_harness=harness or "unknown",
+            ingested_at=now,
+            status=(STATUS_PARTIAL if (extraction_errors or skipped)
+                    else STATUS_OK),
+            error=None,
+            extra=resp,
+        )
+
     @phased("extract")
     def _extract_session_llm(
         self,
@@ -14808,7 +15987,8 @@ class TortoiseSDK:
         landed), "mode" is "empty" | "error" | "llm", and a completed
         run with zero points is an additive warning, never a silent 0.
 
-        Shared with the hosted copy (the only capture lane left after #4282
+        Shared with the hosted copy (and, after #4282 retired the public name, with the
+        private `TortoiseSDK._capture_session` door, which keeps the same shape
         deleted ``TortoiseSDK.capture_session``) so the extraction loops stay in
         sync — the regex decision/claim loop is removed as a product path
         and no-key SKIPS EXTRACTION (the caller short-circuits with
@@ -16157,11 +17337,8 @@ class TortoiseSDK:
             # re-capture of an already-captured session the #1727 no-op REPLAY,
             # and a replay never reaches these SETs. The mechanism, and the
             # routes that DO clear such a node, are in this method's docstring
-            # above. The survival USED to be pinned end to end in
-            # `tests/test_10000_source_prose.py`; that pin drove the SDK capture
-            # door `#4282` deleted (`TortoiseSDK.capture_session`), so it went
-            # with the door and the loss is recorded on `#10227`. The claim is
-            # unchanged and still load-bearing — only its pin is gone.
+            # above; the survival is pinned by
+            # `tests/test_10000_source_prose.py::test_a_re_capture_does_not_heal_a_pre_fix_node`.
             # Load-bearing alongside it, and correct on its own: an earlier cut
             # rewrote this clause as an equivalent `CASE WHEN $st IS NOT NULL
             # …` and claimed THAT rewrite was the healing — the two forms are

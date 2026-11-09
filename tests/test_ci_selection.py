@@ -2383,44 +2383,6 @@ def test_every_named_guard_runs_for_its_own_source():
     )
 
 
-def test_the_pi_volunteer_seam_guard_runs_on_the_cli_diff_it_guards():
-    """#2119: the read seam's CLI half is `api`-classified, so a `core`-only
-    registration would never run the guard for the change it guards.
-
-    The suite `tests/test_pi_volunteer_seam.py` is the ONLY guard for two
-    behaviours that live in `tortoise/__main__.py`:
-    `_uninstall_pi_volunteer`'s `--dry-run` branch (a no-op print became an
-    unconditional `unlink()`) and
-    `_upgrade_artifact_seam(..., introduce_read_seam=False)`, the W4 opt-in gate
-    that keeps `hooks upgrade` from re-arming per-turn prompt search in a tree
-    where the user ran `install pi --uninstall`.
-
-    `tortoise/__main__.py` is an EXACT `api` `SOURCE_PATTERNS` entry and a
-    named-surface match REPLACES the `core` fallback (`tortoise/__main__.py` is
-    not in `CORE_ALSO`), so registering the suite under `core`+`onboarding`
-    alone means a CLI-only diff selects `api` and runs none of it. Measured at
-    the head that shipped the gap: `select(['tortoise/__main__.py'])` returned
-    `surfaces=['api']` with `test_pi_volunteer_seam.py` absent.
-
-    Mutation: delete `- test_pi_volunteer_seam.py` from the `api:` list in
-    `config/ci-surfaces.yml` — this REDs. The `core` arm is asserted too, so
-    the fix cannot be "move it" instead of "dual-register it".
-    """
-    assert _sel(["tortoise/__main__.py"])["surfaces"] == ["api"], (
-        "the mechanism this guard exists for changed: a `__main__.py` diff no "
-        "longer selects `api` alone — re-derive the registration")
-    cli = _sel(["tortoise/__main__.py"])
-    assert "test_pi_volunteer_seam.py" in cli["test_files"], (
-        "a `tortoise/__main__.py`-only diff selects no leg that runs "
-        "tests/test_pi_volunteer_seam.py, the only guard for that file's Pi "
-        "read-seam wiring (`--uninstall --dry-run`, the refresh-only repair "
-        "gate). Register it on `api` in config/ci-surfaces.yml.")
-    mechanism = _sel(["tortoise/capture_install.py"])
-    assert "test_pi_volunteer_seam.py" in mechanism["test_files"], (
-        "the `core` arm regressed — the installer half is unguarded, so the "
-        "api entry alone would not be enough")
-
-
 def test_unrelated_website_change_stays_tier1():
     """SITE_CARVEOUTS is not a wholesale `website/` removal.
 
@@ -20618,44 +20580,6 @@ def test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change():
         assert r["full"] is False, (changed, r)
         assert r["surfaces"] == ["core"], (changed, r)
         assert "test_s4_reeemit_tax.py" in r["test_files"], (changed, r)
-
-
-def test_the_11534_evidence_artifacts_select_the_pins_that_read_them():
-    # #11534 review round 6 (P2): the `core` row for `test_11534_partial_gap.py`
-    # claims in `config/ci-surfaces.yml` that an artifact retargeted under
-    # `docs/evidence/1789-s4-reeemit-tax/` makes the pins measure something else
-    # "and the guard test says so first". That ordering is a property of the
-    # SELECTOR, not of the comment: `docs/` and `tests/` are flat
-    # NON_PYTHON_PREFIXES entries, so an artifact-only or receipt-only diff takes
-    # the docs-only tier-1 early return unless a keep-and-claim entry covers it —
-    # the #1349/#3332/#3616 silent-drop class, one level up from the pins.
-    #
-    # Reviewer-measured at `06052ea0dd9e`: the artifact came back `surfaces=[]`
-    # with the #11534 pins absent, which is why the finding was filed. That
-    # reading does NOT reproduce at this head — `docs/evidence/1789-s4-reeemit-
-    # tax/` carries a CORE_ALSO entry (added by #11385, whose own suite
-    # `test_s4_reeemit_tax_pins_run_on_a_tool_or_evidence_change` above pins the
-    # same entry from the instrument's side), so this arm is the executable form
-    # of the claim rather than a fix to the selector: removing that entry reds
-    # HERE first, which is exactly what the comment says happens.
-    for changed, expected_surfaces, why in (
-        ("docs/evidence/1789-s4-reeemit-tax/ab-20261107T023958Z.json",
-         ["core"],
-         "the artifact the flag-rate and recall pins are re-derived from"),
-        ("tests/eval/write_path/receipts/7947-arms-2026-10-18/"
-         "wp01_quarry_debug.arms.json",
-         # `tests/eval/write_path/` is ALSO a SOURCE_PATTERNS row, so the
-         # `eval` surface is legitimately co-selected here — the claim under
-         # test is that `core` comes along, not that it comes alone.
-         ["core", "eval"],
-         "a receipt in the read-path population the detector is measured on"),
-    ):
-        r = _sel([changed])
-        assert r["full"] is False, (changed, why, r["surfaces"])
-        assert r["surfaces"] == expected_surfaces, (changed, why, r["surfaces"])
-        assert "test_11534_partial_gap.py" in r["test_files"], (
-            f"a diff to {why} ({changed}) must select the #11534 pins — "
-            "otherwise they run on a LATER core-selecting PR instead of first")
 
 
 def test_dashboard_deploy_script_change_selects_core_not_tier1():

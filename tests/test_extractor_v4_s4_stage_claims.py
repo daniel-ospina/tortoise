@@ -310,12 +310,6 @@ class _StageScan(ast.NodeVisitor):
         self.s4_guards: list[ast.expr] = []
         self.merge_call: ast.Call | None = None
         self.merge_target: str | None = None
-        #: EVERY `merge_embed_lists` site, in source order. There is more than
-        #: one since #11534 (the partial-gap fill unions its additions into the
-        #: S2 base before S3, which is a different union from the E4 one this
-        #: file pins), so the E4 site is selected by WHICH VALUE it consumes —
-        #: the one that mentions S4's result — not by being the only one.
-        self.merges: list[tuple[ast.Call, str | None]] = []
         self.result_embed_list: ast.expr | None = None
         self.result_embed_list_lineno: int | None = None
         self.assignments: dict[str, ast.expr] = {}
@@ -359,8 +353,9 @@ class _StageScan(ast.NodeVisitor):
                 self.s4_call = node.value
                 self.s4_guards = list(self.guard_stack)
                 self.s4_result = targets[0] if targets else None
-            elif called == "merge_embed_lists":
-                self.merges.append((node.value, targets[0] if targets else None))
+            elif called == "merge_embed_lists" and self.merge_call is None:
+                self.merge_call = node.value
+                self.merge_target = targets[0] if targets else None
         self.generic_visit(node)
 
 
@@ -368,14 +363,6 @@ def _scan(source: str | None = None) -> _StageScan:
     text = EXTRACTOR.read_text(encoding="utf-8") if source is None else source
     scan = _StageScan()
     scan.visit(_function(ast.parse(text), "extract_session_v2"))
-    # The E4 union is the merge that CONSUMES S4's output (#11534 added a
-    # second, earlier merge that does not). Selected by value, not by order: a
-    # merge whose arguments mention the S4 result. Falling back to the first
-    # site keeps the diagnostics working on a tree whose S4 call moved.
-    chosen = next((site for site in scan.merges
-                   if scan.s4_result and _mentions_name(site[0], scan.s4_result)),
-                  scan.merges[0] if scan.merges else (None, None))
-    scan.merge_call, scan.merge_target = chosen
     return scan
 
 
@@ -1118,21 +1105,8 @@ def test_an_else_branch_call_reds_the_off_switch_check():
 # population and then deleted `run_s4`. These tests pin both halves: the LANDED
 # verdict with its ADD proof, and the FOLD stages' unchanged inability to produce
 # candidates — so a future lane cannot read a stage list as "gap-filling moved" a
-# second time, and then delete `run_s4` believing gap-filling moved. What decides
-# it is the REMEDY half: neither folded stage can ADD an item a coverage check
-# found missing. These tests pin that half, so the pre-condition for removal
-# stays measurable instead of inferable from a stage list.
-#
-# ⛔ AND IT IS TWO HALVES SINCE `#11534` — a fact this guard itself missed. The
-# record said "no stage … performs S4's gap review-and-fill" in the PRESENT
-# tense while `extractor_v2.run_partial_gap_fill` (S2.2b-ADD, DEFAULT OFF) shipped
-# in the same file, and said "the absence of that stage is pinned by" this very
-# module while widening the allow-list that would have been the pin. The round-6
-# review (P2) found both at `06052ea0dd9e` with every check below GREEN — a
-# false PASS in a guard whose job is *"or `run_s4` is deleted believing
-# gap-filling moved"*. So the pins now cover both directions: the record must
-# state both halves (`SUCCESSOR_TWO_HALVES`) and must not regain the two false
-# clauses (`SUCCESSOR_REVIVED_CLAIMS`).
+# second time.
+
 #: §4.0's fold: the clause that gives S2.2 VET the coverage question S4's
 #: removal relies on. If the design re-assigns that purpose, the record's
 #: basis moved and this must be re-derived (not deleted).
@@ -1145,41 +1119,7 @@ FOLD_STATEMENT = "did we account for everything the narrative said?"
 #: still not the test; the test is that a `coverage_suspect` arm's missing
 #: candidate reaches the payload through a stage the pipeline runs.
 SUCCESSOR_LANDED = "THE SUCCESSOR HAS LANDED"
-#: The two gap classes `#11534` separates, plus the flag of the stage that meets
-#: one of them. Required as literals because EACH HALF ALONE IS A DIFFERENT
-#: WRONG ANSWER: without the solution half the record reads "no ADD-capable
-#: stage exists" (the round-6 review found exactly that), and without the unmet
-#: half a coverage TRIGGER reads as a demonstrated successor and `run_s4` is
-#: deleted on it.
-SUCCESSOR_TWO_HALVES = (
-    ("TORTOISE_PARTIAL_GAP_FILL",
-     "the record must name the `#11534` stage's own flag: without it the record "
-     "reads as 'no ADD-capable stage exists', which this file falsifies"),
-    ("ADD-from-an-uncovered-span",
-     "the pre-condition is met for ONE class of gap only; dropping the class "
-     "turns 'met' into a claim the operator measurement refutes"),
-    ("ADD-by-generalisation",
-     "and dropping the UNMET class lets a coverage trigger pass for a "
-     "demonstrated successor"),
-    ("NOT measured",
-     "S2.2b-ADD's OWN yield is unmeasured (it needs live sessions and a key); a "
-     "record that claims the stage's yield is the pre-condition met is "
-     "claiming a measurement nobody took"),
-)
-#: The two clauses the record carried BEFORE this fix, pinned as ABSENCES. A
-#: required-literal list can only demand text, never forbid it — and the review
-#: finding here was text that had to GO: the record asserted both clauses while
-#: the design doc had already been amended to the two-half statement.
-SUCCESSOR_REVIVED_CLAIMS = (
-    ("REMEDY half is unimplemented",
-     "the fold's remedy half IS implemented for the coverage class "
-     "(`run_partial_gap_fill`, DEFAULT OFF) — a record calling it unimplemented "
-     "sends a lane to build what this file ships"),
-    ("absence of that stage",
-     "the stage EXISTS in this file, and the guard that sentence pointed at can "
-     "no longer pin an absence — it pins the two-half record instead, so the "
-     "clause was false in both of its halves"),
-)#: The SCOPE the successor conclusion must carry. `run_s4` is itself a shipped
+#: The SCOPE the successor conclusion must carry. `run_s4` is itself a shipped
 #: stage that emits exactly the candidates a coverage check found missing, so an
 #: unqualified "no shipped stage can emit …" universal denies the capability its
 #: own next clause says is lost by deleting the stage (#8955 review).
@@ -1191,16 +1131,7 @@ CONCLUSION_SCOPE = "folds S4's purpose into"
 #: is satisfied by every spelling it does not name.
 BATCH_SIGNAL_ALLOW = frozenset({
     "narrative_statements", "candidates", "by_section",
-    "coverage_ratio", "coverage_suspect", "partial_gaps",
-    # #11534: the PARTIAL-gap detector's report — the segments no candidate
-    # accounts for, each with a char span into the narrative. It is a REPORT by
-    # the same test the others are: `check_batch` performs no action on it, and
-    # nothing in `vet_gate` can emit a candidate. The ACTION it enables lives in
-    # a separate stage (`extractor_v2.run_partial_gap_fill`, `TORTOISE_PARTIAL_
-    # GAP_FILL`, DEFAULT OFF), which is why the G5 record's "no successor can
-    # emit a candidate" universal was reconciled rather than left standing: that
-    # stage CAN add, its measured reach is 8/12 point additions and 1/9 operator
-    # additions, and the record now states both halves of that.
+    "coverage_ratio", "coverage_suspect",
 })
 #: `classify_items`' documented return keys. A key carrying ITEMS would make
 #: classify a candidate producer — the successor under another name.
@@ -1270,11 +1201,6 @@ def _successor_clause_violations(doc: str) -> list[str]:
     two stages, the COVERAGE half that only detects, the Rule-4 restore that
     makes an unqualified "only REMOVES" false, and the SCOPE that makes the
     conclusion's universal true of the FOLD rather than of every shipped stage.
-
-    The round-6 review added the OTHER direction: `SUCCESSOR_TWO_HALVES` (the
-    `#11534` stage exists and covers one of the two gap classes) and
-    `SUCCESSOR_REVIVED_CLAIMS` (the two false clauses this head deleted, which a
-    required-literal list structurally cannot forbid).
     """
     problems: list[str] = []
     if SUCCESSOR_LANDED not in doc:
@@ -1317,15 +1243,6 @@ def _successor_clause_violations(doc: str) -> list[str]:
     ):
         if required not in doc:
             problems.append(f"the record lost {required!r}: {why}")
-    for required, why in SUCCESSOR_TWO_HALVES:
-        if required not in doc:
-            problems.append(f"the record lost {required!r}: {why}")
-    for forbidden, why in SUCCESSOR_REVIVED_CLAIMS:
-        if forbidden in doc:
-            problems.append(
-                f"the record states {forbidden!r} again: {why} — this is the "
-                "claim the round-6 review found FALSE at `06052ea0dd9e`, and "
-                "the guard stayed green over it")
     return problems
 
 
@@ -1690,41 +1607,6 @@ def test_the_successor_checks_red_on_the_mutations_they_exist_to_catch():
         "`run_s4` is the shipped gap-filler, so the unscoped sentence "
         "contradicts its own next clause"
     )
-
-    # ⛔ THE PRE-FIX RECORD, reproduced from `06052ea0dd9e`. The round-6 review
-    # (P2) found the record asserting these two clauses while the design doc had
-    # already been amended to the two-half statement, and EVERY check above
-    # stayed green on them — the false PASS this arm exists to prevent. Each
-    # revival replaces the sentence that superseded it, verbatim, so the arm is
-    # a reproduction and not a synthetic insert.
-    for pre_fix, superseded in (
-        ("Presence is not sufficiency either: the fold's REMEDY half is "
-         "unimplemented in\nboth.",
-         "so neither of them satisfies the removal pre-condition stated "
-         "below."),
-        ("but the absence of that stage is pinned by",
-         "and not the absence of the stage, because this file now ships"),
-    ):
-        assert superseded in doc, (
-            f"the arm's anchor moved — re-point it at the sentence that "
-            f"superseded {pre_fix!r}")
-        revived = doc.replace(superseded, pre_fix)
-        assert revived != doc, "the revival mutation did not apply"
-        assert _successor_clause_violations(revived), (
-            f"reviving the pre-fix clause {pre_fix!r} must red this check: it "
-            "is the exact claim the round-6 review found false at "
-            "`06052ea0dd9e` while the guard was green")
-
-    # And the two-half record itself: dropping either class, the stage's flag,
-    # or the unmeasured-yield hedge must red — each half alone is a different
-    # wrong answer ("no ADD stage exists" vs "the successor landed").
-    for required, _why in SUCCESSOR_TWO_HALVES:
-        dropped = doc.replace(required, "")
-        assert dropped != doc, (
-            f"the two-half pin {required!r} is not in the record — re-point it "
-            "at the sentence that carries the claim")
-        assert _successor_clause_violations(dropped), (
-            f"dropping {required!r} from the record must red this check")
 
     marker = _marker_block()
     assert not _marker_successor_violations(marker), (

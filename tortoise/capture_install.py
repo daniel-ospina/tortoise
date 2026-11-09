@@ -12,24 +12,17 @@ depends on a hand-copied script or a hand-merged settings fragment.
 What it installs, per harness
 -----------------------------
 ``claude``
-    ``tortoise/claude-hooks/session-start.sh`` + ``session-end.sh`` +
-    ``session-turn.sh`` into ``<root>/.claude/hooks/`` (mode 0755), and
-    **merges** — never overwrites — the ``SessionStart`` / ``SessionEnd`` /
-    ``UserPromptSubmit`` registrations into ``<root>/.claude/settings.json``,
-    carrying the load-bearing ``timeout`` values (60 / 60 / 30) from
-    #3754/#3801/#3963.  ``session-turn.sh`` is the cheap per-turn spool: capture
-    used to happen only at ``SessionEnd``, which is cancelled at its ~1.5 s
-    default and does not fire at all on a kill, so an interrupted session filed
-    nothing.  Unrelated settings keys, other events, and the user's own hooks in
-    those events are preserved.
+    ``tortoise/claude-hooks/session-start.sh`` + ``session-end.sh`` into
+    ``<root>/.claude/hooks/`` (mode 0755), and **merges** — never overwrites —
+    the ``SessionStart`` / ``SessionEnd`` registration into
+    ``<root>/.claude/settings.json``, carrying the load-bearing
+    ``"timeout": 60`` from #3754/#3801.  Unrelated settings keys, other
+    events, and the user's own hooks in those events are preserved.
 
 ``pi``
     ``tortoise/pi-hooks/tortoise-capture.ts`` into
-    ``<home>/.pi/agent/extensions/tortoise-capture.ts`` AND, in the SAME run,
-    ``tortoise/pi-hooks/tortoise-volunteer.ts`` into
-    ``<home>/.pi/agent/extensions/tortoise-volunteer.ts`` — the per-turn READ
-    seam, graded with the capture half as ONE contract number (#2119) — after
-    the non-destructive legacy guard from #3713 (see below).
+    ``<home>/.pi/agent/extensions/tortoise-capture.ts``, after the
+    non-destructive legacy guard from #3713 (see below).
 
 ``codex``
     ``tortoise/codex-hooks/session-end.sh`` into ``<codex_home>/hooks/``
@@ -318,13 +311,6 @@ CURSOR_HOOKS_SUBDIR = "hooks"
 #: ImportError rather than a test failure, so keep the dependency one-way.
 PI_EXTENSION_NAME = hook_install.ARTIFACT_CONTRACTS["pi"].install_name
 
-#: Pi's per-turn READ extension (#2119), written by the SAME install run beside
-#: the capture artifact.  Derived for the same #4680 reason as the line above:
-#: the installer, the ``--uninstall`` verb and the drift detector must all name
-#: the file the contract declares, or one of them edits a path nobody wrote.
-PI_VOLUNTEER_EXTENSION_NAME = (
-    hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source.name)
-
 #: The legacy agent-infra extension directory name (#3713).  Pi's loader does
 #: no basename dedupe, so ``tortoise-capture.ts`` and
 #: ``tortoise-capture/index.ts`` are TWO extensions that both POST the same
@@ -530,21 +516,6 @@ class InstallResult:
     changed: bool = False
     actions: tuple[str, ...] = ()
     error: str = ""
-    #: Which artifact(s) THIS run WROTE, by INSTALL NAME (``tortoise-capture.ts``
-    #: / ``tortoise-volunteer.ts``). ``changed`` stays the union, because most
-    #: callers only ask "did anything happen" — but Pi installs TWO artifacts
-    #: from one call, so a caller that names one of them in a user-facing
-    #: sentence must ask about that artifact, not about the union (#11584
-    #: review finding 1: the summary printed "Pi capture extension installed."
-    #: for a run that wrote only the read seam).
-    #:
-    #: ⛔ EMPTY UNDER ``--dry-run``, by contract: `changed` keeps its
-    #: would-change meaning there (a dry run reports what it *would* do), while
-    #: this field answers only "what did this run WRITE" — nothing. A caller
-    #: that prints an "installed" sentence must therefore key on THIS field and
-    #: get silence for a dry run, rather than relying on its own `dry_run`
-    #: check (which was the only guard until #11584 review round 9).
-    changed_artifacts: tuple[str, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -1708,111 +1679,7 @@ def startup_seam_report(*, home: str | os.PathLike[str] | None = None,
     return sentences
 
 
-def _install_pi_volunteer_artifact(
-        ext_dir: Path, home: Path, *, dry_run: bool) -> tuple[bool, list[str], str]:
-    """Write Pi's per-turn READ extension beside the capture one (#2119).
-
-    Returns ``(changed, actions, error)`` — the same triple ``_install_pi``
-    accumulates, so a caller reports both artifacts of the seam as one install.
-
-    Every guard the capture artifact gets, this one gets, from the SAME
-    helpers: the symlink-escape check against the install home, the
-    non-regular refusal, the ownership refusal before any write, the write-free
-    probe (so ``--dry-run`` and a real run agree on an impossible home), the
-    backup of a differing copy that IS ours, and an atomic write.  A second
-    artifact with weaker guards would be the path a hostile or broken shape
-    slips through, and it would be invisible because the capture half passed.
-
-    The verification is a BYTE comparison against the shipped source after the
-    write — the installer must not claim an artifact it did not land (#10241).
-    ``assert_seam_target`` still grades the capture artifact only; this is that
-    assertion's peer for the read half, assessed here because the read half is
-    OPTIONAL on disk (a capture-only install has no file to assert).
-    """
-    src = hook_install.ARTIFACT_CONTRACTS["pi"].volunteer_source
-    if src is None or not src.is_file():
-        return False, [], (
-            f"shipped Pi read seam not found at {src} — this install is "
-            "incomplete (broken package?). Reinstall tortoise.")
-    dst = ext_dir / PI_VOLUNTEER_EXTENSION_NAME
-    payload = src.read_bytes()
-
-    guard_root, guard_label = _install_guard("pi", home)
-    escape = _symlink_escape(guard_root, dst, label=guard_label)
-    if escape:
-        return False, [], f"Refusing: {escape}"
-    non_regular = _refuse_non_regular(dst)
-    if non_regular:
-        return False, [], non_regular
-    foreign = _foreign_install_refusal(dst, payload)
-    if foreign:
-        return False, [], foreign
-    unwritable = _preflight_probe([ext_dir])
-    if not unwritable and not dry_run:
-        unwritable = _preflight_writable([ext_dir])
-    if unwritable:
-        return False, [], f"Refusing: {unwritable}"
-
-    actions: list[str] = []
-    changed = False
-    try:
-        if not _is_regular_unchanged(dst, payload):
-            if dst.exists() and dst.is_file() and not dst.is_symlink():
-                # A differing copy that passed the ownership guard is a stale
-                # or locally edited Tortoise extension — preserve it first.
-                backup = _backup_path(dst)
-                if dry_run:
-                    actions.append(f"[dry-run] would back up {dst} → {backup}")
-                else:
-                    _atomic_bytes(backup, dst.read_bytes(), 0o600)
-                    actions.append(f"backed up {dst} → {backup}")
-            if dry_run:
-                actions.append(f"[dry-run] would install {dst} "
-                               "(per-turn read seam)")
-            else:
-                _atomic_bytes(dst, payload, 0o644)
-                actions.append(f"installed {dst} (per-turn read seam)")
-            changed = True
-    except OSError as e:
-        state = (f"the per-turn read seam is NOT fully installed, and the "
-                 f"{len(actions)} action(s) above DID land."
-                 if actions else
-                 "the per-turn read seam is NOT installed — nothing was "
-                 "written.")
-        return changed, actions, (
-            f"install failed at "
-            f"{getattr(e, 'filename', None) or dst}: "
-            f"{e.__class__.__name__}: {e} — {state} Re-run once the cause is "
-            "fixed; `tortoise hooks status` reports what is on disk.")
-
-    if not dry_run:
-        try:
-            landed = dst.read_bytes()
-        except OSError as e:
-            return changed, actions, (
-                f"the per-turn read seam could not be re-read after the "
-                f"write: {dst} → {e.__class__.__name__}: {e}")
-        if landed != payload:
-            return changed, actions, (
-                f"the per-turn read seam at {dst} does not match the shipped "
-                f"{src} after the write — something else is writing this path")
-    return changed, actions, ""
-
-
-def _install_pi(
-        home: Path, *, dry_run: bool,
-        introduce_read_seam: bool = True) -> InstallResult:
-    """Install the Pi capture extension, and optionally the per-turn read seam.
-
-    ``introduce_read_seam=False`` makes this the REPAIR path: the read seam is
-    refreshed when it is already on disk, but never introduced.  Installing the
-    read seam is the W4 opt-in for #2119, so a caller whose job is to *fix* an
-    install (``tortoise hooks upgrade``) must not be able to turn the capability
-    on — see `_upgrade_artifact_seam` in ``tortoise/__main__.py``, which routes
-    through this same installer and would otherwise reinstate a seam the user
-    explicitly removed with ``tortoise install pi --uninstall``, without saying
-    so.
-    """
+def _install_pi(home: Path, *, dry_run: bool) -> InstallResult:
     harness = "pi"
     ext_dir = pi_home(home)
     dst = ext_dir / PI_EXTENSION_NAME
@@ -1851,31 +1718,6 @@ def _install_pi(
 
     actions: list[str] = []
     changed = False
-    # ⛔ TWO FLAGS, NOT ONE, AND NEITHER IS `changed` (#11584 review round 8).
-    # `changed` unions THREE things — a legacy-extension disable, the capture
-    # artifact write, and the read-seam write — so neither artifact's own
-    # verdict can be recovered from it:
-    #   * keying the capture flag off `changed` (round 7) captured the legacy
-    #     disable, which mutates Pi's capture BEHAVIOUR without writing
-    #     `tortoise-capture.ts` at all — so `install pi` over a byte-identical
-    #     capture file printed "Pi capture extension installed." on the #3713
-    #     legacy path, the same #3808 R13 over-claim one level down;
-    #   * and `changed` is True before any artifact write on some paths, so a
-    #     field built from it disagrees with the actions on the error returns.
-    # These are set at the WRITE and read through `_written()` below, so every
-    # return — success and error alike — reports the same, true set.
-    capture_written = False
-    read_seam_written = False
-
-    def _written() -> tuple[str, ...]:
-        """The artifacts THIS run WROTE, by install name."""
-        return tuple(
-            name for name, did_write in (
-                (PI_EXTENSION_NAME, capture_written),
-                (PI_VOLUNTEER_EXTENSION_NAME, read_seam_written),
-            ) if did_write
-        )
-
     # Same split as ``_install_claude`` (#3808 R25): the write-free probe runs
     # under ``--dry-run`` too, so the two halves agree on an impossible home.
     unwritable = _preflight_probe([ext_dir])
@@ -1912,8 +1754,7 @@ def _install_pi(
         elif legacy.is_dir():
             if legacy_disabled.exists() or legacy_disabled.is_symlink():
                 return InstallResult(harness, changed=changed,
-                                     actions=tuple(actions),
-                                     changed_artifacts=_written(), error=(
+                                     actions=tuple(actions), error=(
                                          f"cannot disable the legacy extension "
                                          f"{legacy}: {legacy_disabled} already "
                                          "exists. Move one of them aside and "
@@ -1944,15 +1785,6 @@ def _install_pi(
             else:
                 _atomic_bytes(dst, payload, 0o644)
                 actions.append(f"installed {dst}")
-                # ⛔ INSIDE the non-dry-run arm, and that placement IS the
-                # contract (#11584 review round 9). `changed` keeps its
-                # would-change meaning under `--dry-run` (callers render the
-                # action lines from it), but `changed_artifacts` answers "what
-                # did this run WRITE", and a dry run writes nothing — so
-                # setting it here reports two artifacts on a virgin HOME where
-                # the extensions directory does not even exist. A legacy
-                # disable above likewise sets `changed` but NOT this.
-                capture_written = True
             changed = True
     except OSError as e:
         # A write-time failure on a VIRGIN home lands NOTHING — the seam
@@ -1966,8 +1798,7 @@ def _install_pi(
                  if actions else
                  "the capture seam is NOT installed — nothing was written.")
         return InstallResult(harness, changed=changed,
-                             actions=tuple(actions),
-                             changed_artifacts=_written(), error=(
+                             actions=tuple(actions), error=(
                                  f"install failed at "
                                  f"{getattr(e, 'filename', None) or dst}: "
                                  f"{e.__class__.__name__}: {e} — {state} "
@@ -1990,49 +1821,9 @@ def _install_pi(
                                        require_present=True)
         if divergence:
             return InstallResult(harness, changed=changed,
-                                 actions=tuple(actions),
-                                 changed_artifacts=_written(), error=divergence)
+                                 actions=tuple(actions), error=divergence)
 
-    # (#2119) The seam's SECOND artifact — the per-turn READ extension. Written
-    # after the capture half is verified, so a refused/failed capture install
-    # never leaves a read seam behind (the read half alone injects context and
-    # files nothing: a user would see memory appearing and never learn that
-    # capture is broken). Its guards and its post-write byte check live in
-    # `_install_pi_volunteer_artifact`, deliberately the same ones.
-    # ``introduce_read_seam=False`` (the repair path) still REFRESHES a seam
-    # that is already installed — a stale copy is drift and repairing drift is
-    # exactly what this caller exists for — but it never creates one.  Absence
-    # is not reported as drift by `detect_artifact_install`, so skipping here
-    # leaves ``hooks status`` consistent with what ``hooks upgrade`` will do: a
-    # capture-only install stays capture-only until the user opts in.
-    # ⛔ ``lexists``, NOT ``is_file``: the gate asks "is there anything at this
-    # path?", because the shapes where ``is_file()`` is False are exactly the
-    # broken ones the repair exists to diagnose. With ``is_file()`` a broken
-    # symlink, a directory or a FIFO left the gate closed, so the artifact
-    # installer never ran, ``result.actions`` was empty and this function
-    # printed "already current — nothing to do" and exited 0 — while
-    # `detect_artifact_install` still reported a blocking `not-a-regular-file`
-    # for that same path. A silent false SUCCESS over a blocking finding, and a
-    # regression from the pre-gate behaviour (a valid-but-broken symlink was
-    # repaired; a directory produced the documented loud refusal). Present in
-    # any shape => let `_install_pi_volunteer_artifact` apply its guards, which
-    # is where those shapes are classified.
-    read_seam_present = os.path.lexists(ext_dir / PI_VOLUNTEER_EXTENSION_NAME)
-    if introduce_read_seam or read_seam_present:
-        v_changed, v_actions, v_error = _install_pi_volunteer_artifact(
-            ext_dir, home, dry_run=dry_run)
-        changed = changed or v_changed
-        # Same rule as `capture_written`: a dry run writes nothing, so the
-        # read seam half must not be reported as written (#11584 review round 9).
-        read_seam_written = v_changed and not dry_run
-        actions.extend(v_actions)
-        if v_error:
-            return InstallResult(harness, changed=changed,
-                                 actions=tuple(actions),
-                                 changed_artifacts=_written(), error=v_error)
-
-    return InstallResult(harness, changed=changed, actions=tuple(actions),
-                         changed_artifacts=_written())
+    return InstallResult(harness, changed=changed, actions=tuple(actions))
 
 
 def openclaw_home(home: Path) -> Path:
@@ -2273,7 +2064,6 @@ def install_capture(
     root: str | os.PathLike[str] = ".",
     home: str | os.PathLike[str] | None = None,
     dry_run: bool = False,
-    introduce_read_seam: bool = True,
 ) -> InstallResult:
     """Install (or upgrade) the capture seam for ``harness``.
 
@@ -2333,8 +2123,7 @@ def install_capture(
         try:
             result = _install_pi(
                 Path(home) if home is not None else Path.home(),
-                dry_run=dry_run,
-                introduce_read_seam=introduce_read_seam)
+                dry_run=dry_run)
         except MemoryError:
             raise  # resource exhaustion is not a refusal; the handler allocates
         except Exception as e:
