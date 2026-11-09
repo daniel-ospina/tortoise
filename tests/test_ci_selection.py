@@ -8413,6 +8413,17 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
 #: states it. Nothing read any of them, which is how one file came to claim `18` matrix jobs at
 #: `:749` and `17` matrix legs at `:798` a screen apart.
 #:
+#: ⛔ The `max` claim has a SECOND half and this pin did not read it (#11602 review at
+#: `cbc930427cfe`). The sentence `A <wc> run is N jobs (max M)` carries TWO counts: `max` (every
+#: job the run can request) and the leading `typical` (what a PR run requests, i.e. `max` minus
+#: the push-gated jobs). The regex captured `typical` and only ever compared `max`, so the same
+#: sentence the 9 -> 10 raise made half-wrong stayed GREEN — the repo's named defect class, "a
+#: tool that cannot answer its question because it already holds the datum and does not read it".
+#: Both halves are asserted now; `typical` is DERIVED (`fast + non_matrix_pr`), never hard-coded.
+#: ⛔ `<wc>` is a placeholder ON PURPOSE (see the f-string note below): the literal spelling of
+#: that sentence here would match the scanner on this file — one of the pinned sources — and turn
+#: the pin red on its own docstring.
+#:
 #: ⛔ Read through `re.sub(r"\s+", " ", ...)` with `**` stripped: the doc wraps
 #: `**requests 29` / `jobs** (18 matrix legs` across two lines, so a line-oriented pattern would
 #: match nothing there and stay silently green — the exact vacuity this pin exists to avoid.
@@ -8423,9 +8434,14 @@ _FULL_SELECTION_MAX_RE = re.compile(
 
 
 def _full_selection_claim_violations(
-    sources: dict[str, str], total: int, legs: int,
+    sources: dict[str, str], total: int, legs: int, typical: int,
 ) -> list[str]:
-    """Every full-selection count stated in `sources` that disagrees with `total` / `legs`.
+    """Every full-selection count stated in `sources` that disagrees with the shipped shape.
+
+    `total` is the max a run can request (legs + non-matrix), `typical` is what a PR run actually
+    requests (total minus the push-gated jobs). Both are checked: a doc may state one half
+    correctly and the other half wrongly, which is exactly how `20 jobs (max 29)` survived the
+    9 -> 10 raise.
 
     Pure, so the non-vacuity control below can feed it the PRE-FIX text instead of trusting a
     comment that the pin would catch the numbers it was written to catch.
@@ -8444,6 +8460,11 @@ def _full_selection_claim_violations(
                 violations.append(
                     f"{name}: states a max of {match.group('max')} jobs, but the shipped "
                     f"shape requests {total} — {match.group(0)!r}")
+            if int(match.group("typical")) != typical:
+                violations.append(
+                    f"{name}: states a typical run of {match.group('typical')} jobs, but the "
+                    f"shipped shape emits {typical} on a PR (max {total}) — "
+                    f"{match.group(0)!r}")
     return violations
 
 
@@ -8470,9 +8491,22 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
     #6744"" paragraph, and the ""(17 jobs)"" inside this file's other docstring — both describe
     the MEASURED past shape at the 9-leg measurement window, and rewriting a dated measurement to
     today's shard count is how a record becomes a guess.
+
+    P2 (#11602 review at `cbc930427cfe`): the `max` sentence carries a SECOND count, and this pin
+    read only one of them. `A <wc> run is N jobs (max M)` states what a TYPICAL PR run emits in
+    `N` — `fast + non_matrix_pr`, because the slow and carve matrices are path-gated — and the
+    raise moved `M` while leaving `N` at its 9-leg value. The old checker compared `M` only and
+    reported GREEN on the line it was written to protect, which is the ""tool that already holds
+    the datum and does not read it"" class: a false PASS, not prose drift. Both halves are now
+    derived and asserted, and the non-vacuity control below feeds the PRE-FIX sentence through
+    the same checker — against the max-only arm that fixture yields ZERO violations.
     """
-    from tools.ci_selection import (carve_shard_count, fast_shard_count,
-                                    load_manifest, slow_shard_count)
+    from tools.ci_selection import (
+        carve_shard_count,
+        fast_shard_count,
+        load_manifest,
+        slow_shard_count,
+    )
 
     manifest = load_manifest()
     jobs = _load_python_ci()["jobs"]
@@ -8495,7 +8529,12 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
             + carve_shard_count(manifest))
     non_matrix_pr = len(jobs) - len(matrix_jobs) - len(push_gated)
     total = legs + non_matrix_pr
-    assert legs >= 3 and non_matrix_pr >= 1, (legs, non_matrix_pr)
+    # `typical` is NOT `total - push_gated`: the slow and carve matrices are path-GATED, so a
+    # typical PR run emits neither. It is the fast shards plus the always-eligible non-matrix
+    # jobs (`20 = 9 + 11` on origin/main, `21 = 10 + 11` after the raise).
+    typical = fast_shard_count(manifest) + non_matrix_pr
+    assert legs >= 3 and non_matrix_pr >= 1 and 0 < typical < total, (
+        legs, non_matrix_pr, typical, total)
 
     sources = {
         ".github/workflows/python-ci.yml": (
@@ -8518,7 +8557,7 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
         f"deleted): {sites}. Re-point the regexes at the new wording instead of letting the "
         "remaining copies drift unchecked")
 
-    violations = _full_selection_claim_violations(sources, total, legs)
+    violations = _full_selection_claim_violations(sources, total, legs, typical)
     assert not violations, (
         "a full-selection count disagrees with the shape `python-ci.yml` emits today — prose "
         "that understates the emitted shape is how the next reader infers a 9-leg matrix from a "
@@ -8534,15 +8573,33 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
                           f"({legs - 1} matrix legs + 11 non-matrix"),
         "ci-wall-clock.md wrapped": (f"a PR therefore **requests {total - 1}\njobs** "
                                      f"({legs - 1} matrix legs + 11 non-matrix"),
-        "ci-wall-clock.md max": (f"A `python-ci` run is 20 jobs (max {total - 1}) by "
-                                 "construction"),
+        "ci-wall-clock.md max": (f"A `python-ci` run is {typical - 1} jobs "
+                                 f"(max {total - 1}) by construction"),
+        # ⛔ THE ARM THIS REVIEW ADDED, and the only fixture that proves it non-vacuous: the HEAD's
+        # own pre-fix sentence — `max` already correct, `typical` one short. Against the previous
+        # (max-only) checker this fixture produced ZERO violations, i.e. the pin reported GREEN on
+        # the exact line the finding names (#11602 review at `cbc930427cfe`, `20 jobs (max 29)`).
+        # f-string built for the same reason as the others — a literal here would match the scanner
+        # on this file, one of the pinned sources.
+        "ci-wall-clock.md typical": (f"A `python-ci` run is {typical - 1} jobs "
+                                     f"(max {total}) by construction"),
     }
-    pre_fix_violations = _full_selection_claim_violations(pre_fix, total, legs)
-    assert len(pre_fix_violations) == len(pre_fix), (
-        "the checker is vacuous on the very text this fix replaced: "
-        f"{pre_fix_violations}")
+    pre_fix_violations = _full_selection_claim_violations(pre_fix, total, legs, typical)
+    for fixture in pre_fix:
+        assert any(v.startswith(f"{fixture}:") for v in pre_fix_violations), (
+            f"the checker is vacuous on {fixture!r} — the PRE-FIX text passes it: "
+            f"{pre_fix_violations}")
     assert any(f"{total - 1} jobs" in v and f"{legs - 1} matrix legs" in v
                for v in pre_fix_violations), pre_fix_violations
+    # the `typical` arm must reject the head's pre-fix sentence ON ITS OWN, while that sentence's
+    # `max` half is CORRECT — that difference is what makes the new arm load-bearing rather than a
+    # duplicate of the max check. A max-arm rejection here would mean the fixture isolates nothing.
+    typical_arm = [v for v in pre_fix_violations
+                   if v.startswith("ci-wall-clock.md typical:")]
+    assert any(f"typical run of {typical - 1} jobs" in v and f"emits {typical} " in v
+               for v in typical_arm), pre_fix_violations
+    assert not any("states a max of" in v for v in typical_arm), (
+        f"the fixture's `max` is {total}, so only the `typical` arm may reject it: {typical_arm}")
     # the wrapped copy is the one a line-oriented pattern silently skips — key the assertion on
     # its SOURCE NAME: flattening makes its matched text identical to the unwrapped copy's.
     assert any(v.startswith("ci-wall-clock.md wrapped:")

@@ -769,10 +769,10 @@ jobs:
       # choice of ONE cap, not the invariants:
       #   (a) DO NOT INVENT WAVES THE POOL ALREADY CREATES. Measured per-shard
       #       wall p50 10.5m (range 5.8–15.7m) against a measured start stagger
-      #       across the 9 shards of 4.0–23.9m (p50 ~10m): under the present
+      #       across the 10 shards of 4.0–23.9m (p50 ~10m): under the present
       #       queue the pool already delivers these shards in 2–4 waves. A cap
       #       that needs MORE than 4 waves is strictly new wall —
-      #       `ceil(9/C) <= 4  =>  C >= 3`.
+      #       `ceil(10/C) <= 4  =>  C >= 3`.
       #   (b) NO SINGLE PR MAY HOLD THE POOL. The three matrices all start after
       #       `changes` and overlap, so a PR's maximum MATRIX hold is
       #       `C_fast + C_slow + C_carve`. Keeping 3 of the 12 measured

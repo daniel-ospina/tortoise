@@ -431,7 +431,7 @@ same step with the same tail is the investigation.
   measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
   queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
   `OK`: an unmeasured wait is not a measured-healthy one.
-- **It does not reduce jobs per run.** A `python-ci` run is 20 jobs (max 29) by construction; with
+- **It does not reduce jobs per run.** A `python-ci` run is 21 jobs (max 29) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
   many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work. It bounds
@@ -509,13 +509,13 @@ the queue the PR no longer waits behind — gives per-PR peak / matrix-band delt
 
 | cap (fast/slow/carve) | per-PR peak (p50 / max) | matrix-band end delta (p50 / max) |
 | --- | --- | --- |
-| 2 / 2 / 2 — ⛔ rejected by invariant 1 (`ceil(9/2) = 5` waves) | 8 / 9 | +31.8 m / +38.5 m |
+| 2 / 2 / 2 — ⛔ rejected by invariant 1 (`ceil(10/2) = 5` waves) | 8 / 9 | +31.8 m / +38.5 m |
 | **3 / 3 / 3 (shipped)** | **9 / 12** | **+17.9 m / +23.2 m** |
 | 4 / 4 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 13 | +10.1 m / +14.4 m |
 | 5 / 3 / 3 — ⛔ rejected by invariant 2 (`sum = 11 > 12 - 3`) | 10 / 12 | +8.1 m / +9.6 m |
 | unset | 11 / 18 | 0 / 0 |
 
-⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(9 / 2)` = 5
+⛔ **The `2 / 2 / 2` row is the one candidate this section's own pin rejects.** `ceil(10 / 2)` = 5
 waves exceeds the `max_waves = 4` ceiling invariant 1 pins
 (`tests/test_ci_selection.py::test_every_matrix_bounds_its_fan_out_below_the_measured_pool`), so a
 re-derivation from a fresh measurement that picks the row with the most pool headroom (`8 / 9`) is
