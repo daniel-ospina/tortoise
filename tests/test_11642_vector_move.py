@@ -97,6 +97,94 @@ def test_the_scan_cannot_return_a_short_answer_silently():
     assert record_vector.HNSW_ITERATIVE_SCAN == "strict_order"
 
 
+def test_the_shortfall_compares_strictly_and_only_on_the_short_path(monkeypatch):
+    """The comparison itself, pinned — the review's "invert `>` to `>=`" lane.
+
+    ⛔ LIVE POSTGRES CANNOT PIN THIS, and that is why it lives here. The shortfall
+    fires when the filter selects MORE material than the scan returned, and
+    `hnsw.iterative_scan = strict_order` is the fix for exactly that — so a
+    correct server will not produce a short answer on demand. What can be pinned
+    without one is the COMPARISON, and it has three arms which a single
+    assertion cannot cover:
+
+      * `available > len(rows)`  -> raise (a filter that owes more than it gave)
+      * `available == len(rows)` -> NO raise (a complete answer on a small
+        tenant; `>=` here would report a shortfall on a correct read)
+      * `len(rows) == limit`     -> the count is never executed at all (the cost
+        rule: every answer for a tenant smaller than `limit` pays one aggregate,
+        a FULL window pays none)
+
+    Drives `vector_search` over a stub cursor, so the SQL is not executed and
+    the three arms are decided by the code under test alone.
+    """
+    class _Cursor:
+        def __init__(self, rows, available):
+            self._rows, self._available = rows, available
+            self.executed: list[str] = []
+
+        def execute(self, sql, params=None):
+            self.executed.append(sql)
+
+        def fetchall(self):
+            return self._rows
+
+        def fetchone(self):
+            return (self._available,)
+
+        def close(self):
+            pass
+
+    class _Conn:
+        def __init__(self, cursor):
+            self._cursor = cursor
+
+        def cursor(self):
+            return self._cursor
+
+        def close(self):
+            pass
+
+    def _drive(rows, available, limit):
+        # Both seams are imported INSIDE `vector_search`, so patching the MODULE
+        # attributes is what the call site resolves — the stub never touches a
+        # driver, and the only code under test is the comparison.
+        import tortoise.record_projection as rp
+        import tortoise.record_serve as rs
+
+        cursor = _Cursor(rows, available)
+
+        monkeypatch.setattr(rs, "open_record", lambda dsn: _Conn(cursor))
+        monkeypatch.setattr(rp, "scope_connection",
+                            lambda conn, org: conn.cursor())
+        scope = record_vector._Scope(org_id="o", graph_id="g")
+        try:
+            return record_vector.vector_search(
+                scope, "point", [0.0] * 384, limit, record_dsn="postgresql://x/y"
+            ), cursor.executed
+        finally:
+            monkeypatch.undo()
+
+    rows = [("p1", 0.1, "2026-01-01"), ("p2", 0.2, "2026-01-02")]
+
+    # (1) the filter owes more than the scan gave -> NAMED, never returned.
+    with pytest.raises(record_vector.VectorShortfall):
+        _drive(rows, available=3, limit=5)
+
+    # (2) a COMPLETE short answer -> no raise. This is the arm an inverted `>=`
+    #     reds, and it is the common case for a tenant smaller than the limit.
+    got, executed = _drive(rows, available=2, limit=5)
+    assert len(got) == 2, got
+    assert any("count(*)" in sql for sql in executed), (
+        "the short path must ask the filter how much material it selects")
+
+    # (3) a FULL window pays NO aggregate — the per-read cost rule.
+    got, executed = _drive(rows, available=99, limit=2)
+    assert len(got) == 2, got
+    assert not any("count(*)" in sql for sql in executed), (
+        "a full window must not pay the count: every answer for a tenant "
+        f"smaller than the limit already pays one (executed: {executed})")
+
+
 # ── arming ─────────────────────────────────────────────────────────────────
 
 def test_no_tenant_means_no_searcher(monkeypatch):

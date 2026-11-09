@@ -4750,12 +4750,22 @@ jobs:
           # is a nondeterministic RED on a required context, which is why the
           # ctime arm burns an inode-clock tick instead of skipping when a tick
           # boundary happens not to fall between two calls (#9558 cycle 2, P1).
+          # #11642 (PR #11660 review F10): the dense leg's LIVE half. Nothing
+          # else in this repo executes `record_vector.vector_search` — the
+          # DB-free `test_11642_vector_move.py` asserts its CONSTANT and its
+          # residual algebra and says so — so the shortfall comparison, the SQL,
+          # the terminal-status predicate (#689) and the canonical operator
+          # identity (#943) were asserted by strings. This job is the only one
+          # that can run it (`pgvector/pgvector:pg16` above), which is why the
+          # file is here and not merely registered on `core`: there it collects
+          # and skips, and a skip on this job reds the leg gate below.
           timeout -s INT -k 10 12m stdbuf -oL python -m pytest \
             tests/test_9078_record_written_by_production_path.py \
             tests/test_9555_narrative_carrier.py \
             tests/test_9664_capstone_connector_to_record.py \
             tests/test_record_searchkeys_10620.py \
             tests/test_9881_rename_reaches_the_record.py \
+            tests/test_11642_vector_move_live.py \
             tests/test_9558_record_write_cost.py \
             tests/test_9567_record_capstone.py \
             -v --timeout=300 -p no:cacheprovider -r fEs \

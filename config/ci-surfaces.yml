@@ -2241,6 +2241,17 @@ surfaces:
   # Its Postgres-armed sibling legs live in `test_11642_vector_move_live.py`
   # (the `test-record-postgres` job, which asserts zero skips).
   - test_11642_vector_move.py
+  # The LIVE half: it executes `record_vector.vector_search` against a real
+  # pgvector server (the SQL, the shortfall count, the status predicate, the
+  # canonical operator identity, the recency CASE). Registered on `core` for the
+  # same reason `test_9078_record_written_by_production_path.py` is — a diff to
+  # `tortoise/record_vector.py` selects `core` and nothing else, so an
+  # unregistered file would collect NOWHERE on the change that can break it.
+  # Here its DSN-gated legs SKIP (psycopg2 is absent from the fast matrix and
+  # `TEST_RECORD_DB_URI` is unset); they RUN in `test-record-postgres`, which
+  # provisions `pgvector/pgvector:pg16` and lists this file — and that job fails
+  # on ANY skip (#9551), so the armed run cannot pass by absence.
+  - test_11642_vector_move_live.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
   # SOURCE_PATTERN → the `core` fallback); the companion `api` arm above is

@@ -110,6 +110,28 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 #: are Points (``#172``), and a Document IS a Source (``D10``, §4.4) whose
 #: counterpart is told apart by ``document_kind``.
 #:
+#: ⛔ THE OPERATOR FILTER IS THE CANONICAL IDENTITY, NOT ``is_operator IS TRUE``
+#: (PR #11660 review F6). The repo's one definition of an operator is
+#: ``is_operator = true OR op_type IS NOT NULL`` — the ``#943`` parity every
+#: other operator read uses (``ep.py``, ``sdk.py``, ``search_engine.py``) — so a
+#: HYBRID operator (``op_type`` set, the flag absent) is an operator everywhere
+#: except in a leg that tests the flag alone. That miss is invisible rather than
+#: loud: the graph branch keeps finding the node, so only a comparison between
+#: the two legs sees the divergence, and the record leg is the one that now
+#: carries production traffic. Pinned against a real Postgres in
+#: ``tests/test_11642_vector_move_live.py::test_a_hybrid_operator_is_served_by_
+#: the_canonical_identity``.
+#:
+#: ⚠️ THE THIRD DIVERGENCE, stated rather than fixed here: the GRAPH branch for
+#: ``entity_type="operator"`` applies NO operator predicate at all (measured at
+#: ``search_engine.py``'s two vector branches — only the ``scope_kinds`` probe
+#: filters ``is_operator``), so on a box with no record armed an operator query
+#: returns the nearest Points of ANY kind. That is a pre-existing defect on the
+#: fallback path, not something this move introduced, and it is filed rather than
+#: silently widened: until it lands, a hybrid operator is served by the RECORD
+#: leg and missed by the graph leg, and a claim can be served by the graph leg
+#: and never by the record leg. The record leg's answer is the correct one.
+#:
 #: The ``recency`` pair is ``(updated, created)``, applied by
 #: :func:`_recency_sql` with the same CASE `search_engine.recency_key_expr`
 #: uses. ``event`` has no ``created_at`` column, so its "created" half is
@@ -117,7 +139,9 @@ HNSW_ITERATIVE_SCAN = "strict_order"
 #: here rather than left to be discovered as a divergence.
 LABEL_SERVED: dict[str, tuple[str, str, str, tuple[str | None, str | None]]] = {
     "point": ("point", "id", "", ("updated_at", "created_at")),
-    "operator": ("point", "id", "is_operator IS TRUE", ("updated_at", "created_at")),
+    "operator": ("point", "id",
+                 "(is_operator IS TRUE OR op_type IS NOT NULL)",
+                 ("updated_at", "created_at")),
     "source": ("source", "url", "document_kind IS NULL",
                ("updated_at", "created_at")),
     "document": ("source", "url", "document_kind IS NOT NULL",

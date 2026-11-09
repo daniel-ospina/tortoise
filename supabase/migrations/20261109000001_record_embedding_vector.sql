@@ -128,6 +128,33 @@
 --     clause and rely on `search_path`, which `pg_restore` empties.
 CREATE EXTENSION IF NOT EXISTS vector SCHEMA public;
 
+-- ⛔ LOCK POSTURE — AN OPERATOR NOTE, because the figures above are an IDLE
+-- container and a deploy is not (#11660 review F12):
+--
+--   * `ALTER TABLE … ADD COLUMN … GENERATED … STORED` REWRITES each of
+--     `point`/`source`/`event` under `ACCESS EXCLUSIVE`: reads and writes block
+--     for the duration of that table's rewrite. The 6.9 s measured at 20,000
+--     rows is a rewrite of a warm table on an idle box; it scales with the
+--     table and with the IO available, so budget from the ROW COUNT of the
+--     largest of the three, not from the 20k figure.
+--   * `CREATE INDEX` (not `CONCURRENTLY`) takes `SHARE` on the table and
+--     `ACCESS EXCLUSIVE`-class waiting against concurrent DDL, and holds it for
+--     the HNSW build (4.0-4.2 s at 20k, 37.4 s with `maintenance_work_mem`
+--     squeezed). `CONCURRENTLY` is NOT an option here: Supabase runs migrations
+--     inside a transaction, and `CREATE INDEX CONCURRENTLY` cannot run in one.
+--   * so the sequence is one blocking rewrite per table FOLLOWED by one build
+--     per table, and NO statement in this file is online. Plan the window from
+--     the largest table, run it when write traffic is low, and set
+--     `maintenance_work_mem` >= ~2x the raw vector bytes (~62 MB at 20k,
+--     ~619 MB at 200k) so the build stays on the fast path rather than spilling
+--     for 9x the time.
+--
+-- ⚠️ Measured, not assumed: the two figures above come from the same
+-- `pgvector 0.8.7 / Postgres 16.15` run recorded in
+-- `docs/evidence/11642-vector-move/README.md`, and both are for a 20,000-row
+-- table. Nothing here was measured at production scale, and this note says so
+-- rather than implying a 20k number is a deployment budget.
+
 -- ── the one converter: jsonb payload -> indexable vector, NULL when unusable ──
 --
 -- IMMUTABLE + STRICT + PARALLEL SAFE because a generated column requires all

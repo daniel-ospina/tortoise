@@ -160,6 +160,59 @@ rebuild at all.
    PER-REQUEST path, so that is a per-request cost. The retirement reads the
    catalogue first, making the steady state zero statements.
 
+## 8. The READ path — the figure this file was missing (#11660 review F11)
+
+Everything above is a one-time or build-time cost. This is the per-request one,
+and until #11660's review the file did not have it: the move takes the dense read
+off an in-RAM graph index and puts it behind a pooled connection, the tenant
+prologue, an explicit `hnsw.iterative_scan` set, the ANN statement — and, on a
+short answer, an aggregate.
+
+MEASURED on the same `pgvector 0.8.7 / Postgres 16.15` container, **20,000 × 384**,
+loopback, one lane, warm (20 discarded calls, then 100 timed):
+
+| reading | p50 | p95 |
+|---|---|---|
+| `record_vector.vector_search`, `limit=10`, end to end | **3.1-4.4 ms** (mean 3.6) | 5.2-6.2 ms |
+| the same, `limit=50` | **5.5 ms** (mean 5.6) | 5.9-6.1 ms |
+| the same, `limit=500` | **19.3 ms** (mean 20) | 24-26 ms |
+| the ANN statement ALONE, on a warm open connection | **1.13 ms** | 1.29 ms |
+| the same statement as an EXACT scan (`enable_indexscan=off`) | **17.95 ms** | 21.1 ms |
+| the short-path `count(*)` over the same predicate | **6.25 ms** | 11.6 ms |
+
+Three things this says, stated rather than left to be inferred:
+
+* **The index earns its keep at 20k: 16x.** 1.13 ms indexed against 17.95 ms
+  exact. The ANN is not decorative at this size, which is why the leg filters on
+  the GENERATED column rather than scanning `embedding`.
+* **The leg's own overhead is ~2.5 ms on top of a 1.1 ms statement**, and it is
+  FOUR round trips, not one: `set_config('app.current_org_id')`, the scope
+  read-back, `set_config('hnsw.iterative_scan')`, then the SELECT. That is the
+  tenant prologue and the scan setting, both of which exist for correctness
+  reasons this file records elsewhere — the read-back is what catches a
+  transaction-local set on an autocommit/pooled connection, and the scan setting
+  is what stops a filtered ANN returning 0 rows where 152 exist (§5). A
+  future "why is the leg slower than the query" has its answer here: it is not
+  the plan.
+* **The short-path aggregate is a SCAN, and it is priced like one**: 6.25 ms
+  over 20k rows, i.e. ~5x the indexed statement it accompanies. It is paid on
+  every short answer, which is EVERY answer for a tenant smaller than `limit` —
+  so the honest reading of "one bounded aggregate, paid once per short read" is
+  a *scan of the tenant's rows*, and a tenant with 200k rows pays it at 200k.
+
+⚠️ **What this figure is NOT.** It is loopback, on an idle box, at 20,000 rows,
+single lane — a hosted read adds the network hop and shares the CPU, and nothing
+here was measured at production scale. And it is **not a delta against the graph
+leg**: after this move there is no in-graph vector index to time, and
+`GRAPH.COPY`/restore probing is not a read-path measurement. `SEARCH-ARCHITECTURE.md`
+§1.5 ranks retrieval latency as the #1 production risk, so the delta should be
+taken on a hosted-prod-shaped deployment before this section is quoted as one.
+
+Reproduce: `pgvector/pgvector:pg16`, apply the migration, seed 20k unit vectors,
+then time `record_vector.vector_search(scope, "point", q, limit)` warm — the
+statement-only and exact-scan rows come from running its SQL directly with
+`enable_indexscan` toggled.
+
 ## Reproducing
 
 ```bash
