@@ -94,8 +94,9 @@ is §7's lesson one merge later: **a count is only as good as the base it was ta
 record said nothing called.** `#11237`'s write path landed as **`#11548`** (`e49788706a`, *feat(extractor):
 S5 Job 1 remainder — the relations channel gets a write path (`#11237`)*): a new module
 `tortoise/relation_write.py` is the consumer `#10999` did not have, called from
-`TortoiseSDK.capture_session` at `tortoise/sdk.py:17200` (`apply_relation_edges`, and by `:17201` the
-result), fed **only** by
+`TortoiseSDK.capture_session` at `tortoise/sdk.py:17201` (`relation_write = apply_relation_edges(` —
+the `from tortoise.relation_write import apply_relation_edges` is the line above it, `:17200`, and the
+binding below is the result), fed **only** by
 the typed record (`out["relations"]`) and never by the story text (`#10000`). Two measurements, both
 taken on this merge:
 
@@ -675,10 +676,22 @@ git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
 git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9234 :9252 :9259 :9639
 
-# A1 (§1) — the declaration reads, and nothing production writes it
+# A1 (§1) — the declaration reads, and a production caller outside its own module now writes it
+# ⛔ This header read "…and nothing production writes it" until #11548/#11237 landed
+# `relation_write.py` — `plan_hierarchy_edges` IS called from production at
+# `tortoise/relation_write.py:631` (`pack_hierarchy.py:459` is the same module's own internal
+# call, which is why it is not a second consumer). §0 above records the change; do not argue A1
+# from the retired premise (that is the "second producer the epic forbids" argument).
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
-git grep -n apply_hierarchy_edges                          # 9 in the test file + __all__ + def
-git grep -n plan_hierarchy_edges                           # 9 in the test file + :59/:78/:365/:459
+git grep -n apply_hierarchy_edges                          # 12 lines on this merge: 9 in
+                                                          # tests/test_pack_hierarchy_11001.py, 1 in
+                                                          # tests/test_7949_capstone_measure.py, plus
+                                                          # `__all__` and `def` in pack_hierarchy.py
+git grep -n plan_hierarchy_edges                           # 19 lines on this merge: 9 + 2 across the
+                                                          # two test files, `:59/:78/:365/:459` in
+                                                          # pack_hierarchy.py, and — the part this line
+                                                          # used to omit — 4 in relation_write.py
+                                                          # (`:53 :589 :631 :636`), `:631` being the CALL
 git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[:space:]]*\(' \
   tortoise/extractor_v2.py                                 # no output, exit 1 — the class must NOT
                                                           # exclude `.`: a dot-EXCLUDING one exits 1 on
@@ -690,18 +703,26 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
 # extractor_v2.py:11119 (the stale comment), relation_write.py:7, sdk.py:17188.
-# Both sides of the #11534 × #8290 forward-merge printed a different number — and every number
-# either side printed was taken at ITS OWN base, so neither survived the merge: the branch said
-# "ONE at :10906", main said "ONE at :11119", and the merged tree has THREE, at the three lines
-# above (the branch's two cites moved to :11119/:17188 by main's insertions). Re-measured at the
-# merge, not picked from either side.
-git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits, all
-                                                          # PROSE — the stale comment at :11119, the
-                                                          # relation_write.py module docstring, and the
-                                                          # #10999 transport-only note at sdk.py:17188 — so
-                                                          # still no production consumer of #11205's
-                                                          # channel (⚠️ the `-- tortoise/` scope is the
-                                                          # claim: unscoped it also matches the reader below)
+# ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
+# consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
+# and nothing consumed it. … This module is that consumer"), and `capture_session` calls it at
+# `sdk.py:17201`. Of the three hits only ONE is still prose-about-absence (the stale comment at
+# :11119); the other two are the consumer announcing itself. Read §0's amendment above, never
+# "nothing consumes it".
+# ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither side's
+# was taken in THIS tree: the branch printed 10906 / :7 / 17181 at its own tip, main printed
+# 11119 / :7 / 17188 at its own, so the merged tree's line numbers belonged to neither side until
+# re-measured. (The pre-merge text's "at this record's base: ONE hit" was itself stale — that base
+# predates #11205, whose comment is the hit.) Re-measured at the merge, not picked from either side.
+git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
+                                                          # :11119 (the stale "nothing consumes it"
+                                                          # comment), relation_write.py:7 (the
+                                                          # CONSUMER's docstring) and sdk.py:17188 (the
+                                                          # #10999 transport-only note). ⛔ NOT "no
+                                                          # consumer": the second hit IS the consumer
+                                                          # (§0 above). (⚠️ the `-- tortoise/` scope is
+                                                          # the claim: unscoped it also matches the
+                                                          # reader below)
 git grep -c 'result\["relations"\]' -- tests/          # tree-wide READERS — TWO files on this merge:
                                                           # tests/test_10999_batch_story_relations.py — 56
                                                           # LINES — and tests/eval/write_path/
