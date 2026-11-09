@@ -7527,10 +7527,11 @@ surfaces:
   # could red if the reservation were deleted — the exclusion would silently
   # become a filter over ids the write doors admit, the exact hole the P1 closed.
   # ⚠️ #11620 P2: the "246" this note used to quote does not reproduce and was
-  # never a selection (the 60-file slow pool rides EVERY diff while only
-  # `slow_selected` is diff-scoped, and the fast count moves with the manifest —
-  # 189 at `db55b7b51f`). The pin is the SELECTION, which the sdk arm above
-  # makes: this suite is in it.
+  # never a selection: the 60-file slow pool is EMITTED on every selection but
+  # RUNS only where `slow_run` says so (the whole pool on a full matrix, just
+  # `slow_selected` on tier-2, neither on a docs/website-only diff), and the
+  # fast count moves with the manifest — 189 at `db55b7b51f`. The pin is the
+  # SELECTION, which the sdk arm above makes: this suite is in it.
   - test_demo_session_read_exclusion_8290.py
   # #9599 (the `sdk` arm; the `core` row is in that block): same reason. The
   # blank/reserved rule's DOOR half IS `tortoise/ids.py`, so an ids.py-only diff

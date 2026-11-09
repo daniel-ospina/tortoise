@@ -20932,18 +20932,21 @@ def test_the_blank_session_id_guard_runs_on_an_ids_only_diff():
     # named-surface match REPLACES the `core` fallback, so the `core`-only row
     # was asleep on the exact change it guards: measured before the `sdk` arm,
     # `--changed-files tortoise/ids.py` → `surfaces=['sdk']` with
-    # `suite_present=False` — NO diff of the module this suite guards selected
-    # it, so deleting the reservation, or the
+    # `test_9599_blank_session_id.py` ABSENT from `test_files` — NO diff of the
+    # module this suite guards selected it, so deleting the reservation, or the
     # `_writable_container_id(reserved) is True` asymmetry this PR adds, merged
     # green (#1349/#3332/#3616/#4309 silent-drop class). Dual `core` + `sdk` is
     # the established pattern in the manifest (cf. `test_7936_stable_stub_ids.py`).
     # ⚠️ #11620 P2: this comment used to quote "246 files" for that selection. It
-    # does not reproduce and was never a selection — the 60-file SLOW pool rides
-    # EVERY diff (its 3-file `slow_selected` is the diff-scoped part) and the fast
-    # count moves with the manifest, so adding a pool to a count inflates any
-    # total (measured at this head: the ids.py diff selects `['sdk']`,
-    # 189 fast files, `slow_selected` 3). Pin the SELECTION — `suite_present` and
-    # the membership asserted below — never a file count.
+    # does not reproduce and was never a selection: the 60-file SLOW pool is
+    # EMITTED on every selection (a docs-only diff carries all 60 in `slow_files`)
+    # but RUNS only where `slow_run` says so — the whole pool on a full matrix,
+    # the diff-scoped `slow_selected` (3 for this ids.py diff) on tier-2, and
+    # nothing on a docs/website-only diff — and the fast count moves with the
+    # manifest. Adding a pool to a fast count inflates any total (measured at
+    # this head: the ids.py diff selects `['sdk']`, 189 fast files,
+    # `slow_selected` 3). Pin the SELECTION — membership in `test_files`, asserted
+    # below — never a file count.
     root = Path(__file__).resolve().parents[1]
     assert (root / "tortoise/ids.py").exists(), "the guarded module is gone"
     r = _sel(["tortoise/ids.py"])
