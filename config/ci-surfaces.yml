@@ -7473,9 +7473,14 @@ surfaces:
   # `SOURCE_PATTERNS` maps to the NAMED surface `sdk` — and a named-surface match
   # REPLACES the `core` fallback, so the `api`+`core` rows above do NOT run on an
   # `ids.py` diff. Measured (#8290 review, P2): `--changed-files tortoise/ids.py`
-  # selects `['sdk']`, and with only the api+core rows NONE of those 246 selected
-  # files could red if the reservation were deleted — the exclusion would silently
+  # selects `['sdk']`, so with only the api+core rows NONE of the selected files
+  # could red if the reservation were deleted — the exclusion would silently
   # become a filter over ids the write doors admit, the exact hole the P1 closed.
+  # ⚠️ #11620 P2: the "246" this note used to quote does not reproduce and was
+  # never a selection (the 60-file slow pool rides EVERY diff while only
+  # `slow_selected` is diff-scoped, and the fast count moves with the manifest —
+  # 189 at `db55b7b51f`). The pin is the SELECTION, which the sdk arm above
+  # makes: this suite is in it.
   - test_demo_session_read_exclusion_8290.py
   # #9599 (the `sdk` arm; the `core` row is in that block): same reason. The
   # blank/reserved rule's DOOR half IS `tortoise/ids.py`, so an ids.py-only diff

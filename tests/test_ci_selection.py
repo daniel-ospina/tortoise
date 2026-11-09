@@ -20814,11 +20814,19 @@ def test_the_blank_session_id_guard_runs_on_an_ids_only_diff():
     # `SOURCE_PATTERNS` maps `tortoise/ids.py` to the NAMED surface `sdk`, and a
     # named-surface match REPLACES the `core` fallback, so the `core`-only row
     # was asleep on the exact change it guards: measured before the `sdk` arm,
-    # `--changed-files tortoise/ids.py` selected 246 files and NOT ONE of them
-    # was this suite — deleting the reservation, or the
+    # `--changed-files tortoise/ids.py` → `surfaces=['sdk']` with
+    # `suite_present=False` — NO diff of the module this suite guards selected
+    # it, so deleting the reservation, or the
     # `_writable_container_id(reserved) is True` asymmetry this PR adds, merged
     # green (#1349/#3332/#3616/#4309 silent-drop class). Dual `core` + `sdk` is
     # the established pattern in the manifest (cf. `test_7936_stable_stub_ids.py`).
+    # ⚠️ #11620 P2: this comment used to quote "246 files" for that selection. It
+    # does not reproduce and was never a selection — the 60-file SLOW pool rides
+    # EVERY diff (its 3-file `slow_selected` is the diff-scoped part) and the fast
+    # count moves with the manifest, so adding a pool to a count inflates any
+    # total (measured at this head: the ids.py diff selects `['sdk']`,
+    # 189 fast files, `slow_selected` 3). Pin the SELECTION — `suite_present` and
+    # the membership asserted below — never a file count.
     root = Path(__file__).resolve().parents[1]
     assert (root / "tortoise/ids.py").exists(), "the guarded module is gone"
     r = _sel(["tortoise/ids.py"])
