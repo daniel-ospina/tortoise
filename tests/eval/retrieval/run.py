@@ -438,6 +438,11 @@ def _inject_probe_model(args) -> None:
 EMBED_SPACE_MODEL = "model"
 EMBED_SPACE_SYNTHETIC = "oracle-synthetic"
 EMBED_SPACE_UNKNOWN = "unknown"
+# The closed set of labels this module can EMIT. `baseline_space` is read from
+# an arbitrary baseline file, so it can carry anything; a pair whose labels are
+# not both in this set is not a comparable pair even when the two strings are
+# equal (two identical pieces of garbage are not one space).
+EMBED_SPACE_KNOWN = frozenset({EMBED_SPACE_MODEL, EMBED_SPACE_SYNTHETIC})
 
 
 def _loaded_embedding_model():
@@ -748,7 +753,7 @@ def _baseline_embedding_space(base: dict) -> str:
 
 def _gate_vs_baseline(
     per_query, baseline_per_query, rng,
-    *, space: str | None = None, baseline_space: str | None = None,
+    *, space: str | None, baseline_space: str | None,
     model_id: str | None = None, baseline_model_id: str | None = None,
 ) -> dict | None:
     """The pre-registered SHIP/WARN/BLOCK gate, refusing cross-space compares.
@@ -779,6 +784,15 @@ def _gate_vs_baseline(
     if not baseline_per_query:
         return None
     unknown = EMBED_SPACE_UNKNOWN
+    # `space`/`baseline_space` are REQUIRED (no default), for the same reason
+    # `_query_vecs` requires `space`: a `None` default is an ambient decision
+    # taken one call site away and invisible where it happens, and with both
+    # sides omitted every refusal below is skipped and the pair is SCORED —
+    # the two-space-by-omission hole this module exists to close, reopened on
+    # the gate itself. An explicit `None` is an ABSENCE of the fact, not a
+    # space, so it is normalized to `unknown` and refuses below.
+    space = unknown if space is None else space
+    baseline_space = unknown if baseline_space is None else baseline_space
     if unknown in (space, baseline_space):
         seeded_advice = (
             "Re-run with the corpus SEEDED in one space (drop "
@@ -803,16 +817,39 @@ def _gate_vs_baseline(
             "space": space,
             "baseline_space": baseline_space,
         }
-    if space is not None and baseline_space is not None and space != baseline_space:
-        return {
-            "verdict": "INCOMPARABLE",
-            "reason": (
+    # No `is not None` guard here: the normalization above has already made
+    # both sides concrete labels, so a `None` cannot reach this test. Guarding
+    # it anyway would read as if `None` were still reachable a few lines below
+    # the comment saying it is not — and that is exactly the invitation to
+    # "simplify" the refusal back into the fail-open this commit closes.
+    # Membership, not just equality: a baseline file supplies an ARBITRARY
+    # label, so two identical unrecognised labels must refuse rather than
+    # present themselves as "the same space".
+    if (space != baseline_space
+            or space not in EMBED_SPACE_KNOWN
+            or baseline_space not in EMBED_SPACE_KNOWN):
+        unrecognised = [s for s in (space, baseline_space)
+                        if s not in EMBED_SPACE_KNOWN]
+        if unrecognised and space == baseline_space:
+            reason = (
+                f"the embedding space label '{space}' is not one this runner "
+                f"can emit (known: 'model', 'oracle-synthetic'), so two "
+                f"identical labels are two pieces of the same GARBAGE, not "
+                f"one space. A baseline's label is read from the file, not "
+                f"derived, so it can carry anything — re-baseline with a run "
+                f"of this runner so the label is a fact before gating."
+            )
+        else:
+            reason = (
                 f"run measured the '{space}' embedding space but the baseline "
                 f"measured '{baseline_space}' — paired deltas compare the "
                 f"instrument, not the change. Re-baseline in this space "
                 f"(commit a run of unmodified code with the same "
                 f"corpus_embedding_space) before gating."
-            ),
+            )
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": reason,
             "space": space,
             "baseline_space": baseline_space,
         }
@@ -908,6 +945,14 @@ def _run_with_sdk(args, sdk) -> dict:
     space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
     reembedded = 0
     unverified = 0
+    # `unverified` counts the embedded population this run could NOT vouch for.
+    # It is computed on BOTH paths and outside every `--quiet` guard: a
+    # `--no-seed-corpus` run wrote nothing, so that population is the whole
+    # embedded index. Left at its initial 0, the field would tell a reader (or
+    # an automation filtering on `corpus_points_unverified == 0` for "fully
+    # verified") the exact opposite of what happened.
+    if space == EMBED_SPACE_UNKNOWN:
+        unverified = _uncovered_corpus_points(proj.g, [])
     if space != EMBED_SPACE_UNKNOWN:  # `unknown` is already --no-seed-corpus
         if space == EMBED_SPACE_MODEL:
             reembedded = _reembed_corpus(proj.g, points, model)
@@ -1165,6 +1210,13 @@ def _run_with_sdk(args, sdk) -> dict:
         "by_tier": by_tier,
         "paired_vs_fused": paired,
         "gate_vs_baseline": gate,
+        # Whether a baseline was SUPPLIED, independent of whether it could be
+        # compared: `_gate_vs_baseline` returns None both when there is no
+        # baseline and when one was given but nothing paired (no per_query, or
+        # no overlapping query ids). Without this flag the summary reports the
+        # second case as "no --baseline", telling the reader the opposite of
+        # what happened.
+        "baseline_supplied": str(args.baseline) if args.baseline else None,
         "per_query": {qid: oracle_per_query[qid] for qid in sorted(oracle_per_query)},
         "authored_metrics": authored_agg,
         "provenance": _capture_provenance(proj, is_embedded, {
@@ -1195,8 +1247,9 @@ def _run_with_sdk(args, sdk) -> dict:
             "On embedded, fused RRF is NOT vector alone — per-query data shows "
             "FTS populated 40/100 queries and fused != vector on 17/100 "
             "(fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0).",
-            "Embedding space (provenance.corpus_embedding_space): corpus and "
-            "query vectors are ALWAYS produced in ONE space. No model loaded "
+            "Embedding space (provenance.corpus_embedding_space): whenever the "
+            "space is KNOWN ('model' or 'oracle-synthetic'), corpus and query "
+            "vectors are produced in ONE space. No model loaded "
             "→ 'oracle-synthetic' (topic-centroid sums from the oracle "
             "structure + seeded noise; the documented degraded fallback). "
             "Model loaded → 'model', and the seeded corpus is RE-EMBEDDED "
@@ -1217,7 +1270,13 @@ def _run_with_sdk(args, sdk) -> dict:
             "a corpus an earlier MODEL-space run re-embedded, and product "
             "embeddings are indistinguishable here), so no space can be "
             "claimed and the gate refuses to compare — and the metrics this "
-            "run reports are not a quality statement.",
+            "run reports are not a quality statement. The ONE-SPACE claim "
+            "above does NOT hold here: with no trustworthy corpus space to "
+            "follow, the query side falls back to the oracle while the "
+            "corpus keeps whatever vectors it already held, so the arm may "
+            "genuinely span two spaces. That is exactly why the space is "
+            "'unknown' and why the gate refuses — it is a refusal to make a "
+            "statement, not a statement that no comparison was needed.",
             "The gate REFUSES a cross-space comparison (verdict "
             "INCOMPARABLE) — paired deltas across two embedding spaces "
             "measure the instrument, not the change, and the model id is part "
@@ -1286,14 +1345,55 @@ def _markdown_summary(report: dict) -> str:
             f"| {m['r@10']['value']:.3f} | {m['mrr']['value']:.3f} |"
         )
     g = report.get("gate_vs_baseline")
-    gate_line = f"gate vs baseline: {g['verdict']}" if g else "gate: none (no --baseline)"
+    if not g:
+        supplied = report.get("baseline_supplied")
+        gate_line = (
+            f"gate: NONE — a baseline WAS supplied ({supplied}) but nothing "
+            f"could be compared (no paired query ids, or it carried no "
+            f"per_query). NOT a ship signal."
+            if supplied else "gate: none (no --baseline)"
+        )
+    elif g["verdict"] == "INCOMPARABLE":
+        # The refusal must be ACTIONABLE where the loop reads it. The token
+        # alone reads as "not BLOCK", and "did not block" is not "passed" —
+        # no comparison was made at all. `g["reason"]` carries the remedy
+        # (re-baseline in this space); printing the token without it is how a
+        # refusal gets mistaken for a ship signal.
+        # The reason is appended only when there IS one: `g.get('reason', '')`
+        # returns `None` for an explicit ``None`` (the key exists), so a naive
+        # interpolation prints the literal "None" on the refusal line — junk
+        # exactly where a reader most needs a clear answer — and an empty
+        # reason leaves a dangling ". " separator.
+        reason = (g.get("reason") or "").strip()
+        gate_line = "gate vs baseline: INCOMPARABLE — NO COMPARISON WAS MADE, " \
+                    "so this run carries no quality evidence and is NOT a " \
+                    "ship signal."
+        if reason:
+            gate_line = f"{gate_line} {reason}"
+    else:
+        gate_line = f"gate vs baseline: {g['verdict']}"
+    # The SPACE belongs in the summary too, not only in the JSON/report notes:
+    # `--quiet` suppresses every console warning, so without this the whole
+    # console artifact is a normal-looking metrics table over an index whose
+    # space could not be established — the run the notes call "not a quality
+    # statement".
+    space = (report.get("provenance") or {}).get("corpus_embedding_space")
+    space_line = None
+    if space:
+        space_line = f"embedding space: {space}"
+        if space == EMBED_SPACE_UNKNOWN:
+            space_line += (" — the space could not be established for the "
+                           "whole index, so the table above is NOT a quality "
+                           "statement")
     rv = report.get("rerank_verdict")
+    tail = ["", gate_line]
+    if space_line:
+        tail.append(space_line)
     if rv:
         c = rv.get("ndcg@10_delta_points", {})
-        rv_line = (f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
-                   f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
-        return "\n".join(lines + ["", gate_line, rv_line])  # noqa: RUF005
-    return "\n".join(lines + ["", gate_line])  # noqa: RUF005
+        tail.append(f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
+                    f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
+    return "\n".join(lines + tail)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1371,6 +1471,12 @@ def main(argv: list[str] | None = None) -> int:
     out = write_outputs(report, args.out)
     print("\n" + _markdown_summary(report))
     print(f"\nreport: {out}")
+    # EXIT CODE IS ALWAYS 0, for every verdict — SHIP, WARN, BLOCK and
+    # INCOMPARABLE alike. Deliberate and pre-existing: this is a measurement
+    # tool, and no caller in this repo keys on `$?`. The verdict is read from
+    # the JSON (`gate_vs_baseline.verdict`) and from the summary above, which
+    # is why those two must never let a refusal look like a pass. A shell
+    # wrapper that wants `$?` to mean "gated" would need this changed first.
     return 0
 
 

@@ -841,12 +841,21 @@ def test_a_stores_declaration_that_does_not_answer_is_refused():
     """`#11492`: every declaration answers row 2's question, and `load()` refuses a shrug.
 
     Row 2 is *"is every stored vector on a label the query leg can serve?"*, and the one fact it
-    needs — WHERE the vector lands — cannot be derived for most writers (the store is not a
-    `MERGE|CREATE (:Label` in the writer's own body: for five it is a `MATCH` the derivation does not
-    credit, for nine there is no label statement in the writer at all, and for one the statement is
-    its caller's), so it is DECLARED. The refusals below are what keeps that declaration from
-    degrading into a default: an empty tuple ("unspecified") and a missing field would both read to
-    the grader as *nothing to compare*, i.e. a silent pass for the one writer nobody checked.
+    needs — WHERE the vector lands — cannot be derived for most writers (15 of the 20 outside-gate
+    writers name no usable label in their own Cypher, because a store is not always a
+    `MERGE|CREATE (:Label` in the writer's own body: the label may sit in a `MATCH` the derivation
+    does not credit, in a module-level constant, behind a property-map merge, behind a store
+    delegated to another writer (`_index_process_unit`), in a writer that only BUILDS a clause
+    (`set_embedding_clause`), or in the caller's own statement — and those are a SAMPLE: the body may
+    hold no store at all (a read, a read into a dict, or comment prose — `_compare_views`,
+    `_graph_fingerprint`, `turn_prior_vectors`, `_index_gate_read`, `_apply_one`), carry a value a
+    later pass stores (`add_point`, `_journal_event_raw_write`), quote a wipe it does not own
+    (`_prewipe_synthetic_write_scope`, whose whole body is a `return` — the `SET n.embedding = NULL`
+    it quotes is `_rebuild_all_replay`'s, and that writer is NOT among these fifteen), or interpolate
+    the label at runtime (`restore_graph`)), so it is DECLARED. The refusals below are what keeps that
+    declaration from degrading into a default: an empty tuple ("unspecified") and a missing field
+    would both read to the grader as *nothing to compare*, i.e. a silent pass for the one writer
+    nobody checked.
 
     ⛔ The directions are not symmetric and the message says so: a label that is not a Cypher label
     can never match the served set (the false-hold direction), while an empty tuple or a non-tuple
