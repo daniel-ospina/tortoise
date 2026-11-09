@@ -1752,6 +1752,52 @@ class TestCoreHierarchy:
 
     # ── the negative control ───────────────────────────────────────────
 
+    def test_the_subject_row_matches_s5_except_the_nil_bucket(self):
+        """§5's Subject block and this row differ by EXACTLY `other`.
+
+        The failure this prevents: the doc is NOT internally consistent here —
+        §5's block and §6's prose both list `other`, while §6's TABLE row and
+        the #9964 authority (`kind_layers.subject_kind_names()`) both omit it.
+        Before this pin the code comment claimed "both exclude `other`", which
+        was false about §5, and nothing measured the gap — so a reader of §5
+        would have concluded this row was short by one kind. Pinning the
+        difference as an EXACT set makes the divergence a stated decision: a
+        second name joining or leaving it reds here.
+        """
+        s5_subject = _ontology_fenced("### Subject Kind Vocabulary (core)")
+        assert s5_subject, "the §5 subject block parsed empty — pin is vacuous"
+        assert s5_subject - set(CORE_SUBCLASSES["Subject"]) == {"other"}, (
+            "the §5-subject-vs-Subject-row gap is no longer exactly the NIL "
+            f"bucket: {sorted(s5_subject - set(CORE_SUBCLASSES['Subject']))}")
+        assert not (set(CORE_SUBCLASSES["Subject"]) - s5_subject), (
+            "the Subject row names a kind §5 does not: "
+            f"{sorted(set(CORE_SUBCLASSES['Subject']) - s5_subject)}")
+        # …and §6's table row is the one that agrees with the row (its prose does not).
+        table = _ontology_s6_table()
+        assert _kinds_in_cell(table["Subject"]) == set(CORE_SUBCLASSES["Subject"])
+
+    def test_point_and_event_have_no_s6_row_and_that_is_recorded(self):
+        """§6 declares rows for Object/Document/Subject ONLY — Point/Event are an extension.
+
+        The failure this prevents: `CORE_SUBCLASSES` grows a Point and an Event
+        row justified only inside a code comment, so a lane reading §6 concludes
+        `expand_kind("Event")` should be `["Event"]` and files the widening as a
+        regression. The omission is asserted here rather than described, and the
+        extension is recorded where a lane reads it (#11000 + the epic plan's §6
+        table) — `docs/ONTOLOGY.md` is owner-gated, so proposing the two rows is
+        the doc lane's job and this test is the fact it rests on.
+        """
+        table = _ontology_s6_table()
+        assert set(table) >= {"Object", "Subject", "Document"}, table
+        for invented in ("Point", "Event"):
+            assert invented not in table, (
+                f"§6 gained a {invented} row — the code's extension is now a "
+                "transcription and this module's comment is stale")
+            assert invented in CORE_SUBCLASSES, (
+                f"{invented} lost its core hierarchy — §6 has no row, so only "
+                "§5 backs it and `test_point_and_event_rows_are_the_s5_vocabularies` "
+                "is now the sole pin")
+
     def test_a_kind_without_a_subclassof_declaration_is_unchanged(self, shipped):
         """A kind with no `subclassOf` (and no equivalence/alias) stays self-only.
 
@@ -1759,13 +1805,27 @@ class TestCoreHierarchy:
         is DECLARATION-DRIVEN — that it did not become a blanket "every pack kind
         gains a parent", which would make every kind read as every other kind.
         Population is derived: every declared pack kind that appears in no
-        `subclassOf` child / `equivalentTo` source / legacy-alias entry.
+        `subclassOf` child / `equivalentTo` (either end) / bare-form / legacy-alias
+        entry.
         """
+        from tortoise.pack_registry import LEGACY_KIND_ALIASES
+
         universe = {k for packs in shipped.list_all_kinds().values() for k in packs}
         touched = {f"{p.namespace}:{c}" for p in shipped.packs.values()
                    for c in p.kind_subclasses}
-        touched |= {f"{p.namespace}:{k}" for p in shipped.packs.values()
-                    for k in p.kind_equivalences}
+        # `equivalentTo` is BIDIRECTIONAL, so the TARGET end is widened too —
+        # omitting it would red this control on a legitimate equivalence rather
+        # than on a blanket widening.
+        for p in shipped.packs.values():
+            for kind, targets in p.kind_equivalences.items():
+                touched.add(f"{p.namespace}:{kind}")
+                touched.update(targets)
+        for new_kind, legacy in LEGACY_KIND_ALIASES.items():
+            touched.add(new_kind)
+            touched.update(legacy)
+        # A bare spelling inherits from its namespaced forms, so it is not
+        # "untouched" either.
+        touched |= {k.split(":", 1)[1] for k in touched if ":" in k}
         untouched = universe - touched
         assert untouched, "no untouched pack kind exists — the control is vacuous"
 
@@ -1776,29 +1836,29 @@ class TestCoreHierarchy:
             f"anyway — the widening is not declaration-driven: {widened}")
         assert shipped.expand_kind("dev:code") == ["dev:code"]
 
-    # ── transitivity: ONE level, and pinned as such ────────────────────
+    # ── the closure: depth 2, and DIRECTIONAL ─────────────────────────
 
-    def test_one_level_is_the_whole_closure_because_the_declaration_is_depth_one(
-            self, tmp_path):
-        """The contract is ONE hop, and it equals the transitive closure.
+    def test_the_closure_is_depth_two_because_a_declared_parent_is_a_core_child(
+            self, shipped, tmp_path):
+        """ONE hop is NOT the closure — a declared parent is itself a core child.
 
-        #11000 raises the transitivity question directly. The answer is decided
-        and pinned, not left implicit: RDFS §3.4 makes `rdfs:subClassOf`
-        transitive and SHACL's `sh:class` validates against the transitive
-        closure of `rdf:type`, so a *closure* is the standard reading — and here
-        the closure COLLAPSES to one level because of two properties of the
-        declaration model, each asserted below:
+        #11000's first cut argued the declaration model is depth 1, so one hop
+        would equal the transitive closure. That argument is WRONG, and this
+        test is the correction: `_validate` does restrict a `subclassOf` parent
+        to core kinds (true — pinned below), but 15 of the 16
+        `CANONICAL_OBJECT_KINDS` are THEMSELVES children of `Object`, so every
+        declared pair is the chain `pack kind ⊑ core child ⊑ Object`
+        (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
+        17 declared pairs had a parent that is an Object child, and
+        `expand_kind("Object")` carried none of them.
 
-          (1) a pack can only subclass a CORE kind (`_validate` allowlist), so no
-              pack kind can ever be another pack kind's parent; and
-          (2) no core kind is itself a child, so the core rows are a forest of
-              depth 1.
-
-        So a fixpoint walk would compute exactly this table. The pins below are
-        the ones that keep that true: relax either premise and they red, which is
-        the signal to implement the walk — instead of under-widening silently.
+        Both directions are asserted, because they are different relations:
+        DOWN (a root gathers its whole subtree) and UP (a child inherits its
+        ancestors' NAMES). The over-wide direction — a child gaining its
+        parent's OTHER children — is pinned separately, by
+        `test_a_child_gains_only_its_own_parent`.
         """
-        # (1) A pack-parented subclassOf is refused by the validator.
+        # The one-hop argument's still-true half: a pack kind can never parent.
         pack_dir = tmp_path / "grandchild"
         pack_dir.mkdir()
         (pack_dir / "manifest.yaml").write_text(yaml.safe_dump({
@@ -1814,12 +1874,140 @@ class TestCoreHierarchy:
         assert any("not found in core ontology" in e
                    for e in registry.errors.get("grandchild", [])), registry.errors
 
-        # (2) The core rows are depth 1: no row's parent is another row's child.
-        children = {child for row in CORE_SUBCLASSES.values() for child in row}
-        assert not (set(CORE_SUBCLASSES) & children), (
-            "a core kind is both a hierarchy root and a child — the core rows are "
-            f"no longer depth 1, so one-hop widening under-widens: "
-            f"{sorted(set(CORE_SUBCLASSES) & children)}")
+        # …and the half that is FALSE: a declared parent IS a core child.
+        core_children = {c for row in CORE_SUBCLASSES.values() for c in row}
+        depth_two = sorted(
+            f"{p.namespace}:{child}"
+            for p in shipped.packs.values()
+            for child, parent in p.kind_subclasses.items()
+            if parent in core_children
+        )
+        assert depth_two, (
+            "no declared subclassOf parent is a core child — the declaration "
+            "model collapsed to depth 1 and the closure below is over-built")
+
+        # DOWN: every root reaches every DECLARED descendant, transitively. This
+        # is the assertion whose absence let `expand_kind('Object')` miss 16 pack
+        # kinds. The expected set is walked from the declarations here rather
+        # than compared bucket-to-bucket, because a CROSS-AXIS kind (`goal`,
+        # `target`) is a child of BOTH `Object` and `Point`, so a child's bucket
+        # legitimately holds an ancestor `Object` has no claim on.
+        children_of = {root: set(kids) for root, kids in CORE_SUBCLASSES.items()}
+        for p in shipped.packs.values():
+            for child, parent in p.kind_subclasses.items():
+                children_of.setdefault(parent, set()).add(f"{p.namespace}:{child}")
+        for root in CORE_SUBCLASSES:
+            expected: set[str] = set()
+            stack = list(children_of.get(root, ()))
+            while stack:
+                kind = stack.pop()
+                if kind in expected:
+                    continue
+                expected.add(kind)
+                stack.extend(children_of.get(kind, ()))
+            assert expected, root
+            missing = sorted(expected - set(shipped.expand_kind(root)))
+            assert not missing, (
+                f"expand_kind({root!r}) does not reach its declared descendants "
+                f"transitively: {missing}")
+
+        # UP: every declared child carries its parent's ancestors by NAME.
+        for p in shipped.packs.values():
+            for child, parent in p.kind_subclasses.items():
+                bucket = set(shipped.expand_kind(f"{p.namespace}:{child}"))
+                assert parent in bucket, (child, parent)
+                assert set(CORE_SUBCLASSES.get(parent, ())) <= bucket, (
+                    f"{p.namespace}:{child} missed its parent's row: "
+                    f"{sorted(set(CORE_SUBCLASSES.get(parent, ())) - bucket)}")
+
+    def test_the_closure_does_not_walk_down_from_an_ancestor(self, shipped):
+        """The closure is DIRECTIONAL — a child does not inherit its parent's subtree.
+
+        The failure this prevents: implementing the closure as a plain bucket
+        union ("for each member that is itself a key, add that bucket"). That
+        computes the right answer for a ROOT and the wrong one for a CHILD:
+        `WorkItem`'s bucket holds all eight of its children, so a union would put
+        `dev:pullRequest` in `expand_kind("dev:issue")` — every issue read would
+        return pull requests, cards and features. A reviewer proposing the fix
+        for the missing-leg-B report will propose exactly this; it must red.
+        """
+        work_item_children = sorted(
+            f"{p.namespace}:{c}"
+            for p in shipped.packs.values()
+            for c, parent in p.kind_subclasses.items()
+            if parent == "WorkItem"
+        )
+        assert len(work_item_children) >= 2, work_item_children
+        # A declared `equivalentTo` peer is the SAME kind (#7848's surviving
+        # cross-pack bridge), so it is not a sibling leak — excluded here so the
+        # guard fires on a directional mistake and not on a legitimate alias.
+        peers: set[str] = set()
+        for p in shipped.packs.values():
+            for kind, targets in p.kind_equivalences.items():
+                peers.add(f"{p.namespace}:{kind}")
+                peers.update(targets)
+        for child in work_item_children:
+            siblings = set(work_item_children) - {child} - peers
+            leaked = siblings & set(shipped.expand_kind(child))
+            assert not leaked, (
+                f"{child} gained its SIBLINGS ({sorted(leaked)}) — the closure "
+                "walked down from an ancestor instead of up to it")
+
+    def test_a_core_root_reaches_stored_legacy_spellings_beneath_it(self, shipped):
+        """A root's subtree carries the legacy spellings its descendants carry.
+
+        The failure this prevents: `LEGACY_KIND_ALIASES` is applied to the kind
+        it renames, so a root that gathers its descendants by NAME still misses
+        the pre-#7848 spelling of one of them — `deployment` would be in
+        `expand_kind("Event")` while `dev:deployment` (the spelling actually in
+        stored graphs) was not, i.e. present in the table and matching no row.
+        Derived: every legacy alias whose new spelling is a descendant of a root
+        must also appear in that root's bucket.
+        """
+        from tortoise.pack_registry import LEGACY_KIND_ALIASES
+
+        checked = 0
+        for root in CORE_SUBCLASSES:
+            expanded = set(shipped.expand_kind(root))
+            for new_kind, legacy_kinds in LEGACY_KIND_ALIASES.items():
+                if new_kind not in expanded:
+                    continue
+                checked += 1
+                missing = sorted(set(legacy_kinds) - expanded)
+                assert not missing, (
+                    f"expand_kind({root!r}) reaches {new_kind!r} but not its "
+                    f"stored spelling(s) {missing} — a pre-#7848 row is unreadable")
+        assert checked, (
+            "no legacy alias sits under any core root — this pin is vacuous "
+            "(it would pass with the propagation removed)")
+
+    def test_a_bare_kind_inherits_the_widening_of_its_namespaced_forms(self, shipped):
+        """`expand_kind("issue")` ⊇ `expand_kind("dev:issue")`.
+
+        The failure this prevents: the fix being INERT for the bare spelling,
+        which is a live stored state (#6146 — `migrate_kinds` is opt-in, never a
+        read precondition). The bare bucket used to be assembled as
+        `[bare, *fulls]` and nothing more, so it named `dev:issue` without
+        inheriting what `dev:issue` had gained: a bare-kinded row still missed
+        the `WorkItem` the whole change exists to reach. The reverse is NOT owed
+        and is asserted absent, because `dev:code` must stay `["dev:code"]`.
+        """
+        namespaced = sorted(f"{p.namespace}:{c}"
+                            for p in shipped.packs.values() for c in p.kind_subclasses)
+        assert namespaced, "no namespaced subclass exists — pin is vacuous"
+        starved = []
+        for full in namespaced:
+            bare = full.split(":", 1)[1]
+            if bare == full:
+                continue
+            gained = set(shipped.expand_kind(full)) - set(shipped.expand_kind(bare))
+            if gained:
+                starved.append((bare, full, sorted(gained)))
+        assert not starved, (
+            "a bare kind did not inherit the widening of its namespaced form: "
+            f"{starved}")
+        assert "WorkItem" in shipped.expand_kind("issue")
+
 
     def test_a_cross_axis_parent_is_a_recorded_decision(self, shipped):
         """The one declared pair whose parent is ALSO a live point kind — pinned.
