@@ -1084,8 +1084,8 @@ False** — **restricted to sessions where the retry did not fire**
 many arms ran.** A retry whose tail raised publishes `fired: False` as well, with the arm-choosing
 `trigger` and a `retry_failed` string beside it, and its first arm's capture restored binding by
 binding — so such a run belongs in this population, but must be selected deliberately, by
-`retry_failed`, rather than by the flag alone. ⛔ **Whose flag, spelled out, because this PR makes it
-two arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
+`retry_failed`, rather than by the flag alone. ⛔ **Whose flag, spelled out, because this clause spans two
+arms.** A retried run reaches `check_batch` twice, and the SECOND arm is an independent S2
 run whose flag can be `True` again (measured: an empty second yield flags `coverage_suspect=True`
 on both arms) — so counting against the pipeline's published `result["vet"]["s2"]`, which is the
 SECOND arm's block, attributes the wrong arm's verdict to the session. What makes the retry
@@ -1111,8 +1111,11 @@ it exists, this clause is quoted as an inference and never as a measurement. ⛔
 `added_by_s4` is `merged - s2_items`, and on a retried run `s2_items` is the UNION (both arms), so
 S4's contribution would be measured against a bigger base and understated — on precisely the
 population where a retry fired for a reason other than coverage (an injected arbiter). Restricting
-the count to non-retried sessions makes both halves unambiguous: one arm, one flag, one base. The
-population is therefore "S4 added items, the coverage check did not flag the batch, and no retry ran".
+the count to sessions where no retry FIRED makes both halves unambiguous about the capture that
+shipped: one arm, one flag, one base — the fail-open rows included above ship arm A's capture alone,
+which is what keeps "one arm" true of the DATA even though a second band was paid for. The
+population is therefore "S4 added items, the coverage check did not flag the batch, and no retry
+fired" (the phrasing §4.4 uses).
 That is an episode where S4 ADDED items in a case the coverage check could not flag — so the bounded
 re-narrate above cannot reach it, because the retry's armed-by-construction arm is exactly
 `coverage_suspect`. `> 0` means **do not delete `run_s4`**: the retry is a successor for the

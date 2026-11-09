@@ -1490,14 +1490,26 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     )
     # ⛔ AND THE ARM-A HALF, not only the `second: None` that clears arm B
     # (review round 5, P3). `mention_s2_stats` is a PAIR — the record's own
-    # contract (`extractor_v2.py:13009-13016`) is "ONE SHAPE ALWAYS:
-    # `{first, second}` on BOTH returns" — and the assertion above is satisfied
-    # by a PARTIAL restore that drops arm A's half entirely (measured: replacing
-    # the handler's dict with `{"second": None}` left 464 tests green). That is
-    # the same half-restore this PR exists to forbid, one level down: the
-    # shipped arm's mention stats vanish while `second: None` still reads right.
-    assert set(result["mentions"]["stats"]) == {"first", "second"}, (
-        "`{first, second}` is the contract on BOTH returns — a restore that "
+    # contract (`extractor_v2.py:13009-13016`) is "ONE SHAPE ALWAYS: the ARM
+    # keys are `{first, second}` on BOTH returns" — and the assertion above is
+    # satisfied by a PARTIAL restore that drops arm A's half entirely (measured:
+    # replacing the handler's dict with `{"second": None}` left 464 tests
+    # green). That is the same half-restore this PR exists to forbid, one level
+    # down: the shipped arm's mention stats vanish while `second: None` still
+    # reads right.
+    # ⛔ MEMBERSHIP, NOT SET EQUALITY (review round 6, P2): the contract this
+    # cites ends "the post-S4 union pass may add a THIRD key (`union`), so
+    # consumers read the arm keys by membership, never by set equality"
+    # (`extractor_v2.py:13012-13015`), and this file's own
+    # `test_the_union_pass_may_add_the_mentions_union_key` records that a `==`
+    # here "would fail on correct code (review round 3, P2)". The union key is
+    # reachable on the fail-open path — the union pass runs below the handler —
+    # so the `==` form was a latent false red that passed only because this
+    # fixture's shipped arm holds no mention. The floor form still reds on the
+    # `{"second": None}` mutant (measured), which is the property this pin
+    # exists for.
+    assert {"first", "second"} <= set(result["mentions"]["stats"]), (
+        "`{first, second}` is the FLOOR on BOTH returns — a restore that "
         "keeps only `second: None` silently drops ARM A's statistics: "
         f"{result['mentions']['stats']!r}"
     )
