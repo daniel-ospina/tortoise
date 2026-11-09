@@ -11067,7 +11067,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     and a later drift reds the arm while leaving this sentence stale — which is the
     #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
     `probes/capstone_measure.py:2238-2243`
-    ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it), `extractor_v2.py:1720` unchanged, the `create_operator`
+    ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it), `extractor_v2.py:1735` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9021 :9039 :9046 :9426` after the `f5c69f7478` base merge (+68 at #11449, then +15
     from this branch's own insertions), drifted unnoticed — the neighbouring
