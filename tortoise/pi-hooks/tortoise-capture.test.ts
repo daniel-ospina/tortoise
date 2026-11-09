@@ -61,8 +61,10 @@ import {
   carriedWindow,
   clampAttempts,
   clampWindow,
+  captureOutcome,
   classifyFailure,
   clipTurnContent,
+  mayKeepEntry,
   contentDigest,
   countPendingEntries,
   deriveMachineId,
@@ -2908,6 +2910,33 @@ test("#7708: a 422 does not unlink the only copy of the transcript", async () =>
   assert.equal(calls.length, 1, "a terminal entry was re-POSTed");
 });
 
+test("a 403 policy refusal defers and KEEPS the entry (#5051, #4895)", async () => {
+  // A suspended org answers 403. It is a refusal of the CALLER, not of the
+  // bytes: the same turns land once the org is reinstated or the key rotated,
+  // so the entry must be KEPT and retried — not quarantined behind a marker
+  // nothing on this path reaches.
+  //
+  // MUTATION THAT REDS THIS: classify 403 `permanent` again (or route the drain
+  // on `classifyFailure(...) === "permanent"` instead of `mayKeepEntry`) → the
+  // entry is quarantined and the only copy of the session is stranded.
+  const spool = tmpSpool();
+  writeSpoolEntry(spool, snapshot("sess-403"));
+  const { fetchImpl, calls } = statusFetch(403, '{"detail":"Organization is suspended"}');
+
+  const first = await flushSpool(TEST_CFG, { dir: spool, fetchImpl, now: 1_000 });
+  assert.equal(first.discarded.length, 0, "a policy refusal must never terminalise");
+  assert.equal(first.deferred, 1, "a policy refusal is a deferral");
+  const meta = readSpoolEntry(spool, "sess-403");
+  assert.ok(meta, "the only copy of the session was lost");
+  assert.equal(meta.terminal_failure, undefined, "a 403 marked the entry terminal");
+
+  // ...and it re-files once the caller fixes the thing the server named.
+  const ok = statusFetch(200);
+  const second = await flushSpool(TEST_CFG, { dir: spool, fetchImpl: ok.fetchImpl, now: 10 ** 12 });
+  assert.equal(second.filed, 1, "the kept capture must file once the org is reinstated");
+  assert.ok(calls.length >= 1);
+});
+
 test("#8531: a non-object terminal_failure marker does not strand the entry", async () => {
   // The marker is read by SHAPE, not truthiness: a hand-edited / foreign /
   // corrupt meta can carry `1`, `true`, `"yes"` or `[]`. Read by truthiness
@@ -3153,10 +3182,23 @@ test("every 409 stays retryable — a policy-blocked session is never silently d
   // is a network condition, never a server verdict.
   assert.equal(classifyFailure(null), "retry");
   assert.equal(classifyFailure(Number.NaN), "retry");
-  // An ABSOLUTE pin, not only a leg-vs-leg comparison: 403 stays PERMANENT
-  // (a suspended org is a reversible state, but deferring it is a separate
-  // policy question — #4895). Pinned so a same-direction drift reds here.
-  assert.equal(classifyFailure(403), "permanent");
+  // #5051 ANSWERED the 403 question this used to defer: 401/403/407 are
+  // `policy` — a REVERSIBLE credential/entitlement refusal, KEPT and retried
+  // once the caller fixes the org state or the key (#4895), never terminalised.
+  // Pinned absolutely so a same-direction drift reds here as well as in the
+  // Python↔Pi parity test.
+  assert.equal(classifyFailure(403), "policy");
+  assert.equal(classifyFailure(401), "policy");
+  assert.equal(classifyFailure(407), "policy");
+  // The 4-class contract the consequence sites read (Python mirror:
+  // `capture_receipts.capture_outcome`, asserted equal by the parity test).
+  assert.equal(captureOutcome(200), "landed");
+  assert.equal(captureOutcome(503), "retryable");
+  assert.equal(captureOutcome(504), "retryable");
+  assert.equal(captureOutcome(403), "policy");
+  assert.equal(captureOutcome(422), "permanent");
+  assert.equal(mayKeepEntry(403), true, "a policy refusal must be KEPT");
+  assert.equal(mayKeepEntry(422), false, "only a permanent refusal terminalises");
   // A 3xx (a redirect on a stored api_url) must never delete the capture.
   assert.equal(classifyFailure(301), "retry");
   assert.equal(classifyFailure(422), "permanent");

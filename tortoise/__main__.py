@@ -7,6 +7,11 @@ import re
 import sys
 from pathlib import Path
 
+# The ONE definition of the per-attempt outcome contract and of the recorded
+# local-receipt refusal set (#5051). `capture_receipts` is dependency-free, so
+# importing it at module load costs nothing and keeps the two rules in one home.
+from tortoise.capture_receipts import REFUSAL_STATUSES
+
 # #2201: single source of truth for markdown discovery. The "Found N markdown
 # files" count announced during `tortoise init` and `tortoise onboard` (whose
 # step-3 index runs the REAL indexer, so the indexer's own line is the one
@@ -22,18 +27,19 @@ from pathlib import Path
 # a repo merely LIVING under an ancestor dir named venv/ is not.
 _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycache__"})
 
-# The RECORDED local-receipt refusal set: a refusal in this set must never be
-# papered over with a 2xx local receipt (#4675's Task-15 acceptance line —
-# *"a LOCAL receipt is written on a **2xx** (403/402/503 ⇒ exit 1, honest
-# error, NO receipt) … that rule is correct and must not be weakened"*).
+# The RECORDED local-receipt refusal set — defined ONCE in
+# `tortoise/capture_receipts.py` (`REFUSAL_STATUSES`) beside the outcome
+# contract it must NOT be derived from, and imported under this name because
+# the receipt gates read it and `tests/test_session_confirm.py` pins it here.
 #
-# Named EXPLICITLY rather than derived from `classify_failure`, because the two
-# answer DIFFERENT questions, and both answers are correct:
+# It is deliberately INDEPENDENT of the outcome class (#5051), and both answers
+# are correct:
 #
-#   * the classifier answers *"may this become valid by waiting?"* — and 402 is
-#     TRANSIENT there, deliberately: #4614's data-loss fix needs a quota-refused
-#     capture KEPT in the spool (its `est` is computed from the incoming
-#     capture, so the identical capture succeeds once a node is freed).
+#   * the class answers *"what does this attempt mean, and what may happen to
+#     the entry?"* — and 402 is RETRYABLE there, deliberately: #4614's
+#     data-loss fix needs a quota-refused capture KEPT in the spool (its `est`
+#     is computed from the incoming capture, so the identical capture succeeds
+#     once a node is freed).
 #   * this set answers *"is this a refusal the user must be shown?"* — and 402
 #     is.
 #
@@ -41,7 +47,7 @@ _NON_CONTENT_DIRS = frozenset({".venv", "venv", ".git", "node_modules", "__pycac
 # weaken the receipt rule: the receipt gates stopped excluding it, so a 402
 # whose session happened to be durable minted a receipt for a refusal.
 # `tests/test_session_confirm.py` pins the two rules as independent.
-_NO_RECEIPT_REFUSAL_STATUSES = frozenset({402, 403, 503})
+_NO_RECEIPT_REFUSAL_STATUSES = REFUSAL_STATUSES
 
 
 def _markdown_files(root: Path | str) -> list[Path]:
@@ -7914,14 +7920,11 @@ def _session_post(api_key: str, api_url: str):
             alone would confirm them. Uniformity is deliberate: a reviewer must
             not have to work out why one path confirms a 402 and the other does
             not. The deferral is recoverable either way (each is `retry`, so the
-            entry is kept and re-posted); #5051 holds the question of broadening
-            both.
+            entry is kept and re-posted).
             """
-            from tortoise.capture_spool import classify_failure
-            if (outcome.ok
-                    or outcome.status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(
-                        outcome.status, outcome.detail) != "retry"):
+            from tortoise.capture_receipts import may_mint_local_receipt
+            if outcome.ok or not may_mint_local_receipt(
+                    outcome.status, outcome.detail):
                 return outcome
             if not isinstance(payload, dict):
                 # A non-mapping payload has nothing to confirm against; the
@@ -10141,18 +10144,27 @@ def _cmd_sessions_import(args) -> int:
         return 1
 
     def _spool_if_retryable(status: int | None, detail: str) -> None:
-        """Park the turns in the DURABLE SPOOL when the refusal is RETRYABLE.
+        """Park the turns in the DURABLE SPOOL unless the refusal is TERMINAL.
 
         The server's capture guard REFUSES rather than enqueues (its capacity
-        gate advertises `Retry-After`), and `classify_failure` already treats
-        5xx / 402 / 408 / 425 / 429 / 409 / 3xx / no-status as transient. A refusal is
-        therefore a DEFERRAL, not a rejection of the content: the POST reached
-        the server, there is no server-side copy to fall back on, and without
-        this the turns are lost. `claude` and `pi` survive the identical 504
-        because `session capture` spools BEFORE its POST; this path must too.
+        gate advertises `Retry-After`), and #5051's contract
+        (`capture_receipts.capture_outcome`) says which refusals are worth
+        keeping: `retryable` (5xx / 402 / 408 / 425 / 429 / 409 / 3xx /
+        no-status) AND `policy` (401/403/407 — a reversible credential or
+        entitlement state, #4895). A refusal is therefore a DEFERRAL, not a
+        rejection of the content: the POST reached the server, there is no
+        server-side copy to fall back on, and without this the turns are lost.
+        `claude` and `pi` survive the identical 504 because `session capture`
+        spools BEFORE its POST; this path must too.
 
-        PERMANENT failures must NOT be parked here — a malformed payload never
-        becomes valid by waiting, and it would retry forever.
+        A `policy` refusal is the case this gate used to get WRONG: 401/403/407
+        were `permanent` here, so a suspended org's 403 was never spooled at
+        all — the capture was dropped with `exit 1` and an identity-less
+        breadcrumb as the only record (the parent's trace, #5051 §3).
+
+        PERMANENT failures (400/404/405/406/413/415/422/…) must NOT be parked
+        here — a malformed payload never becomes valid by waiting, and it would
+        retry forever.
 
         Best-effort by construction: the spool is ADDITIONAL to the
         `capture-failure` breadcrumb the caller already wrote, never a
@@ -10162,13 +10174,13 @@ def _cmd_sessions_import(args) -> int:
         try:
             import time as _time
 
+            from tortoise.capture_receipts import may_keep_entry
             from tortoise.capture_spool import (
                 RETRY_MAX_SECONDS,
                 Snapshot,
                 _backoff_ms,
                 _terminal_marker,
                 capture_key,
-                classify_failure,
                 read_spool_meta,
                 spool_dir,
                 write_spool_entry,
@@ -10179,7 +10191,7 @@ def _cmd_sessions_import(args) -> int:
                 sanitize_attribution_field,
             )
 
-            if classify_failure(status, detail) != "retry":
+            if not may_keep_entry(status, detail):
                 return
             # Clamp exactly as `session capture` does — through the SDK's ONE
             # clip definition (#4897), never a bare literal: the spool's
@@ -10289,15 +10301,12 @@ def _cmd_sessions_import(args) -> int:
         never replace the honest error with a traceback (fail-open contract).
         """
         try:
-            from tortoise.capture_spool import (
-                _clear_breadcrumb_for,
-                classify_failure,
-            )
+            from tortoise.capture_receipts import may_mint_local_receipt
+            from tortoise.capture_spool import _clear_breadcrumb_for
             from tortoise.session_confirm import FILED, confirm_capture
             from tortoise.session_verify import session_detail
 
-            if (status in _NO_RECEIPT_REFUSAL_STATUSES
-                    or classify_failure(status, detail) != "retry"):
+            if not may_mint_local_receipt(status, detail):
                 return False
             if confirm_capture(session_detail, api_url, api_key,
                                session_id, turns) != FILED:

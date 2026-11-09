@@ -23,6 +23,13 @@ from pathlib import Path
 
 import pytest
 
+from tortoise.capture_receipts import (
+    POLICY_STATUSES,
+    REFUSAL_STATUSES,
+    capture_outcome,
+    may_keep_entry,
+    may_mint_local_receipt,
+)
 from tortoise.capture_spool import (
     Bounds,
     PostOutcome,
@@ -1306,7 +1313,7 @@ def _node_that_can_strip_ts() -> str:
 
 
 def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
-    """#4714. The two capture legs classify THE SAME spool directory
+    """#4714 + #5051. The two capture legs classify THE SAME spool directory
     (``~/.tortoise/capture-spool``), so transient-vs-permanent must be ONE
     policy, not two independent ones that happen to agree today. The Pi leg is
     TypeScript and is the one a Python-only fix forgets — leaving 402 permanent
@@ -1314,10 +1321,15 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     Python drain correctly deferred.
 
     A runtime comparison, not a source-spelling scan: it calls the real Pi
-    `classifyFailure` and compares it to the real Python `classify_failure` over
-    a status matrix. That needs node, so `_assert_both_legs_carry_402` runs
-    unconditionally FIRST — a guard that disappears with a missing runtime is
-    not a guard.
+    classifier and compares it to the real Python one over a status matrix.
+    That needs node, so `_assert_both_legs_carry_402` runs unconditionally
+    FIRST — a guard that disappears with a missing runtime is not a guard.
+
+    #5051: the comparison covers BOTH declared answers — the 4-class contract
+    (`capture_outcome` / `captureOutcome`) and the 2-class projection
+    (`classify_failure` / `classifyFailure`) — over the FULL status space, so a
+    leg cannot drift into a vocabulary of its own (the third one, `store-sync`'s
+    ``advance|permanent|retain``, is #5051's C4 and is not covered here yet).
 
     MUTATION THAT REDS THIS: drop 402 from EITHER classifier -> the maps
     disagree and the unrecoverable-from-one-leg case is exposed. The final 402
@@ -1333,12 +1345,14 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # `null`/`NaN` are passed THROUGH, not converted to `undefined`: the legs
     # must agree on the values a real caller can produce, and the conversion
     # hid the one genuine divergence (JS `classifyFailure(null)` was
-    # "permanent" because `null >= 300` is false).
+    # "permanent" because `null >= 300` is false). Every status the declared
+    # table distinguishes a class for is present.
     driver.write_text(
-        f'import {{ classifyFailure }} from "{ext}";\n'
-        "const matrix = [null, undefined, NaN, true, false, 0, 200, 301, 400, 402, 403, 408, 409, 422, 425, 429, 500, 503];\n"
+        f'import {{ classifyFailure, captureOutcome }} from "{ext}";\n'
+        "const matrix = [null, undefined, NaN, true, false, 0, 200, 201, 301, 400, 401, 402, 403, 404, 407, 409, 422, 425, 429, 500, 502, 503, 504];\n"
         "const out = {};\n"
-        "for (const s of matrix) out[String(s)] = classifyFailure(s);\n"
+        "for (const s of matrix) out[String(s)] = "
+        "{ f: classifyFailure(s), o: captureOutcome(s) };\n"
         "console.log(JSON.stringify(out));\n",
         encoding="utf-8",
     )
@@ -1359,30 +1373,48 @@ def test_the_pi_and_python_classifiers_agree_on_every_status_parity(tmp_path):
     # used to cover (Python returned "permanent" for a nan).
     python_input = {"null": None, "undefined": None, "NaN": float("nan"),
                     "true": True, "false": False}
-    for raw, verdict in pi_map.items():
+    for raw, verdicts in pi_map.items():
         status = python_input[raw] if raw in python_input else int(raw)
-        assert classify_failure(status) == verdict, (
+        assert classify_failure(status) == verdicts["f"], (
             f"the Pi and Python classifiers disagree on status {raw}: "
-            f"pi={verdict!r} python={classify_failure(status)!r}"
+            f"pi={verdicts['f']!r} python={classify_failure(status)!r}"
+        )
+        assert capture_outcome(status) == verdicts["o"], (
+            f"the Pi and Python OUTCOME CONTRACTS disagree on status {raw}: "
+            f"pi={verdicts['o']!r} python={capture_outcome(status)!r}"
         )
     # The matrix must actually exercise the transient 4xx family, or the parity
     # is vacuous. This also catches both legs drifting the same way.
-    assert classify_failure(402) == pi_map["402"] == "retry"
+    assert classify_failure(402) == pi_map["402"]["f"] == "retry"
     # And the no-status rows, which is exactly where the legs diverged.
-    assert pi_map["null"] == pi_map["undefined"] == pi_map["NaN"] == "retry"
+    assert pi_map["null"]["f"] == pi_map["undefined"]["f"] == pi_map["NaN"]["f"] == "retry"
     assert classify_failure(float("nan")) == "retry"
     # The BOOLEAN rows: in Python a bool IS an int, so `math.isfinite(True)` is
     # True and the value reached "permanent" (i.e. `_discard_entry`, i.e.
     # deletion) where `Number.isFinite(true)` is false and the Pi leg said
     # "retry". A real row, not a hypothetical: it is the one value in the int
     # domain the two legs classified differently, in the destructive direction.
-    assert classify_failure(True) == pi_map["true"] == "retry"
-    assert classify_failure(False) == pi_map["false"] == "retry"
-    # An ABSOLUTE pin, not only a leg-vs-leg comparison: a same-direction drift
-    # (both legs reclassifying 403's reversible policy state, #4895) would pass a
-    # pure comparison. 403 is deliberately still permanent here.
-    assert classify_failure(403) == pi_map["403"] == "permanent"
-    assert classify_failure(422) == pi_map["422"] == "permanent"
+    assert classify_failure(True) == pi_map["true"]["f"] == "retry"
+    assert classify_failure(False) == pi_map["false"]["f"] == "retry"
+    # An ABSOLUTE pin per class, not only a leg-vs-leg comparison: a
+    # same-direction drift would pass a pure comparison. #5051 ANSWERED the
+    # question this used to defer — 401/403/407 are `policy` (a reversible
+    # credential/entitlement state, #4895), NOT `permanent` — so the old
+    # `403 == permanent` pin is replaced by the declared table below.
+    for code in sorted(POLICY_STATUSES):
+        assert capture_outcome(code) == pi_map[str(code)]["o"] == "policy", code
+    assert classify_failure(403) == pi_map["403"]["f"] == "policy"
+    assert capture_outcome(422) == pi_map["422"]["o"] == "permanent"
+    assert classify_failure(422) == pi_map["422"]["f"] == "permanent"
+    # The class table is TOTAL and each class is reachable: a vocabulary where
+    # one class can never be produced is a rename, not a contract.
+    table = {raw: verdicts["o"] for raw, verdicts in pi_map.items()}
+    assert table["200"] == table["201"] == "landed"
+    assert table["403"] == table["401"] == table["407"] == "policy"
+    assert table["422"] == table["400"] == table["404"] == "permanent"
+    for raw in ("null", "undefined", "NaN", "301", "402", "409", "429",
+                "500", "502", "503", "504"):
+        assert table[raw] == "retryable", raw
 
 
 def _assert_both_legs_carry_402() -> None:
@@ -1402,13 +1434,22 @@ def _assert_both_legs_carry_402() -> None:
         assert classify_failure(code) == "retry", (
             f"Python leg does not treat {code} as transient"
         )
-    # Pinned the other way too: a same-direction drift that widened the retry set
-    # (e.g. deferring the reversible suspended-org 403, #4895) must red here as
-    # well as in the runtime parity test.
-    for code in (403, 422):
-        assert classify_failure(code) == "permanent", (
-            f"Python leg no longer treats {code} as permanent"
+    # Pinned the other way too. #5051 ANSWERED the 403 question this used to
+    # defer: 401/403/407 are now `policy` — a REVERSIBLE credential/entitlement
+    # refusal that is KEPT and retried (#4895), not terminalised. 422 stays
+    # `permanent` (a malformed payload never becomes valid by waiting), so the
+    # pin still catches a leg that widens the retry family indiscriminately.
+    for code in (401, 403, 407):
+        assert classify_failure(code) == "policy", (
+            f"Python leg no longer treats {code} as a reversible policy refusal"
         )
+    assert classify_failure(422) == "permanent", (
+        "Python leg no longer treats 422 as permanent"
+    )
+    assert may_keep_entry(403) and not may_keep_entry(422), (
+        "the spool consequence drifted: a policy refusal must be KEPT and only "
+        "a permanent one terminalised (#4895/#7708)"
+    )
 
     ts_raw = (REPO / "tortoise" / "pi-hooks" / "tortoise-capture.ts").read_text(
         encoding="utf-8"
@@ -1422,12 +1463,23 @@ def _assert_both_legs_carry_402() -> None:
 
     ts_codes = {
         int(code)
-        for group in re.findall(r'if \(([^)]*)\) return "retry";', ts_src)
+        for group in re.findall(r'if \(([^)]*)\) return "retryable";', ts_src)
         for code in re.findall(r"status === (\d+)", group)
     }
-    assert ts_codes, "the Pi classifyFailure has no integer transient set"
+    assert ts_codes, "the Pi captureOutcome has no integer retryable set"
     for code in (402, 408, 425, 429):
-        assert code in ts_codes, f"Pi leg dropped {code} from its transient set"
+        assert code in ts_codes, f"Pi leg dropped {code} from its retryable set"
+    # ..and the policy row, from the same stripped source: a leg that quietly
+    # moved 403 back to `permanent` would keep the retryable set intact.
+    ts_policy = {
+        int(code)
+        for group in re.findall(r'if \(([^)]*)\) return "policy";', ts_src)
+        for code in re.findall(r"status === (\d+)", group)
+    }
+    assert ts_policy == set(POLICY_STATUSES), (
+        f"Pi leg's policy row drifted: {sorted(ts_policy)} != "
+        f"{sorted(POLICY_STATUSES)}"
+    )
 
 
 def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
@@ -1469,6 +1521,95 @@ def test_a_quota_refusal_defers_the_capture_instead_of_destroying_it(tmp_path):
     now_ok = _Server(PostOutcome(ok=True, status=200))
     second = flush_spool(root, now_ok.post, now=10**12)
     assert second.filed == 1, "the deferred capture must file once the quota clears"
+
+
+def test_a_reversible_policy_refusal_is_kept_never_terminalised(tmp_path):
+    """#5051 (§2 contract) + #4895. A suspended org answers 403.
+
+    Both legs of the capture path used to classify 401/403/407 `permanent` on
+    the strength of "4xx that is not in the retry family" — but a 403 is a
+    refusal of the CALLER (the credential, the org state), never of the BYTES,
+    so it is `policy`: the entry is KEPT and retried once the caller fixes the
+    thing the server named. Terminalising it stranded the only copy of the
+    session behind a marker that nothing reached, and on the `sessions import`
+    path it was not spooled at all.
+
+    MUTATION THAT REDS THIS: classify 403 `permanent` again (or route the drain
+    on `classify_failure`'s old 2-class answer instead of the class) -> the
+    entry is quarantined, `summary.discarded` is non-empty, and the capture is
+    stranded.
+    """
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("sess-policy"))
+    refused = _Server(PostOutcome(
+        ok=False, status=403,
+        detail='{"detail":"Organization is suspended"}',
+    ))
+
+    summary = flush_spool(root, refused.post, now=1000.0)
+
+    assert summary.discarded == [], "a policy refusal must never terminalise"
+    assert summary.deferred == 1, "a policy refusal is a deferral"
+    meta = read_spool_meta(root, "sess-policy")
+    assert meta is not None, "the spool's only copy of the session was lost"
+    assert meta.get("terminal_failure") is None, (
+        "a 403 marked the entry terminal — the reversible state is now permanent"
+    )
+
+    # ...and it genuinely re-files once the credential/org state is fixed,
+    # which is what makes `policy` the safe class rather than a nicer word.
+    now_ok = _Server(PostOutcome(ok=True, status=200))
+    second = flush_spool(root, now_ok.post, now=10**12)
+    assert second.filed == 1, "the kept capture must file once the org is reinstated"
+    assert read_spool_meta(root, "sess-policy")["filed_key"]
+
+
+def test_an_unrecoverable_refusal_still_terminalises(tmp_path):
+    """The other half of #5051's contract: `permanent` is still terminal.
+
+    Widening `policy` must not widen `permanent` away: a 422 is a refusal of
+    THESE BYTES and can never succeed later, so the drain records it and stops
+    retrying (while KEEPING the copy — #7708).
+    """
+    root = tmp_path / "spool"
+    write_spool_entry(root, _snapshot("sess-422"))
+    refused = _Server(PostOutcome(ok=False, status=422, detail="bad payload"))
+
+    summary = flush_spool(root, refused.post, now=1000.0)
+
+    assert len(summary.discarded) == 1, "a 422 must terminalise"
+    assert summary.deferred == 0
+    meta = read_spool_meta(root, "sess-422")
+    assert meta is not None, "#7708: terminalise, never delete"
+    assert meta.get("terminal_failure"), "the entry must carry its terminal marker"
+
+
+def test_the_local_receipt_predicate_reproduces_the_recorded_rule():
+    """#5051: ONE predicate replaced the two hand-spelled gate expressions.
+
+    The gates used to read `status in {402,403,503} or classify_failure(...) !=
+    "retry"`. `may_mint_local_receipt` CONSUMES the class and adds the one
+    non-derivable set, and must reproduce that expression cell-for-cell — the
+    re-declaration is behaviour-neutral or it is a behaviour change disguised as
+    a refactor.
+    """
+    from tortoise.__main__ import _NO_RECEIPT_REFUSAL_STATUSES
+
+    assert _NO_RECEIPT_REFUSAL_STATUSES is REFUSAL_STATUSES, (
+        "the refusal set must have ONE definition, in capture_receipts"
+    )
+    for status in (None, 200, 301, 400, 401, 402, 403, 404, 407, 409, 422,
+                   429, 500, 502, 503, 504, float("nan")):
+        legacy = not (status in _NO_RECEIPT_REFUSAL_STATUSES
+                      or classify_failure(status) != "retry")
+        assert may_mint_local_receipt(status) == legacy, status
+    # The rows the recorded rule (#4675's Task-15 line) names, spelled out: a
+    # refusal is never papered over with a 2xx receipt, and a 504 whose session
+    # LANDED stays confirmable — that is #4675's own fix.
+    for status in (402, 403, 503):
+        assert not may_mint_local_receipt(status), status
+    for status in (429, 500, 502, 504, None):
+        assert may_mint_local_receipt(status), status
 
 
 def test_a_new_turn_does_not_re_arm_the_retry_window(tmp_path):
@@ -4354,16 +4495,22 @@ def test_a_network_backlog_is_a_DRAINING_state_not_a_block(tmp_path):
 
 
 def test_a_PERMANENT_refusal_does_not_latch_a_permanent_BLOCKED(tmp_path):
-    """REGRESSION (r2 review, P2). A rotated key answers 401, so every entry goes
-    TERMINAL — never retried, and `queued` is therefore 0. Counting a terminal
-    entry as "refused NOW" latched the box at `BLOCKED` forever: `tortoise
-    doctor` exited 1 on a box whose capture pipeline was healthy, and no
-    supported command could clear it (`session drain --retry-terminal` clears
-    the marker, and the next flush re-quarantines the same log).
+    """REGRESSION (r2 review, P2). An unrecoverable refusal (422 — a payload
+    these bytes can never make valid) terminalises every entry, so `queued` is
+    therefore 0. Counting a terminal entry as "refused NOW" latched the box at
+    `BLOCKED` forever: `tortoise doctor` exited 1 on a box whose capture
+    pipeline was healthy, and no supported command could clear it (`session
+    drain --retry-terminal` clears the marker, and the next flush re-quarantines
+    the same log).
 
     A terminal entry is a HISTORICAL refusal, not a live block; the verdict after
     a permanent refusal was always "kept on disk, re-file by hand", and the line
     must not promote it to a permanent failure of the box.
+
+    #5051 note: this test used a 401 "rotated key" as its exemplar, and 401 is
+    now `policy` — a rotated key no longer terminalises at all (`#4895`), it
+    RETAINS. The latch it guards is unchanged for genuinely permanent refusals,
+    so the exemplar moved to 422, and the 401 case is asserted separately below.
 
     MUTATION THAT REDS THIS: count a terminal entry as a live refusal (the
     `rejected > 0 and queued == 0` branch) → this box reads BLOCKED.
@@ -4378,7 +4525,7 @@ def test_a_PERMANENT_refusal_does_not_latch_a_permanent_BLOCKED(tmp_path):
     for i in range(2):
         write_spool_entry(root, _snapshot(f"deadkey-{i}"))
     summary = flush_spool(
-        root, _Server(PostOutcome(ok=False, status=401, detail="invalid api key")).post,
+        root, _Server(PostOutcome(ok=False, status=422, detail="bad payload")).post,
         now=1000.0,
     )
     assert summary.filed == 0
@@ -4388,6 +4535,22 @@ def test_a_PERMANENT_refusal_does_not_latch_a_permanent_BLOCKED(tmp_path):
     line = capture_health_line(root)
     assert line.state == "ok", f"a historical refusal is not a live block: {line}"
     assert line.line == "capture: OK (0 queued)"
+
+    # #5051/#4895: the ROTATED KEY that used to be this test's exemplar no
+    # longer terminalises at all — a 401 is `policy`, so the entries are KEPT
+    # and the box is DRAINING, never a terminal "re-file by hand" pile.
+    rotated = tmp_path / "rotated"
+    for i in range(2):
+        write_spool_entry(rotated, _snapshot(f"rotated-{i}"))
+    kept = flush_spool(
+        rotated, _Server(PostOutcome(ok=False, status=401, detail="invalid api key")).post,
+        now=1000.0,
+    )
+    assert kept.discarded == [], "a 401 must not terminalise the only copy"
+    assert kept.deferred == 2
+    assert count_pending_captures(rotated) == 2, (
+        "a rotated key must leave the captures pending, ready for the fixed key")
+    assert capture_health_line(rotated).state != "blocked"
 
 
 def test_a_TORN_transcript_does_not_latch_a_permanent_BLOCKED(tmp_path):
