@@ -36,9 +36,10 @@ They also pin the two review findings on the wiring:
   the SDK lane: ``test_hosted_receipt_discloses_a_failed_journal_append`` drives
   ``_capture_session_impl`` itself (it builds its own receipt and never calls
   ``sdk.capture_session``), asserts the warning is present, and asserts the
-  outcome is unchanged (the envelope's ``status`` is ``"ok"`` — the hosted
-  receipt's success signal — independent of the ``_capture_ok_record`` written
-  earlier).
+  outcome the append failure produces (``status == "partial"`` since `#7951`
+  made the append the commit point — this test's own docstring records the
+  supersession); the DISCLOSURE is the deliverable and must ride whichever
+  outcome the append failure yields.
 * **#5632** — the count disclosed on the receipt is THIS capture's DELTA, never
   the SDK's LIFETIME counter. ⛔ The **SDK-lane** half
   (``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``)
@@ -59,20 +60,20 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
   ``test_…_tortoise``); reachable: the fixture namespace is hyphenated.
 * ``test_no_journal_key_can_escape_the_base_dir`` — FAILS while a ``..`` key is
   accepted; reachable: the pre-F2 guard kept ``.``.
-* ⛔ ``test_capture_aboutobject_edges_survive_rebuild_all`` — **DELETED WITH ITS
-  DRIVER** (`#4282`). Its subject was the **Session** pass's
+* ⛔ ``test_capture_aboutobject_edges_survive_rebuild_all`` — **RESTORED on
+  the surviving private door.** Its subject is the **Session** pass's
   ``(Session)-[:aboutObject]->(Object)`` edge surviving ``rebuild_all``, and that
-  edge is produced by the deleted wrapper's session-link step; the surviving
-  primitives emit the **Point** edge only (measured: replaying
+  edge is produced by the capture's session-link step; the surviving primitives
+  emit the **Point** edge only (measured: replaying
   ``_write_session_and_turns`` → mint → ``_materialize_session_source`` →
   ``_extract_session_v2`` yields ``(('Point',), <pt>, <object>)`` and no Session
-  source) — the wrapper was the only SDK call site that invoked the linker
-  (``session_link.link_session_entities``, which SURVIVES and is still called by
-  the hosted lane at ``hosted_api.py``), so with the SDK door gone no SDK-lane
-  capture can produce that edge. The rebuild-survival of Session edges is still
-  pinned, by ``test_relink_aboutobject_edge_survives_rebuild_all`` below (which
-  asserts ``("Session",)`` in the live edge set and then
-  ``_about_edges(proj) == live`` after ``rebuild_all``).
+  source). But the implementation SURVIVES as the private
+  ``TortoiseSDK._capture_session`` (`#4282` retired the public NAME), and it still
+  calls ``session_link.link_session_entities`` — so an SDK-lane capture CAN still
+  produce that edge, and the leg is kept verbatim (driver line re-pointed). It is
+  the widest rebuild-survival pin in this file: whole edge-set equality **plus**
+  the ``PointAdded``/``ObjectRegistered`` journal records the fold needs, which
+  the surviving-primitive legs below do not cover.
 * ``test_relink_aboutobject_edge_survives_rebuild_all`` — FAILS while the
   re-link's ``EntityLinked`` record is not written; the fixture captures BEFORE
   the Object exists (honest no-match) then materializes it, so the re-link
@@ -89,8 +90,8 @@ Class-B doctrine — every test states (1) the value/state that makes it fail an
 * ``test_hosted_receipt_discloses_a_failed_journal_append`` — FAILS while the
   HOSTED receipt omits the disclosure (the pre-cycle-2 state: only the SDK lane
   carried it); reachable: the hosted impl is driven directly against a mode-0500
-  journal base dir, and the envelope's ``status`` is asserted unchanged
-  (``"ok"`` — the hosted receipt's success signal) alongside it.
+  journal base dir, and the envelope's ``status`` is asserted alongside it
+  (``"partial"`` since `#7951` — see this test's own docstring).
 * ⛔ ``test_capture_after_a_failed_non_capture_write_reports_no_journal_warning``
   — **DELETED WITH ITS DRIVER** (`#4282`), same receipt reason. Its hosted twin
   below fails a non-capture append at the SDK-open seam and asserts NO journal
@@ -339,6 +340,64 @@ def test_journal_key_matches_the_graph_the_sdk_opens(hosted_lane):
 
 # ── the capture path: aboutObject edges survive rebuild_all ────────────────
 
+def test_capture_aboutobject_edges_survive_rebuild_all(hosted_lane):
+    """A capture's Session/turn aboutObject edges must survive ``rebuild_all`` —
+    live == rebuild.
+
+    What this pins: the COMPOSITE seam (the resolver exists AND ``_make_sdk``
+    passes its result to the SDK AND the fold restores the edges). Its RED at
+    the pre-#4240 base is ``AttributeError`` (``_resolve_event_log_path`` does
+    not exist), so it does NOT by itself demonstrate the edge drift — the drift
+    is demonstrated by
+    ``test_live_only_capture_loses_aboutobject_edges_without_the_journal``.
+
+    Driven through the PRIVATE capture door (``sdk._capture_session``): `#4282`
+    retired the public NAME, not the implementation — that body still runs the
+    session-link step (``session_link.link_session_entities``), so an SDK-lane
+    capture CAN still produce the ``(Session)`` edge, and this leg is kept
+    verbatim (only the driver line re-pointed). It is the widest
+    rebuild-survival pin in this file: whole edge-set equality PLUS the
+    ``PointAdded``/``ObjectRegistered`` journal records the ``EntityLinked`` fold
+    needs, which neither surviving-primitive leg covers.
+    ``tests/test_capture_session.py`` drives the same private name throughout.
+
+    Reachable: the fixture mints the WorkItem Object and captures a
+    conversation referencing it, so the live edge set is asserted non-empty
+    BEFORE the rebuild.
+
+    MUTATION: drop the journal wiring → the capture's PointAdded /
+    ObjectRegistered / SessionRecorded / EntityLinked records never land, the
+    rebuild replays an empty journal and the edge set collapses to empty → RED.
+    """
+    sdk = ha._make_sdk(namespace=hosted_lane.org)
+    try:
+        proj = sdk._get_proj()
+        sdk.create_object("test/repo#42", objectKind="pm:issue")
+        r = sdk._capture_session(CONV, session_id="s-4240-capture")
+        assert r.get("ok") is True, r
+
+        live = _about_edges(proj)
+        assert live, "fixture must produce live aboutObject edges to lose"
+        assert any(src == ("Session",) for src, _, _ in live), live
+        assert any(src == ("Point",) for src, _, _ in live), live
+
+        log_path = Path(ha._resolve_event_log_path(
+            namespace=hosted_lane.org, graph_name=None))
+        types = _journal_types(log_path)
+        assert "EntityLinked" in types, (
+            f"the capture's links were not journaled: {sorted(set(types))}")
+        assert "PointAdded" in types and "ObjectRegistered" in types, (
+            f"the capture's nodes were not journaled, so the EntityLinked "
+            f"fold has no endpoints to resolve: {sorted(set(types))}")
+
+        proj.rebuild_all(str(log_path.parent), confirm_destructive=True)
+        assert _about_edges(proj) == live, (
+            "aboutObject edge drift across rebuild\n"
+            f" live={sorted(live)}\n post={sorted(_about_edges(proj))}")
+    finally:
+        sdk.close()
+
+
 # ── the index-completion re-link path ──────────────────────────────────────
 
 def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
@@ -347,9 +406,10 @@ def test_relink_aboutobject_edge_survives_rebuild_all(hosted_lane):
     journaled and survive a rebuild.
 
     What this pins: the composite re-link seam. Its sibling — the capture-path
-    leg ``test_capture_aboutobject_edges_survive_rebuild_all`` — was DELETED WITH
-    ITS DRIVER by ``#4282`` (see the module docstring), so this is now the only
-    rebuild-survival pin in the file.
+    leg ``test_capture_aboutobject_edges_survive_rebuild_all`` — pins the whole
+    edge set through the private capture door; THIS leg is the one that pins the
+    re-link's own ``EntityLinked`` record when the Object arrives after the
+    capture (an honest no-match at capture time).
 
     Reachable: the session is captured BEFORE its Object exists (an honest
     no-match), then the Object materializes and the re-link creates the edge —
