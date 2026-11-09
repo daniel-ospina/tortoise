@@ -1858,6 +1858,52 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+- ⛔ **Superseded for the merged tree by §10.19.** The numbers above are the `#11534` merge's head
+  BEFORE `_gap_fill_collisions` landed; that counter inserts 57 lines above every one of them, so
+  this entry's "measured at this head" is a claim about a tree two commits behind the shipped one.
+
+### 10.19 — the §11 cite block re-pointed for `#11534`'s `_gap_fill_collisions` (2026-11-09, `#11534`)
+
+- **Baseline — measured at `25e1c71173cb`, this branch's head before the collision counter:** the two
+  `if items:` gates at `:13706`/`:13859`, the two fail-open `except` arms at `:13719`/`:13870`, the
+  two result blocks at `:14048` (closing `:14054`) and `:14058` (closing `:14062`), and
+  `_run_vet_pass`'s S2.2 call at `:16229` (the post-S4 union call at `:13835`) — exactly the "new
+  value" §10.18 measured.
+- **New value — measured at this head:** the same symbols at `:13763`/`:13916` (the two `if items:`
+  gates), `:13776`/`:13927` (the two fail-open `except` arms), the two result blocks at `:14105`
+  (closing `:14111`) and `:14115` (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16286`
+  (the post-S4 union call at `:13892`). `_collect_classify_items` and its extent do not move:
+  `:11402`, `:11402-11424`.
+- **Why this delta IS a constant, and why a constant is the shape that rots unnoticed.** The
+  net-vs-gross counter (`_gap_fill_collisions` and its call site) is ONE pure insertion of **57**
+  lines — 44 after `:13147`, 3 after `:13644`, 10 after `:13663` — every one of them ABOVE this
+  block, so all ten numbers move by the same +57 while the collector above the insert stands.
+  §10.15 and §10.17 both warn that the delta is a property of the diff and not a rule; the warning
+  is what was violated here, because a uniform +57 is exactly the arithmetic a re-derivation is
+  tempted to trust. It is used below only after the insertion was verified as a PURE SHIFT
+  (`old[L] == new[L + 57]` for all 17,621 pre-insert lines, 0 mismatches) and only as a check on
+  numbers re-read out of the tree.
+- **Why §10.18 needed a successor when §10.1–§10.17 did not.** Since §10.15 this section's rule has
+  been that an entry records numbers measured at the head it names, and that re-numbering a history
+  entry would be a false record of what was measured. §10.18 is the one entry that rule does not
+  reach: its heading and its first bullet claim the SHIPPED tree ("re-pointed for `#11534`'s S2.2b-ADD
+  merge", "measured at this head (the `#11534` merge)"), so leaving its numbers two commits behind
+  does not preserve a measurement — it publishes a claim about this tree that this tree refutes, in
+  the same document whose §11 and whose `README.md` carry the correct ones. The settled handling of
+  exactly this move is the one §10.17→§10.18 used: a new dated entry, and the old one marked
+  superseded. (The field convention this mirrors — a registration is frozen at submission and a later
+  change is a separate dated amendment, never a silent edit — is what `document_sha256` exists to
+  enforce.)
+- **Verified by content, not by arithmetic.** `:13763`/`:13916` are the two `if items:` gates (one per
+  classify pass), `:13776`/`:13927` are the two fail-open `except` arms whose messages name
+  `classify(S2) failed` / `classify(union) failed`, `:14105`/`:14115` open
+  `result["classify_later"]` and `result["vet"]` and close at `:14111`/`:14119`, and `:16286` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`. A pin now reads the NEWEST entry
+  against the tree rather than only the live prose, so the next insertion cannot leave this block
+  behind silently (`tests/test_7949_capstone_measure.py`,
+  `test_the_newest_change_control_entry_describes_the_shipped_tree`).
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
 
 ## 11. The step set V5 gates over — seven unconditional, one conditional (`#10215`)
 

@@ -5577,6 +5577,131 @@ def test_the_pre_registration_cites_the_classify_sites_the_tree_actually_has():
                 "other line is an argument from code that never runs")
 
 
+def _change_control_entries(text: str) -> list[tuple[int, str]]:
+    """Every `### 10.N` entry as `(N, body)`, in document order.
+
+    Split on the heading and end each body at the next `#`/`##`/`###` heading — the same
+    boundary `_without_change_history` uses, so the two can never disagree about where a
+    change-control entry stops and live prose starts.
+    """
+    entries: list[tuple[int, str]] = []
+    current: tuple[int, list[str]] | None = None
+    for line in text.splitlines(keepends=True):
+        heading = re.match(r"^### 10\.(\d+)", line)
+        if heading:
+            if current is not None:
+                entries.append((current[0], "".join(current[1])))
+            current = (int(heading.group(1)), [])
+            continue
+        if current is not None and re.match(r"^#{1,3} ", line):
+            entries.append((current[0], "".join(current[1])))
+            current = None
+            continue
+        if current is not None:
+            current[1].append(line)
+    if current is not None:
+        entries.append((current[0], "".join(current[1])))
+    return entries
+
+
+def _cited_lines(entry: str) -> set[int]:
+    """Every bare `` `:N` `` line number an entry cites (ranges contribute both ends)."""
+    out: set[int] = set()
+    for start, end in re.findall(r"`:(\d+)(?:-(\d+))?`", entry):
+        out.add(int(start))
+        if end:
+            out.add(int(end))
+    return out
+
+
+def test_the_newest_change_control_entry_describes_the_shipped_tree():
+    """The LAST §10.x entry is a claim about THIS tree — and nothing read it.
+
+    `_without_change_history` strips every `### 10.x` entry from the live-cite gate, and that
+    is correct for §10.1–§10.17: an entry records numbers measured at the head it NAMES, so
+    re-pointing an old one would be a false record of what was measured. The newest entry is
+    the exception, and the reasoning does not apply to it — it is the entry that claims the
+    SHIPPED tree. Left unread, "the newest entry describes the shipped tree" was an
+    assumption no test or gate held: at `099de6ca5256` §10.18 still said the classify gates
+    were at `:13706`/`:13859` and `_run_vet_pass`'s S2.2 call at `:16229` while the tree had
+    carried them at `:13763`/`:13916`/`:16286` for two commits — `_gap_fill_collisions`' +57 —
+    so the hash-pinned record published numbers its own §11 and `README.md` refuted, and
+    every required check stayed green because the CI step that would have noticed
+    (`capstone_preregistration_check.py`) folds this file to one digest and cannot see a
+    cite. This is the reader.
+
+    Scope, stated so the pin does not claim more than it holds: it reads the LAST entry only,
+    and only the SYMBOLS the entry itself names (a mention of `` `if items:` `` makes it
+    answer for both gates; a mention of `_run_vet_pass` makes it answer for both calls; a
+    block cite must name both its opening line and, if the entry claims a close, its close).
+    An entry about a different site is not held to these eight.
+
+    Non-vacuity, measured on the pre-fix document: with `:13706`/`:13859`/`:16229` restored in
+    place of `:13763`/`:13916`/`:16286`, this reds naming the derived line it wanted; and an
+    entry that is the newest but carries the `Superseded` marker reds on the dangling-successor
+    clause, because a document whose newest entry says "a later entry supersedes me" is
+    pointing at an entry that does not exist.
+    """
+    text = (PREREG.parent / "PRE-REGISTRATION.md").read_text(encoding="utf-8")
+    entries = _change_control_entries(text)
+    assert entries, "PRE-REGISTRATION.md has no `### 10.x` change-control entries at all"
+    newest_n, newest = entries[-1]
+    assert "⛔ **Superseded for the merged tree by §" not in newest, (
+        f"§10.{newest_n} is the NEWEST change-control entry but marks itself superseded — "
+        "a supersede marker on the last entry points at an entry that does not exist, so "
+        "the document has no live record of how its cites reached this tree. Add the "
+        "successor entry (the `+N`/`-N` move, its baseline head, and the re-cut digest)")
+
+    #: `mention in the entry` -> the lines of `extractor_v2.py` that mention obliges it to cite.
+    def _num(cite: str) -> int:
+        return int(cite.lstrip(":").split("-")[0])
+
+    def _end(cite: str) -> int | None:
+        parts = cite.lstrip(":").split("-")
+        return int(parts[1]) if len(parts) > 1 else None
+
+    classify = _EXTRACTOR_SITES["classify_later"]
+    vet_block = _EXTRACTOR_SITES["vet"]["result"]
+    classify_block = classify["result"]
+    obligations: tuple[tuple[str, tuple[str, ...]], ...] = (
+        ("`if items:`", (classify["items_s2"], classify["items_union"])),
+        ("fail-open `except`", (
+            _extractor_fail_open_except('errors.append(f"classify(S2) failed'),
+            _extractor_fail_open_except('errors.append(f"classify(union) failed'),
+        )),
+        ('result["classify_later"]', (classify_block,)),
+        ('result["vet"]', (vet_block,)),
+        ("_run_vet_pass", (
+            _extractor_cite("embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass("),
+            _extractor_cite("complete_list, vet_union_stats, _w, _ = _run_vet_pass("),
+        )),
+    )
+    cited = _cited_lines(newest)
+    failures: list[str] = []
+    for mention, cites in obligations:
+        if mention not in newest:
+            continue
+        for cite in cites:
+            want = _num(cite)
+            if want not in cited:
+                failures.append(
+                    f"§10.{newest_n} names {mention} but does not cite :{want}, the line "
+                    f"`extractor_v2.py` carries it on at this head")
+                continue
+            # A block cite that CLAIMS a close must be right about the close too.
+            end = _end(cite)
+            if end is not None and "closing" in newest and end not in cited:
+                failures.append(
+                    f"§10.{newest_n} claims the block opened at :{want} closes at "
+                    f":{end}, and does not cite it")
+    assert not failures, (
+        f"the NEWEST change-control entry (§10.{newest_n}) states numbers this tree does "
+        "not have — `_without_change_history` strips §10.x from every live-cite gate, so "
+        "this pin is the only reader of the one entry that claims the SHIPPED tree. "
+        "Re-derive from the tree, or add a successor entry and mark this one superseded "
+        "(then re-cut `document_sha256`):\n  " + "\n  ".join(failures))
+
+
 def test_the_pre_registration_cites_the_turn_writer_by_symbol_not_by_line():
     """§1's residual counts the turn rows by their WRITER — and that cite was unpinned.
 
