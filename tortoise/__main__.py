@@ -5734,9 +5734,12 @@ def _pi_volunteer_is_provably_ours(target: Path) -> bool:
     contract = _hook_install.ARTIFACT_CONTRACTS.get("pi")
     source = getattr(contract, "volunteer_source", None)
     try:
-        if source is not None and target.is_file():
-            if target.read_bytes() == Path(source).read_bytes():
-                return True
+        if (
+            source is not None
+            and target.is_file()
+            and target.read_bytes() == Path(source).read_bytes()
+        ):
+            return True
     except OSError:  # pragma: no cover - an unreadable file is not provable
         return False
     return _hook_install.read_hook_version(target) is not None
