@@ -387,10 +387,16 @@ measured_at:
 #         `env -u TORTOISE_API_KEY TORTOISE_TEST_CARVE_OUT=1 uv run python -m pytest
 #         tests/test_7949_capstone_measure.py tests/test_capstone_preregistration_9075.py
 #         tests/test_9664_capstone_verdict_ledger.py tests/test_ci_selection.py -q`
-#         -> `1441 passed`, parsed from the log it captured (this review round re-ran
-#         the same command to the same `1441 passed`, recorded as its own row). The
-#         docker-lane SEVEN-file runs below are NOT suite rows and never were: 5 of their
-#         tests are environment-red (`TestCreateGraphWithPacks`, refused 503 `default ACL user is
+#         -> `1441 passed` at `a913fa8ec6` (rows 1-2: the lane's own run and this review
+#         round's re-run of the same command, same count), and `1442 passed` at the MERGE
+#         head `2f9a3aaf68` (row 3), parsed from the logs each run captured. ⛔ THE SECOND
+#         NUMBER IS NOT DRIFT, IT IS MAIN'S: merging `e49788706a` (#11548) added one
+#         `def test_` to `tests/test_ci_selection.py` (473 -> 474; the other three files
+#         are unmoved at 230 / 270 / 146), so the same command legitimately collects one
+#         more case. Re-derive it, and never carry `1441` across a merge of main - which
+#         is why each reading names the head it was taken at rather than one bare count.
+#         The docker-lane SEVEN-file runs below are NOT suite rows and never were: 5 of
+#         their tests are environment-red (`TestCreateGraphWithPacks`, refused 503 `default ACL user is
 #         open (nopass)`), and a recorded environment-red row makes the lane-report gate
 #         refuse a PR whose own surface is green — the export's own `not_done` says so
 #         verbatim. ⛔ AN EARLIER CUT OF THIS BULLET CLAIMED BOTH RUNS WERE RECORDED
