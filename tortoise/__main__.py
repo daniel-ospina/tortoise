@@ -6138,7 +6138,33 @@ def _install_read_hook_impl(args) -> int:
                 check_paths.append(cur)
             for cp in check_paths:
                 if cp.is_symlink():
-                    resolved = cp.resolve()
+                    try:
+                        resolved = cp.resolve()
+                    except (RuntimeError, OSError):
+                        # `resolve()` raises RuntimeError — NOT OSError — on a
+                        # symlink LOOP, and OSError on a component it cannot
+                        # read (#11588 review cycle 9). Letting it escape
+                        # turned `tortoise install cline --dir <proj>` into
+                        # `Install failed: RuntimeError: Symlink loop` (exit 1,
+                        # an internal type name instead of a refusal) whenever
+                        # this PR's PRIMARY target was the loop — measured:
+                        # `ln -s .clinerules .clinerules`, or
+                        # `ln -s hooks .clinerules/hooks`. Cycle 7 closed this
+                        # class for `.cline` only, and that fix cannot reach
+                        # here: `exists()` is False for a loop, so the legacy
+                        # guard is never even called in that shape. Fail
+                        # CLOSED — a path whose destination cannot be
+                        # established is not PROVEN to be inside the root, so
+                        # it is refused like any escape, with a remedy the
+                        # user can act on rather than a traceback.
+                        print(f"Refusing: {cp} is a symlink that cannot be "
+                              "resolved (a symlink loop, or an unreadable "
+                              "target), so whether it stays inside the "
+                              f"install dir {root_r} cannot be established. "
+                              "Nothing was written or deleted. Remove the "
+                              "symlink first, or pass --dir explicitly.",
+                              file=_sys.stderr)
+                        return True
                     if resolved != root_r and root_r not in resolved.parents:
                         print(f"Refusing: {cp} resolves to {resolved} — "
                               f"outside the install dir {root_r}. Symlinked "

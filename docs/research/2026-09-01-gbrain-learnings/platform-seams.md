@@ -169,9 +169,15 @@ added a **stubbed-reflex** test (`::test_volunteer_turn_hook_cline_stdin_prompt_
 asserts what the reflex RECEIVED — that one goes RED when the nested read is reverted (measured).
 
 **Trap for the next lane:** Cline's own `.clinerules/hooks/README.md` documents the workspace hooks
-dir as `.clinerules/hooks` and never mentions `.cline/hooks`, while the CODE treats `.clinerules` as
-`DEPRECATED_CONFIG_DIR` and prefers `.cline`. Reading the README alone would produce the same wrong
-conclusion from the opposite direction. **Read the resolver, not the README.**
+dir as `.clinerules/hooks` and never mentions `.cline/hooks`, while the SDK/CLI resolver
+(`sdk/packages/shared/src/storage/paths.ts` @ main, `resolveHooksConfigSearchPaths()` lines 495-509)
+pushes `<ws>/.clinerules/hooks` **first** (`DEPRECATED_CONFIG_DIR`) and `<ws>/.cline/hooks`
+**second** (`CLINE_CONFIG_DIR`). `DEPRECATED_CONFIG_DIR` is a **naming label, not a search
+preference** — the deprecated directory is still searched AHEAD of the one that replaced it. Do not
+read that constant's name as a verdict about precedence: the VS Code extension's
+`GlobalFileNames.hooksDir` is `.clinerules/hooks` (`apps/vscode/src/core/storage/disk.ts:25`), so it
+is the ONE directory every surface reads, and it is what we install to. **Read the resolver's
+ORDER, not its constant names, and not the README.**
 
 **Sources (fetched 2026-11-08, `cline/cline` @ main):** `apps/vscode/proto/cline/hooks.proto`;
 `apps/vscode/src/core/hooks/hook-factory.ts`; `apps/vscode/src/core/storage/disk.ts`;

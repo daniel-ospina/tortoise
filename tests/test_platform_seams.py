@@ -977,6 +977,46 @@ def test_install_cline_survives_a_symlink_loop_at_the_legacy_path(tmp_path):
     assert (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
 
 
+def test_install_cline_refuses_a_symlink_loop_at_the_primary_target(tmp_path):
+    """A loop on `.clinerules` — or on `.clinerules/hooks` — is a clean
+    REFUSAL, not `Install failed: RuntimeError: Symlink loop` (#11588 review
+    cycle 9).
+
+    `_escape_refusal()` calls `Path.resolve()` on every symlinked component
+    between the root and the target, and `resolve()` raises RuntimeError — NOT
+    OSError — on a loop. That exception escaped the guard, so an install into a
+    project whose PRIMARY target was the loop died at the boundary with an
+    internal type name and exit 1. Cycle 7 closed exactly this class for
+    `.cline`, but that fix cannot reach here: `exists()` is False for a loop,
+    so the legacy guard is never even called in this shape. An unresolvable
+    path is not PROVEN to be inside the root, so it fails CLOSED.
+
+    MUTATION: drop the `try/except` around `cp.resolve()` → RED on both
+    params (`Install failed: RuntimeError: Symlink loop from '…'`).
+    """
+    env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
+    for loopy, make in (
+        ("clinerules", lambda proj: (proj / ".clinerules").symlink_to(
+            ".clinerules")),
+        ("hooks", lambda proj: (
+            (proj / ".clinerules").mkdir(),
+            (proj / ".clinerules" / "hooks").symlink_to("hooks"),
+        )),
+    ):
+        proj = tmp_path / f"proj-{loopy}"
+        proj.mkdir()
+        make(proj)
+
+        r = _run(["install", "cline", "--dir", str(proj)], env)
+
+        assert r.returncode == 1, (loopy, r.returncode, r.stdout, r.stderr)
+        assert "Refusing" in r.stderr, (loopy, r.stderr)
+        assert "Symlink loop" not in r.stderr, (loopy, r.stderr)
+        assert "Traceback" not in r.stderr, (loopy, r.stderr)
+        # Nothing was written: the refusal happens before any write.
+        assert not (proj / ".clinerules" / "hooks" / "UserPromptSubmit").is_file()
+
+
 def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
         tmp_path):
     """The legacy candidate is guarded only when the run would really DELETE
@@ -989,6 +1029,12 @@ def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
     outside the root at risk).
 
     MUTATION: guard the legacy path on `exists()` alone → RED on both rcs.
+
+    ⛔ The out-of-root `.cline` must exist BEFORE the install, not after: it
+    used to be created between the two arms, so the install arm asserted on a
+    tree with NO legacy path at all and the refusal cycle 8 removed could have
+    come back with this suite green (#11588 review cycle 9). Both arms now run
+    against the same tree that actually holds the foreign registration.
     """
     outside = tmp_path / "shared-cline"
     (outside / "hooks").mkdir(parents=True)
@@ -996,6 +1042,7 @@ def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
     foreign.write_text("#!/usr/bin/env bash\necho my own hook\n")
     proj = tmp_path / "proj"
     proj.mkdir()
+    (proj / ".cline").symlink_to(outside)
     env = {**os.environ, "TORTOISE_SECRET_PEPPER": "test-static-pepper"}
 
     # Install writes only in-root: it must succeed and leave the foreign file be.
@@ -1006,7 +1053,6 @@ def test_uninstall_cline_ignores_a_FOREIGN_hook_behind_an_outside_symlink(
     assert foreign.read_text() == "#!/usr/bin/env bash\necho my own hook\n"
 
     # Uninstall deletes only ours: it must succeed, and the foreign file stays.
-    (proj / ".cline").symlink_to(outside)
     u = _run(["install", "cline", "--dir", str(proj), "--uninstall"], env)
     assert u.returncode == 0, (u.returncode, u.stdout, u.stderr)
     assert not live.exists(), "our in-root hook survived an uninstall"
@@ -1702,9 +1748,18 @@ _BOUNDARY_CASES = [
                             b'{"hooks": {"note": "\xff\xfe"}}'),
      ["Install failed:"]),
     # RuntimeError — a symlink cycle, where Path.resolve() raises RuntimeError
-    # (deliberately, not OSError) on CPython.
-    ("symlink-loop-runtimeerror", "claude", _loop_leaf,
-     ["Install failed:", "RuntimeError", "Symlink loop"]),
+    # (deliberately, not OSError) on CPython. Since #11588 review cycle 9 the
+    # ESCAPE GUARD refuses it FIRST: a path whose destination cannot be
+    # established is not PROVEN to be inside the root, so it fails CLOSED with
+    # the guard's own `Refusing:` line instead of letting RuntimeError reach
+    # the boundary and render as `Install failed: RuntimeError: Symlink loop`.
+    # The observable contract is unchanged (exit 1, a populated refusal, no
+    # traceback); the refusal is now EARLIER — it also fires in the write-free
+    # dry run, so the capture half never writes — and it names the remedy.
+    # The boundary's RuntimeError-family arm keeps its own coverage from
+    # `deep-json-recursionerror` below.
+    ("symlink-loop-refused-by-escape-guard", "claude", _loop_leaf,
+     ["Refusing:", "symlink that cannot be resolved"]),
     # RecursionError (a RuntimeError subclass) — a deeply nested document.
     ("deep-json-recursionerror", "claude",
      lambda r: _write_bytes(r / ".claude" / "settings.json",
