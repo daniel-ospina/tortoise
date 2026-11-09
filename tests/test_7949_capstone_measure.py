@@ -10906,11 +10906,17 @@ def _call_sites(src: str) -> list[tuple[int, str]]:
 
 _CITE_QUALIFIER_PATTERN = (
     # ⛔ A RANGE CARRIES ITS QUALIFIER TOO. `:12944-12945` at `<sha>` is a base-qualified
-    # cite in the spelling §2 ALREADY USES three times (`extractor_v2.py:11731-11732` at
-    # `80c912244`, `:12302-12303` at `d69faaf38`, `sdk.py:16516-16530`), and without the
-    # optional `(?:-\d+)?` tail the helper reported every one of them as UNQUALIFIED — a
+    # cite in the spelling §2 ALREADY USES twice (`extractor_v2.py:11731-11732` at
+    # `80c912244`, `:12302-12303` at `d69faaf38`), and without the
+    # optional `(?:-\d+)?` tail the helper reported BOTH of them as UNQUALIFIED — a
     # false BLOCK of a conformant edit whose own message told the author to add the base
     # they had already added (measured by a fresh-context review at `f885a51663`).
+    # ⛔ A THIRD RANGE §2 CARRIES IS DELIBERATELY NOT IN THAT LIST: `sdk.py:16529-16543`
+    # (`A2`'s mint seam) is printed UNQUALIFIED in the record, and that is not a false
+    # block — the range arm below reads the range OUT OF THE RECORD and asserts both of its
+    # endpoints against `tortoise/sdk.py`, so this cite is pinned by derivation instead of
+    # by a base. §2's range cites are not uniform: two carry a base, this one carries a pin
+    # of a different shape.
     # The tail admits digits-dash-digits and NOTHING else: a bare `:12944-12945` still
     # yields no qualifier and still reds, so the range spelling cannot become a false
     # PASS — the qualifier is what this group captures, never the tail. ⛔ AND BOTH
@@ -11054,7 +11060,9 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
 
     Rule 3 of agent-infra#3442: this leg pins the record's LIVE cites — the four
     #11509 re-pointed (`extractor_v2.py:10815`->`:10891`, `sdk.py:17472`->`:17574`,
-    `sdk.py:16414-16428`->`:16516-16530` x3, `probes/capstone_measure.py:2238-2243`
+    `sdk.py:16414-16428`->`:16529-16543` x3 — `#11548` moved this seam +13 after that
+    re-point, and the range is read back out of the record precisely so this note cannot
+    re-type it — `probes/capstone_measure.py:2238-2243`
     ->`:2738-2740`, which was `:2726-2728` before main's #11517 landed +12 above it), `extractor_v2.py:1720` unchanged, the `create_operator`
     reproduction quote this PR re-derived (`:8938 :8956 :8963 :9343` ->
     `:9021 :9039 :9046 :9426` after the `f5c69f7478` base merge (+68 at #11449, then +15
@@ -11699,7 +11707,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         # ⛔ AND THE HOLE IS NOT CONFINED TO BARE `:N` CITES — §2 carries NINE FILE-QUALIFIED
         # cites and only THREE are held (main's enumeration, re-measured on this tree at this
         # merge: 9 found, matching this list exactly). Held: `identity_hold.py:125` and
-        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:16516-16530` (the count-3
+        # `tortoise/value_gate.py:81` (`_cite` loop below) and `sdk.py:16529-16543` (the count-3
         # range arm) — re-staling each inside §2 reds. UNHELD: `extractor_v2.py:1154`, `:8880`,
         # `:9617`, `:11731-11732`, and the `research-brief.md` / `02-research-brief.md` cites.
         # ⛔ Only ONE of those — `extractor_v2.py:1154` — is named by this file's SCOPE paragraph
