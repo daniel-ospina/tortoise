@@ -127,6 +127,39 @@ test("registers exactly the per-turn injection surface, and nothing else", () =>
   assert.deepEqual(Object.keys(pi.handlers), ["before_agent_start"]);
 });
 
+// ⛔ The isolation guard is a GATE, so it is pinned in both directions: the
+// unhermetic shape must THROW (a guard that never fires is an inert enforcer),
+// and the two hermetic shapes must still construct. The sibling
+// `tortoise-capture.ts` has carried the same guard since #3721 — this artifact
+// shipped without it, and the trap it prevents fired for real during this PR.
+test("under `node --test` an unhermetic factory THROWS instead of reading the operator's machine", () => {
+  const saved = process.env.NODE_TEST_CONTEXT;
+  process.env.NODE_TEST_CONTEXT = "1";
+  try {
+    assert.throws(
+      () => tortoiseVolunteer(mockPi() as never),
+      /must inject `env`, `configPath` and `home`/ ,
+      "a row that injects nothing must fail loudly, not adopt the operator's machine",
+    );
+    // A PARTIAL injection is still unhermetic: `home` alone leaves the real
+    // `~/.pi/agent/tortoise-config.json` (and any file-sourced apiKey) in play.
+    assert.throws(
+      () => tortoiseVolunteer(mockPi() as never, { home: tmpHome() }),
+      /must inject `env`, `configPath` and `home`/,
+    );
+    // …and the two shapes that genuinely reach nothing ambient still construct.
+    assert.doesNotThrow(() => tortoiseVolunteer(mockPi() as never, hermetic()));
+    assert.doesNotThrow(() =>
+      tortoiseVolunteer(mockPi() as never, {
+        reflexImpl: () => ({ block: "- x", surfaced: [] }),
+      }),
+    );
+  } finally {
+    if (saved === undefined) delete process.env.NODE_TEST_CONTEXT;
+    else process.env.NODE_TEST_CONTEXT = saved;
+  }
+});
+
 test("injects the reflex block as a SILENT custom message by default", async () => {
   const pi = mockPi();
   const seen: Array<[string, string]> = [];

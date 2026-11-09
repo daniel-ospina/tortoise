@@ -1091,6 +1091,37 @@ export default function tortoiseVolunteer(
   pi: { on: (event: string, handler: (event: never, ctx: never) => unknown) => unknown },
   deps: VolunteerDeps = {},
 ): void {
+  // ⛔ FAIL-CLOSED TEST ISOLATION (#11584 review, P2) — the same guard the
+  // shipped sibling carries (`tortoise-capture.ts`'s `NODE_TEST_CONTEXT`
+  // throw, #3721), for the same reason and one layer further out.
+  //
+  // Every input below defaults to the OPERATOR's machine: `configPath` is
+  // `~/.pi/agent/tortoise-config.json` (which can carry a file-sourced
+  // `apiKey`), `home` resolves the installer's `~/.tortoise/hook-src-dir`
+  // record to the real CLI, and `env` is `process.env` (PATH, kill switch,
+  // `TORTOISE_API_KEY`, `TORTOISE_API_URL`). A row written as
+  // `tortoiseVolunteer(mockPi())` under `node --test` therefore asserts the
+  // machine it runs on instead of the code — and on a box with a configured
+  // key it takes the HOSTED transport and POSTs the test prompt to the
+  // production endpoint. That trap FIRED during this PR's development (see
+  // the note above `hermetic()` in `tortoise-volunteer.test.ts`), and the only
+  // thing preventing a repeat was convention.
+  //
+  // `reflexImpl` is exempt because it replaces the resolver outright: with it
+  // there is no config read, no CLI resolution and no hosted request, so no
+  // path to the operator's machine exists.
+  if (
+    process.env.NODE_TEST_CONTEXT &&
+    !deps.reflexImpl &&
+    !(deps.env && deps.configPath && deps.home)
+  ) {
+    throw new Error(
+      "tortoise-volunteer: under `node --test` you must inject `env`, " +
+        "`configPath` and `home` (or a `reflexImpl`) — refusing to read the " +
+        "operator's config, resolve their install, or post with their " +
+        "credential",
+    );
+  }
   const env = deps.env ?? (typeof process === "undefined" ? {} : process.env);
   const configPath = deps.configPath ?? CONFIG_PATH;
   const home = deps.home ?? homedir();
