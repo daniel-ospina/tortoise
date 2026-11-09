@@ -3775,18 +3775,18 @@ _REFUSAL_CITATION_SITES = (".github/workflows/ci.yml", ".github/actionlint.yaml"
 #: `test-concurrency-falkor` install step) so a reader has a grep-able handle that outlives any
 #: number — the number is the checkable claim, the construct name is the map.
 _WALL_CLOCK_CITATION_ANCHORS: tuple[tuple[str, tuple[str, ...]], ...] = (
-    ("python-ci.yml:4670", ("pip install -e '.[test,postgres]'",)),
-    ("python-ci.yml:2947-2952", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
-    ("python-ci.yml:4662-4664", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
-    ("python-ci.yml:3228", ("cache: pip",)),
+    ("python-ci.yml:4672", ("pip install -e '.[test,postgres]'",)),
+    ("python-ci.yml:2949-2954", ("install-cpu-torch", "pip install -e '.[test,embeddings]'")),
+    ("python-ci.yml:4664-4666", ("path: ~/.cache/pip", "key: pip-${{ runner.os }}-", "restore-keys:")),
+    ("python-ci.yml:3230", ("cache: pip",)),
     # #11273 review (P1): the three citations that PR's correction ADDED. A citation outside this
     # register is an unchecked claim — the doc's arms only ever resolved the registered ones — so
     # adding it here is what puts a new citation under the pin instead of beside it. Each span is
     # anchored on `path:` as well as `uses:`, so a bare `uses: actions/cache@v4` line (there are
     # several in this workflow) cannot satisfy it from the wrong step.
-    ("python-ci.yml:2940-2944", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
-    ("python-ci.yml:2983-2985", ("actions/cache@v4", "path: ~/.cache/huggingface")),
-    ("python-ci.yml:3545-3547", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:2942-2946", ("actions/cache/restore@v4", "path: ~/.cache/pip")),
+    ("python-ci.yml:2985-2987", ("actions/cache@v4", "path: ~/.cache/huggingface")),
+    ("python-ci.yml:3547-3549", ("actions/cache@v4", "path: ~/.cache/huggingface")),
 )
 
 #: The citation shape the completeness arm below reads — a line number or a line RANGE.

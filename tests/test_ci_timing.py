@@ -4288,10 +4288,36 @@ def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
     `tests/conftest.py` imports `httpx` at module scope, so pytest alone is not
     enough to COLLECT anything. Both are asserted, because either one missing puts
     the capability back to inert — and the second is the non-obvious half.
+
+    ⛔ Scoped to the `pip install` LINES, not the whole job. The `measure` job
+    already contains the substring `pytest` in its artifact-assert and bridge steps
+    (`pytest-log-*` globs), so a job-wide substring test passes on the PRE-FIX
+    state it exists to reject — the inert-enforcer vacuity this pin was written to
+    close, recurring inside the pin itself. The predicate below is exercised
+    against a pre-fix install line, so the arm cannot go vacuous again silently.
     """
+
+    def _installs_pytest_and_httpx(run_blocks) -> bool:
+        """The pin's own predicate: the INSTALL lines must carry both."""
+        lines = [
+            line
+            for block in run_blocks
+            for line in str(block or "").splitlines()
+            if "pip install" in line
+        ]
+        return any(re.search(r"\bpytest\b", line) for line in lines) and any(
+            re.search(r"\bhttpx\b", line) for line in lines
+        )
+
     wf = yaml.safe_load(CI_TIMING_WORKFLOW.read_text())
     steps = wf["jobs"]["measure"]["steps"]
-    installs = " ".join(str(s.get("run") or "") for s in steps)
+    run_blocks = [s.get("run") for s in steps]
+    installs = " ".join(
+        line
+        for block in run_blocks
+        for line in str(block or "").splitlines()
+        if "pip install" in line
+    )
     assert "pytest" in installs, (
         "the `measure` job no longer installs pytest, so `collected_test_counts` "
         "cannot run there and a parametrised row is silently back to "
@@ -4301,6 +4327,17 @@ def test_the_refresh_job_can_execute_the_collected_testcase_probe() -> None:
         "`tests/conftest.py` imports httpx at module scope, so `pytest "
         "--collect-only` fails without it and contributes no denominator; "
         "pytest alone is not enough to make the probe runnable")
+
+    # Non-vacuity, executable: the job as a whole always contains the string
+    # `pytest` (the artifact-assert/bridge steps), so a job-wide test cannot fail.
+    # The predicate must REJECT the pre-#11607 install line, which is the state
+    # that shipped inert — `pip install pyyaml==6.0.2` and nothing else.
+    assert not _installs_pytest_and_httpx(
+        ["pip install pyyaml==6.0.2"]
+    ), "the pin would pass the pre-#11607 install line — it is reading the whole job, not the install"
+    assert _installs_pytest_and_httpx(run_blocks), (
+        "the real `measure` job's install lines do not carry both pytest and httpx "
+        "— the predicate above and the assertions below disagree")
 
 
 def test_a_failed_collection_probe_is_loud_and_fails_closed(capsys) -> None:

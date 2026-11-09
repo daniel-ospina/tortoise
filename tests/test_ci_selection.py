@@ -17838,12 +17838,15 @@ def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, m
     The cache exists because one parse of the 1.18 MB map costs ~0.73 s and
     `tests/test_ci_selection.py` alone called it 632 times (~460 s of a 554 s
     suite, which is what red the slow-lane wall pin). Its key is the file's
-    IDENTITY `(path, st_mtime_ns, st_size)`, so a rewrite INVALIDATES; the value
-    handed out is a DEEP COPY, because callers mutate the result in place (the
-    poison tests below do exactly that, through a hand-made copy).
+    IDENTITY `(path, st_mtime_ns, st_size)` PLUS the raw bytes: the identity
+    tuple alone cannot see a same-size rewrite inside the timestamp granularity
+    (the racy-timestamp hole the first version shipped with), so arm 3 compares
+    the bytes too and a rewrite INVALIDATES. The value handed out is a DEEP
+    COPY, because callers mutate the result in place (the poison tests below do
+    exactly that, through a hand-made copy).
 
     Non-vacuity: without the deep copy, arm 2 poisons the cache and arm 3 reds;
-    without the identity key, arm 4 serves the pre-rewrite bytes.
+    without the raw-bytes comparison, arm 3 serves the pre-rewrite bytes.
     """
     import sys as _sys
 
@@ -17882,9 +17885,10 @@ def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, m
     # arm 3 — a REWRITE is a cache miss, not a stale read
     _write(copy_path, 22.0)
     assert cs.load_manifest()["durations"][key] == 22.0, (
-        "the cache served pre-rewrite bytes: this is the failure mode the identity "
-        "key exists to prevent, and it would silently keep a corrected weight out "
-        "of the gate")
+        "the cache served pre-rewrite bytes: this is the failure mode the raw-bytes "
+        "comparison exists to prevent (the identity tuple alone cannot see a "
+        "same-size rewrite inside the timestamp granularity), and it would silently "
+        "keep a corrected weight out of the gate")
     assert _sys  # the import above mirrors the sibling tests' harness
 
 
