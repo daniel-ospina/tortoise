@@ -2076,9 +2076,10 @@ def test_the_real_machine_record_agrees_with_the_pins():
     probe = (PREREG_DIR / "probes" / "capstone_measure.py").read_text().splitlines()
 
     # ⛔ A NEGATIVE LOOKAHEAD, not containment: `":518" in read_back` is satisfied by
-    # `:5060` — a line the 4,349-line probe does not have — so containment certified a
-    # cite pointing at nothing (measured: re-staling the field to `:5060` left this row
-    # GREEN until this regex was written).
+    # `:5180` — a line the 4,361-line probe does not have — so containment certified a
+    # cite pointing at nothing. Measured on this tree: with the containment form in place
+    # and the field re-staled to `:5180`, this row stayed GREEN; under the lookahead it
+    # reds with the message below.
     assert re.search(r"probes/capstone_measure\.py:518(?!\d)", read_back), (
         "the record must name the line the TORTOISE_STATE_VALUE_VERBATIM entry is on, "
         "as a complete number")
@@ -2107,8 +2108,8 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # A set alone cannot tell the two mentions of `:2724-2726` apart (it is `a1dff7cec8`'s
     # move TARGET and this branch's move SOURCE), so `:2713-2715 -> :2724-2726` swapped to
     # `-> :2726-2728` stayed GREEN inside the set while crediting that commit with the final
-    # position — the one thing the field's own last clause denies (measured). With BOTH
-    # moves adjacency-pinned the duplicate can no longer shield a swap. And `carries` was
+    # position — the one thing the field's own last clause denies (measured). With ALL
+    # THREE moves adjacency-pinned the duplicate can no longer shield a swap. And `carries` was
     # itself a prose pin (`cites` redded with every number intact), so the live slot is
     # `count >= 2`: the move supplies one mention and the live cite must supply the other,
     # so deleting or re-staling the live one leaves 1 and reds.
@@ -2124,8 +2125,17 @@ def test_the_real_machine_record_agrees_with_the_pins():
         f"the record states :2738-2740 {read_back.count(':2738-2740')} time(s): the last "
         "move supplies one mention and the LIVE cite must supply the other")
     assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
-        "the record must place the LAST move of that window at its final position "
-        "(:2724-2726 -> :2726-2728); WHO moved it is the record's prose, not asserted here")
+        "the record must place this branch's move of that window at its intermediate "
+        "position (:2724-2726 -> :2726-2728)")
+    # ⛔ The THIRD move, and it needs the same SHA binding as the first — not a count. When
+    # `main` merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
+    # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2726-2728 -> :2738-2740`
+    # (+12). Before this arm the sha was UNPINNED: the field could credit any other commit
+    # with that +12 and every row here stayed green — the exact defect the first-move arm's
+    # own comment records (`a1dff7cec8` swapped for `704fd60ee`, measured GREEN).
+    assert re.search(r"7dabb59e0f45[^:]{0,80}:2726-2728\s*(?:->|→|to)\s*:2738-2740\b", read_back), (
+        "the record must attribute main's move to 7dabb59e0f45 — the SHA in the same clause "
+        "as the ranges — at the final position the merged tree actually reached")
     # ⛔ No separate `":2713-2715" in read_back` arm: the SET pin above already requires
     # that literal, and it is evaluated first, so the smaller arm was UNREACHABLE — a
     # mutant that removed the window reddened the set row (`missing=['2713-2715']`) and
