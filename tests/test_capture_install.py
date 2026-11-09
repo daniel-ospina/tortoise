@@ -4552,29 +4552,30 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # grades the pair as one seam.  Nothing has shipped, so this entry is CREATED
     # here rather than rewritten.
     #
-    # ⛔ RE-PINNED IN PLACE, NOT BUMPED — four times, all inside the review of
-    # the PR that CREATES this generation (1: review findings 1 and 3; 2: the
-    # hosted `catch` was bare; 3: `describeError` had to render `cause`; 4: the
-    # seam now supplies `prior_context`, the reflex's only re-mention-suppression
-    # input).  That is legitimate ONLY because of the sentence above: generation
-    # 18 of the READ half has never shipped — `tortoise-volunteer.ts` has never
-    # been reachable from `main` — so there is no installed copy whose "local
-    # edit" verdict a re-pin could falsify.  The entry is still being CREATED,
-    # not rewritten.
+    # ⛔ RE-PINNED IN PLACE, NOT BUMPED — repeatedly, all inside the review of the
+    # PR that CREATES this generation (the hosted `catch` was bare; `describeError`
+    # had to render `cause`; the seam had to supply `prior_context`; a mangled
+    # line was re-split).  That is legitimate ONLY because of the sentence above:
+    # generation 18 of the READ half has never shipped — `tortoise-volunteer.ts`
+    # has never been reachable from `main` — so there is no installed copy whose
+    # "local edit" verdict a re-pin could falsify.  The entry is still being
+    # CREATED, not rewritten.  (The count is deliberately not stated: a
+    # hand-written count re-stales on the next commit, which this file has
+    # already done twice.)
     #
-    # ⛔ FOUR RE-PINS IS THE SIGNAL TO RE-CHECK THAT REASONING, so state the test
-    # explicitly: if generation 18 HAS shipped by the time this is read, every
-    # re-pin above is a defect, and the correct fix is a BUMP (19 in BOTH Pi
-    # artifacts, a new entry here, and the pair below moved with it) — a SHIPPED
-    # generation's digest must never be rewritten.
-    18: "e801dfd1b23a80ac40bfe073901881ee5d0b3a8cdf6a3be40fb2248b9bdcbeb3",
+    # ⛔ THE TEST FOR WHEN THAT STOPS BEING TRUE, stated explicitly: if generation
+    # 18 HAS shipped by the time this is read, every re-pin above is a defect,
+    # and the correct fix is a BUMP (19 in BOTH Pi artifacts, a new entry here,
+    # and the paired pin below moved with it) — a SHIPPED generation's digest
+    # must never be rewritten.
+    18: "a21f533f4411c1a72d606e1809bc85356e62fb981a24f985cb9f8b1129c961bb",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "e801dfd1b23a80ac40bfe073901881ee5d0b3a8cdf6a3be40fb2248b9bdcbeb3")
+    18, "a21f533f4411c1a72d606e1809bc85356e62fb981a24f985cb9f8b1129c961bb")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

@@ -560,6 +560,103 @@ def _run_driver(home: Path, tmp_path: Path, *, display: bool) -> dict:
     return json.loads(proc.stdout)
 
 
+_HOSTED_DRIVER = r"""
+import { pathToFileURL } from "node:url";
+
+const seam = await import(pathToFileURL(process.env.SEAM_PATH).href);
+const handlers = {};
+const pi = { on: (event, fn) => { handlers[event] = fn; } };
+// PATH is empty and no `tortoise` command is configured, so the seam has NO CLI
+// candidate and must take the HOSTED transport — the leg this row grades.
+seam.default(pi, {
+  env: { PATH: "" },
+  home: process.env.SEAM_HOME,
+  configPath: process.env.SEAM_CONFIG,
+  breadcrumbDir: process.env.CRUMB_DIR,
+});
+
+const ctx = { sessionManager: { getSessionId: () => "sess-hosted" } };
+// TWO turns with DIFFERENT prompts: an identical prompt would be stopped by the
+// digest, and turn 2 is the one that has to carry turn 1's block.
+const first = await handlers.before_agent_start(
+  { messageType: "user", prompt: "first hosted turn" }, ctx);
+const second = await handlers.before_agent_start(
+  { messageType: "user", prompt: "second hosted turn" }, ctx);
+process.stdout.write(JSON.stringify({
+  first: first ?? null,
+  second: second ?? null,
+}));
+"""
+
+
+def test_the_hosted_body_is_the_contract_the_server_validates(home, tmp_path):
+    """#2120/#11584: the seam's HOSTED body must validate against the SERVER's
+    own model — not against a hand-copy.
+
+    The sibling seam shipped exactly this defect once: `runHosted` posted
+    `{prompt}`, `POST /v1/context` requires `window: [{role, content}]`, so EVERY
+    hosted turn was a 422 — and the fail-open catch turned that into "injected
+    nothing" with no signal anywhere. That is why
+    `tests/test_openclaw_seam.py::test_hosted_body_is_the_contract_the_server_validates`
+    exists: a hand-copy of the shape re-encodes the bug it is supposed to catch.
+
+    The node row `CONTINUITY: the HOSTED transport sends prior_context too`
+    compares the emitted body to a LITERAL written from the same reading of
+    `VolunteerContextRequest` the implementation used, so it cannot see a
+    contract drift. This row validates the captured body with the server's own
+    Pydantic model — the same standard as the sibling, applied to this seam.
+    """
+    from tests.test_platform_seams import _RecordingStub, _stub_server
+    from tortoise.hosted_api import VolunteerContextRequest
+
+    node = _node()
+    if not _node_supports_ts(node):
+        if os.environ.get("CI"):
+            pytest.fail("node >= 22.18 is required to load the .ts extension")
+        pytest.skip("node < 22.18 does not enable TypeScript type stripping")
+
+    assert _install(home).ok
+    installed = _ext_dir(home) / VOLUNTEER_EXTENSION.name
+    assert installed.is_file(), "the read seam must be installed before it is graded"
+
+    stub = type("PiHostedStub", (_RecordingStub,), {
+        "body": {"block": "hosted-block"}, "hits": []})
+    with _stub_server(stub) as url:
+        cfg = home / "hosted-config.json"
+        cfg.write_text(json.dumps({"apiKey": "tt_key", "apiUrl": url,
+                                   "volunteer": {}}))
+        # Node takes a `.ts` module's format from the nearest parent
+        # `package.json`; pin it (#11124), as `_run_driver` does.
+        (home / "package.json").write_text('{"type": "module"}\n', encoding="utf-8")
+        driver = tmp_path / "hosted-driver.mjs"
+        driver.write_text(_HOSTED_DRIVER)
+        env = {
+            **_base_env(home),
+            "SEAM_PATH": str(installed),
+            "SEAM_HOME": str(home),
+            "SEAM_CONFIG": str(cfg),
+            "CRUMB_DIR": str(tmp_path / "crumbs"),
+        }
+        proc = subprocess.run([node, str(driver)], env=env, cwd=str(tmp_path),
+                              capture_output=True, text=True, timeout=300)
+
+    assert proc.returncode == 0, f"stdout:\n{proc.stdout}\nstderr:\n{proc.stderr}"
+    assert len(stub.hits) == 2, (
+        f"both turns must reach the hosted transport, got {len(stub.hits)} hit(s): "
+        f"{proc.stderr}")
+    for hit in stub.hits:
+        assert hit["path"].endswith("/v1/context"), hit["path"]
+        # ⛔ THE SERVER'S OWN MODEL. A body it would 422 raises here.
+        VolunteerContextRequest.model_validate(hit["body"])
+    assert stub.hits[0]["body"]["prior_context"] is None, (
+        "turn 1 has nothing to suppress")
+    assert stub.hits[1]["body"]["prior_context"] == "hosted-block", (
+        "turn 2 must carry turn 1's block as `prior_context` — the reflex's only "
+        "re-mention-suppression input")
+    assert json.loads(proc.stdout)["first"]["message"]["content"], (
+        "the hosted turn must still inject on the first turn")
+
+
 def test_the_installed_extension_injects_the_real_reflex_block(home, tmp_path):
     """THE grade the issue asks for: the installed artifact, Pi's own handler
     contract, the REAL reflex over a seeded graph."""

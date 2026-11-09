@@ -1361,6 +1361,71 @@ test("CONTINUITY: the HOSTED transport sends `prior_context` too", async () => {
   });
 });
 
+test("CONTINUITY at the FACTORY: the injected block is what the next turn hands back", async () => {
+  // Round-4 finding: the three CONTINUITY rows above pin `resolveBlock` given a
+  // prior block, `createContinuity` in isolation, and the hosted body — none
+  // pins the two lines that CONNECT them in the SHIPPED path
+  // (`continuity.prior(...)` in the reflex wrapper and `continuity.remember(...)`
+  // in the handler). Measured: pointing either key at a constant left the suite
+  // 35/35 green while a two-turn run against the real CLI sent
+  // `prior_context: null` on EVERY turn — the pre-fix defect, restored.
+  //
+  // The blocks DIFFER per turn on purpose: an identical block is stopped by
+  // `createDedupe` (which runs after the reflex) and would hide the wiring.
+  const home = tmpHome();
+  const blockFile = join(home, "block.txt");
+  const payloadsFile = join(home, "payloads.jsonl");
+  writeFileSync(blockFile, "block-A");
+  const cli = fakeCli(
+    join(home, "bin"),
+    [
+      `cat >> ${JSON.stringify(payloadsFile)}`,
+      `printf '\\n' >> ${JSON.stringify(payloadsFile)}`,
+      `printf '{"block":"%s","surfaced":[]}' "$(cat ${JSON.stringify(blockFile)})"`,
+    ].join("\n"),
+  );
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: `${join(home, "bin")}:/usr/bin` },
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: join(home, "capture-errors"),
+  });
+  const turn = async (prompt: string) =>
+    (await pi.handlers.before_agent_start(
+      { messageType: "user", prompt },
+      SESSION_CTX("sess-w"),
+    )) as { message?: { content?: unknown } } | undefined;
+
+  const first = await turn("one");
+  assert.match(String(first?.message?.content ?? ""), /block-A/);
+  writeFileSync(blockFile, "block-B");
+  const second = await turn("two");
+  assert.match(String(second?.message?.content ?? ""), /block-B/);
+  // …a block this session ALREADY injected: the digest stops it, and the
+  // remembered value must NOT advance (nothing was injected on this turn).
+  writeFileSync(blockFile, "block-A");
+  assert.equal(await turn("three"), undefined, "the digest must reject a repeat");
+  writeFileSync(blockFile, "block-C");
+  const fourth = await turn("four");
+  assert.match(String(fourth?.message?.content ?? ""), /block-C/);
+
+  const payloads = readFileSync(payloadsFile, "utf-8")
+    .trim()
+    .split("\n")
+    .map((line) => JSON.parse(line) as Record<string, unknown>);
+  assert.equal(payloads.length, 4, "every turn must reach the reflex — including the one the digest rejects");
+  assert.equal(payloads[0].prior_context, null, "turn 1 has nothing to suppress");
+  assert.equal(payloads[1].prior_context, "block-A", "turn 2 hands back what turn 1 injected");
+  assert.equal(payloads[2].prior_context, "block-B", "the reflex still runs on a dedupe-rejected turn");
+  assert.equal(
+    payloads[3].prior_context,
+    "block-B",
+    "a REJECTED turn must not advance the memory — 'block-A' here would mean the " +
+      "seam remembered something it never injected",
+  );
+});
+
 test("sessionKeyOf tolerates every ctx shape Pi may hand a handler", () => {
   assert.equal(sessionKeyOf(SESSION_CTX("abc")), "abc");
   assert.equal(sessionKeyOf({}), "");
