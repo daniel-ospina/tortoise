@@ -79,13 +79,46 @@ function tmpHome(): string {
   return mkdtempSync(join(tmpdir(), "tt-volunteer-"));
 }
 
+/** A HERMETIC dependency set for every `tortoiseVolunteer(...)` row below.
+ *
+ *  The factory's two ambient inputs are the OPERATOR's machine: `configPath`
+ *  (defaults to `~/.pi/agent/tortoise-config.json`) and `home` (resolves the
+ *  installer's `~/.tortoise/hook-src-dir` record). Leaving either unset makes
+ *  the suite assert the machine it runs on, not the code:
+ *
+ *    * a Pi user who followed the SHIPPED README — i.e. wrote
+ *      `{"volunteer": {"display": true}}` to the documented path — reds the
+ *      "silent default" row (measured: 29 pass / 1 fail);
+ *    * a machine carrying a file-sourced `apiKey` takes the HOSTED transport
+ *      and POSTs the test prompt to the production endpoint.
+ *
+ *  Same trap, same remedy as `tortoise-capture.test.ts`'s `TEST_ENV` /
+ *  `NO_CONFIG_PATH` (#3721): inject the resolver's INPUTS, never a stubbed
+ *  config, so the shipped chain stays in the tested path. Every row goes
+ *  through this helper; one that does not is not hermetic.
+ */
+function hermetic(): {
+  env: Record<string, string>;
+  home: string;
+  configPath: string;
+  breadcrumbDir: string;
+} {
+  const home = tmpHome();
+  return {
+    env: {},
+    home,
+    configPath: join(home, "absent.json"),
+    breadcrumbDir: join(home, "capture-errors"),
+  };
+}
+
 const SESSION_CTX = (id = "sess-1") => ({
   sessionManager: { getSessionId: () => id },
 });
 
 test("registers exactly the per-turn injection surface, and nothing else", () => {
   const pi = mockPi();
-  tortoiseVolunteer(pi as never, { env: {}, breadcrumbDir: tmpHome() });
+  tortoiseVolunteer(pi as never, hermetic());
   assert.deepEqual(Object.keys(pi.handlers), ["before_agent_start"]);
 });
 
@@ -93,8 +126,7 @@ test("injects the reflex block as a SILENT custom message by default", async () 
   const pi = mockPi();
   const seen: Array<[string, string]> = [];
   tortoiseVolunteer(pi as never, {
-    env: {},
-    breadcrumbDir: tmpHome(),
+    ...hermetic(),
     reflexImpl: (prompt, sessionId) => {
       seen.push([prompt, sessionId]);
       return { block: "## Memory surfaced this turn\n- **CI** → point/p1", surfaced: ["CI"] };
@@ -121,8 +153,7 @@ test("a non-user run (custom message triggerTurn) is never searched", async () =
   const pi = mockPi();
   let called = 0;
   tortoiseVolunteer(pi as never, {
-    env: {},
-    breadcrumbDir: tmpHome(),
+    ...hermetic(),
     reflexImpl: () => {
       called += 1;
       return { block: "x", surfaced: [] };
@@ -146,8 +177,8 @@ test("fail-open: kill switch, empty prompt, empty graph, dead reflex, a throw", 
   for (const [name, event, implOut] of cases) {
     const pi = mockPi();
     tortoiseVolunteer(pi as never, {
+      ...hermetic(),
       env: name === "kill switch" ? { TORTOISE_VOLUNTEER_DISABLE: "1" } : {},
-      breadcrumbDir: tmpHome(),
       reflexImpl: () => implOut as never,
     });
     assert.equal(
@@ -159,8 +190,7 @@ test("fail-open: kill switch, empty prompt, empty graph, dead reflex, a throw", 
 
   const pi = mockPi();
   tortoiseVolunteer(pi as never, {
-    env: {},
-    breadcrumbDir: tmpHome(),
+    ...hermetic(),
     reflexImpl: () => {
       throw new Error("reflex exploded");
     },
@@ -432,8 +462,7 @@ test("the prompt is bounded in BYTES, not characters", async () => {
   const pi = mockPi();
   let seenPrompt = "";
   tortoiseVolunteer(pi as never, {
-    env: {},
-    breadcrumbDir: tmpHome(),
+    ...hermetic(),
     reflexImpl: (prompt) => {
       seenPrompt = prompt;
       return { block: "b", surfaced: [] };
@@ -449,8 +478,7 @@ test("the prompt is bounded in BYTES, not characters", async () => {
 test("cross-turn dedupe: the identical block is not re-injected in a session", async () => {
   const pi = mockPi();
   tortoiseVolunteer(pi as never, {
-    env: {},
-    breadcrumbDir: tmpHome(),
+    ...hermetic(),
     reflexImpl: () => ({ block: "same block", surfaced: [] }),
   });
   const event = { messageType: "user", prompt: "q" };
@@ -1087,6 +1115,93 @@ test("no reflex and no key: an inert breadcrumb lands in the canonical slot; an 
   // (review finding 7 — the previous line compared a constant to `true`).
   assert.equal(statSync(emptyCli).isFile(), true);
   assert.notEqual(statSync(emptyCli).mode & 0o111, 0, `${emptyCli} must be executable`);
+});
+
+test("a THROWN hosted request names its cause, and does not latch", async () => {
+  // #11584 review, finding 4: `runReflexHosted`'s catch was BARE, so the reason
+  // was discarded and the caller reported `POST <url>/v1/context returned no
+  // block` — a sentence that CLAIMS THE ENDPOINT ANSWERED. A DNS/TLS failure is
+  // the documented hosted-transport misconfiguration, and it was
+  // indistinguishable from a healthy endpoint that carried nothing, while this
+  // file's header promised `refused`'s detail "names the actual cause".
+  //
+  // MUTATION: restore `} catch {` (bare) → the trace reads "returned no block"
+  // and the `request failed: …/ENOTFOUND` assertion below REDS.
+  //
+  // The row is also the transient-failure owner for the HOSTED leg: turn 1
+  // throws, turn 2 answers, so a latch written into the catch (rather than a
+  // `refused` classification) reds the turn-2 assertion.
+  const home = tmpHome();
+  const crumbs = join(home, "capture-errors");
+  const cfgPath = join(home, "tortoise-config.json");
+  // A FILE-sourced key: the documented "no `tortoise` on PATH, configured key"
+  // machine. Serialised, so `readVolunteerConfig` reads it for real.
+  writeFileSync(cfgPath, JSON.stringify({ apiKey: "tt_key", apiUrl: "https://h" }));
+  let hostedCalls = 0;
+  const pi = mockPi();
+  tortoiseVolunteer(pi as never, {
+    env: { PATH: "", TORTOISE_VOLUNTEER_DEBUG: "1" },
+    home,
+    configPath: cfgPath,
+    breadcrumbDir: crumbs,
+    fetchImpl: (async () => {
+      hostedCalls += 1;
+      if (hostedCalls === 1) {
+        const dns = new Error("getaddrinfo ENOTFOUND h") as Error & { code?: string };
+        dns.code = "ENOTFOUND";
+        throw dns;
+      }
+      return {
+        ok: true,
+        status: 200,
+        json: async () => ({ block: "## Memory surfaced this turn" }),
+      } as Response;
+    }) as typeof fetch,
+  });
+
+  const realWrite = process.stderr.write;
+  let stderr = "";
+  (process.stderr as { write: unknown }).write = ((chunk: unknown) => {
+    stderr += String(chunk);
+    return true;
+  }) as typeof realWrite;
+  try {
+    assert.equal(
+      await pi.handlers.before_agent_start({ messageType: "user", prompt: "q" }, SESSION_CTX()),
+      undefined,
+      "a thrown hosted request is fail-open — the turn still runs",
+    );
+  } finally {
+    (process.stderr as { write: unknown }).write = realWrite;
+  }
+
+  assert.equal(hostedCalls, 1, "the harness must reach the hosted transport exactly once here");
+  assert.match(
+    stderr,
+    /request failed: Error\/ENOTFOUND/,
+    "the trace must name the ACTUAL cause — a discarded error reported as " +
+      '"returned no block" claims the endpoint answered, which it never did',
+  );
+  assert.equal(
+    /returned no block/.test(stderr),
+    false,
+    "a thrown request must not be reported as an empty answer",
+  );
+  assert.equal(
+    existsSync(join(crumbs, "pi-install.json")),
+    false,
+    "a transient hosted failure is not evidence about the install — no " +
+      "`install-inert` breadcrumb, which would tell an operator to reinstall a " +
+      "working install",
+  );
+
+  const second = (await pi.handlers.before_agent_start(
+    { messageType: "user", prompt: "q" },
+    SESSION_CTX(),
+  )) as { message?: { content?: unknown } } | undefined;
+  assert.ok(second?.message, "turn 2 must retry — a transient hosted failure may NOT latch");
+  assert.match(String(second?.message?.content ?? ""), /Memory surfaced this turn/);
+  assert.equal(hostedCalls, 2);
 });
 
 test("sessionKeyOf tolerates every ctx shape Pi may hand a handler", () => {

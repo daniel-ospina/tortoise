@@ -82,7 +82,14 @@
 // ⛔ Review finding 4: an earlier revision of this paragraph claimed the trace
 // covered `empty` and `timeout` too, while only `refused` was traced — the same
 // over-promise this section exists to remove. The tracing assertion in the suite
-// now covers BOTH traced classes, so the sentence cannot drift again silently.
+// now covers BOTH traced classes on BOTH transports, and it took a second
+// correction to get there: `refused` reached the trace from the CLI leg, but
+// `runReflexHosted`'s `catch` was BARE — the reason was discarded and the caller
+// reported "returned no block", which CLAIMS THE ENDPOINT ANSWERED about a
+// request that never got a response at all. The catch now binds the error
+// (`describeError`) and one suite row drives a thrown `ENOTFOUND` through it and
+// asserts the cause reaches the trace, so the sentence cannot drift again
+// silently.
 //
 // W4 USER-EXPOSURE GATE
 // ----------------------
@@ -635,6 +642,15 @@ export function parseReflexJson(stdout: string): ReflexResult | null {
   return { block, surfaced };
 }
 
+/** A thrown value, as one line safe to put in a trace (never a turn). */
+function describeError(error: unknown): string {
+  if (error instanceof Error) {
+    const code = (error as { code?: unknown }).code;
+    return typeof code === "string" && code ? `${error.name}/${code}: ${error.message}` : `${error.name}: ${error.message}`;
+  }
+  return String(error);
+}
+
 /**
  * The hosted transport, for a machine with no `tortoise` CLI.
  *
@@ -696,10 +712,26 @@ export async function runReflexHosted(
           .filter((label) => label !== "")
       : [];
     return { result: { block, surfaced }, timedOut: false, refused: "" };
-  } catch {
+  } catch (error) {
     // Same distinction as the CLI leg: our OWN abort means the endpoint did not
     // answer in budget (slow, not absent), which is not an inert install.
-    return { result: null, timedOut: controller.signal.aborted, refused: "" };
+    if (controller.signal.aborted) {
+      return { result: null, timedOut: true, refused: "" };
+    }
+    // ⛔ BIND IT (#11584 review finding 4). A bare `catch` discarded the reason,
+    // and the caller then reported `POST <url>/v1/context returned no block` —
+    // which CLAIMS THE ENDPOINT ANSWERED. A DNS failure, a refused connection or
+    // a TLS failure (the documented hosted-transport misconfiguration) was
+    // therefore indistinguishable from a healthy endpoint that carried nothing,
+    // while this file's header promises `refused`'s detail "names the actual
+    // cause … so a persistent misconfiguration is diagnosable". It goes to
+    // stderr through `trace` under `TORTOISE_VOLUNTEER_DEBUG=1`, never to the
+    // canonical `install-inert` slot (see `trace`).
+    return {
+      result: null,
+      timedOut: false,
+      refused: `request failed: ${describeError(error)}`,
+    };
   } finally {
     clearTimeout(timer);
   }

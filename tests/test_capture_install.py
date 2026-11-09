@@ -4559,14 +4559,24 @@ _READ_SEAM_GENERATION_DIGESTS = {
     # created.  A SHIPPED generation's digest must never be rewritten; it moves
     # to a new generation, which is a two-file change (`contract_version_for`
     # grades the pair).
-    18: "fba94c2046b271ff57a8c0b73cf0a1428329a89e76990d1026f8cccdaa94e972",
+    #
+    # ⛔ RE-PINNED IN PLACE A SECOND TIME, and the reason is the same sentence:
+    # the fresh review of the rebased head found `runReflexHosted`'s `catch` was
+    # BARE (the reason discarded, so the caller reported "returned no block" —
+    # which claims the endpoint ANSWERED — about a request that never got a
+    # response), and binding it (`describeError`) changes these bytes again.  The
+    # generation is still 18 and still unshipped, so this is the entry being
+    # finished, not a shipped digest being rewritten.  If generation 18 HAS
+    # shipped by the time this is read, this re-pin is a defect and the fix is a
+    # bump to 19 in BOTH Pi artifacts plus a new entry here.
+    18: "153a4ff708c15ca9275aced77013385ce7f3e11ed791e39d6e1d6a6a8fd86d29",
 }
 
 #: The paired pin for the read half, mirroring
 #: ``_PINNED_PI_SEAM_INSTALL_CONTRACT`` above (and pinned to the SAME number,
 #: asserted by the test below: one seam, one contract).
 _PINNED_PI_READ_SEAM_INSTALL_CONTRACT = (
-    18, "fba94c2046b271ff57a8c0b73cf0a1428329a89e76990d1026f8cccdaa94e972")
+    18, "153a4ff708c15ca9275aced77013385ce7f3e11ed791e39d6e1d6a6a8fd86d29")
 
 
 def test_a_shipped_pi_seam_byte_change_moves_the_generation():

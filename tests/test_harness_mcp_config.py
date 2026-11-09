@@ -616,17 +616,34 @@ class TestPrintHarnessInstructions:
         assert (REPO_ROOT / "tortoise" / "pi-hooks" / PI_EXTENSION_NAME).is_file(), (
             "the advertised extension must be a real file the installer copies")
 
-    def test_every_advertised_extension_resolves_to_a_real_artifact(self):
+    def test_every_advertised_extension_resolves_to_a_real_artifact(self, tmp_path, monkeypatch):
         """#3502: every extension an install surface names must resolve to a
         real extension artifact.
 
         Covers prose claims (`<name> extension`) and install-path claims
         (`extensions/<name>`). MUTATION: hardcode any other extension name
         into any of these surfaces → RED.
+
+        ⛔ HERMETIC HOME (#11584 review, P1). The `--uninstall` surface below
+        runs the REAL verb, and since #2119 that verb DELETES the read seam
+        (`_uninstall_pi_volunteer` → `target.unlink()`) under
+        `Path.home()/.pi/agent/extensions/`. Before #2119 the pi arm printed a
+        sentence and touched nothing, so the row was harmless; now it is a live
+        delete of the machine running the suite, with no backup, and it accepts
+        stale-generation and locally-edited copies as "provably ours". The
+        symptom is the one #4314 exists to prevent: the seam silently stops
+        existing and per-turn memory goes quiet with no error. Pin the home the
+        verb resolves (and `dry_run`, belt-and-braces — nothing here asserts on
+        a deletion) so a test invocation can never opt a runner's machine OUT
+        of the W4 posture, the same rule `tests/test_platform_seams.py:763`
+        states for the sibling row.
         """
         from types import SimpleNamespace
 
         from tortoise.__main__ import _install_read_hook_impl
+
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
 
         real = self._real_extension_names()
         surfaces = {
@@ -639,7 +656,8 @@ class TestPrintHarnessInstructions:
         # #3502 P2/P3: the `--uninstall` message names the install path too —
         # it was the lone retyped literal in the class this guard closes.
         surfaces["`tortoise install pi --uninstall` message"] = self._capture_call(
-            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+            _cmd_install_hooks,
+            SimpleNamespace(uninstall=True, harness="pi", dry_run=True))
 
         advertised: set[str] = set()
         for label, text in surfaces.items():
@@ -656,7 +674,7 @@ class TestPrintHarnessInstructions:
             "the Pi surfaces must name the extension the installer writes; a "
             "guard that also passes when the claim is deleted pins nothing")
 
-    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch):
+    def test_pi_uninstall_message_derives_the_extension_name(self, monkeypatch, tmp_path):
         """#3502: `tortoise install pi --uninstall` must name the file the
         installer writes, DERIVED — never a retyped literal.
 
@@ -670,10 +688,16 @@ class TestPrintHarnessInstructions:
         """
         from types import SimpleNamespace
 
+        # HERMETIC HOME (#11584 review, P1) — see the row above: the verb now
+        # DELETES the read seam under `Path.home()`, so it must never see the
+        # runner's own extensions directory.
+        monkeypatch.setenv("HOME", str(tmp_path))
+        monkeypatch.setenv("USERPROFILE", str(tmp_path))  # Path.home() on Windows
         monkeypatch.setattr(
             "tortoise.capture_install.PI_EXTENSION_NAME", "tortoise-renamed.ts")
         out = self._capture_call(
-            _cmd_install_hooks, SimpleNamespace(uninstall=True, harness="pi"))
+            _cmd_install_hooks,
+            SimpleNamespace(uninstall=True, harness="pi", dry_run=True))
         assert "tortoise-renamed.ts" in out, (
             "the --uninstall message retyped the extension name instead of "
             "deriving it from the install contract:\n" + out)
