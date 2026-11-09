@@ -59,7 +59,7 @@ separate backfill statement, which is why the migration has none.
 `(embedding::text)::vector` — the obvious inline cast — **raises** on a JSON
 array containing nulls:
 
-```
+```text
 ERROR:  invalid input syntax for type vector: "[null, null, … ]"
 ```
 
@@ -124,15 +124,15 @@ rebuild".**
 
 What survives, at the width the evidence supports:
 
-* `#7846` §3's **436.5 s / 191.8 s / instance blocked** is the cost of restoring
+- `#7846` §3's **436.5 s / 191.8 s / instance blocked** is the cost of restoring
   a payload that CARRIES the index — the price of the index existing anywhere in
   the restore path.
-* After this change an index-free graph pays **none** of it: nothing to drop
+- After this change an index-free graph pays **none** of it: nothing to drop
   before the `DUMP`, nothing to re-create after the `RESTORE`, because
   `_ensure_vector_index_api` creates no in-graph index and drops one it finds
   (pinned by `tests/test_4997_vector_index_parity.py` and
   `tests/test_falkordb_compat.py`).
-* ⛔ **And the scope that qualifies it: the saving is earned for every dump taken
+- ⛔ **And the scope that qualifies it: the saving is earned for every dump taken
   AFTER the retirement has swept that graph.** A dump taken BEFORE it still
   carries the index and still costs what §3 measured. `graph_key_restore` reads
   the definition from `CALL db.indexes()` rather than hardcoding it, so a retired
@@ -182,10 +182,10 @@ loopback, one lane, warm (20 discarded calls, then 100 timed):
 
 Three things this says, stated rather than left to be inferred:
 
-* **The index earns its keep at 20k: 16x.** 1.13 ms indexed against 17.95 ms
+- **The index earns its keep at 20k: 16x.** 1.13 ms indexed against 17.95 ms
   exact. The ANN is not decorative at this size, which is why the leg filters on
   the GENERATED column rather than scanning `embedding`.
-* **The leg's own overhead is ~2.5 ms on top of a 1.1 ms statement**, and it is
+- **The leg's own overhead is ~2.5 ms on top of a 1.1 ms statement**, and it is
   FOUR round trips, not one: `set_config('app.current_org_id')`, the scope
   read-back, `set_config('hnsw.iterative_scan')`, then the SELECT. That is the
   tenant prologue and the scan setting, both of which exist for correctness
@@ -194,7 +194,7 @@ Three things this says, stated rather than left to be inferred:
   is what stops a filtered ANN returning 0 rows where 152 exist (§5). A
   future "why is the leg slower than the query" has its answer here: it is not
   the plan.
-* **The short-path aggregate is a SCAN, and it is priced like one**: 6.25 ms
+- **The short-path aggregate is a SCAN, and it is priced like one**: 6.25 ms
   over 20k rows, i.e. ~5x the indexed statement it accompanies. It is paid on
   every short answer, which is EVERY answer for a tenant smaller than `limit` —
   so the honest reading of "one bounded aggregate, paid once per short read" is

@@ -69,6 +69,7 @@ __all__ = [
     "RecordVectorError",
     "VectorShortfall",
     "armed",
+    "cutover_armed",
     "searcher",
 ]
 
@@ -336,24 +337,51 @@ def _recency_sql(columns: tuple[str | None, str | None], alias: str = "t") -> st
     )
 
 
-def _cutover_armed() -> bool:
-    """Is the dense leg's CUTOVER armed? Default NO — see :data:`ARMING_ENV`."""
+def cutover_armed() -> bool:
+    """Is the dense leg's CUTOVER armed? Default NO — see :data:`ARMING_ENV`.
+
+    ⛔ PUBLIC, and a separate question from :func:`armed`, because one consumer
+    outside this module must ask it: `projection.vector_index_retired()` keys
+    the `#4997` log LEVEL on whether a replacement actually answers the dense
+    read, and a DSN alone stopped being that answer when this switch was added
+    (#11660 review round 6, P1-3).
+    """
     from .env_truthy import is_truthy
 
     return is_truthy(os.environ.get(ARMING_ENV))
 
 
+#: The shape `run_vector_query` consumes for BOTH legs: ``(id, distance,
+#: recency)`` rows, or ``None`` for "this label is not served here". The FOURTH
+#: positional argument is the caller's `#689` `excluded_statuses` — declared so a
+#: reader of the annotation cannot conclude the status filter is unavailable
+#: (#11660 review round 6, P3-7).
+DenseSearcher = Callable[
+    [str, Sequence[float], int, tuple | None],
+    list[tuple[str, float, Any]] | None,
+]
+
+
 def searcher(
     record_dsn: str | None = None,
     carried: tuple[str, str] | None = None,
-) -> Callable[[str, Sequence[float], int], list[tuple[str, float, Any]]] | None:
+) -> DenseSearcher | None:
     """A dense searcher bound to this request's tenant, or ``None`` when unarmed.
 
     The returned callable has the signature
-    ``search(entity_type, query_vec, limit) -> [(id, distance, recency), …]``
-    and its shape is deliberately the SHAPE THE CYPHER YIELD PRODUCED, so
-    `run_vector_query`'s single ordering pass consumes both legs identically and
-    the ranking cannot drift between them by construction.
+    ``search(entity_type, query_vec, limit, excluded_statuses=None) ->
+    [(id, distance, recency), …]`` and its shape is deliberately the SHAPE THE
+    CYPHER YIELD PRODUCED, so `run_vector_query`'s single ordering pass consumes
+    both legs identically and the ranking cannot drift between them by
+    construction.
+
+    ⛔ THE FOURTH PARAMETER IS NOT OPTIONAL IN THE CONTRACT (#11660 review round
+    6, P3-7): ``excluded_statuses`` is the caller's `#689` terminal-status
+    exclusion (`None` = exclude the default set, `()` = the audit opt-in that
+    emits no clause). A caller following a three-argument description would not
+    know the status filter exists, and the graph branches apply it on every
+    Point read — so leaving it out is how the two legs start answering different
+    populations again.
 
     ``carried`` is the request's ``(org_id, graph_id)`` when the caller holds it
     BY VALUE — the hosted REST lane's shape, where the tenant rides the SDK
@@ -384,7 +412,7 @@ def searcher(
         return None
     if not dsn:
         return None
-    if not _cutover_armed():
+    if not cutover_armed():
         # See ARMING_ENV: the record is a fold with no backfill, so it does not
         # yet hold the whole corpus and must not become the dense leg's only
         # source. Unarmed is the DEFAULT and it is not a degraded state.

@@ -56,13 +56,53 @@ def _graph_handle(graph_uri: str | None, graph_name: str):
     ⛔ Returning ``None`` (not raising) is deliberate: the caller turns it into
     the graph half's REFUSAL, so a missing URI is an explicit "not measured"
     rather than an exception an operator might read as a tool bug.
+
+    ⛔ AND THE NAME IS VERIFIED AGAINST THE ENGINE'S OWN LISTING BEFORE ANY
+    CYPHER RUNS (#11660 review round 6, P1-4). `select_graph` does not raise for
+    a name the engine does not hold — and an aggregate over a graph that does
+    not exist answers `[[0]]`, indistinguishable from a genuinely empty tenant —
+    so `--graph-name org_typo` used to read nothing, record no refusal, and print
+    **CLEAN**: a false erasure attestation from the one instrument whose contract
+    says that is impossible, reachable by one typo in a flag the round-3 split
+    introduced. Two further reasons the check is HERE rather than in
+    `_count_graph`:
+
+    * a Cypher read on a MISSING graph CREATES an empty one (verified on
+      FalkorDB 4.20.4 — see `tortoise/hosted_backup.py::_await_restore_copy_settled`,
+      which never queries a name `GRAPH.LIST` does not hold for exactly this
+      reason), so a scan must not touch an unverified name at all;
+    * "I read a graph with no nodes" and "I read nothing" are the two states
+      this tool exists to keep apart, and the second one is not a CLEAN.
+
+    A listing that cannot be read is treated the same way as an absent name —
+    refused, never assumed present. Fail-closed is the only safe direction for an
+    attestation.
     """
     if not graph_uri:
         return None
     try:
         from falkordb import FalkorDB
 
-        return FalkorDB.from_url(graph_uri).select_graph(graph_name)
+        db = FalkorDB.from_url(graph_uri)
+        names = {str(n) for n in (db.list_graphs() or [])}
+    except Exception as e:  # noqa: BLE001, RUF100
+        print(f"Warning: no graph handle ({type(e).__name__}: {e}). The graph "
+              "half of the scan is NOT measured; the verdict cannot be CLEAN.",
+              file=sys.stderr)
+        return None
+    if graph_name not in names:
+        print(
+            f"Warning: the engine holds NO graph named {graph_name!r} (its "
+            f"listing has {len(names)} graph(s)). The graph half of the scan is "
+            "NOT measured — an aggregate over a name that does not exist "
+            "answers 0, which is why this is a REFUSAL and not a clean count. "
+            "A Cypher read on an unknown name would also CREATE an empty graph, "
+            "so nothing is queried.",
+            file=sys.stderr,
+        )
+        return None
+    try:
+        return db.select_graph(graph_name)
     except Exception as e:  # noqa: BLE001, RUF100
         print(f"Warning: no graph handle ({type(e).__name__}: {e}). The graph "
               "half of the scan is NOT measured; the verdict cannot be CLEAN.",
@@ -120,6 +160,16 @@ def main(argv: list[str] | None = None) -> int:
     print(f"  record: {outcome.record_vectors!r}"
           + ("" if outcome.record_vectors is None
              else f"  {outcome.record_by_table}"))
+    # ⛔ The split the dense leg cannot serve (#11660 review round 6, P2-6): rows
+    # the record HOLDS whose `embedding_vec` is NULL (non-384, an object, `[]`, a
+    # `null` element). They are not residue and they are not indexed, and the
+    # dense read's `WHERE embedding_vec IS NOT NULL` excludes them silently — so
+    # print the number even when it is zero, because "N vectors, M indexed" is
+    # the question an operator actually has.
+    if outcome.record_unindexed_by_table:
+        print(f"  record held but NOT ANN-indexed: "
+              f"{sum(outcome.record_unindexed_by_table.values())} "
+              f"{outcome.record_unindexed_by_table}")
     print(f"  graph : {outcome.graph_vectors!r}"
           + ("" if outcome.graph_vectors is None
              else f"  {outcome.graph_by_label}"))

@@ -714,16 +714,21 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: stops being read.
 #:
 #: ⛔ "Live" is not a constant, it is the deployment: :func:`vector_index_retired`
-#: asks whether the RECORD can serve the dense leg (a DSN resolves —
-#: `record_writer.record_dsn`, the arming surface itself). That split is the
-#: honest one, because the two states are NOT the same fact:
+#: asks whether the RECORD can serve the dense leg, and that is TWO conditions —
+#: a DSN resolves (`record_writer.record_dsn`, the arming SURFACE) **and** the
+#: cutover is armed (`record_vector.cutover_armed` / `TORTOISE_RECORD_VECTOR_LEG`,
+#: the arming DECISION). Round 3 introduced the second condition and left this
+#: predicate on the first, so the alarm was muted on the posture round 3 makes the
+#: default (#11660 review round 6, P1-3). That split is the honest one, because
+#: the two states are NOT the same fact:
 #:
-#:   * record ARMED — the dense leg is Postgres's job, a graph full scan is the
-#:     documented fallback for the labels the record does not carry
-#:     (`object`/`subject`) and for a store between setups. INFO.
-#:   * record NOT ARMED — nothing serves the dense leg from Postgres, the graph
-#:     has no vector index, and every served label REALLY DOES full-scan. That
-#:     is `#4997`'s defect, unchanged, and it keeps its WARNING.
+#:   * record ARMED (DSN + cutover on) — the dense leg is Postgres's job, a graph
+#:     full scan is the documented fallback for the labels the record does not
+#:     carry (`object`/`subject`) and for a store between setups. INFO.
+#:   * record NOT ARMED (no DSN, or no cutover, or neither) — nothing serves the
+#:     dense leg from Postgres, the graph has no vector index, and every served
+#:     label REALLY DOES full-scan. That is `#4997`'s defect, unchanged, and it
+#:     keeps its WARNING. The cutover defaults OFF, so this is the DEFAULT lane.
 #:
 #: ⛔ AND IT IS A ROLLBACK SWITCH, WHICH IS TWO HALVES (`#11660` review F9). The
 #: flag is read in TWO places and a rollback needs both: the log LEVEL above, and
@@ -741,6 +746,15 @@ _VECTOR_INDEX_GAP_LOCK = threading.Lock()
 #: touches this flag (#11660 review round 3, P3 — an earlier draft pointed a
 #: reader at a file with no such pin).
 #:
+#: `TORTOISE_RECORD_VECTOR_LEG` and it must reach the LOG LEVEL too. After round
+#: 3 the dense leg's cutover is a second, stronger condition (the record has no
+#: backfill yet), so a DSN no longer implies a replacement: both
+#: `vector_index_retired()` and the reader must agree, or the #4997 warning is
+#: muted on exactly the store that needs it (#11660 review round 6, P1-3).
+#: For an operator: the index is retired unconditionally on the next setup; a
+#: store with no armed record leg full-scans every dense query and says so at
+#: WARNING; arming the leg is `TORTOISE_RECORD_VECTOR_LEG=1` WITH a record DSN.
+#:
 #: ⚠️ Flipping it is a CODE revert's cheap cousin, not the whole revert: the
 #: record leg stays armed and keeps answering the dense read (`record_vector`),
 #: and Postgres keeps its columns. A full rollback also reverts the call site
@@ -757,6 +771,26 @@ def vector_index_retired() -> bool:
     not a rollback — it is a store whose dense leg has nowhere else to go, which
     is why it keeps the #4997 warning rather than inheriting an exemption it did
     not earn.
+
+    ⛔ A RECORD DSN IS NOT THAT ANSWER, and treating it as one muted the very
+    alarm this function exists to keep honest (#11660 review round 6, P1-3).
+    Round 3 made the dense leg's cutover a SECOND, stronger condition —
+    :data:`tortoise.record_vector.ARMING_ENV`, default OFF — so a hosted store
+    with a DSN and no arming is the *default* posture, and on it:
+
+      * the in-graph index is dropped (the drop is gated on the constant, which
+        is the deliberate part), and
+      * the record does NOT answer the dense read, so every served label really
+        does full-scan — exactly `#4997`'s defect — and
+      * a DSN-only predicate returned ``True``, downgrading that defect's
+        WARNING to an INFO whose text says the dense read "is served from the
+        Postgres record". The one line an operator reads in an incident said
+        the opposite of the truth.
+
+    So both conditions are asked, and they are asked where each lives: the DSN
+    in ``record_writer`` (the arming SURFACE, and it raises on a malformed
+    value) and the cutover in ``record_vector`` (the arming DECISION). Lazy
+    imports both, for the cycle.
     """
     if not VECTOR_INDEX_RETIRED:
         return False
@@ -765,8 +799,17 @@ def vector_index_retired() -> bool:
     except Exception:  # noqa: BLE001, RUF100 — an unimportable arming module is "unarmed"
         return False
     try:
-        return bool(record_dsn())
+        if not record_dsn():
+            return False
     except Exception:  # noqa: BLE001, RUF100 — a malformed DSN is "unarmed"
+        return False
+    try:
+        from ..record_vector import cutover_armed
+    except Exception:  # noqa: BLE001, RUF100 — see above: "unarmed"
+        return False
+    try:
+        return bool(cutover_armed())
+    except Exception:  # noqa: BLE001, RUF100 — a broken predicate is not an "armed"
         return False
 
 # ── #11087: the last serves/indexes PAIR reported per (endpoint, graph) ──
@@ -20476,10 +20519,22 @@ class FalkorProjection(
         that is the correct answer rather than a regression. The in-graph index
         is retired (`VECTOR_INDEX_RETIRED`; `_ensure_vector_index_api` drops one
         it finds and never creates one), so no graph index exists to bless a
-        width — and the width guarantee moved with the index, to Postgres's
-        ``record_embedding_vector(jsonb) -> vector(384)``, which stores NULL for
-        any other width instead of rejecting the write. The consequence here is
-        the DOCUMENTED no-index behaviour: the write path becomes
+        width.
+
+        ⛔ AND THE WIDTH GUARD IS **REMOVED**, NOT MOVED (#11660 review round 6,
+        P2-3). An earlier draft of this docstring said it "moved with the index"
+        to Postgres's ``record_embedding_vector(jsonb) -> vector(384)`` — but
+        that converter REJECTS nothing: it returns NULL for any other width, so
+        the row is STORED and simply not ANN-indexed
+        (`20261109000001_record_embedding_vector.sql`). So after this change a
+        mismatched-width write is accepted on BOTH stores with no refusal
+        anywhere, where `main` refused it on any store that had an index. That
+        is a deliberate trade (the index, and with it the width constraint, left
+        the graph), and the observable consequence is: the row is visible to
+        every reader, the dense leg's ``WHERE embedding_vec IS NOT NULL``
+        excludes it, and
+        :func:`tortoise.embedding_residual_scan` reports it as "held but NOT
+        ANN-indexed" instead of leaving it invisible. The write path is
         width-agnostic and :func:`tortoise.search_engine.run_vector_query`'s
         brute-force scan reads back whatever the encoder produced (#4280).
 

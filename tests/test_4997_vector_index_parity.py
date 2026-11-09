@@ -498,7 +498,7 @@ def test_warning_is_latched_but_the_measurement_is_not(caplog):
     assert proj._vector_indexed_labels == {"Event"}
 
 
-def test_warning_names_the_gap_and_the_open_question(caplog):
+def test_warning_names_the_gap_and_the_open_question(caplog, monkeypatch):
     """The UNARMED store's warning names the labels AND the open question.
 
     ⛔ This is the default lane for a box with no record DSN: `vector_index_retired()`
@@ -508,11 +508,21 @@ def test_warning_names_the_gap_and_the_open_question(caplog):
     all). The retirement INFO's own wording is pinned in
     `test_the_armed_store_gets_the_retirement_info` below; the two lanes say
     different things because they are different facts.
+
+    ⛔ BOTH ARMING CONDITIONS ARE CLEARED EXPLICITLY (#11660 review round 6,
+    P1-3). `vector_index_retired()` now asks for a record DSN **and** the armed
+    cutover (`record_vector.ARMING_ENV`), so asserting the lane from the ambient
+    environment would let either one move it — the same class of accidental
+    posture shift this guard's message already warned about, one condition short.
     """
     from tortoise.projection import vector_index_retired
+    from tortoise.record_vector import ARMING_ENV
+    monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
+    monkeypatch.delenv(ARMING_ENV, raising=False)
     assert not vector_index_retired(), (
-        "this lane is the UNARMED one — a stray record DSN in the environment "
-        "would silently move the assertion below to a different posture")
+        "this lane is the UNARMED one — a stray record DSN or an armed cutover "
+        "in the environment would silently move the assertion below to a "
+        "different posture")
     proj = _bare([_vector_row("Point")])
     with caplog.at_level(logging.INFO):
         proj._ensure_indexes()

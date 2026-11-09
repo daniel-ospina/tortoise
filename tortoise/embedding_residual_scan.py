@@ -30,10 +30,17 @@ The three outcomes, and why ``2`` exists
 
 ⚠️ ``CLEAN`` is scoped and says so. Both counts are tenant-scoped (the record's
 RLS via `record_projection.scope_connection`, the graph by its own name), so a
-wrong `--org`/`--graph` reads a tenant that holds nothing and reports `CLEAN`
+wrong `--org`/`--graph-id` reads a tenant that holds nothing and reports `CLEAN`
 about **that scope** — which is a true statement about a scope nobody asked
 about, not a false one about the one they did. The outcome names the scope it
 measured for exactly that reason.
+
+⛔ AND A GRAPH NAME THAT DOES NOT EXIST IS **NOT** A SCOPE THAT HOLDS NOTHING
+(#11660 review round 6, P1-4). An aggregate over a name the engine does not hold
+answers `0` rather than raising, so "read nothing" and "holds nothing" are the
+same number and only one of them is a CLEAN — the CLI therefore verifies the
+name against `GRAPH.LIST` and refuses; see
+`tools/embedding_residual_scan.py::_graph_handle`.
 
 Read-only. It writes nothing to either store, creates no index and deletes no
 row: an instrument that erases while attesting cannot attest.
@@ -108,6 +115,13 @@ class ResidualScan:
     graph_id: str
     record_vectors: int | None = None
     record_by_table: dict[str, int] = field(default_factory=dict)
+    #: Per table, vectors the record HOLDS but the ANN index cannot see: a
+    #: non-NULL `embedding` whose `embedding_vec` is NULL. The dense leg filters
+    #: on `embedding_vec IS NOT NULL`, so those rows are served by the graph leg
+    #: only — measured, not inferred (#11660 review round 6, P2-6). This is NOT
+    #: part of the residue verdict (the vector IS still in the record); it is the
+    #: split that makes "N vectors, M indexed" visible instead of silent.
+    record_unindexed_by_table: dict[str, int] = field(default_factory=dict)
     graph_vectors: int | None = None
     graph_by_label: dict[str, int] = field(default_factory=dict)
     refusals: list[str] = field(default_factory=list)
@@ -132,6 +146,10 @@ class ResidualScan:
             "verdict": self.verdict,
             "record_vectors": self.record_vectors,
             "record_by_table": dict(sorted(self.record_by_table.items())),
+            "record_unindexed_by_table": dict(
+                sorted(self.record_unindexed_by_table.items())),
+            "record_unindexed_total": sum(
+                self.record_unindexed_by_table.values()) or 0,
             "graph_vectors": self.graph_vectors,
             "graph_by_label": dict(sorted(self.graph_by_label.items())),
             "refusals": list(self.refusals),
@@ -141,8 +159,12 @@ class ResidualScan:
             # ⛔ TWO SCOPES, TWO IDENTIFIERS: the record's `graph_id` is a
             # `public.graphs.id`; the graph's name is that row's `namespace`.
             # They are NOT interchangeable, and the CLI takes them separately
-            # (#11660 review round 3, P1).
-            "scope": "org_id+graph_id on the record, graph NAME on the graph",
+            # (#11660 review round 3, P1). Named here, not implied: the round-6
+            # review showed a pin on this string could be satisfied by the word
+            # "record" alone, i.e. by nothing.
+            "scope": ("org_id+graph_id on the record (graph_id is a "
+                      "public.graphs.id, NOT the graph name); graph NAME on "
+                      "the graph"),
         }
 
 
@@ -158,6 +180,7 @@ def _count_record(scan: ResidualScan, record_dsn: str | None) -> None:
     from .record_serve import open_record
 
     tallies: dict[str, int] = {}
+    unindexed: dict[str, int] = {}
     try:
         conn = open_record(record_dsn)
     except Exception as e:  # noqa: BLE001, RUF100
@@ -176,6 +199,22 @@ def _count_record(scan: ResidualScan, record_dsn: str | None) -> None:
                 )
                 row = cur.fetchone()
                 tallies[table] = int(row[0]) if row else 0
+                # ── and the split the ANN leg cannot see (P2-6) ──────────
+                # `embedding_vec` is GENERATED from `embedding`, so this counts
+                # rows the converter answered NULL for: a non-384 width, a
+                # double-encoded array, an object, `[]`, or one `null` element.
+                # They are STORED and never ANN-indexed, and the dense leg's
+                # `WHERE embedding_vec IS NOT NULL` therefore excludes them with
+                # no counter anywhere — which reads as "this tenant has no
+                # vectors". Counted apart so it reads as what it is.
+                cur.execute(
+                    f"SELECT count(*) FROM public.{table} "
+                    "WHERE org_id = %s AND graph_id = %s "
+                    "AND embedding IS NOT NULL AND embedding_vec IS NULL",
+                    (scan.org_id, scan.graph_id),
+                )
+                row = cur.fetchone()
+                unindexed[table] = int(row[0]) if row else 0
         finally:
             # `contextlib.suppress`, not `try/except/pass`: a close that failed
             # would mask the read error this leg is REPORTING (a bare except
@@ -191,6 +230,7 @@ def _count_record(scan: ResidualScan, record_dsn: str | None) -> None:
         with contextlib.suppress(Exception):
             conn.close()
     scan.record_by_table = tallies
+    scan.record_unindexed_by_table = unindexed
     scan.record_vectors = sum(tallies.values())
 
 
@@ -198,8 +238,17 @@ def _count_graph(scan: ResidualScan, graph: Any) -> None:
     """Count the graph's embedding-bearing nodes for this graph, or refuse.
 
     The graph is addressed BY NAME, so "the scope" is the graph itself — there is
-    no second axis to get wrong, and that is why `--graph` names the graph in
-    both stores rather than only the record.
+    no second axis to get wrong HERE. ⛔ What that does NOT mean is that one
+    identifier serves both stores: the record's `graph_id` is a `public.graphs.id`
+    and the Falkor graph's name is that row's `namespace`, which is why the CLI
+    takes `--graph-id` and `--graph-name` separately (#11660 review round 6,
+    P3-8 — an earlier sentence here said `--graph` named both, a flag that no
+    longer exists and a conflation that produced a false CLEAN).
+
+    Refusal on an aggregate that returns NO ROW stays: a read that answered
+    nothing is not a zero. A name the engine does not hold CANNOT be caught here
+    (it answers one row of `0`), so the CLI verifies existence before building
+    the handle.
     """
     tallies: dict[str, int] = {}
     try:

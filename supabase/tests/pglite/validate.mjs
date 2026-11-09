@@ -200,9 +200,16 @@ const files = readdirSync(MIG_DIR).filter((f) => f.endsWith('.sql')).sort();
 // `test-record-postgres` job's provisioner to the `pgvector/pgvector:pg16`
 // image, so the record legs apply these same files against a REAL Postgres
 // WITH pgvector. This list is the disclosure, that job is the coverage.
+//
+// ⛔ The coverage is `test-record-postgres` and the file it arms,
+// `tests/test_11642_vector_move_live.py` — NOT `tools/embedding_residual_scan.py`,
+// which an earlier draft of this sentence also credited. A residual scan READS a
+// record that already has the migration applied and applies nothing; naming it
+// beside the job made the disclosure read stronger than it was (#11660 review
+// round 6, P3-9).
 const PGLITE_MISSING_EXTENSIONS = {
   vector: 'pgvector — applied for real by the test-record-postgres job '
-        + '(pgvector/pgvector:pg16) and by tools/embedding_residual_scan.py',
+        + '(pgvector/pgvector:pg16, running tests/test_11642_vector_move_live.py)',
 };
 const skipped = [];
 for (const f of files) {

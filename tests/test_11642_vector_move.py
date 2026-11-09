@@ -299,12 +299,13 @@ def test_the_migration_declares_the_one_embedding_width():
     the suite connects the two, so this pin is the connection.
     """
     import re
+    from pathlib import Path
 
     from tortoise.embeddings import EMBEDDING_DIM
 
-    sql = (record_vector.__file__.rsplit("/tortoise/", 1)[0]
-           + "/supabase/migrations/20261109000001_record_embedding_vector.sql")
-    text = open(sql, encoding="utf-8").read()
+    sql = (Path(record_vector.__file__).parent.parent
+           / "supabase/migrations/20261109000001_record_embedding_vector.sql")
+    text = sql.read_text(encoding="utf-8")
     declared = {int(m) for m in re.findall(r"public\.vector\((\d+)\)", text)}
     declared |= {int(m) for m in re.findall(r"jsonb_array_length\(doc\) <> (\d+)",
                                             text)}
@@ -338,6 +339,44 @@ def test_the_cutover_is_OFF_by_default(monkeypatch):
 
     monkeypatch.setenv(record_vector.ARMING_ENV, "1")
     assert record_vector.searcher(carried=("o", "g")) is not None
+
+
+def test_the_gap_level_follows_the_cutover_not_the_dsn(monkeypatch):
+    """A record DSN is NOT a replacement, so it must not mute the `#4997` warning.
+
+    ⛔ THIS IS THE MUTED-ALARM DEFECT (#11660 review round 6, P1-3). Round 3 made
+    the dense leg's cutover a second, stronger condition and left
+    `projection.vector_index_retired()` on the weaker one (a DSN resolving). On
+    the posture that makes the DEFAULT for every hosted store — DSN set, cutover
+    unset — the in-graph index is dropped, the record does NOT answer the dense
+    read, every served label really does full-scan, and the predicate said the
+    elevation was earned, so the gap report was downgraded to an INFO whose text
+    says the read *is* served from Postgres. The one line an operator reads in
+    an incident said the opposite of the truth.
+
+    Falsifiable: the pre-fix predicate returned True on the first case below, so
+    the first assertion fails.
+    """
+    from tortoise import projection
+
+    assert projection.VECTOR_INDEX_RETIRED is True, (
+        "this pin is about the retired posture; if the rollback ship-wide flag "
+        "moved, the three cases below answer False for a different reason")
+
+    monkeypatch.setenv("TORTOISE_RECORD_DSN", "postgresql://localhost/record")
+    monkeypatch.delenv(record_vector.ARMING_ENV, raising=False)
+    assert projection.vector_index_retired() is False, (
+        "a DSN alone muted #4997's WARNING on an unarmed store — the index is "
+        "dropped and nothing replaced it, which is the state the warning is FOR")
+
+    monkeypatch.setenv(record_vector.ARMING_ENV, "1")
+    assert projection.vector_index_retired() is True, (
+        "an armed cutover with a DSN IS the replacement — the exemption is "
+        "earned, so the line may be an INFO")
+
+    monkeypatch.delenv("TORTOISE_RECORD_DSN")
+    assert projection.vector_index_retired() is False, (
+        "an armed cutover with no record to read is not a replacement either")
 
 
 # ── the residual scan's verdict algebra ────────────────────────────────────
@@ -402,7 +441,77 @@ def test_the_outcome_names_the_scope_it_measured():
     # `graph_id` is a `public.graphs.id`, the graph's name is that row's
     # `namespace`. A reader quoting this CLEAN must be able to see that the two
     # halves were scoped by DIFFERENT identifiers.
-    assert "public.graphs.id" in payload["scope"] or "record" in payload["scope"]
+    # ⛔ AND THIS LINE USED TO BE A TAUTOLOGY (#11660 review round 6, P2-4):
+    # `in payload["scope"] or "record" in payload["scope"]` is satisfied by the
+    # word "record" alone, so it passed against the PRE-fix wording too and
+    # pinned nothing. It now names the identifier, which the pre-fix string did
+    # not contain.
+    assert "public.graphs.id" in payload["scope"], (
+        "the scope must name the record's identifier by its real namespace — "
+        "'graph_id' alone is what made one value look interchangeable with the "
+        "FalkorDB graph name")
+
+
+def test_the_unindexed_split_is_counted_apart_from_the_residue(monkeypatch):
+    """A vector the ANN index cannot see is COUNTED, not silently excluded.
+
+    `embedding_vec` is GENERATED, and the converter returns NULL for a width the
+    store cannot hold (non-384, an object, `[]`, a `null` element). The dense
+    leg's `WHERE embedding_vec IS NOT NULL` then excludes that row with no
+    counter anywhere, which reads exactly like "this tenant has no vectors"
+    (#11660 review round 6, P2-6). `record_unindexed_by_table` is that counter.
+
+    Falsifiable: before this field existed there was no second query at all, so
+    both the attribute and the key are absent.
+    """
+    import tortoise.record_projection as rp
+    import tortoise.record_serve as rs
+    from tortoise.embedding_residual_scan import _count_record
+
+    executed: list[str] = []
+
+    class _Cur:
+        sql = ""
+
+        def execute(self, sql, params):
+            self.sql = sql
+            executed.append(sql)
+
+        def fetchone(self):
+            # 4 unindexed of 10 held, per table — the exact split the ANN leg
+            # cannot serve, so a swapped pair is observable.
+            return (4 if "embedding_vec IS NULL" in self.sql else 10,)
+
+        def close(self):
+            return None
+
+    class _Conn:
+        def close(self):
+            return None
+
+    monkeypatch.setattr(rs, "open_record", lambda dsn: _Conn())
+    monkeypatch.setattr(rp, "scope_connection", lambda conn, org: _Cur())
+
+    outcome = ResidualScan(org_id="o", graph_id="g")
+    _count_record(outcome, "postgresql://localhost/record")
+
+    assert outcome.record_vectors == 30
+    assert outcome.record_by_table == {"point": 10, "source": 10, "event": 10}
+    assert outcome.record_unindexed_by_table == {
+        "point": 4, "source": 4, "event": 4}
+    assert any("embedding IS NOT NULL AND embedding_vec IS NULL" in sql
+               for sql in executed), (
+        "the split is counted by the database, not inferred from the total")
+    payload = outcome.as_dict()
+    assert payload["record_unindexed_total"] == 12
+    assert payload["record_vectors"] == 30, (
+        "the split is counted APART, not added: double-counting would inflate "
+        "every residue report by the number of rows the index cannot see")
+    assert payload["verdict"] == RESIDUE, (
+        "an unindexed vector is still a vector IN the record — if the scope was "
+        "meant to be erased it is residue whether or not the ANN can see it. "
+        "The counter answers a different question (\"why did the dense leg not "
+        "return this row\"), and it must not change the erasure verdict.")
 
 
 def test_the_record_half_counts_both_the_payload_and_the_indexed_projection():
@@ -419,3 +528,70 @@ def test_the_record_half_counts_both_the_payload_and_the_indexed_projection():
         __import__("tortoise.embedding_residual_scan", fromlist=["x"])._count_record)
     assert "embedding IS NOT NULL" in src
     assert "embedding_vec IS NOT NULL" in src
+
+
+# ── the CLI must not read a graph the engine does not hold ─────────────────
+
+def _fake_falkordb(monkeypatch, names, *, listing_raises=False):
+    """Install a stand-in `FalkorDB` and return the names `select_graph` was asked for."""
+    import falkordb
+
+    selected: list[str] = []
+
+    class _DB:
+        @classmethod
+        def from_url(cls, uri):
+            if listing_raises:
+                raise RuntimeError("the listing is down")
+            return cls()
+
+        def list_graphs(self):
+            return list(names)
+
+        def select_graph(self, name):
+            selected.append(name)
+            return ("handle", name)
+
+    monkeypatch.setattr(falkordb, "FalkorDB", _DB)
+    return selected
+
+
+def test_a_graph_name_the_engine_does_not_hold_is_REFUSED_not_read(monkeypatch):
+    """`--graph-name org_typo` must be UNAVAILABLE, never CLEAN (#11660 P1-4).
+
+    An aggregate over a name the engine does not hold answers `[[0]]`, which is
+    the same number a genuinely empty tenant answers — so the old code recorded
+    no refusal and printed a false erasure attestation. Worse, a Cypher read on
+    an unknown name CREATES an empty graph (verified on FalkorDB 4.20.4; see
+    `tortoise/hosted_backup.py`), which is why the check runs BEFORE any query.
+
+    Falsifiable: the pre-fix `_graph_handle` went straight to `select_graph` and
+    returned a handle, so `is None` and the empty `selected` list both fail.
+    """
+    import tools.embedding_residual_scan as cli
+
+    selected = _fake_falkordb(monkeypatch, names=["org_acme"])
+    assert cli._graph_handle("bolt://localhost:6379", "org_typo") is None, (
+        "a name the engine does not hold must not produce a handle — a scan "
+        "over it would answer 0 and report CLEAN")
+    assert selected == [], (
+        "nothing may be SELECTED for an unverified name: a Cypher read on it "
+        "creates an empty graph as a side effect")
+
+
+def test_a_graph_name_the_engine_holds_is_still_read(monkeypatch):
+    """The refusal is not an over-block: a real name produces its handle."""
+    import tools.embedding_residual_scan as cli
+
+    selected = _fake_falkordb(monkeypatch, names=["org_acme", "org_other"])
+    assert cli._graph_handle("bolt://localhost:6379", "org_acme") == (
+        "handle", "org_acme")
+    assert selected == ["org_acme"]
+
+
+def test_an_unreadable_graph_listing_is_a_refusal_not_a_CLEAN(monkeypatch):
+    """`GRAPH.LIST` failing is "not measured", never "nothing there"."""
+    import tools.embedding_residual_scan as cli
+
+    _fake_falkordb(monkeypatch, names=[], listing_raises=True)
+    assert cli._graph_handle("bolt://localhost:6379", "org_acme") is None

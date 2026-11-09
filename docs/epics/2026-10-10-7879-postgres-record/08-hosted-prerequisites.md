@@ -139,8 +139,33 @@ and `ConfidenceChanged` is a **`NoRecordEffect`** — the EP carve-out in execut
 |---|---|
 | the seam | `tortoise/record_writer.py` — `write_live_record`, `_default_connect` |
 | arming surface | `tortoise/record_writer.py` — `RECORD_DSN_ENV` (`TORTOISE_RECORD_DSN`), **default OFF** |
+| dense-leg CUTOVER | `tortoise/record_vector.py` — `ARMING_ENV` (`TORTOISE_RECORD_VECTOR_LEG`), **default OFF**. The second switch, and it is not the same question as the DSN: a DSN is the record being *reachable*, this is the record answering the **dense (vector) read**. See the box below — leaving it off is a measured posture, not an oversight. |
 | production call sites | `record_writer.write_live_record` (`EventAPI._emit` — the v1 extractor, `ingest`, `docs_miner`, `mining`, CLI), `tortoise/mining.py` (`_emit_event`), `tortoise/sdk.py` (`_emit_event`) |
 | tenant carrier | `record_writer.use_record_tenant`, installed by `tortoise/mcp_auth.py`; by-value on the hosted REST lane |
+
+> ⛔ **`TORTOISE_RECORD_VECTOR_LEG` — what an operator must know before touching it.** `#11642`
+> moved the dense retrieval leg to the record, and `#11660` made the cutover a **deliberate act,
+> default OFF**, because the record is a journal fold with **no backfill**: it holds a vector only
+> for content written AFTER the move is deployed. So the four facts, in the order that matters:
+>
+> 1. **The in-graph vector index is retired unconditionally** (`VECTOR_INDEX_RETIRED`) — the next
+>    setup drops a `Point.embedding` HNSW index if it finds one and never creates another. That is
+>    the decision (owner, 2026-11-07), not a consequence of this switch.
+> 2. **With the leg unarmed — the default — every dense `Point`/`Source`/`Event` read is a
+>    brute-force graph scan**, because the index is gone and nothing replaced it. That is
+>    `#4997`'s defect, and the setup reports it at **WARNING** (`#4997/#11642` line).
+> 3. **Arming it (`TORTOISE_RECORD_VECTOR_LEG=1`) WITHOUT a backfilled record silently drops every
+>    pre-existing point out of the dense pool** — the trace reports `mechanism=pgvector, reason=ok`,
+>    because the shortfall assertion counts against the record's own predicate. **Back-fill first,
+>    then arm.** A record still holding 0 rows is the state `#11469` measured on the dogfood tenant.
+> 4. **The switch is an ENV var; the rollback of the index itself is a CODE constant.** Flipping
+>    `TORTOISE_RECORD_VECTOR_LEG` back to off restores the WARNING and the graph scan; it does NOT
+>    bring the index back, because the drop is gated on `VECTOR_INDEX_RETIRED` (see its comment).
+>
+> Both conditions are asked by `projection.vector_index_retired()`, which is what decides the log
+> LEVEL — a DSN alone used to answer it and muted the alarm on an unarmed store (`#11660` review
+> round 6, P1-3). Neither switch is provisioned in `fly.toml`, `entrypoint.sh` or
+> `.github/workflows/deploy-hosted.yml` today: the leg is dark in production, by decision.
 
 ⛔ **Symbols, not line numbers, on purpose.** Every number this table used to carry had drifted onto
 unrelated text — a bare `)`, a `contextvars` line, a tuple member, a blank line — because a line
@@ -1107,7 +1132,7 @@ cd supabase/tests/pglite && npm install && npm run validate
 ```text
 grep -rn TORTOISE_RECORD_DSN fly.toml entrypoint.sh .github/workflows/ \
   docs/infra-runbook.md                    → (no output) when taken; ⚠️ 1 line after #9556/R8 (see below)
-grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0   ⚠️ 28 after #11642 (one file: 20261109000001_record_embedding_vector.sql)
+grep -riE 'pgvector|vector\(' supabase/migrations/*.sql | wc -l              → 0   ⚠️ 29 after #11642 (one file: 20261109000001_record_embedding_vector.sql — re-measured at the round-6 head; this line said 28, which was a stale count)
 grep -riE 'narrative|raw_turn|raw_text|transcript' supabase/migrations/*.sql → 0   ⚠️ see below
 grep -rn 'app.current_org_id' --include=*.py tortoise/ tools/                → 0 setters   ⚠️ see below
 grep -rn 'rebuild_from_record' tortoise/__main__.py                          → 1 (the verb's docstring)

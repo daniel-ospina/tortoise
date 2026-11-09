@@ -2238,20 +2238,21 @@ surfaces:
   # reported as MANIFEST DRIFT: the file collected nowhere, so every pin in it
   # (the served set, the shortfall assertion, the residual verdict algebra) was
   # green by never running — the #1349/#2938/#3154/#4367 silent-drop class.
-  # ⛔ THERE IS NO `test_11642_vector_move_live.py` AT THIS HEAD, and an earlier
-  # draft of this comment said there was (#11660 review round 3, P2). Nothing in
-  # the tree therefore EXECUTES `record_vector.vector_search` — the one SQL
-  # statement that would carry production dense traffic (`embedding_vec <=> %s`,
-  # the status predicates, `_recency_sql`, the shortfall `count(*)`). Its failure
-  # mode is `RecordVectorError` -> the NAMED graph fallback, so a broken query
-  # would ship green and look like a correctly-degrading store — this PR's own
-  # argument about migrations, applied to the reader. That gap is why the CUTOVER
-  # is OFF by default (`record_vector.ARMING_ENV`): the leg cannot be armed on a
-  # statement no leg has run. WHAT WOULD CLOSE IT, named so it is not re-derived:
-  # a live file that applies the migrations to `TEST_RECORD_DB_URI` (the
-  # `pgvector/pgvector:pg16` provisioner), writes a few vectors through the
-  # production projection, and asserts `vector_search` returns them in
-  # distance order with a terminal row excluded.
+  # ⛔ THE GAP THIS FILE CLOSES IS ABOUT `test_11642_vector_move.py` ALONE — the
+  # DB-free half (the served set, the shortfall algebra, the residual verdict).
+  # The statement that carries production dense traffic is EXECUTED, by the LIVE
+  # half registered eleven lines below: `test_11642_vector_move_live.py` applies
+  # the migrations to `TEST_RECORD_DB_URI` (the `pgvector/pgvector:pg16`
+  # provisioner), writes vectors through the production projection, and asserts
+  # `vector_search` (`embedding_vec <=> %s`, the status predicates,
+  # `_recency_sql`, the shortfall `count(*)`) returns them in distance order.
+  # ⚠️ An earlier draft of THIS comment claimed that file did not exist and that
+  # nothing executed `vector_search` (#11660 review round 3 P2, corrected in
+  # round 6 P1-2): it has been tracked since commit `77e40ccb`, and the claim had
+  # already escaped into that commit's message as a stated reason to keep the
+  # cutover off. The reason that survives is the one that stands alone — the
+  # record is a journal fold with NO backfill, so arming it would drop every
+  # pre-existing point out of the dense pool (`record_vector.ARMING_ENV`).
   - test_11642_vector_move.py
   # The LIVE half: it executes `record_vector.vector_search` against a real
   # pgvector server (the SQL, the shortfall count, the status predicate, the
