@@ -2038,8 +2038,11 @@ def test_every_source_pattern_is_selectable():
     # 92.5 s of a 300 s pytest-timeout budget on a quiet box, i.e. a
     # load-dependent flake on a congested runner (test-slow leg c, run
     # 41534018861). `select()` is a pure function of (changed, event, manifest)
-    # — it only ever `.get`s from it, and `load_manifest()` has no cache — so
+    # — it only ever `.get`s from it, and `select()` does not mutate it — so
     # hoisting the parse changes the timing and nothing else: same calls, same
+    # (`load_manifest()` DOES cache since #11602 — identity-keyed, deep copy
+    # out — so the reason hoisting is safe is what `select()` does with the
+    # value, not the absence of a cache.)
     # assertions. The guard reads the SAME parsed value instead of parsing a
     # second time, so the comment's claim is true by construction rather than
     # by the reader subtracting one (review note, PR #10631).
@@ -8349,7 +8352,7 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
     the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
     which the matrices wait on and so cannot overlap them; 5 need only
-    `changes`), so on a full selection a PR requests 28 jobs (17 matrix legs +
+    `changes`), so on a full selection a PR requests 29 jobs (18 matrix legs +
     11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
     at once. The POOL does not bound that — it bounds only the subset that lands
     on it (`test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
@@ -8438,6 +8441,210 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
         f"are left for other PRs: the bound is {measured_pool} - "
         f"{reserved_for_others} = {measured_pool - reserved_for_others} "
         "(#6744)")
+
+
+#: The present-tense "how many jobs does ONE full-selection run emit" claims. There are FOUR
+#: copies of that count in the tree and `fast_shards: 9 -> 10` (#11602) moved all four: the
+#: `max-parallel` comment block in `python-ci.yml` states it TWICE (the second copy, in the same
+#: block, is the one a sibling fix missed), `docs/ops/ci-wall-clock.md` §5 and §7 each state it,
+#: and this file's own `test_every_matrix_bounds_its_fan_out_below_the_measured_pool` docstring
+#: states it. Nothing read any of them, which is how one file came to claim `18` matrix jobs at
+#: `:749` and `17` matrix legs at `:798` a screen apart.
+#:
+#: ⛔ The `max` claim has a SECOND half and this pin did not read it (#11602 review at
+#: `cbc930427cfe`). The sentence `A <wc> run is N jobs (max M)` carries TWO counts: `max` (every
+#: job the run can request) and the leading `typical` (what a PR run requests, i.e. `max` minus
+#: the push-gated jobs). The regex captured `typical` and only ever compared `max`, so the same
+#: sentence the 9 -> 10 raise made half-wrong stayed GREEN — the repo's named defect class, "a
+#: tool that cannot answer its question because it already holds the datum and does not read it".
+#: Both halves are asserted now; `typical` is DERIVED (`fast + non_matrix_pr`), never hard-coded.
+#: ⛔ `<wc>` is a placeholder ON PURPOSE (see the f-string note below): the literal spelling of
+#: that sentence here would match the scanner on this file — one of the pinned sources — and turn
+#: the pin red on its own docstring.
+#:
+#: ⛔ Read through `re.sub(r"\s+", " ", ...)` with `**` stripped: the doc wraps
+#: `**requests 29` / `jobs** (18 matrix legs` across two lines, so a line-oriented pattern would
+#: match nothing there and stay silently green — the exact vacuity this pin exists to avoid.
+_FULL_SELECTION_TOTAL_RE = re.compile(
+    r"(?:REQUESTS|requests)\s+(?P<total>\d+)\s+jobs\s*\((?P<legs>\d+)\s+matrix")
+_FULL_SELECTION_MAX_RE = re.compile(
+    r"`python-ci`\s+run\s+is\s+(?P<typical>\d+)\s+jobs\s*\(max\s+(?P<max>\d+)\)")
+
+
+def _full_selection_claim_violations(
+    sources: dict[str, str], total: int, legs: int, typical: int,
+) -> list[str]:
+    """Every full-selection count stated in `sources` that disagrees with the shipped shape.
+
+    `total` is the max a run can request (legs + non-matrix). `typical` is what a PR run actually
+    requests, and it is NOT `total` minus the push-gated jobs: the `test-slow` and
+    `test-carve-out` matrices are PATH-gated, so a typical PR run emits neither. It is the fast
+    shards plus the always-eligible non-matrix jobs (`21 = 10 + 11` at this head). Both are
+    checked: a doc may state one half correctly and the other half wrongly, which is exactly how
+    `20 jobs (max 29)` survived the 9 -> 10 raise.
+
+    Pure, so the non-vacuity control below can feed it the PRE-FIX text instead of trusting a
+    comment that the pin would catch the numbers it was written to catch.
+    """
+    violations: list[str] = []
+    for name, text in sources.items():
+        flat = re.sub(r"\s+", " ", text.replace("**", ""))
+        for match in _FULL_SELECTION_TOTAL_RE.finditer(flat):
+            stated = (int(match.group("total")), int(match.group("legs")))
+            if stated != (total, legs):
+                violations.append(
+                    f"{name}: states {stated[0]} jobs ({stated[1]} matrix legs), but the "
+                    f"shipped shape emits {total} ({legs}) — {match.group(0)!r}")
+        for match in _FULL_SELECTION_MAX_RE.finditer(flat):
+            if int(match.group("max")) != total:
+                violations.append(
+                    f"{name}: states a max of {match.group('max')} jobs, but the shipped "
+                    f"shape requests {total} — {match.group(0)!r}")
+            if int(match.group("typical")) != typical:
+                violations.append(
+                    f"{name}: states a typical run of {match.group('typical')} jobs, but the "
+                    f"shipped shape emits {typical} on a PR (max {total}) — "
+                    f"{match.group(0)!r}")
+    return violations
+
+
+def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
+    """P2 (#11602 review at `4ddc9ec63a73`): the 9 -> 10 raise falsified four prose counts.
+
+    `da93af0e1c39` rewrote `python-ci.yml:749-750` to *""requests **18** matrix jobs ... (**10**
+    fast + 5 slow + 3 carve-out)""* for exactly this reason — ""Doc prose that understates the
+    emitted shape is how the next reader infers a 9-leg matrix from a file that emits 10"" — and
+    missed the same block's `:798`, both `ci-wall-clock.md` §5/§7 copies, and this file's
+    sibling docstring. On `origin/main` (9 fast legs) 17 legs / 28 jobs was correct; the raise
+    is what made it wrong, so this is attributable to the change, not inherited.
+
+    The counts are DERIVED, never hard-coded, so a future re-tune needs the prose moved with it:
+    `legs = fast + slow + carve` shard counts from the manifest, `non_matrix_pr = every job in
+    `python-ci.yml` minus the matrix jobs minus the push-gated ones, and the in-flight figure is
+    NOT derived — it is `sum(caps) + eligible non-matrix` and is pinned by the sibling test
+    above, which is also why `:798`'s ""at most 17"" is correct at 10 fast legs. `17` therefore
+    appears twice on that line with two different meanings; only the LEG count is this pin's.
+
+    Coverage is asserted per source, so deleting a stale sentence is not a way to pass: the pin
+    reds on a missing claim the same way it reds on a wrong one. ⛔ Deliberately NOT reached: the
+    past-tense ""up to **17** matrix jobs (9 fast + 5 slow + 3 carve-out)"" in §7's ""before
+    #6744"" paragraph, and the ""(17 jobs)"" inside this file's other docstring — both describe
+    the MEASURED past shape at the 9-leg measurement window, and rewriting a dated measurement to
+    today's shard count is how a record becomes a guess.
+
+    P2 (#11602 review at `cbc930427cfe`): the `max` sentence carries a SECOND count, and this pin
+    read only one of them. `A <wc> run is N jobs (max M)` states what a TYPICAL PR run emits in
+    `N` — `fast + non_matrix_pr`, because the slow and carve matrices are path-gated — and the
+    raise moved `M` while leaving `N` at its 9-leg value. The old checker compared `M` only and
+    reported GREEN on the line it was written to protect, which is the ""tool that already holds
+    the datum and does not read it"" class: a false PASS, not prose drift. Both halves are now
+    derived and asserted, and the non-vacuity control below feeds the PRE-FIX sentence through
+    the same checker — against the max-only arm that fixture yields ZERO violations.
+    """
+    from tools.ci_selection import (
+        carve_shard_count,
+        fast_shard_count,
+        load_manifest,
+        slow_shard_count,
+    )
+
+    manifest = load_manifest()
+    jobs = _load_python_ci()["jobs"]
+    matrix_jobs = {
+        job_id for job_id, job in jobs.items()
+        if isinstance(job.get("strategy"), dict) and "matrix" in job["strategy"]
+    }
+    # anchor the population before deriving from it: an emptied/moved matrix set would make
+    # `legs` a sum of nothing and the prose trivially "agree"
+    assert len(matrix_jobs) == 3, matrix_jobs
+    push_gated = {
+        job_id for job_id, job in jobs.items()
+        if job_id not in matrix_jobs
+        and "github.event_name == 'push'" in str(job.get("if") or "")
+    }
+    assert push_gated == {"canary-streak"}, (
+        "the push-gated job set moved, so `non_matrix_pr` below no longer means "
+        f"'jobs a PR actually requests'; got {sorted(push_gated)}")
+    legs = (fast_shard_count(manifest) + slow_shard_count(manifest)
+            + carve_shard_count(manifest))
+    non_matrix_pr = len(jobs) - len(matrix_jobs) - len(push_gated)
+    total = legs + non_matrix_pr
+    # `typical` is NOT `total - push_gated`: the slow and carve matrices are path-GATED, so a
+    # typical PR run emits neither. It is the fast shards plus the always-eligible non-matrix
+    # jobs (`20 = 9 + 11` on origin/main, `21 = 10 + 11` after the raise).
+    typical = fast_shard_count(manifest) + non_matrix_pr
+    assert legs >= 3 and non_matrix_pr >= 1 and 0 < typical < total, (
+        legs, non_matrix_pr, typical, total)
+
+    sources = {
+        ".github/workflows/python-ci.yml": (
+            REPO / ".github" / "workflows" / "python-ci.yml").read_text(),
+        "docs/ops/ci-wall-clock.md": (
+            REPO / "docs" / "ops" / "ci-wall-clock.md").read_text(),
+        "tests/test_ci_selection.py": Path(__file__).read_text(),
+    }
+    sites = {
+        name: (len(_FULL_SELECTION_TOTAL_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))),
+               len(_FULL_SELECTION_MAX_RE.findall(re.sub(r"\s+", " ", text.replace("**", "")))))
+        for name, text in sources.items()
+    }
+    assert sites == {
+        ".github/workflows/python-ci.yml": (1, 0),
+        "docs/ops/ci-wall-clock.md": (1, 1),
+        "tests/test_ci_selection.py": (1, 0),
+    }, (
+        "the full-selection claim sites moved (a sentence was added, reworded past this pin, or "
+        f"deleted): {sites}. Re-point the regexes at the new wording instead of letting the "
+        "remaining copies drift unchecked")
+
+    violations = _full_selection_claim_violations(sources, total, legs, typical)
+    assert not violations, (
+        "a full-selection count disagrees with the shape `python-ci.yml` emits today — prose "
+        "that understates the emitted shape is how the next reader infers a 9-leg matrix from a "
+        "file that emits 10:\n  " + "\n  ".join(violations))
+
+    # NON-VACUITY, derived from the finding rather than hard-coded: the four PRE-FIX copies
+    # (#11602 at 9 fast legs, before the raise) must be rejected by this same checker, and the
+    # line-WRAPPED form must be read, not skipped. ⛔ Built with f-strings ON PURPOSE: a literal
+    # `… 28 jobs (17 matrix …` here would itself match the scanner below (this file is one of the
+    # pinned sources) and turn the pin red on its own non-vacuity fixture.
+    pre_fix = {
+        "python-ci.yml": (f"On a full selection a PR REQUESTS {total - 1} jobs "
+                          f"({legs - 1} matrix legs + 11 non-matrix"),
+        "ci-wall-clock.md wrapped": (f"a PR therefore **requests {total - 1}\njobs** "
+                                     f"({legs - 1} matrix legs + 11 non-matrix"),
+        "ci-wall-clock.md max": (f"A `python-ci` run is {typical - 1} jobs "
+                                 f"(max {total - 1}) by construction"),
+        # ⛔ THE ARM THIS REVIEW ADDED, and the only fixture that proves it non-vacuous: the HEAD's
+        # own pre-fix sentence — `max` already correct, `typical` one short. Against the previous
+        # (max-only) checker this fixture produced ZERO violations, i.e. the pin reported GREEN on
+        # the exact line the finding names (#11602 review at `cbc930427cfe`, `20 jobs (max 29)`).
+        # f-string built for the same reason as the others — a literal here would match the scanner
+        # on this file, one of the pinned sources.
+        "ci-wall-clock.md typical": (f"A `python-ci` run is {typical - 1} jobs "
+                                     f"(max {total}) by construction"),
+    }
+    pre_fix_violations = _full_selection_claim_violations(pre_fix, total, legs, typical)
+    for fixture in pre_fix:
+        assert any(v.startswith(f"{fixture}:") for v in pre_fix_violations), (
+            f"the checker is vacuous on {fixture!r} — the PRE-FIX text passes it: "
+            f"{pre_fix_violations}")
+    assert any(f"{total - 1} jobs" in v and f"{legs - 1} matrix legs" in v
+               for v in pre_fix_violations), pre_fix_violations
+    # the `typical` arm must reject the head's pre-fix sentence ON ITS OWN, while that sentence's
+    # `max` half is CORRECT — that difference is what makes the new arm load-bearing rather than a
+    # duplicate of the max check. A max-arm rejection here would mean the fixture isolates nothing.
+    typical_arm = [v for v in pre_fix_violations
+                   if v.startswith("ci-wall-clock.md typical:")]
+    assert any(f"typical run of {typical - 1} jobs" in v and f"emits {typical} " in v
+               for v in typical_arm), pre_fix_violations
+    assert not any("states a max of" in v for v in typical_arm), (
+        f"the fixture's `max` is {total}, so only the `typical` arm may reject it: {typical_arm}")
+    # the wrapped copy is the one a line-oriented pattern silently skips — key the assertion on
+    # its SOURCE NAME: flattening makes its matched text identical to the unwrapped copy's.
+    assert any(v.startswith("ci-wall-clock.md wrapped:")
+               and f"requests {total - 1} jobs ({legs - 1} matrix" in v
+               for v in pre_fix_violations), pre_fix_violations
 
 
 def test_no_required_check_names_a_fast_leg():
@@ -9527,7 +9734,16 @@ _FLAT_DEFAULT_CLAIM_RE = re.compile(
     r"\b(?:takes|carries|holds|stays|remains|keeps)\b[^.;]{0,60}?flat\s+"
     r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
     r"|\bis\s+(?:the|only|just|still)\s+(?:\S+\s+){0,2}?flat\s+"
-    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)",
+    r"(?:2\.0s?\s+default|`?DEFAULT_FAST_WEIGHT`?)"
+    # The DEMONSTRATIVE copula form, with no determiner and no `flat`:
+    # "This is `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+    # — `test_required_set.py: 0.4` shipped exactly that beside an adopted census
+    # reading, and BOTH arms above were blind to it: the first wants a claim verb,
+    # the second wants a determiner after `is`. Scoped to `this` on purpose, so a
+    # note that explains the convention without claiming it for this row ("what a
+    # new file gets is `DEFAULT_FAST_WEIGHT`", "its absence packs it at the flat
+    # `DEFAULT_FAST_WEIGHT`") stays silent (#11602 review P3).
+    r"|\bthis\s+is\s+`?DEFAULT_FAST_WEIGHT`?",
     re.IGNORECASE)
 
 
@@ -9572,6 +9788,39 @@ def _durations_rows_claiming_unmeasured_on_ci(text: str):
         tail = m.group("tail")
         if _UNMEASURED_ON_CI_RE.search(tail) and _MEASURED_BASIS_RE.search(tail):
             out.append((m.group("key"), tail))
+    return out
+
+
+# The FORWARD-LOOKING form of the same falsified claim: "so the flat 2.0
+# UNDERSTATES it until a sweep replaces this row" (and its `overstates` twin). It
+# names no claim verb and no `is`, so `_FLAT_DEFAULT_CLAIM_RE` cannot see it; and
+# it says `unmeasured` nowhere, so `_UNMEASURED_ON_CI_RE` cannot either. Once the
+# sweep HAS replaced the row, the tail carries its own `ci-timing …; was N` basis
+# and the sentence describes a state the row has left — 6 rows shipped that way in
+# the 2026-11-09 refresh (`test_9664_capstone_verdict_ledger.py` was the one the
+# review named; the guard found the other five). The PAST tense is a true history
+# and must stay silent: "the flat 2.0 UNDERSTATED it until this sweep replaced the
+# row" is what the fix says.
+_FLAT_DEFAULT_STILL_OWED_RE = re.compile(
+    r"\bflat\s+2\.0s?(?:\s+default)?\s+(?:UNDERSTATES|overstates)\b",
+    re.IGNORECASE)
+
+
+def _durations_rows_still_owing_the_flat_default_to_a_sweep(text: str,
+                                                            durations: dict):
+    """Rows that claim a FUTURE sweep still owes them the flat default."""
+    from tools.ci_selection import DEFAULT_FAST_WEIGHT
+    out = []
+    for line in text.splitlines():
+        m = _DURATIONS_ROW_RE.match(line)
+        if m is None or m.group("key") not in durations:
+            continue
+        if abs(float(m.group("value")) - DEFAULT_FAST_WEIGHT) < 1e-9:
+            continue
+        tail = m.group("tail")
+        if (_FLAT_DEFAULT_STILL_OWED_RE.search(tail)
+                and _MEASURED_BASIS_RE.search(tail)):
+            out.append((m.group("key"), float(m.group("value"))))
     return out
 
 
@@ -9735,6 +9984,13 @@ def test_flat_default_claim_check_is_not_vacuous():
         " declaration a file a PR ADDS takes.\n"
         "  test_i.py: 0.4  # so it takes the header's flat `DEFAULT_FAST_WEIGHT`"
         " and NOT a local reading.")
+    # …and the DEMONSTRATIVE copula spelling, which has no claim verb and no
+    # determiner, and so went unread on `test_required_set.py: 0.4` (#11602 review
+    # P3 finding 1: CI was green on a falsified claim).
+    demonstrative = (
+        "  test_j.py: 0.4  # #10991: pre-merge estimate for a NEW file; This is"
+        " `DEFAULT_FAST_WEIGHT`, stated as a placeholder, not a measurement."
+        " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0")
     durations = {f"test_{c}.py": 1.0 for c in "abcdefghij"}
     assert _durations_rows_claiming_the_flat_default(stale, durations) == [
         ("test_a.py", 2.2), ("test_b.py", 3.7),
@@ -9742,6 +9998,66 @@ def test_flat_default_claim_check_is_not_vacuous():
     assert _durations_rows_claiming_the_flat_default(legitimate, durations) == []
     assert _durations_rows_claiming_the_flat_default(named_constant, durations) == [
         ("test_h.py", 2.3), ("test_i.py", 0.4)]
+    assert _durations_rows_claiming_the_flat_default(demonstrative, durations) == [
+        ("test_j.py", 0.4)], (
+        "the demonstrative copula form must bite — it is the shape that shipped "
+        "past this guard at the 2026-11-09 refresh")
+
+
+def test_no_durations_row_still_owes_its_basis_to_a_sweep_that_has_landed():
+    """#11602 review P3 finding 2, as a CLASS: six rows stated the claim.
+
+    The reviewer named `test_9664_capstone_verdict_ledger.py`; re-deriving the
+    shape against the committed map found five siblings carrying the identical
+    sentence (`test_embed_writer_register`, `test_10997_identity_hold`,
+    `test_wait_bound_write_ack`, `test_9664_premise_census`,
+    `test_capstone_a_rows_10982`). Each said a sweep still OWED it the flat
+    default while its own tail cited the sweep's `was N` basis — the map's own
+    rule (`config/ci-surfaces.yml` above the `durations:` block) is that a row's
+    comment is kept only while the value AND its stated basis are unchanged.
+    """
+    from tools.ci_selection import load_manifest
+    text = cs.MANIFEST.read_text(encoding="utf-8")
+    offenders = _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        text, load_manifest()["durations"])
+    assert offenders == [], (
+        "a durations row says the flat default still describes it while its own "
+        "tail cites the sweep that replaced it — re-word to the past tense (the "
+        f"flat default UNDERSTATED it until this sweep replaced the row): {offenders}")
+
+
+def test_the_still_owed_flat_default_guard_bites_and_stays_quiet():
+    """Non-vacuity for the pin above, on the shipped (pre-fix) wording."""
+    durations = {"test_a.py": 1.0, "test_b.py": 1.0, "test_c.py": 1.0}
+    basis = " — ci-timing junit-census+top-15 2026-11-09 (run 1); was 2.0"
+    stale = (
+        # the reviewer-named row, verbatim from the head before the fix
+        "  test_a.py: 39.0  # No DB, no network, no graph fixture; #2818/#3419/#4348:"
+        " ~6s wall for the file. The flat 2.0 UNDERSTATES it until a junction sweep"
+        " replaces this row." + basis + "\n"
+        # the `overstates` twin, verbatim from `test_capstone_a_rows_10982.py`
+        "  test_b.py: 0.9  # measured locally as context, NOT as the weight, so the"
+        " flat 2.0 overstates it until a sweep replaces this from junit" + basis)
+    legitimate = (
+        # the PAST tense the fix uses — a true history, not a claim
+        "  test_a.py: 39.0  # The flat 2.0 UNDERSTATED it; this row's 39.0 is the"
+        " sweep that replaced it." + basis + "\n"
+        # an UNMEASURED row (still the flat default) may state it
+        "  test_b.py: 2.0  # the flat 2.0 UNDERSTATES it until a sweep replaces"
+        " this row.\n"
+        # the same sentence, PRESENT tense, with NO landed basis. The tense arm
+        # MATCHES this row, so only the `_MEASURED_BASIS_RE` conjunct keeps it
+        # quiet — delete that conjunct and this fixture is the one that reds.
+        # ⛔ It must stay present tense: `_FLAT_DEFAULT_STILL_OWED_RE` matches
+        # `UNDERSTATES`, so the PAST-tense wording this fixture first carried
+        # (`UNDERSTATED`) never reached the conjunct at all and the arm was
+        # unpinned (review P3, 2026-11-09).
+        "  test_c.py: 0.4  # the flat 2.0 UNDERSTATES it until a sweep; nothing"
+        " in the tail cites one.")
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        stale, durations) == [("test_a.py", 39.0), ("test_b.py", 0.9)]
+    assert _durations_rows_still_owing_the_flat_default_to_a_sweep(
+        legitimate, durations) == []
 
 
 _DURATIONS_TOP_KEY_RE = re.compile(r"^[a-z_]+:\s*$")
@@ -12984,6 +13300,72 @@ def test_every_required_merge_check_carries_an_outer_cap():
         f"measurement (docs/ops/ci-wall-clock.md).")
 
 
+def _slow_wall_remedy(manifest: dict, target: float | None = None,
+                      setup: float | None = None) -> str:
+    """#11605: the remedy the wall arm can ACTUALLY clear, derived from the map.
+
+    The wall arm's failure text used to tell every reader to "Raise
+    `config/ci-surfaces.yml::slow_shards` (reviewed)". Measured on the 2026-11-09
+    refresh, that advice is INERT: a leg is FILE-granular (`build_shard_entries`
+    packs whole files, and `python-ci.yml` maps each name to `tests/<name>.py`),
+    so `max(leg) >= <the heaviest file>`. Once one file alone exceeds the pytest
+    budget a leg may spend (`target - setup`), no leg count clears the wall —
+    raising the count only relocates the red onto the BALANCE arm. Five lanes
+    re-derived that dead end from the failure text, one after another.
+
+    So the two arms are solved for the leg count before a word is written. With
+    `pool` = the gating pool, `h` = the heaviest file, `room = target - setup`:
+
+      * the WALL needs `pool / L <= room`  ->  `L >= ceil(pool / room)` = `lo`;
+      * the BALANCE band needs `h <= ratio x pool / L`  ->  `L <= floor(ratio x
+        pool / h)` = `hi` (the heaviest file must still fit the band).
+
+    `lo > hi` (or `h > room`) is the indivisible-pool state: no `slow_shards`
+    value can pass, and the message says so, names the file, and names the two
+    routes that remain (split/move it, or move the ceiling — an OWNER decision,
+    #6792). Otherwise the window `[lo, hi]` is stated, so the advice is a number
+    a reviewer can act on instead of "raise it".
+
+    Pure: reads only the passed manifest (and the two measured constants), so it
+    is testable against synthetic maps. Returns "" when the pool is empty (an
+    empty pool is the coverage arm's finding, not this one's).
+    """
+    target = SLOW_LEG_WALL_TARGET_MIN if target is None else target
+    setup = SLOW_LEG_SETUP_ALLOWANCE_MIN if setup is None else setup
+    room = target - setup
+    dmap = cs._durations_map(manifest)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(manifest)}
+    if not weights or room <= 0:
+        return ""
+    heaviest = max(weights, key=lambda n: weights[n])
+    h = weights[heaviest]
+    pool = sum(weights.values())
+    count = slow_shard_count(manifest)
+    ratio = cs.HALF_DURATION_IMBALANCE_RATIO
+    # ceil(pool / room) on the seconds, so the answer is exact at a boundary
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(ratio * pool / h) if h > 0 else 0
+    if h > room or lo > hi:
+        return (
+            f"⛔ No `slow_shards` value can clear this, and more legs are not the "
+            f"remedy: a leg is FILE-granular, so `max(leg)` is at least the "
+            f"heaviest file (`{heaviest}`, {h:.2f}m alone) while a leg may spend "
+            f"only {room:.2f}m of pytest ({target:.0f}m target − {setup:.1f}m "
+            f"setup). Clearing the wall needs >= {lo} legs; the {ratio}x balance "
+            f"band admits at most {hi} at {h:.2f}m — the two windows do not "
+            f"overlap, so the pool has to become DIVISIBLE: split or move "
+            f"`{heaviest}` (or move the {target:.0f}m ceiling, an OWNER decision "
+            f"— #6792 — never a lane's). Committed at {count} legs; see #11605.")
+    return (
+        f"Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the "
+        f"[{lo}, {hi}] window this map admits: the wall needs >= {lo} legs "
+        f"({pool:.2f}m / {room:.2f}m of pytest per leg — a LOWER bound, the LPT "
+        f"pack must still land inside it) and the {ratio}x balance band allows "
+        f"<= {hi} while `{heaviest}` ({h:.2f}m) is the heaviest file, instead of "
+        f"letting this lane become the merge ceiling again")
+
+
 def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     """#9539: the slow legs must be a complete, duration-balanced partition AND
     the wall their pack projects must stay inside the CI guideline.
@@ -13003,10 +13385,13 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
       * the bound — `max(leg) + SLOW_LEG_SETUP_ALLOWANCE_MIN` <= the 10m
         guideline, AND, once the matrix is capped (#6744), the job's real band
         `ceil(legs/cap) x (max leg + allowance)` <= `SLOW_LEG_CAPPED_WALL_TARGET_MIN`.
-        A new slow file big enough to break either reds here, and the remedy is a
-        reviewed `slow_shards` bump, not a quieter number. The second bound is
-        not optional: a per-leg number alone certifies a wall the job cannot
-        hit as soon as one leg is not the whole job.
+        A new slow file big enough to break either reds here, and the remedy is derived
+        by `_slow_wall_remedy()` from the map rather than asserted: a reviewed
+        `slow_shards` bump when the pool is divisible, and a split/move of the
+        offending file when one file alone exceeds the pytest budget a leg may
+        spend (no leg count can help then — #11605). Never a quieter number. The
+        second bound is not optional: a per-leg number alone certifies a wall the
+        job cannot hit as soon as one leg is not the whole job.
 
     The setup allowance is a MEASURED constant (1.9–2.1 min from the jobs API
     over 5 main runs), not zero: a bound that ignored the per-leg fixed cost
@@ -13043,9 +13428,8 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
         f"per leg against a {pool:.2f}m pool at {count} legs, plus the measured "
         f"{SLOW_LEG_SETUP_ALLOWANCE_MIN}m per-leg setup, projects "
         f"{proj['projected_wall_min']:.2f}m — over the "
-        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. Raise "
-        f"`config/ci-surfaces.yml::slow_shards` (reviewed) instead of letting "
-        f"this lane become the merge ceiling again")
+        f"{SLOW_LEG_WALL_TARGET_MIN:.0f}m CI guideline. "
+        + _slow_wall_remedy(m))
     # #6744: the per-leg number above is NOT the job's wall once the matrix is
     # capped. `max-parallel: 3` over 5 legs is TWO waves (ceil(5/3)), so a guard
     # that stops at the per-leg share stays GREEN while asserting a wall the job
@@ -13074,6 +13458,163 @@ def test_slow_shards_are_duration_packed_and_meet_the_wall_target():
     inc = slow_matrix_include(entries)["include"]
     assert [r["half"] for r in inc] == [e["name"] for e in entries]
     assert all(r["files"].split() for r in inc), "a slow leg must never be empty"
+
+
+def _wall_clock_projection_claims(doc: str) -> tuple[float, float] | None:
+    """The `X m per leg → Y m` pair `docs/ops/ci-wall-clock.md` restates.
+
+    Returns `None` when the sentence is gone, so the pin can fail CLOSED and say
+    "re-anchor this pin" rather than pass on a doc it never read.
+    """
+    match = re.search(
+        r"—\s*`([\d.]+) m` per leg → \*\*`([\d.]+) m`\*\* from the\s+committed\s+`durations` map",
+        doc)
+    if match is None:
+        return None
+    return float(match.group(1)), float(match.group(2))
+
+
+def test_the_documented_slow_wall_restates_the_committed_maps_own_projection():
+    """The doc's `per leg → job wall` pair is a COPY, so it is checked as one.
+
+    `docs/ops/ci-wall-clock.md` argues the `3 / 3 / 3` cap from two numbers it
+    restates by hand, "from the committed `durations` map". They went stale on the
+    NEXT refresh — the 2026-11-09 sweep moved the map under them twice (the
+    `#11605` inflated sample, then the `#11607` re-cut) and nothing read them, the
+    same rot that put a third stale copy in `python-ci.yml`'s ARM-2 arithmetic
+    paragraph itself, and a fourth in the map's own notes (`#11602` review, P2).
+
+    So the sentence is pinned to the function that produces it: the per-leg figure
+    is `slow_wall_projection()[`projected_wall_min`]` and the job wall is the same
+    call at the workflow's OWN `max-parallel` (read from `python-ci.yml`, not
+    restated), which is what makes the second number a band rather than a share.
+
+    Non-vacuity: the same resolver is run against the pair the paragraph carried
+    before this pin existed, and must report both as wrong — a checker that only
+    agrees with the file it is checking would pass on nothing.
+    """
+    path = REPO / "docs" / "ops" / "ci-wall-clock.md"
+    doc = path.read_text(encoding="utf-8")
+    claims = _wall_clock_projection_claims(doc)
+    assert claims is not None, (
+        "`docs/ops/ci-wall-clock.md` no longer carries the `X m per leg → Y m` "
+        "sentence for the slow matrix's job wall — re-anchor this pin rather than "
+        "deleting it, so the copy stays checkable")
+
+    m = load_manifest()
+    entries = slow_shard_entries(m)
+    cap = ((_load_python_ci()["jobs"]["test-slow"].get("strategy") or {})
+           .get("max-parallel"))
+    assert isinstance(cap, int), (
+        f"`test-slow` declares no integer `max-parallel` (got {cap!r}), so the "
+        "job-wall half of this pin would be vacuously one wave")
+    per_leg = slow_wall_projection(m, entries)["projected_wall_min"]
+    job_wall = slow_wall_projection(
+        m, entries, max_parallel=cap)["projected_job_wall_min"]
+
+    assert claims == (round(per_leg, 2), round(job_wall, 2)), (
+        f"`docs/ops/ci-wall-clock.md` restates the slow matrix's wall as "
+        f"{claims[0]:.2f} m per leg -> {claims[1]:.2f} m, but the committed "
+        f"`durations` map projects {per_leg:.2f} m per leg -> {job_wall:.2f} m at "
+        f"`max-parallel: {cap}`. Re-derive the sentence from the map (or from a "
+        f"fresh sweep, if the map is the stale side) — do not restate it by hand")
+
+    # Executable non-vacuity: the pair this paragraph carried before the pin.
+    stale_doc = ("reports `waves x (max leg + setup)` — `9.02 m` per leg → **`18.04 m`** "
+                 "from the\ncommitted `durations` map")
+    assert _wall_clock_projection_claims(stale_doc) != (round(per_leg, 2),
+                                                      round(job_wall, 2)), (
+        "the resolver agrees with the pair it was written to reject, so it is not "
+        "reading the map at all")
+
+
+def test_the_slow_wall_remedy_names_a_remedy_that_can_fire():
+    """#11605: the wall arm's advice must be a REMEDY, not an incantation.
+
+    The pin failed for a week telling every reader to "raise `slow_shards`" on a
+    map where no `slow_shards` value can pass (the heaviest file alone is 9.09m
+    against an 8.00m pytest budget). Five lanes re-derived that by hand. This
+    pins both shapes on synthetic maps, and the third arm derives the committed
+    map's verdict from the map itself rather than hard-coding today's answer —
+    so when the monolith is split the assertion flips with it, and a stale
+    "cannot be sharded" claim cannot outlive its cause (#10575 P2).
+    """
+    room = SLOW_LEG_WALL_TARGET_MIN - SLOW_LEG_SETUP_ALLOWANCE_MIN
+    assert room > 0, "the wall/setup constants leave no pytest budget at all"
+
+    # --- Arm 1: one file heavier than a leg may spend — no count can clear it.
+    indivisible = {
+        "slow_shards": 2,
+        "slow_files": ["test_big", "test_a", "test_b"],
+        "durations": {"test_big.py": (room + 2.0) * 60,
+                      "test_a.py": 120.0, "test_b.py": 120.0},
+    }
+    verdict = _slow_wall_remedy(indivisible)
+    assert "No `slow_shards` value can clear this" in verdict, verdict
+    assert "test_big" in verdict, (
+        "the indivisible verdict must NAME the file that cannot be split — that "
+        f"naming is the whole point (got: {verdict})")
+    assert "Raise `config/ci-surfaces.yml::slow_shards` (reviewed) into the" \
+        not in verdict, (
+            "an indivisible pool must not be handed the remediless advice: "
+            f"{verdict}")
+    # and the claim it makes is TRUE — the pack really cannot meet the wall
+    proj = slow_wall_projection(indivisible)
+    assert proj["projected_wall_min"] > SLOW_LEG_WALL_TARGET_MIN, (
+        "the fixture stopped being a failing map, so arm 1 proves nothing")
+
+    # --- Arm 2: every file is small, the POOL is what is too big for 2 legs.
+    # 60 x 50s = 50m over 2 legs; no single file can be blamed, so the leg count
+    # IS the lever — and the window the message names must actually work. (The
+    # fixtures are FINE-GRAINED on purpose: with coarse items no leg count helps
+    # even when the windows overlap, because an LPT pack is integral — that is a
+    # property of the pack, and the verdict says `>=` rather than `=`, never
+    # claiming the count alone is sufficient.)
+    divisible = {
+        "slow_shards": 2,
+        "slow_files": [f"test_s{i:02d}" for i in range(60)],
+        "durations": {f"test_s{i:02d}.py": 50.0 for i in range(60)},
+    }
+    verdict = _slow_wall_remedy(divisible)
+    assert "No `slow_shards` value can clear this" not in verdict, (
+        f"a divisible pool must not be declared hopeless: {verdict}")
+    lo = -(-round(sum(divisible["durations"].values()))
+          // round(room * 60))
+    assert f"[{lo}, " in verdict, (
+        f"the advice must state the leg-count window, starting at {lo}: "
+        f"{verdict}")
+    # non-vacuity of the ADVICE: the count it names clears the wall arm.
+    assert slow_wall_projection(divisible)["projected_wall_min"] \
+        > SLOW_LEG_WALL_TARGET_MIN, "the fixture stopped needing more legs"
+    raised = dict(divisible, slow_shards=lo)
+    assert slow_wall_projection(raised)["projected_wall_min"] \
+        <= SLOW_LEG_WALL_TARGET_MIN, (
+            f"the `slow_shards: {lo}` the message prescribes does not clear the "
+            "wall arm — the advice is inert again, which is the defect")
+
+    # --- Arm 3: the COMMITTED map — verdict derived, never hard-coded.
+    m = load_manifest()
+    dmap = cs._durations_map(m)
+    weights = {n: cs._duration_weight(dmap.get(f"{n}.py")) / 60.0
+               for n in slow_leg_files(m)}
+    heaviest = max(weights, key=lambda n: weights[n])
+    pool = sum(weights.values())
+    lo = -(-round(pool * 60) // round(room * 60))
+    hi = int(cs.HALF_DURATION_IMBALANCE_RATIO * pool / weights[heaviest])
+    committed = _slow_wall_remedy(m)
+    assert heaviest in committed, (
+        f"the committed map's heaviest slow file is `{heaviest}`; the verdict "
+        f"must name it (got: {committed})")
+    if weights[heaviest] > room or lo > hi:
+        assert "No `slow_shards` value can clear this" in committed, (
+            f"`{heaviest}` is {weights[heaviest]:.2f}m against a {room:.2f}m "
+            f"budget and the leg windows [{lo}, {hi}] do not overlap, so the "
+            f"verdict must be the indivisible one (got: {committed})")
+    else:
+        assert f"[{lo}, {hi}]" in committed, (
+            f"a shardable window [{lo}, {hi}] exists for `{heaviest}` "
+            f"({weights[heaviest]:.2f}m), so the verdict must be the window "
+            f"(got: {committed})")
 
 
 def test_slow_shards_declaration_is_fail_closed():
@@ -13660,6 +14201,96 @@ def test_only_a_job_that_can_absorb_the_pip_cache_save_carries_one():
         "restore@v4` is the fix for #11063, not deletion: without it every "
         "shard downloads torch's 140 wheels cold.")
 
+
+#: The citation the `cache:`-family enumeration in
+#: `test_the_test_job_carries_no_unbounded_cache_post_step` carries, keyed on the token that
+#: makes it unique in this file (`test-track-b`). It is read OUT of the source rather than
+#: repeated as a literal here: a pin that hard-codes the number it is guarding only ever
+#: agrees with itself, and the number is the thing that drifts.
+_CACHE_FAMILY_CITATION_RE = re.compile(r"`python-ci\.yml:(\d+)-(\d+)`, `test-track-b`")
+
+
+def test_the_cache_family_citation_lands_on_the_setup_python_input_it_names():
+    """#11602 review (P3): the citation named a span two lines short of its construct.
+
+    The comment enumerates the ways a cache save can be armed and cites the ONE live
+    instance in this workflow — `setup-python`'s `cache:` input, in `test-track-b`. That
+    citation was re-cut by the #11602 render from `3125-3128` to `3226-3228`, and at this
+    head `3226` is `- uses: actions/checkout@v4`, `3227` the `setup-python` step, `3228`
+    its `with:` — the `cache:` input itself is `3230`. So a reader following the citation
+    landed one line ABOVE the offending input and saw no `cache:` key at all, which is
+    exactly the "resolves, but to the wrong construct" shape the window's other citation
+    pins exist to prevent (`tests/test_ci_runner_x64_install.py::_WALL_CLOCK_CITATION_ANCHORS`
+    pins `python-ci.yml:3230`, so one construct had two locations in the tree and only one
+    of them was under a pin).
+
+    Three arms, because the sentence makes three claims:
+
+    1. the span NAMES the construct — its first line is the `setup-python` step's `uses:`
+       and it contains that step's `cache:` input;
+    2. "the ONLY `cache:`-family input in this workflow" — checked by PARSING every job's
+       steps (not by trusting the citation, and not by grepping for one spelling);
+    3. the span ENDS on that input's own line, so "resolves somewhere in the step" cannot
+       stand in for "resolves on the key the sentence is about".
+
+    Non-vacuity is DERIVED from the citation rather than hard-coded (a hard-coded pre-fix
+    span rots with the next insert above it): the two-lines-short shape this fix replaced
+    is `(start - 1, end - 2)`, and the last arm asserts that span FAILS arm 1.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    match = _CACHE_FAMILY_CITATION_RE.search(source)
+    assert match is not None, (
+        "the `cache:`-family enumeration no longer cites `python-ci.yml:<span>`, "
+        "`test-track-b` — if the sentence was reworded, re-point "
+        "`_CACHE_FAMILY_CITATION_RE` at the new wording so the citation stays pinned "
+        "instead of becoming an unchecked claim")
+    start, end = int(match.group(1)), int(match.group(2))
+    lines = (REPO / ".github" / "workflows" / "python-ci.yml").read_text(
+        encoding="utf-8").splitlines()
+    assert 1 <= start <= end <= len(lines), (
+        f"the citation `python-ci.yml:{start}-{end}` is outside the workflow "
+        f"(1-{len(lines)} lines) — an insert above it moved the step")
+
+    def _names_the_construct(a: int, b: int) -> bool:
+        """Is `a-b` the `setup-python` step's `uses:` through its `cache:` input?"""
+        span = lines[a - 1:b]
+        if not span:
+            return False
+        return (span[0].strip().startswith("- uses: actions/setup-python@")
+                and any(re.match(r"\s+cache:\s*['\"]?pip\b", _l) for _l in span))
+
+    assert _names_the_construct(start, end), (
+        f"the cache-family citation `python-ci.yml:{start}-{end}` does not name the "
+        "`actions/setup-python` step AND its `cache:` input. The span at this head is "
+        + repr("\n".join(lines[start - 1:end]))
+        + ". A citation that resolves to the `with:` header (or to the `checkout` step) "
+        "sends the reader one line short of the construct it is about (#11602 review, P3)")
+
+    workflow = _load_python_ci()
+    armed = [(job_name, str(step.get("uses") or ""))
+             for job_name, job in (workflow.get("jobs") or {}).items()
+             for step in (job.get("steps") or [])
+             if any(str(_k).strip().lower() == "cache"
+                    for _k in (step.get("with") or {}))]
+    assert armed == [("test-track-b", "actions/setup-python@v5")], (
+        "the enumeration says `test-track-b` carries the ONLY `cache:`-family input in "
+        f"`python-ci.yml`; the parsed workflow carries {armed}. Either the comment's "
+        "claim or the workflow moved — the citation below is only correct for the shape "
+        "the sentence describes")
+
+    input_lines = [_i for _i, _l in enumerate(lines, 1)
+                   if re.match(r"\s+cache:\s*['\"]?pip\b", _l)]
+    assert input_lines == [end], (
+        f"the `cache:` input this sentence is about sits at python-ci.yml:{input_lines}, "
+        f"but the citation ends at :{end} — the span does not land on the key it names "
+        "(#11602 review, P3: `3226-3228` stopped at the `with:` header of `3230`)")
+
+    assert not _names_the_construct(start - 1, end - 2), (
+        "the two-lines-short span this fix replaced now PASSES the guard above, so the "
+        "guard no longer distinguishes a citation that names the construct from one "
+        "that stops above it (#11602 review, P3)")
+
+
 def test_the_test_job_carries_no_unbounded_cache_post_step():
     """#11063: the `test` job must carry NO unbounded cache post step, and each
     dependency-cache writer must be bounded twice — in SIZE and in TIME.
@@ -13758,7 +14389,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     #   (a) a `cache:`-family input on a `setup-*` action installs that action's own
     #       post step — `actions/setup-python@v5` + `cache: 'pip'` saves `~/.cache/pip`,
     #       the 3.6 GB half, in a post step with no timeout. It is used one job away
-    #       (`python-ci.yml:3125-3128`, `test-track-b` — the ONLY `cache:`-family input in
+    #       (`python-ci.yml:3227-3230`, `test-track-b` — the ONLY `cache:`-family input in
     #       this workflow), so this is a live shape, not a hypothetical;
     #   (b) a LOCAL composite action is a second `uses:` indirection whose body can
     #       call `actions/cache`, arm a `cache:` input, or use a cache-capable setup
@@ -13839,7 +14470,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
     # arming unless the step states an explicit off (#11065 cycle 8 review, P2).
     # ⚠️ `auto` resolves to OFF when `RUNNER_ENVIRONMENT !== "github-hosted"`
     # (`src/utils/inputs.ts:61-66`, at the **v7** ref this repo actually uses), and
-    # `python-ci.yml:790-795` records that
+    # `python-ci.yml:858-861` records that
     # `scripts/ci_runner_gate.sh` attaches `ubuntu-latest` to the SELF-HOSTED pool — which is
     # the runner class the measured incident ran on. So on this repo's own pool the bare
     # form is inert, and this arm is CONSERVATIVE there rather than derived; it is derived
@@ -14168,7 +14799,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         f"the uv save's `timeout-minutes` is {save_bound!r}; it must be a positive "
         "integer <= 8. Arm 2 of `docs/ops/ci-wall-clock.md` §2 caps the `test` "
         "job's SUM at 60 m (x1.5 <= the 90 m cap) and the measured SUM without a "
-        "cache-write term is 49.6 m, so the prune + save terms have <= 10.4 m between "
+        "cache-write term is 51.6 m, so the prune + save terms have <= 8.4 m between "
         "them; a larger bound does not make the payload smaller, it only spends "
         "the margin a real regression needs.")
     save_paths = [ln.strip() for ln in _path_of(uv_save).splitlines() if ln.strip()]
@@ -14253,7 +14884,7 @@ def test_the_test_job_carries_no_unbounded_cache_post_step():
         "distributions\" — the dev-group registry wheels that `uv sync --frozen` "
         "re-resolves cold on every shard are what this cache exists to keep (NOT "
         "the torch set: that is `pip`'s cache, which this job restores read-only). "
-        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:954-962 records "
+        "The `OVERRIDES:` line at .github/workflows/python-ci.yml:1024-1031 records "
         "why this job departs from the vendor's CI recommendation; use plain "
         "`uv cache prune`.")
 
@@ -17529,6 +18160,93 @@ def test_integrity_cli_exits_nonzero_for_a_huge_int_and_a_negative(tmp_path, mon
         monkeypatch.setattr(cs, "MANIFEST", poisoned)
         monkeypatch.setattr(_sys, "argv", ["ci_selection.py", "--integrity"])
         assert cs.main() != 0, f"a bad duration value ({bad!r}) exited 0"
+
+
+def test_load_manifest_cache_cannot_go_stale_or_leak_between_callers(tmp_path, monkeypatch):
+    """#11602: `load_manifest()` caches, so the two ways a cache goes WRONG here are
+    pinned — a stale read after a rewrite, and one caller's mutation reaching the
+    next.
+
+    The cache exists because one parse of the 1.18 MB map costs ~0.73 s and
+    `tests/test_ci_selection.py` alone called it 632 times (~460 s of a 554 s
+    suite, which is what red the slow-lane wall pin). Its key is the file's
+    IDENTITY `(path, st_mtime_ns, st_size)` PLUS the raw bytes: the identity
+    tuple alone cannot see a same-size rewrite inside the timestamp granularity
+    (the racy-timestamp hole the first version shipped with), so arm 3 compares
+    the bytes too and a rewrite INVALIDATES. The value handed out is a DEEP
+    COPY, because callers mutate the result in place (the poison tests below do
+    exactly that, through a hand-made copy).
+
+    Non-vacuity: without the deep copy, arm 2 poisons the cache and arm 3 reds;
+    without the raw-bytes comparison, arm 3 serves the pre-rewrite bytes.
+
+    ⛔ ARM 3 HAS TO PRESERVE THE IDENTITY TUPLE, or it does not test that second
+    claim (#11602 review, P3). `path.write_text(...)` bumps `st_mtime_ns`, so a
+    metadata-ONLY key already misses on the rewrite and the arm passes on the
+    very cache it exists to reject — the raw-bytes comparison is never reached.
+    The rewrite below therefore restores `st_mtime_ns` (and asserts the byte
+    length did not move) after writing, leaving the BYTES as the only thing that
+    differs: delete the `cached[1] != raw` conjunct in `load_manifest()` and this
+    arm reds on `11.0` instead of serving `22.0`.
+    """
+    import os
+    import sys as _sys
+
+    import yaml
+
+    from tools import ci_selection as cs
+
+    def _write(path, surge):
+        doc = yaml.safe_load(cs.MANIFEST.read_text())
+        key = cs.fast_pool(cs.load_manifest())[0]
+        doc["durations"] = dict(doc.get("durations") or {})
+        doc["durations"][key] = surge
+        path.write_text(yaml.safe_dump(doc))
+        return key
+
+    copy_path = tmp_path / "cached-ci-surfaces.yml"
+    _write(copy_path, 11.0)
+    monkeypatch.setattr(cs, "MANIFEST", copy_path)
+
+    # arm 1 — a distinct object every call, nested state included
+    first = cs.load_manifest()
+    second = cs.load_manifest()
+    assert first is not second
+    key = cs.fast_pool(first)[0]
+    assert first["durations"] is not second["durations"]
+
+    # arm 2 — an in-place mutation by one caller is invisible to the next
+    first["durations"][key] = 99999.0
+    first["surfaces"]["core"].append("test_injected_by_a_caller.py")
+    third = cs.load_manifest()
+    assert third["durations"][key] == 11.0, (
+        "a caller's mutation of the returned manifest leaked into the cache — the "
+        "next reader would pack shards from a value no file on disk contains")
+    assert "test_injected_by_a_caller.py" not in third["surfaces"]["core"]
+
+    # arm 3 — a REWRITE is a cache miss, not a stale read.
+    #
+    # The identity tuple must NOT move, or this arm proves nothing: `write_text`
+    # would bump `mtime_ns` and a metadata-only key would miss on its own, so the
+    # raw-bytes comparison — the actual guarantee — would never be exercised.
+    # Same byte length (11.0 -> 22.0) plus a restored `st_mtime_ns` leaves the
+    # bytes as the only difference between the cached parse and the file.
+    before = copy_path.stat()
+    _write(copy_path, 22.0)
+    written = copy_path.stat()
+    assert written.st_size == before.st_size, (
+        "the rewrite changed the byte length, so the identity tuple moved and "
+        "this arm no longer isolates the raw-bytes comparison")
+    os.utime(copy_path, ns=(before.st_atime_ns, before.st_mtime_ns))
+    assert copy_path.stat().st_mtime_ns == before.st_mtime_ns, (
+        "could not restore st_mtime_ns, so the identity tuple moved and the "
+        "metadata-only key would miss on its own — arm 3 would be vacuous")
+    assert cs.load_manifest()["durations"][key] == 22.0, (
+        "the cache served pre-rewrite bytes: this is the failure mode the raw-bytes "
+        "comparison exists to prevent (the identity tuple alone cannot see a "
+        "same-size rewrite inside the timestamp granularity), and it would silently "
+        "keep a corrected weight out of the gate")
+    assert _sys  # the import above mirrors the sibling tests' harness
 
 
 def test_null_or_non_mapping_durations_reports_instead_of_tracebacking(tmp_path, monkeypatch):
