@@ -683,6 +683,18 @@ TEST_NO_REDIRECT_STEMS: tuple[str, ...] = (
     # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
     # tests/test_markers.py::test_no_redirect_stems_registry_exact.
     "test_cli_extraction",
+    # #8099 (epic #2080 W4 phase 2; the why half of #2081's indicator 2): the
+    # dream-cycle precompute of why-blocks and the push path that reads them.
+    # Every case builds a PATH-built store (`TortoiseSDK(<tmpdir>/test.db)`) and
+    # asserts on it — `_fresh_sdk` even wipes it — and the module carries
+    # module-level `pytestmark = pytest.mark.embedded_only`, so the exemption's
+    # load-bearing reason is the SKIP *and* the REDIRECT: an explicit `db_path`
+    # alone does NOT win (the #9209 finding), so a URI-set lane would point the
+    # wipe and the snapshot counts at a shared server graph. Registered with the
+    # ``carve_out`` list in config/ci-surfaces.yml (the two are one set in two
+    # homes; tests/test_ci_selection.py pins the equality) and DECLARED in
+    # tests/test_markers.py::test_no_redirect_stems_registry_exact.
+    "test_why_snapshot_8099",
     # #10121: the recency-tie pins build per-test embedded `TortoiseSDK(<tmpfile>)`
     # stores and read the tie ORDER back off them (the sweep, the id-less
     # `:Object`/legacy-id regressions), so the module is `embedded_only` and a

@@ -935,3 +935,55 @@ def point_ids_in_raw(raw_rows: list[list[str]]) -> list[str]:
             if isinstance(cell, str) and _POINT_ID_RE.match(cell) and cell not in seen:
                 seen.append(cell)
     return seen
+
+
+#: Depth bound for :func:`point_ids_in_payload` — the event payloads the
+#: ``:GraphEvent`` store carries are 1-2 levels deep (``{id}``,
+#: ``{id, op_type, source_id, target_ids[]}``); the bound is what keeps a
+#: pathological/attacker-shaped payload from becoming a deep walk.
+PAYLOAD_MAX_DEPTH = 4
+
+
+def point_ids_in_payload(payload: object, *,
+                         max_depth: int = PAYLOAD_MAX_DEPTH) -> list[str]:
+    """Extract the Point ids a durable event payload references, in order.
+
+    The #2081 delivery path has to answer "which points does this event
+    touch?" for a payload it does NOT shape: ``PointAdded`` carries
+    ``{id}``, ``OperatorAdded`` carries ``{id, source_id, target_ids[]}``,
+    the promote/dedupe types carry a candidate id, and future producers may
+    nest. Scanning every string cell against the SAME conservative id
+    grammar :func:`point_ids_in_raw` uses (one regex, one home) is robust to
+    that; a cell that is not id-shaped is ignored, and a match that is not a
+    real Point node produces no block (the caller's existence anchor).
+
+    Order is first-appearance, de-duplicated — deterministic for a given
+    payload, which is what makes the pushed ``why`` list deterministic. The
+    ``set``/``frozenset`` branch is walked in SORTED order for exactly that
+    reason: a set's iteration order varies across processes (``PYTHONHASHSEED``),
+    so an unsorted walk would push the same event's ``why`` list in a different
+    order on a different worker (#8099 review F3 sub-note).
+    """
+    seen: list[str] = []
+
+    def walk(value: object, depth: int) -> None:
+        if depth > max_depth:
+            return
+        if isinstance(value, str):
+            if _POINT_ID_RE.match(value) and value not in seen:
+                seen.append(value)
+        elif isinstance(value, dict):
+            for cell in value.values():
+                walk(cell, depth + 1)
+        elif isinstance(value, (set, frozenset)):
+            # Sorted by rendered form: elements need not be mutually orderable
+            # (a set can hold a str and a dict), so the key is the type name
+            # plus repr, which is total and stable within a process.
+            for cell in sorted(value, key=lambda c: (type(c).__name__, repr(c))):
+                walk(cell, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for cell in value:
+                walk(cell, depth + 1)
+
+    walk(payload, 0)
+    return seen

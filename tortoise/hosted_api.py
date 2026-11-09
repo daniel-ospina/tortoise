@@ -4016,6 +4016,66 @@ async def _webhook_retry_sweep_loop(interval: float) -> None:
         await _guarded_step("webhook retry sweep", _webhook_retry_sweep_pass)
 
 
+def _precompute_why_blocks(sdk: TortoiseSDK, dream_result: dict | None) -> dict | None:
+    """#8099: assemble + persist the why-blocks this dream pass made true.
+
+    Called from BOTH dream entry points, INSIDE the per-graph dream lock and
+    inside the dream pool item, AFTER the EP pass — `_dream_worker`'s `_drain`
+    (the write-triggered drain) and `POST /v1/dream`'s three branches (the
+    manual / scheduled `stale-first` / whole-graph passes). Both are needed and
+    neither subsumes the other: the drain sees the points THIS write moved, the
+    endpoint sees the points a scheduled or full pass moved, and an EP move
+    emits no `:GraphEvent` (its record is the journal), so the pending half of
+    the id set cannot pick up what a `/v1/dream` pass touched. Skipping either
+    leaves the push serving a pre-pass number with nothing to correct it
+    (#8099 review F2). This is the precompute half of #2081's indicator 2
+    ("precomputed why-blocks are served from cache, no per-push EP recompute").
+    The push that follows READS them (`webhook_delivery.dispatch_pending`);
+    nothing assembles on the push path.
+
+    Best-effort BY CONSTRUCTION: a graph hiccup here must never fail a dream
+    (the roots are already drained and a raise would be read as a dream bug),
+    and it must never break delivery (a push without `why` is the pre-#8099
+    envelope, which is valid). The precompute is also skipped wholesale for a
+    graph with no live subscription — `why_snapshot.precompute_for_dream`
+    probes that FIRST and writes nothing, so a tenant that never subscribed
+    pays one read and no graph writes.
+
+    Returns the precompute summary (for logging/tests), or None when the pass
+    was skipped or failed.
+
+    ⛔ SECTION 17.1 REFUSALS ARE NOT A "BEST-EFFORT MISS". A
+    `DirectCacheWriteRefused` from `why_snapshot` means its statement never
+    reached the store, so it is logged at ERROR with a greppable marker (the
+    same posture `DreamNoOpError` gets in `_dream_worker`, and the rule
+    `webhook_delivery` states at its own `_run`). It is NOT re-raised: unlike
+    the webhook cursor (whose lost write re-delivers forever), the roots are
+    already drained by the time this runs and raising would trade a cache miss
+    for a whole discarded dream pass. The push degrades to the #8099 envelope
+    and the next enabled pass rewrites the snapshots.
+    """
+    import logging
+
+    from tortoise import why_snapshot
+    from tortoise.projection import DirectCacheWriteRefused
+    from tortoise.security import redact_error
+
+    _log = logging.getLogger("tortoise.api")
+    try:
+        if not why_snapshot.enabled():
+            return None
+        return why_snapshot.precompute_for_dream(sdk._get_proj(), dream_result)
+    except DirectCacheWriteRefused as e:
+        _log.error(
+            "why-block precompute REFUSED by §17.1 (the snapshot write did not "
+            "land; pushes fall back to the no-why envelope): %s",
+            redact_error(e))
+        return None
+    except Exception as e:  # noqa: BLE001, RUF100 — a dream must never fail here
+        _log.warning("why-block precompute failed: %s", redact_error(e))
+        return None
+
+
 @_embed_metered
 async def _dream_worker(org_id: str, key: str | None = None) -> None:
     """Drain one tenant's queue with debounce, then run incremental dream.
@@ -4074,7 +4134,14 @@ async def _dream_worker(org_id: str, key: str | None = None) -> None:
                 # drain is LOCAL mode (W1; never silently full — the I1
                 # precedence table governs; scheduled stale-first passes call
                 # /v1/dream with mode="stale-first" explicitly).
-                sdk.dream(dirty_only=True, mode="local")
+                result = sdk.dream(dirty_only=True, mode="local")
+                # #8099: precompute the why-blocks this pass made true, so the
+                # push below READS them instead of assembling per event. Runs
+                # INSIDE the lock and INSIDE the pool item on purpose: it is a
+                # graph writer, so it must be serialized with every other dream
+                # on this graph (the dream is the snapshot cache's only writer),
+                # and it must never extend the capture path.
+                _precompute_why_blocks(sdk, result)
 
         await _run_dream_on_pool(_drain, _open_sdk)
         # #2081: push the events this tenant's subscribers are behind on. Runs
@@ -12934,12 +13001,25 @@ async def dream(
         # SDK's close.
         with _dream_lock(_dk):
             if mode is not None:
-                return sdk.dream(mode=mode, budget=budget)
-            if full:
-                return sdk.dream(full=True)
-            if queued_roots:
-                sdk._mark_dirty(queued_roots)
-            return sdk.dream(dirty_only=True)
+                result = sdk.dream(mode=mode, budget=budget)
+            elif full:
+                result = sdk.dream(full=True)
+            else:
+                if queued_roots:
+                    sdk._mark_dirty(queued_roots)
+                result = sdk.dream(dirty_only=True)
+            # #8099 (review F2): EVERY belief-moving dream pass refreshes the
+            # why-block cache, not only the write-triggered drain. Indicator 3's
+            # "a point whose belief moved in a dream is pushed with the
+            # post-dream numbers" is a property of the DREAM, and this endpoint
+            # is the pass the scheduler runs (`mode="stale-first"`, manual and
+            # whole-graph passes) — a pass that skipped the refresh would leave
+            # the push serving a pre-pass number with nothing to correct it (an
+            # EP move writes the JOURNAL, not a `:GraphEvent`, so the pending
+            # half cannot see it either). Same posture as the drain: inside the
+            # lock, inside the pool, after the pass, best-effort.
+            _precompute_why_blocks(sdk, result)
+            return result
 
     return await _run_dream_on_pool(_run_dream, lambda: sdk)
 

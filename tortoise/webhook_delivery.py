@@ -23,10 +23,12 @@ THE CONTRACTS THIS MODULE PINS
    write time. Nothing here calls ``compute_confidence`` or opens the EP
    engine, so a push can never re-run belief propagation (indicator 2 of
    #2081: a precomputed payload served from the store, never a per-push
-   recompute). The *why-block assembly* half of the phase — enriching these
-   events with support chains/NANDs — is deliberately NOT here; it belongs to
-   the dream-cycle precompute follow-up so this module has no dependency on
-   the EP engine.
+   recompute). The *why-block assembly* half of the phase lives in
+   ``tortoise/why_snapshot.py`` (#8099): the dream cycle assembles the
+   why-blocks and persists them, and this module only READS the ones for the
+   points an event touches (ONE bounded single-node read per page — never an
+   assembly, never a traversal). So this module still has no dependency on the
+   EP engine.
 3. **Best-effort, never a caller's failure.** ``dispatch_pending`` never
    raises: a subscriber's dead endpoint, a TLS failure, or a graph hiccup
    becomes a receipt and a backoff, never an exception on the capture path.
@@ -770,7 +772,17 @@ def _status_code(value) -> int | None:
         return None
 
 
-def _delivery_body(sub: dict, event: dict) -> bytes:
+def _delivery_body(sub: dict, event: dict, why: list[dict] | None = None) -> bytes:
+    """The signed body for one event.
+
+    #8099: ``why`` is the precomputed why-block list for the points THIS event
+    touches (read from ``:WhySnapshot`` — never assembled here). The key is
+    ABSENT when the list is empty, so a graph that never ran a precompute (or a
+    graph with the kill switch off) produces the byte-identical envelope #2081
+    shipped; a subscriber can therefore tell "not computed" from "computed,
+    empty" by the key's presence, which is the §3.1.3 convention the pull
+    surface already uses.
+    """
     envelope = {
         "subscription_id": sub["sub_id"],
         "delivery_id": f"{sub['sub_id']}:{int(event.get('seq') or 0)}",
@@ -782,7 +794,54 @@ def _delivery_body(sub: dict, event: dict) -> bytes:
             "payload": event.get("payload"),
         },
     }
+    if why:
+        envelope["why"] = list(why)
     return json.dumps(envelope, ensure_ascii=False, sort_keys=True).encode("utf-8")
+
+
+def _page_why_entries(proj, events: list[dict]) -> dict[str, dict]:
+    """Read the precomputed why-entries for every point this PAGE mentions.
+
+    ONE graph read for the whole page (not one per event, and certainly not an
+    assembly per event) — indicator 2 of #2081/#8099: the push path performs no
+    EP/assembly work, only a bounded single-node read over
+    ``:WhySnapshot`` (``why_snapshot.read_blocks``; no traversal, no
+    ``compute_confidence``).
+
+    Best-effort by contract 3 of ``why_snapshot``: a snapshot read failure, a
+    missing table, or a projection fault degrades the page to "no why" — a
+    delivery is never skipped, retried, or failed on account of enrichment.
+    """
+    from .why import point_ids_in_payload
+
+    ids: list[str] = []
+    for event in events:
+        for pid in point_ids_in_payload(event.get("payload")):
+            if pid not in ids:
+                ids.append(pid)
+    if not ids:
+        return {}
+    from .why_snapshot import read_why_entries
+
+    try:
+        return read_why_entries(proj, ids)
+    except Exception as e:  # noqa: BLE001, RUF100 — enrichment never breaks egress
+        logger.warning("webhook_delivery: why read failed: %s", redact_error(e))
+        return {}
+
+
+def _event_why(event: dict, entries: dict[str, dict]) -> list[dict]:
+    """The why-entries for the points ONE event touches, in payload order."""
+    if not entries:
+        return []
+    from .why import point_ids_in_payload
+
+    out: list[dict] = []
+    for pid in point_ids_in_payload(event.get("payload")):
+        entry = entries.get(pid)
+        if entry is not None:
+            out.append(entry)
+    return out
 
 
 # ── Dispatcher ────────────────────────────────────────────────────────────
@@ -1248,6 +1307,9 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
             summary["more_pending"] += 1
         if not events:
             continue
+        # #8099: the precomputed why-blocks for this page, read ONCE before the
+        # delivery loop (one bounded graph read per page; no assembly, no EP).
+        page_why = _page_why_entries(proj, events)
         try:
             secret = decrypt_token(sub.get("secret") or "")
         except Exception as e:
@@ -1272,7 +1334,7 @@ def dispatch_pending(proj, *, transport=None, now: datetime | None = None,
             continue
         for event in events:
             started = time.monotonic()
-            body = _delivery_body(sub, event)
+            body = _delivery_body(sub, event, _event_why(event, page_why))
             ts = int(now_dt.timestamp())
             headers = {
                 "Content-Type": "application/json",
