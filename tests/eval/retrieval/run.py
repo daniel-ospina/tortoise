@@ -748,7 +748,7 @@ def _baseline_embedding_space(base: dict) -> str:
 
 def _gate_vs_baseline(
     per_query, baseline_per_query, rng,
-    *, space: str | None = None, baseline_space: str | None = None,
+    *, space: str | None, baseline_space: str | None,
     model_id: str | None = None, baseline_model_id: str | None = None,
 ) -> dict | None:
     """The pre-registered SHIP/WARN/BLOCK gate, refusing cross-space compares.
@@ -779,6 +779,15 @@ def _gate_vs_baseline(
     if not baseline_per_query:
         return None
     unknown = EMBED_SPACE_UNKNOWN
+    # `space`/`baseline_space` are REQUIRED (no default), for the same reason
+    # `_query_vecs` requires `space`: a `None` default is an ambient decision
+    # taken one call site away and invisible where it happens, and with both
+    # sides omitted every refusal below is skipped and the pair is SCORED —
+    # the two-space-by-omission hole this module exists to close, reopened on
+    # the gate itself. An explicit `None` is an ABSENCE of the fact, not a
+    # space, so it is normalized to `unknown` and refuses below.
+    space = unknown if space is None else space
+    baseline_space = unknown if baseline_space is None else baseline_space
     if unknown in (space, baseline_space):
         seeded_advice = (
             "Re-run with the corpus SEEDED in one space (drop "
@@ -908,6 +917,14 @@ def _run_with_sdk(args, sdk) -> dict:
     space, model = _corpus_embedding_space(seeded_synthetic=not args.no_seed_corpus)
     reembedded = 0
     unverified = 0
+    # `unverified` counts the embedded population this run could NOT vouch for.
+    # It is computed on BOTH paths and outside every `--quiet` guard: a
+    # `--no-seed-corpus` run wrote nothing, so that population is the whole
+    # embedded index. Left at its initial 0, the field would tell a reader (or
+    # an automation filtering on `corpus_points_unverified == 0` for "fully
+    # verified") the exact opposite of what happened.
+    if space == EMBED_SPACE_UNKNOWN:
+        unverified = _uncovered_corpus_points(proj.g, [])
     if space != EMBED_SPACE_UNKNOWN:  # `unknown` is already --no-seed-corpus
         if space == EMBED_SPACE_MODEL:
             reembedded = _reembed_corpus(proj.g, points, model)
@@ -1195,8 +1212,9 @@ def _run_with_sdk(args, sdk) -> dict:
             "On embedded, fused RRF is NOT vector alone — per-query data shows "
             "FTS populated 40/100 queries and fused != vector on 17/100 "
             "(fused-vs-vector nDCG@10 delta CI -3.25..-0.83, excludes 0).",
-            "Embedding space (provenance.corpus_embedding_space): corpus and "
-            "query vectors are ALWAYS produced in ONE space. No model loaded "
+            "Embedding space (provenance.corpus_embedding_space): whenever the "
+            "space is KNOWN ('model' or 'oracle-synthetic'), corpus and query "
+            "vectors are produced in ONE space. No model loaded "
             "→ 'oracle-synthetic' (topic-centroid sums from the oracle "
             "structure + seeded noise; the documented degraded fallback). "
             "Model loaded → 'model', and the seeded corpus is RE-EMBEDDED "
@@ -1217,7 +1235,13 @@ def _run_with_sdk(args, sdk) -> dict:
             "a corpus an earlier MODEL-space run re-embedded, and product "
             "embeddings are indistinguishable here), so no space can be "
             "claimed and the gate refuses to compare — and the metrics this "
-            "run reports are not a quality statement.",
+            "run reports are not a quality statement. The ONE-SPACE claim "
+            "above does NOT hold here: with no trustworthy corpus space to "
+            "follow, the query side falls back to the oracle while the "
+            "corpus keeps whatever vectors it already held, so the arm may "
+            "genuinely span two spaces. That is exactly why the space is "
+            "'unknown' and why the gate refuses — it is a refusal to make a "
+            "statement, not a statement that no comparison was needed.",
             "The gate REFUSES a cross-space comparison (verdict "
             "INCOMPARABLE) — paired deltas across two embedding spaces "
             "measure the instrument, not the change, and the model id is part "
@@ -1286,7 +1310,19 @@ def _markdown_summary(report: dict) -> str:
             f"| {m['r@10']['value']:.3f} | {m['mrr']['value']:.3f} |"
         )
     g = report.get("gate_vs_baseline")
-    gate_line = f"gate vs baseline: {g['verdict']}" if g else "gate: none (no --baseline)"
+    if not g:
+        gate_line = "gate: none (no --baseline)"
+    elif g["verdict"] == "INCOMPARABLE":
+        # The refusal must be ACTIONABLE where the loop reads it. The token
+        # alone reads as "not BLOCK", and "did not block" is not "passed" —
+        # no comparison was made at all. `g["reason"]` carries the remedy
+        # (re-baseline in this space); printing the token without it is how a
+        # refusal gets mistaken for a ship signal.
+        gate_line = (f"gate vs baseline: INCOMPARABLE — NO COMPARISON WAS "
+                     f"MADE, so this run carries no quality evidence and is "
+                     f"NOT a ship signal. {g.get('reason', '')}")
+    else:
+        gate_line = f"gate vs baseline: {g['verdict']}"
     rv = report.get("rerank_verdict")
     if rv:
         c = rv.get("ndcg@10_delta_points", {})
