@@ -995,6 +995,50 @@ def test_the_shipped_block_says_nothing_about_multi_worker_at_one():
     assert "MULTI-WORKER" not in proc.stdout
 
 
+def test_the_banner_never_COMPARES_a_count_the_shell_cannot_read():
+    """⛔ The readability guard must hold in the BANNER chain too, not only in
+    the refusal chain.
+
+    `_count_is_verifiable` is the authority on "can this shell read the count".
+    Round 13 gave it a length bound and put it FIRST in the `--lifespan off`
+    refusal chain, but the banner chain below still compared
+    `$TORTOISE_WEB_WORKERS` directly. bash arithmetic is `intmax_t`, so a digit
+    string past 19 digits makes every `-gt 1` fail with
+    `integer expression expected` — which reads as FALSE, i.e. as "1 worker".
+
+    MEASURED at the pre-fix head, on a boot the gate PERMITS (shared DB +
+    `$TORTOISE_MULTI_WORKER=1`, `WEB_CONCURRENCY=` 21 nines):
+
+        rc=0
+        tortoise: uvicorn workers = 1          <- while Config.workers is 21 digits
+        entrypoint: line 375: [: 999999999999999999999: integer expression expected
+        entrypoint: line 377: [: 999999999999999999999: integer expression expected
+
+    A measurement lying about the topology in the direction that reads as safe —
+    the failure class this block exists to remove — plus two raw shell
+    diagnostics in the boot log. The arm must answer UNVERIFIED instead.
+    """
+    huge = "9" * 21
+    # Embedded: refused later by the pre-exec gate, but the BANNER is what is
+    # under test — it must not claim one worker and must not leak a diagnostic.
+    proc = _run_gate_block(("uvicorn", "app:app"), {"WEB_CONCURRENCY": huge})
+    assert "integer expression expected" not in proc.stderr, proc.stderr
+    assert "uvicorn workers = 1" not in proc.stdout, proc.stdout
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+
+    # …and on a boot the gate PERMITS, where the false "1" was the more
+    # dangerous half: a 21-digit topology announced as one worker.
+    proc = _run_gate_block(
+        ("uvicorn", "app:app"),
+        {"WEB_CONCURRENCY": huge, "TORTOISE_DB_URI": _SHARED["TORTOISE_DB_URI"],
+         wt.ACK_ENV: "1"},
+    )
+    assert proc.returncode == 0, (proc.stderr, proc.stdout)
+    assert "integer expression expected" not in proc.stderr, proc.stderr
+    assert "uvicorn workers = 1" not in proc.stdout, proc.stdout
+    assert "UNVERIFIED" in proc.stdout, proc.stdout
+
+
 def test_the_shipped_block_reports_one_worker_while_reloading():
     """`--reload --workers 4` serves ONE child; the banner must say so.
 

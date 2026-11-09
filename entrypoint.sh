@@ -912,6 +912,18 @@ if [ "$_IS_SERVER" = "1" ]; then
         # Same honesty for the wrapped-command shape: this block cannot read the
         # count, and it must not print one it did not measure.
         echo "tortoise: uvicorn workers = UNVERIFIED — the server is launched through a shell string, so the count cannot be read from this argv; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
+    elif ! _count_is_verifiable "$@"; then
+        # ⛔ SAME AUTHORITY as the refusal chain above, for the same reason: an
+        # unreadable count must never REACH arithmetic. Without this arm the two
+        # `-gt 1` tests below evaluate it, fail with `integer expression
+        # expected` (which reads as FALSE, i.e. "1 worker"), and leak two raw
+        # shell diagnostics into every server boot log. MEASURED at the pre-fix
+        # head on a boot the gate PERMITS (shared DB + $TORTOISE_MULTI_WORKER=1,
+        # WEB_CONCURRENCY=s/9x21/): rc=0, "tortoise: uvicorn workers = 1", plus
+        # two `integer expression expected` lines — a measurement lying about the
+        # topology in the direction that reads as safe, which is the failure
+        # class this whole block was written to remove.
+        echo "tortoise: uvicorn workers = UNVERIFIED — the count is not a value this boot script can read (a digit string the shell cannot compare), so it cannot be compared to 1; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
     elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ] && [ "$_reload_env_undecidable" = "1" ]; then
         echo "tortoise: uvicorn workers = UNVERIFIED — \$UVICORN_RELOAD holds a value this boot script cannot classify the way click does (click trims with Python's str.strip(), which strips Unicode spaces a shell cannot), so this may be ONE reloader child instead of ${TORTOISE_WEB_WORKERS} workers; the app's admission gate still refuses a multi-worker boot (tortoise/worker_topology.py, #1677)"
     elif [ "$TORTOISE_WEB_WORKERS" -gt 1 ]; then
