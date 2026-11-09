@@ -83,6 +83,14 @@ record, and `refuse_same_database` correctly refuses a drill pointed at the reco
 The static half is unchanged and still runs beside these: `test_D3_no_write_path_bypasses_the_record`
 executes `tools/record_wiring_check.py` → `WIRED`, exit 0.
 
+**One further `D3`-named leg is not an ordering leg.** `test_D3_the_capture_instrument_is_not_left_installed`
+asserts nothing about a write's position: it pins the **fixture's lifecycle** — the four `_instrument`
+wrappers are removed **before** the `traced` fixture yields, so D4–D12 do not execute against an
+instrumented tree or append to another leg's trace. It is the pin for §9 row 5's fix, which until now
+was held only by the placement of one call and by nothing that reds if the call drifts (F10, §6.2).
+Its property is asserted by **identity** against the four door attributes as they were at *import*
+time — the wrappers are closures, so an assertion that "the doors look right" would be inert.
+
 ## 3. Every falsifier, observed RED (not asserted — run)
 
 Each mutation was applied to a throwaway checkout of this worktree, the named leg was run, the red was
@@ -334,6 +342,26 @@ The pair at journal position `4` and record position `3` is the inversion (a rec
 EARLIER than the append it answers) — the direction D3 forbids, and the only one of the four legs'
 falsifiers a `seq=None` pre-write can produce.
 
+#### F10 — move the fixture's `mp.undo()` back after the `yield` → the lifecycle leg
+
+The §9 row 5 fix (the door wrappers come off before the fixture yields) had no falsifier: until this
+leg, putting `mp.undo()` back in the `finally` — i.e. at MODULE teardown — reddened nothing, and
+every leg after the capture silently ran against wrapped doors. Removing the pre-`yield` `mp.undo()`
+and running the lifecycle leg alone:
+
+```console
+E       AssertionError: the capture's instrumentation is still installed after the fixture yielded:
+  journal (EventLog.append), record (tortoise.record_writer.write_live_record), fold
+  (FalkorProjection.apply), cache (_GuardedGraph.query) — every leg after this one would be measuring
+  an instrumented tree and appending to another leg's trace
+E       assert not ['journal (EventLog.append)', 'record (tortoise.record_writer.write_live_record)',
+  'fold (FalkorProjection.apply)', 'cache (_GuardedGraph.query)']
+1 failed, 19 deselected in 129.08s (0:02:09)
+```
+
+Restored from a byte-exact copy (`sha1` re-checked on both sides), and the clean run reds nothing:
+`6 passed, 14 deselected in 141.55s (0:02:21)`.
+
 ### 6.3 What the fixes do not change
 
 D3 is still **not discharged**, and this PR still reorders no production write path. What changed is that
@@ -400,7 +428,7 @@ Full disposition, including the items that were NOT defects:
 | 2 | the provenance row pinned §8/§8.1 to `a32edfb17f`, where their central claim (the new predicate) is false — §8 landed one commit later | dispatched | each section's head is now named individually |
 | 3 | three places said "three legs" over a table of four; §2's leg-4 cell claimed per-write attribution that §4 and §6.2 F6 exist to deny | both | corrected to four; the cell now says FLOOR and points at §4/F6 |
 | 4 | **leg 4's NAME still stated the per-write property** while its body asserts a floor | PR comment | **renamed** to `test_D3_order_no_cache_write_precedes_the_captures_first_journal_append_and_record` — the id is what CI output and any downstream quote carry, so fixing only the cell left the contradiction in the most-quoted place |
-| 5 | **the door wrappers stayed installed through module teardown** (`mp.undo()` in the fixture's `finally`), so D4–D12 executed with `EventLog.append` / `write_live_record` / `FalkorProjection.apply` / `_GuardedGraph.query` wrapped | PR comment | `mp.undo()` moved **before** the `yield`; leg 2 installs its own instrumentation for its own probe window through the same `_instrument` helper. Re-verified: F2 and F7 still red with unchanged output |
+| 5 | **the door wrappers stayed installed through module teardown** (`mp.undo()` in the fixture's `finally`), so D4–D12 executed with `EventLog.append` / `write_live_record` / `FalkorProjection.apply` / `_GuardedGraph.query` wrapped | PR comment | `mp.undo()` moved **before** the `yield`; leg 2 installs its own instrumentation for its own probe window through the same `_instrument` helper. Re-verified: F2 and F7 still red with unchanged output. **Pinned by `test_D3_the_capture_instrument_is_not_left_installed` (§2, §6.2 F10)** — before that leg, moving the call back into the `finally` reddened nothing |
 | 6 | the PR body headline said "every falsifier observed RED" and named "the two" residues, while its own last row says **does NOT red** and §6.2 has exactly one | dispatched | "Seven of the eight observed RED; the eighth is the one disclosed non-red" |
 | 7 | §6.1's wall-clock duration was read as a defect | PR comment | **NOT A DEFECT**: `19.60s` reproduces at `19.16s`; the cited `142.10s` was box load. Recorded rather than "fixed" |
 | 8 | §6.1 explained the `32 → 29` census delta as "different heads and different captures" | dispatched (round 5) | **WRONG EXPLANATION, corrected**: the delta is the `embeddings` extra. Each of the three folds emits one extra `MATCH … REMOVE n.embedding` (`vector_write.py:192` returns early when the vector is `None`, this venv's state) — 3 folds × 1 = the 3-statement gap exactly. §2's leg-2 sequence likewise measured `['journal','record','fold','cache']` here, not the five doors recorded in §2 previously |
@@ -449,3 +477,36 @@ cache-with-no-declared-lane=6`), so the leg it strengthens is not perturbed by i
 Gates at this head: `5 passed (-k D3, census unchanged)`, whole file `18 passed, 1 skipped` (the skip
 is `TEST_RECORD_SCRATCH_URI`, which only the CI job's second database arms — unrelated to this
 change), `ruff check` clean, worktree restored (no production file in the diff).
+
+## 11. The lifecycle pin — §9 row 5's fix acquires the falsifier it never had
+
+Landed on top of `26fc32e379b1` with `origin/main` (`86aaef8f0271`) merged in (`6cad2a5559c2`); the
+merge touched `tortoise/__main__.py`, `capture_spool.py`, `session_events_drain.py` and the hooks, so
+the instrument's premise was **re-measured at the integrated head**, not carried over:
+
+- the census is byte-identical to §0/§1 — `journal=14 record=14 fold=3 cache=32
+  cache-with-no-declared-lane=6` (this venv has the `embeddings` extra; §6.1's `29` is the
+  non-embeddings count, same delta, same cause);
+- **F9 re-measured** (§6.2): the per-event inversion applied to `_emit_event` reds leg 1 at this head
+  with the inversion visible in the positions — `journal positions [0, 4, 6, 12, …]`, `record
+  positions [1, 3, 7, 13, …]` (`1 failed, 19 deselected`). `tortoise/sdk.py` restored from a
+  byte-exact copy, `sha1` re-checked on both sides, `git diff --exit-code` clean.
+
+**What this adds, and why it is not a fifth ordering leg.** `test_D3_the_capture_instrument_is_not_left_installed`
+(§2, F10 §6.2) asserts nothing about a write's position — it pins the **fixture lifecycle** that §9
+row 5 fixed: the four `_instrument` wrappers come off before the `traced` fixture yields, so D4–D12
+do not execute against an instrumented tree or append to another leg's trace. Until it existed, that
+fix was held only by the placement of one call; putting `mp.undo()` back in the `finally` reddened
+nothing anywhere in the file, which is the shape F10 now reds.
+
+**Provenance, stated because it is not this lane's design.** The leg was found **uncommitted** in this
+worktree (it was never pushed by the lane that produced `57b92812`/`26fc32e3`). It was read, verified
+against the integrated head, and kept rather than discarded — its falsifier was then executed (F10) so
+the claim in its own docstring is measured, not asserted. Its identity assertion is deliberate: the
+wrappers are closures, so only the original object can distinguish "patched" from "restored", and a
+name-based assertion would be inert.
+
+Gates at this head: `6 passed (-k D3, census above)`, whole file `19 passed, 1 skipped` (the skip is
+`TEST_RECORD_SCRATCH_URI`, armed only by the CI job's second database), `ruff check` clean,
+`markdownlint-cli2` 0 issues on this artifact, `tools/ci_selection.py --integrity` ✅ (no test file
+added — the leg is in a file already classified). No production file is in the diff.
