@@ -11193,8 +11193,19 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         "`:12944` at `a1dff7cec8` then `:12944` (HEAD)", "12944")) == 1, (
         "a base discharges ONE occurrence: a bare re-stale printed beside a base-qualified cite "
         "of the same number must not ride its base (the ±window false pass)")
-    assert _unqualified_number_cites("`:13011` at HEAD", "12944") == [], (
-        "the arm names ITS number — a neighbour's qualifier is not this cite's")
+    # ⛔ This case used to be `` _unqualified_number_cites("`:13011` at HEAD", "12944") == [] ``
+    # — which returns at the `if not sites: return []` early return because the region cites
+    # `number` NOWHERE, so it asserted the early return while its message claimed the PAIRING
+    # property ("a neighbour's qualifier is not this cite's"). A case that cannot vary under a
+    # mutation of the pairing logic is the dead weight this file deletes an arm for under its own
+    # "an assertion that can never be the row that reds is not attribution" rule (fresh-context
+    # review at `35a53c4ccc`). It now carries BOTH numbers, so a neighbour's base discharging this
+    # cite's occurrence reds it — measured: shipped `[28]`, ±window mutant `[]`.
+    _neighbour_base = "`:13011` at `b3c2b1a`, and `:12944` here"
+    assert _unqualified_number_cites(_neighbour_base, "12944") == [
+        _neighbour_base.index(":12944")], (
+        "the arm names ITS number — a neighbour's qualifier is not this cite's: `:13011`'s base "
+        "must not discharge `:12944`")
     assert _unqualified_number_cites("`:12943-12944`", "12944") == [1], (
         "⛔ THE TRAILING ENDPOINT OF A RANGE is as HEAD-relative as a bare cite, and reading "
         "sites from `:number` alone made it invisible — a bare `:12943-12944` returned `[]` "
