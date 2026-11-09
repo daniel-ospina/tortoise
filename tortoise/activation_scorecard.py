@@ -361,8 +361,8 @@ FUNNEL_QUERY = (
 # fit in 100 columns, so it wraps and pushes later lines down. Measured over every
 # ``hosted_api.py:<line>`` cite in the tracked tree: **14** distinct cite
 # targets have a line number LARGER than 23128 (23284 … 99999) and those are the
-# ones that shift; **435** have a number smaller than it (22 … 22292) and cannot
-# move. (450 distinct targets in all — the remainder is 23128 itself, which this
+# ones that shift; **434** have a number smaller than it (22 … 22292) and cannot
+# move. (449 distinct targets in all — the remainder is 23128 itself, which this
 # very comment names, and which is why these counts are re-measured whenever
 # ``hosted_api.py`` gains or loses a line above it.)
 # ``STAGE3_PREDICATE`` is interpolated for the same reason, but as a predicate
