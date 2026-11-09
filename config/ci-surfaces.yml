@@ -1769,19 +1769,6 @@ surfaces:
   # CLI-wiring regression still runs the install guard. See the core entry for
   # the mechanism half.
   - test_capture_install.py
-  # #2119: the Pi per-turn READ seam is that same #3808/#3575/#3795 shape — the
-  # artifact (`tortoise/pi-hooks/tortoise-volunteer.ts`) classifies `core`, but
-  # the two behaviours this suite is the ONLY guard for live in
-  # `tortoise/__main__.py`, an exact `api` SOURCE_PATTERNS entry (so a
-  # `__main__.py`-only diff selects `api`, and nothing re-adds `core`):
-  # `_uninstall_pi_volunteer`'s `--dry-run` branch and
-  # `_upgrade_artifact_seam(..., introduce_read_seam=False)`, the W4 opt-in gate
-  # that keeps `hooks upgrade` from re-arming per-turn prompt search after
-  # `install pi --uninstall`. Without this leg a CLI-only change runs no guard
-  # for the very change it guards. Dual-registered with `core` (the mechanism
-  # half + the real-seam/node check) and `onboarding` (the install path a
-  # user's machine takes).
-  - test_pi_volunteer_seam.py
   # #3818: the Codex SessionEnd capture hook — the shipped artifact, its
   # detach/argv behavior, and the CLI install into $CODEX_HOME. Same dual
   # registration as test_capture_install.py (mechanism = core; CLI = api).
@@ -4098,24 +4085,6 @@ surfaces:
   # with an adapter stub — the suite invokes it, but never past `_model_for`) — so it is deliberately NOT
   # carve_out-registered, for the same reason `test_journal_growth.py` isn't.
   - test_s4_reeemit_tax.py
-  # #11534: the partial-gap detector (`tortoise/vet_gate.py::partial_gaps`) and
-  # its ADD-capable consumer (`extractor_v2.run_partial_gap_fill`). Same class as
-  # `test_s4_reeemit_tax.py` above — a MEASUREMENT whose pins are its credibility:
-  # the file re-derives the detector's flag rate and its recall against S4's own
-  # `added_items` from the committed receipts + `ab-*.json` artifacts, so a
-  # receipt or artifact that is retargeted makes the pins measure something else
-  # and the guard test says so first. That "says so first" is a property of the
-  # SELECTOR, not of this comment: it comes from the
-  # `docs/evidence/1789-s4-reeemit-tax/` entry in `CORE_ALSO`
-  # (`tools/ci_selection.py`) — without it an artifact-only diff takes the
-  # docs-only early return — and it is pinned from this suite's side by
-  # tests/test_ci_selection.py::test_the_11534_evidence_artifacts_select_the_pins_that_read_them.
-  # `tortoise/vet_gate.py` and
-  # `tortoise/extractor_v2.py` are both source entries, so this row is what makes
-  # the suite run on a detector-only diff. Hermetic — a prompt-keyed stub model
-  # and in-process pipeline calls through `extract_session_v2`, plus reads of the
-  # two committed artifacts; no DB, no graph, no network, no model call, no `gh`.
-  - test_11534_partial_gap.py
   # #10806: the test-lane container REAPER's actuator. DB-free and docker-free
   # (every docker call in it is monkeypatched), so it belongs on the same lane as
   # the tool it drives — and a destructive tool whose safety suite never runs in
@@ -6388,17 +6357,6 @@ surfaces:
   # for the very change it guards (neither this Python guard nor the
   # extension's `node --test` suite ran). Dual-registered with `onboarding`.
   - test_pi_capture_hooks.py
-  # #2119: the Pi READ seam — `tortoise/pi-hooks/tortoise-volunteer.ts` (the
-  # artifact `tortoise install pi` writes beside the capture extension) and the
-  # `_install_pi` / `--uninstall` wiring in `tortoise/capture_install.py` +
-  # `tortoise/__main__.py`. `tortoise/pi-hooks/` matches no SOURCE_PATTERNS
-  # entry, so a pi-hooks-only diff selects `core` via the `tortoise/` fallback
-  # — and this is the arm that runs the real-seam check (the INSTALLED
-  # extension executed by node against the real reflex over a seeded graph) as
-  # well as the extension's own `node --test` suite. Dual-registered with
-  # `onboarding` (the install path a user's machine takes), the same #2938
-  # silent-drop class as its siblings above.
-  - test_pi_volunteer_seam.py
   # #3515: the store-sync BACKSTOP — `tortoise/pi-hooks/store-sync.ts` +
   # `cursor-store.ts`, driven through `tortoise store-sync` (a `__main__.py`
   # subcommand) as a PROCESS. Same selection reasoning as the sibling directly
@@ -7427,7 +7385,6 @@ surfaces:
   - test_onboarding_w6_capture_disclosure.py  # #2002 (W6): docker-lane first-capture disclosure + Settings view/delete (DE2E-11)
   - test_onboarding_w6_member_authz.py  # #2002 (W6): dual-auth member-authz on the Settings view/delete leg (lane-agnostic)
   - test_pi_capture_hooks.py
-  - test_pi_volunteer_seam.py  # #2119: the Pi per-turn READ seam + its install/uninstall (dual-registered with `core` + `api`; the `api` arm is the `tortoise/__main__.py` half)
   # #1120 review (P1, inert enforcer): DUAL-REGISTERED with `api` (see the entry
   # there). `website/apps/dashboard/functions/` is a SOURCE_PATTERN of THIS
   # surface, and a named-surface match REPLACES the `core` fallback — so an
@@ -9443,7 +9400,6 @@ durations:
   # --refresh-durations` sweep replaces both from junit.
   test_11534_partial_gap.py: 2.0
   test_pi_volunteer_seam.py: 2.0
-  test_11534_partial_gap.py: 2.0  # new in #11534 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`. ⚠️ MEASURED LOCALLY as context, NOT as the weight: ~11 s for this file alone through the local interpreter on a contended box — the dominant cost is the MEASUREMENT, which re-runs the detector over 844 narrative segments across 14 recorded session-runs and re-reads both committed artifacts. What the weight covers: hermetic — a prompt-keyed stub model driven through `extract_session_v2`, unit arms over `vet_gate.partial_gaps`, and the two committed-artifact reads; no DB, no graph, no network, no model call, no `gh`. ⛔ The CASE COUNT is deliberately not quoted as a weight input (`tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it).
   test_relation_write_11237.py: 2.0  # new in #11237 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `core` registration above puts it in `fast_pool()`, and `--integrity` stays green either way (a 0.90 ratio floor with headroom), so nothing but this row records the weight — which is why the review that found the gap was right that only the row can close it (#11548 round 3, nit). What the weight covers: hermetic — the pure-plan guards for `tortoise/relation_write.py` (the `#11235` ambiguity refusal, the `#10000` typed-only rule, the declared-hierarchy branch, the fold and refusal accounting, the direction consumed from `SEMANTICS_DIRECTIONS`, and the inverted-predicate refusal); no DB, no graph, no corpus, no network, no model call. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: ~6 s whole-file on a contended fixer box. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
   eval/write_path/test_write_path_relation_lane.py: 2.0  # new in #11237 — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the `durations` refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT this host's local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419/#4348). The row must EXIST, not merely default ("a default is not a reading"): the `api`/`ep`/`eval` registrations above put it in `fast_pool()`. ⚠️ Its absence would red nothing on its own — `duration_coverage_issues()` is a ratio with headroom, so the row is written by hand rather than discovered by a red; `tools/ci_selection.py --integrity` is the authority. ⚠️ MEASURED LOCALLY as context for a human, NOT as the weight: 7 passed in ~140 s whole-file on a shared lane box — each case builds its own throwaway embedded FalkorDB (`TortoiseSDK(db_path=…)`), which is the cost, and a fixer-box wall reading is exactly the input #2818/#3419 forbids. So the flat 2.0 UNDERSTATES it until a sweep replaces the row; the point of the row is existence + coverage, not an accurate shard weight. ⚠️ THE KEY IS THE PATH RELATIVE TO `tests/`, not a basename: `split_fast_gate`/`build_shard_entries` look the weight up as `durations.get(<file minus the tests/ prefix>)` (`tools/ci_selection.py`), and `duration_issues` requires the key to be a CLASSIFIED file — a bare basename satisfies neither (measured: it raised `durations key test_write_path_relation_lane.py is not classified in the manifest`, and it would silently take `DEFAULT_FAST_WEIGHT` in the pack). The 48 sibling `eval/...` rows are path-qualified for this reason. What the weight covers: hermetic otherwise — the eval corpus's own fixtures, a monkeypatched `extract_session_v2` seam (the WIRE half) and the REAL `execute_embed` (the fold half); no docker, no network, no model call, no `gh`. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds (`test_10360`/`test_10513` each record that), and this row is refreshed from junit by `tools/ci_timing.py`.
   test_haystack_overlap_1779.py: 2.0  # unmeasured — new in #1779 (PR #11577) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `eval` registration above puts it in `fast_pool()`, because the file was MOVED to `tests/` ROOT — where `on_demand`'s `longmem_eval/**` no longer subtracts it — and that same move is what makes the earlier "it is an `on_demand` subtree, so no weight applies" rebuttal FALSE rather than merely stale. 2.0 is exactly the weight it already packed at as a default, so this row moves no shard and its absence reds no gate (`duration_coverage_issues()` is a ratio against the pool's own size with headroom; `--integrity` exits 0 both ways) — what it buys is the RECORD, not a pass. What the weight covers: pure-unit and hermetic — no DB, no server, no network, no model, no dataset read: it recomputes the published overlap arithmetic over hand-built instances, drives the CLI/JSON round-trip and the three empty-population refusals in process, and reads `tools/longmem_eval/ingest.py`/`ingest_v2.py` as TEXT (`str.count`) for the `_turn_text` ratchet, and parses its OWN `ast` for the published-test-count pin; the single `@slow` real-split pin SKIPS in CI (no lane provisions `~/.cache/tortoise-longmemeval`), so that leg's cost there is a skip. ⛔ The CASE COUNT is deliberately NOT quoted: a hand-written count re-stales on every case a later round adds, which this file has already done twice. `tools/ci_selection.py --integrity` is the authority; `tools/ci_timing.py --refresh-durations` replaces this from junit once a push-to-main sweep includes it.
@@ -11004,7 +10960,6 @@ durations:
   test_metering_unmetered.py: 60.0  # carried forward (not a full-file CI measurement) — #4779: locally measured (50 tests, live docker FalkorDB: 42–111s across the review cycles, 275s under fleet load); no source leg of the sweep collected it — refresh from CI junit. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (9.9s) is a LOWER bound; kept 60.0
   test_operator_annotator_rebuild.py: 6.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.2
   test_pi_capture_hooks.py: 16.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 16.1
-  test_pi_volunteer_seam.py: 2.0  # unmeasured — new in #2119 (PR #11584) — the #3400/#4348 trap: a file a PR ADDS can never carry a CI junit reading yet (the refresher samples push-to-main runs only), so it takes the header's flat `DEFAULT_FAST_WEIGHT` and NOT a local reading, which this map forbids as a SHARD-LAYOUT input (#2818/#3419). The row must EXIST, not merely default ("a default is not a reading"): the `core`/`api`/`onboarding` registrations above put the file in `fast_pool()` (measured with the shipped selector: 'test_pi_volunteer_seam.py' in fast_pool(load_manifest()) is True, and `_durations_map(...).get(...)` was None — so it packed at the flat 2.0 with no record of why). 2.0 is exactly the weight it already packed at, so this row moves no shard and its absence reds no gate (`duration_coverage_issues()` is a ratio against the pool's own size with headroom; `--integrity` exits 0 both ways) — what it buys is the RECORD, not a pass. What the weight covers: NO DB and no network of its own, but it is NOT cheap — two node end-to-end runs each drive two real `tortoise volunteer` invocations (the per-process embedder load the file documents) plus a `node --test` run whose own rows carry `sleep 1.2`/`sleep 5`/a 3 s worker-exit wait; measured 158.9 s on the lane that added it. That reading is deliberately NOT the weight (it is local, not CI, and this map forbids local readings as shard-layout inputs), but it is why the next `tools/ci_timing.py --refresh-durations` sweep should pick this file up rather than leave it at the default.
   test_store_sync_worker.py: 106.3  # new in #3515; The row is REQUIRED, not cosmetic: the file is ADDED to the fast pool by the PR that introduces it, and the coverage floor is measured against the pool's own size (`--integrity`'s `duration_coverage_issues`) — at the parent commit the map sat at 905/1005 = 90.0498 % against the 0.90 floor, so one more unweighted fast file (906/1006 = 89.96 %) reds it with no headroom. What the weight covers: 22 DB-free cases — a real local HTTP collector, in-process `run_sweep` rows over a tmp spool, and ONE `node --test` subprocess that dominates the file but belongs to the harness it pins. `tools/ci_timing.py --refresh-durations` replaces this from junit once a sweep includes it — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 106.9
   # #2120: measured locally on the carve-out lane (26 tests, ~6.2s): the plugin
   # artifact + installer + parser, one node --test subprocess, and one real

@@ -67,8 +67,8 @@ landing from a branch. **So: an ancestry `1` and a `--all` grep both fail to ans
 ⚠️ **A fourth landing arrived between the base and this record's merge — and it is why one recipe below
 no longer prints its base number.** `#11205` (S5 Job 1, `316a572ce2`, 2026-11-06T22:40:32Z) added an
 **entity↔entity `relations` channel** to the extractor contract, whose predicate allowlist includes
-`hasPart` (`tortoise/extractor_v2.py:1735`). It does **not** discharge A1: it is **transport only** —
-nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:10906`, and
+`hasPart` (`tortoise/extractor_v2.py:1764`). It does **not** discharge A1: it is **transport only** —
+nothing in `tortoise/` consumes `result["relations"]` (`extractor_v2.py:11119`, and
 `git grep -n 'result\["relations"\]' -- tortoise/` prints that comment and no consumer at all), and
 materialising them as Object→Object edges is **`#11237`** (OPEN). ⚠️ **The scope is `tortoise/`, and it is
 load-bearing:** tree-wide the channel HAS a reader — `tests/test_10999_batch_story_relations.py` names
@@ -641,7 +641,7 @@ for s in aa414b4d5 8e49ae909 80c912244 d69faaf38; do echo "== $s"; \
 git show 80c912244:tortoise/extractor_v2.py | grep -c 'create_operator'   # 0
 git show de72cfd45:tortoise/extractor_v2.py | grep -n 'create_operator'  # :8892 :8910 :8917 :9231
 # the previous base printed :8938 :8956 :8963 :9343 (`62248db88`); `91dbc9a888` (#11449) moved all four +68
-git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9021 :9039 :9046 :9426
+git grep -n 'create_operator' -- tortoise/extractor_v2.py                 # :9234 :9252 :9259 :9639
 
 # A1 (§1) — the declaration reads, and nothing production writes it
 .venv/bin/python3 -m tortoise pack validate packs/dev      # 6 declared hierarchies, exit 0
@@ -656,7 +656,7 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # origin/main since #11205 (four COMMENTS naming
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
-git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :10906 — no production
+git grep -n 'result\["relations"\]' -- tortoise/        # ONE hit, the comment at :11119 — no production
                                                           # consumer of #11205's channel (⚠️ the `-- tortoise/`
                                                           # scope is the claim: unscoped it also matches the
                                                           # reader below)
