@@ -2863,7 +2863,23 @@ def test_every_in_scope_page_appears_in_a_sitemap() -> None:
 
 
 def test_the_sitemap_index_alias_redirects() -> None:
-    """/sitemap_index.xml is the other convention a tool probes (Yoast, most auditors)."""
-    assert _canonical_redirect_targets().get("/sitemap_index.xml") == "/sitemap.xml", (
+    """/sitemap_index.xml is the other convention a tool probes (Yoast, most auditors).
+
+    And `/sitemap.xml` must NOT itself be a redirect SOURCE. `website/_redirects` rows are
+    evaluated BEFORE the static asset is looked up — Cloudflare Pages' own rule is
+    "redirects are always followed, regardless of whether or not an asset matches the
+    incoming request" — so a row like `/sitemap.xml  /index.html  301` would keep every
+    other assertion here green while sending the conventional path away: #11615's 404,
+    restored, with the guard that exists to catch it silent. That is the same class this
+    PR closed for `config/pages-upload-classification.txt` (a table-derived expectation
+    cannot see the table change), so the source side is asserted too.
+    """
+    redirects = _canonical_redirect_targets()
+    assert redirects.get("/sitemap_index.xml") == "/sitemap.xml", (
         "website/_redirects must send /sitemap_index.xml to /sitemap.xml — otherwise the "
         "second-most-probed sitemap path is a 404 (#11615)")
+    assert "/sitemap.xml" not in redirects, (
+        "website/_redirects redirects /sitemap.xml away to "
+        f"{redirects.get('/sitemap.xml')!r}. Pages follows a _redirects row BEFORE serving "
+        "the matching asset, so the conventional sitemap path would 301 off the real file "
+        "and #11615 is back — drop the row; the index is a static file at the site root")
