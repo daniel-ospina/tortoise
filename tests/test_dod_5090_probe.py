@@ -484,9 +484,10 @@ def test_row_two_reads_MET_when_the_register_resolves_every_writer(monkeypatch):
     Three ways a writer gets there, all present at once: through the gate (label derived), from a
     declared label, or by a declaration that it stores no live graph vector. ⛔ The third is what
     makes `stored-without-a-query-path` a statement about STORES rather than about NAMES: ten of
-    this tree's twenty outside-gate writers issue no vector store of their own (reads, carriers, a
-    store DELEGATED to `_session_event_write` — `_index_process_unit` — a docstring QUOTING a wipe,
-    the clause builder), and two more store on a label chosen at RUNTIME — those two are held as
+    this tree's twenty outside-gate writers issue no vector store of their own (reads, comment
+    prose — `_compare_views`, `_apply_one` — carriers, a store DELEGATED to `_session_event_write`
+    — `_index_process_unit` — a docstring QUOTING a wipe, the clause builder), and two more store on
+    a label chosen at RUNTIME — those two are held as
     `PARTIAL`, never as `no-live-vector`, so twelve is the size of the two holds together and NOT
     the count of writers that never store. A row that held those ten forever was measuring its own
     vocabulary.
