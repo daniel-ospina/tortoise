@@ -464,6 +464,18 @@ def test_gate_refuses_a_cross_space_comparison():
         assert blind["verdict"] == "INCOMPARABLE", \
             f"a None space ({blind_space} vs {blind_base}) must refuse, not score"
 
+    # Two IDENTICAL unrecognised labels are two pieces of the same garbage, not
+    # one space: a baseline's label is read from an arbitrary file, so equality
+    # alone is not evidence. Refuse on membership, not just on difference.
+    for garbage in ("weird", "", "MODEL"):
+        bogus = run_module._gate_vs_baseline(
+            per_query, baseline, random.Random(0),
+            space=garbage, baseline_space=garbage,
+        )
+        assert bogus["verdict"] == "INCOMPARABLE", (
+            f"identical unrecognised label {garbage!r} must refuse, not score"
+        )
+
     # `unknown` on EITHER side refuses, including unknown-vs-unknown: two
     # absences of the same fact are not the same space. Without this, a
     # --no-seed-corpus run on a centroid db gated against a --no-seed-corpus
@@ -533,6 +545,59 @@ def test_summary_still_prints_a_plain_verdict_token():
     out = run_module._markdown_summary(report)
     assert "gate vs baseline: SHIP" in out
     assert "NOT a ship signal" not in out
+
+
+def test_summary_distinguishes_a_baseline_that_could_not_compare():
+    """`gate_vs_baseline` is None both when NO baseline was passed and when one
+    WAS passed but nothing paired (no per_query, or no overlapping query ids).
+    Reporting the second as "no --baseline" tells the reader the opposite of
+    what happened — the same defect class as the rest of this change."""
+    base = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": None,
+    }
+    absent = run_module._markdown_summary(dict(base))
+    assert "gate: none (no --baseline)" in absent
+
+    supplied = run_module._markdown_summary(
+        {**base, "baseline_supplied": "/tmp/some-baseline.json"})
+    assert "no --baseline" not in supplied, (
+        "a baseline WAS supplied; saying none was is a false statement"
+    )
+    assert "NOT a ship signal" in supplied, (
+        "nothing was compared, so the run carries no quality evidence"
+    )
+    assert "/tmp/some-baseline.json" in supplied
+
+
+def test_summary_states_the_space_and_caves_the_unknown_one():
+    """`--quiet` suppresses every console warning, so the summary is the only
+    console artifact a quiet run leaves. It must name the space, and must cave
+    the `unknown` one, or a quiet run over an unverified index prints a
+    clean-looking metrics table."""
+    base = {
+        "strategies": ["fused"],
+        "metrics": {"fused": {m: {"value": 0.5}
+                              for m in ("ndcg@10", "p@5", "r@10", "mrr")}},
+        "gate_vs_baseline": None,
+    }
+    known = run_module._markdown_summary(
+        {**base, "provenance": {"corpus_embedding_space": "model"}})
+    assert "embedding space: model" in known
+    assert "NOT a quality statement" not in known
+
+    unknown = run_module._markdown_summary(
+        {**base, "provenance": {"corpus_embedding_space": "unknown"}})
+    assert "embedding space: unknown" in unknown
+    assert "NOT a quality statement" in unknown, (
+        "the metrics table under an unknown space is not a quality statement "
+        "and the summary must say so where the loop reads it"
+    )
+
+    # No provenance at all must not crash or invent a space.
+    assert "embedding space" not in run_module._markdown_summary(dict(base))
 
 
 def test_gate_refuses_a_different_model_in_the_model_space():

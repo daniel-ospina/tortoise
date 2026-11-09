@@ -81,7 +81,8 @@ embeddings live in the SAME space. The seeded corpus ships the oracle's
 `ORACLE_EMBED_ALPHA`), and a `model`-space run RE-EMBEDS it (`_reembed_corpus`)
 so both sides share one space.
 
-⚠️ The claim is scoped: it holds for the two KNOWN spaces. In the third row a
+⚠️ The claim is scoped: it holds for the two KNOWN spaces. In the third and
+fourth rows a
 run has no trustworthy corpus space to follow, so the query side falls back to
 the oracle against whatever vectors the graph already held — the arm may
 genuinely span two spaces, which is why the space is `unknown` and the gate

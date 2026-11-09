@@ -438,6 +438,11 @@ def _inject_probe_model(args) -> None:
 EMBED_SPACE_MODEL = "model"
 EMBED_SPACE_SYNTHETIC = "oracle-synthetic"
 EMBED_SPACE_UNKNOWN = "unknown"
+# The closed set of labels this module can EMIT. `baseline_space` is read from
+# an arbitrary baseline file, so it can carry anything; a pair whose labels are
+# not both in this set is not a comparable pair even when the two strings are
+# equal (two identical pieces of garbage are not one space).
+EMBED_SPACE_KNOWN = frozenset({EMBED_SPACE_MODEL, EMBED_SPACE_SYNTHETIC})
 
 
 def _loaded_embedding_model():
@@ -817,16 +822,34 @@ def _gate_vs_baseline(
     # it anyway would read as if `None` were still reachable a few lines below
     # the comment saying it is not — and that is exactly the invitation to
     # "simplify" the refusal back into the fail-open this commit closes.
-    if space != baseline_space:
-        return {
-            "verdict": "INCOMPARABLE",
-            "reason": (
+    # Membership, not just equality: a baseline file supplies an ARBITRARY
+    # label, so two identical unrecognised labels must refuse rather than
+    # present themselves as "the same space".
+    if (space != baseline_space
+            or space not in EMBED_SPACE_KNOWN
+            or baseline_space not in EMBED_SPACE_KNOWN):
+        unrecognised = [s for s in (space, baseline_space)
+                        if s not in EMBED_SPACE_KNOWN]
+        if unrecognised and space == baseline_space:
+            reason = (
+                f"the embedding space label '{space}' is not one this runner "
+                f"can emit (known: 'model', 'oracle-synthetic'), so two "
+                f"identical labels are two pieces of the same GARBAGE, not "
+                f"one space. A baseline's label is read from the file, not "
+                f"derived, so it can carry anything — re-baseline with a run "
+                f"of this runner so the label is a fact before gating."
+            )
+        else:
+            reason = (
                 f"run measured the '{space}' embedding space but the baseline "
                 f"measured '{baseline_space}' — paired deltas compare the "
                 f"instrument, not the change. Re-baseline in this space "
                 f"(commit a run of unmodified code with the same "
                 f"corpus_embedding_space) before gating."
-            ),
+            )
+        return {
+            "verdict": "INCOMPARABLE",
+            "reason": reason,
             "space": space,
             "baseline_space": baseline_space,
         }
@@ -1187,6 +1210,13 @@ def _run_with_sdk(args, sdk) -> dict:
         "by_tier": by_tier,
         "paired_vs_fused": paired,
         "gate_vs_baseline": gate,
+        # Whether a baseline was SUPPLIED, independent of whether it could be
+        # compared: `_gate_vs_baseline` returns None both when there is no
+        # baseline and when one was given but nothing paired (no per_query, or
+        # no overlapping query ids). Without this flag the summary reports the
+        # second case as "no --baseline", telling the reader the opposite of
+        # what happened.
+        "baseline_supplied": str(args.baseline) if args.baseline else None,
         "per_query": {qid: oracle_per_query[qid] for qid in sorted(oracle_per_query)},
         "authored_metrics": authored_agg,
         "provenance": _capture_provenance(proj, is_embedded, {
@@ -1316,7 +1346,13 @@ def _markdown_summary(report: dict) -> str:
         )
     g = report.get("gate_vs_baseline")
     if not g:
-        gate_line = "gate: none (no --baseline)"
+        supplied = report.get("baseline_supplied")
+        gate_line = (
+            f"gate: NONE — a baseline WAS supplied ({supplied}) but nothing "
+            f"could be compared (no paired query ids, or it carried no "
+            f"per_query). NOT a ship signal."
+            if supplied else "gate: none (no --baseline)"
+        )
     elif g["verdict"] == "INCOMPARABLE":
         # The refusal must be ACTIONABLE where the loop reads it. The token
         # alone reads as "not BLOCK", and "did not block" is not "passed" —
@@ -1325,16 +1361,31 @@ def _markdown_summary(report: dict) -> str:
         # refusal gets mistaken for a ship signal.
         gate_line = (f"gate vs baseline: INCOMPARABLE — NO COMPARISON WAS "
                      f"MADE, so this run carries no quality evidence and is "
-                     f"NOT a ship signal. {g.get('reason', '')}")
+                     f"NOT a ship signal. {g.get('reason') or ''}")
     else:
         gate_line = f"gate vs baseline: {g['verdict']}"
+    # The SPACE belongs in the summary too, not only in the JSON/report notes:
+    # `--quiet` suppresses every console warning, so without this the whole
+    # console artifact is a normal-looking metrics table over an index whose
+    # space could not be established — the run the notes call "not a quality
+    # statement".
+    space = (report.get("provenance") or {}).get("corpus_embedding_space")
+    space_line = None
+    if space:
+        space_line = f"embedding space: {space}"
+        if space == EMBED_SPACE_UNKNOWN:
+            space_line += (" — the space could not be established for the "
+                           "whole index, so the table above is NOT a quality "
+                           "statement")
     rv = report.get("rerank_verdict")
+    tail = ["", gate_line]
+    if space_line:
+        tail.append(space_line)
     if rv:
         c = rv.get("ndcg@10_delta_points", {})
-        rv_line = (f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
-                   f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
-        return "\n".join(lines + ["", gate_line, rv_line])  # noqa: RUF005
-    return "\n".join(lines + ["", gate_line])  # noqa: RUF005
+        tail.append(f"rerank verdict nDCG@10 delta: mean={c.get('mean')} "
+                    f"CI[{c.get('lower')},{c.get('upper')}] (n={c.get('n')})")
+    return "\n".join(lines + tail)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -1412,6 +1463,12 @@ def main(argv: list[str] | None = None) -> int:
     out = write_outputs(report, args.out)
     print("\n" + _markdown_summary(report))
     print(f"\nreport: {out}")
+    # EXIT CODE IS ALWAYS 0, for every verdict — SHIP, WARN, BLOCK and
+    # INCOMPARABLE alike. Deliberate and pre-existing: this is a measurement
+    # tool, and no caller in this repo keys on `$?`. The verdict is read from
+    # the JSON (`gate_vs_baseline.verdict`) and from the summary above, which
+    # is why those two must never let a refusal look like a pass. A shell
+    # wrapper that wants `$?` to mean "gated" would need this changed first.
     return 0
 
 
