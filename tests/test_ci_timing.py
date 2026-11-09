@@ -6612,8 +6612,11 @@ def _assert_a_re_base_supersedes_the_newest_basis(text: str) -> None:
     The contract is stated relative to whatever `text` commits, on purpose: a
     re-base must (a) make this render's basis the NEWEST one, (b) drop the newest
     basis `text` carried, and (c) not grow the note's basis count. Those three are
-    exactly what the pre-fix module violates — it left the superseded span standing
-    AND appended this render's — and unlike a literal `"was 2.3"` they stay true
+    what a module with NO mid-note span pattern violates on a WRAPPED note, and what
+    a no-op prune violates on ANY note — the committed row's span is END-anchored
+    (#11602), so it no longer reaches the first case, and
+    `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle` is what pins the
+    mid-note pattern — and unlike a literal `"was 2.3"` they stay true
     after any weekly sweep re-values the row, including the HOLD outcome where
     `#9134`'s P2 deliberately keeps an older ADOPTED basis beside the new one.
     """
@@ -6652,24 +6655,22 @@ def test_a_wrapped_rows_prior_basis_is_pruned_wherever_it_sits() -> None:
     `test_the_wrapped_row_prune_guard_survives_the_next_sweep` pins the sweep
     outcomes that a value-pinned version of this test used to red on a healthy map.
 
-    Non-vacuity, measured against the module before `643bbaf12` (which introduced
-    the mid-note prune): the
-    re-base emitted the stale `2026-11-02 …; was 3.2` clause on the row line and the
-    new basis on the last continuation — two bases in one note, so both "the
-    superseded basis survived" and `len(bases) <= len(committed_bases)` fail.
-
-    ⛔ WHAT THIS NO LONGER COVERS, measured at #11602: the MID-note arm. This test
-    used to be pinned on `test_source_staleness_sweep_5038.py` BECAUSE its note
-    opened on its row line and continued across five indented lines, with the
-    `2026-11-02` basis appended in the MIDDLE (`… deliverable 3: 34 tests —
-    ci-timing … 2026-11-02 …; was 3.2 embedded (…) lane …`), where an end-anchored
-    match finds nothing. The `2026-11-09` refresh flattened that note, so the
-    committed row is now ONE line whose only basis ends it and this test exercises
-    the END-anchored arm. That flattening is the writer's documented CUT behaviour
-    (see `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), not a
-    defect — but pinning the mid-note arm to whichever row the last sweep happened
-    to leave wrapped is exactly what let it go vacuously green, so the mid-note case
-    is BUILT in `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle`.
+    ⛔ NON-VACUITY IS GONE HERE, measured at #11602 — and the paragraph this
+    replaced claimed otherwise. This test's subject was
+    `test_source_staleness_sweep_5038.py` because its note opened on the row line and
+    continued across five indented lines, with the `2026-11-02` basis appended in the
+    MIDDLE (`… deliverable 3: 34 tests — ci-timing … 2026-11-02 …; was 3.2 embedded
+    (…) lane …`), where an end-anchored match finds nothing. The `2026-11-09` refresh
+    flattened that note, so the row is now ONE line whose only basis ENDS it
+    (`config/ci-surfaces.yml:11133`; `spans[-1][1] == len(note.rstrip())`). The
+    flattening is the writer's documented CUT behaviour (see
+    `test_the_maps_indented_blocks_are_preamble_shaped_not_wrap_shaped`), not a
+    defect — but its consequence is that a module whose `_prior_basis_spans` is
+    END-ANCHORED-ONLY (the pre-`643bbaf12` production behaviour) PASSES this test,
+    and so does an end-anchored-only `_strip_prior_basis`. The mid-note arm is
+    therefore BUILT in `test_a_wrapped_mid_note_prior_basis_is_pruned_from_the_middle`,
+    which does red on that module; pinning the arm to whichever row the last sweep
+    happened to leave wrapped is what let it go vacuously green.
     """
     _assert_a_re_base_supersedes_the_newest_basis(
         (REPO_ROOT / "config" / "ci-surfaces.yml").read_text())
