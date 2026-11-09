@@ -312,8 +312,7 @@ def test_tripped_bars_reads_an_absent_metric_as_tripped():
     for bad in (None, "0.99", True, [0.99]):
         corrupted = dict(complete)
         corrupted["conflict_surfacing_rate"] = bad
-        assert schema.tripped_bars(corrupted, adv) == [
-            "conflict-surfacing-below-floor"], bad
+        assert schema.tripped_bars(corrupted, adv) == ["conflict-surfacing-below-floor"], bad
 
 
 def test_failure_classes_record_every_tripped_bar_not_the_first_four():
