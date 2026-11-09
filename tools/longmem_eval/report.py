@@ -1333,6 +1333,21 @@ def build_report(
                 continue
             block[key] = {"value": _mean(real), "n": len(real),
                           "n_missing": len(rows) - len(real)}
+        # #2516 (C1) / #10538: the ADDITIVE gold-cutoff variant's per-question
+        # FRACTION (a scalar, not a {k: v} dict — hence its own loop). It is
+        # carried here because `recall_all@5` is identically 0.0 for a question
+        # whose evidence set exceeds five pieces, so the per-category rows need
+        # a cutoff that can see the class at all. The BINARY projection of it
+        # (`recall_all@N_gold`) stays in `w7_publish` alone — the same
+        # one-implementation invariant the block's comment states, which is also
+        # why `recall_all@5` is deliberately NOT emitted here.
+        gold_vals = [v for v in (o.get("session_recall@n_gold") for o in rows)
+                     if isinstance(v, (int, float))
+                     and not isinstance(v, bool)]
+        if gold_vals:
+            block["session_recall@n_gold"] = {
+                "value": _mean(gold_vals), "n": len(gold_vals),
+                "n_missing": len(rows) - len(gold_vals)}
         return block
 
     by_cat_outcomes: dict[str, list[dict]] = {}
