@@ -21,7 +21,7 @@ so the class-by-class matrix in this file IS the authorization contract:
                                | an ORG-OWNED durable row the caller MINTER
                                | (created_by == caller, but not self-service)
 
-and the two regression pins that must NOT move:
+and the three regression pins that must NOT move:
 
   * `rotate` keeps its #4355 cap predicate verbatim — a member rotating even
     their OWN bootstrap row still 403s at the POLICY A gate (the brief §8
@@ -29,8 +29,23 @@ and the two regression pins that must NOT move:
   * `rotate`'s non-own cases are pinned on DURABLE targets (a peer's, the
     owner's, and one the acting member MINTER themselves): an owner rotating
     the same rows gets 200, a member gets the POLICY A 403, so the refusal is
-    the authorization and never the cap predicate. This is the half the
-    per-criterion check on #2446 (2026-11-01) left unproven.
+    the authorization and never the cap predicate.
+    CO-OWNER of this invariant — read before you edit either file:
+    `tests/test_rotate_key.py:450 test_member_session_cannot_rotate` (clause
+    T4, on main since #4355) already pins the owner-durable shape. Its target
+    is the signup key: `created_via='provisioned'` (`hosted_api.py:15290`) so
+    it occupies a cap slot, `expires_at=None` so it is durable, and
+    `_claim_migrate_created_by` (`tests/fake_control_plane.py:499`) hands its
+    `created_by` to the owner — i.e. a session member sees exactly the
+    non-own durable target pinned here. Any claim that the rotate route had
+    "no non-own pin at all" before this file is false, and so is anything
+    that reads this bullet as the first pin of the class.
+    What is genuinely NEW here is the third row: a durable row the acting
+    MEMBER minted — the only shape where a `created_by`-keyed gate would
+    admit and the holder predicate refuses. The peer/owner-durable pins are
+    KEPT (not folded; the file is measured at 2.7 s) because they assert what
+    T4 does not: the byte-identical #2297 detail (T4 accepts a substring),
+    that nothing was minted, and that the target stayed live.
   * every non-own-key surface reads the pre-#2446 403 detail — a distinct
     message would turn the gate into an ownership oracle.
 
@@ -529,8 +544,15 @@ class TestPolicyAUnchanged:
         assert _row(fake, "owner-boot")["enabled"] is True
 
     def test_member_rotate_of_a_peer_durable_key_still_403(self, sb, as_user):
-        """The remainder #2446's per-criterion check left open (issue comment
-        2026-11-01): a member must not reach the ROTATE route for a PEER's key.
+        """A member must not reach the ROTATE route for a PEER's key.
+
+        NOT the first pin of this class: `tests/test_rotate_key.py:450
+        test_member_session_cannot_rotate` (T4, main since #4355) pins the
+        owner-durable shape on the same lane and dies to the same mutation
+        (gate removed → session member is `is_owner_class` → 200). This pin's
+        delta is the assertion contract — the byte-identical #2297 detail,
+        nothing minted, target still live — plus a `created_by` that is a
+        plain MEMBER rather than the owner.
 
         The target is a DURABLE row, not a bootstrap one, so the refusal is
         provably the POLICY A gate and not the #4355 cap predicate — an owner
@@ -554,7 +576,11 @@ class TestPolicyAUnchanged:
 
     def test_member_rotate_of_the_owners_durable_key_still_403(self, sb, as_user):
         """Same pin one rung up: the owner's durable credential is not a
-        member's to rotate, and the refusal is the shared POLICY A gate."""
+        member's to rotate, and the refusal is the shared POLICY A gate.
+
+        This is the case `tests/test_rotate_key.py:450` already covers — kept
+        as an independent lane-local pin (byte-identical detail + nothing
+        minted), not as new coverage. See this module's header."""
         tc, fake = sb
         _sb_membership(fake, _SB_TEAM, _U1, "member")
         _sb_membership(fake, _SB_TEAM, _UOWN, "owner")
