@@ -756,6 +756,7 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
                        workspaces_measured=True,
                        generated_at=None, repo=SLUG,
                        liveness_unmeasured=False,
+                       liveness_source=None, liveness_unreadable=None,
                        open_issues_truncated=False) -> dict:
     """A `fleet-state.json` shaped the way `collision_preflight._read_board`
     consumes it.
@@ -825,7 +826,13 @@ def _fleet_board_state(*, issues=None, lanes=None, registry_measured=True,
         # that must not print "0 live workspace(s)" (#9392 review P1).
         for key, value in (("registry_rows", registry_rows),
                            ("workspaces_count", workspaces_count),
-                           ("workspaces_measured", workspaces_measured)):
+                           ("workspaces_measured", workspaces_measured),
+                           # #11202: the LIVENESS read's provenance. Passed only
+                           # when a test asks for it, because a board from an
+                           # older writer carries neither key and the gate must
+                           # then print no claim at all.
+                           ("liveness_source", liveness_source),
+                           ("liveness_unreadable", liveness_unreadable)):
             if value is not None:
                 state["reconciliation"][key] = value
     for number, entries in (issues or {}).items():
@@ -12389,6 +12396,99 @@ class HolderGateTests(unittest.TestCase):
             with self.subTest(value=bad):
                 self.assertIsNone(
                     self.cp._board_count({"registry_rows": bad}, "registry_rows"))
+
+    def test_the_holder_gate_note_names_the_liveness_store_beside_the_board_read(
+            self):
+        """#11202: `board source` is the BOARD read, not the liveness underneath it.
+
+        Measured on a cell (2026-11-09, `origin/main` 86aaef8f02): the board answers
+        from `process-table` while BOTH cmux grammars refuse — the Cloud guest CLI
+        has no per-lane session store at all (every `session list` request comes
+        back `validation.invalid: request contains unknown parameters`) — and the
+        note printed `board source: rebuilt; lane roster: 0 row(s); live cmux
+        workspaces: 46`, identical to a run that read every store. A CLEAN that
+        rests on ONE store must say so: a durable store that a lane not run by this
+        user would appear in was gone, and the reader had no way to know.
+
+        Disclosure only — the verdict still keys on the board's own `measured`.
+        """
+        note = self.cp._holder_gate_note(self.cp.HolderRead(
+            True, "rebuilt", roster_rows=0, workspaces_count=46,
+            workspaces_measured=True,
+            liveness_source="process-table",
+            liveness_unreadable=("cmux-session-store",)))
+        self.assertIn("board source: rebuilt", note)
+        self.assertIn("liveness from: process-table", note)
+        self.assertIn("liveness store(s) UNREADABLE: cmux-session-store", note)
+        # … and on the ATTRIBUTED arm too: a holder row is exactly where a reader
+        # decides whether the CLEAN/holder verdict rests on complete coverage.
+        attributed = self.cp._holder_gate_note(self.cp.HolderRead(
+            True, "rebuilt",
+            holders=(self.cp.Holder("L", "e", self.cp.HOLDER_LIVE, ""),),
+            liveness_source="process-table",
+            liveness_unreadable=("cmux-session-store",)))
+        self.assertIn("liveness from: process-table", attributed)
+        self.assertIn("cmux-session-store", attributed)
+
+    def test_an_older_board_prints_no_liveness_claim(self):
+        """ABSENT IS NOT EMPTY, for the liveness provenance too (#11202).
+
+        A board written before these fields existed carries neither, and printing
+        "liveness store(s) UNREADABLE: (none)" — or any store name the reader
+        invented — is a claim about a read that did not happen. The one exception
+        is a MEASURED board whose source is published but whose unreadable list is
+        empty: that combination says every store that exists answered, and printing
+        the source alone is correct.
+        """
+        bare = self.cp._holder_gate_note(self.cp.HolderRead(True, "cache"))
+        self.assertNotIn("liveness", bare)
+        # Strict polarity at the two readers: a malformed value is NOT a datum.
+        self.assertIsNone(self.cp._board_text({}, "liveness_source"))
+        self.assertIsNone(self.cp._board_text({"liveness_source": "  "},
+                                             "liveness_source"))
+        self.assertIsNone(self.cp._board_text({"liveness_source": 7},
+                                             "liveness_source"))
+        self.assertEqual(self.cp._board_names({}, "liveness_unreadable"), ())
+        self.assertEqual(
+            self.cp._board_names({"liveness_unreadable": "process-table"},
+                                 "liveness_unreadable"), (),
+            "a bare string is not a list of names")
+        self.assertEqual(
+            self.cp._board_names({"liveness_unreadable": ["a", 3]},
+                                 "liveness_unreadable"), (),
+            "one malformed name means the list is not a measurement")
+        self.assertEqual(
+            self.cp._board_names({"liveness_unreadable": ["process-table"]},
+                                 "liveness_unreadable"), ("process-table",))
+
+    def test_the_board_carries_the_liveness_stores_into_the_note(self):
+        """END TO END FROM THE BOARD SHAPE (#11202): the keys the WRITER publishes
+        are the ones the NOTE reads, so a rename on either side is red.
+
+        Hand-built `HolderRead`s (above) prove the note formats what it is given;
+        this proves `read_holders` actually lifts `reconciliation.liveness_source`
+        / `liveness_unreadable` off a `fleet-state.json` and hands them over — the
+        join a formatter-only test cannot see.
+        """
+        _write_board(self.board, _fleet_board_state(
+            liveness_source=self.cp.fleet_state.LIVE_STORE_PROCESS,
+            liveness_unreadable=[self.cp.fleet_state.LIVE_STORE_CMUX_GROUP],
+        ))
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured, read.unanswerable)
+        self.assertEqual(read.liveness_source,
+                         self.cp.fleet_state.LIVE_STORE_PROCESS)
+        self.assertEqual(read.liveness_unreadable,
+                         (self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,))
+        note = self.cp._holder_gate_note(read)
+        self.assertIn("liveness from: process-table", note)
+        self.assertIn("liveness store(s) UNREADABLE: cmux-session-store", note)
+        # An OLDER board (no keys) carries the fields as ABSENT, never as a claim.
+        _write_board(self.board, _fleet_board_state())
+        old = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertIsNone(old.liveness_source)
+        self.assertEqual(old.liveness_unreadable, ())
+        self.assertNotIn("liveness", self.cp._holder_gate_note(old))
 
     def test_an_unmeasured_workspace_read_never_prints_a_live_count(self):
         """⛔ EVERY failure path of `cmux_workspaces` returns an EMPTY map, so the
