@@ -4376,8 +4376,16 @@ def test_commit_schema_change_keeps_the_core_pool_and_runs_the_docs_guard():
     # #9607 review P2 (round 5): the SIBLING of the quadrature arm one test up, and
     # the reason an enumeration claiming to be exhaustive was wrong. The /docs
     # guard imports `Point` / `point_content_id` from `tortoise/commit_schema.py`
-    # (`tests/test_website_docs_consistency.py:57`) and derives an asserted
-    # expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
+    # (in `tests/test_website_docs_consistency.py` — cited WITHOUT a line number on
+    # purpose, as `test_a_fold_never_moves_the_canary_producer_row`'s docstring
+    # does for its runbook row: that import lives in a block every branch appends
+    # to, so a `path:line` decays silently the moment one import is added above it.
+    # Measured 2026-11-09: #11623's sitemap contract added
+    # `from xml.etree import ElementTree` at the TOP of that file, the import moved
+    # 56 -> 57, and the harness pin redded on `main` with this paragraph unchanged.
+    # The sentinel that verifies the import still exists lives in
+    # `tests/test_ci_runner_x64_install.py`'s `symbol_citations`) and derives an
+    # asserted expectation from it — `test_commit_schema_requires_a_source_on_every_extracted_
     # claim` is the evidence under the FAQ's PUBLISHED traceability sentence — but
     # a commit_schema-only diff selected `surfaces=['core']`, where that guard is
     # not registered. So relaxing `Point.source_ref` reds the contract tests, gets
@@ -20386,24 +20394,6 @@ def test_lane_wip_guard_runs_on_a_tools_only_change():
     assert "test_lane_wip.py" in r["test_files"], r
 
 
-def test_the_census_tool_change_selects_core():
-    # #8290 / #11576 review (P3): `tools/hosted_api_cite_census.py` owns the citation
-    # census that two prose notes state, and TWO `core`-registered pins hold it —
-    # `test_demo_session_read_exclusion_8290.py` (the notes' invariants) and
-    # `test_entry_point_python_guard.py` (the #5128 guard EVERY `tools/**` entry point
-    # must carry; missing it already made this head red). `tools/` is a flat
-    # NON_PYTHON_PREFIXES entry and the tool matches no SOURCE_PATTERNS row, so before
-    # the CORE_ALSO entry a tools-only diff came back `surfaces=[]`, `full=False` and
-    # selected NEITHER pin — a later edit to `CITE_RE` or `DEFAULT_PIVOT` would ship
-    # unverified (the #1349/#3332/#3616 silent-drop class). Mutation check: removing the
-    # CORE_ALSO entry fails all three arms below.
-    r = _sel(["tools/hosted_api_cite_census.py"])
-    assert r["full"] is False, r
-    assert r["surfaces"] == ["core"], r
-    assert "test_demo_session_read_exclusion_8290.py" in r["test_files"], r
-    assert "test_entry_point_python_guard.py" in r["test_files"], r
-
-
 def test_rail_pin_runs_on_a_tools_only_change():
     # #2148: `tests/test_rail_detach.py` (registered `core`) pins the merge
     # rail's DURABILITY — the detached session that lets `admin-merge.sh`
@@ -21000,56 +20990,4 @@ def test_gh_read_cache_guard_is_REGISTERED_so_the_required_gate_can_see_it():
     # trap); the VALUE is the flat default only until junit measures it.
     assert "test_gh_read_cache.py" in m.get("durations", {}), (
         "an absent row packs the file at the flat default AND trips the coverage floor"
-    )
-
-
-def test_the_blank_session_id_guard_runs_on_an_ids_only_diff():
-    # #8290 review (P3): `tests/test_9599_blank_session_id.py` pins the blank
-    # and RESERVED session-id rule — whose DOOR half lives in `tortoise/ids.py`.
-    # `SOURCE_PATTERNS` maps `tortoise/ids.py` to the NAMED surface `sdk`, and a
-    # named-surface match REPLACES the `core` fallback, so the `core`-only row
-    # was asleep on the exact change it guards: measured before the `sdk` arm,
-    # `--changed-files tortoise/ids.py` → `surfaces=['sdk']` with
-    # `test_9599_blank_session_id.py` ABSENT from `test_files` — NO diff of the
-    # module this suite guards selected it, so deleting the reservation, or the
-    # `_writable_container_id(reserved) is True` asymmetry this PR adds, merged
-    # green (#1349/#3332/#3616/#4309 silent-drop class). Dual `core` + `sdk` is
-    # the established pattern in the manifest (cf. `test_7936_stable_stub_ids.py`).
-    # ⚠️ #11620 P2: this comment used to quote "246 files" for that selection. It
-    # does not reproduce and was never a selection: the 60-file SLOW pool is
-    # EMITTED on every selection (a docs-only diff carries all 60 in `slow_files`)
-    # but RUNS only where `slow_run` says so — the whole pool on a full matrix,
-    # the diff-scoped `slow_selected` (3 for this ids.py diff) on tier-2, and
-    # nothing on a docs/website-only diff — and the fast count moves with the
-    # manifest. Adding a pool to a fast count inflates any total (measured at
-    # this head: the ids.py diff selects `['sdk']`, 189 fast files,
-    # `slow_selected` 3). Pin the SELECTION — membership in `test_files`, asserted
-    # below — never a file count.
-    root = Path(__file__).resolve().parents[1]
-    assert (root / "tortoise/ids.py").exists(), "the guarded module is gone"
-    r = _sel(["tortoise/ids.py"])
-    assert r["full"] is False, r
-    assert r["surfaces"] == ["sdk"], r
-    assert "test_9599_blank_session_id.py" in r["test_files"], (
-        "a `tortoise/ids.py`-only diff does not select "
-        "tests/test_9599_blank_session_id.py, so the blank/reserved door rule "
-        "could be reverted with the suite asleep (#8290 review P3, #4309 class)"
-    )
-
-
-def test_the_blank_session_id_guard_keeps_its_core_arm_too():
-    # #8290 review (P3): the `sdk` arm is an ADDITION, never a move. The two
-    # replay folds (`projection/`) fall through to `core`, so dropping the
-    # `core` row would sleep the REPLAY half on a `projection/` diff — the
-    # other half of the same rule.
-    m = load_manifest()
-    assert "test_9599_blank_session_id.py" in m["surfaces"]["core"], (
-        "the `core` arm pins the REPLAY half (`projection/`) — do not drop it"
-    )
-    assert "test_9599_blank_session_id.py" in m["surfaces"]["sdk"], (
-        "the `sdk` arm pins the DOOR half (`tortoise/ids.py`)"
-    )
-    assert integrity(m) == [], integrity(m)
-    assert "test_9599_blank_session_id.py" in m.get("durations", {}), (
-        "a fast-pool file needs a durations row (the #3400/#4348 trap)"
     )

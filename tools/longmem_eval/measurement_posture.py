@@ -399,12 +399,40 @@ def summarize_belief_activation(
     # re-divide ``questions_with_ep / questions`` itself, so the ratio the issue
     # exists to publish was the only headline cell with no producer in the
     # runner — and two derivations of one number is how they disagree (#10137
-    # review's own rule; the probe carried the second one). Gated by the SAME
-    # rule as ``belief_eligible_ratio`` below and as the probe's fallback: a
-    # ratio over a denominator that is not a usable positive count is ``None``
-    # (UNKNOWN), never ``0.0`` — a run of zero questions has not measured a
-    # zero rate, and ``0.0`` there reads exactly like ``no question carried a
-    # posterior``, which is a finding.
+    # review's own rule; the probe carried the second one). The gate is the
+    # DENOMINATOR's: a ratio over a count that is not a usable positive
+    # denominator is ``None`` (UNKNOWN), never ``0.0`` — a run of zero questions
+    # has not measured a zero rate, and ``0.0`` there reads exactly like ``no
+    # question carried a posterior``, which is a finding.
+    #
+    # ⛔ That is NOT ``belief_eligible_ratio``'s gate, and this comment claimed it
+    # was until the #11645 review: that sibling also requires ``*_unread == 0`` on
+    # BOTH sides, whereas ``questions_with_ep`` has no ``_unread`` companion — so
+    # a population whose census was never read counts in the DENOMINATOR and never
+    # in the numerator, and the ratio publishes ``0.0`` here.
+    #
+    # ⛔ REACHABLE ON TWO PATHS THE CURRENT PRODUCER ALREADY TAKES. This comment
+    # said "not reachable from the current producer (an armed pass always reports
+    # the census)" until the review's second pass measured it, and the half it got
+    # wrong is the half that matters: an armed pass always reports the census KEY,
+    # and a FAILED read degrades its VALUE to ``None``. (1) ``ep_activation._census``
+    # exists to "degrade a failure to UNKNOWN" — it returns ``None`` and logs
+    # "census query failed, reporting UNKNOWN" — so an ARMED pass publishes
+    # ``points_with_ep: None``. (2) ``run.py``'s fail-open manifest for a question
+    # whose activation RAISED is ``{"ep_ran": False, "error": ...}``. Both land in
+    # ``_classify_question``'s ``INERT_UNMEASURED`` / ``INERT_ACTIVATION_FAILED``
+    # arms (``measured=False``), so they count in ``questions`` and never in
+    # ``questions_with_ep``: measured at this head, either one alone publishes
+    # ``0.0``, and mixed with one measured question ``2 1 0.5``. That is #11650's
+    # LIVE shape, so its fix must cover both paths — the pin that holds them is
+    # ``test_an_unread_census_is_the_live_11650_boundary``.
+    #
+    # And it is not repaired by borrowing the sibling's clause: the per-question
+    # read/unread split it needs does not exist (``_classify_question`` returns
+    # ``INERT_UNMEASURED`` both from its ``with_ep is None`` arm and from the
+    # "read, zero, unexplained" residual at the end), so the honest fix is a
+    # companion cell with its own review.
+    # Filed as #11650.
     summary["questions_with_ep_ratio"] = (
         summary["questions_with_ep"] / summary["questions"]
         if summary["questions"] > 0 else None)

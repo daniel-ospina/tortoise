@@ -1679,3 +1679,45 @@ substring: that substring occurs in unrelated passages (a `0.0 < v <= 1.0` knob 
 `weight + 1.0`), so the substring form can never fail and would have let the rule be deleted with
 the pin still green.
 Measured with the qualifier removed: it fails.
+
+## `#11086` — G2's step is placed: `S6a EMBED-DECISION`, and the two premises that had to be corrected first
+
+**What changed in the design document.** §4.0's purpose table, §4.1's step list and §4.2's
+resulting-order block each gained `S6a EMBED-DECISION` — a per-row sub-step of **S6 COMMIT**, running
+**before that row's write clause is built**, asking the `EMBED` / `NO-EMBED` question of the **same
+rule set** `S2.2b` asks the `DISCARD` question of. §4.3's **G2** row now records the step instead of its
+absence, and a new subsection (*G2's step — `S6a EMBED-DECISION`*) states its position, its failure
+policy and the two corrections below. §4.3's opening paragraph moved G2 out of *"needs a step and
+nothing else"* and the summary line's G2 cell names `S6a`.
+
+**Two premises were corrected rather than implemented.** Both would have produced a placement the
+design could not honour, and `02-research.md:224` records the rule that made correcting them the
+required move — *"Stating it as an ordering constraint would invent the placement the design says is
+absent."*
+
+1. **"EMBED before `execute_embed`" is not an order that exists.** `execute_embed` performs no write:
+   it returns a `payload` dict, and the commit that reaches the seam is the SDK / projection writer
+   *after* it returns. The constraint is **EMBED before S6 COMMIT's write**, which is where the step
+   now sits.
+2. **"S2.3's kNN path silently assumes every candidate is embedded" does not hold against the tree.**
+   `KindClassifier` encodes the candidate's **own text** (`self.encoder.encode`) and matches it against
+   a **kind index** built from the pack's kind vocabulary (`kind_index.KindIndex.nearest`). It never
+   reads a stored row vector, so whether a row carries one cannot change its answer and `S6a` feeds
+   nothing into it. G2's core claim — the step list had no home for the EMBED decision — was true and
+   is what the placement closes.
+
+**The VET asymmetry, made explicit because the two gates are not the same shape.** The **`VALUE`** gate
+is subordinate to `VET` by **arming** (its flag switches the pass on; on its own it would be inert,
+which is why `vet_enabled` folds it in). The **`EMBED`** gate is subordinate by **precedence**:
+`vet_gate.apply_vet` removes a `DISCARD`ed candidate from `embed_list`, and every later step — S2.3,
+S3, S5, the commit — reads that list, so a discarded candidate is never offered to the seam. Folding
+the `EMBED` flag into `vet_enabled` would arm nothing while appearing to arm the gate.
+
+**Behavioral pins.** `tests/test_embed_decision_step_11086.py` drives a `DISCARD`ed candidate through
+the S2.2b pass and through `execute_embed`'s payload and asserts it is absent from **both** the
+list every later step reads and the payload the commit is handed — pinned as a **DELTA** against
+the predicate's kill-switch, where the candidate IS present in both, so the assertion measures
+the removal rather than this file's own input; asserts the `VET`-wins direction with **both**
+gates armed; pins that
+`execute_embed` calls no encoder; pins that `kind_classifier` reads a kind index rather than a stored
+row vector; and re-runs the rate measurement against its committed record.
