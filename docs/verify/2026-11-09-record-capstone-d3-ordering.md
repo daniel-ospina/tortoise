@@ -26,7 +26,7 @@ Read that precisely. Two different claims are separated below and must not be me
 | | |
 |---|---|
 | Issue | #9567 **D3** (carrier: #11477) |
-| Head measured | `cbb9df838` + this PR's change to `tests/test_9567_record_capstone.py` |
+| Head measured | `a32edfb17f` (§6.1, §7 and §8) — §0/§1 below are the ORIGINAL pre-fix run at `cbb9df838`, retained as the first measurement and marked as superseded where its numbers differ |
 | Record | `postgres:16`, throwaway container `t9567-cap-pg` on `127.0.0.1:33209`, repo record migrations applied by `_ensure_record_schema`; writer connected as `tortoise_record_app` (the RLS-scoped app role) |
 | Graph | the SDK's **embedded** backend (`TortoiseSDK(<tmp>/graph.db)`) — the same shape the armed CI job (`test-record-postgres`) runs, so this measurement is reproducible without a graph server |
 | Instrument | **committed**: `tests/test_9567_record_capstone.py` §"D3's ORDERING half" — `Door` / `Traced` / `_instrument` / the `traced` fixture and the three legs |
@@ -34,6 +34,11 @@ Read that precisely. Two different claims are separated below and must not be me
 | "Declared lane" | read from the ContextVar the guard itself reads (`_CACHE_WRITE_AUTHORIZED`), so "declared" here means exactly what it means at the door |
 
 ## 0. The command
+
+⛔ **EVERY NUMBER IN §0–§1 IS FROM THE ORIGINAL PRE-FIX RUN AT `cbb9df838`.** That head had three legs;
+this one has four, so §0's `4 passed` and `cache=32` are NOT reproducible here. §6.1 carries the
+current head's outputs and they are the ones to quote; these are kept because deleting a measurement
+does not make the record better.
 
 ```console
 $ TEST_RECORD_DB_URI='postgresql://record:record@127.0.0.1:33209/record' \
@@ -299,10 +304,13 @@ the instrument's three assertions can now fail for the failure each one names. �
 with a `⛔ SUPERSEDED AND WRONG` marker rather than deleted: it recorded a real run whose *conclusion* was
 mistaken, and a reader who trusted it would re-apply the inert comparison.
 
-## 7. Review cycle 2 — seven more, all verified and fixed
+## 7. Review cycle 2 — six verified findings fixed, and ONE FALSE FINDING CORRECTED
 
-A second fresh-context review, on the head this section's predecessor produced, found seven more. Each
-was reproduced before it was fixed; the two substantive ones are now falsifiers F7 and F8 in §6.2.
+A second fresh-context review, on the head this section's predecessor produced, raised seven findings.
+Six reproduced and were fixed; the seventh did **not** reproduce and is recorded below as falsified —
+recording it as a verified fix is exactly the defect `AGENTS.md` → *Finding Verification* names, because
+a false correction changes nothing yet reads as an improvement. The two substantive reds are F7 and F8
+in §6.2.
 
 | # | finding | verified against | fix |
 |---|---|---|---|
@@ -312,7 +320,30 @@ was reproduced before it was fixed; the two substantive ones are now falsifiers 
 | 4 | **P2** — §6.2 F3 showed the `('ObjectRegistered','chokepoint')` red, which existed only at the superseded head (it was a product of the probe leak) | re-ran the same mutation at the current head | F3 replaced with the lane-change red, and the old output retained under a `⛔ SUPERSEDED` marker naming WHY it was unreproducible |
 | 5 | **P2** — the PR body still carried the round-1 inert falsifier and pre-fix counts | artifact §3 marks it `⛔ SUPERSEDED AND WRONG` | corrected on the PR (body while no record exists, comment once one does) |
 | 6 | **P2** — leg 4's narrowing is honest about the floor, but its implied "nothing stronger is available" is broader than the measurement: a membership rule is checkable from this trace | reasoned from the `Door` fields; the reviewer reproduced F6 independently | §4 now states the membership rule, that it WOULD red on F6, and why it is declined (a ~30-shape raw-CYPHER pin would red on unrelated edits and be silenced by editing the pin) |
-| 7 | **P2** — an exception from `_apply_and_journal` would surface as `UnboundLocalError` because `observed` was bound inside the `try` | code read | `observed: list[Door] = []` before the `try` |
+| 7 | ⛔ **FALSIFIED — NOT APPLICABLE.** The claim was that an exception from `_apply_and_journal` would surface as `UnboundLocalError` because `observed` was bound inside the `try`. It does not: `observed = list(traced.entries[mark:])` is the LAST statement inside the `try`, and `doors = [e.door for e in observed]` sits AFTER the `try/finally`, so a raise propagates from the `finally` and the statement after it is never executed. Reproduced with a standalone copy of the shape: `raised: RuntimeError door raised`, no `UnboundLocalError`. | the shape, executed outside the suite | the `observed: list[Door] = []` initialisation is KEPT as defensive only — it fixes nothing, and this row is retained (rather than deleted) so the next reader cannot re-derive the finding and "fix" it again |
 
 Gates re-verified green at this head: `18 passed, 1 skipped` (whole file), `5 passed` (`-k D3`),
 `ruff check .` clean, markdownlint 0 issues.
+
+## 8. Review cycle 3 — a latent false accusation, a contradictory message, and a self-corrected record
+
+A third fresh-context review raised four. All four reproduced or were falsifiable by inspection, and all
+four are fixed.
+
+| # | finding | verified against | fix |
+|---|---|---|---|
+| 1 | **P2 (latent)** — leg 3's round-3 window widening took *every* cache entry in `[fold, its append)`, so a statement preceded by a **nested** journal-first door's append would be attributed to the outer ahead fold (`(EventRecorded, "chokepoint")`) and accused as a fresh violation — on code that is correct. Not reachable on today's tree (the three windows are `[8,11)`, `[19,22)`, `[36,39)`, each holding only that fold's own statements), but the round-3 widening removed the filter that made it unreachable | reproduced with a nested `_emit_event` + `_live_write_scope("chokepoint")` probe inside the window: leg 3 went red naming `("chokepoint", …)` as a violation | the window predicate is now *fold-attached* **or** *(raw-handle with nothing journalled between the fold and the statement)*. Measured: the nested probe leaves leg 3 GREEN (`1 passed`) and F8 still reds |
+| 2 | **P2** — `_ahead_population_advice` printed two contradictory remedies for one change: F3's lane rename produced BOTH "NOT RECORDED … fix the door" and "the deviation was closed … re-grade D3" | the exact output of F3's mutation | a third branch: `LANE MOVED on a recorded event type` (rename → update the KNOWN DEVIATIONS block and extend the pin; or genuinely re-declared apply-first → re-grade D3), and the moved type is excluded from the `lost` line. Measured: F3 now prints LANE MOVED and neither of the contradictory lines |
+| 3 | **P2** — §7 recorded the `UnboundLocalError` finding as *reproduced and fixed*; it is unreachable | ran the shape standalone: `raised: RuntimeError door raised`, no `UnboundLocalError` | §7 row 7 marked `⛔ FALSIFIED — NOT APPLICABLE`, with the reasoning and the standalone run; the initialisation is kept as defensive only, and §7's heading no longer claims seven verified fixes |
+| 4 | **P2 (low)** — the artifact's provenance still pinned `Head measured cbb9df838` with §0/§1's superseded `4 passed` / `cache=32`, and the PR title said "three doors, three falsifiers" | re-ran the §0 command at this head: `5 passed`, `cache=29`; whole file `18 passed, 1 skipped` | the metadata row now names this head and says which sections it governs; §0/§1 carry an explicit `⛔ PRE-FIX RUN` banner; §6.1 is the current output of record. The PR title is retitled |
+
+### 8.1 What cycle 3 changed about the instrument's coverage
+
+Leg 3's population is now: every cache statement in an ahead fold's window that is **still ahead of its
+own append** — fold-attached statements unconditionally, raw-handle ones only while nothing has journalled
+between the fold and the statement. That is the precise predicate "the cache is ahead of the journal",
+rather than "the cache is between two indices", and it is what makes F8 a real red without making a
+nested door's correct journal-first write a false one.
+
+Gates at this head: `5 passed (-k D3, cache=29)`, `18 passed, 1 skipped` (whole file), `ruff check .`
+clean, markdownlint 0 issues.

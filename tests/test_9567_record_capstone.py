@@ -429,16 +429,38 @@ _RECORDED_DEVIATION_EVENT_TYPES = frozenset(
 def _ahead_population_advice(gained: set, lost: set) -> str:
     """The remediation text for a moved journal-first-ahead population.
 
-    Split by whether the pair is one the tree ALREADY records, so the leg cannot
-    accuse a recorded deviation of being a fresh violation (the Subject arm is
-    named at `sdk.py:4836` but this capture never creates a Subject, so it is not
-    in the pin).
+    The tree ALREADY records these arms as apply-first (`sdk.py:4836`: the
+    Object/**Subject**/Event registration blocks, all under `create_entity` at
+    `sdk.py:43309`). Three shapes need three different remedies, and conflating
+    them printed contradictory advice for one change (review cycle 3):
+
+    * the pin carried this pair and still does, but the capture now drives it →
+      RECORDED, newly exercised (extend the pin);
+    * the pin carried the event type under a DIFFERENT lane → LANE MOVED (a
+      rename, or an arm newly claiming journal-first) — never reported as both
+      "a fresh violation" and "the deviation was closed";
+    * nothing records it → a fresh violation.
     """
     recorded = sorted(
         p for p in gained if p[1] == "create_entity" and p[0] in _RECORDED_DEVIATION_EVENT_TYPES
     )
-    unrecorded = sorted(p for p in gained if p not in recorded)
+    # Event types the PIN carried under the recorded lane and no longer does.
+    pin_recorded_types = {
+        p[0] for p in lost if p[1] == "create_entity" and p[0] in _RECORDED_DEVIATION_EVENT_TYPES
+    }
+    moved = sorted(p for p in gained if p[0] in pin_recorded_types)
+    unrecorded = sorted(p for p in gained if p not in recorded and p not in moved)
+    lost = {p for p in lost if p[0] not in pin_recorded_types}
     lines = []
+    if moved:
+        lines.append(
+            f"  \u2022 LANE MOVED on a recorded event type: {moved}. The "
+            "KNOWN DEVIATIONS block at `tortoise/sdk.py:4835` records this arm as "
+            "apply-first under `create_entity`, and the pin no longer carries that "
+            "lane. Either the deviation's lane was RENAMED (update the KNOWN "
+            "DEVIATIONS block and extend the pin) or it really was re-declared "
+            "apply-first (re-grade D3, #9567/#11477)."
+        )
     if recorded:
         lines.append(
             f"  \u2022 RECORDED, newly exercised by this capture: {recorded}. The "
@@ -850,11 +872,24 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
             ),
             len(traced.entries),
         )
-        stmts = [
-            e
-            for e in traced.entries[i:stop]
-            if e.door == "cache"
-        ]
+        # ⛔ THE WINDOW IS EVERY STATEMENT THAT IS STILL AHEAD OF ITS OWN APPEND.
+        # Taking every cache entry in `[i, stop)` was too wide (review cycle 3): a
+        # statement preceded by a NESTED door's append is not ahead of its journal
+        # — only ahead of the OUTER fold's — and a journal-first lane there is
+        # correct code. Accusing it would send a fixer to reorder a conforming
+        # door. So: fold-attached statements always qualify; a raw-handle one
+        # qualifies only while nothing has journalled between the fold and it.
+        stmts: list[Door] = []
+        for j, e in enumerate(traced.entries[i:stop], start=i):
+            if e.door != "cache":
+                continue
+            if e.in_fold == fold.event_type or (
+                e.in_fold is None
+                and not any(
+                    traced.entries[k].door == "journal" for k in range(i + 1, j)
+                )
+            ):
+                stmts.append(e)
         assert stmts, (
             f"the {fold.event_type} fold ran ahead of its append and issued no cache "
             "statement — the instrument observed a fold, not a write"
