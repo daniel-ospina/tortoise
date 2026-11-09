@@ -436,6 +436,11 @@ class Traced:
     session_id: str
     tenant: tuple[str, str]
     sdk: Any
+    #: `len(entries)` when the capture returned. Everything after it belongs to a
+    #: leg that DROVE a door — leg 2's probe, the cache-only injection — so the
+    #: capture-wide legs measure `entries[:capture_len]` and one leg's probe can
+    #: never be read as the capture's own behaviour.
+    capture_len: int = 0
 
 
 def _instrument(mp, entries: list[Door]) -> dict:
@@ -578,7 +583,7 @@ def traced(armed, tmp_path_factory):
             f"cache-with-no-declared-lane={undeclared}"
         )
         yield Traced(entries=entries, receipt=receipt, session_id=session_id,
-                     tenant=tenant, sdk=sdk)
+                     tenant=tenant, sdk=sdk, capture_len=len(entries))
     finally:
         mp.undo()
         sdk.close()
@@ -661,8 +666,8 @@ def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
     Falsifier: swap the door's order (fold before the append) → the fold's own
     statements precede its record write and this reds, naming both positions.
     """
-    from tortoise.record_writer import RECORD_DSN_ENV
     from tests.test_9078_record_written_by_production_path import _app_role_dsn
+    from tortoise.record_writer import RECORD_DSN_ENV
 
     monkeypatch.setenv(RECORD_DSN_ENV, _app_role_dsn(armed.dsn))
 
@@ -813,6 +818,105 @@ a pair appears (a fresh contradiction) or when a pinned pair is gone (a
     )
 
 
+def _record_pairs(entries: list[Door]) -> list[tuple[Door, Door | None]]:
+    """Pair each journal append with the record door that answers it.
+
+    Positional, and that is the pairing leg 1 validates field-by-field on
+    `event_id`; an unpaired append reads as `(append, None)` so a caller reds on it
+    instead of silently skipping it.
+    """
+    appends = [e for e in entries if e.door == "journal"]
+    records = [e for e in entries if e.door == "record"]
+    return [
+        (append, records[n] if n < len(records) else None)
+        for n, append in enumerate(appends)
+    ]
+
+
+def _cache_only_writes(entries: list[Door]) -> list[str]:
+    """D3's SECOND half: cache writes that no journal append + record owns.
+
+    D3's criterion is *"journal → record → cache in that order, with no cache-only
+    path"*, and its falsifier is *"inject a cache write that skips the record → D3
+    must red"*. This is the detector that reds on it, and it is mechanical:
+
+    * a statement a FOLD issued is owned by that fold instance's paired append, and
+      by that append's record write (the pairing leg 1 pins);
+    * any other statement (the raw-handle class, `in_fold is None`) is owned by the
+      most recent append before it, which must also have an APPLIED record write;
+    * a statement with no owning append — or whose owner's record was REFUSED or
+      unarmed — is CACHE-ONLY.
+
+    ⚠️ The bound, stated so it is not over-read: ownership is attributed to the
+    append EPISODE a statement falls in, so a cache write injected INSIDE an episode
+    that appended and recorded is attributed to that episode. That is why the
+    injection leg opens a DECLARED lane: a lane-less mutating statement is refused
+    by the §17.1 guard before any instrument sees it (`Refusing a DIRECT fold …`),
+    so the reachable cache-only shape is a declared lane that appends nothing, and
+    that shape this detector reds on — as does any episode whose record declined.
+    """
+    append_indices: list[int] = []
+    record_by_append: dict[int, Door | None] = {}
+    pair_iter = iter(_record_pairs(entries))
+    for index, entry in enumerate(entries):
+        if entry.door != "journal":
+            continue
+        _append, record = next(pair_iter)
+        append_indices.append(index)
+        record_by_append[index] = record
+
+    # Fold instances: fold index -> its paired append index (None when the fold
+    # never got an append of its own type, which IS a cache-only fold).
+    appends_by_type: dict[str | None, list[int]] = {}
+    for index in append_indices:
+        appends_by_type.setdefault(entries[index].event_type, []).append(index)
+    seen: dict[str | None, int] = {}
+    fold_indices: list[int] = []
+    fold_owner: dict[int, int | None] = {}
+    for index, entry in enumerate(entries):
+        if entry.door != "fold":
+            continue
+        n = seen.get(entry.event_type, 0)
+        seen[entry.event_type] = n + 1
+        typed = appends_by_type.get(entry.event_type) or []
+        fold_owner[index] = typed[n] if n < len(typed) else None
+        fold_indices.append(index)
+
+    problems: list[str] = []
+    for index, entry in enumerate(entries):
+        if entry.door != "cache":
+            continue
+        owner: int | None
+        if entry.in_fold is not None:
+            enclosing = [i for i in fold_indices if i < index]
+            owner = fold_owner.get(enclosing[-1]) if enclosing else None
+            if owner is None:
+                problems.append(
+                    f"a cache write attributed to the fold {entry.in_fold!r} has no "
+                    f"journal append behind it ({entry.statement!r}) — a cache-only "
+                    "write"
+                )
+                continue
+        else:
+            previous = [i for i in append_indices if i < index]
+            if not previous:
+                problems.append(
+                    f"a cache write with NO journal append before it "
+                    f"({entry.statement!r}, lane {entry.lane!r}) — a cache-only write"
+                )
+                continue
+            owner = previous[-1]
+        record = record_by_append[owner]
+        if record is None or record.outcome is not record_writer.RecordWriteOutcome.APPLIED:
+            problems.append(
+                f"a cache write whose journal append "
+                f"({entries[owner].event_type!r}) has no record write that landed "
+                f"(outcome {getattr(record, 'outcome', None)!r}) — "
+                f"{entry.statement!r}"
+            )
+    return problems
+
+
 def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_write(
     traced,
 ):
@@ -829,48 +933,151 @@ def test_D3_order_no_cache_write_runs_without_a_journal_append_and_a_record_writ
       was never examined anywhere.
 
     So this leg takes the WHOLE mutating-cache population, folded and raw, and
-    requires every statement to have a journal append AND an APPLIED record write
-    behind it. A statement that reached the cache with neither is a cache-only
-    path by definition — the census's `cache-with-no-declared-lane` count is a
-    different question (§17.1 declaration), and this leg is the one D3 asks.
+    requires every statement to be owned by a journal append AND an APPLIED record
+    write. A statement that reached the cache with neither is a cache-only path by
+    definition — the census's `cache-with-no-declared-lane` count is a different
+    question (§17.1 declaration), and this leg is the one D3 asks.
 
-    Falsifier: add
-    `traced.sdk._get_proj().g.query("CREATE (:X {id:'cache-only'})")` at the top of
-    the measured region (before the capture) → the statement has no journal append
-    and no APPLIED record write behind it, and this reds naming it. Measured on a
-    tree where the injection is absent: every cache statement follows the first
-    append and the first APPLIED record.
+    ⛔ WHY OWNERSHIP IS PER-EPISODE AND NOT "after the first append" (#11647
+    review P1). The first form of this leg compared each statement's index against
+    the FIRST append and the FIRST APPLIED record in the trace, which no
+    mid-capture cache-only write can fail: everything after the capture's opening
+    `SessionRecorded` is "behind" an append, so the detector was green by
+    construction and its falsifier had to be injected at the very top of the trace
+    to red. `_cache_only_writes` attributes each statement to the append EPISODE it
+    falls in (a fold's own paired append; otherwise the most recent append) and
+    requires THAT append's record write to have landed — so a statement is only
+    owned by the write it actually derives from, and a REFUSED or unarmed record
+    behind it is cache-only however late in the trace it lands.
+
+    Falsifier: the next leg fires D3's own falsifier at this detector, live —
+    a declared lane that writes the cache and appends nothing.
     """
-    cache = [(i, e) for i, e in enumerate(traced.entries) if e.door == "cache"]
+    capture = traced.entries[:traced.capture_len]
+    cache = [(i, e) for i, e in enumerate(capture) if e.door == "cache"]
     assert cache, (
         "the capture issued no mutating cache statement — this leg measured nothing "
         "(DoD rule 1: an empty population is not a green measurement)"
     )
-    journal = [i for i, e in enumerate(traced.entries) if e.door == "journal"]
-    applied = [
-        i
-        for i, e in enumerate(traced.entries)
-        if e.door == "record" and e.outcome is record_writer.RecordWriteOutcome.APPLIED
-    ]
-    assert journal and applied, (
-        "this trace cannot distinguish a cache-only write: "
-        f"journal={len(journal)} append(s), APPLIED record write(s)={len(applied)}. "
-        "With no APPLIED record there is nothing for a cache write to be 'behind', "
-        "and a leg asserting it would be vacuous"
-    )
-    first_journal = min(journal)
-    first_applied = min(applied)
-    orphans = [
-        (i, e) for i, e in cache if i < first_journal or i < first_applied
-    ]
-    assert not orphans, (
-        f"{len(orphans)} mutating cache statement(s) ran with no journal append and "
-        "no APPLIED record write behind them — the cache-only path D3 forbids: "
-        + "; ".join(
-            f"[{i}] {e.statement!r} (lane={e.lane!r}, in_fold={e.in_fold!r})"
-            for i, e in orphans
+    problems = _cache_only_writes(capture)
+    assert problems == [], "\n".join(problems)
+
+
+def test_D3_a_cache_write_that_skips_the_record_is_detected(traced):
+    """D3's stated falsifier, FIRED: a cache-only write must red the detector.
+
+    Issue #9567's D3 row names this exact mutation — *"inject a cache write that
+    skips the record → D3 must red"* — and a detector nobody has broken on purpose
+    is the defect this PR is fixing. So the injection runs here, against the SAME
+    instrumented graph and the SAME detector the leg above uses, and the detector
+    must red.
+
+    The injection opens a DECLARED lane, because that is the only reachable shape: a
+    mutating statement with NO scope in flight is refused by the §17.1 guard before
+    any instrument can see it (`Refusing a DIRECT fold … no sanctioned write scope
+    in flight`, recorded as F3′ in the artifact). What a cache-only path looks like
+    in production is a lane that writes the cache and appends nothing — the #9068
+    shape the apply-first lane's own docstring forbids — and that is what is fired.
+    """
+    from tortoise.projection import _live_write_scope
+
+    mark = len(traced.entries)
+    probe_id = f"cache-only-{uuid.uuid4().hex[:8]}"
+    with _live_write_scope("injected-cache-only-probe"):
+        traced.sdk._get_proj().g.query(
+            f"CREATE (:CacheOnlyProbe {{id: '{probe_id}'}})"
         )
+    injected = traced.entries[mark:]
+    assert any(e.door == "cache" for e in injected), (
+        "the injected cache write never reached the instrumented cache door — "
+        f"observed {[e.door for e in injected]}: the detector below would be green "
+        "about a write it never saw"
     )
+    problems = _cache_only_writes(injected)
+    assert problems, (
+        "the detector did NOT red on a cache write that appends no record — observed "
+        f"{[(e.door, e.lane, e.in_fold) for e in injected]}. D3's own falsifier is "
+        "therefore unreddened and the leg above proves nothing"
+    )
+
+
+def _trace(
+    *entries: tuple[str, str | None, str | None, str | None],
+) -> list[Door]:
+    """A DB-free trace builder: `(door, event_type, lane, in_fold)` tuples.
+
+    `Door` is plain data, so the cache-only detector can be driven with synthetic
+    traces anywhere — no Postgres, no graph, no capture. `_landed` additionally
+    marks every `record` door APPLIED, so a synthetic trace can distinguish "the
+    seam wrote" from "the seam declined".
+    """
+    return [
+        Door(door, event_type=event_type, lane=lane, in_fold=in_fold)
+        for door, event_type, lane, in_fold in entries
+    ]
+
+
+def _landed(
+    *entries: tuple[str, str | None, str | None, str | None],
+) -> list[Door]:
+    """A synthetic trace in which every record door is an APPLIED write."""
+    out = _trace(*entries)
+    for entry in out:
+        if entry.door == "record":
+            entry.outcome = record_writer.RecordWriteOutcome.APPLIED
+    return out
+
+
+def test_D3_the_cache_only_detector_reds_on_an_unowned_cache_write():
+    """The detector's directions, with no database and no capture.
+
+    Green: a cache write inside an episode that appended and whose record landed.
+    Red, three ways: no append before it (the injected shape), an append whose
+    record was `REFUSED`, and an append whose record door was UNARMED (no outcome)
+    — a declined seam is the `derived = replay(journal)` gap, so it must not own a
+    cache write. Red, fourth way: a fold whose event was never appended at all.
+    """
+    owned = _landed(
+        ("journal", "X", None, None),
+        ("record", "X", None, None),
+        ("cache", None, "create_point", None),
+    )
+    assert _cache_only_writes(owned) == [], _cache_only_writes(owned)
+
+    unowned = _landed(("cache", None, "injected-lane", None))
+    assert any("NO journal append before it" in p for p in _cache_only_writes(unowned)), (
+        "a cache write with nothing appended before it must read as cache-only"
+    )
+
+    refused = _trace(
+        ("journal", "X", None, None),
+        ("record", "X", None, None),
+        ("cache", None, "create_point", None),
+    )
+    refused[1].outcome = record_writer.RecordWriteOutcome.REFUSED
+    assert any("no record write that landed" in p for p in _cache_only_writes(refused)), (
+        "a cache write whose record was REFUSED must read as cache-only: the "
+        "journal holds the record and the record does not"
+    )
+
+    unarmed = _trace(
+        ("journal", "X", None, None),
+        ("record", "X", None, None),
+        ("cache", None, "create_point", None),
+    )
+    assert any("no record write that landed" in p for p in _cache_only_writes(unarmed)), (
+        "a cache write whose record door was UNARMED (no outcome) must read as "
+        "cache-only — the seam stored nothing"
+    )
+
+    fold_never_appended = _landed(
+        ("fold", "X", None, None),
+        ("cache", None, "create_entity", "X"),
+    )
+    assert any(
+        "no journal append behind it" in p
+        for p in _cache_only_writes(fold_never_appended)
+    ), "a fold whose event was never appended wrote the cache only"
 
 
 # ── D4/D5/D6 — the rebuild from the record only ────────────────────────────
