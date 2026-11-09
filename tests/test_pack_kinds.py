@@ -1195,9 +1195,17 @@ class TestWorkedExampleV3Fixture:
         # fixture's cross-pack `equivalentTo` bridge is gone. The legacy
         # `dev:requirement` spelling still rides the expansion as a READ alias
         # for stored data (LEGACY_KIND_ALIASES); it is not a declared kind.
-        assert registry.expand_kind("product-strategy:requirement") == [
-            "product-strategy:requirement", "dev:requirement"
-        ]
+        #
+        # #11000: the bucket is now ALSO widened by the kind's declared
+        # `subclassOf: WorkItem` — both spellings of the parent — so this is an
+        # additive-content pin, not an exact list (an exact list here re-encodes
+        # "the parent is missing" and would have to be re-broken by hand to
+        # widen the expansion again).
+        _req = registry.expand_kind("product-strategy:requirement")
+        assert set(_req) == {
+            "product-strategy:requirement", "dev:requirement",
+            "WorkItem", "core:WorkItem",
+        }, _req
         assert "dev:requirement" not in registry._all_known_kinds()
 
 

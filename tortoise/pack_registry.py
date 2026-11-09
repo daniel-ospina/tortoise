@@ -194,6 +194,65 @@ CORE_KINDS = (
     | CANONICAL_DOCUMENT_KINDS | CANONICAL_ACTION_KINDS | CORE_ENTITY_TYPES
 )
 
+# ── ONTOLOGY §6 — the CORE subclass table (core parentage) ─────────────────
+# Which core kinds are subclasses of a core entity type. `get_subclasses` used
+# to read ONLY the pack-declared `kind_subclasses`, so this declared parentage
+# never reached the expansion table at all (#11000, Leg B). Measured at
+# `86aaef8f0271`: `expand_kind("Object") == ["Object"]` and
+# `expand_kind("Subject") == ["Subject"]` while §6 declares 16 Object
+# subclasses and 5 Subject subclasses, and `get_subclasses("Subject") == []`.
+#
+# ⛔ These rows are NOT a second vocabulary — each is the canonical set that
+# already exists, so a kind is added in ONE place and both readers follow:
+#   * ``Object``  ← ``CANONICAL_OBJECT_KINDS``, the §5 object block (pinned
+#     three ways against the doc and the extractor by
+#     ``tests/test_pack_kinds.py::TestCanonicalObjectKindAlignment``);
+#   * ``Subject`` ← ONTOLOGY §5's subject block, which is also
+#     ``kind_layers.subject_kind_names()`` — the #9964 ONE authority for the
+#     subject vocabulary. It is spelled here rather than imported because that
+#     authority pulls ``extractor_v2`` onto the pack-load path, and it is
+#     pinned back to it (and to §6) by
+#     ``tests/test_pack_registry_gaps.py::TestCoreHierarchy``;
+#   * ``Point``/``Event`` ← ``CANONICAL_POINT_KINDS``/``CANONICAL_EVENT_KINDS``
+#     (§5's point and event vocabularies — §6's table has no row for either,
+#     and the relation is the same one it declares for Object).
+# ``Document`` is deliberately ABSENT: §6 states a document is **not** an
+# Object subclass (it is a `:Source`, §4.4), so `expand_kind("Document")` keeps
+# only its PACK subclasses. ``Source``/``Action`` have no declared core
+# hierarchy either — `sourceKind` is its own axis, and `CANONICAL_ACTION_KINDS`
+# is retired (#122).
+#
+# ORDER is sorted, not the doc's table order: the object/point/event sets are
+# ``frozenset``s, and an unsorted ``tuple(frozenset)`` iterates in an order that
+# varies with PYTHONHASHSEED — which would make `expand_kind`'s list order
+# unstable across processes.
+CORE_SUBCLASSES: dict[str, tuple[str, ...]] = {
+    "Object": tuple(sorted(CANONICAL_OBJECT_KINDS)),
+    "Subject": (
+        # ONTOLOGY §5 Subject Kind Vocabulary = §6's Subject row. Both exclude
+        # `other` (the NIL bucket, which declares nothing about the layer).
+        "legalPerson", "naturalPerson", "organization", "role", "team",
+    ),
+    "Point": tuple(sorted(CANONICAL_POINT_KINDS)),
+    "Event": tuple(sorted(CANONICAL_EVENT_KINDS)),
+}
+
+#: Every core kind that is spelled BOTH ways in this tree — bare (pack
+#: declarations, §5 prose) and `core:`-prefixed (the classifier's candidate index
+#: and the open write doors). `_build_kind_expansions` makes the two spellings of
+#: a kind interchangeable so a read in one spelling reaches rows stored in the
+#: other (#11000).
+#:
+#: The Subject vocabulary is only in here through ``CORE_SUBCLASSES`` —
+#: `organization`/`team`/`role`/`legalPerson`/`naturalPerson` are §5 Subject kinds
+#: and are NOT in ``CORE_KINDS`` (which is the pack-facing reference universe plus
+#: the entity types). They are exactly the kinds `extractor_v2.SUBJECTS` spells
+#: `core:organization`, so leaving them out made `expand_kind("Subject")` unable
+#: to reach a `core:team` row — the spelling `create_subject` actually stores.
+CORE_ALIASED_KINDS: frozenset[str] = frozenset(CORE_KINDS).union(
+    *(frozenset(children) for children in CORE_SUBCLASSES.values())
+)
+
 # Kinds that persist in STORED graphs but are no longer DECLARED by any pack, so
 # they cannot ride `equivalentTo` (whose targets must resolve to a declared
 # kind). Read paths still expand through them, so a query keeps finding
@@ -2701,12 +2760,15 @@ class PackRegistry:
                 # that are NOT canonical object kinds, so camelCase typos like
                 # `workItem` still error (the membership check below is the
                 # real typo guard).
-                # Known duality (pinned in tests): `document` (§5 objectKind)
-                # and `Document` (core entity type) are BOTH valid parents and
-                # expand SEPARATELY (`expand_kind` keys on the literal string).
-                # That duality is pre-existing in the core_parents membership
-                # set — this relaxation only stops the shape check from
-                # contradicting it for the lowercase half of the vocabulary.
+                # The lowercase half of the vocabulary is the canonical
+                # objectKind set (`tag`, `goal`, `target`, …). ⚠ `document` is
+                # NOT in it and is NOT a valid parent: D10 (#5013, ONTOLOGY
+                # v3.15 §4.4, #5022) retired `objectKind: document` — a document
+                # is a `:Source`, so `Document` (the core entity type) is the
+                # only document parent. This comment used to claim both were
+                # valid parents and expanded separately; that stopped being true
+                # at D10 and `tests/test_pack_kinds.py` pins the refusal (#11000
+                # corrected the stale note while touching this pass).
                 # The isinstance guard keeps a malformed manifest value (list,
                 # int) on the shape-error path instead of raising TypeError out
                 # of `_validate` (which surfaced as an opaque dropped-pack error).
@@ -3209,11 +3271,19 @@ class PackRegistry:
         return self.packs.get(namespace)
 
     def get_subclasses(self, parent_kind: str) -> list[str]:
-        """Return all pack kinds that are subclasses of parent_kind.
+        """Return every kind that is a subclass of parent_kind — CORE first, then pack.
 
-        Example: get_subclasses("Project") → ["dev:epic"]
+        Example: get_subclasses("Project") → ["dev:epic", "venture:program"]
+                 get_subclasses("Subject") → ["legalPerson", …, "organization"]
+
+        #11000: the CORE half comes from ``CORE_SUBCLASSES`` (ONTOLOGY §6). This
+        used to read ONLY pack-declared ``kind_subclasses``, so no core
+        parentage was ever returned — ``get_subclasses("Subject") == []`` — and
+        ``_build_kind_expansions`` (built from this method) could not widen a
+        core root. Pack declarations are appended AFTER the core ones so the
+        returned order is stable across loads.
         """
-        result = []
+        result = list(CORE_SUBCLASSES.get(parent_kind, ()))
         for p in self.packs.values():
             ns = p.namespace
             for child, parent in p.kind_subclasses.items():
@@ -3222,10 +3292,22 @@ class PackRegistry:
         return result
 
     def expand_kind(self, kind: str) -> list[str]:
-        """Expand a kind to include subclasses and equivalents.
+        """Expand a kind to its subclasses, superclasses, equivalents and spellings.
 
         Returns list of kind strings for Cypher IN clause.
         Example: expand_kind("WorkItem") → ["WorkItem", "dev:issue", "pm:issue", …]
+
+        Four directions, all ADDITIVE:
+          * **superclass** — a pack child expands to its declared `subclassOf`
+            parent (`expand_kind("dev:issue")` carries `WorkItem`, #11000 Leg A);
+          * **subclass** — a parent expands to its children, CORE (ONTOLOGY §6 via
+            ``CORE_SUBCLASSES``) then pack (`expand_kind("Subject")` carries
+            `organization`, `team`, …; #11000 Leg B);
+          * **equivalent** — `equivalentTo`, bidirectionally (§7);
+          * **spelling** — the bare and `core:` forms of a core kind are ONE kind
+            (`WorkItem` ↔ `core:WorkItem`), because pack declarations spell it
+            bare while the classifier's index and the open write doors spell it
+            `core:`-prefixed and rows are stored either way.
 
         INVARIANT (#6146): the argument is ALWAYS in its own expansion —
         ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
@@ -3272,13 +3354,37 @@ class PackRegistry:
                     full = f"{ns}:{kind}"
                     expansions[full] = [full]
 
-        # Apply subclassOf: children also expand to parent
+        # Apply subclassOf: a pack child ALSO expands to its declared parent.
+        #
+        # #11000 (Leg A): `parent` was bound and never read — the B007
+        # (unused-loop-variable) suppression on the loop was the tell — so the
+        # comment above promised a widening the loop did not do. `expand_kind("dev:issue")` therefore carried only
+        # its `equivalentTo` peer (`pm:issue`) and never `WorkItem`, i.e. a
+        # pack's declared business vocabulary was loaded, validated, and then
+        # invisible to every read that depends on it.
+        #
+        # ONE level IS the transitive closure here, and that is a property of
+        # the DECLARATION model, not a simplification: `_validate` restricts a
+        # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`,
+        # so a pack can never parent another pack kind, and no core kind carries
+        # a parent of its own (`CORE_SUBCLASSES` rows are a forest of depth 1).
+        # Both premises are pinned by
+        # ``tests/test_pack_registry_gaps.py::TestCoreHierarchy`` — relax either
+        # and the closure stops being one level, which reds those pins rather
+        # than silently under-widening. (RDFS §3.4 makes `rdfs:subClassOf`
+        # transitive and SHACL's `sh:class` validates against the transitive
+        # closure of `rdf:type`; here the closure of a depth-1 forest is the
+        # forest, so a fixpoint walk would compute the same table.)
+        #
+        # The PARENT NAME only, never the parent's bucket: a `dev:issue` is a
+        # `WorkItem`, but it is not a `dev:pullRequest`.
         for p in self.packs.values():
             ns = p.namespace
-            for child, parent in p.kind_subclasses.items():  # noqa: B007
+            for child, parent in p.kind_subclasses.items():
                 full_child = f"{ns}:{child}"
-                if full_child not in expansions:
-                    expansions[full_child] = [full_child]
+                bucket = expansions.setdefault(full_child, [full_child])
+                if parent not in bucket:
+                    bucket.append(parent)
 
         # Apply equivalentTo: bidirectional
         for p in self.packs.values():
@@ -3333,6 +3439,48 @@ class PackRegistry:
                 old_bucket = expansions.setdefault(old_kind, [old_kind])
                 if new_kind not in old_bucket:
                     old_bucket.append(new_kind)
+
+        # ── #11000: ONE kind, TWO live spellings ──────────────────────────
+        # A core kind is spelled BARE (`WorkItem`) by pack declarations and
+        # `core:`-prefixed (`core:WorkItem`) by the classifier's candidate index
+        # (`extractor_v2.CORE_OBJECT_KEYS` / `SUBJECTS` / `EVENTS`) and by the
+        # open write doors (`create_object(objectKind="core:organization")`, and
+        # `subject_binding._normalize_kind` folds the prefix back for comparison).
+        # Rows are STORED in either spelling, so a bucket carrying only the bare
+        # form still returns nothing for a `core:`-kinded row. Without this pass
+        # the widening above was inert on the `search`/object path, where
+        # `core:WorkItem` is the spelling the classifier actually emits — the
+        # parent would be present in the table and match nothing.
+        #
+        # LAST pass on purpose: `LEGACY_KIND_ALIASES` above adds stored
+        # spellings to a bucket, so an alias taken as an earlier snapshot would
+        # silently drop them (`expand_kind("core:deployment")` must still carry
+        # `dev:deployment`).
+        for kind in CORE_ALIASED_KINDS:
+            core = f"core:{kind}"
+            base = expansions.setdefault(kind, [kind])
+            bucket = expansions.setdefault(core, [core])
+            for member in base:
+                if member not in bucket:
+                    bucket.append(member)
+            if core not in base:
+                base.append(core)
+        # …and every bucket that already names a core kind in ONE spelling names
+        # it in BOTH, so `expand_kind("Object")` reaches a `core:WorkItem` row as
+        # well as a `WorkItem` one. One pass suffices: the two spellings of a
+        # kind are the only alias pair, so a member added here needs no second
+        # visit.
+        for bucket in expansions.values():
+            for member in list(bucket):
+                if member in CORE_ALIASED_KINDS:
+                    alias = f"core:{member}"
+                elif (member.startswith("core:")
+                        and member[5:] in CORE_ALIASED_KINDS):
+                    alias = member[5:]
+                else:
+                    continue
+                if alias not in bucket:
+                    bucket.append(alias)
 
         self._kind_expansions = expansions
 

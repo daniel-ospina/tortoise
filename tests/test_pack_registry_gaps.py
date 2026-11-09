@@ -16,7 +16,12 @@ import yaml
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
-from tortoise.pack_registry import PackRegistry
+from tortoise.pack_registry import CORE_ALIASED_KINDS, CORE_SUBCLASSES
+from tortoise.pack_registry import CANONICAL_EVENT_KINDS, CANONICAL_OBJECT_KINDS
+from tortoise.pack_registry import CANONICAL_POINT_KINDS, PackRegistry
+
+REPO = Path(__file__).resolve().parent.parent
+PACKS_DIR = REPO / "packs"
 
 
 # ── Validation edge cases ──────────────────────────────────────────────────
@@ -1420,3 +1425,398 @@ class TestCrossPackRefs:
         assert not any(
             "nearMisses" in e for e in registry.errors.get("dev", [])
         )
+
+
+# ── #11000 — the kind expansion table: superclass + CORE hierarchy ──────────
+#
+# TWO independent defects lived in `_build_kind_expansions`, and each one is
+# pinned separately below so neither can be "fixed" by accident and neither can
+# regress behind the other's green:
+#
+#   Leg A — a pack child never expanded to its declared `subclassOf` parent.
+#           The loop bound `parent` and never read it (the B007
+#           unused-loop-variable suppression was the tell) while the comment above it claimed "children also expand to
+#           parent". Measured at 86aaef8f0271: `expand_kind("dev:issue")` →
+#           `['dev:issue', 'pm:issue']` (the `equivalentTo` peer only), and
+#           `expand_kind("dev:bug")` → `['dev:bug']`.
+#
+#   Leg B — the CORE hierarchy (ONTOLOGY §6) was never a source for the table at
+#           all. `get_subclasses` read only pack-declared `kind_subclasses`, so
+#           `expand_kind("Object") == ["Object"]` and `get_subclasses("Subject")
+#           == []` while §6 declares 16 Object subclasses and 5 Subject ones.
+#           This is a hard dependency of #11656, whose gate must accept a
+#           declared `toKind: Subject` as "a Subject or any subtype".
+#
+# Population is always DERIVED (from the loaded registry, from §6/§5 parsed out
+# of the doc, or from the registry's own declarations) — never a hand-copied
+# list — so a new pair or a new kind joins the pin automatically instead of
+# silently leaving coverage.
+
+_S6_SECTION = "## §6. Subclass Model"
+
+
+def _ontology_s6_table() -> dict[str, str]:
+    """ONTOLOGY §6's "Core subclasses (no pack needed)" table → {parent: cell}.
+
+    Parsed from the doc rather than restated, so a §6 edit that the code does not
+    follow reds here instead of drifting silently. The doc is owner-gated
+    (`CRITICAL RULE` at its head), which is exactly why the CODE is pinned to it
+    rather than the other way round.
+    """
+    text = (REPO / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    section = text.split(_S6_SECTION, 1)[1]
+    table: dict[str, str] = {}
+    for line in section.splitlines():
+        line = line.strip()
+        if not line.startswith("|"):
+            if table:  # the table ended
+                break
+            continue
+        cells = [c.strip() for c in line.strip("|").split("|")]
+        if len(cells) < 2:
+            continue
+        parent, children = cells[0], cells[1]
+        if not parent or set(parent) <= set("-: ") or parent == "Parent":
+            continue
+        table[parent] = children
+    return table
+
+
+def _kinds_in_cell(cell: str) -> set[str]:
+    return {tok for tok in cell.replace("*", "").replace("`", "")
+            .replace(",", " ").split() if tok}
+
+
+def _ontology_fenced(header: str) -> set[str]:
+    """Parse a §5 vocabulary fenced block (comments and prose stripped)."""
+    text = (REPO / "docs" / "ONTOLOGY.md").read_text(encoding="utf-8")
+    after = text.split(header, 1)[1]
+    block = after.split("```", 2)[1]
+    block = block.split("\n", 1)[1] if "\n" in block else ""
+    kinds: set[str] = set()
+    for line in block.splitlines():
+        line = line.split("#", 1)[0]
+        kinds.update(tok for tok in line.replace(",", " ").split() if tok)
+    return kinds
+
+
+@pytest.fixture(scope="module")
+def shipped() -> PackRegistry:
+    """The 7 shipped packs, loaded once."""
+    registry = PackRegistry(str(PACKS_DIR))
+    assert registry.load_all() == 7, registry.errors
+    assert not registry.errors, registry.errors
+    return registry
+
+
+class TestCoreHierarchy:
+    """#11000 — the declared kind hierarchy actually reaches `expand_kind`."""
+
+    # ── Leg A: pack child → its declared parent ──────────────────────────
+
+    def test_every_declared_parent_is_in_its_child_expansion(self, shipped):
+        """For EVERY declared `subclassOf` pair, the parent is in the child's bucket.
+
+        The failure this prevents: the append being dropped again (the original
+        defect), a new declared pair landing half-wired, or the widening being
+        applied in one namespace only. The population is derived from the loaded
+        registry — 17 pairs across 7 packs today — so it cannot pass vacuously
+        and a newly declared pair is covered without touching this test.
+        """
+        pairs = [(f"{p.namespace}:{child}", parent)
+                 for p in shipped.packs.values()
+                 for child, parent in p.kind_subclasses.items()]
+        assert len(pairs) >= 17, f"declared subclassOf pairs went missing: {pairs}"
+        assert len({c.split(":", 1)[0] for c, _ in pairs}) >= 2, pairs
+
+        missing = [
+            (child, parent, shipped.expand_kind(child))
+            for child, parent in pairs
+            if parent not in shipped.expand_kind(child)
+        ]
+        assert not missing, (
+            "a declared `subclassOf` parent is absent from its child's expansion "
+            "— the declaration is loaded and validated but widens nothing "
+            f"(#11000 Leg A): {missing}")
+
+        # …and in the spelling rows are actually STORED under. The classifier's
+        # candidate index spells core kinds `core:WorkItem` (extractor_v2
+        # .CORE_OBJECT_KEYS) and the open doors accept that spelling, so a bucket
+        # carrying only the bare form matches nothing on the `search`/object path.
+        missing_core = [
+            (child, parent) for child, parent in pairs
+            if f"core:{parent}" not in shipped.expand_kind(child)
+        ]
+        assert not missing_core, (
+            "the child's expansion carries the bare parent but not the parent's "
+            "`core:` spelling, so a row stored under the classifier's spelling is "
+            f"invisible: {missing_core}")
+
+    def test_a_child_gains_only_its_own_parent(self, shipped):
+        """…and NOT its parent's other children, nor the parent's parent.
+
+        The failure this prevents: widening done by UNIONING the parent's bucket
+        instead of appending the parent's NAME. That looks green on the test
+        above while quietly turning `expand_kind('dev:issue')` into "every
+        WorkItem", so a read for issues returns pull requests, cards and
+        features — a wrong-BROAD answer, the mirror of the defect being fixed.
+        """
+        declared_parents = {parent for p in shipped.packs.values()
+                            for parent in p.kind_subclasses.values()}
+        assert declared_parents >= {"Project", "WorkItem", "Problem"}, declared_parents
+
+        over_wide = []
+        for p in shipped.packs.values():
+            for child, parent in p.kind_subclasses.items():
+                bucket = set(shipped.expand_kind(f"{p.namespace}:{child}"))
+                gained = bucket & declared_parents
+                if gained != {parent}:
+                    over_wide.append((f"{p.namespace}:{child}", parent, sorted(gained)))
+        assert not over_wide, (
+            "a child's expansion names a declared parent that is not its own — "
+            f"the widening copied the parent's bucket instead of its name: {over_wide}")
+
+    # ── Leg B: the CORE hierarchy (ONTOLOGY §6) ────────────────────────
+
+    def test_the_s6_core_table_matches_the_declared_parentage(self):
+        """ONTOLOGY §6's rows ARE `CORE_SUBCLASSES` — parsed, not restated.
+
+        The failure this prevents: the core parentage being a second, drifting
+        copy of the §5 vocabulary. §6 is owner-gated (no edit without Daniel's
+        approval of the exact change), so the CODE is pinned to the doc: a §6
+        row that changes without the code following, or a code row edited without
+        §6, reds here and names both sides.
+        """
+        table = _ontology_s6_table()
+        assert set(table) >= {"Object", "Subject", "Document"}, table
+
+        assert _kinds_in_cell(table["Object"]) == set(CORE_SUBCLASSES["Object"]), (
+            "ONTOLOGY §6's Object row and CORE_SUBCLASSES['Object'] disagree: "
+            f"doc-only={sorted(_kinds_in_cell(table['Object']) - set(CORE_SUBCLASSES['Object']))}, "
+            f"code-only={sorted(set(CORE_SUBCLASSES['Object']) - _kinds_in_cell(table['Object']))}")
+        assert _kinds_in_cell(table["Subject"]) == set(CORE_SUBCLASSES["Subject"]), (
+            "ONTOLOGY §6's Subject row and CORE_SUBCLASSES['Subject'] disagree: "
+            f"doc-only={sorted(_kinds_in_cell(table['Subject']) - set(CORE_SUBCLASSES['Subject']))}, "
+            f"code-only={sorted(set(CORE_SUBCLASSES['Subject']) - _kinds_in_cell(table['Subject']))}")
+
+        # §6 says Document is NOT a subclass of Object, and its row is prose
+        # saying so — so `Document` must have no core children (its pack
+        # subclasses still expand; see the next test).
+        assert "not a subclass" in table["Document"].lower(), table["Document"]
+        assert "Document" not in CORE_SUBCLASSES, CORE_SUBCLASSES.get("Document")
+
+        # `Object` is the §5 object block, unchanged — the two constants must not
+        # diverge now that one is derived from the other.
+        assert set(CORE_SUBCLASSES["Object"]) == set(CANONICAL_OBJECT_KINDS)
+
+    def test_the_subject_row_is_the_one_authority(self):
+        """`CORE_SUBCLASSES['Subject']` is `kind_layers.subject_kind_names()`.
+
+        The failure this prevents: a SECOND answer to "what is a §5 Subject
+        kind". #9964 made `kind_layers` the one authority for the kind↔layer
+        question; this row is spelled in `pack_registry` (importing that
+        authority would pull `extractor_v2` onto the pack-load path), so the two
+        are pinned together. A subject kind added to `extractor_v2.SUBJECTS` and
+        not here would otherwise leave `expand_kind('Subject')` narrow with every
+        test green.
+        """
+        from tortoise.kind_layers import subject_kind_names
+
+        declared = {k.split(":", 1)[1] if k.startswith("core:") else k
+                    for k in subject_kind_names()}
+        assert declared, "the subject vocabulary came back empty — pin is vacuous"
+        assert set(CORE_SUBCLASSES["Subject"]) == declared, (
+            "the Subject hierarchy diverged from kind_layers.subject_kind_names(): "
+            f"code-only={sorted(set(CORE_SUBCLASSES['Subject']) - declared)}, "
+            f"authority-only={sorted(declared - set(CORE_SUBCLASSES['Subject']))}")
+
+    def test_point_and_event_rows_are_the_s5_vocabularies(self):
+        """§6 has no Point/Event row, so they follow §5 — and the gap is NAMED.
+
+        The failure this prevents: silently inheriting a wider or narrower set
+        than §5 declares. §5's point block carries eleven names while the
+        pack-facing set carries nine; the two extra (`humanApproval`, `event`)
+        are the #1013 option-B gate-only exception, pinned here as an EXACT
+        difference so a third name cannot join it unnoticed.
+        """
+        assert set(CORE_SUBCLASSES["Point"]) == set(CANONICAL_POINT_KINDS), (
+            f"Point row drifted: {sorted(set(CORE_SUBCLASSES['Point']) ^ set(CANONICAL_POINT_KINDS))}")
+        assert set(CORE_SUBCLASSES["Event"]) == set(CANONICAL_EVENT_KINDS), (
+            f"Event row drifted: {sorted(set(CORE_SUBCLASSES['Event']) ^ set(CANONICAL_EVENT_KINDS))}")
+
+        s5_point = _ontology_fenced("### Point Kind Vocabulary (core)")
+        assert s5_point, "the §5 point block parsed empty — pin is vacuous"
+        assert s5_point - set(CORE_SUBCLASSES["Point"]) == {"humanApproval", "event"}, (
+            "the §5-point-vs-hierarchy gap is no longer exactly the two documented "
+            f"gate-only kinds (#1013 option B): {sorted(s5_point - set(CORE_SUBCLASSES['Point']))}")
+        s5_event = _ontology_fenced("### Event Kind Vocabulary (core)")
+        assert s5_event, "the §5 event block parsed empty — pin is vacuous"
+        assert s5_event == set(CORE_SUBCLASSES["Event"]), (
+            f"§5's event block and the Event row disagree: {sorted(s5_event ^ set(CORE_SUBCLASSES['Event']))}")
+
+    def test_core_roots_expand_to_their_core_subclasses(self, shipped):
+        """`expand_kind(<core root>)` carries §6's/§5's children, in both spellings.
+
+        The failure this prevents: the Leg-B half of the original defect —
+        `expand_kind('Object') == ['Object']` and `get_subclasses('Subject') ==
+        []` — returning. `#11656` reads this table to accept a declared
+        `toKind: Subject` as "a Subject or any subtype"; an empty answer there
+        turns every valid subject link into a false refusal.
+        """
+        for parent, children in CORE_SUBCLASSES.items():
+            expanded = shipped.expand_kind(parent)
+            assert parent in expanded, (parent, expanded)
+            absent = sorted(set(children) - set(expanded))
+            assert not absent, (
+                f"expand_kind({parent!r}) is missing its declared core subclasses "
+                f"({absent}) — the core hierarchy is not a source for the table")
+            absent_core = sorted(f"core:{c}" for c in children
+                                 if f"core:{c}" not in expanded)
+            assert not absent_core, (
+                f"expand_kind({parent!r}) is missing the `core:` spelling of "
+                f"{absent_core} — a row stored under the classifier's spelling is invisible")
+            assert set(shipped.get_subclasses(parent)) >= set(children), (
+                f"get_subclasses({parent!r}) dropped the core half")
+
+        # The measured symptoms, verbatim — a root with no pack subclasses at all
+        # must still widen (Subject/Object had none, which is why they read []).
+        assert set(shipped.expand_kind("Subject")) >= {
+            "organization", "team", "role", "legalPerson", "naturalPerson",
+            "core:team",
+        }
+        assert len(shipped.expand_kind("Object")) > 1
+        for root in ("Point", "Event"):
+            assert len(shipped.expand_kind(root)) > 1, root
+
+    def test_document_keeps_its_pack_subclasses_and_gains_no_genre_axis(self, shipped):
+        """§6: a document is a `:Source`, NOT an Object subclass — so no genre axis.
+
+        The failure this prevents: "completing" the table by treating the
+        `documentKind` genre vocabulary (`planDoc`, `research`, …) as Document
+        subclasses. Those are genres of a `:Source` (§5), not kinds of the
+        Document entity type, and widening Document to them would make
+        `search(kind='Document')` return every plan and transcript as a
+        document-kind match. The pack-declared subclass must keep working.
+        """
+        expanded = set(shipped.expand_kind("Document"))
+        assert "Document" in expanded
+        assert "product-strategy:architecture" in expanded, (
+            "the PACK-declared Document subclass stopped expanding (§6.2a regression)")
+        from tortoise.pack_registry import CANONICAL_DOCUMENT_KINDS
+
+        genres = set(CANONICAL_DOCUMENT_KINDS) - {"Document"}
+        assert genres, "the document genre axis came back empty — pin is vacuous"
+        leaked = sorted(genres & expanded)
+        assert not leaked, (
+            "the Document expansion carries documentKind GENRES as if they were "
+            f"subclasses (§6: a document is a :Source): {leaked}")
+
+    # ── the two spellings of one core kind ────────────────────────────
+
+    def test_core_prefixed_and_bare_spellings_are_one_kind(self, shipped):
+        """`core:WorkItem` and `WorkItem` expand to the same kind.
+
+        The failure this prevents: fixing the missing parent while leaving the
+        fix INERT for the spelling that is actually emitted/stored. The
+        classifier's candidate index spells core kinds `core:<Kind>`
+        (`extractor_v2.CORE_OBJECT_KEYS`/`SUBJECTS`/`EVENTS`), `create_object`/
+        `create_subject` accept that spelling, and `subject_binding._normalize_kind`
+        already folds it away for comparison — the expansion table was the one
+        place that told the two apart.
+        """
+        assert CORE_ALIASED_KINDS, "alias universe is empty — pin is vacuous"
+        for kind in sorted(CORE_ALIASED_KINDS):
+            core = f"core:{kind}"
+            bare_bucket = set(shipped.expand_kind(kind))
+            core_bucket = set(shipped.expand_kind(core))
+            assert kind in bare_bucket and core in bare_bucket, (kind, sorted(bare_bucket))
+            assert kind in core_bucket and core in core_bucket, (core, sorted(core_bucket))
+            assert bare_bucket <= core_bucket, (
+                f"expand_kind({core!r}) dropped members of expand_kind({kind!r}): "
+                f"{sorted(bare_bucket - core_bucket)}")
+            assert core_bucket <= bare_bucket, (
+                f"expand_kind({kind!r}) dropped members of expand_kind({core!r}): "
+                f"{sorted(core_bucket - bare_bucket)}")
+
+        # The Subject vocabulary is the reason the alias universe is not just
+        # `CORE_KINDS`: `organization`/`team`/… are §5 Subject kinds that no
+        # canonical set holds, yet `core:team` is exactly what SUBJECTS declares.
+        assert "team" in CORE_ALIASED_KINDS
+        assert "core:team" in shipped.expand_kind("team")
+
+        # ORDERING (#11000 R3): the alias pass must run AFTER
+        # `LEGACY_KIND_ALIASES`, or a stored legacy spelling is dropped from the
+        # `core:` bucket — `core:deployment` would lose `dev:deployment` and
+        # pre-#7848 rows stop being readable.
+        assert "dev:deployment" in shipped.expand_kind("core:deployment")
+
+    # ── the negative control ───────────────────────────────────────────
+
+    def test_a_kind_without_a_subclassof_declaration_is_unchanged(self, shipped):
+        """A kind with no `subclassOf` (and no equivalence/alias) stays self-only.
+
+        Control: this passes before AND after the fix. It pins that the widening
+        is DECLARATION-DRIVEN — that it did not become a blanket "every pack kind
+        gains a parent", which would make every kind read as every other kind.
+        Population is derived: every declared pack kind that appears in no
+        `subclassOf` child / `equivalentTo` source / legacy-alias entry.
+        """
+        universe = {k for packs in shipped.list_all_kinds().values() for k in packs}
+        touched = {f"{p.namespace}:{c}" for p in shipped.packs.values()
+                   for c in p.kind_subclasses}
+        touched |= {f"{p.namespace}:{k}" for p in shipped.packs.values()
+                    for k in p.kind_equivalences}
+        untouched = universe - touched
+        assert untouched, "no untouched pack kind exists — the control is vacuous"
+
+        widened = [(k, shipped.expand_kind(k)) for k in sorted(untouched)
+                   if shipped.expand_kind(k) != [k]]
+        assert not widened, (
+            "a kind with no `subclassOf`/`equivalentTo` declaration was widened "
+            f"anyway — the widening is not declaration-driven: {widened}")
+        assert shipped.expand_kind("dev:code") == ["dev:code"]
+
+    # ── transitivity: ONE level, and pinned as such ────────────────────
+
+    def test_one_level_is_the_whole_closure_because_the_declaration_is_depth_one(
+            self, tmp_path):
+        """The contract is ONE hop, and it equals the transitive closure.
+
+        #11000 raises the transitivity question directly. The answer is decided
+        and pinned, not left implicit: RDFS §3.4 makes `rdfs:subClassOf`
+        transitive and SHACL's `sh:class` validates against the transitive
+        closure of `rdf:type`, so a *closure* is the standard reading — and here
+        the closure COLLAPSES to one level because of two properties of the
+        declaration model, each asserted below:
+
+          (1) a pack can only subclass a CORE kind (`_validate` allowlist), so no
+              pack kind can ever be another pack kind's parent; and
+          (2) no core kind is itself a child, so the core rows are a forest of
+              depth 1.
+
+        So a fixpoint walk would compute exactly this table. The pins below are
+        the ones that keep that true: relax either premise and they red, which is
+        the signal to implement the walk — instead of under-widening silently.
+        """
+        # (1) A pack-parented subclassOf is refused by the validator.
+        pack_dir = tmp_path / "grandchild"
+        pack_dir.mkdir()
+        (pack_dir / "manifest.yaml").write_text(yaml.safe_dump({
+            "namespace": "grandchild", "name": "Grandchild",
+            "ontology": {
+                "extends": "core",
+                "objectKinds": ["thing"],
+                "subclassOf": {"thing": "dev:epic"},  # a PACK kind as parent
+            },
+        }), encoding="utf-8")
+        registry = PackRegistry(str(tmp_path))
+        registry.load_all()
+        assert any("not found in core ontology" in e
+                   for e in registry.errors.get("grandchild", [])), registry.errors
+
+        # (2) The core rows are depth 1: no row's parent is another row's child.
+        children = {child for row in CORE_SUBCLASSES.values() for child in row}
+        assert not (set(CORE_SUBCLASSES) & children), (
+            "a core kind is both a hierarchy root and a child — the core rows are "
+            f"no longer depth 1, so one-hop widening under-widens: "
+            f"{sorted(set(CORE_SUBCLASSES) & children)}")
