@@ -185,8 +185,8 @@ below, and `test-track-b`'s save arm — `python-ci.yml:3222`, `cache: pip`) are
 against the censored 15.9 m and by ~11 m against the completed ~20 m. ⛔ **`test` is NOT one of
 them:** #11063 re-derived its SUM on a MEASURED ~7.3 m startup plus an 8 m cache-write term and
 split its payload, so it no longer writes the 3.6 GB archive at all (its row below is the
-authority). Nor is `test-carve-out`, whose pip step has been `actions/cache/restore@v4` since
-#10182. Re-deriving them is owed and is deliberately NOT done here: the two cancellations that DID
+authority). Nor is `test-carve-out`, whose pip step has been `actions/cache/restore@v4` since #10182.
+Re-deriving them is owed and is deliberately NOT done here: the two cancellations that DID
 move a cap (`test-d14-hosted-api`, `test-track-b` — both worked below) were sized WITH this `~9 m`
 figure rather than from a fresh save measurement, and this document's rule is to move a cap from a measurement, not from a comparison of two samples.
 
