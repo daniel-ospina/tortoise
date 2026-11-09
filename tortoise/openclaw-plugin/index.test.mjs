@@ -10,10 +10,17 @@ import { join } from "node:path";
 import { test } from "node:test";
 
 import register, {
+  boundedPrompt,
+  boundedSessionId,
+  MAX_SESSION_ID_CHARS,
+  REFLEX_PROMPT_MAX_BYTES,
   captureRecords,
+  createContinuity,
   createDedupe,
   readConfig,
+  reflexPayload,
   runCommand,
+  runHosted,
   spoolDir,
   spoolFile,
   stateDir,
@@ -109,12 +116,27 @@ test("createDedupe: a repeated block is injected once per session key", () => {
   assert.equal(dedupe("s2", "same"), true);
 });
 
-test("runCommand: reads the block off stdout; a failing command yields ''", async () => {
+test("createContinuity: the last block per session, '' when none", () => {
+  const continuity = createContinuity();
+  assert.equal(continuity.prior("s1"), "");
+  continuity.remember("s1", "b1");
+  continuity.remember("s1", "b2");
+  assert.equal(continuity.prior("s1"), "b2");
+  assert.equal(continuity.prior("s2"), "");
+});
+
+test("runCommand: pipes the reflex contract; a failing command yields ''", async () => {
   const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const capture = join(dir, "stdin.json");
   const good = join(dir, "good.sh");
-  writeFileSync(good, "#!/bin/sh\ncat >/dev/null\nprintf 'block:%s' \"$1\"\n");
+  writeFileSync(good, `#!/bin/sh\ncat > ${capture}\nprintf 'block'\n`);
   chmodSync(good, 0o755);
-  assert.equal(await runCommand(good, "hello", 2000), "block:volunteer");
+  assert.equal(await runCommand(good, "hello", 2000), "block");
+  assert.deepEqual(JSON.parse(readFileSync(capture, "utf8")), {
+    window: [{ role: "user", content: "hello" }],
+    session_id: null,
+    prior_context: null,
+  });
 
   const bad = join(dir, "bad.sh");
   writeFileSync(bad, "#!/bin/sh\nexit 3\n");
@@ -197,4 +219,216 @@ test("register: llm_output appends each session to its OWN spool file", async ()
     if (previous === undefined) delete process.env.TORTOISE_OPENCLAW_SPOOL_DIR;
     else process.env.TORTOISE_OPENCLAW_SPOOL_DIR = previous;
   }
+});
+
+test("reflexPayload: the machine contract, with continuity in prior_context", () => {
+  assert.deepEqual(JSON.parse(reflexPayload("hi")), {
+    window: [{ role: "user", content: "hi" }],
+    session_id: null,
+    prior_context: null,
+  });
+  // A payload KEY (not an argv flag) is what makes an older `tortoise`
+  // ignore continuity and still run — an unknown flag would exit non-zero and
+  // the fail-open catch would inject nothing, silently, on every turn.
+  assert.deepEqual(
+    JSON.parse(reflexPayload("hi", { sessionId: "s1", priorContext: "blk" })),
+    {
+      window: [{ role: "user", content: "hi" }],
+      session_id: "s1",
+      prior_context: "blk",
+    },
+  );
+});
+
+test("register: hands the reflex the block it injected last turn (continuity)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const log = join(dir, "payloads.jsonl");
+  const bin = join(dir, "fake-tortoise.sh");
+  // Records the payload it was handed and answers with a block derived from
+  // the prompt, so two turns produce two DIFFERENT blocks (the digest dedupe
+  // cannot be what suppresses anything here).
+  writeFileSync(
+    bin,
+    `#!${process.execPath}\n` +
+      `const fs = require("node:fs");\n` +
+      `let raw = "";\n` +
+      `process.stdin.on("data", (c) => { raw += c; });\n` +
+      `process.stdin.on("end", () => {\n` +
+      `  fs.appendFileSync(${JSON.stringify(log)}, raw + "\\n");\n` +
+      `  const body = JSON.parse(raw);\n` +
+      `  process.stdout.write("block-for:" + body.window[0].content);\n` +
+      `});\n`,
+  );
+  chmodSync(bin, 0o755);
+
+  const api = fakeApi({ command: bin });
+  register(api);
+  const hook = api.hooks.get("before_prompt_build");
+
+  const first = await hook({ prompt: "alpha" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(first, { prependContext: "block-for:alpha" });
+  const second = await hook({ prompt: "beta" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(second, { prependContext: "block-for:beta" });
+
+  // Continuity is ONE TURN DEEP, as the README states: turn 3 carries TURN 2's
+  // block only, so turn 1's is no longer an input and can fire again. Pinned so
+  // the documented boundary cannot be quietly overstated a second time.
+  const third = await hook({ prompt: "delta" }, { trigger: "user", sessionKey: "s1" });
+  assert.deepEqual(third, { prependContext: "block-for:delta" });
+
+  // A different session starts clean — continuity is per session key.
+  const other = await hook({ prompt: "gamma" }, { trigger: "user", sessionKey: "s2" });
+  assert.deepEqual(other, { prependContext: "block-for:gamma" });
+
+  const calls = readFileSync(log, "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  assert.equal(calls.length, 4);
+  // Turn 1 has nothing to suppress; turn 2 carries TURN 1's block, which is
+  // the reflex's only re-mention-suppression input.
+  assert.deepEqual(calls[0], {
+    window: [{ role: "user", content: "alpha" }],
+    session_id: "s1",
+    prior_context: null,
+  });
+  assert.deepEqual(calls[1], {
+    window: [{ role: "user", content: "beta" }],
+    session_id: "s1",
+    prior_context: "block-for:alpha",
+  });
+  // …and turn 3 carries only turn 2's block: the depth is one turn, not the
+  // whole session (see the README's "one turn deep" boundary).
+  assert.deepEqual(calls[2], {
+    window: [{ role: "user", content: "delta" }],
+    session_id: "s1",
+    prior_context: "block-for:beta",
+  });
+  assert.deepEqual(calls[3], {
+    window: [{ role: "user", content: "gamma" }],
+    session_id: "s2",
+    prior_context: null,
+  });
+});
+
+test("runHosted: posts the documented /v1/context contract, not a bare prompt", async () => {
+  const realFetch = globalThis.fetch;
+  let seen = null;
+  globalThis.fetch = async (url, options) => {
+    seen = { url, options };
+    return { ok: true, json: async () => ({ block: "hosted-block", pointers: [] }) };
+  };
+  try {
+    // A 300-char key: the hosted model caps `session_id` at 256
+    // (`tortoise/hosted_api.py`), and an over-long one 422s EVERY turn — which
+    // `!response.ok` turns into "" for the whole session. Driven through the
+    // HOSTED body on purpose: pinning only the exported helper leaves this leg
+    // free to drop the bound with every test still green (measured, review 3).
+    const longSessionId = "k".repeat(300);
+    const block = await runHosted(
+      "https://api.test.example/",
+      "k",
+      "what do we know?",
+      500,
+      { sessionId: longSessionId, priorContext: "prev-block" },
+    );
+    assert.equal(block, "hosted-block");
+    assert.equal(seen.url, "https://api.test.example/v1/context");
+    assert.equal(seen.options.method, "POST");
+    assert.equal(seen.options.headers.Authorization, "Bearer k");
+    // `window` is REQUIRED by VolunteerContextRequest (tortoise/hosted_api.py):
+    // the old `{prompt}` body is a 422, which the fail-open catch turns into a
+    // silent no-injection with no signal at all.
+    const body = JSON.parse(seen.options.body);
+    assert.deepEqual(body, {
+      window: [{ role: "user", content: "what do we know?" }],
+      session_id: longSessionId.slice(0, 256),
+      prior_context: "prev-block",
+    });
+    // The literal, not the constant: this is the bound the SERVER enforces, and
+    // the Python row pins the constant to the model. Together they close the
+    // loop; either one alone lets the pair drift.
+    assert.equal(body.session_id.length, 256);
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("runHosted: no key, a refused request and a non-JSON body are all ''", async () => {
+  const realFetch = globalThis.fetch;
+  try {
+    assert.equal(await runHosted("https://api.test", "", "p", 100), "");
+    for (const response of [
+      { ok: false, json: async () => ({ detail: "Invalid API key" }) },
+      { ok: true, json: async () => { throw new Error("not json"); } },
+    ]) {
+      globalThis.fetch = async () => response;
+      assert.equal(await runHosted("https://api.test", "k", "p", 100), "");
+    }
+    globalThis.fetch = async () => { throw new Error("unreachable"); };
+    assert.equal(await runHosted("https://api.test", "k", "p", 100), "");
+  } finally {
+    globalThis.fetch = realFetch;
+  }
+});
+
+test("boundedPrompt: the window is bounded in BYTES, so a multibyte prompt is not refused", () => {
+  // 15,000 CJK characters is 45,000 UTF-8 bytes. A CHARACTER slice passed it
+  // through, the reflex's `validate_request` refused the window
+  // (`WINDOW_TOO_LARGE_BYTES`), and the fail-open catch turned that into an
+  // empty injection — the silent-no-op class this seam exists to avoid.
+  const long = "字".repeat(15000) + "END";
+  const bounded = boundedPrompt(long);
+  assert.ok(Buffer.byteLength(bounded, "utf8") <= REFLEX_PROMPT_MAX_BYTES);
+  // …and the bound is not "achieved" by corrupting the text: no replacement
+  // char (a split codepoint), and the ask at the END of the turn survives.
+  assert.ok(!bounded.includes("\uFFFD"));
+  assert.ok(bounded.endsWith("END"));
+  // A prompt inside the budget is returned untouched — the bound must not
+  // rewrite ordinary turns (nor normalise them).
+  assert.equal(boundedPrompt("short á prompt"), "short á prompt");
+});
+
+test("register: a long multibyte prompt reaches the reflex inside its byte budget", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "tortoise-oc-"));
+  const log = join(dir, "payloads.jsonl");
+  const bin = join(dir, "fake-tortoise.sh");
+  writeFileSync(
+    bin,
+    `#!${process.execPath}\n` +
+      `const fs = require("node:fs");\n` +
+      `let raw = "";\n` +
+      `process.stdin.on("data", (c) => { raw += c; });\n` +
+      `process.stdin.on("end", () => {\n` +
+      `  fs.appendFileSync(${JSON.stringify(log)}, raw + "\\n");\n` +
+      `  process.stdout.write("block");\n` +
+      `});\n`,
+  );
+  chmodSync(bin, 0o755);
+
+  const api = fakeApi({ command: bin });
+  register(api);
+  const hook = api.hooks.get("before_prompt_build");
+  // 12,000 CJK chars = 36,000 bytes: over the reflex's 15,296-byte content
+  // budget, comfortably under the old 15,000-CHARACTER slice, so only a byte
+  // bound can keep this inside the contract.
+  const prompt = "字".repeat(12000) + " the actual question";
+  await hook({ prompt }, { trigger: "user", sessionKey: "long" });
+
+  const sent = JSON.parse(readFileSync(log, "utf8").trim());
+  const content = sent.window[0].content;
+  assert.ok(Buffer.byteLength(content, "utf8") <= REFLEX_PROMPT_MAX_BYTES);
+  assert.ok(content.endsWith("the actual question"));
+  assert.ok(!content.includes("\uFFFD"));
+});
+
+test("boundedSessionId: the hosted body's session_id stays inside the model's 256", () => {
+  // The server model is `session_id: str | None = Field(None, max_length=256)`,
+  // and an over-long key 422s every hosted turn — swallowed as "" by the
+  // fail-open catch, i.e. nothing injected for that whole session.
+  assert.equal(MAX_SESSION_ID_CHARS, 256);
+  const long = "k".repeat(300);
+  assert.equal(boundedSessionId(long).length, 256);
+  assert.equal(boundedSessionId("s-1"), "s-1"); // short ids pass through
+  assert.equal(boundedSessionId(""), null);
+  assert.equal(boundedSessionId(undefined), null);
+  const payload = JSON.parse(reflexPayload("p", { sessionId: long }));
+  assert.equal(payload.session_id.length, MAX_SESSION_ID_CHARS);
 });

@@ -40,8 +40,21 @@ The earlier `platform-seams.md` row for #2120 (`~/.openclaw/*.claw` +
 * **Fail-open.** Every handler catches. Unreachable API, missing key, timeout,
   empty graph or nothing above the confidence gate ⇒ nothing is injected and the
   turn proceeds untouched. A reflex failure can never break an OpenClaw turn.
-* **Cross-turn dedupe.** The same injected block is never repeated within one
-  session key.
+* **Cross-turn dedupe.** A block identical to the one just injected is not
+  injected again on the next turn (per session key), and the block itself is
+  handed back to the reflex as `prior_context` — `tortoise volunteer`'s JSON
+  contract locally, the `POST /v1/context` body hosted — so a pointer the last
+  injected block carried is suppressed when the next block differs — **except on
+  an explicit ask** (a wh-question, a trailing "?", or "remind me what X was"),
+  which deliberately re-fires (`volunteer._is_explicit_ask`): the user asked
+  for it again. Measured, not assumed: a turn 3 phrased as a question re-fires
+  with correct continuity in place, so that carve-out is not a continuity
+  failure.
+  Continuity is **one turn deep**: `createContinuity` remembers the last block
+  per session key, not a session-wide ledger of every pointer surfaced, so a
+  pointer surfaced two or more turns ago can fire again. `prior_context` is the
+  reflex's only re-mention-suppression input; a session id alone suppresses
+  nothing.
 * **No credentials required for capture.** Captured turns go to a local spool,
   **one file per session** — `$OPENCLAW_STATE_DIR/tortoise/turns/<session>.jsonl`
   (default `~/.openclaw/tortoise/turns/`) — which
@@ -69,9 +82,9 @@ the plugin config, so the plugin files nothing to the network itself.
 | Key | Default | Meaning |
 |---|---|---|
 | `command` | `$TORTOISE_COMMAND` | Local `tortoise` executable to run the reflex through (preferred — no key leaves the machine) |
-| `apiKey` | `$TORTOISE_API_KEY` | Key for the hosted reflex (`POST /v1/context`) |
+| `apiKey` | `$TORTOISE_API_KEY` | Key for the hosted reflex (`POST /v1/context`, the documented `{window, session_id, prior_context}` contract) |
 | `apiUrl` | `$TORTOISE_API_URL` or `https://api.premiselabs.co` | Hosted API base |
-| `timeoutMs` | `800` | Per-turn reflex budget |
+| `timeoutMs` | `800` | Per-turn reflex budget. It matches the HOSTED call (the `≤300 ms p95` delivery target); the local `command` path spawns a Python process that loads the graph engine + embedding model on every turn — measured ~10–13 s per invocation on a dev box with the `embeddings` extra (2026-10-13) — so raise it well above the default when `command` is set, or the plugin's fail-open timeout injects nothing (`#8959`) |
 | `capture` | `true` | Append turns to the capture spool |
 
 ## Test
@@ -80,5 +93,11 @@ the plugin config, so the plugin files nothing to the network itself.
 node --test tortoise/openclaw-plugin/index.test.mjs
 ```
 
-`tests/test_openclaw_seam.py` runs the same suite and pins the installer and the
-spool parser against it.
+`tests/test_openclaw_seam.py` runs the same suite and pins the installer, the
+spool parser, and the hosted body (validated with the server's own
+`VolunteerContextRequest`) against it.
+
+`tortoise-hook-version` is the install-contract generation (version 2: the
+hosted contract + continuity). Re-install after an upgrade —
+`tortoise session verify --harness openclaw` / `tortoise doctor` report an
+older installed copy as stale.
