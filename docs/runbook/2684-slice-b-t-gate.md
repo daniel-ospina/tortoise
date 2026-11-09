@@ -66,9 +66,9 @@ explicitly or the numbers below are simply not re-read.
 |---|---|---|
 | "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:4472` (`_verbatim_span_in_turn`), `:4500` (`_carries_value`), `:5542` (`_value_verbatim_span`), call site `:10367-10370`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
 | "a span-carrying schema field" | **landed** — `Point.span_start`/`span_end`, all-or-nothing, `end > start`, `>= 0`, validated on the model AND every write path | `tortoise/commit_schema.py:678-705` (fields + `_span_is_an_address`), `tortoise/commit_schema.py:445` (`validate_span`) — the field itself is #5007's (`2ff8c3c88`) |
-| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:1004-1006`; `tortoise/sdk.py:38950` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:38944`); `e70a5ff17` (#8658 / #9543) |
+| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:1004-1006`; `tortoise/sdk.py:39006` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:39000`); `e70a5ff17` (#8658 / #9543) |
 | "Requires ONE extractor re-ingest (~4 h) then cached cycles" | **true for T-2 only**; the per-question leg needs **no** re-ingest — the committed receipts + fixtures are the population (§2) | this runbook §2 |
-| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:38911-38927` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
+| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:38967-38983` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
 
 **Nothing in the ontology or the SDK/MCP surface is touched by this slice.**
 
@@ -411,7 +411,7 @@ each of the 11 carries a warning the census attributes to its class, pinned by
 "no resolvable source turn" string, so for those two the class is carried by the
 census's derivation from `quote`/`turn_idx`, not by the warning text); the
 obvious relaxation is measured on both readings and refused; the degraded-tier
-boundary is declared (@ `sdk.py:38911-38927`), not an oversight.
+boundary is declared (@ `sdk.py:38967-38983`), not an oversight.
 
 **Not settled, and it needs a home.** The accuracy movement (T-2, re-homed to
 **#8486**), the *observed* — rather than re-derived — stamping rate (needs an

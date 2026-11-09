@@ -1487,7 +1487,7 @@ def test_a_retry_that_raises_after_the_re_bind_keeps_the_first_arms_capture(
     assert model.s4_prompts, "S4 ran, so it saw a narrative"
     # ⛔ A phrase UNIQUE TO THE NARRATIVE, never the bare entity name (review round
     # 6, P3). `run_s4` appends `_render_source_transcript(edus)` to its prompt
-    # (`extractor_v2.py:3627`, called with the run's `edus` at `:13216`), and this
+    # (`extractor_v2.py:3627`, called with the run's `edus` at `:13260`), and this
     # fixture's transcript opens "Alice decided the budget is 40k" — so
     # `"Alice" in s4_prompts[0]` is satisfied by the TRANSCRIPT regardless of
     # `story`, and the positive leg pinned nothing. "Alice set a budget" is arm A's

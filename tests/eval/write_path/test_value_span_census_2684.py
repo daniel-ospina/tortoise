@@ -1225,15 +1225,15 @@ _CROSS_FILE_CITES: dict[tuple[str, int], tuple[str, str]] = {
     ("tools/longmem_eval/retrieve.py", 1006):
         ('entry["span_end"] = p["span_end"]',
          "the annotated end offset"),
-    ("tortoise/sdk.py", 38944):
+    ("tortoise/sdk.py", 39000):
         ("rows = graph.query(", "the provenance query's opener"),
-    ("tortoise/sdk.py", 38950):
+    ("tortoise/sdk.py", 39006):
         ('+ ", n.quote, n.source_turn_id, n.span_start, n.span_end",',
          "the RETURN continuation appending #8658's four columns"),
-    ("tortoise/sdk.py", 38911):
+    ("tortoise/sdk.py", 38967):
         ("# ⛔ KNOWN LIMITATION — this read is the PROJECT-search point",
          "the ⛔ KNOWN LIMITATION comment"),
-    ("tortoise/sdk.py", 38927):
+    ("tortoise/sdk.py", 38983):
         ("# or of #8658.", "the end of the ⛔ KNOWN LIMITATION comment"),
     ("tortoise/retrieval.py", 3288):
         ("at = _pkg_turn_key(a)",
