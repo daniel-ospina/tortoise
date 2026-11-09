@@ -3573,14 +3573,6 @@ class PackRegistry:
         # `expand_kind("issue")` inherits everything `dev:issue` gained because
         # the bare form is equivalent to it, not because a bare bucket copies.
         #
-        # ⚠ RECORDED, not fixed (measured 2026-11-09): the five §5 SUBJECT
-        # children (`organization`, `team`, …) only become bucket keys in the
-        # `core:`-alias pass BELOW, which runs after this walk — so unlike every
-        # Object/Point/Event child they do NOT inherit `Subject` upward
-        # (`expand_kind("team") == ["team", "core:team"]`). No writer stores
-        # `subjectKind="Subject"` (the layer root is not a stored kind), so this
-        # has no wrong answer today; seeding those keys before this walk is the
-        # fix if one ever appears.
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
         # are disjoint from its keys — both pinned), so both walks reach a
