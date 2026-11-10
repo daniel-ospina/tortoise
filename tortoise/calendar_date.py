@@ -18,6 +18,16 @@ numeric epoch into a window. All of them are accepted here, and the result is
 always validated through ``date``, so ``2026-13-45`` is undated rather than a
 fabricated date.
 
+⛔ THE RULE IS A UNION, and it is a union over the SECOND axis too: no value
+that any of the replaced parsers read may stop parsing. Three of them read a
+calendar-date PREFIX and one was as tolerant as ``datetime.fromisoformat``, so
+this resolver deliberately keeps BOTH tolerances as documented fallbacks: the
+whole-value grammar first (it knows about offsets, which is what the UTC
+truncation needs), then a prefix reading for a value whose TAIL is unreadable
+(``2023-05-20 02:21 PDT``, ``2023/05/20 (Sat) 02:21 (approx)``,
+``2023-05-20T+05:00``) — an unparseable tail means the exact INSTANT is
+unknown, not that the stated DAY is.
+
 ⛔ MONTH GRANULARITY IS NOT COERCED. A value naming only ``YYYY/MM`` (or
 ``2026-09``) has NO day, and this resolver returns ``None`` rather than
 inventing the 1st. Inventing one would silently place a month-granularity
@@ -52,7 +62,12 @@ it that way, and naming a day makes no instant claim — but NOT to
 :func:`calendar_datetime`, because #9202 (owner ruling, ``ONTOLOGY.md`` §4.7)
 makes a present-but-un-orderable window end ``END_UNKNOWN`` and names the
 number as the fix; dating the string here would be a fourth notion of "names
-an instant", the exact defect #9202 exists to remove.
+an instant", the exact defect #9202 exists to remove. The string-epoch reading
+is BOUNDED by DIGIT COUNT, so a pure number is never guessed: 8 digits is a
+compact DATE (``20230520``), 9-10 digits is a SECONDS epoch
+(``1684549260``), and 11+ digits is undated — that is the millisecond shape
+``validity`` names and refuses at the write door (#10079), not something this
+module should turn into a year-8380 date.
 
 The undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``) is a
 POSITIVE date that means "no date". It is EXPORTED, never applied: callers
@@ -92,19 +107,30 @@ UNDATED_SENTINEL_DATE = "1970-01-01"
 #: trailing ``(?!\d)`` keeps a 3-digit day (``2023/04/105``) from being
 #: truncated to two. Moved here from ``coverage_loop`` (#11646) so the shape
 #: set has ONE home instead of one copy per seam.
+#:
+#: Its TWO roles are deliberate: it is a component of ``_INSTANT_RE`` AND the
+#: TOLERANT last-resort reading for a value the whole-value grammar rejects but
+#: whose leading date is unmistakable (``2023-05-20 02:21 PDT``,
+#: ``2023/05/20 (Sat) 02:21 (approx)``, ``2023-05-20T+05:00``). Every seam that
+#: read a prefix before #11646 accepted those, so a strictly-anchored grammar
+#: would have made the union claim false in exactly the direction the issue
+#: exists to fix (a real date silently becoming undated) — an unreadable TAIL
+#: means the exact INSTANT is unknown, not that the stated DAY is.
 _CALENDAR_SHAPE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 
 #: A WHOLE-value instant: the calendar prefix, an optional producer weekday
 #: label, an optional time of day, and an optional offset. The weekday label
 #: (``(Sat)``) is REDUNDANT and is deliberately not checked against the date —
-#: a mislabelled day must never make a real date unparseable. Hours/minutes
-#: are ``\d{2}`` because that is what ``datetime.fromisoformat`` accepts (it
-#: refuses ``T2:5``), so the two agree on what a timestamp is.
+#: a mislabelled day must never make a real date unparseable. The time grammar
+#: is deliberately as WIDE as ``datetime.fromisoformat`` accepts it (an
+#: hour-only ``T02``, comma OR dot decimals, more than 6 fractional digits —
+#: ``fromisoformat`` takes all three), because every narrowing here would make a
+#: value that parsed before stop parsing (the union rule).
 _INSTANT_RE = re.compile(
     r"^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})(?!\d)"
     r"(?:\s*\([A-Za-z]{2,9}\))?"
-    r"(?:[T\s]+(?P<hour>\d{2}):(?P<minute>\d{2})"
-    r"(?::(?P<second>\d{2})(?:\.(?P<fraction>\d{1,6}))?)?)?"
+    r"(?:[T\s]+(?P<hour>\d{2})"
+    r"(?::(?P<minute>\d{2})(?::(?P<second>\d{2})(?:[.,](?P<fraction>\d+))?)?)?)?"
     r"\s*(?P<offset>[Zz]|[+-]\d{2}:?\d{2})?\s*\Z"
 )
 
@@ -112,9 +138,17 @@ _INSTANT_RE = re.compile(
 #: calendar form: compact (``20261020``) and ISO week (``2026-W43-2``,
 #: ``2026W432``, week-only). Kept because the assembly ladder has always
 #: accepted them — this union must not drop a value that already parsed.
-_COMPACT_OR_WEEK_RE = re.compile(r"^(?:\d{8}|\d{4}-?W\d{2}(?:-?\d)?)")
+#: ANCHORED to the whole value: an unanchored ``\d{8}`` would truncate a 9+
+#: digit EPOCH spelling (``2020010112`` = 2034-01-04) to its first eight digits
+#: and invent 2020-01-01 — the fabricated day this module forbids, and a window
+#: bound read fourteen years early.
+_COMPACT_OR_WEEK_RE = re.compile(r"^(?:\d{8}|\d{4}-?W\d{2}(?:-?\d)?)\Z")
 
 _OFFSET_RE = re.compile(r"^(?P<sign>[+-])(?P<hours>\d{2}):?(?P<minutes>\d{2})$")
+
+#: A pure-number string in the SECONDS-epoch range (9-10 digits, optional
+#: fraction). 8 digits is a compact date; 11+ is a millisecond epoch.
+_EPOCH_STRING_RE = re.compile(r"^-?\d{9,10}(?:\.\d+)?$")
 
 
 def calendar_date(value: object, *, utc_truncate: bool = False) -> date | None:
@@ -177,8 +211,9 @@ def _date_from_epoch(value: float) -> date | None:
 
 
 def _string_date(s: str, *, utc_truncate: bool) -> date | None:
-    """The day a STRING names — the instant grammar first, then the date-only
-    spellings, then an epoch spelling (see the #9202 asymmetry)."""
+    """The day a STRING names — the whole-value instant grammar, then the
+    date-only spellings, then an epoch spelling (see the #9202 asymmetry), and
+    finally the TOLERANT prefix reading (see ``_CALENDAR_SHAPE_RE``)."""
     if not s:
         return None
     match = _INSTANT_RE.match(s)
@@ -196,7 +231,10 @@ def _string_date(s: str, *, utc_truncate: bool) -> date | None:
     if d is not None:
         return d
     epoch = _as_epoch(s)
-    return None if epoch is None else _date_from_epoch(epoch)
+    if epoch is not None:
+        return _date_from_epoch(epoch)
+    # tolerant fallback: a rejected tail does not make a stated day unknown
+    return _prefix_date(s)
 
 
 def _string_instant(s: str) -> datetime | None:
@@ -229,7 +267,36 @@ def _date_only_shape(s: str) -> date | None:
         return None
 
 
+def _prefix_date(s: str) -> date | None:
+    """The leading calendar date of a value the whole-value grammar rejected.
+
+    The written day is the answer: an unparseable TAIL (`` PDT``, ``(approx)``,
+    a bare ``T+05:00``) means the value's exact instant is unknown, not that its
+    stated day is. Validation still goes through ``date``, so ``2023/04/105``
+    and ``2026-13-45`` stay undated.
+    """
+    match = _CALENDAR_SHAPE_RE.match(s)
+    if match is None:
+        return None
+    try:
+        return date(int(match.group(1)), int(match.group(2)),
+                    int(match.group(3)))
+    except ValueError:
+        return None
+
+
 def _as_epoch(s: str) -> float | None:
+    """A bounded SECONDS-epoch reading of a pure-number string.
+
+    8 digits is a compact DATE (``20230520``), so the epoch arm needs 9+; and it
+    stops at 10 digits, the seconds range this repo writes. Beyond that a number
+    is a MILLISECOND epoch (``validity`` names that shape and the write door
+    refuses it with the number named as the fix, #10079) — reading it here would
+    yield year-8380 dates from a 12-digit value. Not reading it is UNDATED,
+    which is the honest answer for a shape no reader of this module writes.
+    """
+    if not _EPOCH_STRING_RE.match(s):
+        return None
     try:
         epoch = float(s)
     except (ValueError, TypeError):
@@ -257,7 +324,8 @@ def _match_naive(match: re.Match[str]) -> datetime | None:
             0 if hour is None else int(hour),
             int(match.group("minute") or 0),
             int(match.group("second") or 0),
-            int((match.group("fraction") or "0").ljust(6, "0")),
+            # >6 fractional digits are truncated, exactly as the stdlib does
+            int((match.group("fraction") or "0")[:6].ljust(6, "0")),
         )
     except ValueError:
         return None

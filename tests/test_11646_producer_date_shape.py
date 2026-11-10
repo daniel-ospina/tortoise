@@ -150,18 +150,25 @@ def test_assembly_as_of_window_excludes_producer_dated_rows_after_the_question()
 
 def test_assembly_spine_orders_producer_dates_chronologically():
     """Dating the rows also restores the CHRONOLOGICAL spine: producer-shaped
-    rows used to sort to ``_date.max`` (last) regardless of their date."""
+    rows used to sort to ``_date.max`` (last) regardless of their date.
+
+    The ids are chosen so the ID tiebreak and the DATE order DISAGREE
+    (``a-late`` sorts first by id, last by date). With the ids in the opposite
+    order this test would pass even if no row were dated at all — the spine's
+    tiebreak is ``(date, object_id, id)`` — so it would not pin the regression
+    it is named for (review cycle 1, finding 4)."""
     port = _Port([
-        {"object_id": "o", "kind": "point", "id": "p-late",
+        {"object_id": "o", "kind": "point", "id": "a-late",
          "content": "later", "when": "2023/05/25 (Thu) 10:00",
          "created_at": None, "status": "live"},
-        {"object_id": "o", "kind": "point", "id": "p-early",
+        {"object_id": "o", "kind": "point", "id": "z-early",
          "content": "earlier", "when": "2023/05/20 (Sat) 02:21",
          "created_at": None, "status": "live"},
     ])
     rows = collect_slices(port, [_cand("o", 0)],
                           shape=AssemblyShape.ORDERING).timeline_rows
-    assert [r["id"] for r in rows] == ["p-early", "p-late"]
+    assert [r["id"] for r in rows] == ["z-early", "a-late"]
+    assert [r["date"] for r in rows] == [date(2023, 5, 20), date(2023, 5, 25)]
 
 
 # ── seam 2: the shipped valid-time selection ───────────────────────────────
@@ -237,10 +244,13 @@ def test_created_sort_key_and_names_an_instant_read_the_producer_shape():
     assert _created_sort_key(PRODUCER_SESSION_DATE)[0] == 0
     assert _names_an_instant(PRODUCER_SESSION_DATE) is True
     assert end_state(PRODUCER_SESSION_DATE, None) == END_KNOWN
-    # ordered by REAL instant, between the two ISO controls (same day ± time)
-    assert _created_sort_key("2023-05-20T00:00:00Z") < \
+    # Ordered WITHIN the producer shape only: that value is zone-less, so it is
+    # read NAIVELY (the #3982 reading) and comparing it against a UTC-anchored
+    # value would make the assertion a property of the HOST zone, not the value
+    # (it fails at TZ=Asia/Kolkata — review cycle 1, finding 3).
+    assert _created_sort_key("2023/05/20 (Sat) 00:00") < \
         _created_sort_key(PRODUCER_SESSION_DATE) < \
-        _created_sort_key(PRODUCER_SESSION_DATE.replace("02:21", "09:00"))
+        _created_sort_key("2023/05/20 (Sat) 09:00")
     # ISO controls unchanged (date-only = UTC midnight, #3982)
     assert _created_sort_key(ISO_SESSION_DATE) == \
         (0, datetime(2023, 5, 20, tzinfo=UTC).timestamp())
@@ -337,3 +347,52 @@ def test_write_door_still_canonicalises_a_date_variant():
     # a variant whose TIME is unreadable is still refused, never half-shaped
     with pytest.raises(ValueError):
         read_caller_end("2024/3/1Txx")
+
+
+# ── UNION parity: no value that parsed before may stop parsing ─────────────
+#
+# These are the reviewer's cycle-1 counterexamples (finding 1), all VERIFIED
+# against `origin/main`'s three parsers: every one of them read a calendar-date
+# PREFIX (or was as tolerant as ``datetime.fromisoformat``), so a strictly
+# anchored whole-value grammar would have turned a REAL date silently undated —
+# the exact defect #11646 exists to remove, reintroduced through another input.
+
+
+@pytest.mark.parametrize("value", [
+    "2023-05-20 02:21 PDT",             # a zone ABBREVIATION is not an offset
+    "2023/05/20 (Sat) 02:21 (approx)",  # producer shape + an unreadable tail
+    "2023-05-20T+05:00",                # an offset with no time-of-day
+    "2023-05-20T02",                    # hour-only (fromisoformat accepts it)
+    "2023-05-20T02:21:00.1234567",      # >6 fractional digits
+    "2023-05-20T02:21:00,123",          # comma decimal separator
+])
+def test_a_value_that_parsed_before_still_names_its_day(value):
+    expected = "2023-05-20"
+    for name, seam in (("calendar_date", calendar_date), ("_norm_date", _norm_date),
+                       ("_as_date", time_aware._as_date),
+                       ("_calendar_date", _calendar_date),
+                       ("_as_iso_date", time_aware._as_iso_date)):
+        got = seam(value)
+        assert got is not None, f"{name} lost a value it used to parse: {value!r}"
+        assert str(got).startswith(expected), f"{name}({value!r}) -> {got!r}"
+
+
+def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
+    """Review cycle 1, finding 2: an unanchored ``\\d{8}`` alternative read the
+    first eight digits of a 9/10-digit EPOCH spelling and invented a day
+    (``2020010112`` → 2020-01-01, fourteen years early as a window bound).
+    The digit count decides, deterministically:
+
+    * exactly 8 → a compact DATE (``20230520``);
+    * 9-10 → a SECONDS epoch;
+    * 11+ → undated (the millisecond shape ``validity`` refuses at the write
+      door, #10079 — never a year-8380 date).
+    """
+    assert calendar_date("20230520") == date(2023, 5, 20)
+    assert calendar_date("2020010112") == date(2034, 1, 4)
+    assert calendar_date("202001011") == date(1976, 5, 26)
+    assert calendar_date("202305201112") is None
+    assert calendar_date("1719792000000") is None
+    # and no seam fabricates a day for them either
+    assert time_aware._as_date("202305201112") is None
+    assert _calendar_date("202305201112") is None

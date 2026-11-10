@@ -305,9 +305,13 @@ def _as_date(value) -> str | None:
 
     The measure that decides "names an instant" is
     ``search_engine._created_sort_key`` (via ``validity._names_an_instant``),
-    never this function alone: it is why an epoch spelled as a STRING
-    (``"1900000000"``) is un-datable here and there, while the NUMBER
-    ``1900000000`` is the 2030-03-17 instant in both.
+    never this function alone. The two disagree DELIBERATELY on one spelling:
+    an epoch spelled as a STRING (``"1900000000"``) is dated HERE (the 2030-03-17
+    day) because a day makes no instant claim, while that same measure buckets it
+    as un-orderable — the #9202 ruling, so a present-but-un-orderable window end
+    reads ``END_UNKNOWN``. The NUMBER ``1900000000`` is the 2030-03-17 instant in
+    both. (This sentence previously said the string was "un-datable here and
+    there"; only "there" was true — corrected with #11646.)
     """
     if value is None or isinstance(value, bool):
         return None

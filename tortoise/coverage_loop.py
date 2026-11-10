@@ -94,18 +94,14 @@ _DATE_RECENCY_RE = re.compile(
     r"|\blast\s+(\d+)\s+(days?|weeks?|months?)\b)")
 _UNIT_DAYS = {"day": 1, "week": 7, "month": 30}
 
-#: Calendar-date shapes — MOVED to ``tortoise/calendar_date.py`` (#11646). This
-#: module keeps a thin consumer so the shape set has ONE home: the ingest
-#: producer's ``2023/05/20 (Sat) 03:29`` (measured on the frozen LongMemEval
-#: dataset, 23,867/23,867 values, #3011) and ISO are parsed there, unpadded
-#: month/day included, and validated through ``date.fromisoformat``. Widening
-#: this seam's acceptance is therefore a UNION, and every shape it already read
-#: reads the same day as before — except an offset-bearing timestamp that falls
-#: on a different UTC day, which the written-day reading here keeps as the day
-#: the dataset states.
-#: The PREFIX shape is the one ``tortoise/subgraph_render.py`` and
-#: ``TortoiseSDK._iso_date10`` parse as well; those two stay padded-only (a
-#: frozen render spec, and a session label), so they are not routed here.
+#: Calendar-date shapes live in ``tortoise/calendar_date.py`` (#11646) — ONE
+#: resolver, imported above, so this module carries no grammar of its own. What
+#: this seam needs from it is the measured fact that the ingest producer's
+#: ``2023/05/20 (Sat) 03:29`` (23,867/23,867 values on the frozen LongMemEval
+#: dataset, #3011) and ISO both parse, unpadded month/day included, validated
+#: through ``date``. That is a UNION over what this seam read before, and the
+#: written-day semantics it always had (a timestamp offset never moves the day)
+#: are the resolver's default, so every value reads the same day it did.
 
 
 @dataclass(frozen=True)
@@ -155,8 +151,13 @@ def _calendar_date(value: object) -> str | None:
     every stored date shape in the read path — instead of holding its own
     copy of the grammar. It accepts what the two date sources actually carry
     (ISO dates and timestamps, and the ingest producer's real
-    ``2023/05/20 (Sat) 03:29``, #3011) and validates through
-    ``date.fromisoformat``, so an out-of-range ``2026-13-45`` is undated too.
+    ``2023/05/20 (Sat) 03:29``, #3011) and validates through ``date``, so an
+    out-of-range ``2026-13-45`` is undated too.
+
+    The WRITTEN-DAY semantics are this seam's (and ``sdk._iso_date10``'s): an
+    offset-bearing timestamp keeps the day the dataset states. The resolver's
+    other reading — UTC truncation — belongs to the assembly as-of boundary
+    and is opt-in there.
 
     ``None`` means UNDATED (missing, empty, the undated sentinel, free text):
     no date is ever fabricated, and the caller decides what undated means
