@@ -1554,7 +1554,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
     moved to **57** lines across **18** files, in two moves, one per workstream:
-    `cache_eviction.py:635` (the #10976 census's note on why labels do not partition
+    `cache_eviction.py:677` (the #10976 census's note on why labels do not partition
     the node set) is one, and #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring) is the other. That move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
@@ -1562,7 +1562,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
     matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
-    plus that same `cache_eviction.py:635` comment — is what makes *"a guard would
+    plus that same `cache_eviction.py:677` comment — is what makes *"a guard would
     have needed a hand-maintained allowlist"* a measurement rather than an assertion,
     and it moved 2 → 3 with the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day

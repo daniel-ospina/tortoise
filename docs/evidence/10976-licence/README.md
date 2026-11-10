@@ -115,7 +115,7 @@ eviction suites — the counts are the final run recorded in `WORKTREE-REPORT.md
 | `test_no_two_populations_share_a_resident_count_statement` | a copy-pasted statement would bound a new population by the turn count — fail-open, and invisible to the whole-graph backstop |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
-| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a claim under the graph total with an inflated ceiling passes both guards, so that class rests on the mirror pin alone |
+| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible (a mirror-vs-total check cannot tell inflation from a live cache gaining nodes, and a report-total check would refuse legitimate growth), so that class rests on the mirror pin alone |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.

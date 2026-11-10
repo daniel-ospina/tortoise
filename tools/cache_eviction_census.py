@@ -297,7 +297,10 @@ def main(argv: list[str] | None = None) -> int:
                               "cannot be re-badged by repeating --graph here. "
                               "⚠️ The check is NAME-ONLY: a graph of the same name "
                               "on a different INSTANCE, or measured EARLIER, is "
-                              "NOT detected here."))
+                              "NOT detected here. An earlier census IS bounded "
+                              "downstream: a report claiming more nodes than its "
+                              "population now holds is REFUSED, as is a claim above "
+                              "the graph's whole node count."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "

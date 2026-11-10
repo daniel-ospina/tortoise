@@ -189,8 +189,10 @@ PARITY_INSTRUMENTS: dict[str, str] = {
 #: ``cache_evictor``/``licence_remaining`` spends — became **40x** the population it
 #: bounds. Nothing unserved could be deleted (gate 3 asks the record per node), but the
 #: property the cap exists for — *"evicting more nodes than the instrument measured is
-#: evicting nodes nothing proved"* — was weakened by two orders of magnitude on a small
-#: population. Measured on a lane container: `docs/evidence/10976-licence/`.
+#: evicting nodes nothing proved"* — was weakened by **40x** on a small population (the
+#: multiple is the report's claim over the real population; nothing here is a square, so
+#: do not restate it as an order of magnitude). Measured on a lane container:
+#: `docs/evidence/10976-licence/`.
 #:
 #: ⚠️ THE PREDICATE IS THE INSTRUMENT'S, NOT THIS MODULE'S. `tools/turn_parity_census.py`
 #: owns the turn population's shape (#3551) — ``_GRAPH_EPISODIC_COUNT_CYPHER`` — and this
@@ -251,9 +253,10 @@ class ParityReport:
     reader still trusts the instrument to name the graph it actually opened, the reader
     cannot correlate a name with an INSTANCE (two hosts can both call a graph
     ``tortoise``), and a census of the SAME graph measured EARLIER passes this check
-    untouched — time is not part of the identity. The staleness guard downstream is
-    :func:`assess`'s over-count check against the POPULATION's own resident count
-    (:data:`POPULATION_RESIDENT_COUNT`), not the whole graph's node total. Stated here
+    untouched — time is not part of the identity. Downstream, :func:`assess` applies TWO
+    staleness guards: the PRIMARY one bounds the report against its POPULATION's own
+    resident count (:data:`POPULATION_RESIDENT_COUNT`), and the whole-graph over-count
+    check REMAINS as a backstop for a claim above every node the graph holds. Stated here
     rather than overclaimed: an earlier version of this docstring called the field "an
     OPERATOR ASSERTION" and the loader filled in a missing name with the caller's own —
     which made the check unable to fail at all (review P1 on #11004).
@@ -1200,10 +1203,11 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     # `tools/turn_parity_census.py::census` emits the identity, so the honest path is
     # open; a report without one is an artifact that cannot say what it measured.
     # ⚠️ Neither this check nor any other on this path closes STALENESS: a census of
-    # the SAME graph measured earlier carries the same name and passes. The downstream
-    # guard is `assess()`'s over-count check, which compares the report against the
-    # POPULATION's own resident count — the whole-graph total it used to compare against
-    # let a 20,000-node claim through on a 500-node population (#10976, measured).
+    # the SAME graph measured earlier carries the same name and passes. Downstream,
+    # `assess()` bounds it against the POPULATION's own resident count (the primary
+    # guard) and KEEPS the whole-graph over-count check as a backstop. The whole-graph
+    # total was the ONLY comparison before this — which let a 20,000-node claim through
+    # on a 500-node population (#10976, measured, 40x).
     if reported_graph is None or not str(reported_graph).strip():
         raise CacheReadError(
             f"parity report {path} names no graph — the field is REQUIRED "
