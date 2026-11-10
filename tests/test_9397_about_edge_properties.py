@@ -7096,7 +7096,11 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     # *"**The exemption is about CONTENT, not the declaration site …**"* — which
     # names no census row and is not a denial of one. `.lower()` makes the
     # sentence-initial capital match the literal, so this leg red a REQUIRED
-    # check on `main` and on every merge of it (`test (i)`, run 42768411220).
+    # check on `main` itself (`test (c)`, run 42760976461 @ `2bb22d9e`: *"these
+    # markers are declared absent-by-design but DO appear in the documents:
+    # ['the exemption']"*) and on this branch's own head `d7ed9c0e4` (`test (i)`,
+    # run 42768411220 — `cancelled`, so that one is the branch evidence and is
+    # NOT a run on main).
     # The marker is NOT weakened or exempted: it stays in `DENIAL_MARKERS`, where
     # `_denies_the_class` still judges it per occurrence against a sentence that
     # names a counted row — the direction the owner's decision governs. Only the

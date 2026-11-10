@@ -508,18 +508,22 @@ stale or absent value. Tell the user: quit Pi, open a new terminal, and start
 Pi again from it.
 
 **4. Verify in that new session** — call `tortoise_graph_overview(section="health")`
-(§4); it must name
-the organization you expect. The pre-restart session cannot verify: its MCP
-client was built before the export.
+(§4); it must report the graph reachable (`status: "ok"`). That payload does
+**not** name the organization, so it cannot check one — to check *which* org the
+session reached on the hosted connector, call
+`tortoise_graph_overview(section="graphs")`: it lists the calling org's own graph
+as `org_<org_id>` (legacy `team_<org_id>`). The pre-restart session cannot
+verify: its MCP client was built before the export.
 
 > ⛔ **The env var — not the config file — decides which organization you
 > connect to.** A Pi process launched with a stale `TORTOISE_API_KEY` connects
 > to the *previous* org and returns data from the wrong graph with no error.
 > Observed live 2026-09-12: a stale key quietly reached a different, fully
 > populated organization — every tool answered normally, none of it from the
-> graph the user thought they were querying. If `tortoise_graph_overview(section="health")`
-> reports an org you did not expect, the process env is stale — relaunch from a new
-> shell; editing `.mcp.json` will not help.
+> graph the user thought they were querying. If
+> `tortoise_graph_overview(section="graphs")` lists an `org_<org_id>` you did not
+> expect, the process env is stale — relaunch from a new shell; editing
+> `.mcp.json` will not help.
 
 ### Claude Desktop (teach-human)
 
@@ -617,8 +621,12 @@ Never hand-edit inside markers you did not write; the next refresh discards it.
 ## 4. Verify, then checkpoint harness-connected
 
 1. Call `tortoise_graph_overview(section="health")` (MCP tool, all 6 harnesses
-   once connected). It must report the graph reachable + your organization
-   context.
+   once connected). It must report the graph reachable — `status: "ok"` with a
+   `graph_size`. ⛔ It does **not** name the organization (the payload has no org
+   key at all), so "it must report your org" is a criterion this call can never
+   satisfy. The org is named by `tortoise_graph_overview(section="graphs")` on
+   the hosted connector, as `org_<org_id>` (legacy `team_<org_id>`); on stdio that
+   section lists every graph on the server, so it does not isolate one.
 2. On failure: retry once, then diagnose against these THREE outcomes, in
    this order — the first is the commonest and the easiest to misread:
    - **The session has not loaded the server yet** — the `tortoise_*` tools
