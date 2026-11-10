@@ -15,6 +15,7 @@ DELETE`/`DROP` anywhere on the path fails the run rather than being argued about
 """
 from __future__ import annotations
 
+import math
 import re
 import sys
 import time
@@ -1281,13 +1282,20 @@ def test_a_report_with_no_measurement_time_is_not_evidence():
     assert g.mutated == []
 
 
-def test_a_stale_report_larger_than_the_population_but_smaller_than_the_graph_is_refused():
+def test_a_stale_report_larger_than_the_population_but_smaller_than_the_graph_is_refused(
+    monkeypatch,
+):
     """The measured 40x shape: 20,000 claimed, 25,000 resident, 500 real turns.
 
     ⛔ THIS IS THE RESIDUAL ITSELF. The over-count cross-check passes it
     (`500 < 20,000 < 25,000`), and before the age bound the plan offered 20,000 nodes
     — the number the executor would have capped its sweep at.
+
+    `monkeypatch.delenv` makes the bound the DEFAULT: the fixture is aged 7200 s, so an
+    operator lever exported at, say, 7200 s would otherwise read this refusal as the
+    default's and the test would flip on an environment it never set.
     """
+    monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
     g = _FakeGraph({"Point": 25_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     aged = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -1381,8 +1389,131 @@ def test_a_non_positive_or_malformed_bound_is_REFUSED_not_clamped(monkeypatch):
             resolve_max_report_age()
 
 
-def test_the_licence_carries_when_it_was_measured_and_against_which_bound():
+def test_the_bound_source_is_derived_from_the_bound_that_applied(monkeypatch):
+    """An artifact field a monitor keys on must name the bound that REALLY licensed.
+
+    Reachable — and it WAS the shipped state: `bound_source` was chosen by truthiness
+    of the raw variable while the resolution treats a whitespace-only value as unset,
+    so `TORTOISE_PARITY_REPORT_MAX_AGE_S='   '` applied the DEFAULT bound (3600 s) and
+    reported `bound_source: "TORTOISE_PARITY_REPORT_MAX_AGE_S"`. The field exists so a
+    monitor can tell which bound licensed a DESTRUCTIVE cap, so naming the wrong one is
+    the artifact lying about its own provenance.
+    """
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    fresh = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                         measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                         measured_at=time.time() - 30)
+
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "   ")
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh}
+                      ).plan["parity_evidence"]
+    assert evidence["bound_source"] == "default", evidence["bound_source"]
+    assert evidence["max_age_seconds"] == DEFAULT_PARITY_REPORT_MAX_AGE_S
+
+    # The environment, when it DOES bind, and the argument, which always wins.
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "600")
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh}
+                      ).plan["parity_evidence"]
+    assert evidence["bound_source"] == PARITY_REPORT_MAX_AGE_ENV
+    assert evidence["max_age_seconds"] == 600.0
+
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh},
+                      max_report_age_seconds=120).plan["parity_evidence"]
+    assert evidence["bound_source"] == "argument"
+    assert evidence["max_age_seconds"] == 120.0
+
+
+def test_parse_measured_at_refuses_a_stamp_it_cannot_age():
+    """A stamp the bound cannot EVALUATE is a refusal, not a fresh reading.
+
+    Reachable — and it WAS the shipped state: the numeric arm returned `float(raw)`
+    unchecked, so `json.load`'s documented `NaN`/`Infinity` extension reached `assess`
+    as a stamp. `now - nan` is `nan`, every comparison in the staleness block is False
+    for it, and the report therefore stayed PROVEN — licensed — with only a render
+    helper raising two frames later. Same rule the bound already applied one function
+    up: a non-finite operand is REFUSED, never clamped.
+
+    The range arm is the same defect in its other shape: a millisecond epoch is 1000x
+    too large and must be refused AS A UNIT ERROR, not crash the artifact renderer.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(CacheReadError, match="not a finite instant"):
+            parse_measured_at(bad)
+    for bad in (1.75e12, 1e18):
+        # A unit error is named as one, so the operator fixes the producer's stamp
+        # rather than hunting a clock drift that does not exist.
+        with pytest.raises(CacheReadError, match="MILLISECOND"):
+            parse_measured_at(bad)
+    # ...and the two edges of the representable window are REFUSED / ACCEPTED exactly
+    # where `datetime`'s own year range puts them, so the bound is measured not guessed.
+    with pytest.raises(CacheReadError):
+        parse_measured_at(253_402_300_800.0)
+    assert parse_measured_at(-62_135_596_800.0) == -62_135_596_800.0
+    assert parse_measured_at(1_700_000_000.0) == 1_700_000_000.0
+
+
+def test_a_nan_stamp_in_the_report_FILE_is_a_refusal_not_a_licence(tmp_path):
+    """The artifact seam: `json.load` accepts `NaN`, so the READER must not."""
+    path = tmp_path / "r.json"
+    path.write_text(
+        '{"instrument": "tools/turn_parity_census.py", "graph": "tortoise", '
+        '"verdict": "CLEAN", "measured_at": NaN, '
+        '"population": {"episodic_graph_nodes": 5}, '
+        '"dry_run": {"would_delete_turn_nodes": 5}}',
+        "utf-8",
+    )
+    with pytest.raises(CacheReadError):
+        load_parity_report(str(path), graph_name="tortoise")
+
+
+def test_an_un_ageable_stamp_is_REFUSED_by_assess_and_does_not_raise():
+    """The LIBRARY surface: `assess` returns a refusal, never a diagnostic-free crash.
+
+    Reachable — and it WAS the shipped state for a directly-constructed report: (1) a
+    NaN stamp stayed PROVEN (every age comparison is False for NaN), licensing the
+    sweep; (2) an out-of-range finite stamp was demoted correctly but then
+    `parity_evidence`'s `_epoch_to_iso` raised `ValueError`/`OverflowError`/`OSError`
+    out of `assess` — a non-`CacheReadError` escaping a function whose contract is
+    "an `Assessment` or a `CacheReadError`". Both must now be refusals an operator can
+    READ, with the artifact still emitted.
+    """
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+
+    for stamp, expected in ((float("nan"), "not a finite instant"),
+                            (float("inf"), "not a finite instant"),
+                            (1.75e12, "clock disagreement")):
+        report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                              measured_nodes=20_000, total_nodes=20_000,
+                              graph_name="tortoise", measured_at=stamp)
+        result = assess(c, g, "tortoise", ceiling_bytes=100,
+                        parity_reports={"tools/turn_parity_census.py": report})
+        assert result.verdict == "REFUSED", (stamp, result.verdict)
+        assert result.plan["evictable"] == [], stamp
+        assert expected in " ".join(result.problems), (stamp, result.problems)
+        # The artifact is still emitted, and it says the stamp could not be rendered.
+        row = result.plan["parity_evidence"]["reports"][0]
+        assert row["measured_at"] is None, (stamp, row)
+        if math.isfinite(stamp):
+            # An out-of-range finite stamp still HAS an age, and it is the datum that
+            # names the defect (a huge negative: decades in the future).
+            assert row["age_seconds"] == pytest.approx(-(stamp - time.time()), rel=1e-6)
+            assert row["age_seconds"] < 0, row
+        else:
+            # `now - nan` is `nan`, and every comparison against it is False — so an
+            # un-ageable stamp must report NO age rather than a NaN that a JSON
+            # consumer would read as a number.
+            assert row["age_seconds"] is None, (stamp, row)
+    assert g.mutated == []
+
+
+def test_the_licence_carries_when_it_was_measured_and_against_which_bound(monkeypatch):
     """`nodes` is a destructive cap: the operator must be able to audit its freshness."""
+    monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
     g = _FakeGraph({"Point": 25_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     stamp = time.time() - 30

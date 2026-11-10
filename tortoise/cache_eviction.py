@@ -87,6 +87,7 @@ nothing — so a typo'd graph name is a REFUSAL here, never a store mutation.
 """
 from __future__ import annotations
 
+import math
 import os
 import re
 import time
@@ -236,6 +237,45 @@ def config_labels() -> frozenset[str]:
     return frozenset(cls.label for cls in _config_classes())
 
 
+#: The instants an epoch-second float can be RENDERED as — inclusive lower, exclusive
+#: upper (`datetime`'s own year range, 0001-01-01T00:00:00Z .. 9999-12-31T23:59:59.999999Z).
+#: ⛔ A stamp outside it is REFUSED, never clamped. It is not a measurement time this
+#: process can name, and the shape that produces one is a UNIT ERROR (a millisecond epoch
+#: is 1000x too large) — the alternative turns that into a late ``ValueError`` /
+#: ``OverflowError`` from a FORMATTING helper, two frames from the value that caused it
+#: (measured: ``datetime.fromtimestamp(1.75e12, UTC)`` → "year 57425 is out of range").
+_MIN_REPRESENTABLE_EPOCH_S = -62_135_596_800.0
+_MAX_REPRESENTABLE_EPOCH_S = 253_402_300_800.0
+
+
+def _checked_instant(value: float, raw: Any) -> float:
+    """``value`` as an epoch-second instant, or a :class:`CacheReadError`.
+
+    ⛔ A STAMP THE FRESHNESS BOUND CANNOT EVALUATE IS NOT FRESHNESS. ``json.load``
+    accepts ``NaN``/``Infinity`` — outside RFC 8259 §6's number grammar, but a
+    documented Python extension — and EVERY comparison in :func:`assess`'s staleness
+    block is False for NaN, so a NaN stamp would have stayed ``proven`` and licensed the
+    sweep, with only a render helper raising two frames later. Refusing here is the same
+    rule :func:`resolve_max_report_age` applies to the *bound*: a non-finite operand is a
+    refusal, never a quietly-clamped value. The same refusal bounds the representable
+    range, because an out-of-range stamp is a unit error and not a clock reading.
+    """
+    if not math.isfinite(value):
+        raise CacheReadError(
+            f"parity report `measured_at` is {raw!r}, which is not a finite instant — "
+            f"NaN and Infinity are not JSON numbers (RFC 8259 §6) and nothing can age "
+            f"them against a freshness bound"
+        )
+    if not _MIN_REPRESENTABLE_EPOCH_S <= value < _MAX_REPRESENTABLE_EPOCH_S:
+        raise CacheReadError(
+            f"parity report `measured_at` is {raw!r}, which is outside the instants "
+            f"this process can represent: epoch values are SECONDS, in "
+            f"[{_MIN_REPRESENTABLE_EPOCH_S:.0f}, {_MAX_REPRESENTABLE_EPOCH_S:.0f}) — a "
+            f"value ~1000x too large is usually a MILLISECOND stamp"
+        )
+    return value
+
+
 def parse_measured_at(raw: Any) -> float | None:
     """The instant a parity report was measured, as epoch seconds UTC — or ``None``.
 
@@ -260,7 +300,7 @@ def parse_measured_at(raw: Any) -> float | None:
             f"parity report `measured_at` is {raw!r} — that is not a measurement time"
         )
     if isinstance(raw, (int, float)):
-        return float(raw)
+        return _checked_instant(float(raw), raw)
     text = str(raw).strip()
     if not text:
         return None
@@ -274,7 +314,7 @@ def parse_measured_at(raw: Any) -> float | None:
         ) from exc
     if parsed.tzinfo is None:
         parsed = parsed.replace(tzinfo=UTC)
-    return parsed.timestamp()
+    return _checked_instant(parsed.timestamp(), text)
 
 
 def resolve_max_report_age(value: float | None = None) -> float:
@@ -289,7 +329,20 @@ def resolve_max_report_age(value: float | None = None) -> float:
     from a store where nothing is proven, which is the one failure mode this module
     exists to detect everywhere else.
     """
+    return _resolve_max_report_age(value)[0]
+
+
+def _resolve_max_report_age(value: float | None = None) -> tuple[float, str]:
+    """The bound AND the source that produced it, from ONE resolution.
+
+    ``plan["parity_evidence"]["bound_source"]`` exists so a monitor can tell which
+    bound licensed a destructive cap, so it must be derived from the SAME decision —
+    re-deciding it by truthiness of the raw environment variable let a whitespace-only
+    value (which this resolution reads as unset) label the DEFAULT as the environment's.
+    One resolution, two outputs, so the two cannot disagree.
+    """
     resolved: float
+    source: str
     if value is not None:
         try:
             resolved = float(value)
@@ -297,10 +350,12 @@ def resolve_max_report_age(value: float | None = None) -> float:
             raise CacheReadError(
                 f"parity report age bound {value!r} is not a number of seconds"
             ) from exc
+        source = "argument"
     else:
         raw = os.environ.get(PARITY_REPORT_MAX_AGE_ENV)
         if raw is None or raw.strip() == "":
             resolved = DEFAULT_PARITY_REPORT_MAX_AGE_S
+            source = "default"
         else:
             try:
                 resolved = float(raw)
@@ -308,6 +363,7 @@ def resolve_max_report_age(value: float | None = None) -> float:
                 raise CacheReadError(
                     f"{PARITY_REPORT_MAX_AGE_ENV}={raw!r} is not a number of seconds"
                 ) from exc
+            source = PARITY_REPORT_MAX_AGE_ENV
     if resolved != resolved or resolved in (float("inf"), float("-inf")):
         raise CacheReadError(
             f"parity report age bound {resolved!r} is not a finite number of seconds"
@@ -318,7 +374,7 @@ def resolve_max_report_age(value: float | None = None) -> float:
             f"a bound must be greater than zero (a non-positive bound refuses every "
             f"report, which reads as a configured gate that can never pass)"
         )
-    return resolved
+    return resolved, source
 
 
 @dataclass(frozen=True)
@@ -342,7 +398,7 @@ class ParityReport:
     missing name with the caller's own — which made the check unable to fail at all
     (review P1 on #11004).
 
-    ``measured_at`` is the SECOND identity axis, and it is the one that closes
+    ``measured_at`` is the SECOND identity axis, and it is the one that bounds
     staleness: a census of the SAME graph measured EARLIER satisfies every name check
     by construction, so before this field the population's size claim was undated and
     a report from any prior pass could size the executor's cap (see
@@ -391,8 +447,14 @@ class ParityReport:
         :data:`PARITY_REPORT_FUTURE_SKEW_S` and demotes past that — two hosts are
         allowed a little NTP skew, and a report that claims to have been measured well
         after the pass it licenses has not been shown to have been measured at all.
+
+        ⛔ A NON-FINITE stamp (``NaN``/``Infinity``, which ``json.load`` will hand a
+        reader) has NO age: ``now - nan`` is ``nan`` and every comparison against it is
+        False, so reporting it as an age would let the report read as fresh. It is
+        reported as ``None`` (undated) here and demoted by its own arm in
+        :func:`assess`; :func:`parse_measured_at` refuses it at the artifact boundary.
         """
-        if self.measured_at is None:
+        if self.measured_at is None or not math.isfinite(self.measured_at):
             return None
         return now - self.measured_at
 
@@ -563,11 +625,22 @@ def _epoch_to_iso(epoch: float | None) -> str | None:
     not have to convert one to know when the licence was measured. ``None`` stays
     ``None`` so "undated" is never rendered as the epoch zero, which would read as
     1970 — a real instant.
+
+    ⛔ TOTAL on purpose. This RENDERS the artifact, and :func:`assess` emits
+    ``parity_evidence`` for EVERY verdict — so a report whose stamp is non-finite or
+    out of range must still be REFUSED with the diagnostic that names the cause, not
+    killed by the helper that formats it (measured pre-fix: a millisecond stamp raised
+    ``ValueError: year 57425 is out of range`` two frames from the value). ``None``
+    here means "cannot be rendered", and the row's own ``age_seconds`` still names the
+    defect.
     """
-    if epoch is None:
+    if epoch is None or not math.isfinite(epoch):
         return None
-    return datetime.fromtimestamp(epoch, UTC).isoformat().replace(
-        "+00:00", "Z")
+    try:
+        return datetime.fromtimestamp(epoch, UTC).isoformat().replace(
+            "+00:00", "Z")
+    except (ValueError, OverflowError, OSError):
+        return None
 
 
 def measure_state(
@@ -894,7 +967,8 @@ def assess(
     #: reference the report ages are measured against, so a report stamped after it is a
     #: clock disagreement rather than freshness (see :meth:`ParityReport.age_seconds`).
     pass_started_at = time.time()
-    max_report_age = resolve_max_report_age(max_report_age_seconds)
+    max_report_age, max_report_age_source = _resolve_max_report_age(
+        max_report_age_seconds)
 
     classes: list[ClassReading] = []
     problems: list[str] = []
@@ -984,7 +1058,21 @@ def assess(
         # and mismatched arms above, and for the same reason: an artifact that cannot
         # show it describes THIS pass is not evidence about this pass.
         age = report.age_seconds(pass_started_at) if report is not None else None
-        if proven and age is None:
+        stamp = report.measured_at if report is not None else None
+        if proven and stamp is not None and not math.isfinite(stamp):
+            # ⛔ A STAMP NOTHING CAN AGE IS NOT FRESH (`NaN`/`Infinity` reach here from
+            # a hand-built report or `json.load`; `parse_measured_at` refuses the
+            # artifact, and this arm covers the LIBRARY surface, which this module says
+            # a future sweeper consumes). Every age comparison below is FALSE for NaN,
+            # so without this arm the report stays `proven` and licenses the sweep while
+            # only a render helper raises later — a false PASS, the class this module
+            # exists to catch, reached past the guard.
+            proven = False
+            reason = (f"cannot-answer: {instrument}'s report carries a `measured_at` "
+                      f"that is not a finite instant ({stamp!r}), so no age can be "
+                      f"computed for it — a population size whose measurement time "
+                      f"cannot be evaluated cannot size a sweep")
+        elif proven and age is None:
             proven = False
             reason = (f"cannot-answer: {instrument}'s report carries NO measurement "
                       f"time (`measured_at`), so it cannot be shown to describe this "
@@ -1181,10 +1269,7 @@ def assess(
     # verdict keeps the reason auditable without re-running anything.
     plan["parity_evidence"] = {
         "max_age_seconds": max_report_age,
-        "bound_source": (
-            "argument" if max_report_age_seconds is not None
-            else PARITY_REPORT_MAX_AGE_ENV if os.environ.get(PARITY_REPORT_MAX_AGE_ENV)
-            else "default"),
+        "bound_source": max_report_age_source,
         "reports": [
             {"instrument": instrument,
              "measured_at": _epoch_to_iso(report.measured_at),
