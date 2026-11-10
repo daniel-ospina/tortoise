@@ -760,7 +760,8 @@ def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> 
         "`alive` reports a recycled pid as ours — the start-time witness `record` "
         "writes and `stop`'s PID-REUSE GUARD re-checks is missing:\n" + body
     )
-    assert not re.search(r"\bkill\s+-0\b", "\n".join(_cut_comment(l) for l in body.splitlines())), (
+    code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
+    assert not re.search(r"\bkill\s+-0\b", code_only), (
         "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
         "forever:\n" + body
     )
