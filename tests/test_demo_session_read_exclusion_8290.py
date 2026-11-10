@@ -810,36 +810,48 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     The arm below was added back in that same commit and re-created the block: it
     redded #11685, a docs PR whose eight markdown artifacts legitimately cite seven
     more `hosted_api.py` lines (population 449 → 456). Arm 1 therefore proves the
-    ROUND TRIP on the throwaway copies — restate to the measured census, then
-    `--check` is green — which is all this test can own.
+    ROUND TRIP on the throwaway copies — a degraded figure must be restated to the
+    MEASURED one, and `--check` must then call the result green — which is all this
+    test can own about a population it must not assert.
     """
     from tools import hosted_api_cite_census as census_mod
 
     repo = _census_tmp_repo(tmp_path, monkeypatch)
     measured = census_mod.census(_PIVOT)
+    scorecard = repo / census_mod._SCORECARD
+    below_sentence = r"\*\*(\d+)\*\* have a number smaller"
 
-    # arm 1: notes that AGREE with the census are green. The copies are brought
-    # into agreement first, so the arm holds whether or not the shipped notes
-    # happen to be current at this head.
-    rc = census_mod._sweep(measured, refresh=True)
-    assert rc in (0, 1), (
-        f"a restatement pass returned {rc}: it must be 0 (nothing stale) or 1 "
-        "(rewrote), never a refusal over measurable figures")
+    # arm 1: the round trip, FORCED so it is exercised at every head. This arm
+    # degrades a figure on the copy FIRST: when the shipped notes are already
+    # current a bare refresh rewrites nothing, so the rewrite half would never run
+    # (measured at #11685's own head: refresh rewrote 0 files, and a broken
+    # `_restate` — `str(value)` → `str(value + 1)` — survived a `refresh-then-check`
+    # arm while the note it wrote was never read).
+    text = scorecard.read_text(encoding="utf-8")
+    stated = _stated(below_sentence, text)  # whatever THIS tree ships
+    degraded = text.replace(f"**{stated}**", "**999**", 1)
+    assert degraded != text, (
+        f"the BELOW count sentence does not spell its figure as `**{stated}**` — "
+        "the degradation would be a no-op")
+    scorecard.write_text(degraded, encoding="utf-8")
+    assert census_mod._sweep(measured, refresh=True) == 1, (
+        "a deliberately degraded figure is stale work: the restatement pass must "
+        "report it (1), not 0")
+    assert _stated(below_sentence, scorecard.read_text(encoding="utf-8")) == (
+        measured["below_pivot"]), (
+        "the restatement pass did not put the MEASURED below-pivot figure back — "
+        "the rewrite and the sentence it targets have diverged")
     assert census_mod._sweep(measured, refresh=False) == 0, (
-        "the notes agree with the measured census and `--check` still called them "
-        "stale — the verb is not reading the sentence it just wrote")
+        "the notes now agree with the measured census and `--check` still called "
+        "them stale — the verb is not reading the sentence it just wrote")
 
     # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
-    scorecard = repo / census_mod._SCORECARD
     text = scorecard.read_text(encoding="utf-8")
-    # DERIVED, never a literal: the degradation must track the figure the note
-    # actually states, so a `--refresh` anywhere in the tree cannot silently turn
-    # this arm into a no-op (the previous `**434**` literal had to be re-pointed by
-    # hand on every restatement).
+    # DERIVED, never a literal: the degradation tracks the figure the copy actually
+    # states (arm 1 just proved that is the measured one), so no restatement
+    # anywhere in the tree can silently turn this arm into a no-op — the previous
+    # `**434**` literal had to be re-pointed by hand on every restatement.
     below = measured["below_pivot"]
-    assert _stated(r"\*\*(\d+)\*\* have a number smaller", text) == below, (
-        f"arm 1's restatement left the BELOW count stating something other than "
-        f"the measured {below} — it cannot be degraded")
     degraded = text.replace(f"**{below}**", "**999**", 1)
     assert degraded != text, (
         f"the BELOW count sentence does not spell its figure as `**{below}**` — "
