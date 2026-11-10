@@ -2516,6 +2516,29 @@ def test_every_registered_population_has_a_resident_count_statement():
     )
 
 
+def _shared_count_statements(mapping: dict[str, str]) -> set[str]:
+    """The count statements that two or more populations of `mapping` would SHARE.
+
+    Squashed (`" ".join(value.split())`), because a Cypher statement's identity is
+    semantic and the realistic copy-paste failure is the same one-liner REFLOWED across
+    source lines — byte comparison would call that unique while FalkorDB sees one
+    statement, bounding the new population by `turn`'s count (fail-open).
+
+    A helper rather than an inline comprehension so the pin has DEMONSTRABLE
+    discriminating power: `test_the_shared_statement_check_can_actually_fire` feeds it a
+    duplicated mapping and asserts the collision is reported. An inline assertion over
+    the live registry alone cannot fail while the registry holds one population.
+    """
+    seen: set[str] = set()
+    shared: set[str] = set()
+    for value in mapping.values():
+        squashed = " ".join(value.split())
+        if squashed in seen:
+            shared.add(squashed)
+        seen.add(squashed)
+    return shared
+
+
 def test_no_two_populations_share_a_resident_count_statement():
     """⛔ A COPY-PASTED STATEMENT IS A FAIL-OPEN BOUND, not a harmless duplicate.
 
@@ -2537,11 +2560,46 @@ def test_no_two_populations_share_a_resident_count_statement():
     # byte comparison would call that unique while FalkorDB sees one statement, bounding
     # the new population by `turn`'s count (fail-open, and invisible to the whole-graph
     # backstop). The mirror pin above squashes for the same reason.
-    statements = [" ".join(value.split()) for value in POPULATION_RESIDENT_COUNT.values()]
-    assert len(set(statements)) == len(statements), (
-        f"two populations share one count statement: {POPULATION_RESIDENT_COUNT} — "
-        f"each population must be counted by the statement for ITS OWN predicate"
+    shared = _shared_count_statements(POPULATION_RESIDENT_COUNT)
+    assert not shared, (
+        f"two populations share one count statement: {shared} of "
+        f"{POPULATION_RESIDENT_COUNT} — each population must be counted by the "
+        f"statement for ITS OWN predicate"
     )
+
+
+def test_the_shared_statement_check_can_actually_fire():
+    """⛔ PROOF THE PIN ABOVE IS NOT VACUOUS.
+
+    `POPULATION_RESIDENT_COUNT` holds ONE population today, so the live assertion above
+    is "no shared statement" over a single element and CAN NEVER FAIL: it is a guard with
+    no demonstrated discriminating power. This test drives the SAME helper with the
+    defect that guard exists to catch and asserts it reports the collision — otherwise
+    nothing shows it would fire the day a second population is registered, which is the
+    only day it matters (#11726).
+
+    It also asserts the NEGATIVE direction: a genuinely distinct predicate must NOT be
+    reported, or the guard would block every new population and get deleted.
+    """
+    reflowed_copy = POPULATION_RESIDENT_COUNT["turn"].replace(
+        " RETURN count(t)", "\n    RETURN count(t)"
+    )
+    assert reflowed_copy != POPULATION_RESIDENT_COUNT["turn"], (
+        "the fixture must differ BYTEWISE, or this test proves nothing about the squash"
+    )
+    duplicated = {"turn": POPULATION_RESIDENT_COUNT["turn"], "turn_v2": reflowed_copy}
+    assert _shared_count_statements(duplicated) == {
+        " ".join(POPULATION_RESIDENT_COUNT["turn"].split())
+    }, (
+        "a REFLOWED copy of another population's statement must be reported as shared — "
+        "byte comparison would call it unique while FalkorDB sees one statement"
+    )
+    assert not _shared_count_statements(
+        {
+            "turn": POPULATION_RESIDENT_COUNT["turn"],
+            "other": "MATCH (o:Object) RETURN count(o)",
+        }
+    ), "a genuinely distinct predicate must NOT be reported, or the guard is a false block"
 
 
 def test_an_empty_population_count_read_is_a_refusal_not_zero():
