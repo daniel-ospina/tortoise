@@ -5599,7 +5599,7 @@ surfaces:
   # unregistered doc, a bare citation of an ambiguous basename, and line-keyed citations (banned for
   # `.py`/`.yaml`/`.yml`/`.md`/`.json`: 44 in the scope + 36 in the brief went stale on one `main` merge;
   # cited by SYMBOL now, and every `packs/*/manifest.yaml::key.path` citation is resolved to a real key).
-  # 25 test functions / 27 collected.
+  # 26 test functions / 28 collected.
   # Offline, no graph, ~5s. ⚠️ DUAL-REGISTERED with `tier1` (below): `core` is the not-found FALLBACK, so
   # this row alone leaves a docs-only diff running the pin zero times (#11656 review F1).
   - test_11656_endpoint_kind_binding_scope.py

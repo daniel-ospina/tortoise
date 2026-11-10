@@ -470,8 +470,11 @@ class TestTheThirdDoorExists:
         starts = [i for i, ln in enumerate(lines) if "fold ``DirectEdgeCreated``" in ln]
         assert len(starts) == 1, f"expected exactly one DirectEdgeCreated fold marker, found {len(starts)}"
         # The window ENDS at the next leg: `DirectEdgeRepoint` reads `etype = ev.get("edge_type")`
-        # too, at `:17306` (inside 400 lines of the marker). Without this bound the assertion
-        # below could not fail — the copy it means to exclude satisfies it.
+        # too, in the leg this bound below identifies by the same string it reads
+        # (`for ev in direct_repoint_events`). Cited by SIGN, never by line number: a `:<line>` here
+        # was 127 lines stale on the commit that introduced it and pointed INSIDE the window it claims
+        # to exclude (round-17 P2-2). Without this bound the assertion below could not fail — the copy
+        # it means to exclude satisfies it.
         ends = [i for i in range(starts[0], len(lines)) if "for ev in direct_repoint_events" in lines[i]]
         assert ends, "the DirectEdgeRepoint leg is gone — the window's end bound has to be re-derived"
         window = "\n".join(lines[starts[0]: ends[0]])
@@ -725,7 +728,10 @@ class TestTheDocsAreDiscoverableAndResolve:
         A hand-maintained count rots the moment a test is added, which is precisely what happened: the
         commit that made it stale added the twelfth errata row in a *different* file. So the count is
         DERIVED here and both stated copies are held to it — a new test that forgets to update them reds
-        this row instead of shipping a false coverage claim.
+        this row instead of shipping a false coverage claim. The parenthetical that EXPLAINS the delta is
+        held to the same derivation: it said "(one is parametrised over the two docs)" against 25→27, a
+        reason that contradicts the two integers beside it while no integer-only assertion could see it
+        (round-17 P2-1).
         """
         source = Path(__file__).read_text()
         functions = len(re.findall(r"^    def test_", source, re.M))
@@ -746,6 +752,29 @@ class TestTheDocsAreDiscoverableAndResolve:
         assert (stated_f, stated_c) == (functions, collected), (
             f"{SCOPE_DOC.name} says **{stated_f} test functions / {stated_c} collected**; this file holds "
             f"{functions} / {collected}. The doc's number is what a reader uses to judge coverage."
+        )
+
+        # The parenthetical must also be TRUE, not merely present: it exists to explain the delta, so the
+        # count it states is derived from this file's own decorators and held to the delta it explains.
+        doc_arms = len(re.findall(r'@pytest\.mark\.parametrize\("doc", \[SCOPE_DOC, BRIEF_DOC\]', source))
+        assert collected - functions == doc_arms, (
+            f"this file collects {collected} from {functions} functions but holds {doc_arms} doc-parametrised "
+            "tests — the delta is no longer explained by the arms the doc's parenthetical names"
+        )
+        numwords = {"one": 1, "two": 2, "three": 3, "four": 4, "five": 5}
+        stated_arms = re.findall(
+            r"\(([a-z]+|\d+) (?:is|are) parametrised over the two docs[^)]*\)", scope
+        )
+        assert len(stated_arms) == 1, (
+            "the scope must explain the delta exactly once as `(N is/are parametrised over the two docs)`; "
+            f"found {stated_arms} — update it in the same commit that changes the arms"
+        )
+        word = stated_arms[0]
+        stated_n = int(word) if word.isdigit() else numwords.get(word)
+        assert stated_n == doc_arms, (
+            f"{SCOPE_DOC.name} says **{word}** test(s) are parametrised over the two docs; this file holds "
+            f"{doc_arms} ({collected} collected from {functions} functions). A wrong count here contradicts "
+            "the two integers in the same sentence and sends a merger to the wrong coverage figure."
         )
 
         surfaces = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
@@ -823,4 +852,22 @@ class TestTheDocsAreDiscoverableAndResolve:
         assert symbols, (
             f"{doc.name} cites no python symbol at all — the doc's mechanism is code citations, so either "
             "the scanner is broken or the citations were deleted rather than re-keyed"
+        )
+
+    def test_this_pin_carries_no_line_keyed_citation(self):
+        """The file that SHIPS the ban must obey it — the ban above scans the two docs only.
+
+        Round-17 P2-2, measured: this file explained its own window bound with a bare line number that was
+        **127 lines stale on the commit that introduced it**, and wrong in the most misleading direction
+        available — it named a location *inside* the window the bound claims to exclude, so a reader trying
+        to verify the bound landed on unrelated operator-cleanup code. The class is exactly the one the ban
+        above closes for the two docs; it shipped here because nothing scanned this file, and the parse it
+        would need is narrow (a backticked bare line reference), not the free-text one the docs need.
+        """
+        source = Path(__file__).read_text()
+        offenders = re.findall(r"`:\d{3,5}`", source)
+        assert not offenders, (
+            f"this pin carries {len(offenders)} line-keyed citation(s) {sorted(set(offenders))}. Cite the "
+            "SYMBOL, or the literal string an assertion already reads (`for ev in direct_repoint_events`): "
+            "a line number rots on the next `main` merge and lands the reader in unrelated code."
         )

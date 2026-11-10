@@ -349,11 +349,13 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **25 test functions / 27 collected**
-(one is parametrised over the two docs). The two populations are deliberately different: the file pins the
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **26 test functions / 28 collected**
+(two are parametrised over the two docs — `test_every_cited_markdown_path_resolves` and
+`test_neither_doc_cites_a_line_keyed_reference`, one case per doc; that is the whole 26→28 delta). The two
+populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
-(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔25 difference is the
+(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔26 difference is the
 reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
 table's row count against that file, and was stale on both.
 
