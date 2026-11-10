@@ -1669,7 +1669,7 @@ def run_benchmark(
                     session_id, fixture["conversation"], fixture["harness"],
                     workdir=workdir, log=log,
                 )
-                capture = sdk.capture_session(
+                capture = sdk._capture_session(
                     conversation, session_id=session_id, harness=fixture["harness"]
                 )
                 notes.append(

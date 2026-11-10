@@ -818,7 +818,7 @@ class TestCaptureSeam:
         Fixture: the payload above (core:team subject slot at 0.9) — reachable.
         """
         sdk, jpath = journal_sdk
-        r = sdk.capture_session(CONV, session_id="s1370")
+        r = sdk._capture_session(CONV, session_id="s1370")
         assert r["ok"] is True, r
         proj = sdk._get_proj()
         pid = proj.g.query(
@@ -858,7 +858,7 @@ class TestCaptureSeam:
         # aboutObject edge to THIS node.
         proj.g.query(
             "MERGE (o:Object {name:'the team'}) SET o.objectKind='core:team'")
-        r = sdk.capture_session(CONV, session_id="s1370b")
+        r = sdk._capture_session(CONV, session_id="s1370b")
         assert r["ok"] is True, r
         # exactly ONE aboutSubject edge (from the binder)...
         n1 = proj.g.query(
@@ -882,7 +882,7 @@ class TestCaptureSeam:
         monkeypatch.setattr(sdk_mod, "_V2SessionMock",
                             _make_slots_mock(_FOREIGN_KIND_PAYLOAD))
         sdk, _ = journal_sdk
-        r = sdk.capture_session(CONV, session_id="s1370-foreign")
+        r = sdk._capture_session(CONV, session_id="s1370-foreign")
         assert r["ok"] is True, r
         proj = sdk._get_proj()
         assert proj.g.query(
@@ -904,7 +904,7 @@ class TestCaptureSeam:
         monkeypatch.setattr(sdk_mod, "_V2SessionMock",
                             _make_slots_mock(_CASE_PAYLOAD))
         sdk, _ = journal_sdk
-        r = sdk.capture_session(CONV, session_id="s1370-case")
+        r = sdk._capture_session(CONV, session_id="s1370-case")
         assert r["ok"] is True, r
         proj = sdk._get_proj()
         # The subject-kind entity is a :Subject; the Object keeps its case.
@@ -927,7 +927,7 @@ class TestCaptureSeam:
         0.9 — the value is reachable.
         """
         sdk, jpath = journal_sdk
-        r = sdk.capture_session(CONV, session_id="s1370-conf")
+        r = sdk._capture_session(CONV, session_id="s1370-conf")
         assert r["ok"] is True, r
         proj = sdk._get_proj()
         pid = proj.g.query(
@@ -951,7 +951,7 @@ class TestCaptureSeam:
         """
         from tortoise.search_engine import fetch_point_epistemic_state
         sdk, _ = journal_sdk
-        sdk.capture_session(CONV, session_id="s1370c")
+        sdk._capture_session(CONV, session_id="s1370c")
         proj = sdk._get_proj()
         pid = proj.g.query(
             "MATCH (p:Point) WHERE p.content = 'the team approved the plan' "

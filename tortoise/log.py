@@ -284,8 +284,9 @@ TORN_TAIL_HARMLESS_EVENT_TYPES = frozenset({
 #                     ``capture_ok=False`` on a failed or keyless capture. A
 #                     dropped tear restores ``capture_ok=NULL``, which
 #                     the capture lane reads as the legacy "presumed captured"
-#                     replay case (``TortoiseSDK.capture_session``'s
-#                     ``#2335 WI-2b`` gate) — so the failed
+#                     replay case (``hosted_api._capture_session_impl``'s
+#                     ``#2335 WI-2b`` gate — the SDK's ``capture_session``
+#                     was #4282-deleted, so the hosted lane is the survivor) — so the failed
 #                     session silently STOPS being re-attempted while recovery
 #                     reports success. Same root cause as #5921 (a payload-only
 #                     lifecycle property), but its harmful payload is COMMON and

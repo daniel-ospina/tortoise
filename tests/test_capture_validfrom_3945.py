@@ -109,7 +109,7 @@ def test_capture_maps_when_to_validfrom_so_restore_is_unambiguous(
                           when="2026-06-10")],
         "operators": [],
     })
-    r1 = sdk.capture_session(CONV, session_id="3945-s1")
+    r1 = sdk._capture_session(CONV, session_id="3945-s1")
     assert r1["ok"] is True, r1
     assert r1["errors"] == [], r1
     assert [p["id"] for p in r1["points"]] == [v1], r1["points"]
@@ -126,7 +126,7 @@ def test_capture_maps_when_to_validfrom_so_restore_is_unambiguous(
         "supersessions": [{"superseded": v1, "supersedes_by": v2,
                            "evidence": "later session value change"}],
     })
-    r2 = sdk.capture_session(CONV, session_id="3945-s2")
+    r2 = sdk._capture_session(CONV, session_id="3945-s2")
     assert r2["ok"] is True, r2
     assert r2["errors"] == [], r2
     # The chain actually formed (the fold landed, not a silent skip).
@@ -160,7 +160,7 @@ def test_capture_without_a_date_leaves_the_point_open_ended(sdk, monkeypatch):
         "points": [_point("the cache is warm", pid)],   # no ``when``
         "operators": [],
     })
-    res = sdk.capture_session(CONV, session_id="3945-undated")
+    res = sdk._capture_session(CONV, session_id="3945-undated")
     assert res["ok"] is True, res
     assert res["errors"] == [], res
 

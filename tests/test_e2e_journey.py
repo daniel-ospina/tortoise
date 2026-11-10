@@ -12,10 +12,10 @@ import tempfile  # noqa: F401
 
 os.environ.setdefault("TORTOISE_SECRET_PEPPER", "test-static-pepper")
 
-import pytest  # noqa: I001
+import pytest
 
-from tortoise.sdk import TortoiseSDK
 from tortoise.pricing import tier_limits
+from tortoise.sdk import TortoiseSDK
 
 
 @pytest.fixture(autouse=True)
@@ -34,10 +34,6 @@ class TestE2E1SignupProvision:
         # No max_teams field (user-level capability)
         assert "max_teams" not in team
 
-    def test_membership_owner_created(self, provision_test_user):
-        u = provision_test_user()
-        members = u["sdk"].membership_list(u["org_id"])
-        assert any(m.get("role") == "owner" for m in members)
 
     def test_api_key_hash_stored(self, provision_test_user):
         u = provision_test_user()
@@ -56,6 +52,16 @@ class TestE2E1SignupProvision:
             "MATCH (t:Team {id:$id}) RETURN t.api_key", params={"id": u["org_id"]},
         ).result_set
         assert org_row and ":" in org_row[0][0]
+
+    def test_membership_owner_created(self, provision_test_user):
+        u = provision_test_user()
+        # #4282 deleted membership_list; the same question is asked of the
+        # registry the create door writes to.
+        rows = u["sdk"]._get_registry().query(
+            "MATCH (m:Membership {org_id:$t}) RETURN m.user_id, m.role",
+            params={"t": u["org_id"]},
+        ).result_set
+        assert any(r[1] == "owner" for r in rows), rows
 
 
 class TestE2E3KeyRecovery:
@@ -104,8 +110,6 @@ class TestE2E6EmptyState:
 
 
 class TestE2E10Decoupling:
-    """E2E-10: user↔team decoupling — one user, two teams."""
-
     def test_user_memberships_two_teams(self):
         # One SDK, two teams — the same user is a member of both (M:N)
         import tempfile, os as _os  # noqa: E401, F811, I001
@@ -114,13 +118,19 @@ class TestE2E10Decoupling:
         team_a = sdk.org_create("team-a")
         team_b = sdk.org_create("team-b")
         user_id = "shared-user-1"
-        sdk.membership_create(team_a["id"], user_id, "owner")
-        sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
-        members_a = sdk.membership_list(team_a["id"])
-        members_b = sdk.membership_list(team_b["id"])
-        assert any(m.get("user_id") == user_id for m in members_a)
-        assert any(m.get("user_id") == user_id for m in members_b)
-        assert len(members_a) == 1 and len(members_b) == 1
+        ma = sdk.membership_create(team_a["id"], user_id, "owner")
+        mb = sdk.membership_create(team_b["id"], user_id, "admin")  # SDK roles: owner|admin
+        # #4282 deleted membership_list; the M:N contract it projected is read
+        # here through membership_get, which survives.
+        assert sdk.membership_get(ma["id"])["user_id"] == user_id
+        assert sdk.membership_get(mb["id"])["user_id"] == user_id
+        assert ma["role"] == "owner" and mb["role"] == "admin"
+        for team_id in (team_a["id"], team_b["id"]):
+            n = sdk._get_registry().query(
+                "MATCH (m:Membership {org_id:$t}) RETURN count(m)",
+                params={"t": team_id},
+            ).result_set[0][0]
+            assert n == 1, f"{team_id} has {n} memberships, expected exactly 1"
 
 
 class TestE2E11TierLimits:

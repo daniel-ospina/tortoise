@@ -240,7 +240,7 @@ def main() -> int:
                              "content": _trend_text(999, i, args.turn_chars)}
                             for i in range(min(args.turns, 6))]
             with use_record_tenant(*tenant):
-                receipt = sdk.capture_session(public_turns,
+                receipt = sdk._capture_session(public_turns,
                                               session_id="10000-bytes-public")
             public_report = {
                 "receipt_ok": bool(receipt.get("ok")),

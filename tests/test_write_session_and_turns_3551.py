@@ -1,7 +1,8 @@
 """#3551 — the shared ``_write_session_and_turns`` primitive.
 
 Behaviour-preserving extraction: this file proves the two server capture
-writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK.capture_session``)
+writers (W1 ``hosted_api._capture_session_impl``, W2 ``TortoiseSDK._capture_session``,
+private since #4282 retired the public name)
 each delegate the ``:Session`` MERGE / turn store to ONE primitive, and that the
 extraction did not change a byte of what either lane writes.
 
@@ -402,7 +403,7 @@ def test_huge_decimal_suffix_is_not_swept_and_does_not_break_capture(tmp_path):
 
 def test_neither_writer_holds_independent_merge_text():
     """W1 and W2 call the primitive and carry no copy of the Session/turn text."""
-    for fn in (ha_mod._capture_session_impl, TortoiseSDK.capture_session):
+    for fn in (ha_mod._capture_session_impl, TortoiseSDK._capture_session):
         src = inspect.getsource(fn)
         assert "_write_session_and_turns" in src, (
             f"{fn.__qualname__} does not call the shared primitive")
@@ -425,7 +426,7 @@ def test_sdk_writer_is_behaviour_equivalent(tmp_path):
     machine_id/model."""
     sdk = TortoiseSDK(db_path=str(tmp_path / "sdk.db"))
     with _record_writes(sdk) as seen:
-        sdk.capture_session(_CONV, session_id=_SDK_SID)
+        sdk._capture_session(_CONV, session_id=_SDK_SID)
 
     session_cypher, session_params = seen["session_writes"][-1]
     turn_cypher, turn_params = seen["turn_writes"][-1]

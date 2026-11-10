@@ -555,7 +555,7 @@ def replay_and_grade(
     parsed = wp.parse_roundtrip(
         session_id, conversation, REPLAY_HARNESS, workdir=workdir, log=log
     )
-    capture = sdk.capture_session(
+    capture = sdk._capture_session(
         parsed, session_id=session_id, harness=REPLAY_HARNESS
     )
     if capture.get("ok") is not True:

@@ -202,7 +202,7 @@ def _capture_with_record_armed(sdk, monkeypatch, turns=CONV) -> None:
             tid for tid in _held.get(sid, ())
             if int(tid.rpartition("_t")[2]) >= first))
 
-    res = sdk.capture_session(turns, session_id=SESSION_ID)
+    res = sdk._capture_session(turns, session_id=SESSION_ID)
     assert res["ok"] is True
     held[SESSION_ID] = [f"{SESSION_ID}_t{i}" for i in range(len(turns))]
     sdk._stub_record_turn_rows = held
@@ -528,7 +528,7 @@ def test_the_carrier_survives_an_unimportable_embeddings_seam(
     # it reaches the CARRIER's stamp import and nothing on the construction
     # path.
     monkeypatch.setitem(sys.modules, "tortoise.embeddings", None)
-    res = armed_sdk.capture_session(CONV, session_id=SESSION_ID)
+    res = armed_sdk._capture_session(CONV, session_id=SESSION_ID)
     assert res["ok"] is True
     records = _records(_journal_of(armed_sdk))
     assert [r for r in records if r["type"] == rp.TURNS_RECORD_TYPE], (
@@ -544,7 +544,7 @@ def test_the_GRAPH_held_lane_still_announces_its_turns(tmp_path, monkeypatch):
     monkeypatch.delenv("TORTOISE_RECORD_DSN", raising=False)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=_journal(tmp_path))
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
+        sdk._capture_session(CONV, session_id=SESSION_ID)
         rows = sdk._get_proj().g.query(
             "MATCH (e:GraphEvent {type:'PointAdded'}) RETURN e.payload"
         ).result_set
@@ -633,7 +633,7 @@ def test_a_delete_with_no_journal_record_RESURRECTS_the_turns(tmp_path):
     log_path = _journal(tmp_path)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)   # graph-held lane
+        sdk._capture_session(CONV, session_id=SESSION_ID)   # graph-held lane
         removed = _delete_turn_nodes_like_a_purge(sdk)
         assert removed == EXPECTED_TURN_IDS
         assert _turn_ids(sdk) == []
@@ -657,7 +657,7 @@ def test_a_journaled_removal_survives_the_rebuild(tmp_path):
     log_path = _journal(tmp_path)
     sdk = TortoiseSDK(str(tmp_path / "tortoise.db"), event_log_path=log_path)
     try:
-        sdk.capture_session(CONV, session_id=SESSION_ID)
+        sdk._capture_session(CONV, session_id=SESSION_ID)
         removed = _delete_turn_nodes_like_a_purge(sdk)
         outcomes = sdk._journal_turn_removal(removed)
 

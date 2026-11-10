@@ -139,6 +139,23 @@ writer-produced record, not a client field.
 | the census artifact | one schema, `measured` + `unmeasured_reason` per cell | a new cell is additive; a removed cell reds the pin |
 | **errors** | every refusal names (a) that it refused, (b) what failed, (c) what to do — and a surface that cannot write (c) must not refuse | `docs/ax/ax-principles.md` |
 
+<!-- v4-mechanism: declared_pack_relations state: implemented -->
+**State of the hierarchy edge's producer (DM5), stated where the contract is declared:**
+**built** — the pack declares a kind pair (`relations[]` and/or `hierarchies[]`), and
+`pack_hierarchy.declared_hierarchy` resolves it to a namespaced
+`(from_kind, predicate, to_kind)`, `relation_write.plan_relation_edges` renders the
+plan and **`sdk.py`'s capture commit path consumes it** (`apply_relation_edges`, the
+S5 Job 1 remainder). Structural rows land a bare
+`(:Object)-[:predicate]->(:Object|:Subject)` whose replay route is
+`RECORD_CARRIED_STRUCTURAL_RELS` + `RECORD_ADDRESSABLE_EDGE_LABELS`; operator rows
+land the `[:INPUT]`/`[:IMPL]` bridge and replay through `OperatorAdded`. `written` is
+measured per row by `tools/pack_relation_census.py --write-probe`
+(`docs/evidence/11083/pack-relation-census.json`). ⚠️ The one half DM5 named as OWED —
+the per-edge `direction` field — **exists**: `pack_registry.effective_direction`
+resolves a declaration's own `direction` through `live.canonical_direction` before
+falling back to `SEMANTICS_DIRECTIONS`, which is what lets `venture:holds` keep its
+`<-` stake sense.
+
 ## §7 — Detailed E2E tests
 
 | # | from | given | when | then (assertable) | issue | surface |

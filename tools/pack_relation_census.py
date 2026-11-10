@@ -485,16 +485,18 @@ def build_census(packs_dir: Path | str = REPO_ROOT / "packs", *,
                 "status": "UNMEASURED",
                 "owner": PIPELINE_OWNER,
                 "why": (
-                    "`result[\"relations\"]` (#10999's channel) has no consumer in "
-                    "tortoise/: the code says so itself in `extractor_v2.py`'s S5 "
-                    "Job 1 block — \"nothing in this tree consumes "
-                    "`result[\"relations\"]`\" — and that block is the ONLY "
-                    "support for this UNMEASURED cell, so it is cited by its "
-                    "SENTENCE. ⛔ Not by a line number: this string carried "
-                    "`:10815`, which is inside the MITIGATES-strength warning "
-                    "block, not the S5 Job 1 block — a line cite re-stales on "
-                    "every edit above it and `--write-probe` would reproduce the "
-                    "stale pointer forever. An unmeasured column reads "
+                    "`result[\"relations\"]` (#10999's channel) IS consumed: the "
+                    "capture commit path calls "
+                    "`relation_write.apply_relation_edges` on that same dict "
+                    "(`sdk.py::TortoiseSDK._extract_session_v2` — "
+                    "`out = extract_session_v2(...)`, then "
+                    "`if out.get(\"relations\")`). What stays UNMEASURED is the "
+                    "EMISSION leg (whether a capture actually populates the "
+                    "channel, and how many edges it yields) and the declared-PAIR "
+                    "gate, which is `#11656`'s scope. Cited by SYMBOL, never by a "
+                    "line number: this string carried `:10815`, which was inside "
+                    "the MITIGATES-strength warning block, and a line cite "
+                    "re-stales on every edit above it. An unmeasured column reads "
                     "UNMEASURED, never 0 (#10995)."
                 ),
             },

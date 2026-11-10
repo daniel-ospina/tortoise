@@ -1,5 +1,10 @@
 <!-- research-path: docs/epics/2026-08-20-1509-extractor-v3/02-research-brief.md -->
 
+> **Historical plan record, not runnable as written.** The `sdk.capture_session` and
+> `sdk.get_org_structure` calls in the code fences below address PUBLIC names that
+> `#4282` retired (the `capture_session` body survives as the private
+> `TortoiseSDK._capture_session`). They are kept as the record of what was planned.
+
 # #1529 — P1 Fail-Closed Capture (extraction errors surface; truthful extraction_mode) — Implementation Plan
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.

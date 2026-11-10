@@ -104,7 +104,7 @@ def _capture(lane, monkeypatch, result: dict, *,
     conv = runner.parse_roundtrip(
         SESSION, fixture["conversation"], fixture["harness"],
         workdir=lane["workdir"])
-    cap = lane["sdk"].capture_session(
+    cap = lane["sdk"]._capture_session(
         conv, session_id=session_id or SESSION, harness=fixture["harness"])
     assert cap.get("ok") is True, cap
     return cap

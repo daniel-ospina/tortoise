@@ -1390,33 +1390,34 @@ class TestTheInventoryTheScopeCites:
 
     def test_totals(self):
         rows = _declared_relations()
-        assert len(rows) == 36, "the scope says 36 declared relations across 7 packs"
-        assert len(_kind_bearing(rows)) == 35, "35 of them carry fromKind+toKind (32 before origin/main moved)"
+        assert len(rows) == 39, "the scope says 39 declared relations across 7 packs"
+        assert len(_kind_bearing(rows)) == 38, (
+            "38 of them carry fromKind+toKind (35 before #11001's KIN-2 three, 32 before origin/main moved)")
 
     def test_every_kind_bearing_declaration_carries_a_core_mechanism(self):
-        """34 IMPL + 1 NAND.
+        """37 IMPL + 1 NAND.
 
-        This is the fact that makes the OPERATOR path (35/35) the seam — and the reason a `create_edge`-only
-        gate covers 2 of 35, a partial one. If a pack ever adds a kind-bearing relation on a non-core
+        This is the fact that makes the OPERATOR path (38/38) the seam — and the reason a `create_edge`-only
+        gate covers 3 of 38, a partial one. If a pack ever adds a kind-bearing relation on a non-core
         mechanism, the seam choice has to be re-derived — so it must red, not drift.
         """
         mechanisms = Counter(r.get("mechanism") for r in _kind_bearing(_declared_relations()))
-        assert mechanisms == {"IMPL": 34, "NAND": 1}, mechanisms
+        assert mechanisms == {"IMPL": 37, "NAND": 1}, mechanisms
 
     def test_the_routing_the_gate_choice_rests_on(self):
         """The number the brief's §2.1 write-path table and the epic's `04-plan.md` §5.3a point 3 both state:
         which write paths each declaration binds.
 
-        ⚠️ **Not the same 33 as §1.1's.** §1.1's 33 is the **direct-shape** population (complement: the 2
-        Point-involved rows); this pin's 33 is the **operator-path-only** population (complement:
-        `hasPart`/`dependsOn`, which ALSO bind the structural path). The two sets differ on four rows, so
-        citing §1.1 here would send a lane building pin 14's fixture to the wrong set — and omit exactly the
-        two Point-bearing rows §1.1's own paragraph requires that arm to cover.
+        ⚠️ **Not the same 36 as §1.1's.** §1.1's 36 is the **direct-shape** population (complement: the 2
+        Point-involved rows); this pin's 35 is the **operator-path-only** population (complement:
+        `hasPart`/`dependsOn`/`ownedBy`, which ALSO bind the structural path). The two sets differ on five
+        rows, so citing §1.1 here would send a lane building pin 14's fixture to the wrong set — and omit
+        exactly the two Point-bearing rows §1.1's own paragraph requires that arm to cover.
 
         `relation_write_paths()` is the real routing predicate — the `mechanism` counts above are only a
-        proxy for it. Measured at this head: 33 declarations bind the OPERATOR path alone, and exactly 2
-        (`hasPart`, `dependsOn`) ALSO bind the structural path — which is why a `create_edge`-only gate
-        covers 2 of 35 and an operator-path gate covers 35 of 35. A change to `CORE_PREDICATES` or to
+        proxy for it. Measured at this head: 35 declarations bind the OPERATOR path alone, and exactly 3
+        (`hasPart`, `dependsOn`, `ownedBy`) ALSO bind the structural path — which is why a `create_edge`-only
+        gate covers 3 of 38 and an operator-path gate covers 38 of 38. A change to `CORE_PREDICATES` or to
         `relation_write_paths` itself must red here rather than leave the scope silently wrong.
         """
         from tortoise.pack_registry import relation_write_paths
@@ -1424,8 +1425,8 @@ class TestTheInventoryTheScopeCites:
         bearing = _kind_bearing(_declared_relations())
         operator_only = [r["predicate"] for r in bearing if relation_write_paths(r) == ("operator",)]
         structural = [r["predicate"] for r in bearing if "structural" in relation_write_paths(r)]
-        assert len(operator_only) == 33, Counter(operator_only)
-        assert sorted(structural) == ["dependsOn", "hasPart"], sorted(structural)
+        assert len(operator_only) == 35, Counter(operator_only)
+        assert sorted(structural) == ["dependsOn", "hasPart", "ownedBy"], sorted(structural)
         assert all("operator" in relation_write_paths(r) for r in bearing), "every one rides the operator path"
 
     def test_haspart_is_declared_exactly_once(self):
@@ -1449,15 +1450,15 @@ class TestTheInventoryTheScopeCites:
         assert {r["predicate"] for r in semantics_only} == {
             "decomposesInto", "contains", "partOf", "partOfSprint"}, sorted({r["predicate"] for r in semantics_only})
 
-    def test_the_direct_shape_partition_28_object_and_33_non_point(self):
-        """§1.1 / the brief's §2.4: **28** Object↔Object, **33** direct-shape, **2** Point-involved.
+    def test_the_direct_shape_partition_30_object_and_36_non_point(self):
+        """§1.1 / the brief's §2.4: **30** Object↔Object, **36** direct-shape, **2** Point-involved.
 
         ⚠️ This pins a figure that has already been got wrong once: the first revision said "32 of the 35 are
         Object→Object", which is the **non-`Subject`** count (35 − 3) relabelled — it absorbed the four
         non-`Subject` non-Object rows, and two of those are Point-involved. `_point_mediated_route` reifies
         only on `:Point` (`sdk.py::TortoiseSDK._point_mediated_route`), so the direct-shape population is "not Point-involved", which
-        is 33, not 32. An implementer building pin 14's fixture from the richest documented predicate
-        (`addresses`, 6 declarations) would pick the `useCase→feature` row, watch it reify, and conclude the
+        is 36 at this head (33 when that correction was recorded, 32 before it). An implementer building pin 14's fixture from the richest documented predicate
+        (`addresses`, 8 declarations) would pick the `useCase→feature` row, watch it reify, and conclude the
         direct door is not the dominant shape.
         """
         partition = _axis_partition()
@@ -1467,8 +1468,8 @@ class TestTheInventoryTheScopeCites:
         # `dev:deploysTo` (Object→Event ⇒ Event→Object) left it GREEN while both documents and the ledger
         # still published `1 Object→Event` / `1 Event→Object`. Deriving the Counter makes every cell a claim.
         assert dict(partition) == {
-            ("object", "object"): 28,
-            ("object", "subject"): 3,
+            ("object", "object"): 30,
+            ("object", "subject"): 4,
             ("object", "event"): 1,
             ("event", "object"): 1,
             ("object", "point"): 1,
@@ -1550,18 +1551,19 @@ class TestTheInventoryTheScopeCites:
         bearing = _kind_bearing(_declared_relations())
         counts = Counter(r.get("predicate") for r in bearing)
         repeated = {p: n for p, n in counts.items() if n > 1}
-        assert repeated == {"addresses": 6, "contains": 2, "targets": 2, "assignedTo": 2}, repeated
+        assert repeated == {"addresses": 8, "contains": 2, "targets": 2, "assignedTo": 2}, repeated
 
         addresses = [r for r in bearing if r.get("predicate") == "addresses"]
         pairs = {(r["fromKind"], r["toKind"]) for r in addresses}
-        assert len(pairs) == 6, "6 declarations over 6 DISTINCT pairs — not 6 uses of one pair"
+        assert len(pairs) == 8, "8 declarations over 8 DISTINCT pairs — not 8 uses of one pair"
         assert len([r for r in addresses if r["_ns"] == "product-strategy"]) == 4
 
-    def test_the_declarations_a_naive_binding_test_would_disable_are_eight(self):
+    def test_the_declarations_a_naive_binding_test_would_disable_are_eleven(self):
         """D3 must bind the vocabulary a declaration NAMES, not only the declaring pack's.
 
-        5 name a foreign namespace explicitly; 3 rows over 2 predicates are layer-valued (`toKind: Subject` —
-        `assignedTo` twice, `holds`). Under the naive "both kinds in the declaring pack" test all 8 become
+        7 name a foreign namespace explicitly (5 before `#11001` declared the two `addresses` rows that reach
+        `core:goal` from `dev`); 4 rows over 3 predicates are layer-valued (`toKind: Subject` —
+        `assignedTo` twice, `holds`, `ownedBy`). Under the naive "both kinds in the declaring pack" test all 11 become
         permanently `unbound` — never enforced, never warned about — and `portfolio:marks` is load-bearing
         (`domain_validators._portfolio_mark_contract`).
         """
@@ -1574,8 +1576,8 @@ class TestTheInventoryTheScopeCites:
                 layer.append(r["predicate"])
             elif any(ns and ns != r["_ns"] for ns in declared):
                 cross.append(r["predicate"])
-        assert sorted(cross) == ["constrainedBy", "deploysTo", "implements", "manifests", "marks"], cross
-        assert sorted(layer) == ["assignedTo", "assignedTo", "holds"], layer
+        assert sorted(cross) == ["addresses", "addresses", "constrainedBy", "deploysTo", "implements", "manifests", "marks"], cross
+        assert sorted(layer) == ["assignedTo", "assignedTo", "holds", "ownedBy"], layer
         # ⛔ No `len(cross) + len(layer) == 8` row here. The two exact sorted rows above FIX both lists, so
         # such a row is determined by them: any edit that makes it false has already reddened line 241 or
         # 242 first, and it can never be the failing row under any mutation (review F3 — a DEAD assertion in
@@ -1700,7 +1702,7 @@ class TestTheSeveritySeamThePrecedenceMustAnswerFor:
             pack = registry.get_pack(rel["_ns"])
             assert pack is not None, rel["_ns"]
             resolved[pack.enforcement_for_relation(rel["predicate"])] += 1
-        assert resolved == {"warn": 35}, resolved
+        assert resolved == {"warn": 38}, resolved
 
 
 class TestTheThirdDoorExists:
@@ -3050,7 +3052,7 @@ class TestTheDocsAreDiscoverableAndResolve:
         Scope, stated rather than implied (round-21 P3 caught the first version claiming more than it read):
         the three figures DERIVED here are asserted as derived strings; the direct-shape figures are held to
         the same integers the scope states, and those integers are pinned against the registry by
-        `test_the_direct_shape_partition_28_object_and_33_non_point` — so the chain is
+        `test_the_direct_shape_partition_30_object_and_36_non_point` — so the chain is
         registry -> scope -> ledger and no link can drift. ⛔ **The row's `19 CI pins` is NOT covered here**:
         that is plan §6's row count, which this file does not derive, and saying otherwise would be the same
         over-claim in a new place.
@@ -3130,9 +3132,9 @@ class TestTheDocsAreDiscoverableAndResolve:
 
         # `addresses` ×6 is spelled as a code-block row in the scope and as prose in the ledger, so each is
         # held in its own form rather than through a shared substring that neither actually contains.
-        assert "addresses   declared 6×, 6 DISTINCT pairs" in scope_text, (
+        assert "addresses   declared 8×, 8 DISTINCT pairs" in scope_text, (
             "the scope's §1.3 multiplicity row for `addresses` moved — update this ledger check with it"
         )
-        assert "`addresses` is declared 6×" in index, (
-            "the index row no longer states the `addresses` ×6 multiplicity the scope's §1.3 table pins"
+        assert "`addresses` is declared 8×" in index, (
+            "the index row no longer states the `addresses` ×8 multiplicity the scope's §1.3 table pins"
         )

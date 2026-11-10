@@ -252,7 +252,7 @@ from tortoise.sdk import (
     _stamp_capture_provenance,  # #9350: the journal-first capture provenance stamp door
     _supersede_window_end,  # #5363: the ONE inverted-window predicate (pre-write check)
     _supersede_window_start_source,  # #3985: the ONE home for the stored-start predicate
-    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk.capture_session)
+    _write_session_and_turns,  # #3551: the ONE :Session + turn store writer (shared with sdk._capture_session)
 )
 from tortoise.security import (  # billing webhook + checkout error logging; #3293 drill incident detail
     redact_error,
@@ -17385,12 +17385,15 @@ class SessionRequest(BaseModel):
     # #4005 — the validator lives on ``CommitPayload``; there is no
     # ``CommitRecord`` class, and citing one sent a review to re-derive a third
     # spelling); this is the same sentence at the boundary — ONE predicate for
-    # every DOOR (the two SDK doors, the commit-payload Layer-1 model and this
-    # one), so they cannot drift apart. ⚠️ ``CommitPayload`` used to carry its
-    # OWN ad-hoc blank test, which is how the #8290 review found the RESERVED
+    # every DOOR (the SDK capture door, the commit-payload Layer-1 model and
+    # this one), so they cannot drift apart. ⚠️ ``CommitPayload`` used to carry
+    # its OWN ad-hoc blank test, which is how the #8290 review found the RESERVED
     # demo namespace admitted on the public ``POST /v1/sessions/commit`` while
-    # refused here and at the two SDK doors — a namespace gated at three of four
-    # doors is not reserved. It now delegates to the same predicate.
+    # refused here and at the SDK door. ⚠️ That was THREE OF FOUR doors before
+    # #4282 retired the SDK ``commit_session`` door; the census is three doors
+    # now, and the rule the episode taught is the one that says "all of them, or
+    # the namespace is not reserved" — an admitter is an admitter at any count.
+    # It now delegates to the same predicate.
     # ⛔ The blank rule has a SECOND, deliberate home one layer down: the
     # REPLAY half is ``projection._writable_container_id`` (``_writable_id``
     # PLUS this same blank clause), which gates both journal carriers and the
@@ -22430,7 +22433,7 @@ async def list_sessions(request: Request, org: dict = Depends(get_current_org_se
         # and cannot collide with a mintable id (`mint_session_id()` =
         # `session_<12 hex>` — `demo_` is neither hex nor 12 chars long), and
         # the namespace is RESERVED at EVERY caller-id door
-        # (`ids.session_id_refusal` — the two SDK doors, the commit payload
+        # (`ids.session_id_refusal` — the SDK capture door, the commit payload
         # model and the hosted `SessionRequest` boundary), so a caller cannot
         # file a real capture into the excluded set either.
         #

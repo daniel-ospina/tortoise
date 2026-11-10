@@ -255,7 +255,7 @@ def test_capture_session_writes_and_records_both_halves_under_the_armed_guard(
     so a FAILED capture would never retry.
     """
     sdk = armed_sdk
-    out = sdk.capture_session([
+    out = sdk._capture_session([
         {"role": "user", "content": "apply-first capture: does it write?"},
         {"role": "assistant", "content": "it does, and it journals both halves."},
     ], session_id="sess_9206_lane")

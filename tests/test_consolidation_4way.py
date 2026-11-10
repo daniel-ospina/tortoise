@@ -552,14 +552,25 @@ class TestResolutionNarrative:
         default = v2._resolution_prompt(self._existing(), ["Mike"])
         assert explicit == default
         assert "NARRATIVE" not in default
-        # the pre-#11654 instruction survives verbatim
+        # the JSON contract tail survives verbatim — it was NOT part of the
+        # #11654 narrative change. ⚠️ It DID move once since: #11693 (#11653)
+        # replaced `; ambiguous → omit.` with the HOLD rule (`an ambiguous name
+        # goes in NEITHER list: it is held, never asserted new`) plus the
+        # `"new": […]` list, and left this literal behind — so this test was
+        # RED on `main` from #11693 until it was re-pointed at the shipped
+        # text. The pin is the WHOLE contract, deliberately: a partial pin is
+        # what let the "ambiguous"/"omit" phrases be satisfied by prose the
+        # narrative change never touched (review round 4).
         assert default == (
             "EXISTING ENTITIES (id | name | kind):\n"
             "- obj_michael | Michael | core:person\n\n"
             "NEW ENTITY NAMES:\n- Mike\n\n"
             "Return {\"resolutions\":[{\"name\": ..., \"resolves_to\": "
-            "existing-id-or-name}]} — every resolution must match an id or "
-            "exact name in the EXISTING ENTITIES table; ambiguous → omit.")
+            "existing-id-or-name}], \"new\": [names that are NOT any "
+            "existing entity]} — every resolution must match an id or "
+            "exact name in the EXISTING ENTITIES table, and EVERY new name "
+            "must appear in exactly one of the two lists. An ambiguous name "
+            "goes in NEITHER list: it is held, never asserted new.")
 
     def test_the_narrative_rides_inside_the_untrusted_envelope(self):
         """#10311: S3 phase 2 is a WRITE-path prompt — its answer rewrites
@@ -886,8 +897,25 @@ class TestResolutionNarrativeInPipeline:
         crucially no error: the resolver simply declines."""
         out, prompts = self._run(monkeypatch, self.FLAT_STORY)
         assert prompts and "Kaironis" not in prompts[0]
+        # no evidence → NO fold, and the unresolved name is HELD (#11653/#11693),
+        # never asserted new: it is absent from `entities[]` and recorded in
+        # `resolution_held` with its reason. ⚠️ Until this was re-pointed the
+        # assertion below demanded TWO entities (`"no evidence → two entities,
+        # never a guess"`), which #11693's HOLD rule deliberately replaced — the
+        # test was RED on `main` from #11693.
         assert [e["name"] for e in out["payload"]["entities"]] == [
-            "Michael", "Mike"], "no evidence → two entities, never a guess"
+            "Michael"], "no evidence → no fold, and never a minted 'Mike'"
+        assert [h["name"] for h in out["resolution_held"]] == ["Mike"], (
+            "the unresolved name must be HELD and recorded, not silently dropped")
+        # the hold must not leave the claim naming an entity the payload no
+        # longer carries — that is the Layer-1 refusal #11693 review finding 1
+        # was filed for (a payload the commit refuses is not "capture blocked
+        # but fine")
+        assert out["payload"]["points"][0]["about_entities"] == [], (
+            f"the claim still names the held entity: "
+            f"{out['payload']['points'][0]['about_entities']!r}")
+        l1, _ = commit_schema.validate_payload_dict(out["payload"])
+        assert l1.ok, f"the held name breaks Layer-1: {l1.errors}"
         assert out["payload"]["points"], "capture is never blocked"
 
 

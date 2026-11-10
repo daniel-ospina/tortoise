@@ -11464,16 +11464,16 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # ── S5 Job 1 (#10999): the batch's own story ──────────────────────────
     # The narrative's entity↔entity relations, validated against the entities
     # THIS emission produced. RESULT-level, not payload-level — the Layer-1
-    # commit payload does not grow for a channel no writer materialises yet
-    # (the D8 record-level convention the retractions/merges/noops records
-    # already follow). Materialising these as Object→Object edges is **#11237**
-    # — nothing in this tree consumes `result["relations"]`, which is why
-    # #10999 is `Part of`, not closed. ⛔ Do NOT read #11001 as this channel's
-    # writer: it is CLOSED COMPLETED and owned the DIFFERENT population (the
-    # pack-declared hierarchy, consumed from
-    # `pack_registry.relation_write_paths`), so an earlier attribution to it
-    # left this leg with no open owner. Whatever #11237 decides, it CONSUMES
-    # that declared verdict and must not re-derive it.
+    # commit payload does not grow here (the D8 record-level convention the
+    # retractions/merges/noops records already follow). The CHANNEL IS
+    # consumed: `relation_write.apply_relation_edges` runs on it, fed
+    # — `result["relations"]` — inside the capture commit path
+    # (`sdk.py::TortoiseSDK._extract_session_v2`: `out = extract_session_v2(…)`;
+    # `if out.get("relations")`), so #10999 stays `Part of` for the EMISSION
+    # leg's measurement and its declared-pair gate (**#11237** / **#11656**),
+    # NOT for a missing consumer. ⛔ Do NOT read #11001 as this channel's
+    # writer: it owned the DIFFERENT population (the pack-declared hierarchy).
+    # Whatever #11237 decides, it CONSUMES that verdict, never re-derives it.
     payload_relations, relations_dropped = _assemble_relations(
         embed_list, payload_entities, warnings)
     # ── #10997 SETTLE the drained claims (review P0) ───────────────────────

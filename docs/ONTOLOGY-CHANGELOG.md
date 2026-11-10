@@ -138,7 +138,7 @@ aboutObjects: ONTOLOGY.md, canonical ontology, model versions
 > reports (`'live'` for a status-carrying label, `''` for an `:Event`). **Scope of the trap:** `:Object` and
 > `:Subject` only. `Point` births keep the `#7856` born-live contract and still STORE `status='live'`, so the
 > `MATCH (p:Point {status:'live'})` idiom printed in **§5's Point Status Vocabulary**
-> (`ONTOLOGY.md:1152`) remains correct as written.
+> (`ONTOLOGY.md:1156`) remains correct as written.
 
 ---
 

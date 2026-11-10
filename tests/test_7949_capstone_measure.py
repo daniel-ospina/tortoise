@@ -11496,9 +11496,24 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     assert re.findall(r"(?<!extractor_v2\.py):11470", text) == [":11470"], (
         "the reproduction block must state the live number `:11470` exactly once as a BARE "
         "cite — re-stale it and this record's only reproduction path points at a dead line")
-    assert "nothing in this tree consumes" in ext[11470 - 1], (
-        f"extractor_v2.py:11470 reads {ext[11470 - 1].strip()[:90]!r}, not the "
-        "comment stating nothing consumes `result[\"relations\"]`")
+    # ⛔ DIRECTION FLIPPED with the correction this arm forced. The comment at this line used to
+    # read "nothing in this tree consumes `result[\"relations\"]`" — a claim that was FALSE from the
+    # moment `#11548` landed the consumer (this record's own §5 names it at `sdk.py:17416`), so the
+    # arm was pinning a falsehood into the live tree. It now asserts the corrected sentence AT THE
+    # SAME LINE (the block's line count was held at 13 so every cite below keeps its number) and that
+    # the retracted sentence is gone from the file entirely.
+    assert "result[\"relations\"]" in ext[11470 - 1], (
+        f"extractor_v2.py:11470 reads {ext[11470 - 1].strip()[:90]!r} — the record's three-hit grep "
+        "is scoped to this channel, so the line it names must still carry the token")
+    # The block is READ AS ONE PROSE UNIT: it wraps mid-sentence, so a literal phrase match would
+    # pin the line breaks rather than the claim (measured: `IS consumed` spans two comment lines).
+    _s5 = " ".join(line.strip().lstrip("#").strip() for line in ext[11463:11476])
+    assert "apply_relation_edges" in _s5 and "consumed" in _s5.lower(), (
+        "the S5 Job 1 block no longer names the channel's consumer — the retracted "
+        "\"nothing consumes it\" reading is what this arm replaced")
+    assert "nothing in this tree consumes" not in "\n".join(ext), (
+        "the retracted sentence is back in the live file — it was false while this record's own §5 "
+        "cited `sdk.py:17416` as the consumer, so no arm may require it again")
 
     # A1's environment block: the reproduction that states A1's producer claim — the
     # bare-token grep whose four `create_operator` mentions ARE its evidence that the
