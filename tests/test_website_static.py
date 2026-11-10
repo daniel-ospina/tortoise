@@ -6016,26 +6016,50 @@ class TestSiteIconAndSocialPreviewContract:
                     f"{page_name} blanks its icon with {href!r} — a blank icon is not a "
                     "harmonised icon, it is the browser's generic glyph")
                 continue
-            path = href.split("?", 1)[0]
-            if "/logo.png" in path:
+            # ⛔ RESOLVED THROUGH `_icon_ref`, WHICH IS WHAT MAKES `origins` REAL.
+            # `href.split("?", 1)[0]` DROPPED the origin instead of checking it: an
+            # absolute `https://app.premiselabs.co/favicon.ico?v=…` — the exact form
+            # `ICON_ORIGINS`'s own comment says the app pages may use — kept its scheme
+            # and host, matched no key in `expected`, and reded a CORRECT page with "is
+            # not one of the three icon files" (the file it names IS one of the three).
+            # That false red was the only place `origins` could have changed an answer,
+            # so before this the parameter was unobservable too: every graded page uses
+            # a root-relative href, which `_icon_ref` resolves through `SITE_ORIGINS`
+            # whether or not `origins` is threaded — replacing
+            # `ICON_ORIGINS` with `SITE_ORIGINS`, or deleting `origins` outright, left
+            # this whole file green. Resolving here grades the origin that actually
+            # serves the file: another host yields "" (so a protocol-relative
+            # `//evil.example/favicon.ico` can no longer pass as `/favicon.ico`), and
+            # this surface's own origin is accepted in both the absolute and
+            # root-relative spellings. `test_the_app_tree_accepts_an_absolute_href_on_
+            # its_own_origin` drives all four directions through a real app page.
+            resolved = self._icon_ref(href, origins=origins)
+            if not resolved:
+                violations.append(
+                    f"{page_name} declares {href!r}, which resolves to no icon file on "
+                    f"this surface's origins {sorted(origins)} — the browser fetches "
+                    "that tab icon from another host (or the href is not a URL), so the "
+                    "mark on the tab is not ours")
+                continue
+            if "/logo.png" in resolved:
                 violations.append(
                     f"{page_name} uses the wordmark as a tab icon ({href!r}) — 400x244 "
                     "squashed into a square slot (#11407)")
                 continue
-            if path not in expected:
+            if resolved not in expected:
                 violations.append(
                     f"{page_name} links {href!r}, which is not one of the three icon "
                     f"files {sorted(expected)}")
                 continue
-            if not (root / path.lstrip("/")).is_file():
+            if not (root / resolved.lstrip("/")).is_file():
                 violations.append(
                     f"{page_name} links {href!r}, which does not exist under "
                     f"{root.name}/ — the tab request 404s")
                 continue
-            if self._href_version(href) != expected[path]:
+            if self._href_version(href) != expected[resolved]:
                 violations.append(
                     f"{page_name} links {href!r} but the file's sha256 starts "
-                    f"{expected[path]!r} — bump the `?v=` with the bytes, or a browser "
+                    f"{expected[resolved]!r} — bump the `?v=` with the bytes, or a browser "
                     "holding the old icon keeps drawing it (that is the stale-icon bug)")
         return [f"{label}: {v}" for v in violations]
 
@@ -6096,3 +6120,79 @@ class TestSiteIconAndSocialPreviewContract:
             assert href in blog, (
                 f"the blog SSR head does not declare {href} — a post's tab icon would differ "
                 "from the page that links it")
+
+    def test_the_app_tree_accepts_an_absolute_href_on_its_own_origin(self):
+        """NON-VACUITY for `origins` — it must CHANGE AN ANSWER, in both directions.
+
+        `ICON_ORIGINS` exists for one documented reason (its own comment): the app surface
+        is a separate Pages deployment, so its pages "may name
+        `https://app.premiselabs.co/...` absolutely". On the code before this test the
+        href loop compared `href.split("?", 1)[0]` against `expected`, so that blessed
+        form kept its scheme and host, matched no key, and a page correct by every count,
+        file and version was reported as linking "which is not one of the three icon
+        files" — a FALSE RED on a correct page, with a message that misnames the cause
+        (the file IS one of the three).
+
+        The same read made `origins` UNOBSERVABLE: all 19 graded pages use root-relative
+        hrefs, which `_icon_ref` resolves through `SITE_ORIGINS` whether `origins` is
+        passed or not, so replacing `ICON_ORIGINS` with `SITE_ORIGINS` — or deleting the
+        parameter and its four call sites — left every assertion green. A check whose
+        failure path cannot run is indistinguishable from a no-op, which is the case this
+        file's own `_missing_icon_links` docstring says must not ship.
+
+        All four directions are driven through a REAL app page, not a fixture, so this
+        cannot drift into testing a string nobody deploys.
+        """
+        expected = {f"/{name}": hashlib.sha256((self.WEB / name).read_bytes()).hexdigest()[:12]
+                    for name in self.ICON_FILES}
+        page = self.DASHBOARD_ROOT / "signup.html"
+        head = page.read_text()
+
+        def grade(html: str, origins: frozenset[str]) -> list[str]:
+            return self._surface_icon_violations(
+                "app", page.name, html, self.DASHBOARD_ROOT, expected, origins)
+
+        absolute = head
+        for path, version in expected.items():
+            absolute = absolute.replace(
+                f'href="{path}?v={version}"',
+                f'href="https://app.premiselabs.co{path}?v={version}"')
+        for path, version in expected.items():
+            assert f'href="https://app.premiselabs.co{path}?v={version}"' in absolute, (
+                "fixture drift: signup.html no longer declares the versioned "
+                f"{path} href, so the absolute form below tests fewer links than the "
+                "page has")
+
+        # Direction 1 — the form the comment blesses must PASS. This is the false red.
+        assert grade(absolute, self.ICON_ORIGINS) == [], (
+            "a page may name its own origin's icons ABSOLUTELY (`ICON_ORIGINS`'s comment "
+            "says so), and grading it root-relative-only reds a correct page:\n"
+            + "\n".join(grade(absolute, self.ICON_ORIGINS)))
+
+        # Direction 2 — `origins` is OBSERVABLE: the app origin is deliberately not in
+        # `SITE_ORIGINS`, so the same page graded against the marketing set must red. A
+        # mutant that passes `SITE_ORIGINS` (or drops the parameter) fails here.
+        assert grade(absolute, self.SITE_ORIGINS), (
+            "grading the app surface against `SITE_ORIGINS` must red an absolute "
+            "app-origin href — otherwise `ICON_ORIGINS` changes no answer and the "
+            "parameter is dead weight")
+
+        # Direction 3 — the protocol-relative spelling is the same origin, not another.
+        protocol_relative = head
+        for path, version in expected.items():
+            protocol_relative = protocol_relative.replace(
+                f'href="{path}?v={version}"',
+                f'href="//app.premiselabs.co{path}?v={version}"')
+        assert protocol_relative.count('href="//app.premiselabs.co') == 3
+        assert grade(protocol_relative, self.ICON_ORIGINS) == [], (
+            "`//app.premiselabs.co/favicon.ico?...` is this surface's own origin and must "
+            "pass:\n" + "\n".join(grade(protocol_relative, self.ICON_ORIGINS)))
+
+        # Direction 4 — the widening is by ORIGIN, not "any host". A foreign host still
+        # reds, both as a missing declaration and as an href that names no file of ours.
+        foreign = absolute.replace("https://app.premiselabs.co", "https://evil.example")
+        caught = grade(foreign, self.ICON_ORIGINS)
+        assert len([v for v in caught if "evil.example" in v]) == 3, (
+            "every one of the three foreign hrefs must be reported, not just the first — "
+            "an icon served from another host is not ours and one defect must not hide "
+            f"the rest. Got: {caught}")
