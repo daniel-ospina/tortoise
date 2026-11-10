@@ -4267,19 +4267,21 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "is exempt",
     "is exempted",
     "an exemption",
-    # ⚠️ `the exemption` is LIVE as of the `#11665` clause in the extractor's §3
-    # (*"The exemption is about CONTENT, not the declaration site"*): a TOPIC use —
-    # the noun naming the exempt class, not a sentence calling a counted writer an
-    # exemption. ⛔ IN THE DENIAL LEG this tuple is consulted only for a sentence that
-    # leg has already keyed on a NAMED census writer, and each occurrence is then
-    # judged per-occurrence (`_denies_the_class`, `#11714`) — so THERE the failure
-    # direction is OVER-red, never a miss: a sentence naming a counted writer that
-    # carries the phrase affirmatively DOES red, which is why the topic use is
-    # tolerable only where it is not a claim about a writer. ⛔ Leg 36 ALSO consults
-    # this tuple CORPUS-WIDE, with no writer key (`families`, `~:7224`), for liveness
-    # only — so the marker must keep appearing in §3, and that half (plus why the
-    # absence declaration was deleted) is recorded at `MARKERS_ABSENT_BY_DESIGN`
-    # below.
+    # ⚠️ `the exemption` is a REAL denial phrase (the owner's decision — *"a counted
+    # writer may not be called **an exemption**"* — and a DEFINITE-articled counted
+    # writer is the same claim), never a topic use the guard merely tolerates. ⛔ IN
+    # THE DENIAL LEG this tuple is consulted only for a sentence that leg has already
+    # keyed on a NAMED census writer, and each occurrence is then judged
+    # per-occurrence (`_denies_the_class`, `#11714`) — so THERE the failure direction
+    # is OVER-red, never a miss: a sentence naming a counted writer that carries the
+    # phrase affirmatively DOES red. ⛔ Leg 36 ALSO consults this tuple CORPUS-WIDE,
+    # with no writer key (`families`, `~:7224`), for liveness only — and the phrase
+    # is now absent from both documents: `#11665` had put it into EXTRACTOR §3 as a
+    # topic use (*"The exemption is about CONTENT, not the declaration site"*) and
+    # `#11688` reworded that clause to *"The carve-out is about CONTENT…"*. So the
+    # liveness half finds 0 occurrences and the declaration RESTORED at
+    # `MARKERS_ABSENT_BY_DESIGN` below is what keeps this pin honest — it reds in the
+    # other direction the day the phrase reappears (`stale`).
     "the exemption",
     "carries nothing",
     "writes nothing",
@@ -7117,42 +7119,31 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    # ⛔ `the exemption` IS NOT HERE ANY MORE, and the MARKER stays live: it is a
-    # real denial phrase (the owner's decision — *"a counted writer may not be
-    # called **an exemption**"* — and a DEFINITE-articled counted writer is the same
-    # claim), so it remains in `DENIAL_MARKERS` above and the DENIAL frame still
-    # catches it. What was removed is the DECLARATION, because the one reason that
-    # justified it — "absent from both documents until someone writes it" — became
-    # false: `#11665` added EXTRACTOR §3's clause *"The exemption is about CONTENT,
-    # not the declaration site"*, and a marker declared absent-by-design that DOES
-    # appear is exactly the stale declaration the liveness half below reds on.
-    # ⚠️ That occurrence is the word in a DIFFERENT sense — a carve-out from the
-    # no-prompt-text rule, not a census row excused — which is why it also stays
-    # out of the census. Precisely: §3 is OUTSIDE `CORRECTED_SECTIONS`, so
-    # `test_no_corrected_passage_denies_a_verdict_the_census_counts` never reads
-    # the sentence at all, and `_denied_verdicts` could not attribute it anyway
-    # (its stated limit 2: a denial that names no census writer is invisible).
-    # Green by EXCLUSION, not by being read and found true — the difference the
-    # `:4252` block exists to keep visible. This is the same doctrine that DELETED the
-    # bare `exempt` stem from the marker tuples: its live effect is a FALSE RED,
-    # because a stem match cannot tell a denial from the non-denial prose both
-    # documents DO write — EXTRACTOR §3's carve-out *"The exemption is about
-    # CONTENT, not the declaration site"* (the occurrence quoted above) and
-    # STORAGE's *"exempts that statement exactly"* — so it was removed rather than
-    # kept as coverage that fires on true prose (`#10200` review, cycle 5). It is
-    # also the doctrine that deleted the `#10200` cycle-9 orphans ("the entries
-    # were deleted rather than left as dead coverage"). Removing the entry does not
-    # weaken the liveness tripwire — it strengthens it, since `unpinned` below now
-    # demands this marker appear, and will red the day a reword drops it.
-    # ⚠️ `main` reached the same deletion independently (the two sides agreed on
-    # the RESOLUTION and differed only in the note): its substance is kept below,
-    # because it names WHERE the red was first recorded.
-    # The marker's non-denial occurrence cannot hide a real denial either way —
-    # whether an OCCURRENCE is a denial is decided sentence-by-sentence by
-    # `DENIAL_PATTERNS` + `_class_marker_negated` — so this pin only asks that a
-    # marker is not DEAD, and it is not. Recorded on `#9066` as one more nodeid
-    # red on `main` because push-to-main legs never complete (that is why it
-    # reached a PR instead of `main`'s CI).
+    # ⛔ `the exemption` IS DECLARED HERE AGAIN, and the history is the reason this
+    # file can be trusted about it. The declaration was DELETED once, correctly:
+    # `#11665` put the phrase into EXTRACTOR §3 (*"The exemption is about CONTENT,
+    # not the declaration site"*) as a TOPIC use — a carve-out from the
+    # no-prompt-text rule, never a census row excused — and a marker declared
+    # absent-by-design that DOES appear is exactly the stale declaration the
+    # `stale` half below reds on. `#11688` then reworded that same clause to *"The
+    # carve-out is about CONTENT…"*, so the only live occurrence is gone and the
+    # `unpinned` half below redded this marker — the liveness tripwire firing as
+    # designed, one reword after the occurrence died, which is precisely why the
+    # deletion did not weaken it. The marker stays in `DENIAL_MARKERS` above because
+    # it is a real denial phrase (the owner's decision — *"a counted writer may not
+    # be called **an exemption**"*), so the restore is the DECLARATION, not the
+    # marker. ⚠️ Whether an OCCURRENCE is a denial is decided sentence-by-sentence by
+    # `DENIAL_PATTERNS` + `_class_marker_negated`; this pin only asks that a marker is
+    # not DEAD, and asks the declaration to die the moment it becomes stale again.
+    "the exemption": (
+        "contradiction vocabulary — the DEFINITE-articled form of `an exemption`, "
+        "and the same claim about a counted writer. Absent from both documents "
+        "today (`#11688` reworded EXTRACTOR §3's *\"The exemption is about "
+        "CONTENT, not the declaration site\"* to *\"The carve-out is about "
+        "CONTENT…\"*, so the `#11665` topic occurrence is gone), and restored to "
+        "this table rather than left dead: a dead marker reads as coverage while "
+        "pinning nothing. It reds the day the phrase is written again"
+    ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
