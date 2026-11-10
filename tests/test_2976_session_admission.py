@@ -483,15 +483,25 @@ def test_tr_complete_sessions_splices_a_padded_session_id_11382(monkeypatch):
 
     This function joins a fetched group back onto its base hits through
     ``retrieval.session_key_of`` (the #10540 change), so it inherits the
-    normalisation — but only because the pool key is normalised. Before the
-    fix the two sides were produced independently and diverged on a padded id:
-    the fetch's group key was the graph's RAW value under BOTH spellings
-    (``coalesce(p.session_id, s.id)``), while the POOL HIT was raw for the
-    snake spelling and STRIPPED for the camel one (``session_key_of``'s camel
-    leg, #10540) — one session, two keys, and only the raw one could equal
-    the group. So the camel-spelled hit's material was fetched, charged
-    against the total budget (``total == 1``) and then never placed:
-    ``seeded > 0`` with ``sessions == 0``.
+    normalisation — but only because the pool key is normalised. The fixture
+    below keeps the POOL side REAL (``_hit`` stamps a padded SNAKE
+    ``session_id``, ``"  sid-a  "``) and stubs the GRAPH side to the
+    NORMALISED value (``seeded_sessions`` returns ``"sid-a"``, and
+    ``by_session`` is keyed ``"sid-a"``), which is exactly the shape the fix
+    exists for: before it the two sides were produced independently, so the
+    RAW pool key could never equal the normalised group key — one session,
+    two keys — and the group was fetched, charged against the total budget
+    (``total == 1``) and then never placed: ``seeded > 0`` with
+    ``sessions == 0``. That is why this test fails pre-fix.
+
+    ⚠️ The CAMEL half of the pre-fix defect is deliberately NOT in this
+    fixture — there is no ``sessionId`` here — so do not read the sentences
+    above backwards. The camel leg was the one already STRIPPED by #10540, so
+    on the pre-fix TREE it was the spelling that got dropped, while the raw
+    snake pool key MATCHED the raw graph group key and nothing was lost.
+    What this test pins is the SNAKE side under the fixed rule; the test that
+    carries BOTH spellings is
+    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``.
 
     It also pins ``report["total"]`` — the fetch's DISTINCT-item count —
     which this issue asks for so a "charged then dropped" fetch is visible as
