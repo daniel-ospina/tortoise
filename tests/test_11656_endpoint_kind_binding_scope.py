@@ -26,8 +26,10 @@ have shipped because nothing reads prose:
 
   * neither #11656 doc was registered in `docs/00_index.md` (the repo's ledger — how the next lane finds a
     doc);
-  * a cited `.md` was written bare where the basename is ambiguous (8 files under `docs/` are named
-    `04-plan.md`), so the reference did not resolve from the citing document.
+  * a cited `.md` was written bare where the basename is ambiguous (more than one file under `docs/` is
+    named `04-plan.md`), so the reference did not resolve from the citing document. ⛔ No hard count is
+    carried here on purpose: the count rotted the moment this PR stopped adding an eighth `04-plan.md`,
+    and the assertion's own message derives it.
 """
 from __future__ import annotations
 
@@ -510,8 +512,10 @@ class TestTheDocsAreDiscoverableAndResolve:
     def test_every_cited_markdown_path_resolves(self, doc):
         """A cited `.md` must resolve from the citing doc, or be an UNAMBIGUOUS repo-wide basename.
 
-        8 files under `docs/` are named `04-plan.md`, so citing it bare from `docs/research/` is a reference
-        that does not resolve — the exact defect the review found.
+        More than one file under `docs/` is named `04-plan.md`, so citing it bare from `docs/research/` is a
+        reference that does not resolve — the exact defect the review found. The count is derived in the
+        assertion message rather than written here, because a hard number in this docstring is the same
+        rot this file's own header records (`31` → `33`, `three readers` → `four`).
         """
         basenames = Counter(p.name for p in (REPO_ROOT / "docs").rglob("*.md"))
         cited = set(re.findall(r"`([A-Za-z0-9_./-]+\.md)`", doc.read_text()))
