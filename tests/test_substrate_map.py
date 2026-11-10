@@ -721,8 +721,8 @@ def test_the_d10_retirement_mechanism_is_checked(monkeypatch) -> None:
     Reachable: `migrate_kinds.py` does not declare `build_master_list`, so
     retargeting the pair is a real file that genuinely lacks the symbol — exactly
     what deleting the migration would leave behind. The `:Document` label itself
-    is deliberately NOT regex-checked (63 prose lines across 19 files at this
-    head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
+    is deliberately NOT regex-checked (the figure §5 states
+    at this head — pinned by `test_the_document_label_prose_count_is_the_LINE_count`), so
     the retirement is guarded through these two symbols instead.
     """
     monkeypatch.setattr(
@@ -1187,7 +1187,7 @@ def test_the_label_population_is_every_tracked_file_not_just_py(monkeypatch) -> 
     distinction is load-bearing: the first cut of this fix asserted only that
     `_tracked_files_under()` returns a non-`.py` file, which stayed green with
     `_label_hits`'s own loop reverted to `rglob("*.py")` — the two populations
-    are numerically identical today (all 63 hits are in `.py` files), so the
+    are numerically identical today (every hit is in a `.py` file), so the
     count matches either way and the latent false CLEAN survives behind a green
     suite. A control on the helper is not a control on the count (#5086 review
     P2, cycle 5).
@@ -1621,16 +1621,21 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     """
     doc = _doc()
     heading = "## 5. The interface map — what changes hands"
-    assert doc.count(heading) == 1, (
-        f"the document carries {doc.count(heading)} copies of §5's heading — "
-        "`_section` binds the FIRST, so a duplicate heading above the real §5 would "
-        "let these pins read a different section; keep one heading"
+    copies = doc.count(heading)
+    assert copies, (
+        "§5's heading `## 5. The interface map — what changes hands` is MISSING — "
+        "these pins anchor to it, so restore it rather than falling back to a "
+        "whole-document search"
+    )
+    assert copies == 1, (
+        f"the document carries {copies} copies of §5's heading — `_section` binds "
+        "the FIRST, so a duplicate heading above the real §5 would let these pins "
+        "read a different section; keep one heading"
     )
     section = smc._section(doc, heading)
     assert section, (
-        "§5's heading `## 5. The interface map — what changes hands` is gone — these "
-        "pins anchor to it; re-state the heading rather than falling back to a "
-        "whole-document search"
+        "§5's heading is present but §5 has NO BODY after it — these pins read "
+        "that section, so restore its contents rather than re-stating the heading"
     )
     match = _LABEL_CLAIM.search(section)
     assert match, (

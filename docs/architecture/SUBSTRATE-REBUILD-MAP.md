@@ -275,7 +275,7 @@ population this sentence is stated in — every *tracked* file under `tortoise/`
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
 of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
-`migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
+`migrate_kinds.py` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
 lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
