@@ -2559,6 +2559,65 @@ def test_checker_refuses_a_matched_binding_under_an_owned_share_floor(
                for f in findings), findings
 
 
+def test_a_quoted_binding_value_is_not_a_number_the_gate_can_read(log_text):
+    """The binding's numbers are read from their RAW tokens, never the stripped ones.
+
+    #11725 review (P1): `Log.kv` strips the surrounding quotes, so the value the
+    probe prints for a floor it could NOT read — `_floor_number` renders a declared
+    JSON string QUOTED, e.g. `declared_before_floor="0.2"` — arrived at every rule
+    in V15 as the bare `0.2` and read as a MET floor. Measured on the pre-fix code:
+    both `declared_before_floor="0.2"` and `declared_surviving_floor="30"`
+    certified a MATCHED binding with ZERO findings, i.e. `--require-green` passed a
+    run whose newly-owned floor was never compared — the "present but unreadable is
+    not absent" property `_num`'s own docstring claims and could not deliver, while
+    the plain non-number `abc` WAS refused (so the rule existed; only its discriminator
+    was dead). Each shape below must red ON ITS OWN, so an arm that stops
+    discriminating takes this with it.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], "the honest scored log must stay clean"
+
+    # (a) a quoted DECLARED floor on an owned key reds BOTH arms: the mirror (the
+    #     label claims a floor nothing compared) and the arithmetic (nothing was
+    #     readable to compare it against).
+    share = scored.replace("declared_before_floor=0.2",
+                           'declared_before_floor="0.2"', 1)
+    findings, _ = check.check(share)
+    assert any("[V15]" in f and "names a floor it never read" in f
+               for f in findings), findings
+    assert any("[V15]" in f and "is not a bare number" in f
+               for f in findings), findings
+    # (b) the same for E2b's population floor
+    surviving = scored.replace("declared_surviving_floor=30",
+                               'declared_surviving_floor="30"', 1)
+    findings, _ = check.check(surviving)
+    assert any("[V15]" in f and "names a floor it never read" in f
+               for f in findings), findings
+    assert any("[V15]" in f and "is not a bare number" in f
+               for f in findings), findings
+    # (c) the denominator pair: a quoted declared floor is not a plain integer
+    objects = scored.replace("declared_floor=20", 'declared_floor="20"', 1)
+    findings, _ = check.check(objects)
+    assert any("[V15]" in f and "neither a plain integer nor `n/a`" in f
+               for f in findings), findings
+    # (d) a quoted MEASURED side is a quantity the log never printed, on both new
+    #     pairs — the stripped read made a forged number reconcile a real floor.
+    for field in ("before_share", "surviving_units"):
+        bare = next(ln for ln in scored.splitlines()
+                    if ln.startswith("prereg-binding "))
+        assert f"{field}=" in bare, (field, bare)
+        quoted = re.sub(rf"\s{field}=(\S+)", rf' {field}="\1"', bare, count=1)
+        assert f'{field}="' in quoted, (field, quoted)
+        tampered = scored.replace(bare, quoted, 1)
+        findings, _ = check.check(tampered)
+        assert any("[V15]" in f and f"no readable {field}" in f
+                   for f in findings), (field, findings)
+
+    # …and every tampered shape above is a REFUSAL, never a clean certification.
+    for tampered in (share, surviving, objects):
+        assert check.check(tampered)[0], tampered
+
+
 def test_checker_refuses_a_scored_log_without_the_floor_accounting(log_text):
     """A SCORED log must declare the floors it owned and the rows it skipped.
 
