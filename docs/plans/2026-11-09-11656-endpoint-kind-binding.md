@@ -98,7 +98,7 @@ the declared relation.
 |---|---|
 | **D1** | **Refuse** where the pair is declared **and both endpoint kinds are known**. **Never refuse** on an unknown / `unclassified` kind. **Severity declared by the pack; the policy applied by the graph.** |
 | **D2** | A declared parent kind **accepts its declared subclasses** — closure over the declared kind, both spelling forms admitted, `equivalentTo` included. |
-| **D3** | A declaration's binding scope is **the vocabulary it names**, not the predicate name. |
+| **D3** | A declaration's binding scope is **the vocabulary it names**, not the predicate name. ⛔ **This DEPARTS from the ruling as recorded on the issue** ("the declaring pack's vocabulary") and is **reopened there, pending one line from the owner**: [#11656 comment 6754927533](https://github.com/daniel-ospina/tortoise/issues/11656#issuecomment-6754927533). Read it before implementing — the two readings differ in outcome (§5.2: the pack-scoped reading leaves **8 of the 35** declarations permanently `unbound`). |
 | **D5** | The **prevention half lives in this issue**. |
 
 ### 2.1 D1's precedence, stated — the contradiction in revision 1
