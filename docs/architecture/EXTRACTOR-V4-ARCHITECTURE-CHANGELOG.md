@@ -1930,10 +1930,13 @@ real surfaces sit at depth 2, which is why it was latent. The root is now DERIVE
 counted off it — and, because the attribution half must resolve the same path `gate_errors` validated, an entry is
 accepted for a surface inside the repo root only when its leading components ARE that surface's repo-relative path,
 so an entry naming no surface (`architecture/a.md`) is no longer pulled into `docs/architecture/` and its real
-declaration site can no longer go marker-unchecked while the row reads clean (review cycle 8, P1). A surface outside
-the root — every fixture tree — falls back to matching its trailing components against the entry's leading ones, so
-the document is `surface / <the rest>` and no root is counted. The pins build both arms: the deep surface's depth,
-and a repo-relative entry that names no surface at all.
+declaration site can no longer go marker-unchecked while the row reads clean (review cycle 8, P1). That arm resolves
+`<ROOT> / entry` itself rather than re-deriving it from the surface's lexical parts, so a surface that IS the root is
+attributed too, instead of dropping every entry through a `parts[-0:]` comparison that can only disagree with the
+resolved relationship the match came from (review cycle 9, P3). A surface outside the root — every fixture tree —
+falls back to matching its trailing components against the entry's leading ones, so the document is
+`surface / <the rest>` and no root is counted. The pins build both arms: the deep surface's depth, and a
+repo-relative entry that names no surface at all.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
 registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is

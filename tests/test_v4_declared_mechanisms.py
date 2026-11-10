@@ -944,20 +944,36 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
             # depth the pin below builds) has no `ROOT`-relative path to compare,
             # so it keeps the trailing-component match — the document is then
             # `surface / <the rest of the entry>`, no root counted.
+            #
+            # ⛔ AND THE `ROOT`-ANCHORED ARM RESOLVES `<ROOT> / entry` ITSELF, once
+            # containment is established (review cycle 9, P3). Re-deriving the
+            # same path from the surface's LEXICAL `parts` re-introduces a
+            # comparison that can only DISAGREE with the resolved relationship
+            # that produced `depth`: a surface that IS `ROOT` has `depth == 0`,
+            # and `parts[-0:]` is `parts[0:]` — the WHOLE path — so it never
+            # equals `()`, and a surface spelled through a symlink resolves to
+            # the surface but is not spelled like it. Both shapes attributed
+            # NOTHING, which is the cycle-7 fail-open again (a dropped surface is
+            # invisible whenever another surface keeps `scanned_targets`
+            # non-empty). Neither is reachable from `DECLARATION_SURFACES` today —
+            # both are spelled literally at depth 2 — and that is exactly why the
+            # agreement is worth having by construction rather than by luck.
             try:
                 surface_rel = surface.resolve().relative_to(ROOT.resolve())
             except (OSError, RuntimeError, ValueError):
                 surface_rel = None  # a fixture surface: no repo-relative path
             if surface_rel is not None:
                 depth = len(surface_rel.parts)
-                depths: tuple[int, ...] = (
-                    (depth,) if rel.parts[:depth] == surface_rel.parts else ()
-                )
-            else:
-                depths = tuple(
-                    range(min(len(surface.parts), len(rel.parts) - 1), 0, -1)
-                )
-            for depth in depths:
+                if rel.parts[:depth] != surface_rel.parts:
+                    continue  # the entry names no part of this surface
+                try:
+                    resolved = (ROOT / rel).resolve()
+                except (OSError, RuntimeError, ValueError):
+                    continue  # unresolvable: not attributable
+                if resolved.is_relative_to(surface.resolve()):
+                    targets.add(resolved)
+                continue
+            for depth in range(min(len(surface.parts), len(rel.parts) - 1), 0, -1):
                 if surface.parts[-depth:] != rel.parts[:depth]:
                     continue
                 try:
@@ -7939,6 +7955,12 @@ def test_an_entry_that_names_NO_surface_is_not_attributed_to_one() -> None:
     assert ARCH_DOCS / "a.md" not in _scanned_targets(
         ["docs/epics/a.md"], DECLARATION_SURFACES
     )
+    # …and the arm resolves `<ROOT> / entry` ITSELF, so a surface that IS the
+    # root (`depth == 0`) attributes rather than silently dropping everything:
+    # re-deriving the path from the surface's lexical `parts` made `parts[-0:]`
+    # the WHOLE path, which never equals `()`, and every entry vanished
+    # (review cycle 9, P3 — the cycle-7 fail-open, by a different route).
+    assert _scanned_targets(["docs/architecture/a.md"], ROOT) == {ARCH_DOCS / "a.md"}
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
