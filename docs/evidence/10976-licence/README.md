@@ -50,8 +50,11 @@ cache under its byte ceiling answers `CLEAN` with an empty licence.
 
 `before.log` / `after.log` in this directory are the captured runs, **both produced by the
 committed probe at ONE head** — the commit that adds `--without-population-bound`
-(`6080da8a24df`, the earliest head whose probe can produce both arms; the two commands below
-are the reproduction) — differing only in whether `assess()` applies the population bound:
+(`779947436e`, *"the evidence logs now come from ONE probe at ONE head"* — the earliest head
+whose probe can produce both arms, cited by subject as well as sha because a rebase rewrites the
+sha and an earlier revision of this line named a commit this branch does not contain; the two
+commands below are the reproduction) — differing only in whether `assess()` applies the
+population bound:
 
 ```bash
 export TORTOISE_DB_URI=<a throwaway lane container>
