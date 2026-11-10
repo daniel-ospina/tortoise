@@ -473,7 +473,7 @@ class TestThePairHasProductionReaders:
             "do not just move the number here"
         )
 
-    def test_the_readers_exist_and_the_catalog_carries_the_pair(self):
+    def test_the_readers_exist_and_the_catalog_carries_the_pair(self, monkeypatch):
         """§5.5 readers 1 and 3, asserted as CALLS — not as `callable()` plus a source substring.
 
         ⛔ **Review F2: §5.5 says FOUR readers and this file pinned two of them, part of a third.**
@@ -524,6 +524,26 @@ class TestThePairHasProductionReaders:
         assert "_pack_relations()" in inspect.getsource(domain_validators._portfolio_mark_contract), (
             "the reader stopped consulting the loaded pack and now returns the module constants, which is "
             "the hardcoded-copy drift §5.5 says to reuse it to avoid"
+        )
+
+        # ⛔ **The derivation, not the fallback** — a source-text check is not enough: an early
+        # `return MARK_KIND, POSITION_KIND, MARK_RELATION` leaves the `_pack_relations()` call in place and
+        # stays green over a reader that can no longer follow a manifest edit. Swapping the pack's `marks`
+        # row must MOVE the answer (this is the same mechanism
+        # `test_investment_portfolio_manager_pack.py::test_the_mark_contract_follows_a_manifest_edit` pins in
+        # its own suite; here it is what makes §5.5's "reuse it" claim — and §6 pin 10 — non-vacuous).
+        monkeypatch.setattr(
+            domain_validators,
+            "_pack_relations",
+            lambda: [{"predicate": "marksPosition", "fromKind": "portfolio:valuationMark",
+                      "toKind": "venture:position"}],
+        )
+        assert domain_validators._portfolio_mark_contract() == (
+            "portfolio:valuationMark", "venture:position", "marksPosition",
+        ), (
+            "`_portfolio_mark_contract` no longer FOLLOWS the declaration — it is answering from the "
+            "module constants, so a manifest edit to `marks` desynchronises the rule silently and §5.5's "
+            "'reuse the reader that already exists' becomes a re-derivation with nothing red"
         )
 
         registry = PackRegistry(PACKS_DIR)
