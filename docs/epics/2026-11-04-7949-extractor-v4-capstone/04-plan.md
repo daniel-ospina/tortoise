@@ -13,8 +13,8 @@ stage: epic-plan
 
 # Epic Plan — #7949 extractor v4 CAPSTONE
 
-**Inputs:** `00-align.md` (PROCEED; GREEN bar = E1–E5 + A1–A5) · `01-research-brief.md` · `02-scope.md` (9
-in-scope items, E2E-1…8, D-S1…D-S5) · `03-test-design.md` / **#11454** (17 surfaces + the CI tier rule).
+**Inputs:** `00-align.md` (PROCEED; GREEN bar = E1–E5 + A1–A5) · `01-research-brief.md` · `02-scope.md` (10
+in-scope items, E2E-1…8, D-S1…D-S5) · `03-test-design.md` / **#11454** (18 surfaces — `1…17` plus `10a` — + the CI tier rule).
 **Supersedes:** `00-plan.md`, whose §1–§4 were written before research and whose §5 is now a pointer to #11454.
 
 > **Gate grouping, disclosed.** `epic-plan` specifies one review gate **per substep**. This lane runs them as
@@ -825,7 +825,7 @@ pack content. `#11083` says so explicitly and this plan adopts that reading.
 | J1 ↔ §7 | J1 promises "no number taken on trust"; a case that reports a bare number breaks it | every case names its artifact + state (`I4`) |
 | W2 ↔ §5.4 | the workflow retries capture; the architecture forbids retry on 402 | §5.4 wins; W2 says "402 ⇒ stop" |
 | §4.4 ↔ §6 I1 | the enum is derived, but I1 freezes the row shape | both: derive from `criteria[].id`, freeze the field set |
-| §3 ↔ #11454 | the prototype draws three tiers; the map lists 17 surfaces | the diagram is the *tier* view; the map is the *surface* view — one cross-reference, no second list |
+| §3 ↔ #11454 | the prototype draws three tiers; the map lists 18 surfaces | the diagram is the *tier* view; the map is the *surface* view — one cross-reference, no second list |
 | §7 ↔ 02-scope | ⛔ **the claim "1:1, no new case invented" is FALSE** — §7 has **ten** cases, the scope **eight**; §7 added **E2E-9** (F3's retry/replay contract, a money-spending one) and **E2E-10** (the 402 state) with **no scope parent** | **02-scope gains E2E-9/E2E-10**, or §7 marks them derived additions that **C2's child must carry** — either way they get an owner, or decomposition drops them |
 | **§6 I1 ↔ the seven E-rows** | I1 freezes `floor_kind`, `max_realizations`, `corpus_id`; the seven E-rows carry **none of the three** today | state that `floor_kind`/`max_realizations` are **A-row-only** (or add them to all twelve) — §4.1 resolves only `corpus_id` |
 | **§6 I9 ↔ §5.3 / J2** | I9 names "J2's reader" and "the census/verdict tooling" as consumers, while §5.3 says C3's rollup is **EVIDENCE-ONLY** and J2 says **no new service is built** | narrow I9's consumers to **C3 + the scorer** (the reader is the existing graph path, not a new one) |
@@ -886,23 +886,27 @@ already works**."*
 
 ### 8.4 Readiness
 
-Every in-scope item (1–9) has a §7 case or a §4/§6 contract; the tier rule is written; the four routed decisions
+Every in-scope item (1–10) has a §7 case or a §4/§6 contract (item 10 — E6 — is §7a); the tier rule is written; the four routed decisions
 (D3, §13.8 Q1, `#9736`, quota) are untouched. **Ready for decomposition.**
 
 **The amendments decomposition must apply — enumerated, because the earlier "nine amendments" resolved to nothing**
 (superseded wording; the scope's review table has 5 findings, §8.5 has 6, and neither list was a decomposition input):
 
+> ⚠️ **The identifiers are `AM1…AM9`, not `A1…A9`.** The scope already uses **A1–A5** for the epic's assertion
+> rows, so a plain `A4` here read as *"the A4 criterion belongs to C6"* — the opposite of the truth (C6 carries
+> **A5**, and **A4** is **C7**). The `AM` prefix is local to this table and names **amendments only**.
+
 | # | amendment | owner |
 |---|---|---|
-| A1 | C3 re-scoped to **evidence**; `blocked-by #11001`; the **rollup** stays C3's (with **I9** as its shape) | C3 |
-| A2 | C4 names **`#10997`** by id; remains the argued attach/resolve exception | C4 |
-| A3 | C5 re-scoped to **evidence**; `blocked-by #10998 + #10999`; D-S5's two arms | C5 |
-| A4 | C6 follows D-S3: measure here, **file a real mechanism gap under `#5087`** | C6 |
-| A5 | C1: the **A-row criteria** (+ `threshold_basis`, `measurement_visible_to_author`, `max_realizations`), the **A-floors in BOTH homes**, the **per-row corpus map**, the **enum derived** with `SUB_ROW_PARENT`, and the **three literal row lists replaced** | C1 |
-| A6 | C2: the **A-corpus artefact**, the A-lane's **G0/G1**, the **point-budget pointer**, and the **runner-register entry** | C2 |
-| A7 | C7: A4 = **read-only fleet census** at a named head, measuring **per-layer label coverage** on the **appears + labelled** bar with the percentage reported, floor **≥1 labelled node** | C7 |
-| A8 | C8/C9: **`BLOCKED(402)` as an acceptance branch**; C9 reports **`N/15` as RED** with attribution, and E5's **full** bar | C8, C9 |
-| A9 | every A-row child cites **#11454** for its tier, and carries a **CI contract twin** (E2E-9/E2E-10 included) | all |
+| AM1 | C3 re-scoped to **evidence**; `blocked-by #11001`; the **rollup** stays C3's (with **I9** as its shape) | C3 |
+| AM2 | C4 names **`#10997`** by id; remains the argued attach/resolve exception | C4 |
+| AM3 | C5 re-scoped to **evidence**; `blocked-by #10998 + #10999`; D-S5's two arms | C5 |
+| AM4 | C6 follows D-S3: measure here, **file a real mechanism gap under `#5087`** | C6 |
+| AM5 | C1: the **A-row criteria** (+ `threshold_basis`, `measurement_visible_to_author`, `max_realizations`), the **A-floors in BOTH homes**, the **per-row corpus map**, the **enum derived** with `SUB_ROW_PARENT`, and the **three literal row lists replaced** | C1 |
+| AM6 | C2: the **A-corpus artefact**, the A-lane's **G0/G1**, the **point-budget pointer**, and the **runner-register entry** | C2 |
+| AM7 | C7: A4 = **read-only fleet census** at a named head, measuring **per-layer label coverage** on the **appears + labelled** bar with the percentage reported, floor **≥1 labelled node** | C7 |
+| AM8 | C8/C9: **`BLOCKED(402)` as an acceptance branch**; C9 reports **`N/15` as RED** with attribution, and E5's **full** bar | C8, C9 |
+| AM9 | every A-row child cites **#11454** for its tier, and carries a **CI contract twin** (E2E-9/E2E-10 included) | all |
 
 ⚠️ **And one correction to the twin rule:** E2E-2/3/4 were paired to **I4**, which freezes the state *words* and
 **cannot fail** for what those cases test. They are re-paired: **E2E-2 → I1's A2 row; E2E-3 → I1's A3 row + the

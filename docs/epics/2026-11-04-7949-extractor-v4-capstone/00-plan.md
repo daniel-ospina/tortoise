@@ -2,7 +2,7 @@
 title: "Epic #7949 — extractor v4 CAPSTONE: the plan and the decomposition"
 type: engineering
 domain: platform
-doc_status: live
+doc_status: superseded
 created: 2026-11-04
 subjects.team: epistemic-team
 aboutSubjects: epistemic-team
@@ -12,8 +12,19 @@ issue: daniel-ospina/tortoise#7949
 
 # Epic #7949 — extractor v4 CAPSTONE
 
-**This document is the epic's plan and decomposition.** It is the artifact the child issues derive
-from and the place the epic's evidence attaches. Owner direction: `#7949` comment `6645275147`
+> ⛔ **SUPERSEDED — document level, not section level.** This is the epic's **first cut**, written
+> before the research pass. **`04-plan.md` supersedes it** (its own `**Supersedes:**` line) and is the
+> authoritative plan: §7a is E6's home, §8.4 lists the amendments, and `05-verify.md` is the audit.
+> **Nothing below directs work** — §3, §4, §6 and C7 are retained as history only, because comments
+> reference them. Concretely: the retired A4 framing (*"attribute the typed population"*,
+> *"Target: 100 % attribution"*, *"⛔ BLOCKED on the D3 reopen"*) is **not** current. The owner
+> answered the D3 question on **2026-11-09** (*classification is on by default; the declared kinds are
+> the point*), so A4 is unblocked and carries **no percentage target** — `02-scope.md` item 5 and
+> `04-plan.md` §8.4's **AM7** carry its current wording.
+
+**This document WAS the epic's plan and decomposition.** It is the artifact the first round of child
+issues derived from, kept because comments reference it. **The current plan is `04-plan.md`.**
+Owner direction: `#7949` comment `6645275147`
 (2026-11-04) and this lane's brief (`.lane-brief.md`, 2026-11-04).
 
 **Head at authoring:** `641e5f1b37`. Every `file:line` below was read at that head. ⚠️ **The symbol is
@@ -280,7 +291,7 @@ each against its **registered** threshold where one exists.
 | **A1** | **the pack's business logic is load-bearing** | *(unregistered — C1 registers it)* object→object edges of the pack's declared types + a rollup that answers | a pass still yields zero object→object edges |
 | **A2** | **S3 attaches instead of minting** | *(unregistered — C1 registers it)* the attach rate, attached vs minted | the rate is not measured, or rises by dropping real subjects |
 | **A3** | **S5 emits the batch's story AND the cross-batch link** | *(unregistered)* chain-join rate (today 9,910 of 15,534 = 64 % unlinked) | statements still never join |
-| **A4** | **typing is applied** | ⛔ **none — and none may be invented** until §6 D3 is answered | a lane picks a target that reverses D3 |
+| **A4** | **things and events carry the labels the ontology declares for them, reported per layer** — ⚠️ *rewritten by the owner's 2026-11-09 ruling; the "typing is applied / typed population attribution" framing is retired (`02-scope.md` item 5)* | appears + labelled, **per layer**, floor **≥ 1 labelled node**, the percentage **reported, not chased** | the claim layer alone is counted again (the one layer deliberately uniform — it can never fail), or a percentage target is set |
 | **A5** | **Subjects are populated** | *(unregistered)* `Subject` count + the four subject-edge families + the search `subject` field | 26 Subjects for a fleet of agents plus one human |
 
 ⛔ **E1 and E2 pull against each other, and A1 can be faked by minting edges to satisfy a count.** The
@@ -296,8 +307,7 @@ apparatus. **A green run that has not run the falsifier is not green** — and t
 **The covering argument.** Every row of §3 is either an **object-layer assertion** (A1, A2, A3, A5 — the
 owner's question and the only genuinely unbuilt part), an **instrument extension** (C1) or **door
 contract** (C2) that serves all rows, or a **guard** that stops the object work from being bought with
-lost facts (C8) or from resting on a stale claim (C9). A4 has **no child that chases a number** until
-the D3 reopen is answered (C7). **E1–E5's instrument is not a child (§2 R11); their remaining work is
+lost facts (C8) or from resting on a stale claim (C9). A4 has **no child that chases a number** (C7 — and the "until the D3 reopen is answered" clause this sentence used to carry is retired: the owner answered D3 on 2026-11-09, see `02-scope.md` item 5). **E1–E5's instrument is not a child (§2 R11); their remaining work is
 their blockers — E1 via C4, E4+E5 via C9, E2 via C8's arm and `#10360`, E3 as a reported figure plus a routed
 denominator decision.**
 
@@ -307,7 +317,7 @@ denominator decision.**
 | **A2 + E1** | **C4** attach instead of mint | E1's registered arithmetic is *what attach-instead-of-mint produces*; a second child would double-count. **C4 owns E1's movement** |
 | **A3** | **C5** — the evidence that both S5 jobs reached the graph (producers: `#10999` Job 1 · `#10998` Job 2) | one stage, two jobs (§S5); splitting would let "job 1 done" report as progress on a question that needs job 2 |
 | **A5** | **C6** Subjects | the S1–S5 spine; adjudicates the `#4889` closed-vs-symptom contradiction |
-| **A4** | **C7** typing (blocked) | may not be filed as an improvement target until §6 D3 is answered |
+| **A4** | **C7** — the read-only per-layer label census (§8.4 **AM7**) | the "blocked on the D3 reopen" wording here is retired: the owner answered D3 on 2026-11-09, and the child may not set a percentage target |
 | **E2 (and E1 non-regression)** | **C8** the anti-"extract less" guard | the only child that can falsify C3/C4/C5, gated on the **registered** E2a/E2b |
 | **E4 + E5** | **C9** re-derive both stale bars | E4's registered denominator is 15 and its only test patches the extractor; E5 is **RED** on the raw floor with unreconciled populations — neither is a "confirmation" |
 | **E3** | **C1** (reported) + **§6 routed** | E3's bar is unreachable as registered and its blocker **CLOSED without making it reachable**; the remaining item is a denominator decision (`#9736`'s two owed owner-gated lines), so the only lane-side duty is to **report** the figure and the composition |
@@ -415,12 +425,20 @@ corpus, or the graph served is not the graph measured — are decided by evidenc
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
 or the honest finding that the corpus has no bindable subjects, recorded as such (**not** a pass).
 
-### C7 · A4 — typing (⛔ BLOCKED on the D3 reopen)
+### C7 · A4 — the declared labels appear on the right nodes (⚠️ superseded heading, kept as history)
 
-**Filed because the measurement is legitimate; no target may be set.** **Produces:** the provenance of
-today's **109 typed points** (which writer — `extractor.py::_classify_point_kind` vs the v2 lane) and the
-typed/`statement`/**NULL** shares. **Decides nothing.** Target: 100 % attribution, and a pointer to the
-D3 answer's home before any numeric target exists.
+> ⛔ **The rest of this section is superseded text.** The D3 question was answered by the owner on
+> **2026-11-09** (*classification is on by default; the declared kinds are the point*), so this child
+> is **not blocked** and carries **no percentage target**. The current wording is `02-scope.md` item 5
+> and `04-plan.md` §8.4 **AM7**: **things and events carry the labels the ontology declares for them,
+> reported per layer**, bar = **appears + labelled**, floor **≥ 1 labelled node**, percentage
+> **reported, not chased**. The provenance of today's **109 typed points** (which writer —
+> `extractor.py::_classify_point_kind` vs the v2 lane) and the typed/`statement`/**NULL** shares
+> survive as read-only census inputs, not as the criterion.
+>
+> Superseded text, retained verbatim: *"Filed because the measurement is legitimate; no target may be
+> set. Produces: the provenance of today's 109 typed points … Decides nothing. Target: 100 %
+> attribution."*
 
 ### C8 · E2 (and E1 non-regression) — the guard
 
@@ -457,7 +475,7 @@ peer.
 ## 5. Integration surfaces (the Test-Design Gate's output, inline)
 
 > ⚠️ **SUPERSEDED by the Test-Design Gate's own artifact:** `03-test-design.md`, filed as **#11454** —
-> 17 surfaces each with a test layer **and a run tier** (`CI` · `Tier E` · `milestone`), a measured CI-cost
+> 18 rows (1–17 plus `10a`, E6) each with a test layer **and a run tier** (`CI` · `Tier E` · `milestone`), a measured CI-cost
 > baseline (64.3 s of 12,734.8 s), and an existing-test audit. The table below is retained only as the
 > historical inline version; **children cite #11454**, not this section.
 
@@ -483,6 +501,11 @@ behaviour.
 ---
 
 ## 6. Routed to the owner — two items, two different routes
+
+> ✅ **The D3 item below was ANSWERED by the owner on 2026-11-09** (*classification is on by default; the
+> declared kinds are the point*), and the answer is recorded where a lane reads it: `02-scope.md` item 5,
+> `04-plan.md` §8.4 **AM7**, `05-verify.md` item 3. The fork below is kept verbatim as the history of the
+> question — **do not read it as open**, and do not set the percentage target fork (a) proposed.
 
 **REOPEN — D3 `statement`-only (`docs/ONTOLOGY.md:975`, option B 2026-08-12, `#1022` MERGED).**
 A4 ("0.6 % typed is the ceiling the capstone must beat") points **opposite** to D3. A later owner ruling
@@ -525,14 +548,15 @@ All three are relayed by a comment on `#7949` naming the decision home each answ
 | scope + plan human gates | one plan doc holding both, reviewed by fresh-context reviewers | the epic's direction is owner-given (two comments); the gates' purpose is that the *plan* is reviewed, and it is (§1.1) |
 | Test-Design Gate files an issue | output inlined (§5) | the gate exists so children carry verification; they do (§4) |
 | Capstone Verification Gate files a child | **not filed** | ⛔ circular: **this epic IS the capstone** for v4. Its closing rule (E1–E5 + A1–A5 evidence attached to the epic) is what that gate exists to guarantee — and it is already **enforced in code** by `tools/capstone_verdict_check.py` (#9089/#10601) |
-| open a PR for this doc | **no PR** — committed to the lane branch, posted to `#7949` | `INTAKE-FROZEN` applies: **25 open PRs** at this head (bar ≥ 10). Work to PR-ready and report |
+| open a PR for this doc | ⚠️ **Outdated — a PR now exists: `#11685`** (`docs/7949-capstone-artifacts`). At this document's head the lane worked to PR-ready only | `INTAKE-FROZEN` applied then: **25 open PRs** at that head (bar ≥ 10). The intake unfroze and the bundle was filed as `#11685` |
 
 ---
 
 ## 8. Review record — decompose gate, cycle 2
 
-See §1.1. Cycle 1's seven findings are folded into §3/§4 and into the child issues; cycle 2 is recorded
-with its verdict on completion.
+⚠️ **Outdated.** See §1.1. Cycle 1's seven findings were folded into §3/§4 and into the child issues,
+but **cycle 2 never completed for this document**: the supersession by `04-plan.md` moved the remaining
+review cycles to that artifact, whose record is `05-verify.md` Step 4.
 
 ---
 

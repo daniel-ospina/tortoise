@@ -171,8 +171,10 @@ only value is "easier for us" is marked as such and earns no place.
 | E4+E5 — re-derived at this head | The owner's ship call rests on a number measured at the current head, not on a closed issue's claim — the difference between evidence and a citation. |
 | **Instrument + door** | **Internal — no user-visible value.** Recorded as such: it exists so the other seven rows' numbers are reproducible. It is in scope because *without* it every other row is an unverifiable claim, not because it helps a user. |
 
-**Rule applied:** eight rows for nine in-scope items; item 9 (*Reporting*) is the delivery mechanism of the
-first eight and is not given a value line of its own.
+**Rule applied:** eight rows for ten in-scope items; item 9 (*Reporting*) is the delivery mechanism of the
+first eight and is not given a value line of its own, and item 10 (*E6 evidence*) was added by `#11083` after
+this map was drawn — it is a per-pack `declared → writable → written` census whose user-visible value is that
+A1's declared-but-not-written gap becomes a number instead of a claim. Neither has a value line of its own.
 
 ---
 
@@ -446,7 +448,7 @@ and it is cheap to close."*
          readings scored, transitive-with-cycle-guard carries A1's verdict · D-S3 A5 measured here, a real
          mechanism gap filed under #5087 · D-S4 per-row floors + REFUSED rule · D-S5 chain-join = baseline
          metric as verdict, connected-component as the anti-gameable arm
-**Test-design gate:** satisfied by `03-test-design.md`, filed as **#11454** — 17 surfaces, each with a
+**Test-design gate:** satisfied by `03-test-design.md`, filed as **#11454** — 18 surfaces (`1…17` plus `10a`), each with a
          test layer AND a run tier (`CI` / `Tier E` / `milestone`); children must cite it for their tier.
 **Two corpus pins:** the **A-corpus** (curated real payloads, hash-pinned, second pin in the SAME record) and
          the existing **fixture** — with a **row → corpus → run** matrix in D-S1, extended G0/G1, and sealed

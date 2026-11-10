@@ -24,16 +24,17 @@ stage: epic-verify
 |---|---|---|
 | strategy alignment decision (`epic-align`) | ✅ | `00-align.md`, **rev 9**, gate **`NO ISSUES FOUND`** |
 | research brief (`epic-research`) | ✅ | `01-research-brief.md`, canonical 5 sections + `## Raw Notes`; **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only |
-| scope + high-level E2E (`epic-scope`) | ✅ | `02-scope.md` — 9 in-scope items, 8 E2E cases, D-S1…D-S5, value map, complexity |
-| integration-surface map (Test-Design Gate) | ✅ | `03-test-design.md`, filed as **#11454** (17 surfaces + the CI tier rule) |
+| scope + high-level E2E (`epic-scope`) | ✅ | `02-scope.md` — 10 in-scope items, 8 E2E cases, D-S1…D-S5, value map, complexity |
+| integration-surface map (Test-Design Gate) | ✅ | `03-test-design.md`, filed as **#11454** (18 surfaces — 1–17 plus `10a` — + the CI tier rule) |
 | epic plan, 8 substeps (`epic-plan`) | ✅ | `04-plan.md` §1–§8 |
 | dependency-ordered issue list (`epic-decompose`) | ✅ | `#10982`–`#10990` + `#11484` + `#11496`, all sub-issues of `#7949` |
 | per-issue + MECE review records | ✅ | `#7949` comment (Stage 5), plus per-issue blocker corrections on `#10984`/`#10985`/`#10986` |
 | capstone verification issue | ✅ | **#11496** |
 
 **8/8 present.** ⚠️ One artifact is **superseded rather than deleted**: `00-plan.md` (the first cut, written before
-research). Its §5 is a pointer to #11454 and its children table is stale; it is retained because deleting a plan
-that a comment references would break the trail.
+research). The supersession is **document-level** — `doc_status: superseded`, a banner under its title, and its
+A4 passages rewritten as pointers — because a §5-only marker left the rest of the file reading as current. It is
+retained because deleting a plan that comments reference would break the trail.
 
 ---
 
@@ -42,9 +43,9 @@ that a comment references would break the trail.
 | check | source → target | verdict |
 |---|---|---|
 | Strategy → Scope | `00-align` PROCEED + the widened bar → `02-scope` boundaries | ✅ the widening is explicit; the mechanism/evidence cut survived into scope |
-| Scope → Plan | 9 in-scope items → `04-plan` §1–§7 | ✅ but **one drift**: the scope has **8** E2E cases, the plan **10** (E2E-9/E2E-10 added at the plan gate with no scope parent — recorded in §8.1, and the owner of both is `#10983` per the decompose gate) |
+| Scope → Plan | 10 in-scope items → `04-plan` §1–§7 (item 10 → §7a) | ✅ but **one drift**: the scope has **8** E2E cases, the plan **10** (E2E-9/E2E-10 added at the plan gate with no scope parent — recorded in §8.1, and the owner of both is `#10983` per the decompose gate) |
 | High-level → Detailed E2E | `02-scope` E2E-1…8 → `04-plan` §7 | ⚠️ **1:1 for 1–8; 9–10 are plan-born.** The plan says so explicitly rather than hiding it |
-| Plan → Issues | `04-plan` §8.4's A1–A9 → the nine amendments | ✅ applied to all nine bodies (prepended `## ⛔ AMENDMENT` blocks) — but the per-issue gate found **10 residual divergences** the amendments did not reach, recorded on `#7949` |
+| Plan → Issues | `04-plan` §8.4's AM1–AM9 → the nine amendments | ✅ applied to all nine bodies (prepended `## ⛔ AMENDMENT` blocks) — but the per-issue gate found **10 residual divergences** the amendments did not reach, recorded on `#7949` |
 
 ---
 
@@ -74,7 +75,7 @@ twin **builders** for 9 and 10 are the two gaps.
 
 | phase | gate | status | evidence |
 |---|---|---|---|
-| `epic-align` | strategy review | ✅ **6 cycles** → `NO ISSUES FOUND` | `00-align.md` §6 (6×P1 + 13×P2 fixed) |
+| `epic-align` | strategy review | ✅ **9 cycles recorded**, 5 of them P-counted → `NO ISSUES FOUND` at cycle 9 | `00-align.md` §6 (7×P1 + 17×P2 fixed across cycles 1/2/5/6/7; cycle 8 cosmetic-only; cycle 3 never run and cycle 4 caught by the decompose gate — both rows record it) |
 | `epic-research` | research brief review | ✅ **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only → fixed | `01-research-brief.md` |
 | `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, all fixed | `02-scope.md` §"review" |
 | `epic-scope` | **`duplication-architecture`** | ✅ ran, **`ISSUES — DEGRADED`** (registry 401); verdicts recorded, **not** fix-looped | `02-scope.md` §"verdicts recorded" |
@@ -97,7 +98,7 @@ twin **builders** for 9 and 10 are the two gaps.
 | **D1** | **Scope and plan substeps were gate-grouped**, not one gate per substep (plan: 4 gates over 8 substeps; decompose: 1 gate over 10 issues) | each gate is a billed dispatch, and substeps 1–4 are thin here (no UI, no schema migration, no new journey) | a per-substep gate could catch drift *between* adjacent substeps that a grouped gate sees at once — **mitigated**: all four plan gates ran, and the decompose gate reviewed **every** issue in a table |
 | **D2** | The **human approval gates** at scope were satisfied by this session's presentation + the owner's "proceed"/"ok"/"go", not by a `human_approval` step | enforcement was session-escaped earlier (recorded) and re-requesting approval for each re-entry would have stalled the lane | the approval is in the transcript, **not** in the enforcement audit — an auditor relying on `enforcement.jsonl` will not see it |
 | **D3** | The **research stage's graph write-back** could not land | the hosted graph is at its **25,000-point cap** (`-32006`), and the CLI is out of sync with the tool schema (`#11076`) | the research findings are in the brief and on `#7949`, but **not** in the graph — so the next lane cannot find them by searching memory |
-| **D4** | `00-plan.md` retained, not deleted | it is referenced by comments and by the children | a reader must follow the "SUPERSEDED" header at its §5 |
+| **D4** | `00-plan.md` retained, not deleted | it is referenced by comments and by the children | the risk was that a reader took it as current — **mitigated at the document level**, not at its §5: `doc_status: superseded`, a supersession banner under its title, and its A4 passages rewritten as pointers to `02-scope.md` item 5 / `04-plan.md` §8.4 **AM7** |
 
 ---
 
@@ -112,7 +113,7 @@ Status:        READY FOR DECOMPOSITION WORK — NOT ready to close
 Artifacts:     8/8 present
 Coherence:     3 issues found (1 scope↔plan E2E count drift, 1 stale-blocker P0, 10 residual issue divergences)
 E2E Alignment: 8/10 chained; 2 gaps (E2E-9, E2E-10) named and assigned to #10983
-Review Gates:  15/15 ran (4 of them distinct duplication passes); 2 declared deviations (D1 gating granularity, D2 approval channel)
+Review Gates:  15/15 ran (3 of them distinct duplication passes); 4 declared deviations (D1 gating granularity, D2 approval channel, D3 research write-back failure, D4 retained 00-plan.md)
 ```
 
 **Decision: PROCEED** — into the children, **not** into closing the epic. The planning pipeline is complete and
@@ -122,7 +123,9 @@ gated; the epic's ten rows are unproven, which is the whole point of a capstone.
 
 0. **E6 is carried** — the sixth criterion registered by **`#11083`** (per-pack `declared → writable → written`
    census, before-arm **0 written on Object→Object**). It was **missing from this pipeline's artifacts** (built on
-   E1–E5 + A1–A5) and is now recorded in `04-plan.md` §7a and the scope's acceptance table. ⚠️ **E6 is `RED` by
+   E1–E5 + A1–A5) and is now recorded in `04-plan.md` §7a and as `02-scope.md` **in-scope item 10**. ⚠️ It is an
+   in-scope item, **not** a criteria row: E6 has no row in D-S1's corpus matrix yet, unlike every E-row — recorded
+   here rather than papered over. ⚠️ **E6 is `RED` by
    construction today**, and for the same reason as item 1 below — the wiring — **not** because of pack content.
 
 1. The **wiring residual** (found at the decompose gate): `pack_hierarchy.py`'s applier ships and `extractor_v2.py`

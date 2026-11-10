@@ -13,7 +13,7 @@ stage: test-design
 
 # Test Design — #7949 extractor v4 CAPSTONE
 
-**Input:** `02-scope.md` (in-scope items 1–9; high-level E2E-1…E2E-8). **Produced by:** `test-design` (read in
+**Input:** `02-scope.md` (in-scope items 1–10; high-level E2E-1…E2E-8). **Produced by:** `test-design` (read in
 full). **Filed as:** a child issue, per the Test-Design Gate.
 **Scope of this artifact:** *where each test runs*, not just which layer it is — regular CI must stay fast, and
 milestone evals are allowed to be slow.
@@ -71,6 +71,10 @@ wrong tier is how CI becomes unusable.
 (c) under ~1 s of measured weight each.* Anything needing a graph, a model call, a quota, or a non-deterministic
 composer goes to **Tier E** (the dispatch-only eval lane).
 
+**18 rows below — numbered `1…17` plus `10a`.** `10a` is **E6**, added by **`#11083`** after the table was
+numbered; it keeps its own label because that is the label `#11454` and the children cite for it. So the map is
+**18 surfaces**, not 17 — the figure the earlier summary and the siblings carried.
+
 | # | Surface | Test layer | **Runs where** | Why that tier | Key failure modes to test |
 |---|---|---|---|---|---|
 | 1 | A-row criteria in the registration | **contract** (unit, file-scan) | **CI** | pure JSON/markdown; the amendment is the thing that rots | a criterion id the verdict enum refuses; a threshold re-derived after a run; superseded text overwritten |
@@ -92,9 +96,11 @@ composer goes to **Tier E** (the dispatch-only eval lane).
 | 16 | **the rollup's ground-truth scoring** | **eval (milestone)** | **Tier E** | it IS the measurement | a gold fitted to the query by the same lane |
 | 17 | performance / cost of the pipeline | **eval (milestone)** | **Tier E** | by definition not a correctness signal (precedent: `test_perf_lane_volunteer_context.py` is already `on_demand`) | a p95 on a shared runner read as a regression |
 
-**Layer summary:** 8 surfaces are CI-eligible (contract/unit, offline); 9 are Tier E (integration/eval against a
-real graph or model). **No surface is assigned "none"**, and **no Tier-E surface may be promoted into merge
-gating** to "make it real" — that is the trade the owner already ruled on (#10194).
+**Layer summary:** of the **18** rows, **7** are CI-only (1, 2, 3, 12, 13, 14, 15 — contract/unit, offline), **10**
+are Tier E (4–11, 16, 17 — integration/eval against a real graph or model), and **1** is split (10a: `declared` and
+`writable` are file/graph facts and run in CI; `written` needs a real capture and runs in Tier E). **No surface is
+assigned "none"**, and **no Tier-E surface may be promoted into merge gating** to "make it real" — that is the trade
+the owner already ruled on (#10194).
 
 ---
 
