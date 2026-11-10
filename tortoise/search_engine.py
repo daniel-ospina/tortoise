@@ -2119,8 +2119,15 @@ def run_bm25_query(
             })
     else:
         def _corpus_text(row) -> str:
-            # The family's own text: the coalesced content/_searchText arm ∪
-            # search_keys — unchanged by #11682.
+            # The family's PRE-#11682 text, unchanged here: the coalesced
+            # content/_searchText arm ∪ ``search_keys``. ⚠️ That is one field
+            # WIDER than the `:Source` label's declared FTS set
+            # (``("Source", ["_searchText"])``): ``search_keys`` is not one of
+            # its fields. It is INERT today — no Source writer sets
+            # ``search_keys`` (it is absent from ``_Source_NODE_PROPS`` /
+            # ``_SOURCE_EXTRA_PROPS``) — so narrowing it would be a behaviour
+            # change with no observable effect, and it is named here rather
+            # than quietly claimed as parity.
             return index_text(row[1], row[2])
 
     id_field = "url" if entity_type in ("source", "document") else "id"
@@ -2152,8 +2159,9 @@ def run_bm25_query(
         # field the verbatim source text lives in. It is selected for EVERY
         # entity type the leg serves (one Cypher, one row shape): on the
         # document/source family the column is NULL, which is not an error —
-        # and ``_corpus_text`` above joins it for the Point family ONLY, so the
-        # other families mirror their own FTS field set.
+        # and ``_corpus_text`` above joins it for the Point family ONLY. The
+        # other families keep their pre-#11682 text; that residual is named on
+        # the branch itself (see the ⚠️ beside ``index_text(row[1], row[2])``).
         cypher = (
             f"MATCH (n:{label}) WHERE {' AND '.join(where)} "
             f"RETURN n.{id_field}, coalesce(n.content, n._searchText, ''), "
