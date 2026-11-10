@@ -282,8 +282,10 @@ def test_a_stale_read_seam_is_reported_and_its_absence_is_not(home):
     shipped = VOLUNTEER_EXTENSION.read_text()
     # The marker is DERIVED from the shipped artifact, never spelled: after a
     # generation bump (#11662 moved the pair to 19) a hard-coded ``18`` strips
-    # nothing, the copy keeps its marker, and this row turns into a
-    # `modified-artifact` assertion that can pass for the wrong reason.
+    # nothing, the copy written back is byte-identical to the shipped seam, and
+    # `detect_artifact_install` answers `[]` — so this row REDS on the
+    # `unversioned-artifact` assertion instead of exercising the branch it
+    # names. The derivation keeps the row bump-proof rather than bump-fragile.
     marker = ("// tortoise-hook-version: "
               f"{hook_install.read_hook_version(VOLUNTEER_EXTENSION)}\n")
     assert marker in shipped, marker

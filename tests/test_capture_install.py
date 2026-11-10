@@ -4704,13 +4704,13 @@ def test_pi_seam_carries_exactly_one_canonical_marker():
 #: Generation 19 (#11662): #11636 changed this file's BYTES without moving the
 #: generation, so every install made from generation 18's bytes read
 #: `modified-artifact` — the verdict whose message is "you hand-edited this
-#: file" — on the next `hooks status` / `doctor`. No byte changed in THIS commit:
-#: only the marker moves, onto the bytes #11636 already landed, which is what
-#: turns that accusation into the honest `stale-artifact` ("reinstall"). Both
-#: halves of the Pi seam move together, because `contract_version_for('pi')`
-#: grades them as ONE contract.
+#: file" — on the next `hooks status` / `doctor`. No byte EXCEPT the header line
+#: changes in this commit: the marker moves onto the bytes #11636 already landed,
+#: which is what turns that accusation into the honest `stale-artifact`
+#: ("reinstall"). Both halves of the Pi seam move together, because
+#: `contract_version_for('pi')` grades them as ONE contract.
 _PINNED_PI_SEAM_INSTALL_CONTRACT = (
-    19, "d96ec17370d8eeea8e9f8004b2c9f49d6b209ccccbbc568c98d4967db6eb1f03")
+    19, "59da9e75b24e801974edaf4f99d036cb48ccdd662f2cb4713b3db62fe6aaa312")
 
 #: One digest per generation from generation 3 forward, so "bytes changed,
 #: generation left alone" cannot be certified by editing the pair above by itself:
@@ -4821,7 +4821,7 @@ _GENERATION_DIGESTS = {
     # Generation 19 (#11662): the marker moves onto the bytes #11636 landed.
     # THIS commit changes no byte of the artifact, so the 18 entry above stays
     # exactly as it shipped — a shipped digest is never rewritten.
-    19: "d96ec17370d8eeea8e9f8004b2c9f49d6b209ccccbbc568c98d4967db6eb1f03",
+    19: "59da9e75b24e801974edaf4f99d036cb48ccdd662f2cb4713b3db62fe6aaa312",
 }
 
 #: The READ half of the same Pi seam (#2119) — a SECOND shipped artifact of the
@@ -4859,8 +4859,8 @@ _READ_SEAM_GENERATION_DIGESTS = {
     18: "4b78646fbf63a30ce7d4b27107f86a51413273d8548dfb92e56d33aa7a60a2a0",
     # Generation 19 (#11662): the read half's marker moves with the capture
     # half's, because `contract_version_for('pi')` grades the pair as ONE
-    # contract (and answers None when the two disagree). Its BYTES are unchanged
-    # from generation 18, so the 18 entry stays exactly as it shipped.
+    # contract (and answers None when the two disagree). Nothing but its header
+    # line changes here, so the 18 entry stays exactly as it shipped.
     19: "ce5145601142555e3d63bb8c94d9749b2600244e6b257f2b9639e7cc1fddc26e",
 }
 
