@@ -863,9 +863,11 @@ def _cardinality_claims_in(source: str) -> list[str]:
     live sentence then reds with *"no longer carries the sentence"* — the #11775 false red,
     back, with CI green and nothing announcing it). The call site is held the way the body is
     held, by execution: `test_the_prose_pin_is_the_code_path_the_artifact_runs` replaces this
-    seam for the duration of one REAL run of the pin test, so a body that reads through the seam
-    records the source it was handed and a body that re-implements the extraction records
-    nothing and reds there.
+    seam for two real runs of the pin test, so a body that reads through the seam takes its
+    VALUE — a deliberately wrong claim must make the pin raise — while a body that
+    re-implements the extraction never consults the stub. (An earlier version of this paragraph
+    said "one REAL run … records the source", which described the superseded call-presence
+    property; a dead `_dead = _cardinality_claims_in(...)` satisfied that, #11777 round 10.)
 
     The region is the COMMENT REGION immediately above the definition — bounded by the
     first line that is not part of the comment block — which is what keeps a decoy
@@ -922,8 +924,10 @@ def _assert_the_prose_names_the_set_size(source: str) -> None:
     satisfied the earlier version of that test (measured, #11777 review at `a1809fde`).
 
     The boundary, stated rather than glossed: a copy that re-assembles the same helpers in the
-    same order is BEHAVIOURALLY IDENTICAL to the seam, so no behavioural test can tell them
-    apart — and telling them apart is not what this property needs. The property is that the
+    same order is behaviourally identical **on real input**, so no test that reads the artifact
+    can tell them apart — the call-site arm distinguishes them only by SUBSTITUTING the seam's
+    value, which is why it exists and why the tolerance test alone cannot do it. And telling
+    them apart is not what this property needs: the property is that the
     pin tolerates formatting and reds on drift; a duplicate that preserves both keeps it. What
     a duplicate costs is that `_cardinality_claims_in` stops being the one place the extraction
     lives, which is a reviewable diff choice, not a silently-lost guarantee — and it is why the
@@ -979,7 +983,7 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     entry while the prose goes on describing the set it used to be. That is not
     hypothetical — it is what this test was written for, and it is also why the
     prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
-    the doc line at source rather than keep the exemption).
+    the doc line at source and LEFT the exemption entry, which then matched no live line).
     ⛔ Measured at source, because two rounds have now proposed "corrections" to that sentence
     and BOTH invert it: `#11756` (`7c45d5af1f`) rewrote
     `docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md:310` from `$ python3 …` to
@@ -1008,7 +1012,7 @@ def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
     *"no longer carries the sentence"*, i.e. the #11775 false red is back while CI is green.
 
     So the call site is held the way the body is held: by execution. `_cardinality_claims_in`
-    is replaced for the duration of one real run of the pin test. A body that reads through the
+    is replaced for the duration of two real runs of the pin test. A body that reads through the
     seam takes its VALUE and reds when the value disagrees; a body that re-implements the
     extraction never consults the stub at all, and reds on ARM 1 below — as `DID NOT RAISE`,
     since the tolerance test cannot fail in that direction. ARM 2's `assert seen` is kept as the
