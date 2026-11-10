@@ -1185,7 +1185,9 @@ def test_one_session_id_resolves_to_one_key_whichever_spelling_11382():
         assert session_key_of({"id": "p", "sessionId": junk}) == (
             "idx:point:p")
     # ... and the per-session cap therefore treats the four spellings as ONE
-    # session: 4 raw chunks at cap=1 survive as 1, not as 3.
+    # session. Measured: pre-fix the two buckets survived one chunk each —
+    # ``['c0', 'c3']`` (raw ``'  s1  '`` and stripped ``'s1'``) — and after
+    # the fix ONE bucket survives at cap=1.
     pool = [_chunk(f"c{i}", "  s1  ") for i in range(3)] + [
         _chunk("c3", "s1")]
     assert [h["id"] for h in dedup_pool(pool, max_chunks_per_session=1)] == [

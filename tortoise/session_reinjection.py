@@ -419,11 +419,23 @@ def _merge_key(value: object) -> str:
     ⚠️ The exemption is on the WHOLE key, so the two sides must agree on
     spelling INSIDE the ``idx:`` namespace too. A bespoke caller that builds
     its own raw ``seed_order`` carrying a padded ``idx:``-prefixed id
-    (``"idx:3 "``) while its fetch returns ``"idx:3"`` loses that group
-    (measured: the group is dropped, not tailed, because ``groups`` ends up
-    empty). Nothing in the shipped paths can do that — ``seeded_sessions``
-    rejects every ``idx:`` key (``_is_real_session_id``) and the fetch builds
-    both sides from the same stored string.
+    (``"idx:3 "``) while its fetch returns ``"idx:3"`` loses that group:
+    it never enters ``order``, so it is not spliced AND not tailed (measured;
+    ⚠️ the reason is the ``order`` membership, not an empty ``groups`` — with
+    a second valid group present that group still splices and the padded one
+    is simply never looked up). Nothing in the shipped paths can do that —
+    ``seeded_sessions`` rejects every ``idx:`` key (``_is_real_session_id``)
+    and the fetch builds both sides from the same stored string.
+
+    ⚠️ A non-``str`` key maps to ``""``, i.e. it is not a session: a bespoke
+    caller whose ``session_key`` returns an ``int`` (e.g. the raw
+    ``lme_session_index``) therefore has those seeds dropped from ``order``
+    and all such hits collapsed into one empty bucket. Pre-#11382 they were
+    dict-keyed as-is (the ``int`` itself). No in-repo caller passes
+    ``session_key=`` to this pair (measured: only ``dedup_pool`` takes a
+    custom key, in ``tortoise/ask_lane.py`` and ``tools/ask_recall_bench.py``),
+    so this is a bespoke-path change, and it is the same fail-closed direction
+    :func:`retrieval.normalize_session_key` takes everywhere else.
     """
     text = value if isinstance(value, str) else ""
     if not text:

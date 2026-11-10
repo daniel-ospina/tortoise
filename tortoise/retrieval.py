@@ -843,8 +843,10 @@ def session_key_of(hit: dict) -> str:
     identity in a spelling the function read.
 
     ⚠️ #11382 SUPERSEDES the "byte-identical" half of that paragraph, and
-    does it on purpose: normalising BOTH legs moves exactly THREE shapes, and
-    the first is a REAL identity, not a phantom. Measured pre-fix → post-fix:
+    does it on purpose: normalising BOTH legs moves THREE CLASSES of shape,
+    and the first is a REAL identity, not a phantom. Measured pre-fix →
+    post-fix on a 33-shape probe of this function (10 shapes move, every one
+    inside these three classes):
     ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
     — #9599's shape — whose key moves because it is the defect: it could only
     ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
