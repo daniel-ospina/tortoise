@@ -1889,7 +1889,23 @@ unnamable declared document is its own fail-closed verdict. (2) An empty surface
 return `({}, [])`, i.e. the state half of the gate compared nothing and reported agreement — now a first-class
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
+**Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
+registry header said *"the thirteen rows above"* (there are fourteen, and `mechanisms:` starts below it) and
+`test_ci_selection.py`'s tier-1 failure message still asserted the pre-change surface — both corrected. Cycle 3 found
+one **inherited** claim in the text this change adds: the row said `commit_schema` *"clamps and dedupes the list"*,
+but that shape has **no list-level validator** — it bounds each `Mention` field, while the clamp
+(`extractor_v2._clamped_mention`) and the dedupe (`extractor_v2._dedupe_mentions`, via `route_mentions` /
+`_mentions_for_claim`) are the **producer's**. That attribution matters to this row's only audience, the `#11239`
+lane: a write door told the schema dedupes can persist a payload verbatim and store duplicate/over-cap records the
+schema never refuses. Corrected in the registry note, the module docstring and the plan sentence. Cycle 3 also
+re-measured the two stale `select()` counts in `config/ci-surfaces.yml` (78 → **84** for an architecture-doc-only
+diff, 155 → **165** for a STORAGE-only diff; an epic-plan-only diff takes the same early return at 84) — pre-existing
+drift inside the comment block this change edits, kept correct rather than carried.
+
 **Provenance.** Review cycle 1 (reviewer B: the two fail-opens above, both measured; reviewer A: the disposition had
-to be relayed onto #5064, and five records still described a one-directory surface — all corrected here). The
-mechanism's absence is unchanged and still tracked by `#11239`; `#5064`'s Target 3 is not moved by this change,
-because a gate that can SEE an absence is not a mechanism that is built.
+to be relayed onto #5064, and five records still described a one-directory surface — all corrected here). Cycle 2
+(a fresh reviewer over the corrected artifact: the two documentation-truth defects above). Cycle 3 (a fresh reviewer
+over the final head: the clamp/dedupe attribution and the stale selection counts — both measured against
+`extractor_v2` and `tools/ci_selection.py`). The mechanism's absence is unchanged and still tracked by `#11239`;
+`#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism that is
+built.

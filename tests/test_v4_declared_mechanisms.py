@@ -108,7 +108,9 @@ was not enough (#11239 re-measured in this lane). Most of the v4 substrate's
 declarations live in `docs/architecture/**/*.md`; ONE mechanism the design
 declares does not. DM1 — *"a mention is **a property on the claim Point that
 carried it**"* — is declared in `docs/epics/2026-11-05-5087-extractor-v4/05-plan.md`
-§4. The payload half is built (`commit_schema.Mention`, clamped and deduped) and
+§4. The payload half is built (`commit_schema.Mention` bounds each field; the
+clamp and the dedupe are the producer's — `extractor_v2._clamped_mention` and
+`extractor_v2._dedupe_mentions`) and
 NO write door persists it: `sdk._CAPTURE_PASSTHROUGH_ORDER`, `CreatePointRequest`,
 `hosted_api` and `selfhost_api` all omit `mentions`, so a capture counts mentions
 the write DISCARDS and a graph read holds the claim and no mention (`#11239`

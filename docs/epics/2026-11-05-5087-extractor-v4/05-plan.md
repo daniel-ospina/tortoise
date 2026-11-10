@@ -95,8 +95,9 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 
 <!-- v4-mechanism: mention_record state: not-implemented -->
 ⛔ **DM1's home on the `Point` is DECLARED AND UNBUILT** (`#11239`): the record is
-built as a payload (`commit_schema.Mention`, clamped and deduped) and **no write
-door persists it** — the REST `CreatePointRequest`, the SDK capture whitelist
+built as a payload (`commit_schema.Mention` bounds each field, while the clamp and
+the dedupe are the producer's — `extractor_v2._clamped_mention` /
+`_dedupe_mentions`) and **no write door persists it** — the REST `CreatePointRequest`, the SDK capture whitelist
 (`sdk._CAPTURE_PASSTHROUGH_ORDER`) and both `hosted_api`/`selfhost_api` omit
 `mentions` — so a capture counts records the write DISCARDS, and a graph read
 after a capture holds the claim and no mention on it. Read this row as the TARGET
