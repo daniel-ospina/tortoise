@@ -3417,9 +3417,15 @@ class PackRegistry:
         ``Document``) is unchanged.
 
         The contract is over SET membership, not list order: the bucket is a
-        list, but its ordering is an artefact of the builder's
-        ``sorted(gained.difference(bucket))`` append, not a guarantee. Compare
-        with ``set(...)``.
+        list, but its ordering is an artefact, not a guarantee. Two mechanisms,
+        measured over the 311 buckets: a bucket's PREFIX is pre-closure snapshot
+        order (``down_base``: declaration, ``equivalentTo``, alias/bare append
+        order), and only the buckets the closure actually grows gain a
+        ``sorted(...)`` tail — 163 of 311 gain nothing at all, the example above
+        among them (``gained.difference(bucket)`` is empty for it, so its order
+        is written entirely by the ``equivalentTo`` block). ``sorted()`` could
+        not order a bucket anyway: it sorts only the members being APPENDED, so
+        they always land after what was already there. Compare with ``set(...)``.
         """
         if not hasattr(self, '_kind_read_filters'):
             self._build_kind_expansions()
