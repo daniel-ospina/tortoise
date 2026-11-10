@@ -58,6 +58,7 @@ logger = logging.getLogger(__name__)
 from . import spend_guard  # noqa: E402
 from .errors import (  # noqa: E402
     INGEST_WRITE_RETRIES,
+    NON_FATAL_EXTRACTOR_CENSUS,
     call_with_predicate,
     retryable_transient,
 )
@@ -841,6 +842,14 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
              # each session's extractor ``error_census`` + the session-level
              # exception class; feeds outcome ``valid``/``error_classes``.
              "error_census": {},
+             # #11653: the extractor's HEALTHY-signature classes
+             # (``NON_FATAL_EXTRACTOR_CENSUS`` — e.g. ``entity_identity_held``)
+             # are rolled up HERE instead. They carry no ``errors`` entry and
+             # name a state the pipeline is designed to reach, so they must not
+             # reach ``error_census``, where both consumers read them as an
+             # extraction failure (the integrity gate's error fold turns green
+             # without running a tier; ``run.py`` skips its cache marker).
+             "benign_census": {},
              # #1746 (D7): the per-question LLM telemetry + recovery counters
              # rolled from each session's extractor result — feeds the
              # report's warning-only truncation readout (criterion 3: no
@@ -1096,7 +1105,11 @@ def ingest_haystack_v2(sdk: TortoiseSDK, question: dict,
                 if len(_warn_acc["sample"]) < WARNING_SAMPLE_CAP:
                     _warn_acc["sample"].append(_ws)
         for _class, count in (out.get("error_census") or {}).items():
-            stats["error_census"][_class] = stats["error_census"].get(_class, 0) + count
+            # #11653: a held identity is the FIX working, not a failure — it
+            # goes to its own bucket (see ``NON_FATAL_EXTRACTOR_CENSUS``).
+            _bucket = ("benign_census" if _class in NON_FATAL_EXTRACTOR_CENSUS
+                       else "error_census")
+            stats[_bucket][_class] = stats[_bucket].get(_class, 0) + count
         # #1746 (D7): thread the extractor's llm telemetry + recovery counters
         # through the ingest stats — the report's warning-only truncation
         # readout + recovery observability.

@@ -4,12 +4,12 @@
 
 > **For Pi:** Use `executing-plans` to implement this plan task-by-task.
 
-**Goal:** Generalize the S3-retrieved-priors comparison in `execute_embed` from the current 2-way (NEW/REVISES) to the Mem0 4-way — **ADD** (new fact), **UPDATE** (same entity+attribute, new value, later date → REVISES/supersede), **DELETE-soft** (retraction → `retract_point` tombstone, never hard-delete), **NOOP** (duplicate → additive `duplicates` property on the existing point, NO new point, NO new edge) — plus a write-time **Graphiti two-phase entity-resolution pass** (deterministic exact/bare first, bounded LLM fallback for alias names that degrades to ADD and never blocks capture).
+**Goal:** Generalize the S3-retrieved-priors comparison in `execute_embed` from the current 2-way (NEW/REVISES) to the Mem0 4-way — **ADD** (new fact), **UPDATE** (same entity+attribute, new value, later date → REVISES/supersede), **DELETE-soft** (retraction → `retract_point` tombstone, never hard-delete), **NOOP** (duplicate → additive `duplicates` property on the existing point, NO new point, NO new edge) — plus a write-time **Graphiti two-phase entity-resolution pass** (deterministic exact/bare first, bounded LLM fallback for alias names that never blocks capture — ⛔ its *"degrades to ADD"* clause is SUPERSEDED by D3 below, where a failed/undecided disambiguation is HELD, `#11653`).
 
 **Team:** epistemic-team
 **Role:** product-implementer
 
-**Architecture:** The 4-way decision lives where S3 priors and the embed list meet — `execute_embed` (S5) in `tortoise/extractor_v2.py` — consuming the E5-length-guarded `_token_overlap` and an E3 `search_keys`/E2 Tier-A value slot for entity+attribute identity. NOOP and DELETE-soft records travel at the **extractor-result level** (`result["noops"]`, `result["deletions"]`) and are applied by the eval write path (`tools/longmem_eval/ingest_v2.py`): NOOP stamps the additive `duplicates` property + CONTAINS link-only edge (existing edge types only), DELETE-soft calls the existing `sdk.retract_point` (status=`retracted`, no resurrect by construction). Entity resolution runs between S4 and S5 as a new bounded sub-step: deterministic `_find_existing_entity` first; one wall-clock-bounded LLM call only for the unmatched/ambiguous remainder when the backend is real and candidates exist; LLM failure/timeout → resolution skipped (degrade to ADD), never a block. The verify-gate fix (`_point_exists` N+1 at 500-Q scale) lands as a batch `_existing_point_ids` helper in the ingest lane, mirroring the existing `point_props_for_hits` pattern.
+**Architecture:** The 4-way decision lives where S3 priors and the embed list meet — `execute_embed` (S5) in `tortoise/extractor_v2.py` — consuming the E5-length-guarded `_token_overlap` and an E3 `search_keys`/E2 Tier-A value slot for entity+attribute identity. NOOP and DELETE-soft records travel at the **extractor-result level** (`result["noops"]`, `result["deletions"]`) and are applied by the eval write path (`tools/longmem_eval/ingest_v2.py`): NOOP stamps the additive `duplicates` property + CONTAINS link-only edge (existing edge types only), DELETE-soft calls the existing `sdk.retract_point` (status=`retracted`, no resurrect by construction). Entity resolution runs between S4 and S5 as a new bounded sub-step: deterministic `_find_existing_entity` first; one wall-clock-bounded LLM call only for the unmatched/ambiguous remainder when the backend is real and candidates exist; LLM failure/timeout → resolution skipped, never a block — ⛔ the *"degrade to ADD"* disposition this line used to state is SUPERSEDED by D3 below: `#11653` HOLDS the candidate and `execute_embed` refuses to create it. The verify-gate fix (`_point_exists` N+1 at 500-Q scale) lands as a batch `_existing_point_ids` helper in the ingest lane, mirroring the existing `point_props_for_hits` pattern.
 
 ### Pattern Research
 
@@ -31,7 +31,7 @@ From test-design #1515 (28 surfaces), via the issue's verification checklist:
 
 | Surface | Layer | Test | E7 delta |
 |---|---|---|---|
-| **S17 consolidation** | unit + integration | 4-way decision vs S3-retrieved priors; NOOP = additive `duplicates` (NOT a new edge, NOT IMPL); DELETE-soft via `retract_point`; entity resolution deterministic-first, LLM fallback degrades to ADD, never blocks; no double-count | the core of this issue (`tests/test_consolidation_4way.py`, `tests/test_ingest_v2_consolidation.py`) |
+| **S17 consolidation** | unit + integration | 4-way decision vs S3-retrieved priors; NOOP = additive `duplicates` (NOT a new edge, NOT IMPL); DELETE-soft via `retract_point`; entity resolution deterministic-first, LLM fallback never blocks (⛔ *"degrades to ADD"* is SUPERSEDED — a failed/undecided disambiguation is HELD, see D3 / `#11653`); no double-count | the core of this issue (`tests/test_consolidation_4way.py`, `tests/test_ingest_v2_consolidation.py`) |
 | **S12 graph writes** (bug-pattern flag: N+1) | integration | batch `_point_exists` lookups — NO N+1 at 500-Q run scale (verify P2, 2026-08-20) | `_existing_point_ids` batch helper in `ingest.py`/`ingest_v2.py` + query-count spy test |
 | **S13 supersession CORRECTS** | integration | UPDATE rides E5's machinery end-to-end (payload reason=REVISES → new content-addressed id → `supersede_point`) | E7 only *feeds decisions*; E5 owns the write. E7 integration asserts the chain exists post-ingest |
 | **S16 supersession derivation** | unit | the classifier inherits E5's length-guarded `_token_overlap` (no false REVISES at ≥0.6 on short points) | consume, do not re-derive |
@@ -67,6 +67,14 @@ The "same entity+attribute" gate needs data S3 does not return today. Two additi
 - **Attribute:** `search_keys` on the prior (E3) overlap with the candidate's `search_keys`; for Tier-A state-value points (E2), the master-list vocabulary anchors the attribute and the value-signature (`_value_signature`: normalized numeric/time tokens — "6pm"/"six pm", "27:12" → canonical form) decides NOOP-vs-UPDATE: **equal signature → NOOP, differing signature → UPDATE (later date)**.
 
 ### D3 — Entity resolution: two-phase, LLM-bounded, degrade-to-ADD
+
+> ⛔ **SUPERSEDED on its fallback clause by §4.4's S3-disambiguation row (`#11653`).** A
+> failed, timed-out or undecided disambiguation no longer "degrades to ADD": the affected
+> candidate is **HELD** (`resolve_entities` returns `new` and `held` as disjoint populations,
+> the phase-2 contract carries an explicit `new` verdict, and `execute_embed` creates only the
+> licensed set). The rest of this section — the two phases, the bounded call, the validation
+> ladder — still describes the mechanism; the plan's own contract text below was written
+> before the ruling and is kept as the plan's record.
 
 New `resolve_entities(entity_refs, search, model=None) -> ResolutionMap` in `extractor_v2.py`:
 

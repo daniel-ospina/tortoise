@@ -17,6 +17,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
+from tortoise import commit_schema  # noqa: E402, RUF100
 from tortoise import extractor_v2 as v2  # noqa: E402, RUF100
 
 
@@ -379,7 +380,16 @@ class TestExecuteEmbedConsolidation:
 
 class TestEntityResolution:
     """D3 — two-phase entity resolution (deterministic first, bounded LLM
-    fallback; degrade-to-ADD; never blocks)."""
+    fallback; never blocks).
+
+    ⛔ #11653 REVERSED the second half of this contract: a failed or undecided
+    disambiguation no longer *degrades to ADD*. The affected candidate is HELD
+    (`res["held"]`, with its reason) and only a positive absence verdict
+    (`res["new"]`) reaches the payload — §4.4 I1, and its S3 disambiguation
+    row's *FAIL-CLOSED on `new`*. The assertions below that read `res["map"]`
+    are unchanged; `test_model_failure_degrades_to_phase1_never_raises` keeps
+    its name for the "never raises" half only.
+    """
 
     def test_phase1_exact_no_model_call(self):
         search = {"entities": [{"id": "obj1", "name": "Joseph",
@@ -950,10 +960,27 @@ class TestResolutionOrchestration:
 
         conv = [{"role": "user", "content": "Joe runs every morning at 6am."}]
         out = v2.extract_session_v2(self._model(boom), conv, session_id="s1")
-        # P1: the pipeline still returns a payload (degrade-to-ADD)
+        # P1: the pipeline still returns a payload, and the candidate the
+        # resolver could not decide is HELD, not asserted new (#11653).
         assert out["payload"] is not None
         assert out["payload"]["points"], "capture must not be blocked"
+        assert "Joe" not in [e["name"] for e in out["payload"]["entities"]], (
+            "a failed disambiguation minted the entity it could not identify")
+        assert [h["name"] for h in out["resolution_held"]] == ["Joe"]
         assert any("failed" in w for w in out["warnings"])
+        # ⛔ #11693 review finding 1: the claim that names the held entity must
+        # have the name STRIPPED, and the produced payload must pass the door's
+        # own Layer-1 gate. Asserting "capture must not be blocked" on a payload
+        # the commit refuses was the gap: the entity is absent from `entities[]`
+        # while the claim still names it, so the SDK returns `ok=False` without
+        # POSTing and the hosted door answers 422.
+        assert out["payload"]["points"][0]["about_entities"] == [], (
+            f"the claim still names the held entity: "
+            f"{out['payload']['points'][0]['about_entities']!r}")
+        l1, _ = commit_schema.validate_payload_dict(out["payload"])
+        assert l1.ok, (
+            "the held entity is withheld while the claims still name it, so "
+            f"Layer-1 refuses the whole session: {l1.errors}")
 
     def test_phase1_resolution_no_llm_call(self, monkeypatch):
         def fake_search(sdk, embed_list, story, **kw):
