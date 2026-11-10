@@ -157,8 +157,12 @@ def _expected_legs(manifest: dict) -> set[str]:
     What the derivation does NOT give up: if the selector produces fewer (or
     differently named) shards than the manifest declares — a real defect — the
     equality below still fails, and it now names the declared count rather than a
-    stale one. Label SPELLING has its own pin
-    (`tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes`).
+    stale one. Label SPELLING is pinned by the seams that would actually refuse a
+    merge — `tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s
+    _changes` for the `test (a)`/`test (b)` names the rail subtracts, and
+    `::test_shard_count_is_stable_regardless_of_the_selection_size` for the full
+    `a`..`i` positional sequence. (The former alone does NOT catch a rename past
+    the first two labels — measured: renaming label index 2 leaves it green.)
     What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
@@ -208,8 +212,8 @@ def _expected_legs(manifest: dict) -> set[str]:
            moves both sides together, so the read-backs above cannot see it;
        (b) nothing here enumerates the keys `select()` RETURNS, so a new gating
            key there is unguarded — including by the leak check below, which
-           iterates only the keys this map built. "Today" in the next sentence
-           means "no such key exists", not "the leak guard would catch it".
+           iterates only the keys this map built. The absence of such a key today
+           is not a guard: a key that does not exist yet cannot be caught.
 
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
