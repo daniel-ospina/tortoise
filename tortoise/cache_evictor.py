@@ -34,8 +34,13 @@ declared 20,000-node budget -> ``CLEAN``). Gating the licence on the byte verdic
 the enforced bound unreachable in exactly the population shape #10976 describes. Every
 gate below is unchanged, and ``REFUSED``/``UNBOUNDED`` still yield an EMPTY licence.
 
-Both record gates — #10593 and #7879 — are open as of this writing, so in production the
-LICENCE is EMPTY (``REFUSED`` over the byte ceiling, ``CLEAN`` under it, with
+⚠️ Record readiness is NOT why the licence is empty, and this header said it was:
+``#10593`` (the record's write path) closed COMPLETED on 2026-11-06, so the record CAN
+serve a node; only ``#7879`` (the epic) remains open, which is about the record as system
+of record, not its ability to serve one. What withholds the licence is the absence of a
+CLEAN parity census for the graph being swept — nothing schedules that instrument, so no
+graph has one until an operator runs the census. In production the LICENCE is therefore
+EMPTY (``REFUSED`` over the byte ceiling, ``CLEAN`` under it, with
 ``plan["evictable"] == []`` either way) and this module issues no mutating statement at
 all.
 
