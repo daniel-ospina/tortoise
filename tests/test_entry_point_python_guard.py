@@ -650,10 +650,13 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         #     merged 3 min after it) and the file was GREEN there, so the removal
         #     CREATED the doc-scan red rather than clearing a dead key. It is not the
         #     model to copy (#11774);
-        #   · `#11759` restored the `python3` record, and this key with it, 37 s after
-        #     `#11756`; `#11757` removed the key 3 min after THAT, on a base where it had
-        #     just been revived — so the record relied on a key that was live when it was
-        #     written, not one "already removed" (#11777 review round 8, finding 3).
+        #   · `#11759` restored the `python3` record, and this key with it, at 15:18:13Z
+        #     (`179e688661`) — 15 min after `#11756` merged (15:03:02Z) — and its own merge
+        #     (15:45:12Z) preceded `#11757`'s merge parent `215e7d9d8b` (15:45:48Z);
+        #     `#11757` removed the key 3 min 35 s after that, on a base where it had just
+        #     been revived — so the record relied on a key that was live when it was written,
+        #     not one "already removed" (#11777 review round 8: an earlier phrasing of this
+        #     bullet re-anchored bullet 2's 37 s to `#11756`, where the true gap is 42 min).
         # The merged tree therefore advertised the refused form with nothing exempting
         # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
         # `origin/main` at `900d4aafc61a`, with no branch content involved.
