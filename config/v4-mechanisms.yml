@@ -840,7 +840,13 @@ mechanisms:
       and 8 state no value — of which exactly ONE drops a state value the quote
       carries (the `thirty seconds` lease grace,
       `wp07_bluepeak_followup`/narrative, named by
-      `test_the_ONE_dropped_state_value_on_the_census_is_NAMED`). Retention on the
+      `test_the_ONE_dropped_state_value_on_the_census_is_NAMED`). ⛔ The DROPPED
+      count's denominator is the 105 rows this projection can CHECK (112 − the 7
+      form-excluded), not 112: a value dropped while the content keeps its clock
+      is invisible to a projection that binds no clock slot at all (measured — of
+      the 7, exactly 2 bind any quote-side slot and both bind an ISO date, which
+      the content restates), so it is declared residual (c) with its size pinned
+      rather than claimed clean. Retention on the
       committed census is therefore **91 of 112 STATED (62 ALIGNED + 29
       LAYOUT_RETAINED), 7 form-excluded (not checkable) and 1 DROPPED** —
       the remaining 13 carry no state value to state (6 a determiner-only quote,
