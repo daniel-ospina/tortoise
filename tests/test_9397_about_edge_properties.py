@@ -7144,11 +7144,6 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
-    ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"

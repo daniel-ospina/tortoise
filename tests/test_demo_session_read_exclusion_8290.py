@@ -814,10 +814,22 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
     scorecard = repo / census_mod._SCORECARD
     text = scorecard.read_text(encoding="utf-8")
-    assert "**436**" in text, (
-        "the BELOW count this arm degrades must still be the figure the note "
-        "states; re-point the degradation at the new one")
-    scorecard.write_text(text.replace("**436**", "**999**", 1), encoding="utf-8")
+    # ⛔ DERIVE the figure to degrade; never spell it. A hard-coded literal here
+    # reds the moment `--refresh` moves the census — which is exactly what happened
+    # to the former `**436**`: an honest restatement left this arm pointing at a
+    # number the note no longer states, and the arm failed on the ARM rather than on
+    # the verb it exists to convict. A literal that must be re-pointed by hand is
+    # the bump-fragility the branch already removed from the Pi-seam row (#11662).
+    import re as _re
+
+    figures = _re.findall(r"\*\*(\d+)\*\*", text)
+    assert figures, (
+        "the scorecard note states no bold figure to degrade — the census restates "
+        "these with `uv run python tools/hosted_api_cite_census.py --refresh`; this "
+        "arm needs one of them")
+    stated = figures[0]
+    scorecard.write_text(text.replace(f"**{stated}**", "**999**", 1),
+                         encoding="utf-8")
     assert census_mod._sweep(measured, refresh=False) == 1, (
         "`--check` green-lit a note whose stated figure is not the measured one — "
         "that is the false green the nightly census-drift job exists to prevent")
