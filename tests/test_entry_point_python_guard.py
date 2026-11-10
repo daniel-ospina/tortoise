@@ -1014,10 +1014,11 @@ def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
     So the call site is held the way the body is held: by execution. `_cardinality_claims_in`
     is replaced for the duration of two real runs of the pin test. A body that reads through the
     seam takes its VALUE and reds when the value disagrees; a body that re-implements the
-    extraction never consults the stub at all, and reds on ARM 1 below — as `DID NOT RAISE`,
-    since the tolerance test cannot fail in that direction. ARM 2's `assert seen` is kept as the
-    named check for the same property, but ARM 1 is what makes it ungameable: a vestigial call
-    satisfies `seen` while leaving the value unread, and only the value can tell them apart.
+    extraction never consults the stub at all, and reds on ARM 1 below — with the remedy in ARM
+    1's OWN message, since the tolerance test cannot fail in that direction. ARM 1 asks the seam's
+    VALUE to disagree and requires the pin to raise on THAT claim; ARM 2 then asks the identity
+    question (this file, not a sample). Neither is call-presence: a vestigial
+    `_dead = _cardinality_claims_in(...)` satisfies a call count while leaving the value unread.
 
     ⛔ ARM 1 exists because call-presence is NOT the property, and the first version of this
     test asserted only that (`assert seen`, `assert seen[0] == …`). A pin body that keeps ONE
@@ -1035,17 +1036,37 @@ def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
     seen: list[str] = []
     stated = str(len(_DELIBERATE_BARE_FORM))
 
-    # ARM 1 — a WRONG claim from the seam must make the pin RAISE. An inline copy never asks
-    # the stub, sees the live (correct) prose, and so never raises: this arm reds, by name.
+    # ARM 1 — a WRONG claim from the seam must make the pin RAISE, and raise ON THAT CLAIM. An
+    # inline copy never asks the stub, sees the live (correct) prose, and so never raises: this
+    # arm reds below, carrying the remedy (a bare `pytest.raises` could not — its failure is only
+    # `DID NOT RAISE`, which names neither the cause nor the fix).
     monkeypatch.setattr(
         sys.modules[__name__],
         "_cardinality_claims_in",
         lambda source: [str(len(_DELIBERATE_BARE_FORM) + 1)],
     )
-    with pytest.raises(AssertionError, match="but the set holds"):
+    raised: AssertionError | None = None
+    try:
         test_the_record_exemption_prose_counts_the_set_it_describes()
+    except AssertionError as exc:
+        raised = exc
 
-    # ARM 2 — the CORRECT claim must let it pass, and must be handed THIS file's source.
+    assert raised is not None, (
+        "the cardinality pin's body no longer reads through `_cardinality_claims_in`: handed a "
+        "claim the set does NOT support, the pin PASSED — so it never consulted the seam. A copy "
+        "that re-implements the extraction there leaves the seam dead while every other test "
+        "keeps passing (measured, #11777 review round 7), and a vestigial "
+        "`_dead = _cardinality_claims_in(...)` line does not help. Restore the call to "
+        "`_assert_the_prose_names_the_set_size` — that call IS the pin's one path through it."
+    )
+    assert "but the set holds" in str(raised), (
+        "the pin raised, but not on the cardinality the seam handed it, so the seam's value "
+        f"never reached the assertion. It raised: {raised}"
+    )
+
+    # ARM 2 — the CORRECT claim must let it pass, and must be handed THIS file's source. ARM 1
+    # has already established that the value reaches the assertion, so the only question left is
+    # identity: a sample would let the pin measure something other than the artifact.
     def record_and_answer(source: str) -> list[str]:
         seen.append(source)
         return [stated]
@@ -1053,15 +1074,11 @@ def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
     monkeypatch.setattr(sys.modules[__name__], "_cardinality_claims_in", record_and_answer)
     test_the_record_exemption_prose_counts_the_set_it_describes()
 
-    assert seen, (
-        "the cardinality pin's body no longer reads through `_cardinality_claims_in`. A copy "
-        "that re-implements the extraction there leaves the seam dead while every other test "
-        "keeps passing (measured, #11777 review round 7), so restore the call to "
-        "`_assert_the_prose_names_the_set_size` — that call IS the pin's one path through it."
-    )
-    assert seen[0] == Path(__file__).read_text(encoding="utf-8"), (
+    handed = seen[0] if seen else None
+    assert handed == Path(__file__).read_text(encoding="utf-8"), (
         "the pin reads through the seam, but not with THIS FILE's source — it must hand over "
-        "`Path(__file__).read_text(...)`, or the pin measures a sample instead of the artifact."
+        "`Path(__file__).read_text(...)`, or it measures a sample instead of the artifact "
+        f"(handed: {'nothing' if handed is None else repr(handed[:60]) + '…'})."
     )
 
 
