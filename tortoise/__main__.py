@@ -6051,6 +6051,13 @@ def _install_capture_seam(args, install_capture) -> int:
         # self-hosted clause that follows names all THREE sources the page
         # lists there (project, team, enterprise-managed), not project alone:
         # naming one of three reads as exclusive.
+        #
+        # ⛔ AND KEEP THE PAGE'S `and on Enterprise` GATE (review round 3, P2).
+        # The page says those workers "run the same command-based project hooks,
+        # AND ON ENTERPRISE ALSO run team and enterprise-managed hooks" — so a
+        # non-Enterprise self-hosted customer must not read that team/enterprise
+        # hooks reach their workers. That is the same defect the PR removes, one
+        # level down.
         print(
             f"Both Cursor hooks are registered in "
             f"{cursor_root / 'hooks.json'}, the USER-level file, which a "
@@ -6064,8 +6071,8 @@ def _install_capture_seam(args, install_capture) -> int:
             "this install serves; for cloud-agent sessions use the MCP pull "
             "surface (`tortoise_search` / `tortoise_recall`). Cursor also "
             "fires `sessionStart`/`sessionEnd` on Self-Hosted Machines "
-            "workers, which run project, team and enterprise-managed hooks — "
-            "none of which this installer writes.")
+            "workers — project hooks, plus team and enterprise-managed hooks "
+            "on Enterprise — none of which this installer writes.")
     if args.harness == "openclaw" and not getattr(args, "dry_run", False):
         # #2120: the plugin is discovered under the HOME-scoped
         # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
@@ -6258,8 +6265,8 @@ def _install_read_hook_impl(args) -> int:
               "its beforeSubmitPrompt event cannot inject. A CURSOR CLOUD "
               "AGENT VM gets neither hook — that file is user-level and the "
               "VM cannot read it; Self-Hosted Machines workers DO fire both, "
-              "from project/team/enterprise-managed hooks this installer "
-              "does not write)")
+              "from project hooks (plus team and enterprise-managed hooks on "
+              "Enterprise) this installer does not write)")
         print("  tortoise install hermes  → <dir>/.hermes/plugins/"
               "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "
               "injection surface; import with `tortoise sessions import "
