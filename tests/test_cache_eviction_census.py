@@ -1157,6 +1157,41 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     assert "only 5" in " ".join(result.problems)
 
 
+def test_the_demoted_row_still_names_its_population():
+    """⛔ A DEMOTION MUST NOT NULL THE NAME the row demonstrably has.
+
+    `assess()` carries `population_name` through the whole-graph demotion, and the comment
+    beside that carry records a MEASURED defect: dropping it made the exported artefact
+    report `population: null` beside a row whose label names a population.
+
+    ⛔ That comment carried no assertion — deleting the carry left the whole suite green —
+    so the regression it records could be re-introduced silently. That is the same
+    unpinned-claim class this PR has been closing elsewhere, so pin it here.
+
+    The row is `eligible=False` and never reaches the licence; what this protects is the
+    ARTEFACT's legibility, for an operator reading WHICH population was demoted.
+    """
+    g = _FakeGraph({"Point": 5}, populations={"turn": 120})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                         measured_nodes=120, total_nodes=120, graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": stale})
+
+    demoted = [r for r in result.classes if r.population_name and not r.eligible]
+    assert demoted, "the fixture must demote a POPULATION row, or this pins nothing"
+    row = demoted[0]
+    assert row.as_dict()["population"] == "turn", (
+        "dropping the `population_name` carry through the demotion makes the exported "
+        "artefact report `population: null` beside a label that names one"
+    )
+    assert row.label != row.as_dict()["population"], (
+        "the label is a DISPLAY string ('turn (population)'); a licence keyed on it does "
+        "not match the word the executor's population gate compares"
+    )
+
+
 def test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement():
     """⛔ THE BACKSTOP IS REACHABLE ON A QUIESCENT GRAPH — pinned, because the comment
     that claimed otherwise was wrong in the other direction.
@@ -2405,14 +2440,24 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
     ⛔ WHY THIS IS THE IRREDUCIBLE BAND, and not a checker someone forgot to write:
     the band is bounded by the CLAIM, not by how badly a count statement multiplies. It is
     ``true_population < claim <= node_total``: the population bound cannot fire above the
-    population, and the whole-graph backstop cannot fire at or below the total. Refusing on
-    the MIRROR's count vs the total (`resident_population > node_total`) adds no detection
-    this backstop lacks — for an honest mirror it can only fire under removal skew (a gain
-    raises the total with the population, now that the total is read AFTER every population
-    count), and for an inflated one it fires exactly when the claim also lands above the
-    total, which is the case the backstop already refuses (measured: a `turn` statement
-    answering 30,000 on a 25,000-node graph refuses a 30,000 claim, and still licenses a
-    25,000 one). Refusing on
+    population, and the whole-graph backstop cannot fire at or below the total.
+
+    ⛔ Refusing on the MIRROR's count vs the total (``resident_population > node_total``)
+    WOULD close a sub-band of this residual, and an earlier revision of this docstring
+    claimed otherwise — wrongly. It would catch an inflated mirror that exceeds the total
+    while the claim stays under it: measured, a ``turn`` statement answering 30,000 on a
+    25,000-node graph licenses a 25,000 claim today, and such a guard would refuse it.
+    ``test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`` asserts the CURRENT
+    behaviour (the licence IS issued), so it is the arm a mirror-vs-total change would red —
+    which is the opposite of "adds no detection".
+
+    It is not used because it is UNSOUND in the OTHER direction, which is the real reason
+    this band stays: for an HONEST mirror it fires on removal skew alone (a gain raises the
+    total with the population, now that the total is read AFTER every population count), so
+    it would false-block a legitimate report. The residual is irreducible GIVEN that a
+    mirror-vs-total check is unsound — not because no such check would detect anything.
+
+    Refusing on
     `resident_population > report.total_nodes` is worse: the
     report's total is frozen at measurement time, so it would refuse every legitimate
     growth. That is why the residual rests on the identity pin
