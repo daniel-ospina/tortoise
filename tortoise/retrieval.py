@@ -844,9 +844,12 @@ def session_key_of(hit: dict) -> str:
 
     ⚠️ #11382 SUPERSEDES the "byte-identical" half of that paragraph, and
     does it on purpose: normalising BOTH legs moves THREE CLASSES of shape,
-    and the first is a REAL identity, not a phantom. Measured pre-fix →
-    post-fix on a 33-shape probe of this function (10 shapes move, every one
-    inside these three classes):
+    and the first is a REAL identity, not a phantom. Every move measured
+    pre-fix → post-fix is inside these three classes, and ⚠️ no COUNT is
+    published on purpose — a count is a property of the probe's shape list,
+    not of the rule (different natural shape lists give different totals), so
+    the claim worth making is the classes, and each is pinned behaviourally by
+    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``:
     ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
     — #9599's shape — whose key moves because it is the defect: it could only
     ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
@@ -2469,9 +2472,13 @@ def _session_admission_key(
     divergence — "raw in the pool, stripped here"; #11382 removed it by
     normalising the pool leg through :func:`normalize_session_key` too, the
     same ``.strip()`` this function applies, so both grains now read a padded
-    id as the one identity it is. No module under ``tortoise/`` imports
-    ``session_reinjection`` (measured: ``grep -rn 'import session_reinjection'
-    tortoise/`` → none), so the ``-1`` shape arrives only through the EVAL
+    id as the one identity it is. No module under ``tortoise/`` imports it
+    (measured by AST over ``tortoise/**/*.py``: zero ``Import``/``ImportFrom``
+    nodes naming it — an AST result rather than a text search, because the
+    name also appears in prose cross-references in this package, so a text hit
+    is not an import; the only importers are ``tools/longmem_eval/retrieve.py``
+    and four test modules), so the ``-1``
+    shape arrives only through the EVAL
     annotator (``session_id: ""`` plus ``lme_session_index`` defaulted to
     ``-1``, ``tools/longmem_eval/retrieve.py``).
 
