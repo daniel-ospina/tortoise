@@ -174,6 +174,14 @@ kind_pair_verdict(*, predicate, from_kind, to_kind, bound_ns) -> Verdict
 | `unknown_kind` | an actual kind is missing or `unclassified` | **write**, reported as its **own** state, counted — never merged with a refusal |
 | `mismatch` | a declaration binds and an actual kind falls outside the closure | **refuse** unless the pack declares a non-blocking level (§2.1), with the three AX parts: the predicate, the declared from/to kinds, the actual kinds, **and the declared predicates for the actual pair** |
 
+⛔ **At a replay fold (§1.2 items 5 and 6) the `mismatch` arm does NOT raise, and does NOT skip.**
+`rebuild_all` must never refuse a committed record — R1 and the brief's D4 — and it must not *omit* the write
+either, because a skip is exactly the live≠replay divergence that pins 15/15b exist to prevent. The fold
+**computes the same verdict, emits and counts it, and writes anyway**; pins 15/15b assert **verdict equality**,
+never refusal equality. Getting this wrong in either direction is a shipped defect, so it is stated here rather
+than left to the implementation: "refuse" is a *live-write* disposition, and the fold's disposition is
+"classify and report" (the same shape `pack_state.graph_kind_namespaces` / #9068 uses for the same reason).
+
 Endpoint kinds are normalised with **`status_folds.kind_forms_for` ∪ `PackRegistry.expand_kind`** — neither is
 a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issue`; `expand_kind` has
 `pm:issue` but not `issue`), both sides case-folded because kinds are stored **verbatim**
@@ -263,7 +271,9 @@ does not install still decides the level. The label leg never reaches this seam 
   for a narrower job than this issue needs.
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
-`ontology.relations[]` (35 populated declarations, which collapse to **34** distinct `(fromKind, toKind)` pairs — `venture:asset→venture:program` is declared twice, by `protects` and `producedBy`) — **not** `extraction.relationTemplates[]` (declared but
+`ontology.relations[]` (36 declared relations, **35 of them kind-bearing** — `pm:onBoard` is `declarationOnly`
+and carries no kinds, so it maps no pair — which collapse to **34** distinct `(fromKind, toKind)` pairs:
+`venture:asset→venture:program` is declared twice, by `protects` and `producedBy`) — **not** `extraction.relationTemplates[]` (declared but
 unshipped; only `packs/_template` has it, commented out). Reuse `extractor_v2.build_master_list`, which
 already carries the per-graph tenant-narrowed kind vocabulary.
 

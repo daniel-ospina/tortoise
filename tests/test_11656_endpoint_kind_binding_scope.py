@@ -252,7 +252,12 @@ class TestTheThirdDoorExists:
         lines = (REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text().splitlines()
         starts = [i for i, ln in enumerate(lines) if "fold ``DirectEdgeCreated``" in ln]
         assert len(starts) == 1, f"expected exactly one DirectEdgeCreated fold marker, found {len(starts)}"
-        window = "\n".join(lines[starts[0]: starts[0] + 400])
+        # The window ENDS at the next leg: `DirectEdgeRepoint` reads `etype = ev.get("edge_type")`
+        # too, at `:17305` (inside 400 lines of the marker). Without this bound the assertion
+        # below could not fail — the copy it means to exclude satisfies it.
+        ends = [i for i in range(starts[0], len(lines)) if "for ev in direct_repoint_events" in lines[i]]
+        assert ends, "the DirectEdgeRepoint leg is gone — the window's end bound has to be re-derived"
+        window = "\n".join(lines[starts[0]: ends[0]])
 
         assert "`ownedBy`/`hasPart`/" in window, (
             "the note naming the rels a structural-lane record carries is gone from the fold — that note is "
