@@ -4822,10 +4822,15 @@ def test_every_record_migration_selects_core_and_both_readers():
     migrations = sorted(
         p.name for p in (REPO / "supabase" / "migrations").glob("*_record_*.sql")
     )
-    # Cross-check the glob against an INDEPENDENT spelling of the same family
-    # (`re`, not the selector's own regex), so a NARROWED glob cannot pass on a
-    # membership assertion alone — measured: a glob narrowed to one filename
-    # passed such a guard while covering 1 of 16 (#11728 review P3).
+    # Cross-check the glob against an INDEPENDENT ENUMERATION of the same family —
+    # `iterdir` vs the selector's `glob` — so a NARROWED glob cannot pass on a
+    # membership assertion alone (measured: a glob narrowed to one filename passed
+    # such a guard while covering 1 of 16, #11728 review P3). ⚠️ The regex below is
+    # NOT an independent SPELLING, which is what an earlier version of this comment
+    # claimed: it is `ci_selection._RECORD_MIGRATION_RE` minus its basename anchor,
+    # in the same `re` dialect. The genuinely independent spelling of the family is
+    # `record_projection.RECORD_MIGRATIONS`, and the reader assertion in the loop
+    # below is what makes its pin (`test_9231`) actually run here.
     family = re.compile(r"_record_.*\.sql$")
     expected = sorted(
         p.name
@@ -4834,11 +4839,29 @@ def test_every_record_migration_selects_core_and_both_readers():
     )
     assert migrations == expected, (migrations, expected)
     assert migrations, "record-migration family is empty — the pin would cover nothing"
+    # The readers asserted in the loop are the two this record names as having run
+    # NOTHING before the fix (the width pin and the registry pin) plus the
+    # projection pin — and they are the three that CAN discriminate: each is a
+    # slow file, so it rides the `core` surface and is ABSENT on a selection with
+    # `surfaces: []`. `test_record_schema_placement.py` stood here until the #11728
+    # P3 and cannot fail: it is tier1, and tier1 ⊆ `test_files` on every return
+    # path (measured: the `off_family` selection below — `surfaces: []`, n=84 —
+    # still carries it). A vacuous assertion is worse than none: it reads as
+    # coverage.
+    # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
+    # structural rule disabled AND this member's `CORE_ALSO` entry removed,
+    # `select()` returns `surfaces: []`, n=84, and both reader assertions red.
+    # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
+    # entry — measured on the embedding migration: `surfaces: ['core']`, n=801,
+    # both readers present — which is the same measurement that makes those entries
+    # redundant rather than load-bearing, and why the synthetic arm below is the
+    # one the rule alone carries.
     for name in migrations:
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
         assert r["surfaces"] == ["core"], (name, r)
-        assert "test_record_schema_placement.py" in r["test_files"], (name, r)
+        assert "test_11642_vector_move.py" in r["test_files"], (name, r)
+        assert "test_9231_record_migrations_trigger.py" in r["test_files"], (name, r)
         assert "test_record_projection.py" in r["test_files"], (name, r)
 
     # The case the enumeration used to miss entirely: a record migration NOBODY
