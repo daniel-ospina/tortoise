@@ -886,7 +886,7 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
     required `legal-e2e` check on PR #11675 itself (job 129650228746): `:8808`
     was ready at 05:42:03Z, 11 app-origin specs then failed
     `ERR_CONNECTION_REFUSED`, and the teardown printed `app (pid 983187) already
-    exited` while the marketing preview was still serving — a preview that DIED
+    exited` while the marketing preview was still RUNNING — a preview that DIED
     MID-RUN, whose own log went unread, so the red could not be diagnosed after
     the fact. `legal-e2e` boots the same two previews through the same helper and
     had no such step, from #10305 until now.

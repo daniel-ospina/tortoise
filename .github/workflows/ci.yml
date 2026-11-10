@@ -2443,8 +2443,9 @@ jobs:
       # undiagnosable after the fact: `:8808` was ready at 05:42:03Z, the suite ran
       # to 05:44:09Z, 11 app-origin specs failed `ERR_CONNECTION_REFUSED`, and the
       # teardown step afterwards reported `app (pid 983187) already exited` while
-      # the marketing server was still serving — i.e. the DASHBOARD PREVIEW DIED
-      # MID-RUN, and `app.log` sat unread. The liveness verdict below is what
+      # the marketing preview was still RUNNING (its own pids were stopped, not
+      # found dead) — i.e. the DASHBOARD PREVIEW DIED MID-RUN, and `app.log` sat
+      # unread. The liveness verdict below is what
       # separates that from "the specs were wrong" (#8059 is the same misreading:
       # a dead preview reported as a `--d1`/`dist` problem).
       - name: Dump the preview servers' logs, and say whether each preview DIED
