@@ -150,10 +150,10 @@ document, do not re-route**. See R11/E3 for why that constrains C3.
 vocabulary are comments). A1 cannot be satisfied by "enabling something"; something has to emit.
 
 **R4 · The declarations have two legs, and only one is unread.** `relation_write_paths` /
-`relation_write_verdict` (`tortoise/pack_registry.py:534-585`) return **`writable`** for the relations
+`relation_write_verdict` (`tortoise/pack_registry.py:701` / `:734`, the `RELATION_WRITABLE` arm at `:743`) return **`writable`** for the relations
 above (they declare `mechanism: IMPL`, so the `operator` path binds; the predicate is in the structural
 set). The **`mechanism`** leg *is* read at the write door by `declared_mechanisms`
-(`pack_registry.py:598-820`, matching at `:804`), consumed by `create_operator`. Unread: (i) the
+(`pack_registry.py:1006-1118`, the `CORE_PREDICATES` membership test at `:1107`), consumed by `create_operator`. Unread: (i) the
 **`semantics`** leg — surfaced at `:3736`, and nothing derives an op_type or direction from it; and (ii)
 **`hierarchies`** — validated only (`pack_registry.py:2341-2355`). ⚠️ The operator writers (`commit_ops.py:426-429`,
 `sdk.create_operator`) are the **Point-layer** mechanism; they are not evidence about Object→Object.
