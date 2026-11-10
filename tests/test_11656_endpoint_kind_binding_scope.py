@@ -807,7 +807,7 @@ def _derive_population(source: str) -> tuple[int, int]:
     #: reviewer round 3: `def test_a()` twice + `test_a.__test__ = False` collects **0** where head gave
     #: `(1, 1)` — a regression the qualified-path rewrite introduced).
     _path_of: dict[int, str] = {}
-    _duplicate_paths: set[str] = set()
+    _duplicate_paths: dict[str, list[ast.AST]] = {}
 
     def _index_scope(scope_body: list[ast.stmt], prefix: str) -> None:
         for _n in scope_body:
@@ -815,7 +815,7 @@ def _derive_population(source: str) -> tuple[int, int]:
                 continue
             _path = f"{prefix}{_n.name}"
             if _path in _declared:
-                _duplicate_paths.add(_path)
+                _duplicate_paths.setdefault(_path, [_declared[_path]]).append(_n)
             _declared[_path] = _n
             _path_of[id(_n)] = _path
             if isinstance(_n, ast.ClassDef):
@@ -922,12 +922,24 @@ def _derive_population(source: str) -> tuple[int, int]:
     _already_counted = {id(node) for node in nodes}
 
     def _class_selected(path: str, node: ast.ClassDef) -> bool:
-        """True when pytest obtains a COLLECTOR for this class — i.e. reads its members' `__test__` at all."""
-        if not _pytest_collects_class(node) or _is_abstract_class(node):
+        """True when pytest obtains a COLLECTOR for this class — i.e. reads its members' `__test__` at all.
+
+        ⛔ The in-body falsy-`__test__` veto is NOT applied before `path in _forced_paths`: an OUT-OF-BODY
+        `True` overrides it (that is why `_class_declares_init_or_new` was split out), and gating on
+        `_pytest_collects_class` first under-counted the member (measured, reviewer round 4: `class TestX:
+        __test__ = False; test_a; helper` + `TestX.__test__ = True` + `TestX.helper.__test__ = True` →
+        pytest **2**, derived `(1, 1)`). `hasinit`/`hasnew` still refuse, because an out-of-body `True`
+        does not stop them.
+        """
+        if _is_abstract_class(node) or _class_declares_init_or_new(node):
             return False
         if node.name in _case_names:
             return True
-        return node.name.startswith("Test") or _test_dunder(node.body) is True or path in _forced_paths
+        if path in _forced_paths:
+            return True
+        return _pytest_collects_class(node) and (
+            node.name.startswith("Test") or _test_dunder(node.body) is True
+        )
 
     for _path, _cand in sorted(_declared.items()):
         if _path not in _forced_paths:
@@ -1003,11 +1015,29 @@ def _derive_population(source: str) -> tuple[int, int]:
                 "whether pytest sees it is a runtime fact this derivation cannot read"
             )
 
-    # ⛔ Two declarations of one name in one scope: the walk counts BOTH, pytest sees only the LAST binding.
-    # Measured (reviewer round 3): `def test_a(): …` twice collects **1** while the derivation said `(2, 2)`,
-    # and a `test_a.__test__ = False` on the survivor left the shadowed one counted. The refusal is
-    # deliberate: which declaration a `__test__` binding names is a source fact this walk does not track.
-    for _path in sorted(_duplicate_paths):
+    # ⛔ Two declarations of one name in one scope: pytest collects only the LAST binding, and the walk
+    # counts both (`def test_a(): …` twice collects **1**, the walk `(2, 2)`; with a `test_a.__test__ =
+    # False` on the survivor the shadowed one still counted). ⛔ BUT only a duplicate that can AFFECT
+    # collection is refused (reviewer round 4): a `@property`/`@x.setter` pair, an `@overload` pair and two
+    # `_private` helpers all redeclare a name pytest never collects, and refusing them hides a population
+    # pytest does collect (**1** each, measured). A duplicate that can affect collection is still refused,
+    # because which declaration a `__test__` binding names is a source fact this walk does not track.
+    for _path, _declarations in sorted(_duplicate_paths.items()):
+        if not any(
+            _is_test_named(_decl)
+            or _path in _forced_paths
+            or _path in _refused_paths
+            or (
+                isinstance(_decl, ast.ClassDef)
+                and (
+                    _decl.name.startswith("Test")
+                    or _decl.name in _case_names
+                    or _test_dunder(_decl.body) is True
+                )
+            )
+            for _decl in _declarations
+        ):
+            continue
         unreadable.append(
             f"`{_path}` is declared more than once in the same scope; pytest collects only the LAST "
             "binding of a name, and this walk cannot tell which declaration a `__test__` binding names"
@@ -1015,18 +1045,37 @@ def _derive_population(source: str) -> tuple[int, int]:
     # ⛔ `setattr(obj, "__test__", value)` binds out of body too, and pytest honours it (measured,
     # reviewer round 3: `setattr(TestX, "__test__", False)` on an otherwise collected class collects **0**
     # while a scan of `obj.__test__ = …` saw nothing). Refused rather than modelled: the object may be
-    # anything this walk does not index.
+    # anything this walk does not index. ⛔ The NAME argument must be provably not `__test__` to be
+    # answerable (reviewer round 4): `_NAME = "__test__"; setattr(TestX, _NAME, False)` and a module-level
+    # `s = setattr` alias both collect **0** while a literal-only match counted the class — the same
+    # invisible-alias class this file already refuses for `parametrize` and `pytestmark`.
+    _setattr_aliases: set[str] = set()
+    for _node in tree.body:
+        if not isinstance(_node, (ast.Assign, ast.AnnAssign)) or _node.value is None:
+            continue
+        if ast.unparse(_node.value) != "setattr":
+            continue
+        _targets = _node.targets if isinstance(_node, ast.Assign) else [_node.target]
+        _setattr_aliases |= {t.id for t in _targets if isinstance(t, ast.Name)}
     for _call in ast.walk(tree):
         if not isinstance(_call, ast.Call) or len(_call.args) < 2:
             continue
-        if _decorator_leaf(_call.func) != "setattr":
+        _func = _call.func
+        if _decorator_leaf(_func) != "setattr" and not (
+            isinstance(_func, ast.Name) and _func.id in _setattr_aliases
+        ):
             continue
         _name_arg = _call.args[1]
-        if isinstance(_name_arg, ast.Constant) and _name_arg.value == "__test__":
-            unreadable.append(
-                f"`{ast.unparse(_call)[:72]}` binds `__test__` through `setattr`, which this scan does "
-                "not model — the object it names cannot be resolved here"
-            )
+        if isinstance(_name_arg, ast.Constant):
+            if _name_arg.value != "__test__":
+                continue
+            _what = "binds `__test__`"
+        else:
+            _what = "may bind `__test__` (its attribute name is not a literal)"
+        unreadable.append(
+            f"`{ast.unparse(_call)[:72]}` {_what} through `setattr`, which this scan does not model — "
+            "the object it names cannot be resolved here"
+        )
     # ⛔ A `parametrize` matched by SUFFIX is the same spelling guess this derivation removed for `fixture`
     # and the `abstract` markers, and `@myparametrize("x", [1, 2, 3])` is an ordinary decorator: pytest
     # collects **1** where the suffix model added the three cases and reported `(1, 3)` (measured,
@@ -2689,6 +2738,16 @@ class TestTheDocsAreDiscoverableAndResolve:
             "out-of-body `__test__` bound through `setattr`": (
                 "class TestX:\n    def test_a(self):\n        pass\nsetattr(TestX, \"__test__\", False)\n"
             ),
+            # ⛔ Round-31 P3 (reviewer round 4) — the NAME argument is not provably literal, or the builtin
+            # is aliased: pytest collects **0** for each, and a literal-only match counted the class.
+            "`setattr` with the attribute name held in a module name": (
+                '_NAME = "__test__"\nclass TestX:\n    def test_a(self):\n        pass\n'
+                "setattr(TestX, _NAME, False)\n"
+            ),
+            "`setattr` through a module-level alias": (
+                "s = setattr\nclass TestX:\n    def test_a(self):\n        pass\n"
+                "s(TestX, '__test__', False)\n"
+            ),
             # ⛔ Round-31 P3 — a `parametrize` matched by SUFFIX is the spelling guess removed for `fixture`
             # and the `abstract` markers; `@myparametrize('x', [1,2,3])` collects **1**, not 3.
             "a decorator that merely ENDS in `parametrize`": (
@@ -2899,6 +2958,81 @@ class TestTheDocsAreDiscoverableAndResolve:
             (
                 "`TestX.__test__ = 1` leaves the name-collected class in place",
                 "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = 1\n",
+                (1, 1),
+            ),
+            # ⛔ Round-31 P2 (reviewer round 3) — a METHOD's `__test__` is read only through a collector
+            # that already collects its class. Measured: forcing a member of a class pytest never collects
+            # selects NOTHING (0); a `unittest.TestCase` member is invisible to that path (only
+            # `testMethodPrefix` is iterated: **1**, i.e. `test_a` alone); a member of a COLLECTED `Test*`
+            # class IS selected despite its name (**1**).
+            (
+                "forcing a member of a class pytest never collects selects nothing",
+                "class Helper:\n    def test_b(self):\n        pass\nHelper.test_b.__test__ = True\n",
+                (0, 0),
+            ),
+            (
+                "forcing a nested class of a class pytest never collects selects nothing",
+                "class Helper:\n    class TestInner:\n        def test_b(self):\n            pass\n"
+                "Helper.TestInner.__test__ = True\n",
+                (0, 0),
+            ),
+            (
+                "forcing a non-`test`-named MEMBER of a collected `Test*` class selects it",
+                "class TestX:\n    def helper(self):\n        pass\nTestX.helper.__test__ = True\n",
+                (1, 1),
+            ),
+            (
+                "forcing a member of a `unittest.TestCase` is invisible to the unittest path",
+                "import unittest\nclass FoldCase(unittest.TestCase):\n    def test_a(self):\n        pass\n"
+                "    def helper(self):\n        pass\nFoldCase.helper.__test__ = True\n",
+                (1, 1),
+            ),
+            # ⛔ Round-31 P2 (reviewer round 3) — an out-of-body `True` overrides an in-body falsy
+            # `__test__`, but it does NOT stop `hasinit`/`hasnew` refusing the class (measured: **0**, plus
+            # a `PytestCollectionWarning`); the in-body arm already models exactly that.
+            (
+                "a forced class with `__init__` is still refused by `hasinit`",
+                "class helper:\n    def __init__(self):\n        pass\n"
+                "    def test_h(self):\n        pass\nhelper.__test__ = True\n",
+                (0, 0),
+            ),
+            (
+                "a forced class with `__new__` is still refused by `hasnew`",
+                "class helper:\n    def __new__(cls):\n        return super().__new__(cls)\n"
+                "    def test_h(self):\n        pass\nhelper.__test__ = True\n",
+                (0, 0),
+            ),
+            # ⛔ Round-31 P2 (reviewer round 4) — the OUT-OF-BODY `True` override is what makes the
+            # container of a forced member collectable: `class TestX: __test__ = False; test_a; helper` +
+            # `TestX.__test__ = True` + `TestX.helper.__test__ = True` collects **2**. The control without
+            # the out-of-body `True` collects **0** — the member's `__test__` cannot rescue it.
+            (
+                "an out-of-body `True` makes the container collectable, so a forced member counts",
+                "class TestX:\n    __test__ = False\n    def test_a(self):\n        pass\n"
+                "    def helper(self):\n        pass\n"
+                "TestX.__test__ = True\nTestX.helper.__test__ = True\n",
+                (2, 2),
+            ),
+            (
+                "without the out-of-body `True`, a forced member of a falsy-`__test__` class counts nothing",
+                "class TestX:\n    __test__ = False\n    def test_a(self):\n        pass\n"
+                "    def helper(self):\n        pass\nTestX.helper.__test__ = True\n",
+                (0, 0),
+            ),
+            # ⛔ Round-31 P2 (reviewer round 4) — a duplicate name pytest NEVER collects is answerable: the
+            # property/setter pair, the `@overload` pair and two `_private` helpers each redeclare a name
+            # with no collection effect (**1** collected each, measured). Only a duplicate that can affect
+            # collection is refused (the duplicated-`test_a` rows in `unmodellable` above).
+            (
+                "a `@property`/`@setter` pair redeclaring a name is not a collection duplicate",
+                "class TestFoo:\n    def test_a(self):\n        pass\n\n"
+                "    @property\n    def value(self):\n        return 1\n\n"
+                "    @value.setter\n    def value(self, v):\n        pass\n",
+                (1, 1),
+            ),
+            (
+                "two `_private` helpers with one name are not a collection duplicate",
+                "def _helper():\n    pass\n\ndef _helper():\n    pass\n\ndef test_a():\n    pass\n",
                 (1, 1),
             ),
         ):
