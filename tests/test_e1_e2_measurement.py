@@ -417,6 +417,49 @@ def test_the_produced_log_passes_the_structural_check(log_text):
     assert state["result"] == "UNPREREGISTERED"
 
 
+def _assert_the_log_sha_is_a_real_object(log_sha: str, state: str) -> None:
+    """The OBJECT half of the provenance pin, as a function OF THE ANSWER.
+
+    Split out of the test body so both outcomes are pinnable on any machine, with no
+    dependence on which objects THIS clone happens to carry (#11689 review round 10):
+    the old inline `assert state == "exists"` could only vary by a foreign ref
+    disappearing, which is the defect rather than a mutant any test could run.
+
+    ⛔ `absent` is ACCEPTED, and that is a measurement, not a relaxation. Measured at
+    `1891e5244874`: this log's sha (`c2544f54f14`) is NOT an ancestor of `origin/main`
+    AND NOT an ancestor of this branch (`git merge-base --is-ancestor` → false for
+    both); its only fetched ref is `refs/remotes/origin/feat/9076-tm` — the head of PR
+    #9110, MERGED, squash commit `bc547406f255` — and `refs/pull/*` is not fetched by
+    a clone. This repo DELETES merged heads (measured: 4 of 5 recently merged PR heads
+    have no `refs/heads/*` ref left), so once `feat/9076-tm` is reaped the object is
+    reachable from no fetched ref: `cat-file -e` exits 128, the repo is complete, and
+    `_commit_state` answers `absent`. So `absent` is a fact about the CLONE's refspec,
+    not about the log — and reddening on it makes this pin red on `main` in every fresh
+    full clone, for a log `PRE-REGISTRATION.md` §0 forbids anyone from re-taking. An
+    assertion whose only remedy a recorded decision forbids is unsatisfiable by
+    construction: the same class this PR already removed one field over.
+
+    ⛔ It is NOT a fail-open, because the fabricated-sha catch the object probe used to
+    carry is owned by `_FROZEN_LOG_SHA256`: the `sha=` line is INSIDE the bytes that
+    digest pins, so `sha=0000…0` (or a force-pushed-away commit) cannot reach here
+    without reddening `test_the_committed_log_is_frozen_and_stays_unscored` first.
+    `test_the_frozen_digest_owns_the_sha_line` pins that ownership in both directions —
+    and the digest, unlike this probe, also runs in the depth-1 CI checkout, where the
+    probe answered `unprovable` and caught nothing at all.
+
+    What is LEFT as a verdict here: `unprovable` is a MEASURED answer about a shallow
+    checkout and skips; `unmeasurable` (git could not be asked) is not evidence and
+    reds, as does any state this predicate cannot classify.
+    """
+    if state == "unprovable":
+        pytest.skip(f"a shallow checkout cannot resolve {log_sha} — unprovable is "
+                    f"not absent (tools/capstone_ledger.py::_commit_state)")
+    assert state in ("exists", "absent"), (
+        f"e1-e2.log names sha={log_sha}, and this checkout answers {state!r} — neither "
+        f"'exists' (measured present) nor 'absent' (measured not reachable here) was "
+        f"measured, so this is not a verdict about the log")
+
+
 def test_the_committed_log_names_a_real_commit_and_the_doc_agrees():
     """`sha=` must name a commit, and `Measured at:` must be that same commit.
 
@@ -460,22 +503,81 @@ def test_the_committed_log_names_a_real_commit_and_the_doc_agrees():
     #
     # ⛔ It cannot be a `git cat-file -e` exit test, and the reason is MEASURED in
     # this repo: the `test` job's only checkout is `actions/checkout@v4` with no
-    # `fetch-depth`, so every shard is depth-1, and this log names an ANCESTOR
-    # (`c2544f54f14`) that such a clone does not carry — `cat-file -e` exits 128 and
-    # a correct tree would red a REQUIRED check. That is the doctrine in
-    # `tools/capstone_ledger.py::_commit_state` ("a shallow checkout CANNOT answer",
-    # pinned by `test_a_shallow_checkout_is_unprovable_never_absent`), so this uses
-    # that one predicate rather than a second owner of it: `unprovable` is a
-    # MEASURED answer about a shallow checkout and is skipped; `absent` (the object
-    # is not here and the clone is complete) and `unmeasurable` (git could not be
-    # asked at all) are both red.
-    state = _LEDGER._commit_state(log_sha, _REPO_ROOT)
-    if state == "unprovable":
-        pytest.skip(f"a shallow checkout cannot resolve {log_sha} — unprovable is "
-                    f"not absent (tools/capstone_ledger.py::_commit_state)")
-    assert state == "exists", (
-        f"e1-e2.log names sha={log_sha}, which is {state!r} in this checkout — a "
-        f"40-hex string is not provenance")
+    # `fetch-depth`, so every shard is depth-1 and the object is simply not there —
+    # `cat-file -e` exits 128 and a correct tree would red a REQUIRED check. That is
+    # the doctrine in `tools/capstone_ledger.py::_commit_state` ("a shallow checkout
+    # CANNOT answer", pinned by `test_a_shallow_checkout_is_unprovable_never_absent`),
+    # so this uses that one predicate rather than a second owner of it. The object
+    # half is `_assert_the_log_sha_is_a_real_object`, whose docstring carries the
+    # measurements — this log's sha is NOT an ancestor of this branch, which an
+    # earlier revision of this comment wrongly asserted.
+    _assert_the_log_sha_is_a_real_object(
+        log_sha, _LEDGER._commit_state(log_sha, _REPO_ROOT))
+
+
+def test_the_frozen_digest_owns_the_sha_line():
+    """A fabricated `sha=` is caught by the byte digest, in every checkout.
+
+    #11689 review round 10: the object half of the provenance pin stops reddening on
+    `absent` (see `_assert_the_log_sha_is_a_real_object`), so the fabricated-sha catch
+    it was carrying — `sha=0000…0`, or a commit a force-push removed — must be
+    demonstrably owned by the digest that pins this log's bytes. It is: the `sha=` line
+    lives INSIDE those bytes. Pinned in both directions below, and note that unlike the
+    object probe this digest runs in the depth-1 CI checkout — where the probe answered
+    `unprovable` and caught nothing at all.
+    """
+    raw = _LOG.read_bytes()
+    assert hashlib.sha256(raw).hexdigest() == _FROZEN_LOG_SHA256
+    sha_line = next(ln for ln in raw.decode("utf-8").splitlines()
+                    if ln.startswith("sha=")).encode("utf-8")
+    forged = raw.replace(sha_line, b"sha=" + b"0" * 40, 1)
+    assert forged != raw
+    # the SHA-SHAPE assertions this pin also makes pass a forged 40-hex value …
+    import re
+
+    forged_sha = next(ln for ln in forged.decode("utf-8").splitlines()
+                      if ln.startswith("sha=")).split("=", 1)[1]
+    assert not forged_sha.endswith("+dirty")
+    assert re.fullmatch(r"[0-9a-f]{40}", forged_sha)
+    # … and the object probe cannot refuse it once no fetched ref reaches it (it
+    # accepts `absent` for the REAL sha, so it must accept it for this one too):
+    # the DIGEST is what refuses it, below. That is the ownership this test pins.
+    assert hashlib.sha256(forged).hexdigest() != _FROZEN_LOG_SHA256, (
+        "the digest does not cover the sha= line — then accepting `absent` in the "
+        "object probe really would be a fail-open")
+
+
+@pytest.mark.parametrize("state", ["exists", "absent"])
+def test_the_object_half_does_not_depend_on_which_refs_this_clone_has(state):
+    """`absent` is a fact about the clone's refspec, not about the log (#11689 r10).
+
+    This log's sha is not on `main`, is not an ancestor of this branch, and is
+    reachable only through `refs/heads/feat/9076-tm` (the head of PR #9110) plus
+    `refs/pull/*`, which a clone does not fetch. This repo deletes merged heads, so once
+    that one is reaped a COMPLETE clone answers `absent` — and an `== "exists"` oracle
+    then reds `main` forever, for a log `PRE-REGISTRATION.md` §0 forbids anyone from
+    re-taking. An assertion whose only remedy a recorded decision forbids is
+    unsatisfiable by construction.
+
+    ⛔ Non-vacuous by construction: before this round the helper asserted
+    `state == "exists"`, so the `absent` parameter raises `AssertionError` there.
+    """
+    _assert_the_log_sha_is_a_real_object("c" * 40, state)
+
+
+def test_the_object_half_still_refuses_a_state_that_is_not_a_measurement():
+    """What is LEFT as a verdict: git could not be asked, or an unknown state.
+
+    `unprovable` is a MEASURED answer about a shallow checkout (the doctrine in
+    `tools/capstone_ledger.py::_commit_state`), so it skips; `unmeasurable` is not
+    evidence and reds, as does any state this predicate cannot classify.
+    """
+    with pytest.raises(pytest.skip.Exception):
+        _assert_the_log_sha_is_a_real_object("c" * 40, "unprovable")
+    with pytest.raises(AssertionError):
+        _assert_the_log_sha_is_a_real_object("c" * 40, "unmeasurable")
+    with pytest.raises(AssertionError):
+        _assert_the_log_sha_is_a_real_object("c" * 40, "bogus")
 
 
 def test_the_committed_log_passes_the_structural_check():
