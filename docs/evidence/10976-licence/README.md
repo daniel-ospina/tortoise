@@ -108,11 +108,11 @@ gated individually by the executor's per-node record probe.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (117 tests in the file, 223 across the four
+`tests/test_cache_eviction_census.py` (118 tests in the file, 224 across the four
 eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
 tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
-`223 passed`, recorded in `WORKTREE-REPORT.md`):
+`224 passed`, recorded in `WORKTREE-REPORT.md`):
 
 | arm | what it pins |
 |---|---|
@@ -128,6 +128,7 @@ tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
 | `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is `true_population < claim <= node_total`, bounded by the CLAIM and not by the multiplier, which is why the mirror pin is the only guard there |
 | `test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement` | `turn` answering 30,000 on a 25,000-node graph with a 30,000 claim is refused by the **graph-total** check, population bound silent. ⛔ Proves the backstop is reachable on a QUIESCENT graph — a comment claiming it was unreachable there was wrong — and that the refusal comes from the right guard |
 | `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total` | the **boundary of the residual band**: the SAME 30,000 ceiling on the same 25,000-node graph with a 25,000 claim licenses 25,000, neither guard firing. ⛔ Pins the correction in the direction the previous comment got wrong — the multiplier is irrelevant, only the claim's position against the total matters |
+| `test_the_demoted_row_still_names_its_population` | a demotion must not NULL the name the row demonstrably has — dropping the `population_name` carry through the whole-graph demotion makes the exported artefact report `population: null` beside a label that names one. The comment recorded that measured defect but nothing pinned it (deleting the carry left the suite green), so the regression it describes could return silently |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.
