@@ -12586,15 +12586,21 @@ class HolderGateTests(unittest.TestCase):
         # 1. …and the gate SERVES it rather than rebuilding. `source`/`why` ride the
         #    message so a merely STALE fixture (or a `_board_is_for_repo` mismatch)
         #    names its own cause instead of accusing the reader of arm (a).
+        #    ⛔ THE READ BELOW IS INSIDE THE PATCH ON PURPOSE (#11681 review, P2).
+        #    `read_holders` re-enters `_read_board` itself, so with the second call
+        #    OUTSIDE this `with` a stale fixture rebuilt the board through the live
+        #    gh/cmux/ps path instead of failing loudly — the "this test must never
+        #    rebuild" contract was enforced on one of the two entry points. Both
+        #    now share one `build_state` patch, so a rebuild raises here.
         with mock.patch.object(self.cp.fleet_state, "build_state", _no_rebuild):
             state, source, why = self.cp._read_board(SLUG, str(self.tmp))
-        self.assertIsNotNone(state, (
-            "the board must be SERVED, not rebuilt or refused — an unreadable cmux "
-            "session store does not make a measured board unanswerable"
-            f" [source={source}; why={why}]"))
-        # 2. …and the READ is measured, with the absent store still named beside the
-        #    one that answered (disclosure survives the decision).
-        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+            self.assertIsNotNone(state, (
+                "the board must be SERVED, not rebuilt or refused — an unreadable "
+                "cmux session store does not make a measured board unanswerable"
+                f" [source={source}; why={why}]"))
+            # 2. …and the READ is measured, with the absent store still named
+            #    beside the one that answered (disclosure survives the decision).
+            read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
         self.assertTrue(read.measured, read.unanswerable)
         self.assertEqual(read.liveness_unreadable,
                          (self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,))

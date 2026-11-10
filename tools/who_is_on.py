@@ -861,13 +861,26 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
     # #11202 is about. The note is the BOARD's holder arm; the heading says so.
     # An INCOMPLETE holder read is NOT repeated here: it already prints, with this
     # same note, under INCOMPLETE SURFACES above.
+    # ⛔ THE GUARD READS THE SAME PREDICATE THE PRINTER DOES (#11681 review, P2).
+    # It used to re-test `status != STATUS_INCOMPLETE` alone, while the section that
+    # already prints this note is `incomplete` above — `status == INCOMPLETE OR
+    # truncated`. Two descriptions of one state in one file is the exact defect this
+    # PR is about, and `incomplete` is already computed a few lines up (the same
+    # predicate `ANSWER:`'s `n_queried` uses), so it is read, never re-derived.
     holder_surface = next((s for s in surfaces if s.name == cp.SURFACE_ISSUE), None)
     if (holder_surface is not None
-            and holder_surface.status != cp.STATUS_INCOMPLETE
+            and holder_surface not in incomplete
             and (holder_surface.note or "").strip()):
         lines.append("")
+        # ⛔ THE HEADING NAMES THE ROW, NOT "the holder read" (#11681 review, P2).
+        # `scan_issue_surface` appends an `issue state=…` sentence to this same
+        # `note`, so the rendered string is the WHOLE note — on a LANDED answer a
+        # heading promising "the BOARD's holder read" sits over a clause that is
+        # not part of that read. Re-composing a filtered string is not an option
+        # (the note must stay the GATE's own string), so the heading is narrowed to
+        # the row it belongs to instead of over-claiming its contents.
         lines.append("CLAIM GATE [" + cp.SURFACE_ISSUE + "] — the gate's own note "
-                     "for the BOARD's holder read")
+                     "for the `" + cp.SURFACE_ISSUE + "` row")
         lines.append("             (separate from any surface hit listed above; a "
                      "CLEAN that rested on ONE")
         lines.append("             liveness store says so here):")
