@@ -218,7 +218,12 @@ def _axis_partition() -> Counter:
 
 
 def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
-    """Names of the MODULE-LEVEL classes pytest collects as `unittest.TestCase` subclasses.
+    """Names of the classes in ONE body pytest collects as `unittest.TestCase` subclasses.
+
+    ⛔ Passed `tree.body` for the module scope, and called once per nested body by `_collected_test_nodes`:
+    a `unittest.TestCase` nested inside a collected `Test*` class IS collected (measured round-30 P3:
+    `TestOuter::CaseInner::test_b`, 2 collected for that module), so a module-level-only scan was an
+    UNDERCOUNT of exactly the direction this file names as the dangerous one.
 
     ⛔ pytest collects a `unittest.TestCase` subclass **regardless of its name**. Its own docs (rung 3,
     `https://docs.pytest.org/en/stable/how-to/unittest.html`): "pytest will automatically collect
@@ -259,16 +264,23 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
     real population grew. A nested `def test_` is not collected and is not counted here either.
     """
     tree = ast.parse(source)
-    case_classes = _unittest_case_classes(tree.body)
     nodes: list[ast.AST] = []
 
     def _walk(body: list[ast.stmt], *, module_level: bool) -> None:
+        # ⛔ Per BODY, not per module: a TestCase nested in a collected `Test*` class is collected too, and
+        # its name only exists in the enclosing class's body.
+        case_classes = _unittest_case_classes(body)
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 nodes.append(node)
-            elif module_level and isinstance(node, ast.ClassDef) and node.name in case_classes:
-                # A `unittest.TestCase` subclass is collected by name-independent discovery — but only at
-                # MODULE level, and its own body is NOT walked as a container: a `Test*` class nested inside
+            elif isinstance(node, ast.ClassDef) and node.name in case_classes:
+                # A `unittest.TestCase` subclass is collected by name-independent discovery. It applies at
+                # MODULE level AND inside a collected `Test*` class, but this branch is only REACHED from the
+                # `Test*` recursion — which is the whole measured rule (round-29/30 P3): a TestCase nested in
+                # a `Test*` class IS collected (`TestOuter::CaseInner::test_b`, measured 2 for that module),
+                # while one nested inside ANOTHER TestCase is not (`Outer::Inner::test_b` absent, measured 1)
+                # because this branch never recurses. Its own body is NOT walked as a container: a `Test*`
+                # class nested inside
                 # `FoldCase(unittest.TestCase)` is collected by nobody (measured — `--collect-only` lists
                 # only `FoldCase::test_outer`), so recursing here would over-count in the direction whose
                 # tempting fix is to falsify the document.
@@ -297,14 +309,22 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
                 )
             elif (
                 isinstance(node, ast.ClassDef)
-                and node.name.startswith("Test")
+                and (node.name.startswith("Test") or _test_dunder(node.body) is True)
                 and _pytest_collects_class(node)
             ):
+                # ⛔ A class is selected by NAME **or** by `__test__`, and the `__test__` half is IDENTITY
+                # with `True`, not truthiness — `_pytest/python.py::isnosetest` reads
+                # `safe_getattr(obj, "__test__", False) is True` and `istestclass` is
+                # `classnamefilter(name) or isnosetest(obj)`. Measured (round-30 P3): `class Helpers:
+                # __test__ = True` IS collected (`1 test`) while a name-only walk reported 0, and
+                # `__test__ = 1` is NOT collected — which is what proves the identity, and is why this arm
+                # must not reuse the truthiness helper.
+                # ⛔ Otherwise ONLY `Test*` names: pytest's default `python_classes = Test`, so a
+                # `class Helpers:` holding a `test_` method and NO `__test__` is collected by NOBODY
+                # (measured) and counting it is the OVERCOUNT direction — the one whose tempting "fix" is
+                # to falsify the document.
                 # ⛔ Recurse, because pytest collects a nested-class method
                 # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
-                # ⛔ But ONLY into `Test*` classes: pytest's default `python_classes = Test`, so a
-                # `class Helpers:` holding a `test_` method is collected by NOBODY (measured) and counting
-                # it is the OVERCOUNT direction — the one whose tempting "fix" is to falsify the document.
                 _walk(node.body, module_level=False)
 
     _walk(tree.body, module_level=True)
@@ -528,10 +548,22 @@ def _derive_population(source: str) -> tuple[int, int]:
                 f"class `{node.name}`: `__test__` is bound to a non-literal, so whether pytest collects "
                 "this class is a runtime fact this derivation cannot read"
             )
-    # ⛔ A `__test__` assigned from OUTSIDE the class body — `TestX.__test__ = False` at module level — is
-    # bound too late for any in-body read, and it is what pytest sees. Measured round-29 P3: pytest collects
-    # **0** for that shape while reading only the class body reported **(1, 1)**.
-    _module_class_names = {n.name for n in tree.body if isinstance(n, ast.ClassDef)}
+    # ⛔ A `__test__` assigned from OUTSIDE the body — `TestX.__test__ = False` at module level — is bound
+    # too late for any in-body read, and it is what pytest sees. Measured round-29 P3: pytest collects **0**
+    # for that shape while reading only the class body reported **(1, 1)**. ⛔ It applies to FUNCTIONS too
+    # (round-30 P3): `test_x.__test__ = False` is read by pytest's module collector
+    # (`elif getattr(obj, "__test__", True):` in `_pytest/python.py`'s `PyCollector`) and pytest drops that
+    # test — measured `1` collected where
+    # the derivation counted **(2, 2)**. Both are fail-closed here rather than modelled, because the
+    # binding is not in the object's own AST body and a name-collision guess would be a silent number.
+    _module_class_names = {
+        n.name
+        for n in tree.body
+        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
+    }
+    _case_names: set[str] = set()
+    for _body in [tree.body, *(n.body for n in ast.walk(tree) if isinstance(n, ast.ClassDef))]:
+        _case_names |= _unittest_case_classes(_body)
     for node in tree.body:
         if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
             continue
@@ -549,10 +581,15 @@ def _derive_population(source: str) -> tuple[int, int]:
     # ⛔ A `unittest.TestCase` whose `__init__` cannot take the argument pytest passes is a collection ERROR,
     # not a count (`UnitTestCase.newinstance` calls `self.obj("runTest")`) — measured: `no tests collected,
     # 1 error`, rc=2. Failing closed is the honest answer; `(0, 0)` would read as a clean empty population.
+    # ⛔ BUT only when the class is actually instantiated: `_pytest/unittest.py` returns on a falsy
+    # `__test__` BEFORE reaching `newinstance`, so a DISABLED class with a bare `__init__` collects **0
+    # cleanly** (measured rc=5, no error). Without the `_class_refuses_collection` guard this arm
+    # over-blocked a module pytest collects without complaint (round-30 P3).
     for node in ast.walk(tree):
         if (
             isinstance(node, ast.ClassDef)
-            and node.name in _unittest_case_classes(tree.body)
+            and node.name in _case_names
+            and not _class_refuses_collection(node)
             and _unittest_init_cannot_take_the_instance(node)
         ):
             unreadable.append(
@@ -1867,6 +1904,44 @@ class TestTheDocsAreDiscoverableAndResolve:
             f"`unittest.TestCase` subclass — got {_derive_population(module_off.read_text())}"
         )
 
+        # --- Round-30 P3: three more shapes, each measured with `--collect-only`, each a SILENT number
+        # before the fix. `istestclass` is `classnamefilter(name) or isnosetest(obj)` and `isnosetest` reads
+        # `__test__ IS True` — so `class Helpers: __test__ = True` is collected (a name-only walk was an
+        # UNDERCOUNT) while `__test__ = 1` is NOT (which is the proof the selection is identity, not
+        # truthiness). A `unittest.TestCase` nested inside a COLLECTED `Test*` class is collected too,
+        # whereas one nested inside another TestCase is not. And a DISABLED TestCase whose `__init__` cannot
+        # take the instance collects 0 CLEANLY, because `_pytest/unittest.py` returns on a falsy `__test__`
+        # before it ever calls `newinstance` — the arm must not over-block it. ---
+        more = tmp_path / "synthetic_more_shapes.py"
+        more.write_text(
+            "import unittest\n"
+            "\n"
+            "class TestOuter:\n"
+            "    def test_a(self):\n        pass\n"
+            "\n"
+            "    class CaseInner(unittest.TestCase):\n"
+            "        def test_b(self):\n            pass\n"
+            "\n"
+            "class Helpers:\n"
+            "    __test__ = True\n"
+            "    def test_c(self):\n        pass\n"
+            "\n"
+            "class HelpersNumbered:\n"
+            "    __test__ = 1\n"
+            "    def test_d(self):\n        pass\n"
+            "\n"
+            "class DisabledBare(unittest.TestCase):\n"
+            "    __test__ = False\n"
+            "    def __init__(self):\n        super().__init__()\n"
+            "    def test_e(self):\n        pass\n"
+        )
+        assert _derive_population(more.read_text()) == (3, 3), (
+            "pytest collects exactly THREE (`TestOuter::test_a`, `TestOuter::CaseInner::test_b`, "
+            "`Helpers::test_c`) — measured. `HelpersNumbered` (`__test__ = 1`) is NOT collected because "
+            "selection tests identity with `True`; `DisabledBare` collects 0 cleanly, no error. Got "
+            f"{_derive_population(more.read_text())}"
+        )
+
         # --- ISSUE 2: the AST symbol check keeps class qualification. ---
         assert _ast_declares(module, "test_module_level") is True
         assert _ast_declares(module, "TestOuter.test_a_method") is True
@@ -1958,6 +2033,13 @@ class TestTheDocsAreDiscoverableAndResolve:
             # Round-29 P3 — two more shapes that got a SILENT number where pytest reads something else.
             "`__test__` assigned from OUTSIDE the class body": (
                 "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = False\n"
+            ),
+            # Round-30 P3 — a `__test__` bound OUTSIDE the object's own body is not in its AST, and a
+            # name-collision guess would be a silent number, so it is an ERROR. Measured for a FUNCTION:
+            # `test_x.__test__ = False` drops that test (pytest's module collector reads
+            # `getattr(obj, "__test__", True)`), so counting it was an OVERCOUNT.
+            "method-level `__test__` assigned after the function": (
+                "def test_disabled():\n    pass\ntest_disabled.__test__ = False\n"
             ),
             "`unittest.TestCase` whose `__init__` is a collection ERROR": (
                 "import unittest\n"
