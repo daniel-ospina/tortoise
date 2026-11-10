@@ -29,7 +29,9 @@ Two halves are pinned here, and they are DIFFERENT kinds of assertion:
 ⚠️ What `ready` does NOT prove: that the port's LISTENER belongs to our pid
 tree. Proving that needs a socket→pid mapping (`ss`/`lsof`) that the runner
 image does not guarantee, so `ready` asserts (a) the pid we recorded is still
-alive, (b) the port is bound, and (c) that listener answers HTTP successfully.
+alive **and still OURS** — the start-time witness `record` wrote, re-read, and
+refused when it cannot be re-read — (b) the port is bound, and (c) that listener
+answers HTTP successfully.
 (c) is the pre-fix `curl -fsS` requirement, kept: a bound listener is not a
 serving server, and the specs behind this gate require 200 —
 `test_ready_requires_the_preview_to_SERVE_not_just_bind` is the arm that pins it.
@@ -756,7 +758,11 @@ def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, sta
         assert _script("record", "--name", "app", "--pid", str(victim.pid), env=state).returncode == 0
         (Path(state["PREVIEW_STATE"]) / "app.start").unlink()
         result = _script("alive", "--name", "app", env=state)
-        assert result.returncode == 0, result.stdout + result.stderr
+        # 9, not 0: no port was recorded for this name, so the SERVING leg was not
+        # taken either and `0` ("alive AND serving") is not this verb's to return —
+        # its own arm,
+        # `test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict`.
+        assert result.returncode == 9, result.stdout + result.stderr
         assert "IDENTITY was NOT checked" in result.stdout, (
             "`alive` claims the start time matches the boot witness even though no "
             f"witness exists: {result.stdout}"
@@ -764,6 +770,139 @@ def test_alive_does_not_claim_an_identity_it_could_not_check(tmp_path: Path, sta
         assert "still matches the boot witness" not in result.stdout, result.stdout
     finally:
         _reap(victim.pid)
+
+
+def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, state) -> None:
+    """A witness that EXISTS but cannot be re-read is still not a match.
+
+    The sibling arm below deletes `.start`, so it only covers *no witness*. The
+    harder state is a witness that IS there and a start-time read that FAILS —
+    the process exited in the window between `alive`'s liveness probe and its
+    start-time probe, or the host could not answer (psutil documents the
+    pid + creation-time rule as *inherently racy*, so that window is designed
+    for). The pre-fix code branched the sentence on the WITNESS
+    (`[[ -n "$recorded" ]]`) instead of on the comparison, so it printed *"its
+    start time still matches the boot witness"* for a comparison it never ran —
+    measured on this arm's exact state.
+
+    The capability gap is simulated the way #5049 describes it — an `awk` that
+    cannot answer, first on `PATH` — so the script under test is the REAL file,
+    unmodified. RED on the pre-fix code (verified by running it): the sentence
+    claimed a match.
+    """
+    blind = tmp_path / "blind-bin"
+    blind.mkdir()
+    (blind / "awk").write_text("#!/bin/sh\nexit 1\n")
+    (blind / "awk").chmod(0o755)
+
+    port = _script("alloc", "--name", "app", "--base", "18789", env=state)
+    assert port.returncode == 0, port.stderr
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        # Positive control: with a working `awk` the same state DOES report the
+        # match, so the arm below cannot pass for the wrong reason (no match was
+        # ever expected here).
+        control = _script("alive", "--name", "app", env=state)
+        assert control.returncode == 7, control.stdout + control.stderr
+        assert "still matches the boot witness" in control.stdout, control.stdout
+
+        result = _script(
+            "alive", "--name", "app",
+            env={**state, "PATH": f"{blind}:{state['PATH']}"},
+        )
+        assert "still matches the boot witness" not in result.stdout, (
+            "`alive` claims the start time matches the boot witness although the "
+            f"read that would have compared them never ran: {result.stdout}"
+        )
+        assert "its start time could NOT be read" in result.stdout, result.stdout
+        assert "IDENTITY was NOT checked" in result.stdout, result.stdout
+        # The liveness answer DOES stand — a host gap degrades the read, never a
+        # verdict (#5049), so the process is still reported alive.
+        assert " is ALIVE" in result.stdout, result.stdout
+        assert result.returncode == 7, result.stdout + result.stderr
+    finally:
+        _reap(victim.pid)
+
+
+def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
+    tmp_path: Path, state
+) -> None:
+    """`0` means "alive AND serving"; a leg that was NOT taken may not return it.
+
+    The contract block said `exit 0 iff … AND the port still answers HTTP`, while
+    the no-port branch returned 0 — a claim broader than the code, in the block a
+    CI author reads first (the #11675 review's P3). `alloc` always precedes
+    `record` in the workflow, so this is not a live CI defect; it is the same
+    class of overclaim the rest of this verb exists to remove, and the fix gives
+    the state its own code so the contract's `iff` is true.
+
+    RED on the pre-fix code (measured): it returned 0 and called itself ALIVE.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert not (Path(state["PREVIEW_STATE"]) / "app.port").exists(), (
+            "the harness cannot measure: `record` must not have written a port"
+        )
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 9, (
+            "no port was recorded, so SERVING was never checked, yet `alive` "
+            f"returned its alive-and-serving code: {result.stdout}{result.stderr}"
+        )
+        assert "SERVING was NOT checked" in result.stdout, result.stdout
+        assert "SURVIVED the run" not in result.stdout, result.stdout
+    finally:
+        _reap(victim.pid)
+
+
+def test_ready_refuses_a_witness_that_no_longer_describes_the_recorded_pid(
+    tmp_path: Path, state
+) -> None:
+    """The boot gate's identity leg is a BEHAVIOUR change, and nothing pinned it.
+
+    `cmd_ready`'s (a) leg was replaced by `pid_is_ours` — which can now refuse a
+    preview that a bare `kill -0` accepted (a zombie, or a recycled pid beside a
+    peer's listener: the #2757 shape one step out). Reverting that call to
+    `kill -0 "$pid"` reddened NOTHING in the diff, so the guard's value could not
+    vary under any mutation for the reader who assumed it was covered.
+
+    RED on that mutant (**verified by applying it**): the refusal arm below then
+    returns 0. Two arms are needed for it to be discriminating — the untouched
+    witness is the positive control, and the port still SERVES 200, so the refusal
+    can only come from the identity leg (a dead port refuses under either
+    primitive).
+    """
+    port = _script("alloc", "--name", "app", "--base", "18801", env=state)
+    assert port.returncode == 0, port.stderr
+    listener = _spawn_http(int(port.stdout.strip()), 200, tmp_path)
+    try:
+        assert _wait_port(int(port.stdout.strip())), "the decoy listener never bound"
+        assert _script(
+            "record", "--name", "app", "--pid", str(listener.pid), env=state
+        ).returncode == 0
+        healthy = _script("ready", "--name", "app", env=state)
+        assert healthy.returncode == 0, (
+            "the positive control failed: our own recorded listener serves 200 and "
+            f"was still reported NOT ready — {healthy.stdout}{healthy.stderr}"
+        )
+
+        # The witness now describes a DIFFERENT process; the listener still serves.
+        (Path(state["PREVIEW_STATE"]) / "app.start").write_text("1\n")
+        recycled = _script("ready", "--name", "app", env=state)
+        assert recycled.returncode == 1, (
+            "a recorded pid whose boot witness no longer matches was reported READY "
+            "while the port answered 200 — a recycled pid beside a serving listener "
+            f"passes the boot gate: {recycled.stdout}{recycled.stderr}"
+        )
+    finally:
+        _reap(listener.pid)
 
 
 def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> None:
@@ -781,11 +920,17 @@ def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> 
         "`alive` no longer uses the zombie-aware predicate `record`/`stop` use, so an "
         "unreaped preview reads as a surviving one:\n" + body
     )
-    assert "pid_starttime" in body, (
-        "`alive` reports a recycled pid as ours — the start-time witness `record` "
-        "writes and `stop`'s PID-REUSE GUARD re-checks is missing:\n" + body
+    assert "pid_identity" in body, (
+        "`alive` no longer takes its identity from the shared predicate `record` and "
+        "`ready` use, so one question has two answers again (the drift that made it "
+        "print a comparison it never ran):\n" + body
     )
     code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
+    assert not re.search(r"\bpid_starttime\b", code_only), (
+        "`alive` re-derives the start-time comparison instead of reading the shared "
+        "predicate's answer, so a witness it could not READ can be reported as a "
+        "match (finding 1 of the #11675 review):\n" + body
+    )
     assert not re.search(r"\bkill\s+-0\b", code_only), (
         "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
         "forever:\n" + body

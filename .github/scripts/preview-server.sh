@@ -52,22 +52,31 @@
 #                                             EADDRINUSE are what keep a peer's server
 #                                             from being graded.
 #   alive --name N                            exit 0 iff OUR recorded process is still
-#                                             running (not a zombie, start time still
-#                                             matching the boot witness) AND the port
-#                                             still answers HTTP; every other outcome
-#                                             gets its OWN exit code and message — see
-#                                             `cmd_alive`. This is the verb a FAILURE
-#                                             dump calls: it separates "the preview died
-#                                             mid-run" from "the specs were wrong",
-#                                             which a bare `kill -0` cannot do.
+#                                             RUNNING (not a zombie) AND the port it
+#                                             recorded still answers HTTP — and, when
+#                                             `record` left a start-time witness, iff
+#                                             that witness was RE-READ and still
+#                                             matches. A witness that exists but
+#                                             cannot be re-read is reported as
+#                                             "IDENTITY was NOT checked" (never as a
+#                                             match), and a read that fails because
+#                                             the process exited is GONE. Every other
+#                                             outcome gets its OWN exit code and
+#                                             message — see `cmd_alive`. This is the
+#                                             verb a FAILURE dump calls: it separates
+#                                             "the preview died mid-run" from "the
+#                                             specs were wrong", which a bare
+#                                             `kill -0` cannot do.
 #   stop --name N                             signal the recorded tree only
 #   stop-all                                  stop every server this job recorded
 #
 # Exit codes: 0 ok · 2 usage · 3 no free port · 4 unusable pid
 #   `alive` adds its own: 7 alive-but-not-serving · 8 pid recycled · 5 recorded then
-#   stopped · 6 never recorded · 1 gone (died mid-run). The MESSAGE carries the same
-#   fact; the step only decides whether to prefix `::error::`, so the code is the
-#   contract and the prose is for the human reading the red.
+#   stopped · 6 never recorded · 1 gone (died mid-run, or it exited between the two
+#   probes) · 9 alive, but NO port was recorded, so SERVING was not checked. 0 is
+#   therefore never returned on a leg that was not taken. The MESSAGE carries the
+#   same fact; the step only decides whether to prefix `::error::`, so the code is
+#   the contract and the prose is for the human reading the red.
 set -euo pipefail
 
 PROG="$(basename "$0")"
@@ -157,11 +166,46 @@ pid_running() {
 # checked at all: that degrades the READ to liveness-only, never to a wrong
 # VERDICT that a stranger is ours (#5049).
 pid_is_ours() {
+  # ONLY "ours" opens a gate. GONE / RECYCLED / UNVERIFIABLE all fail CLOSED — a
+  # boot gate must not admit a process whose identity it could not check — and
+  # `pid_identity` keeps them distinct so `alive` can REPORT which one it got
+  # instead of collapsing them into a boolean (#11675 review, finding 1).
+  pid_identity "$1" "$2" && return 0
+  return 1
+}
+
+# The start time `pid_identity` last READ — "" when the read failed — so a caller
+# that has to quote it in a message does not have to take the same probe twice.
+PID_IDENTITY_NOW=""
+
+# …but FOUR answers, not two, because a consumer that REPORTS a verdict has to say
+# which one it got: collapsing "it matches" and "it could not be read" is exactly
+# what made `alive` print a comparison it never ran (#11675 review, finding 1).
+#
+#   0 — OURS          running, and either the witness matches or there was none.
+#   1 — GONE          not running when asked: dead, a zombie, or it exited between
+#                     `alive`'s own liveness probe and this one — the window psutil
+#                     documents as inherent to the pid + creation-time rule.
+#   2 — RECYCLED      running, the start time READ, and it differs: a stranger.
+#   3 — UNVERIFIABLE  running, but the start time could not be READ. NOT a match
+#                     (the false claim this exists to prevent) and NOT a stranger
+#                     (a host gap must not become a verdict — #5049).
+pid_identity() {
   local pid="$1" recorded="$2" now
+  PID_IDENTITY_NOW=""
   pid_running "$pid" || return 1
   [[ -n "$recorded" ]] || return 0
   now="$(pid_starttime "$pid" 2>/dev/null || true)"
-  [[ -n "$now" && "$now" == "$recorded" ]]
+  PID_IDENTITY_NOW="$now"
+  if [[ -z "$now" ]]; then
+    # The READ failed, and its two causes must not be reported alike: the host
+    # could not answer, or the process exited in the window. Re-probe liveness —
+    # an exit is a verdict, a host gap is not.
+    pid_running "$pid" || return 1
+    return 3
+  fi
+  [[ "$now" == "$recorded" ]] || return 2
+  return 0
 }
 
 # The port legs: (a) something must be LISTENING, and (b) it must answer an HTTP
@@ -296,7 +340,8 @@ cmd_ready() {
   # (a) is `pid_is_ours`, not a bare `kill -0`: a zombie answers kill(0) forever,
   # and a RECYCLED pid would let a stranger satisfy this leg while our server is
   # gone — then (c) could pass on the stranger's answer, which is the #2757 shape
-  # one step over (#11675 review).
+  # one step over (#11675 review). An identity that could not be READ is refused
+  # too: the boot loop retries, and a gate that cannot verify must not open.
   pid_is_ours "$pid" "$(cat "$dir/${name}.start" 2>/dev/null || true)" || return 1
   # (b)+(c) …something must be LISTENING there, and it must be SERVING, not merely
   # bound: a wrangler whose listener is up while its bundle/workerd is still
@@ -329,11 +374,12 @@ cmd_ready() {
 #     `.booted` witness `record` writes separates the two.
 #
 # Exit codes (see the header table): 0 alive and serving · 7 alive but not
-# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded · 1 gone.
+# serving · 8 pid recycled · 5 recorded then stopped · 6 never recorded · 1 gone ·
+# 9 alive but no port recorded, so SERVING was not checked.
 cmd_alive() {
   local name
   name="$(name_flag alive "$@")"
-  local dir pfile pid port recorded now identity
+  local dir pfile pid port recorded
   dir="$(state_dir)"
   pfile="$dir/${name}.pid"
   port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
@@ -360,30 +406,38 @@ cmd_alive() {
     return 1
   fi
 
-  # The PID-REUSE GUARD `stop` already applies, applied to the READ: a pid whose
-  # start time changed is a different process, and the preview we started is gone.
-  if [[ -n "$recorded" ]]; then
-    now="$(pid_starttime "$pid" 2>/dev/null || true)"
-    if [[ -n "$now" && "$now" != "$recorded" ]]; then
-      printf '%s\n' "${PROG}: ${name}: pid ${pid} was RECYCLED — it is running, but its start time (${now}) no longer matches the one witnessed at boot (${recorded}), so it is a DIFFERENT process and the preview this job started is GONE. It DIED MID-RUN; its log is the cause, and anything answering${at_port} is a stranger's answer, never this preview's."
-      return 8
-    fi
-  fi
-
-  # ⛔ A VERDICT MAY NOT CLAIM A FACT THE PROBE NEVER TOOK. Identity is checked
-  # only when `record` left a start-time witness; when it did not, the sentence
-  # says so rather than asserting a match nobody performed — the same class of
-  # defect as the bare `kill -0` this verb replaced.
-  local identity
-  if [[ -n "$recorded" ]]; then
-    identity="its start time still matches the boot witness"
-  else
+  # The PID-REUSE GUARD `stop` already applies, applied to the READ — through the
+  # SAME predicate `record` and `ready` use, so one question cannot have two
+  # answers. A pid whose start time changed is a different process, and the preview
+  # we started is gone.
+  #
+  # ⛔ A VERDICT MAY NOT CLAIM A FACT THE PROBE NEVER TOOK. Each of the predicate's
+  # four answers gets its OWN sentence: "still matches the boot witness" is printed
+  # only when the comparison was actually TAKEN, and a start time that could not be
+  # re-read says so instead of asserting a match nobody performed — the same class
+  # of defect as the bare `kill -0` this verb replaced (#11675 review, finding 1).
+  local identity ident=0
+  if [[ -z "$recorded" ]]; then
     identity="no start-time witness was recorded, so its IDENTITY was NOT checked"
+  else
+    pid_identity "$pid" "$recorded" || ident=$?
+    case "$ident" in
+      0) identity="its start time still matches the boot witness" ;;
+      1)
+        printf '%s\n' "${PROG}: ${name}: pid ${pid}${at_port} is GONE — the process this job recorded is no longer running: it exited between this check and its start-time re-read, or it is a zombie that has not been reaped. This preview DIED MID-RUN. Its log is the cause, and every ECONNREFUSED in the specs above is a SYMPTOM of it."
+        return 1
+        ;;
+      2)
+        printf '%s\n' "${PROG}: ${name}: pid ${pid} was RECYCLED — it is running, but its start time (${PID_IDENTITY_NOW}) no longer matches the one witnessed at boot (${recorded}), so it is a DIFFERENT process and the preview this job started is GONE. It DIED MID-RUN; its log is the cause, and anything answering${at_port} is a stranger's answer, never this preview's."
+        return 8
+        ;;
+      *) identity="its start time could NOT be read, so its IDENTITY was NOT checked" ;;
+    esac
   fi
 
   if [[ -z "$port" ]]; then
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity}. No port was recorded for this name, so whether it was still SERVING is not answerable from here; the log is the next read."
-    return 0
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but no port was recorded for this name, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
+    return 9
   fi
 
   if serves_now "$port"; then
