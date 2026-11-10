@@ -26,14 +26,20 @@ So the pins here are:
 6. **Collecting this file must not mutate the interpreter.** The probe is imported
    at collection time, so a process-global `logging.disable` in it would silence
    every `caplog` assertion in the files that run after this one (#9110 review P1).
-7. **The committed log IS what the probe prints** — the corpus is pinned to a
-   rebuild and the log is pinned to a run, so an edited log or a probe improved
-   without a re-take cannot pass as the bundle's evidence (#9110 review P2).
+7. **The committed log is FROZEN, not re-taken** — `e1-e2.log` predates the
+   pre-registration, which grandfathers it on five bounds (`PRE-REGISTRATION.md`
+   §0/§7 item 2), one of them being that its content may not be modified at or
+   after the registration's add-commit. So it is pinned as a **constant digest**
+   (`test_the_committed_log_is_frozen_and_stays_unscored`), never as
+   "what the probe prints" — that older pin's remedy (re-take the log) is
+   forbidden, and it was what made a required check unsatisfiable (#11746). The
+   probe's printed text is pinned against the probe's **own** output instead.
 
 DB-free: the pipeline runs with a scripted model, ``sdk=None``, no network.
 """
 from __future__ import annotations
 
+import hashlib
 import importlib.util as _ilu
 import json
 import logging
@@ -72,6 +78,14 @@ def _bound_artifact(threshold: float = 0.05) -> dict:
             "corpus": {"path": _CORPUS_REL},
             "denominator_floors": {"e1_objects": 20}}
 _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
+
+#: `e1-e2.log`'s bytes, pinned as a CONSTANT (#11746 review P2). The *reproduction* pin is
+#: gone — it demanded a re-take the pre-registration forbids — but a *content* pin is a
+#: different thing and stays satisfiable forever: this log may never change again, so its
+#: digest is a constant rather than a re-take target. Without it, a hand-edit that keeps the
+#: log self-consistent (e.g. `real_facts=90` → `91` on BOTH arms) passes the census checker
+#: (which reconciles the log WITH ITSELF) and the ordering gate that does not run here.
+_FROZEN_LOG_SHA256 = "9e44d4f13d716e063bb50bc4305ba14e5e8b81709275e914a44eac1e61de5f37"
 
 sys.path.insert(0, str(_REPO_ROOT))
 from tools import e1_e2_census_check as check  # noqa: E402
@@ -411,11 +425,15 @@ def test_the_committed_log_names_a_real_commit_and_the_doc_agrees():
     log_sha = next(ln for ln in _LOG.read_text(encoding="utf-8").splitlines()
                    if ln.startswith("sha=")).split("=", 1)[1]
     assert not log_sha.endswith("+dirty"), (
-        f"e1-e2.log names {log_sha!r}, which is not a commit — re-take it on a CLEAN "
-        f"tree into a temp file and `mv` it into place: "
-        f"`uv run python docs/evidence/7949-capstone/probes/e1_e2_probe.py \\ "
-        f"> /tmp/e1e2.log; mv /tmp/e1e2.log docs/evidence/7949-capstone/e1-e2.log` "
-        f"(a SEMICOLON: this run exits 3 by design, so `&&` would leave the log stale)")
+        f"e1-e2.log names {log_sha!r}, which is not a commit — a tree that is not any "
+        f"commit is not evidence. This log is FROZEN (PRE-REGISTRATION.md §0), so the "
+        f"remedy is NOT to re-take it: a `+dirty` sha means something overwrote the "
+        f"frozen bytes with a fresh probe run. Restore them — "
+        f"`git checkout origin/main -- docs/evidence/7949-capstone/e1-e2.log` — and put "
+        f"that run in a NEW log, which is what the E1/E2 re-run must do anyway (it must "
+        f"postdate the pre-registration). `| tee <a tracked log>` is what produced this "
+        f"shape: it truncates the file before the probe asks for its sha"
+    )
     assert re.fullmatch(r"[0-9a-f]{40}", log_sha), log_sha
     # ⛔ The GIT-FREE half runs FIRST (#11689 review round 9). The `test` job checks
     # out at depth-1, so the sha below is `unprovable` there and skips — if the
@@ -436,7 +454,7 @@ def test_the_committed_log_names_a_real_commit_and_the_doc_agrees():
     # ⛔ It cannot be a `git cat-file -e` exit test, and the reason is MEASURED in
     # this repo: the `test` job's only checkout is `actions/checkout@v4` with no
     # `fetch-depth`, so every shard is depth-1, and this log names an ANCESTOR
-    # (`b165cb386b…`) that such a clone does not carry — `cat-file -e` exits 128 and
+    # (`c2544f54f14`) that such a clone does not carry — `cat-file -e` exits 128 and
     # a correct tree would red a REQUIRED check. That is the doctrine in
     # `tools/capstone_ledger.py::_commit_state` ("a shallow checkout CANNOT answer",
     # pinned by `test_a_shallow_checkout_is_unprovable_never_absent`), so this uses
@@ -481,15 +499,21 @@ def test_the_committed_log_is_frozen_and_stays_unscored():
       *reason* no reproduction pin applies, so if the exemption is ever withdrawn (the
       log would then have to be ordered normally, which no re-take can achieve) this
       reds instead of leaving a stale "does not apply" claim behind;
+    * its bytes are a **constant digest**. Freezing removes the reproduction pin, not the
+      anti-tamper one: a content pin stays satisfiable forever precisely because the log
+      may never change again. Without it, a hand-edit that keeps the log self-consistent
+      (`real_facts=90` → `91` on BOTH arms) passes the census checker, which reconciles
+      the log WITH ITSELF;
     * it is still the `UNPREREGISTERED`, exit-3 artefact the exemption is granted to,
       so it can never be read as a scored run.
 
     The current probe's printed text is verified against its OWN output by the note-
     state pins below, never against this historical artefact.
 
-    ⛔ "Was the log edited after the registration?" has exactly ONE owner — the
-    ordering gate in the `changes` job. This file deliberately keeps no second copy of
-    that predicate.
+    ⛔ The ORDERING predicate — "was a commit that touches this log newer than the
+    registration?" — has exactly ONE owner: the ordering gate in the `changes` job, which
+    reads git history. This file keeps no second copy of that; a digest is a different
+    fact (the bytes), not a re-derivation of the timeline.
     """
     pins = prereg_check.parse_pins(
         (_LOG.parent / "PRE-REGISTRATION.md").read_text(encoding="utf-8"))
@@ -501,6 +525,15 @@ def test_the_committed_log_is_frozen_and_stays_unscored():
         f"order the log normally; a re-take cannot do the latter")
 
     committed = _LOG.read_text(encoding="utf-8")
+    digest = hashlib.sha256(_LOG.read_bytes()).hexdigest()
+    assert digest == _FROZEN_LOG_SHA256, (
+        f"e1-e2.log's bytes changed (sha256 {digest}). This log is FROZEN by "
+        f"PRE-REGISTRATION.md §0 — it is NOT re-taken, and a probe-message change does "
+        f"not license an edit. Restore it with "
+        f"`git checkout origin/main -- docs/evidence/7949-capstone/e1-e2.log` and put the "
+        f"re-run in a NEW log. (If a change to this file is ever genuinely justified it is "
+        f"an AMENDMENT to the pre-registration, argued in its own home — never a fresh "
+        f"digest pasted here.)")
     assert "prereg=UNPREREGISTERED" in committed, (
         "e1-e2.log no longer declares itself UNPREREGISTERED — the exemption is "
         "granted only to a log that says so on its own line")

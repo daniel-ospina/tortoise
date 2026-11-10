@@ -118,7 +118,7 @@ Every call site / consumer of each thing this change touches:
 | `tools/e1_e2_census_check.py` V15 floor accounting | gate | disjointness of the three buckets, skip must name an owner, a compared floor must be claimed as owned, scored logs must carry the accounting, and the two new measured sides are anchored to the ARM lines | covered (8 new pins) |
 | `tools/e1_e2_census_check.py` V15 BELOW_FLOOR | gate | generalised from `objects`/`declared_floor` to the floor that actually fired | covered |
 | `docs/evidence/7949-capstone/E1-E2.md` limit 7 + Re-running | docs | states the owned/skipped/unconsumed partition and the two newly consumed floors | covered |
-| `docs/evidence/7949-capstone/e1-e2.log` | evidence artifact | re-taken: the re-worded `prereg_e2_floor=` note + `sha=` (the numbers are unchanged) | covered by its own byte pin |
+| `docs/evidence/7949-capstone/e1-e2.log` | evidence artifact | **NOT touched** — `origin/main`'s bytes; frozen by `PRE-REGISTRATION.md` §0 (see §9) | sha256 constant digest (`test_the_committed_log_is_frozen_and_stays_unscored`) |
 | `preregistration.json` | input record | **unchanged** — this lane must not edit the record it reads | n/a |
 
 ## 7. Implementation steps (each with the test that proves it)
@@ -334,12 +334,19 @@ artefact. So:
 - `E1-E2.md`'s `Measured at:` returns to `c2544f54f14` (2026-10-19) and its "Re-running" block now
   writes a NEW log, so it no longer documents an edit the pre-registration refuses.
 
-**What this costs, stated plainly.** `probes/e1_e2_probe.py` no longer has a byte-for-byte pin on
-*this bundle's committed log*. It could not have one: the log is frozen by a recorded decision that
-outranks the pin. The property the old pin was reaching for — "a probe improved without a re-take"
-— is not enforceable here at all, because the re-take it names is prohibited; the E1/E2 coverage
-that remains is the note-state tests (one per branch), the census check's V-rules over the committed
-log, and the ordering gate's content bound.
+**What this costs, stated plainly.** `probes/e1_e2_probe.py` no longer has a **reproduction** pin on
+*this bundle's committed log*, and cannot have one: reproducing it would mean re-running the probe
+over it, which the freeze forbids. The property that pin was reaching for — "a probe improved without
+a re-take" — is not enforceable here at all, because the re-take it names is prohibited.
+
+What it does NOT cost is the **anti-tamper** pin, and the difference is the fix rather than a
+quibble: a reproduction pin is a moving target, a **content** pin is a constant. The log may never
+change again, so `sha256(e1-e2.log)` is one hex string forever, and
+`test_the_committed_log_is_frozen_and_stays_unscored` asserts it (`_FROZEN_LOG_SHA256`). That is what
+catches a hand-edit that keeps the log self-consistent — `real_facts=90` → `91` on **both** arms
+passes the census checker, which reconciles the log with *itself*. Remaining E1/E2 coverage is that
+digest, the note-state tests (one per branch), the census check's V-rules over the committed log, and
+the ordering gate's content bound.
 
 **Scope note.** Whether the E1/E2 re-run should land as `e1-e2-rerun.log` (the name the doc now
 uses) is a decision for the follow-up that reconciles the two corpora — it is named as an example,
