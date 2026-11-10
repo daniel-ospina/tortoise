@@ -2041,10 +2041,20 @@ the boundary is worth stating because the two neighbouring sets are deliberately
 - `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` **only**. Before that, a
   verdict table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5 criterion"* — so this
   row's own §8 precondition (its add-commit strictly earlier than any `E6` scored log) could never be
-exercised, because no `E6` log could exist. `CRITERIA` — the epic's CLOSING rule, *"5/5"* — is NOT
-  changed: it is a separate recorded decision (`#7949`), and V2 demands one row per member, so growing
-  it here would red every table that predates the row, including the shipped `capstone.log` refusal
-  record whose bytes §7/§8 forbid editing in place.
+exercised, because no `E6` log could exist.
+
+  ⛔ **CORRECTED ON THE `#11673` REVIEW (P1): the paragraph below it used to say `CRITERIA` is "the
+  epic's CLOSING rule" and that `E6` therefore stays out of it. That was WRONG, in the one way this
+  epic keeps producing — the issue said one thing and the tool said another.** `#7949`'s close
+  condition, verbatim: *"Close this epic only when **E1–E6** all have evidence attached to this
+  issue"*. So the closing rule gained `E6` (`CLOSING_CRITERIA` in `tools/capstone_verdict_check.py`,
+  which `V9`/`--require-green` now runs over) — a table that is 5/5 green with no `E6` row, or with
+  a RED one, can no longer be read as a closeable epic. What did NOT change is `CRITERIA`, and the
+  reason is the other half of the same fact: `CRITERIA` is the rows every TABLE must structurally
+  carry (`V2`), and the tables that predate the sixth row are FROZEN evidence whose bytes §7 item 2
+  forbids revising in place — so demanding `E6` of the shipped `capstone.log` and
+  `capstone-measured-9152448d.log` would red this bundle permanently on artifacts nobody may edit.
+  The row is demanded at the CLOSE, not in every historical table.
 
 **The bar, and the `A1` boundary in both directions.** `E6`'s bar is a COUNT of declared rows that are
 **unbound and unexplained**, and it is not the census's `written` column. `A1` (§3.7) already measures

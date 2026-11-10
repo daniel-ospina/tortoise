@@ -345,9 +345,9 @@ def test_unknown_criterion_is_a_finding():
     ⛔ IT WIDENED AGAIN ON 2026-11-10 AND THIS ARM'S ID MOVED WITH IT (`#11673`). `E6` is now a
     RECOGNISED capstone row — the sixth the owner ruled on 2026-11-05 — so `E6` is no longer unknown
     and the unknown id here is `E7`. That move is REQUIRED by the new row and is the arm's whole
-    point: leaving `E6` here would assert the opposite of what the tree does. `E6` is recognised but
-    NOT in `CRITERIA`, so the epic's closing rule is still 5/5 (`test_the_shipped_log_is…` depends
-    on it) — the same recognised-not-required shape `#10982` used for the `A`-rows.
+    point: leaving `E6` here would assert the opposite of what the tree does. `E6` is recognised, and
+    it is NOT in `CRITERIA` while it IS in `CLOSING_CRITERIA` — the two are different questions
+    (`test_the_sixth_capstone_row…` states both halves).
     """
     rec = _record()
     rec["rows"].append(dict(rec["rows"][4], criterion="E7"))
@@ -4325,21 +4325,28 @@ def test_g5_refuses_a_malformed_step_declaration(tmp_path, monkeypatch):
     assert "BEFORE the pass" in reason, reason
 
 
-def test_the_sixth_capstone_row_is_RECOGNISED_and_not_REQUIRED():
-    """`E6` is a capstone row the scorer must ACCEPT, and the closing rule still says 5/5 (#11673).
+def test_the_sixth_capstone_row_is_RECOGNISED_and_GATES_the_close():
+    """`E6` is a capstone row the scorer must ACCEPT **and** one the epic cannot close without
+    (`#11673` review P1).
 
-    Two halves, and the second is the one that would break shipped artefacts if it were confused
-    with the first:
+    Three halves, and which constant carries which is the whole finding:
 
     * RECOGNISED — before this, a table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5
       criterion"*, so the pre-registration's own §8 precondition (its add-commit strictly earlier
       than any `E6` scored log) could never be exercised, because no `E6` log could exist;
-    * NOT REQUIRED — `CRITERIA` is the epic's CLOSING rule (`#7949`: "5/5"), which this change does
-      not reach. V2 demands one row per member, so adding `E6` there would red every table that
-      predates the row, including the shipped `capstone.log` refusal record — whose bytes §7/§8 of
-      the pre-registration forbid editing in place.
+    * IN THE CLOSING SET — `#7949`'s close condition is *"Close this epic only when **E1–E6** all
+      have evidence"*. Shipping `E6` as merely recognised let the epic close 5-of-5 with `E6` non-
+      green, i.e. the issue and the gate that is its mechanical form said different things. `V9`
+      is therefore run over `CLOSING_CRITERIA`, and the arm below is the NON-VACUITY proof: a
+      table with E1–E5 all GREEN and NO `E6` row is refused, while it read "closeable" pre-fix;
+    * NOT IN `CRITERIA` — that constant is the rows every TABLE must structurally carry (`V2`),
+      and the tables predating the sixth row are frozen evidence whose bytes §7 item 2 forbids
+      revising in place. Demanding `E6` of them would permanently red the bundle's own structural
+      pin on two artifacts nobody may edit.
     """
     assert "E6" in cvc.RECOGNISED_CRITERIA
+    assert "E6" in cvc.CLOSING_CRITERIA
+    assert cvc.CLOSING_CRITERIA == ("E1", "E2", "E3", "E4", "E5", "E6")
     assert "E6" not in cvc.CRITERIA
     assert cvc.CRITERIA == ("E1", "E2", "E3", "E4", "E5")
     rec = _record()
@@ -4350,3 +4357,24 @@ def test_the_sixth_capstone_row_is_RECOGNISED_and_not_REQUIRED():
     # …and it is held to the DECIDED-ONCE rule as a recognised row: two `E6` rows are a finding.
     rec["rows"].append(dict(rec["rows"][4], criterion="E6"))
     assert any("2 rows" in m and "decided once" in m for m in _messages(rec))
+
+    # ⛔ THE CLOSE, AND ITS NON-VACUITY. Five GREEN rows and no `E6`: `--require-green` answered
+    # "closeable" before `V9` moved to `CLOSING_CRITERIA`, which is exactly the 5-of-5 close
+    # `#7949` forbids. An ABSENT row is not a green one, so the close must be refused.
+    five_green = _record()
+    for row in five_green["rows"]:
+        row["verdict"] = "GREEN"
+    assert [r["criterion"] for r in five_green["rows"]] == list(cvc.CRITERIA)
+    assert "V9" in _codes(five_green, require_green=True), _codes(five_green, require_green=True)
+    # …and once the sixth row is carried and GREEN, the same record closes.
+    six_green = _record()
+    for row in six_green["rows"]:
+        row["verdict"] = "GREEN"
+    six_green["rows"].append(dict(six_green["rows"][4], criterion="E6"))
+    assert "V9" not in _codes(six_green, require_green=True), _codes(six_green, require_green=True)
+    # A RED `E6` is the case the P1 named: 5/5 green beside a red sixth row must not close.
+    red_six = _record()
+    for row in red_six["rows"]:
+        row["verdict"] = "GREEN"
+    red_six["rows"].append(dict(red_six["rows"][4], criterion="E6", verdict="RED"))
+    assert "V9" in _codes(red_six, require_green=True)
