@@ -520,9 +520,16 @@ class TestResolutionNarrative:
                                        narrative=self.STORY)
         assert "Kaironis" in prompt, "the narrative must reach the prompt"
         assert "NARRATIVE" in prompt
-        # the rule the narrative exists to enable — and its bound
+        # the rule the narrative exists to enable — and its bound.
+        #
+        # These must be phrases UNIQUE to the rule: `"ambiguous"` and
+        # `"omit"` alone also occur in the pre-#11654 JSON-contract tail
+        # ("…; ambiguous → omit."), so they were satisfied by text this change
+        # never touched (review round 4 measured that on the merge base).
         assert "same referent" in prompt
-        assert "ambiguous" in prompt and "omit" in prompt
+        assert "Where neither establishes identity" in prompt, (
+            "the rule's own omission bound, not the pre-existing contract tail")
+        assert "the name is ambiguous → omit" in prompt
         # the candidate table + JSON contract are still pinned
         assert "obj_michael" in prompt and "Michael" in prompt
         assert '"resolutions"' in prompt and "resolves_to" in prompt
@@ -581,12 +588,26 @@ class TestResolutionNarrative:
         the pre-existing diminutive/variant folding on 100% of runs — and
         S1's compressed narration need not repeat a name it already named.
 
-        The fake below models exactly that: it folds the lexical alias unless
-        the prompt narrows the basis to the narrative alone.
+        The fake below models the shipped instruction faithfully: it folds the
+        lexical alias ONLY while the prompt still grants that the narrative
+        never replaces the spelling evidence — so deleting that grant makes the
+        fake (like a real model) decline, and this arm measures the PROMPT
+        rather than a sentinel that can drift out of it.
+
+        Review round 4 measured the previous version passing with the grant
+        deleted: its guard keyed on `"resolve only what the narrative
+        evidences"`, a phrase round 1 had already removed, so the guard was
+        dead code, the fake could only fold unconditionally, and the assertion
+        measured the fake rather than the prompt.
         """
+        seen: list[str] = []
+
         class _M:
             def complete(self, *, system, user, max_tokens=None, **_kw):
-                if "resolve only what the narrative evidences" in user.lower():
+                seen.append(user)
+                # the grant's own words: absent → no fold, exactly as a real
+                # model reading a prompt without it would behave.
+                if "never replaces" not in user:
                     return json.dumps({"resolutions": []})
                 if "Joseph" in user and "Joe" in user:
                     return json.dumps({"resolutions": [
@@ -602,6 +623,12 @@ class TestResolutionNarrative:
             model=_M(), narrative=story)
         assert res["map"]["Joe"]["id"] == "obj_joseph", (
             "a lexical alias must still fold when a narrative is present")
+        # …and the grant that licensed the fold is asserted on the SAME
+        # rendered prompt, so deleting the clause reddens this test twice over
+        # (the fake declines, and this line names the missing text).
+        assert seen and "supplements" in seen[0], (
+            "the additive grant must be in the prompt this arm measured")
+        assert "never replaces" in seen[0] and "spelling evidence" in seen[0]
 
     def test_a_long_narrative_keeps_evidence_from_both_ends(self):
         """P3 (review): head-ONLY truncation drops the late mention.
