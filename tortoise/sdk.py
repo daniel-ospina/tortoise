@@ -13014,6 +13014,23 @@ class TortoiseSDK:
         in the scope it STARTS in — and a `WITH` that drops an alias and re-binds the same name
         defeats that with a false PASS: a `VectorF32` paid for and unreachable, with row 2 still
         green. That is the defect `#11641` exists to close.
+
+        ⛔ THE RESIDUAL, VERBATIM, because an earlier revision of these paragraphs claimed totality
+        and was measured FALSE: the bound refuses the DECLARED construct list (`WITH`, `UNION`,
+        `CALL` including `CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS`) and a
+        `FOREACH` whose loop variable re-binds an alias a node pattern already binds; the list is a
+        DECLARATION, not a proof of exhaustiveness — a scope construct it does not name is not
+        refused. The `FOREACH` half is not in that list because `FOREACH` is INSIDE the accepted
+        grammar (the product's own clear guard is one) and the Manual says its variable context *"is
+        separate from the one outside it"* (`clauses/foreach/`) — so the COLLISION with a
+        pattern-bound alias is what
+        `tortoise.vector_write::statement_write_target_problem` refuses, not the clause. Both halves
+        are pinned in `tests/test_11641_runtime_vector_label.py` and neither is a claim about
+        statements other than the ones the tests execute. (`WITH` and the other six are refused only
+        in CLAUSE position — at the statement's own bracket level; an ALIAS or projection named
+        after one, `SET with += $props` / `RETURN x AS with`, is a statement the engine accepts and
+        this door accepts it too, which is a false-block fix from `#11641`'s sixth round and not a
+        widening of the grammar.)
         """
         # ⛔ FIRST, the grammar (#11641's fifth review round). A statement that moves or replaces the
         # variable scope has bindings this door's alias-keyed readers cannot prove, so it is refused
@@ -13031,8 +13048,8 @@ class TortoiseSDK:
                 "`entity_type` reaches (measured: `MATCH (p:Event {eventId:'seed'}) WITH 1 AS x "
                 "MATCH (p) SET p += $props, …embedding` stored a `VectorF32` on `:Meta`). This "
                 "door accepts a DECLARED grammar — `MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` "
-                "/ `FOREACH` — and refuses every scope construct rather than guessing at one; "
-                "re-spell the store without it (#11641)."
+                "/ `FOREACH` — and refuses every scope construct in that declared list rather "
+                "than guessing at one; re-spell the store without it (#11641)."
             )
         _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
         _named_labels = statement_node_labels(statement)

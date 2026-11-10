@@ -98,9 +98,15 @@ own seam and then declare the set (`restore_graph` refuses a dump whose vector-b
 no served label — the ONE explicit exception is its `allow_unserved_vectors` repair-on-read path,
 which drops the vector, keeps the node and REPORTS it, for artifacts a pre-D10 writer already
 produced; `_event_raw_write_door` refuses a caller statement outside its DECLARED grammar
-(`MATCH`/`MERGE`/`CREATE`/`SET`/`REMOVE`/`FOREACH` — every scope construct is refused), one that
+(`MATCH`/`MERGE`/`CREATE`/`SET`/`REMOVE`/`FOREACH` — every construct on its DECLARED refusal list
+is refused in CLAUSE position), one that
 names no label, names one outside its set, renders one by interpolation, or stores through an alias
-it never binds to a declared label). The disposition remains a legal SHAPE for a writer that has no
+it never binds to a declared label). ⛔ THE RESIDUAL, VERBATIM, because an earlier revision of this
+sentence claimed totality and was measured FALSE: the bound refuses the DECLARED construct list
+(`WITH`, `UNION`, `CALL` including `CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS`)
+and a `FOREACH` whose loop variable re-binds an alias a node pattern already binds; the list is a
+DECLARATION, not a proof of exhaustiveness — a scope construct it does not name is not refused.
+The disposition remains a legal SHAPE for a writer that has no
 bound — it is now unused
 by any live entry, which is the state `#5090` row 2 wants. Note the two-label pair is NOT in this list:
 `_event_plain_merge` and `_rebuild_all_replay` keep their `MERGE`s in their own bodies, which is
@@ -151,8 +157,9 @@ same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPP
 that door a BOUND (`sdk::_RAW_WRITE_DOOR_LABELS`, refused at the seam) rather than a marker, and it
 is a FOUR-leg bound: the GRAMMAR the door accepts
 (`tortoise.vector_write::statement_uses_unmodelled_scope` — `MATCH` / `MERGE` / `CREATE` / `SET` /
-`REMOVE` / `FOREACH`, with every scope construct — `WITH`, `UNION`, `CALL`, `CALL { … }`,
-`OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS` — REFUSED, because all three legs below key an
+`REMOVE` / `FOREACH`, with every construct on its DECLARED list — `WITH`, `UNION`, `CALL`,
+`CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS` — refused in CLAUSE position, because
+all three legs below key an
 alias's labels BY NAME and a `WITH` drops that name from the scope, so a later `MATCH (p)` binds a
 new unlabelled `p` that a name-keyed map still reads as the label the first pattern bound); the
 labels the statement NAMES (`::statement_node_labels`); the labels it renders by INTERPOLATION
@@ -160,11 +167,17 @@ labels the statement NAMES (`::statement_node_labels`); the labels it renders by
 served pattern and store through a second, interpolated one); and the alias it WRITES TO
 (`::statement_write_target_problem`). So a store on an unbound, unlabelled or label-mutated target
 is refused too, and a caller can no longer pass by naming a served label it does not store on.
-Review still catches the label the DECLARATION names. ⚠️ That bound sees statement TEXT, and its
-accepted grammar is a DECLARATION rather than a proof of exhaustiveness: a scope construct the
-declared list does not name is not refused (widening the list is a review duty), and clause text a
-helper builds is read as text like any other, so a scope construct inside it is refused too — the
-door's own docstring names those residuals instead of claiming totality.
+Review still catches the label the DECLARATION names. ⛔ THE RESIDUAL, VERBATIM, because an earlier
+revision of this paragraph claimed totality and was measured FALSE: the bound refuses the DECLARED
+construct list (`WITH`, `UNION`, `CALL` including `CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN
+TRANSACTIONS`) and a `FOREACH` whose loop variable re-binds an alias a node pattern already binds;
+the list is a DECLARATION, not a proof of exhaustiveness — a scope construct it does not name is
+not refused. The `FOREACH` half is inside the accepted grammar on purpose (the product's own clear
+guard is a `FOREACH`, and the Manual's `clauses/foreach/` says its variable context *"is separate
+from the one outside it"*), so it is the collision that
+`::statement_write_target_problem` refuses, not the clause. ⚠️ That bound sees statement TEXT, and
+clause text a helper builds is read as text like any other, so a construct inside it is refused too
+— the door's own docstring names the same residual instead of claiming totality.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
@@ -907,9 +920,13 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             # because the record it journals replays through `_upsert_event`, which MERGEs `:Event`
             # and nothing else. A caller writing elsewhere would have its vector come back on a
             # different label after a rebuild. ⚠️ The residual is the DECLARED grammar's: the door
-            # refuses every scope construct in its list and accepts only `MATCH` / `MERGE` / `CREATE`
-            # / `SET` / `REMOVE` / `FOREACH`, so a construct the list does not name is not refused,
-            # and clause text a helper builds is read as text under the same grammar. That is named
+            # refuses every construct in its refusal list and accepts only `MATCH` / `MERGE` / `CREATE`
+            # / `SET` / `REMOVE` / `FOREACH`, so a construct the list does not name is not refused;
+            # a `FOREACH` whose loop variable re-binds a pattern-bound alias is refused by the
+            # write-target leg (the Manual's `clauses/foreach/`: the variable context inside it *"is
+            # separate from the one outside it"*, and `FOREACH` is inside the accepted grammar on
+            # purpose); and clause text a helper builds is read as text under the same grammar. That
+            # is named
             # in the door's own docstring rather than claimed away. Cited by SYMBOL, never by
             # line — this file's own rule, for the reason the census learned.
             stores=("Event",),

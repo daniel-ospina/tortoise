@@ -145,6 +145,7 @@ __all__ = [
     "served_store_labels",
     "set_embedding_clause",
     "statement_conflicting_bindings",
+    "statement_foreach_rebound_aliases",
     "statement_interpolates_label",
     "statement_label_mutations",
     "statement_node_labels",
@@ -481,6 +482,19 @@ def _depths(statement: str) -> list[int]:
     below: a quote opens a span that runs to its matching quote (with ``\\`` escapes), and every
     character in it — the quotes included — is marked ``-1``. A comma inside ``'a, b'`` therefore
     cannot split a ``SET`` list, and ``'{not: a label}'`` cannot be read as a map literal.
+
+    ⛔ ``\\`` IS AN ESCAPE IN A STRING, NEVER IN A BACKTICKED IDENTIFIER, and getting that wrong
+    was a complete BYPASS of this seam by one character (#11641's sixth review round). A backtick
+    span is Cypher's other spelling of an IDENTIFIER, and an identifier has no escape: `` e.`a\\` ``
+    is a property whose NAME contains a backslash, and the span ends at the next backtick. Reading
+    the ``\\`` as an escape kept the span open past it, and because every character in a span is
+    marked ``-1``, the phantom span swallowed EVERY FOLLOWING CLAUSE — the grammar guard read no
+    scope construct and the write-target reader's targets collapsed to the alias before it. Measured
+    at `623d59a4`: ``MATCH (e:Event {eventId:'seed'}) SET e += $props, e.`a\\` = 1 WITH 1 AS x MATCH
+    (p) SET <embedding on p>`` was ACCEPTED and stored the vector on `:Meta`. :func:`_blank_comments`
+    and :func:`_blank_string_literals` in this module already carry the same ``quote != "`"`` guard;
+    this is the third reader agreeing with them, which is the module's own "one reading of the
+    grammar" rule rather than a new one.
     """
     depth = 0
     quote: str | None = None
@@ -491,7 +505,7 @@ def _depths(statement: str) -> list[int]:
             depths[index] = -1
             if escaped:
                 escaped = False
-            elif char == "\\":
+            elif char == "\\" and quote != "`":
                 escaped = True
             elif char == quote:
                 quote = None
@@ -518,9 +532,22 @@ def _clause_bodies(statement: str, depths: list[int]) -> list[tuple[str, int, in
     statement's own target looked fine.
     """
     bodies: list[tuple[str, int, int]] = []
+
+    def _is_clause(index: int, match: re.Match[str]) -> bool:
+        """A keyword match is a CLAUSE only where an identifier cannot be — see
+        :func:`_is_identifier_position`, shared with the grammar guard so the two cannot disagree."""
+        return (depths[index] >= 0
+                and not _is_identifier_position(statement, match.start(), match.end()))
+
     for match in _CLAUSE_KEYWORD_RE.finditer(statement):
         start = match.start()
         if depths[start] < 0:  # a keyword inside a quoted string is text, not a clause
+            continue
+        if not _is_clause(start, match):
+            # ⛔ A KEYWORD-NAMED ALIAS IS NOT A CLAUSE BOUNDARY. `SET with += $props` used to end its
+            # own `SET` body at `with`, so the item — and therefore the write TARGET — vanished,
+            # and the door refused a statement the engine accepts with "NO write target this reader
+            # can prove" (#11641's sixth review round).
             continue
         base = depths[start]
         end = len(statement)
@@ -531,7 +558,8 @@ def _clause_bodies(statement: str, depths: list[int]) -> list[tuple[str, int, in
             if inner < base:
                 end = index
                 break
-            if inner == base and _CLAUSE_KEYWORD_RE.match(statement, index):
+            boundary = _CLAUSE_KEYWORD_RE.match(statement, index)
+            if inner == base and boundary is not None and _is_clause(index, boundary):
                 end = index
                 break
         bodies.append((match.group(1).upper(), match.end(), end))
@@ -901,6 +929,58 @@ _SCOPE_CONSTRUCT_RE = re.compile(
 #: matcher that refused those would block a statement the engine accepts for no gain.
 _SCOPE_TOKEN_TERMINATORS = ")]},;.:"
 
+#: The ASSIGNMENT operators that make the token before them an alias rather than a clause keyword.
+#: `SET with += $props` / `SET with = $props` write the VARIABLE `with`; no clause can be followed by
+#: an assignment, so the leader is unambiguous (#11641's sixth review round — refusing these was a
+#: NEW false block on a statement the engine accepts, and `556284de` accepted it).
+#:
+#: ⛔ The COMPOUND form only counts when its `=` is IMMEDIATELY after the leader (`+=`, `-=`, …), so
+#: `WITH +1 AS x` — a clause with a signed literal, which the engine accepts — is NOT mistaken for an
+#: assignment. A reader that skipped that distinction would stop refusing a real `WITH` and fail OPEN.
+_COMPOUND_ASSIGNMENT_LEADERS = "+-*/%^|"
+
+
+def _is_identifier_position(text: str, start: int, end: int) -> bool:
+    """True when the clause-KEYWORD match at ``[start, end)`` is really an IDENTIFIER.
+
+    ⛔ ONE predicate, used by BOTH the clause-boundary scan (:func:`_clause_bodies`) and the grammar
+    guard (:func:`statement_uses_unmodelled_scope`) — the two used to disagree about what a keyword
+    is, which is how a keyword-named ALIAS could trip the guard while the write-target reader could
+    not even find the store (#11641's sixth review round, a NEW false block on statements the engine
+    accepts: `… SET with += $props` and `… RETURN e.eventId AS with`).
+
+    Three shapes, each one an identifier the ENGINE also reads as one:
+
+    * **an ``AS`` target** — ``RETURN e.eventId AS with`` PROJECTS to a variable named `with`; the
+      ``AS`` is what distinguishes it from the clause, and nothing in Cypher puts a clause after
+      ``AS``;
+    * **an ASSIGNMENT target** — ``SET with += $props`` / ``SET with = $props``; a clause keyword
+      cannot be followed by an assignment operator, and ``+=`` is not a signed literal (``WITH +1 AS
+      x`` is, so the leader only counts when a compound one is spelled with its ``=``);
+    * **anything else a clause cannot be followed by** — the :data:`_SCOPE_TOKEN_TERMINATORS`
+      ``)]},;.:`` (a pattern/property/map position, as in `MATCH (with)`, `SET with.x = 1`,
+      `{with: 1}`) and END OF STATEMENT (no clause is complete without a body).
+
+    Everything else stays a CLAUSE. That asymmetry is deliberate: a shape this predicate does not
+    recognise is refused (the fail-CLOSED direction), while a shape it wrongly claims is an
+    identifier could hide a real scope construct — so the list is kept to tokens that cannot begin
+    a clause body in any Cypher the engine accepts.
+    """
+    if re.search(r"\bAS\s*$", text[:start], re.IGNORECASE):
+        return True
+    following = end
+    while following < len(text) and text[following].isspace():
+        following += 1
+    if following >= len(text):
+        return True                     # a clause at end-of-statement has no body — it is a name
+    char = text[following]
+    if char in _SCOPE_TOKEN_TERMINATORS:
+        return True                     # `(with)`, `(with:Event)`, `with.x`, `{with: 1}`
+    if char == "=":
+        return True                     # `SET with = $props`
+    return (char in _COMPOUND_ASSIGNMENT_LEADERS
+            and following + 1 < len(text) and text[following + 1] == "=")   # `SET with += …`
+
 
 def statement_uses_unmodelled_scope(statement: str) -> str | None:
     """The scope construct ``statement`` uses that this module cannot read, or ``None``.
@@ -947,13 +1027,29 @@ def statement_uses_unmodelled_scope(statement: str) -> str | None:
     (``SET e.note = 'WITH 1 AS x'``), inside a backticked identifier, or inside a comment
     (``/* WITH */``) is not syntax, and a guard that refused it would block statements the engine
     accepts while proving nothing.
+
+    ⛔ AND IT READS CLAUSES ONLY AT THE STATEMENT'S OWN BRACKET LEVEL (``depth == 0``), which is the
+    sixth review round's other half. At depth 0 a scope clause IS a scope boundary and is refused;
+    DEEPER, the token is an identifier — a pattern's alias, a map key, a relationship's property —
+    and a guard that fired there refused statements the engine accepts (`MATCH (e:Event …)-[with
+    {k:1}]->(q) SET e += $props`, measured). Nothing is lost by the narrower read: a clause can only
+    live at depth 0 or inside a ``CALL { … }`` / ``FOREACH ( … )`` body, ``CALL`` at depth 0 is
+    refused FIRST (it precedes anything inside its braces in statement order), and the Cypher Manual
+    (`clauses/foreach/`) limits a ``FOREACH`` body to the UPDATING commands — ``SET``, ``REMOVE``,
+    ``CREATE``, ``MERGE``, ``DELETE``, ``FOREACH`` — so no scope construct can legally sit in one.
+    :func:`_is_identifier_position` then removes the identifier spellings that reach depth 0
+    (``SET with += $props``, ``RETURN x AS with``).
     """
     text = _blank_comments(statement)
     depths = _depths(text)
     for match in _SCOPE_CONSTRUCT_RE.finditer(text):
         start = match.start()
-        if depths[start] < 0:      # inside a string literal or a backticked identifier — TEXT
+        if depths[start] != 0:
+            # A quoted span (``-1``) is TEXT; anything deeper than 0 is inside brackets, where a
+            # scope keyword is an IDENTIFIER (a pattern alias, a map key, a property) — see above.
             continue
+        if _is_identifier_position(text, start, match.end()):
+            continue               # an ALIAS / projection name the engine accepts — not a clause
         construct = " ".join(match.group(1).upper().split())
         previous = start - 1
         while previous >= 0 and text[previous].isspace():
@@ -966,12 +1062,62 @@ def statement_uses_unmodelled_scope(statement: str) -> str | None:
         following = match.end()
         while following < len(text) and text[following].isspace():
             following += 1
-        if following < len(text) and text[following] in _SCOPE_TOKEN_TERMINATORS:
-            continue               # a VARIABLE in a pattern / property write, not a clause
         if construct == "CALL" and following < len(text) and text[following] == "{":
             return "CALL { … } (a CALL subquery)"
         return construct
     return None
+
+
+#: The loop variable of a ``FOREACH`` — ``FOREACH (e IN [ … ] | …)``. Reads both identifier
+#: spellings, because a loop variable is an identifier like any other.
+_FOREACH_VAR_RE = re.compile(
+    rf"\bFOREACH\s*\(\s*({_IDENT_FRAGMENT})\s+IN\b", re.IGNORECASE)
+
+
+def statement_foreach_rebound_aliases(statement: str) -> frozenset[str]:
+    """Aliases a ``FOREACH`` LOOP VARIABLE re-binds, i.e. names a node pattern also binds.
+
+    ⛔ ``FOREACH`` IS A SCOPE BOUNDARY THAT IS INSIDE THE DECLARED GRAMMAR, so the grammar guard
+    cannot close it and every name-keyed reader is blind to it (#11641's sixth review round). The
+    Cypher Manual (`clauses/foreach/`) is explicit: *"The variable context within the ``FOREACH``
+    parenthesis is separate from the one outside it"* — so a loop variable named after an outer
+    alias RE-BINDS that name for the body, while :func:`statement_pattern_labels` still reports the
+    label the OUTER pattern gave it. Measured at `623d59a4`, ACCEPTED, vector on a non-served label:
+
+        MATCH (e:Event {eventId:'seed'}) MATCH (z) FOREACH (e IN [z] | … a store through `e` …)
+
+    ⚠️ DESCRIBED, not spelled, and that is not stylistic: `tortoise.embed_writer_register` discovers
+    writers by scanning source text — docstrings included — for a store clause, so a literal one
+    here would make this READER look like a WRITER and put an unknown producer in `#5090` row 2's
+    HOLD set (the same trap :func:`statement_rebound_aliases` documents).
+
+    ``UNWIND [z] AS e`` is a different story — the ENGINE rejects it (``Variable 'e' already
+    declared``) — which is why ``UNWIND`` is left in the accepted set and this shape is not.
+
+    Only a loop variable that COLLIDES with a pattern-bound alias is refused: `FOREACH (_ IN CASE … |
+    REMOVE e.embedding)` (the product's own clear guard, `clear_then_set_prefix`) binds `_`, and a
+    fresh loop variable cannot defeat a name-keyed map — a store through one is refused by the
+    ABSENT branch of :func:`statement_write_target_problem` instead.
+
+    ⚠️ THE OVER-REFUSAL IS DELIBERATE AND STATED: the collision is refused even when the store sits
+    OUTSIDE the loop (a `FOREACH` body that only touches the loop variable, then a store through `e`
+    after it — where `e` is the outer node again). Telling which side of the parenthesis a store is
+    on is a scope question — the parser
+    this module refuses to be — so the shape fails CLOSED. It costs a caller a re-spelling
+    (name the loop variable something else); accepting it costs a vector nothing can reach.
+    """
+    text = _blank_comments(statement)
+    depths = _depths(text)
+    bound = set(statement_pattern_labels(statement))
+    rebound: set[str] = set()
+    for match in _FOREACH_VAR_RE.finditer(text):
+        start = match.start()
+        if depths[start] < 0:   # inside a string literal or a backticked span — not syntax
+            continue
+        name = match.group(1).strip("`")
+        if name in bound:
+            rebound.add(name)
+    return frozenset(rebound)
 
 
 def statement_write_target_problem(statement: str, allowed) -> str | None:
@@ -1022,6 +1168,15 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
       `SET`/`REMOVE`/`CREATE`/`MERGE` at all. Inside the grammar it refuses what it cannot attribute
       (an unlabelled target, a label mutation, a `SET` item with a non-alias head).
 
+    ⛔ ONE SCOPE BOUNDARY LIVES INSIDE THE DECLARED GRAMMAR, and it is refused HERE rather than by
+    the grammar guard: a ``FOREACH`` LOOP VARIABLE that names an alias a node pattern also binds
+    (:func:`statement_foreach_rebound_aliases`). The Cypher Manual (`clauses/foreach/`) says *"the
+    variable context within the ``FOREACH`` parenthesis is separate from the one outside it"*, so
+    the loop variable re-binds the name for the body while every name-keyed reader still reports
+    the OUTER pattern's label — measured at `623d59a4`, ACCEPTED, vector on `:Meta`. `FOREACH`
+    cannot be dropped from the accepted grammar (the product's own clear guard is one), so the
+    collision is what is refused.
+
     It is also why the door's own docstring says the bound is on the statement TEXT: a caller that
     never reaches this door writes outside every reader here, and that is the chokepoint's question
     (#9079), not this one.
@@ -1034,6 +1189,7 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
     rebound = statement_rebound_aliases(statement)
     conflicting = statement_conflicting_bindings(statement)
     map_store = statement_stores_embedding_in_a_map(statement)
+    rebound_by_foreach = statement_foreach_rebound_aliases(statement)
 
     problems: list[str] = []
     if map_store:
@@ -1051,6 +1207,13 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
             "denotes one node but ACROSS `UNION` arms denotes different ones — and this reader "
             "unions per alias name, so an arm that binds the alias with no label contributes "
             "nothing to the union and stores on a label-less node")
+    if rebound_by_foreach:
+        problems.append(
+            f"it REBINDS alias(es) {sorted(rebound_by_foreach)} with a `FOREACH` LOOP VARIABLE "
+            f"(`FOREACH ({sorted(rebound_by_foreach)[0]} IN … | …)`), and the variable context "
+            "INSIDE the `FOREACH` parenthesis is separate from the one outside it (Neo4j Cypher "
+            "Manual, `FOREACH`), so a store inside the loop writes the LOOP variable while this "
+            "reader still reports the label the OUTER pattern gave that name")
     shadowed = sorted(alias for alias in targets
                       if alias in rebound and alias in bindings)
     if shadowed:

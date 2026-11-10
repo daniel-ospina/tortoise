@@ -64,6 +64,7 @@ from tortoise.vector_write import (
     served_store_labels,
     set_embedding_clause,
     statement_conflicting_bindings,
+    statement_foreach_rebound_aliases,
     statement_interpolates_label,
     statement_label_mutations,
     statement_node_labels,
@@ -787,6 +788,18 @@ def test_a_WITH_in_a_string_or_a_comment_is_NOT_a_scope_construct(statement: str
     "MATCH (e:Event) SET e.call = 1",
     # `SET e.with = 1` — same, the keyword is a property NAME.
     "MATCH (e:Event) SET e.with = 1, e.embedding = $embedding",
+    # ⛔ A PROJECTION alias named after one (`AS with`) — the sixth review round's P2, and a NEW
+    # false block until this round: the ENGINE accepts this statement and the door refused it.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props RETURN e.eventId AS with",
+    # ⛔ A PATTERN alias named after one, written at the head of a `SET` item — the same false block
+    # in its other spelling. Note the SECOND occurrence is the hard one: `(with:Event …)` was already
+    # spared by the `:` terminator, while `SET with += $props` was read as a `WITH` CLAUSE.
+    "MATCH (with:Event {eventId:$eid}) SET with += $props",
+    # …and a RELATIONSHIP alias carrying a property map: the keyword sits inside brackets, where a
+    # clause cannot live at all (#11641 r6 — the depth rule, not the token rule).
+    "MATCH (e:Event {eventId:$eid})-[with {k:1}]->(q) SET e += $props",
+    # A projection alias whose item is followed by a comma rather than ending the statement.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props RETURN e.eventId AS call, e.eventId AS n",
 ])
 def test_a_scope_KEYWORD_used_as_an_identifier_is_not_refused(statement: str) -> None:
     """Precision, in the false-BLOCK direction: the token match must not fire on a variable.
@@ -795,11 +808,60 @@ def test_a_scope_KEYWORD_used_as_an_identifier_is_not_refused(statement: str) ->
     LABEL rules where appropriate (`(with)` binds no label), but they must not be refused as SCOPE
     constructs — a guard that fires on the substring would report the wrong reason and teach a
     caller to re-spell something that was never the problem.
+
+    ⛔ THE LAST THREE ROWS ARE `#11641` r6's P2, and they were a REGRESSION this round introduced
+    rather than a shape the first cut missed: `556284de` accepted all three, the declared-grammar
+    guard refused two of them, and the module's own note — *"a token matcher that refused those
+    would block a statement the engine accepts for no gain"* — says which answer is right. The pin
+    had claimed the opposite of the behaviour, which is why the claim needed teeth rather than
+    wording.
     """
     assert statement_uses_unmodelled_scope(statement) is None, (
         f"the grammar guard read an IDENTIFIER as a scope construct: "
         f"{statement_uses_unmodelled_scope(statement)} in {statement}"
     )
+
+
+@pytest.mark.parametrize("statement", [
+    # The three P2 shapes, again — this time through the DOOR, because "the engine accepts it" is
+    # only half the claim: a guard that stops refusing it and a door that still blocks it later
+    # would pass the reader row above and still block a real caller.
+    "MATCH (e:Event {eventId:$eid}) SET e += $props RETURN e.eventId AS with",
+    "MATCH (with:Event {eventId:$eid}) SET with += $props",
+    "MATCH (e:Event {eventId:$eid})-[with {k:1}]->(q) SET e += $props, "
+    + set_embedding_clause("e"),
+])
+def test_the_door_ACCEPTS_a_statement_whose_ALIAS_is_a_scope_keyword(statement: str) -> None:
+    """The other half of P2: the false block was on the DOOR, not only on the reader.
+
+    ⛔ Asserted as "reaches the journal" rather than "does not raise": `_NoJournal` raises if the
+    append is reached, so passing this test means the bound let the statement all the way through.
+    The engine accepts every row (measured through a real FalkerDB handle at `623d59a4`), and the
+    door accepted them at `556284de` — refusing them was a regression on a legal write, with no
+    gain in soundness: an alias named `with` binds no new scope.
+    """
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+@pytest.mark.parametrize("statement", [
+    # ⛔ THE EXCLUSION MUST NOT DISARM THE GUARD IT BELONGS TO. A keyword-named alias AND a real
+    # scope clause in the SAME statement: the identifier rule must spare the alias and still refuse
+    # the clause. Without this row, an over-broad identifier rule (`skip anything near a keyword`)
+    # would silence the grammar guard on exactly the statements it exists for.
+    "MATCH (with:Event {eventId:$eid}) SET with += $props WITH 1 AS x MATCH (p) SET "
+    + set_embedding_clause("p"),
+    "MATCH (e:Event {eventId:$eid}) SET e += $props RETURN e.eventId AS with "
+    + "CALL apoc.mutate(e)",
+])
+def test_a_real_scope_clause_beside_a_keyword_ALIAS_is_still_refused(statement: str) -> None:
+    """The identifier exclusion is surgical: the same statement still loses on its scope clause."""
+    assert statement_uses_unmodelled_scope(statement) in ("WITH", "CALL"), (
+        statement_uses_unmodelled_scope(statement))
+    with pytest.raises(ValueError, match="scope"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
 
 
 @pytest.mark.parametrize("statement", [
@@ -893,6 +955,170 @@ def test_the_remaining_scope_constructs_are_declared_and_refused() -> None:
     # subquery brace precedes it, so precision is kept where the token alone would misfire.
     assert statement_uses_unmodelled_scope(
         "MATCH (e:Event) WHERE e.id IN transactions RETURN e") is None
+
+
+# ── FOREACH: a scope boundary INSIDE the declared grammar (#11641 r6's P1a) ──────────────────
+#
+# `FOREACH` is in the accepted set because the product's own clear guard is one
+# (`clear_then_set_prefix`), and the Cypher Manual (`clauses/foreach/`) says why that is still a
+# boundary: *"The variable context within the FOREACH parenthesis is separate from the one outside
+# it."* So a loop variable named after an outer alias RE-BINDS that name for the body while every
+# name-keyed reader still reports the OUTER pattern's label — measured at `623d59a4`: ACCEPTED, with
+# `VectorF32` on `:Meta`, a label no `entity_type` reaches. `UNWIND [z] AS e` is not this hole: the
+# ENGINE rejects it (`Variable 'e' already declared`, measured), which is why `UNWIND` stays in the
+# accepted set and this shape does not.
+
+#: ``(id, statement)`` — one row per SPELLING of the `FOREACH` re-bind, each one engine-accepted
+#: (measured through a real handle; the nested row too).
+FOREACH_REBIND_ROWS: list[tuple[str, str]] = [
+    (
+        "plain FOREACH",
+        "MATCH (e:Event {eventId:'seed'}) MATCH (z) FOREACH (e IN [z] | SET "
+        + set_embedding_clause("e") + ")",
+    ),
+    (
+        "nested FOREACH",
+        "MATCH (e:Event {eventId:'seed'}) MATCH (z) FOREACH (x IN [z] | FOREACH (e IN [x] | SET "
+        + set_embedding_clause("e") + "))",
+    ),
+]
+
+
+@pytest.mark.parametrize("label, statement", FOREACH_REBIND_ROWS,
+                         ids=[row[0] for row in FOREACH_REBIND_ROWS])
+def test_a_FOREACH_loop_variable_that_REBINDS_a_bound_alias_is_refused(
+        label: str, statement: str) -> None:
+    """P1a: the one scope boundary that lives inside the declared grammar.
+
+    ⛔ NON-VACUITY, asserted first and per row: every name-keyed reader is BLIND here — the pattern
+    reader reports the loop variable as `Event`-bound (the OUTER pattern), the write-alias reader
+    reports `e` as the store's target, and the grammar guard reports NO construct at all, because
+    `FOREACH` is accepted. That blindness is the reason the collision has to be refused instead of
+    reasoned about: only :func:`statement_foreach_rebound_aliases` can see it.
+
+    ⛔ And the JOURNAL must not be reached: a door that appends first and refuses after leaves a
+    record for a node it never wrote, which is the divergence its own contract forbids.
+    """
+    assert statement_foreach_rebound_aliases(statement) == {"e"}, (
+        f"the FOREACH reader did not see the re-bind ({label}): "
+        f"{statement_foreach_rebound_aliases(statement)} in {statement}"
+    )
+    # …every OTHER reader is blind to it, which is why this cannot be closed by tightening them.
+    assert statement_pattern_labels(statement)["e"] == frozenset({"Event"}), (
+        statement_pattern_labels(statement))
+    assert statement_write_aliases(statement) == {"e"}, statement_write_aliases(statement)
+    assert statement_label_mutations(statement) == frozenset()
+    assert statement_interpolates_label(statement) is False
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "FOREACH" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "FOREACH" in str(refused.value), str(refused.value)
+
+
+def test_the_product_FOREACH_clear_guard_is_still_INSIDE_the_bound() -> None:
+    """The anti-vacuity half: `clear_then_set_prefix` IS a `FOREACH`, and must stay accepted.
+
+    A fix that refused `FOREACH` wholesale (the cheap way to pass the rows above) would break every
+    overwrite writer's clear guard. Its loop variable is `_`, which no pattern binds, so the
+    collision rule does not reach it — pinned on the reader AND on the door, the same way the
+    channel does for every other accepted shape in this file.
+    """
+    statement = ("MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+                 + "SET e += $props, " + set_embedding_clause("e"))
+    assert "FOREACH (_ IN" in statement, statement
+    assert statement_foreach_rebound_aliases(statement) == frozenset(), (
+        statement_foreach_rebound_aliases(statement))
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        statement_write_target_problem(statement, {"Event"}))
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+def test_a_FOREACH_rebind_writes_no_vector_at_all(tmp_path) -> None:
+    """End to end against a REAL graph: the refused shape leaves no `VectorF32` behind.
+
+    ⛔ A reader-level pin proves the guard fires; it does NOT prove the vector is gone from the
+    graph — only the executed statement shows that. Measured at `623d59a4`: this exact statement was
+    ACCEPTED and put `VectorF32` on two `:Meta` nodes, which no `entity_type` reaches (`#5090` row
+    2's own defect). The assertion is on the GRAPH, so a future edit that reopened the acceptance
+    would red here even if every reader still answered correctly.
+    """
+    sdk = TortoiseSDK(str(tmp_path / f"{uuid4().hex}.db"))
+    try:
+        proj = sdk._get_proj()
+        proj.g.query("CREATE (e:Event {eventId:'seed'})")
+        proj.g.query("CREATE (m:Meta {k:'meta'})")
+        statement = ("MATCH (e:Event {eventId:'seed'}) MATCH (z) FOREACH (e IN [z] | SET "
+                     + set_embedding_clause("e") + ")")
+        with pytest.raises(ValueError, match="FOREACH"):
+            sdk._event_raw_write_door(proj, statement, event_id="seed", props={},
+                                      embedding=VEC, lane="test-11641")
+        rows = [list(row) for row in proj.g.query(
+            "MATCH (n) RETURN labels(n), typeof(n.embedding)").result_set]
+        assert not [row for row in rows if row[1] == "Vectorf32"], (
+            f"the refused statement still stored a vector: {rows}"
+        )
+    finally:
+        sdk.close()
+
+
+# ── `_depths` reads a backtick the way the other two readers do (#11641 r6's P1b) ──────────────
+
+def test_a_BACKSLASH_inside_a_BACKTICK_identifier_does_not_open_a_span() -> None:
+    """P1b: an escape in a string, never in an identifier — one character used to disarm the guard.
+
+    `_depths` marked a quoted span ``-1`` and honoured ``\\`` as an escape INSIDE backticks, which
+    Cypher does not: ` e.`a\\` ` is a property whose NAME contains a backslash, so the span ends at
+    the next backtick. Escaping past it opened a PHANTOM span that swallowed every following clause
+    — measured at `623d59a4`: the grammar guard read no `WITH` and the write-target reader's targets
+    collapsed to the alias before it, so a `VectorF32` landed on `:Meta`. The other two readers in
+    the module (`_blank_comments`, `_blank_string_literals`) already carried `quote != "`"`; this
+    pins the third one's AGREEMENT through public readers rather than through `_depths` itself.
+
+    ⛔ NON-VACUITY, in both directions, and each names a different reader:
+      * the `WITH` AFTER the backticked identifier is still SEEN (else the span is still phantom);
+      * the second `SET` target is still a WRITE ALIAS (else the depth scan lost the clause);
+      * and the door refuses the statement instead of executing it.
+    """
+    statement = ("MATCH (e:Event {eventId:'seed'}) SET e += $props, e.`a\\` = 1 "
+                 "WITH 1 AS x MATCH (p) SET " + set_embedding_clause("p"))
+    assert statement_uses_unmodelled_scope(statement) == "WITH", (
+        f"the phantom span still hides the `WITH`: {statement_uses_unmodelled_scope(statement)}"
+    )
+    assert "p" in statement_write_aliases(statement), (
+        "the second `SET` target is still invisible to the write-alias reader: "
+        f"{sorted(statement_write_aliases(statement))}"
+    )
+    assert statement_pattern_labels(statement) == {"e": frozenset({"Event"}),
+                                                   "p": frozenset()}, (
+        statement_pattern_labels(statement))
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None and "NO LABEL" in problem, problem
+    with pytest.raises(ValueError):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+@pytest.mark.parametrize("statement", [
+    # ⛔ The anti-vacuity direction: a BACKTICKED identifier is still a QUOTED span to `_depths`
+    # (every character in it is `-1`, which is what keeps a comma or a paren INSIDE an identifier
+    # from splitting a `SET` list), so narrowing the escape must not un-quote the span. The product's
+    # `REMOVE `e`.embedding` clear guard has to keep accepted.
+    "MERGE (`e`:Event {eventId:$eid}) " + clear_then_set_prefix("`e`")
+    + "SET `e` += $props, " + set_embedding_clause("`e`"),
+    # …and a paren inside a backticked identifier is not syntax.
+    "MATCH (`e(x`:Event {eventId:$eid}) SET `e(x` += $props",
+])
+def test_a_BACKTICK_span_is_still_a_QUOTED_span(statement: str) -> None:
+    """The other direction of P1b: only the ESCAPE changes, not the span."""
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        statement_write_target_problem(statement, {"Event"}))
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
 
 
 def test_a_property_removal_is_not_read_as_a_label_mutation() -> None:
