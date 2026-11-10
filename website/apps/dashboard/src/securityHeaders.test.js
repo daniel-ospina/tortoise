@@ -1455,6 +1455,23 @@ test('the /auth/confirm interstitial is nonce-gated and uncacheable', async () =
   )
   assert.ok(res.headers.get('Set-Cookie'), 'the interstitial must still issue the flow cookie')
 
+  // ⛔ THE HEAD MAKES THREE SAME-ORIGIN ICON REQUESTS AND THIS PAGE'S URL CARRIES
+  // `token_hash`. Under the browser default (`strict-origin-when-cross-origin`) a
+  // SAME-ORIGIN referrer carries the full path AND query, so without this header the
+  // credential would ride along on `/favicon.ico`, `/favicon.png` and
+  // `/apple-touch-icon.png` and from there into edge/CDN logs. The same rule and the
+  // same remedy as `website/functions/_middleware.ts`'s `strayReturnRefusal`, which
+  // `tests/test_oauth_stray_code_refusal.py` grades the same way. This page has no
+  // `_headers` counterpart (Cloudflare does not apply `_headers` to Functions output),
+  // so the served response is the only place the rule can be enforced.
+  assert.equal(
+    res.headers.get('Referrer-Policy'),
+    'no-referrer',
+    'the interstitial must serve Referrer-Policy: no-referrer — it emits icon <link>s ' +
+      'while token_hash is in its own URL, so the default policy would leak the ' +
+      'credential into the icon requests and their logs (#11670)',
+  )
+
   const csp = res.headers.get('Content-Security-Policy') ?? ''
   const scriptSrc = csp.split(';').find((d) => d.trim().startsWith('script-src')) ?? ''
   assert.match(scriptSrc, /'nonce-/, 'script-src must be nonce-gated')
