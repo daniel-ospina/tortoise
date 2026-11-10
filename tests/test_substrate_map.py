@@ -1620,10 +1620,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     moved to the figure §5 states, in three moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
-    (`tortoise/hosted_backup.py` — a file the population had not previously reached,
-    carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
-    dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    `REFUSED_NOT_FOUND` enum docstring), and #11729's prose in
+    `tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
+    mention at `4f68a2aa7`, whose served-label bound added the pre-D10
+    dump/restore refusal and repair prose. That move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
@@ -1696,9 +1696,10 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     )
     populations = _POPULATION_CLAIM.findall(section)
     assert populations, (
-        "§5 no longer states the population its `:Document` figure is measured over — "
-        "re-state it as `files under ``tortoise/``` so this pin can read it, rather "
-        "than leaving the figure unattributed"
+        "§5 no longer states, in the pinned shape, the population its `:Document` "
+        "figure is measured over — it states either none or more than one. Re-state "
+        "it as: files under tortoise/ (one population, in that phrasing), so this "
+        "pin can read which set the number belongs to"
     )
     assert populations == [_TRACKED_DIR + "/"], (
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
@@ -1706,8 +1707,9 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"population they were measured over, so naming a different one (e.g. "
         "`tests/`, a population more than twice as large as the one this pin measures) "
         "makes the sentence false "
-        "while every number here stays green. State `files under "
-        f"`{_TRACKED_DIR}/``, or measure the population you name"
+        "while every number here stays green. State the population as "
+        f"files under {_TRACKED_DIR}/ in that phrasing, or measure the population "
+        "you name"
     )
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "

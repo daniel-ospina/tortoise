@@ -283,9 +283,9 @@ census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring), and #11729's prose lines in
-`tortoise/hosted_backup.py` — a file the population had not previously reached,
-carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
-the pre-D10 dump/restore refusal and repair prose. All three are the point rather than an
+`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
+mention at `4f68a2aa7`, whose served-label bound added the pre-D10 dump/restore
+refusal and repair prose. All three are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
@@ -480,7 +480,7 @@ What it checks, and deliberately does not:
 | checked | not checked |
 |---|---|
 | every **file family** a lane declares resolves on disk — and a §3 lane row that declares its family only in **prose** must say so with `*(prose — not measured)*`, or it is reported: a silently unmeasured row is a CLEAN over nothing (D3 is why L7 now names `extractor_v2.py` / `commit_schema.py` / `value_extractor.py` instead of *"the three compile seams"*) | whether a lane is *live* (that is the tracker's job — §1's command) |
-| every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
+| every **symbol** the interface map places is still **declared** in the file it names (`STRUCTURAL_REL_LABELS`, `stub_key`, `_SOURCE_HANDLED`, `_DOC_RETIRED_KEYS`, `relabel_legacy_documents`, `build_master_list`, `compile_vocab`, `compile_value_brief`, `_ensure_indexes`) — *declared*, not merely mentioned: a comment or a reader does not satisfy it — and that the document still *names* it | whether the symbol still *means* what the map says |
 | every §5 row whose `depends on` cell says `*leaf*` really imports nothing under `tortoise/` that executes at **module level** — a module-scope `try:`/`if:`/`with:`/`for:`/`while:`/`match:`/`class` body counts (it runs at import time), the BODY of an `if TYPE_CHECKING:` block and a lazy in-function import do not (that is how `source_identity` and `quota` break their cycles) | whether a row's dependency list is *complete*: the non-leaf rows name the interfaces that matter to the contention argument, not every import |
 | | whether `:Document` is minted anywhere — **not regex-checkable**, and §5 records the measurement showing why |
 | | the tracker state of any issue — **the 76/33 split above is a point-in-time measurement, and it is dated in the frontmatter** |
