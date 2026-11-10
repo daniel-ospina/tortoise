@@ -290,9 +290,9 @@ catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
 lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
 `relabel_legacy_documents`'s docstring), that same
-`cache_eviction.py:956` comment, and in `hosted_backup.py` (the
+`cache_eviction.py:956` comment, and the `hosted_backup.py` ones (the
 served-label declaration, the validator's docstring and `restore_backup`'s),
-all of which arrived with #11729. The exception is still an exception, so the exclusion
+which arrived with #11729. The exception is still an exception, so the exclusion
 argument stands; a guard carrying a hand-maintained allowlist of docstrings is a
 guard nobody can trust, so the label claim stays evidence recorded here rather
 than a check that would have to be argued with.

@@ -50,6 +50,17 @@ _LABEL_CLAIM = re.compile(
     r"occurs on \*\*(\d+)\*\*\s+lines(?:\s+across\s+\*\*(\d+)\*\*\s+files)?"
 )
 
+#: The POPULATION §5 states its figure over, read out of the count sentence itself.
+#: Without this, §5 could say `files under `tests/`` and stay green — measured: 43 passed
+#: and `substrate_map_check --check` CLEAN while the sentence claimed the `tortoise/`
+#: figure for `tests/`, which actually has 153 lines across 27 files. The adjacent
+#: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
+#: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
+#: population this sentence is stated in") asserts the very thing nothing read.
+_POPULATION_CLAIM = re.compile(
+    r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+`([^`]+)`"
+)
+
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
 #: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
@@ -96,7 +107,7 @@ _QUOTED_GREP = re.compile(
 #: filter so the check measures the same set the sentence's `git grep` does —
 #: `rglob("*.py")` omitted the tracked non-`.py` files under `tortoise/`
 #: (`SKILL.md`, `config/*.json|*.yaml`, `pi-hooks/*.ts`, …), so a `:Document`
-#: added to one of them raised the true figure while the check still saw 55 and
+#: added to one of them raised the true figure while the check still saw the old and
 #: passed: a latent false CLEAN on the number the no-regex-check decision rests
 #: on (#5086 review P3, cycle 4).
 _TRACKED_DIR = "tortoise"
@@ -1664,6 +1675,15 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 states {claimed_lines} lines but no file count — the tree has {lines} "
         f"lines across {files} files; state BOTH, because confusing the two is the "
         "defect this pins"
+    )
+    populations = _POPULATION_CLAIM.findall(section)
+    assert populations == [_TRACKED_DIR + "/"], (
+        f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
+        f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
+        f"population they were measured over, so naming a different one (e.g. "
+        "`tests/`, which has 153 lines across 27 files) makes the sentence false "
+        "while every number here stays green. State `files under "
+        f"`{_TRACKED_DIR}/``, or measure the population you name"
     )
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
