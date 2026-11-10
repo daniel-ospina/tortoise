@@ -50,7 +50,7 @@ can see.
 
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
-* It does not implement any mechanism. Five of the fourteen are genuinely
+* It does not implement any mechanism. Five of the fifteen are genuinely
   absent
   and are *meant* to be marked `not-implemented` — recording an absence is the
   output, not a failure.
@@ -251,6 +251,11 @@ REGISTRY = ROOT / "config" / "v4-mechanisms.yml"
 #: write door persists it (#11239) — a declared-and-absent mechanism the marker
 #: scan could not see until the plan surface was added (#5064's root, one
 #: directory out).
+#: `declared_pack_relations` is the fifteenth (DM5, same surface) and it is the
+#: mirror case: `#11001` SHIPPED the producer and closed without this row, so the
+#: omission was on the registry side rather than the code side. A shipped
+#: mechanism this tuple does not name is invisible to the very gate that exists
+#: to prove a declared mechanism is not merely believed shipped.
 DECLARED_IDS = (
     "vet",
     "source_dedup",
@@ -266,6 +271,12 @@ DECLARED_IDS = (
     "atomic_point_write",
     "failure_policy",
     "mention_record",
+    # #11001's seam — the pack's DECLARED relations/hierarchies become
+    # replayable edges (DM5). The FIFTEENTH, and the first added under a
+    # recorded boundary comment rather than a discovery: #11001 closed without
+    # the row its own comment promised, so the mechanism shipped invisible to
+    # this registry.
+    "declared_pack_relations",
 )
 
 #: WHERE the design's declarations live, and HOW one is marked. The marker is the
