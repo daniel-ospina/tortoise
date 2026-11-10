@@ -6041,22 +6041,31 @@ def _install_capture_seam(args, install_capture) -> int:
         # its source does. Say what IS settled: the LOAD PATH this installer
         # writes, the two events' cloud exclusion, and the surface that DOES
         # fire both so an Enterprise self-hosted-pool user is not undersold.
+        #
+        # ⛔ AND SCOPE THE EXCLUSION TO THE VM (review round 2, P2). "Neither
+        # seam reaches a cloud agent" was the SAME over-assertion one level up:
+        # Cursor's "Choose Where Cloud Agents Run" makes Self-Hosted Machines a
+        # cloud-agent surface, and the page says both events fire there — so the
+        # universal is only settled for the HOSTED VM ("Cloud agent VMs don't
+        # have access to your local home directory configuration"). The
+        # self-hosted clause that follows names all THREE sources the page
+        # lists there (project, team, enterprise-managed), not project alone:
+        # naming one of three reads as exclusive.
         print(
             f"Both Cursor hooks are registered in "
-            f"{cursor_root / 'hooks.json'}, the USER-level file — which a "
-            "CURSOR CLOUD AGENT cannot read, so CLOUD AGENT sessions are NOT "
-            "captured and are NOT injected: Cursor's docs say 'Cloud agents "
-            "have no editor-lifetime session boundary. sessionEnd is tied to "
-            "the IDE session, not a cloud agent chat', that 'sessionStart' is "
-            "not available in cloud agents, and that 'User-level hooks "
-            "(~/.cursor/hooks.json) are not available in cloud agents'. So "
-            "neither the capture seam nor the cold-context injection seam "
-            "reaches a cloud agent — LOCAL desktop-editor sessions are the "
-            "surface this install serves; for cloud agents use the MCP pull "
+            f"{cursor_root / 'hooks.json'}, the USER-level file, which a "
+            "Cursor cloud agent VM cannot read. So a session running in a "
+            "cloud agent VM is NOT captured and is NOT injected: Cursor's "
+            "docs say 'Cloud agents have no editor-lifetime session boundary. "
+            "sessionEnd is tied to the IDE session, not a cloud agent chat', "
+            "that 'sessionStart' is not available in cloud agents, and that "
+            "'User-level hooks (~/.cursor/hooks.json) are not available in "
+            "cloud agents'. LOCAL desktop-editor sessions are the surface "
+            "this install serves; for cloud-agent sessions use the MCP pull "
             "surface (`tortoise_search` / `tortoise_recall`). Cursor also "
             "fires `sessionStart`/`sessionEnd` on Self-Hosted Machines "
-            "workers, which run PROJECT-level `.cursor/hooks.json` — a file "
-            "this installer does not write.")
+            "workers, which run project, team and enterprise-managed hooks — "
+            "none of which this installer writes.")
     if args.harness == "openclaw" and not getattr(args, "dry_run", False):
         # #2120: the plugin is discovered under the HOME-scoped
         # ~/.openclaw/extensions and hooks only bind at Gateway startup, so a
@@ -6247,9 +6256,9 @@ def _install_read_hook_impl(args) -> int:
               "(the sessionEnd capture hook + the sessionStart cold-context "
               "injection hook; Cursor has no per-turn shell-hook read seam — "
               "its beforeSubmitPrompt event cannot inject. A CURSOR CLOUD "
-              "AGENT gets neither hook — that file is user-level and a cloud "
-              "agent VM cannot read it; Self-Hosted Machines workers DO fire "
-              "both, from a PROJECT-level `.cursor/hooks.json` this installer "
+              "AGENT VM gets neither hook — that file is user-level and the "
+              "VM cannot read it; Self-Hosted Machines workers DO fire both, "
+              "from project/team/enterprise-managed hooks this installer "
               "does not write)")
         print("  tortoise install hermes  → <dir>/.hermes/plugins/"
               "tortoise-volunteer/ (the pre_llm_call PLUGIN — Hermes' per-turn "

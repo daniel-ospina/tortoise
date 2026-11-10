@@ -2995,9 +2995,27 @@ def test_cli_install_cursor_installs_capture_and_discloses_the_cloud_agent_limit
     assert "that 'sessionStart' is not available in cloud agents" in r.stdout, r.stdout
     assert "User-level hooks" in r.stdout, r.stdout
     # …and the qualification that keeps the claim true: the third surface where
-    # both events DO fire, which this installer does not write (#11807).
+    # both events DO fire, and ALL THREE sources the page lists there — naming
+    # project alone reads as exclusive (review round 2, P2) — none of which
+    # this installer writes (#11807).
     assert "Self-Hosted Machines" in r.stdout, r.stdout
-    assert "does not write" in r.stdout, r.stdout
+    assert "none of which this installer writes" in r.stdout, r.stdout
+    assert "project, team and enterprise-managed hooks" in r.stdout, r.stdout
+    # ⛔ AND THE RETIRED ABSOLUTE MAY NOT COME BACK. A presence assert alone is
+    # LATERAL, not stronger: appending "These hooks are IDE-ONLY." to the
+    # message kept the whole suite green (measured, review round 2 P2).
+    assert "IDE-ONLY" not in r.stdout, r.stdout
+    assert "IDE-only" not in r.stdout, r.stdout
+    # …and the SECOND surface that states this claim -- `install --list` -- was
+    # pinned by nothing at all, so a revert there was silent.
+    listing = _run(("install", "--list"), env, root)
+    assert listing.returncode == 0, listing.stdout + listing.stderr
+    cursor_lines = [ln for ln in listing.stdout.splitlines()
+                    if "tortoise install cursor" in ln]
+    assert len(cursor_lines) == 1, listing.stdout
+    assert "AGENT VM gets neither hook" in cursor_lines[0], cursor_lines[0]
+    assert "Self-Hosted Machines" in cursor_lines[0], cursor_lines[0]
+    assert "IDE-ONLY" not in listing.stdout, listing.stdout
 
 
 def test_cli_install_cursor_uninstall_says_the_seam_remains(tmp_path):
