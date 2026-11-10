@@ -1083,8 +1083,7 @@ def _referenced_entity_names(embed_list: object,
     return names
 
 
-def _layer1_reference_spellings(embed_list: object,
-                                discarded_ids: set[str]) -> dict[str, set[str]]:
+def _layer1_reference_spellings(embed_list: object) -> dict[str, set[str]]:
     """``_norm`` key → every VERBATIM spelling a surviving Layer-1 candidate uses.
 
     The sibling of :func:`_referenced_entity_names`, which answers in ``_norm``
@@ -1096,11 +1095,23 @@ def _layer1_reference_spellings(embed_list: object,
     (``about_entities`` and the non-``event`` role slots of every surviving
     item) — a slot name is a Layer-1 reference exactly as much as an
     ``about_entities`` entry is, and both are compared by exact string.
+
+    ⛔ **NO ``discarded_ids`` PARAMETER, DELIBERATELY.** Both call sites pass a
+    list that ALREADY holds only survivors — the nothing-to-do branch requires
+    ``not discarded_ids``, and the working path passes ``out``, where
+    ``out[section] = kept`` has dropped every discarded item. Filtering it
+    again is not just redundant, it is WRONG: ``_item_id`` is index-dependent
+    (``section:index:text``, deliberately — it is what lets two
+    identical-content twins be judged independently), so a survivor that
+    COMPACTS onto a discarded twin's index carries that twin's id and would be
+    skipped. Measured (review at ``2b843a0e``): points ``[A, B, B]`` with the
+    first twin DISCARDed left the surviving twin's ``RETRY STORM`` unreconciled
+    → the payload still 422s, the exact failure this pass exists to close.
+    The sibling call three lines below already passes ``set()`` for the same
+    reason.
     """
     spellings: dict[str, set[str]] = {}
-    for section, index, item in _iter_items(embed_list):
-        if _item_id(section, index, item) in discarded_ids:
-            continue
+    for _section, _index, item in _iter_items(embed_list):
         refs = item.get("about_entities")
         if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes)):
             for ref in refs:
@@ -1123,7 +1134,6 @@ def _layer1_reference_spellings(embed_list: object,
 
 def _reconcile_held_layer1_spellings(
         embed_list: object,
-        discarded_ids: set[str],
         settled: Mapping[str, str] | None = None
 ) -> tuple[dict[str, str], list[str]]:
     """Re-spell a Layer-1 reference whose ``_norm`` ALREADY matches a held name.
@@ -1177,8 +1187,7 @@ def _reconcile_held_layer1_spellings(
         return {}, []
     canonical: dict[str, str] = {}
     warnings: list[str] = []
-    for key, used in sorted(_layer1_reference_spellings(
-            embed_list, discarded_ids).items()):
+    for key, used in sorted(_layer1_reference_spellings(embed_list).items()):
         emitted = held.get(key)
         if not emitted:
             continue          # not held — Rule 4's restore leg owns this one
@@ -1591,7 +1600,7 @@ def apply_vet(embed_list: Mapping[str, Any],
         # ``_rewrite_entity_references`` mutates the item dicts it rewrites, so
         # the reconcile runs on a COPY.
         held_canonical, held_warnings = _reconcile_held_layer1_spellings(
-            base, discarded_ids)
+            base)
         if not held_canonical:
             # Nothing to re-spell — but an AMBIGUOUS reference still owes its
             # warning (refusing to guess is a decision the record must carry).
@@ -1699,7 +1708,7 @@ def apply_vet(embed_list: Mapping[str, Any],
     # write an exact spelling a reference names, and their keys are disjoint
     # from these anyway (they are in ``to_restore``, i.e. NOT in ``present``).
     held_canonical, held_warnings = _reconcile_held_layer1_spellings(
-        out, discarded_ids, settled=canonical)
+        out, settled=canonical)
     warnings.extend(held_warnings)
     for _held_key, _held_spelling in held_canonical.items():
         canonical.setdefault(_held_key, _held_spelling)

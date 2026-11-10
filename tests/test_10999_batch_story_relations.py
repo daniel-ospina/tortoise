@@ -1951,16 +1951,62 @@ def test_a_case_variant_relation_endpoint_is_left_to_s5():
     """The reconcile must not reach the RESULT-level channel: `relations[].src`
     is not a Layer-1 reference (it never enters the payload), and S5 resolves
     endpoints on its own two-fold rule. Rewriting it here would be a second
-    owner of that decision."""
+    owner of that decision.
+
+    ⛔ The emission carries a REFERENCE THAT IS ACTUALLY REWRITTEN, on purpose:
+    the first version of this test had no `about_entities` at all, so
+    `held_canonical` was empty, `apply_vet` took the early return and passed
+    identically on the pre-change module — it named a property it could not
+    detect (review at `2b843a0e`, P3). The positive assertion is what makes the
+    negative one mean something.
+    """
     emission = {
         "entities": [{"name": "Retry Storm", "kind": "core:event"},
                      {"name": "Deadline Rule", "kind": "core:rule"}],
-        "points": [], "events": [], "operators": [],
+        "points": [{"content": "p", "about_entities": ["RETRY STORM"]}],
+        "events": [], "operators": [],
         "relations": [{"src": "RETRY STORM", "dst": "Deadline Rule",
                        "predicate": "IMPL"}],
     }
-    out, _warns = vg.apply_vet(emission, {})
+    out, warns = vg.apply_vet(emission, {})
+    # the Layer-1 reference IS reconciled …
+    assert out["points"][0]["about_entities"] == ["Retry Storm"], warns
+    # … while the endpoint keeps the spelling the story used
     assert out["relations"][0]["src"] == "RETRY STORM", out["relations"]
+
+
+def test_a_surviving_twin_on_the_discarded_twins_index_is_still_scanned():
+    """P2 of the review at `2b843a0e`: the working path handed
+    `_layer1_reference_spellings` `out` (COMPACTED) together with
+    `discarded_ids` (index-keyed against `base`) — and `_item_id` is
+    index-dependent by design (`section:index:text`), so a survivor that shifts
+    down onto a discarded twin's index carried that twin's id, was skipped, and
+    its divergent reference was never reconciled.
+
+    Measured pre-fix with this exact fixture: `[['Retry Storm'], ['RETRY
+    STORM']]` and no re-spell warning — and through `execute_embed` that is
+    `ok=False, points[1].about_entities: about_entities reference unknown
+    entities`, i.e. the whole session rejected, the failure this pass exists to
+    close. The parameter is gone rather than passed `set()`: both call sites
+    already hand it a survivor-only list, so filtering again could only ever
+    subtract a survivor.
+    """
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"},
+                     {"name": "Other", "kind": "core:rule"}],
+        "points": [{"content": "a", "about_entities": ["Retry Storm"]},
+                   {"content": "b", "about_entities": ["RETRY STORM"]},
+                   {"content": "b", "about_entities": ["RETRY STORM"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    # the FIRST of two identical-content twins, so the survivor compacts onto
+    # the discarded twin's index 1
+    verdicts = {vg._item_id("points", 1, emission["points"][1]):
+                {"outcome": "DISCARD"}}
+    out, warns = vg.apply_vet(emission, verdicts)
+    assert [p["about_entities"] for p in out["points"]] == [
+        ["Retry Storm"], ["Retry Storm"]], warns
+    assert any("re-spelled" in w for w in warns), warns
 
 
 def test_the_reconciled_payload_no_longer_422s_end_to_end():
