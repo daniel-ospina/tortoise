@@ -45653,6 +45653,21 @@ class TortoiseSDK:
         """
         if not session_id:
             return None
+        # #8290: the demo/sample namespace answers ``None`` HERE, before either
+        # lane runs. The guard is on the ENTRY, not in the captured arm below,
+        # because this read has TWO lanes and the FIRST serves a raw
+        # ``AgentSession`` ``Event`` by ``session_id``/``sessionId``; guarding
+        # only the captured arm left that one answering for a demo-prefixed id —
+        # the SDK serving sample content the hosted detail door 404s, which is
+        # this issue's own defect one arm over. An indexed graph can hold such an
+        # Event (it predates the namespace's reservation at the capture doors,
+        # ``ids.session_id_refusal``). The predicate is the shared
+        # ``session_schema.is_demo_session_id``, never a local prefix test, so the
+        # SDK cannot exclude a different set than the hosted doors.
+        from tortoise.session_schema import is_demo_session_id
+
+        if is_demo_session_id(session_id):
+            return None
         proj = self._get_proj()
         rows = proj.g.query(
             "MATCH (e:Event {eventKind: 'AgentSession'}) "
@@ -45680,6 +45695,13 @@ class TortoiseSDK:
         'statement']`` filter reported 0 for them until #3555 unified the two.
 
         Returns ``None`` when no ``:Session`` carries the id.
+
+        #8290: reachable only for a NON-demo id — ``get_session`` applies the
+        shared ``session_schema.is_demo_session_id`` guard at its ENTRY, so both
+        lanes (the ``AgentSession`` Event arm and this captured arm) answer
+        ``None`` for the reserved namespace. The guard therefore lives on the
+        public read, which is the surface the hosted detail door mirrors; a
+        second copy here would be a second place to forget.
         """
         rows = proj.g.query(
             "MATCH (s:Session {id:$sid}) RETURN s.id, s.created_at, "
