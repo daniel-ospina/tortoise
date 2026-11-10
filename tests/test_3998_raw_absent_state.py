@@ -1392,11 +1392,14 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
 # re-measured from THIS tree: the chain read that produced that number was
 # `get_provenance_chain`, one of the 26 public methods #4282 retired
 # (`tortoise/sdk_retired.py`), and its Cypher + row shaping were inline in that
-# method — no projection reader replaced it. What survives is the DATA, not a
-# query: the `:Source` / `extractedFrom` edges are still there, so the residual is
-# still reachable by writing that two-hop query yourself — not through a surviving
-# reader. The number is retained as the record of a measurement, not as a claim
-# reproducible at this head. It is
+# method — no projection reader replaced it. What survives is the DATA, not the
+# chain: the `:Source` / `extractedFrom` edges are still there, so the residual is
+# still reachable by writing that two-hop query yourself. ⚠️ One CURRENCY-ONLY
+# reader of the `references` hop does survive
+# (`search_engine.read_reference_currency_links`), but it answers `currency`, not
+# the chain — it is not a rebuilt provenance reader and does not make this number
+# reproducible. The number is retained as the record of a measurement, not as a
+# claim reproducible at this head. It is
 # PRE-EXISTING to #3998 and it is #4649's structural issue (the outer label loop
 # takes the FIRST matching label), recorded on #4649 — which is CLOSED, so it is
 # neither open-tracked nor test-pinned. That is a real gap, stated rather than

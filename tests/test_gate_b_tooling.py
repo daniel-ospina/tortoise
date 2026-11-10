@@ -13,8 +13,9 @@ and they split in two — which is why the ledger records three and REBUILDS two
   surface row `sdk:calibration_passed`). They drove ``record_calibration`` only
   as ARRANGEMENT, so they are restored below with the arrangement written as the
   marker node the record writer itself creates (the raw-Cypher form already used
-  by `tests/test_rebuild_config_preservation.py`). Dropping them would leave the
-  accessor read by `tortoise/gates.py` driven by no test in the tree.
+  by `tests/test_rebuild_config_preservation.py`), with the marker KEY's value
+  pinned by literal — deriving it from the class attribute the accessor also
+  reads would make a rename invisible.
 - **Recorded as removed (3)** — `test_record_calibration_validation`,
   `test_record_calibration_enforces_gate_targets` and
   `test_record_calibration_is_idempotent` assert behaviour OF
@@ -236,13 +237,37 @@ def _store_calibration_marker(sdk, **props) -> None:
 
     The writer (`record_calibration`) is gone with #4282, so the tests below
     arrange its RESULT directly — the same `MERGE (m:Meta {key:$key}) SET m += $props`
-    form `tests/test_rebuild_config_preservation.py` already uses. The key comes
-    from the class attribute, never a literal, so a key drift reds these too.
+    form `tests/test_rebuild_config_preservation.py` already uses, and the same
+    `recordedAt` stamp the writer applied.
+
+    ⛔ The key is derived from the class attribute here, which on its own would
+    be VACUOUS as a pin (the accessor reads that same attribute, so a rename
+    moves both sides together and both stay green). The key's VALUE is therefore
+    pinned separately, by literal, in
+    `test_calibration_marker_key_is_the_persisted_literal` below — a literal on
+    the TEST side is what makes a rename visible.
     """
     props.setdefault("recordedAt", "2026-01-01T00:00:00Z")
     sdk._get_proj().g.query(
         "MERGE (m:Meta {key:$key}) SET m += $props",
         params={"key": TortoiseSDK._CALIBRATION_MARKER_KEY, "props": props})
+
+
+def test_calibration_marker_key_is_the_persisted_literal():
+    """The marker key is DATA already written into shipped graphs — pin its value.
+
+    `_CALIBRATION_MARKER_KEY` is read by ``calibration_passed()`` and was written
+    by the retired ``record_calibration``. Pinning it only against itself is
+    vacuous: a rename moves writer and reader together, every test stays green,
+    and every EXISTING graph — whose marker sits under the literal
+    ``calibration_milestone``, the key `tortoise/hosted_backup.py` and
+    `tortoise/record_restore.py` classify as DATA — silently reads False. So the
+    LITERAL is asserted here.
+
+    FAILS IF the constant is renamed or re-spelled, which is exactly when the
+    graphs in the field would stop answering.
+    """
+    assert TortoiseSDK._CALIBRATION_MARKER_KEY == "calibration_milestone"
 
 
 def test_calibration_passed_false_then_true(sdk):

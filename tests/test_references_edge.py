@@ -12,12 +12,12 @@ Covers:
 `get_provenance_chain`, one of the 26 dead public methods #4282 deleted (see
 `tortoise/sdk_retired.py`). ⚠️ Nothing was delegated: its two-hop Cypher
 (`(Point)-[:extractedFrom]->(Source)` + `OPTIONAL MATCH (Source)-[references]->`)
-and its row shaping were INLINE in that method, and no projection reader answers
-that question — the projection's own reader (`projection/edges.py`) is the
-CURRENCY reader over `extractedFrom` only, a different link set. So the READER
-went with the method; what survives is the DATA (the edges), not a query to
-re-point these tests at. The provenance-chain section headers below are kept as
-the ledger for them.
+and its row shaping were INLINE in that method, so the READER went with it. What
+survives is the DATA (the edges), not a query to re-point these tests at — and
+for the `references` hop specifically one CURRENCY-ONLY reader does survive,
+`tortoise/search_engine.py::read_reference_currency_links`, which answers
+`currency` and not the chain; do not mistake it for a rebuilt provenance reader.
+The provenance-chain section headers below are kept as the ledger for them.
 
 All tests use TortoiseSDK (not direct FalkorProjection) because
 conftest.py sets TORTOISE_DB_URI for the Docker FalkorDB container;
@@ -280,8 +280,11 @@ def test_backfill_references_idempotent():
 # EMPTY BY DESIGN (#4282): the three tests that lived under these two headers all
 # drove `get_provenance_chain`, which this PR deleted. The Cypher and the row
 # shaping were inline in that method, so the READER went with it — the graph
-# edges it read survive, a surviving query does not. See the module docstring for
-# the per-test ledger.
+# edges it read survive, a surviving provenance query does not. (A CURRENCY-ONLY
+# reader of the same `references` hop does survive —
+# `search_engine.read_reference_currency_links` — so "nothing reads that hop" is
+# false; it just does not answer the chain.) See the module docstring for the
+# per-test ledger.
 
 
 def test_link_source_to_entity_source_kind_passthrough():
