@@ -367,7 +367,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7) while the enum was `E1…E5` (5) when this section was first written and is now `CRITERIA + A_CRITERIA` (`capstone_verdict_check.py:144-145`, tested at `:920-922`), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers** — 12 total while the enum was `E1…E5` (5) when this section was first written and is now `CRITERIA + A_CRITERIA` (`capstone_verdict_check.py:144-145`, tested at `:920-922`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -377,8 +377,8 @@ SUB_ROW_PARENT    = {"E1b": "E1", "E2a": "E2", "E2b": "E2"}   # which row carrie
 ```
 
 ⛔ **P0 from the `duplication-architecture` review: the invariant as first written is FALSE.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` — **there is no plain `E2` row** — so `record ids − NON_VERDICT_ROWS` = **4**, not 5;
-and after the amendment 12 − 3 = **9**, not 10. The correct invariant adds the **parent** of every sub-row back:
+`E1, E1b, E2a, E2b, E3, E4, E5` — **there is no plain `E2` row** — so `record ids − NON_VERDICT_ROWS` = **9**, not 5 — 4 E-rows plus the 5 already-registered A-rows. The
+amendment adds **no** ids; it re-authors A4's row, so the set stays 12. The correct invariant adds the **parent** of every sub-row back:
 
 ```text
 (record ids − NON_VERDICT_ROWS) ∪ SUB_ROW_PARENT.values() == enum ids
@@ -553,7 +553,7 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
 | # | vocabulary | what it holds | who reads it |
 |---|---|---|---|
 | **V1** | the ontology's declared Object↔Object section | `docs/ONTOLOGY.md` **§3.7**: exactly **two** predicates — `wasDerivedFrom` (provenance) and `hasPart` (composition, inverse traversal covers "part of") | humans; the design |
-| **V2** | the ontology's enforced write vocabulary | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6**, which live in `_VALID_ABOUT_EDGE_PREDICATES` and are written by a **different verb** | `create_edge` and `create_about_edge` |
+| **V2** | the ontology's enforced write vocabulary | **§3.9** *"Valid Predicate Vocabulary (code)"*: **16 generic** predicates — `performs, produces, uses, authoredBy, ownedBy, managedBy, hasMember, holdsRole, memberOf, reportsTo, participatesIn, hasPart, related, dependsOn, references, wasDerivedFrom` — **plus the `about*` family's 6** — but the family splits across **two** sets, and the split is the point: `_VALID_EDGE_PREDICATES` accepts six `about*` (`aboutSubject/Object/Event/Document/Action/Source`, `edges.py:621-630`) while `_VALID_ABOUT_EDGE_PREDICATES` accepts **five** (`aboutSubject/Object/Event/Point/Document`, `:639`) and is what `create_about_edge` validates. So `aboutAction`/`aboutSource` are **edge-verb only** and `aboutPoint` is **about-verb only** — I10's `verb` map must carry that, not a single `about*` count | `create_edge` and `create_about_edge` |
 | **V3** | what the packs declare | `dev`: `decomposesInto`(→hasPart), `implements`(→addresses), `deploysTo`(→addresses), **`dependsOn`**(→addresses), `causes`(→supports), `fixes`(→addresses), `addresses`(→addresses) · `venture`: **`funds`, `produces`, `managedBy`, `holds`, `related`, `dependsOn`** · `product-strategy`: `addresses`, `opposes`, `supports` · **every one `mechanism: IMPL`** | `list_relations()`, the classifier's kind index, the write-path verdict |
 
 **The three mismatches, each load-bearing:**
@@ -689,7 +689,9 @@ nor the replay path. **The retry contract is the door's; the plan declares it, i
 **Eleven contracts** to freeze before implementation — I1, I2, I3, I4a, I4b, I5, I6, I7, I8, **I9**, **I10** —
 the derived-vocabulary shape §5.3's C10 needs). Each names its consumers, so a change is visibly breaking. ⚠️
 *Corrected twice: the first version said "six" over a nine-row table and left I6 after I8; the second said "nine"
-over the eleven-row table below and counted I9 as the tenth while omitting I10 altogether.*
+over the eleven-row table below and counted I9 as the tenth while omitting I10 altogether. The prose list above is
+in order and complete; the **table's** last row is I6, kept at the end rather than resequenced because §5.3a and
+§8.4's AM5 both cite it by position — the count and the list are what the reader should trust, not row order.*
 
 | # | contract | shape | consumers | breaking change |
 |---|---|---|---|---|
