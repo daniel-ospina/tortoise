@@ -134,6 +134,18 @@ def _expected_legs(manifest: dict) -> set[str]:
     equality below still fails, and it now names the declared count rather than a
     stale one. Label SPELLING has its own pin
     (`tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes`).
+    A producer leg that is added or renamed without landing in `_gating_sets()`
+    reads as a pass over a set nobody walked, which is what this pin refuses; the
+    leg KINDS stay literal (`_LEG_KINDS`) for exactly that reason.
+
+    The count is `main`'s, never this branch's: the two `core` rows #11642 added
+    move no shard count at all (measured over `push_legs` — strip both and the
+    names are still `a`..`k`; only the file count moves, and that number decays
+    with every unrelated registration, so the claim here is the NAMES, never the
+    total). Nor is it a pool-size threshold — `fast_shard_count` reads the
+    manifest's `fast_shards` literal, and `split_fast_gate` says as much ("N comes
+    from the manifest's `fast_shards` … NOT capped by the file count"), so a lane
+    that unregisters files must not drop a label.
     """
     return {
         *_LEG_KINDS,

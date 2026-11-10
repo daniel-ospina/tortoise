@@ -263,9 +263,22 @@ def main() -> int:
             for f in tmp.iterdir():
                 (args.keep / f.name).write_bytes(f.read_bytes())
 
+    # ⛔ BOTH DESTINATIONS, not one. `app.premiselabs.co` is a separate Pages project whose
+    # root is `website/apps/dashboard/public` (vite copies `public/` → `dist/`), and the icon
+    # contract asserts the two copies are BYTE-IDENTICAL — so writing only `website/` leaves a
+    # stale app copy and a red guard. That is a footgun for exactly the person following this
+    # tool's own docstring, and it is one `write_bytes` to remove.
+    mirrors = []
+    if args.out.resolve() == WEB.resolve():
+        mirrors.append(WEB / "apps" / "dashboard" / "public")
+
     for name in ("favicon.png", "favicon.ico", "apple-touch-icon.png"):
         p = args.out / name
         print(f"{p}  {p.stat().st_size} B")
+        for dest in mirrors:
+            dest.mkdir(parents=True, exist_ok=True)
+            (dest / name).write_bytes(p.read_bytes())
+            print(f"{dest / name}  {(dest / name).stat().st_size} B (mirror)")
     return 0
 
 
