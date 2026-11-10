@@ -3587,8 +3587,8 @@ class PackRegistry:
         # The declaration model is depth 2, not depth 1. `_validate` restricts a
         # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`, so
         # a pack kind is never a parent — but all 16 of the
-        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row IS
-        # that canonical set), so every declared pair is the chain
+        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row's
+        # members ARE that canonical set), so every declared pair is the chain
         # `pack kind ⊑ core child ⊑ Object`
         # (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
         # 17 declared pairs had a parent that is an `Object` child, and

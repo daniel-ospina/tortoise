@@ -7,6 +7,7 @@ Covers (#7864, #7863):
 """
 from __future__ import annotations
 
+import ast
 import os
 import sys
 from pathlib import Path
@@ -2315,10 +2316,11 @@ class TestCoreHierarchy:
         the literal row; `tortoise_fts_query("widget", kind="Object",
         entity_type="object")` returned both. ⚠️ Widening the full scan is a
         BEHAVIOUR change, not a doc fix — #11690 owns it.
-        ⚠️ And the cause is LEG B, not the closure: `CORE_SUBCLASSES["Object"]` IS
-        `CANONICAL_OBJECT_KINDS`, so registering the §6 rows already put these four
-        in `expand_kind("Object")` at ONE hop; the closure only adds the pack kinds
-        beneath them.
+        ⚠️ And the cause is LEG B, not the closure: `CORE_SUBCLASSES["Object"]` is
+        the same SET as `CANONICAL_OBJECT_KINDS` (a `tuple(sorted(...))` against a
+        `frozenset`, so equality of members, not identity), so registering the §6
+        rows already put these four in `expand_kind("Object")` at ONE hop; the
+        closure only adds the pack kinds beneath them.
 
         ⚠ It is a consequence of the mandated contract, not an implementation
         error — #7813's ruling is that confidence propagates across
@@ -2344,7 +2346,8 @@ class TestCoreHierarchy:
                 f"expand_kind('Object') does not carry {kind!r} — the overlap "
                 "stopped widening, so this pin's premise is stale")
 
-    def test_the_object_read_asymmetry_the_docstring_states_still_holds(self):
+    def test_the_object_read_asymmetry_the_docstring_states_still_holds(
+            self, tmp_path):
         """The FORM-SCOPE the docstring above states, pinned where it is produced.
 
         `test_the_object_and_point_rows_overlap_exactly` can only read the TABLE;
@@ -2358,12 +2361,22 @@ class TestCoreHierarchy:
           exact-match assertion goes red, which is the same edit that would make
           the docstring's "does NOT widen" false.
         * the SDK hands that leg the **UNEXPANDED** kind, and only applies the
-          expansion post-retrieval, gated on a text query. Those are statement
-          SHAPES, not line numbers (measured: `sdk.py`'s cited line numbers had
-          drifted ~610 lines by the time #5534 anchored them, so an anchor on the
-          statement is the form that survives a merge).
+          expansion post-retrieval, gated on a text query — driven through the
+          REAL `tortoise_fts_query` with `degradation_chain` captured, so the
+          assertion is on the arguments the SDK actually passes.
+
+        ⛔ BOTH are behavioural on purpose. An earlier version of this pin grepped
+        `sdk.py` for `source.count(snippet) == 1`; that reds on a
+        semantics-preserving reflow (the statement wrapped over two lines) and on
+        a comment that merely QUOTES the statement — the habit this very docstring
+        uses — and its message then sends the next lane hunting a behaviour change
+        that does not exist. It also would not have caught the edit it claimed to
+        guard: nothing observed what the SDK hands the leg. The one thing that
+        cannot be driven without a DB (the post-retrieval expansion gate) is
+        anchored on the AST instead, which is immune to both false-red modes.
         """
         from tortoise import sdk as sdk_module
+        from tortoise import search_engine
         from tortoise.search_engine import run_structural_query
 
         class _Result:
@@ -2390,15 +2403,66 @@ class TestCoreHierarchy:
             "the structural leg must be handed the UNEXPANDED kind, never "
             f"expand_kind(...): {params['kind']!r}")
 
-        source = Path(sdk_module.__file__).read_text(encoding="utf-8")
-        for snippet in (
-            # a kind-only read IS a full scan …
-            "is_full_scan = (query is None and kind is not None)",
-            # … and the expanded kind filter is gated on a TEXT query …
-            "if kind and query is not None and result_ids:",
-            # … while the structural leg gets the unexpanded kind.
-            "struct_kind = structural_kind if structural_kind is not None else kind",
-        ):
-            assert source.count(snippet) == 1, (
-                "the sdk.py statement this docstring's asymmetry depends on is "
-                f"gone or duplicated ({source.count(snippet)} hits): {snippet!r}")
+        # ── the SDK's half, captured at the hand-off ──────────────────────
+        captured: list[dict] = []
+        original_chain = search_engine.degradation_chain
+
+        def _capture(graph_, query, struct_kind, query_vec, strategies, **kw):
+            captured.append(
+                {"query": query, "struct_kind": struct_kind,
+                 "strategies": strategies})
+            return {}
+
+        search_engine.degradation_chain = _capture
+        sdk = None
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope.db"),
+                namespace=f"form_scope_{os.urandom(6).hex()}")
+            # the kind-only form, then the text-query form — the two the
+            # docstring says disagree
+            sdk.tortoise_fts_query(kind="Object", entity_type="object")
+            sdk.tortoise_fts_query(
+                "widget", kind="Object", entity_type="object")
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
+
+        kind_only, text_query = captured
+        for form in (kind_only, text_query):
+            assert form["struct_kind"] == "Object", (
+                "the structural leg must be handed the UNEXPANDED kind on both "
+                f"forms, never expand_kind(...): {form['struct_kind']!r}")
+        # …and the kind-only form carries NO text query, so the post-retrieval
+        # `if kind and query is not None and result_ids:` expansion filter cannot
+        # run — the structural `=` is the only kind predicate on that read.
+        assert kind_only["query"] is None, kind_only
+        assert kind_only["strategies"] == {
+            "fts": False, "vector": False, "structural": True}, kind_only
+        # …while the text-query form carries one, which is what reaches the
+        # expansion filter — the widening the docstring attributes to it ALONE.
+        assert text_query["query"] == "widget", text_query
+
+        # ── and the GATE itself, anchored on the AST ───────────────────────
+        # The capture above proves the two forms differ in `query`; it cannot
+        # prove the post-retrieval expansion is still gated ON that difference.
+        # Dropping the `query is not None` conjunct makes the KIND-ONLY read
+        # widen too — the exact claim this docstring makes false — so the gate is
+        # asserted as a statement SHAPE. An AST dump, not a text anchor: it is
+        # immune to a reflow and to a comment quoting the line, and it names the
+        # mutation it catches.
+        gate = ast.parse(
+            "kind and query is not None and result_ids", mode="eval").body
+        tree = ast.parse(
+            Path(sdk_module.__file__).read_text(encoding="utf-8"))
+        hits = [
+            node for node in ast.walk(tree)
+            if isinstance(node, ast.If)
+            and ast.dump(node.test) == ast.dump(gate)
+        ]
+        assert len(hits) == 1, (
+            "the post-retrieval expansion gate `kind and query is not None and "
+            "result_ids` is gone or duplicated — without `query is not None` "
+            "the KIND-ONLY object read widens too, which is what this "
+            f"docstring says it does not ({len(hits)} hits)")
