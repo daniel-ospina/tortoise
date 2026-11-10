@@ -1515,7 +1515,7 @@ SOURCE_PATTERNS = {
 # member nobody has written yet, and it is what makes the completeness pin in
 # `tests/test_ci_selection.py` RUN on a migration-only diff: `core` is a surface,
 # so it arms the slow legs, whereas the tier-1 smoke set does not carry that test.
-# The eleven per-file `CORE_ALSO` record entries stay, though they are now FULLY
+# The per-file `CORE_ALSO` record entries stay, though they are now FULLY
 # redundant (selection AND the `_selection_relevant()` keep-signal both come from
 # the rule above): they are kept as the per-migration rationale, which the rule —
 # one regex — has no room to carry.

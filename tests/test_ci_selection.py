@@ -4857,8 +4857,8 @@ def test_every_record_migration_selects_core_and_its_readers():
     # `test_record_schema_placement.py` stood here until the #11728 P3 and cannot
     # fail: it is tier1 (config/ci-surfaces.yml), and tier1 ⊆ `test_files` on every
     # return path (measured: the `off_family` selection below — `surfaces: []`,
-    # n=84 — still carries it). A vacuous assertion is worse than none: it reads as
-    # coverage.
+    # n=84 at `2026-11-10` — still carries it). A vacuous assertion is worse than
+    # none: it reads as coverage.
     #
     # #11728 review P2: that axis is PINNED below, not merely described — a reader
     # promoted into `tier1` (an ordinary edit for a fast DB-free pin) would make its
@@ -4878,7 +4878,8 @@ def test_every_record_migration_selects_core_and_its_readers():
         )
     # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
-    # `select()` returns `surfaces: []`, n=84, and every reader assertion reds.
+    # `select()` returns `surfaces: []`, n=84 at `2026-11-10`, and every reader
+    # assertion reds.
     # ⚠️ Disabling the rule ALONE changes nothing for a member that still has its
     # entry — measured on the embedding migration: `surfaces: ['core']`, every
     # reader present — which is the same measurement that makes those entries
@@ -4888,7 +4889,8 @@ def test_every_record_migration_selects_core_and_its_readers():
     # assertion added to an existing one, and nothing reds on the sentence. The
     # `n=84` stated elsewhere in this block is a measurement of ONE specific
     # selection — correct today, re-derivable in a single `select()` call — and not
-    # a claim about how many such migrations there are.
+    # a claim about how many such migrations there are. Both of its mentions carry
+    # the `2026-11-10` anchor date, so the block's own anchor rule holds.
     for name in migrations:
         r = _sel([f"supabase/migrations/{name}"])
         assert r["full"] is False, (name, r)
@@ -4956,11 +4958,11 @@ def test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family(
     neighbour = "supabase/migrations/20261012000006_recover_team_key_expiry.sql"
     # The FILE must exist, or this pin is VACUOUS rather than covering it:
     # `select()` never stats a path, so `_sel()` on a renamed, deleted or wholly
-    # synthetic name still returns `['core']` from the PREFIX. Measured on this
-    # head: `_sel(["supabase/migrations/20261012000006_does_not_exist.sql"])` ->
-    # `surfaces: ['core']`, n=802. Without this arm the pin outlives its own
-    # subject and still READS as coverage — the failure mode this file calls out
-    # as "a vacuous assertion is worse than none".
+    # synthetic name still returns `['core']` from the PREFIX (measured
+    # `2026-11-10` on `_sel(["supabase/migrations/20261012000006_does_not_exist.sql"])`).
+    # Without this arm the pin outlives its own subject and still READS as
+    # coverage — the failure mode this file calls out as "a vacuous assertion is
+    # worse than none".
     assert (REPO / neighbour).is_file(), neighbour
     assert not cs.is_record_migration_path(neighbour), neighbour
     # "its ONLY claim" is MEASURED here, not asserted in prose: enumerating the
@@ -4982,8 +4984,9 @@ def test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family(
         rn,
     )
     # NON-VACUITY, proven by the suite rather than asserted in prose: with that one
-    # entry removed, the same selection drops to `surfaces: []` (n=84, the
-    # tier-1-only return). `select()` reads `CORE_ALSO` at call time, so the
+    # entry removed, the same selection drops to `surfaces: []` (`n=84` at
+    # `2026-11-10`, the tier-1-only return). `select()` reads `CORE_ALSO` at call
+    # time, so the
     # `monkeypatch` of the module global IS the deletion — the same mechanism the
     # #11728 review's mutation used.
     monkeypatch.setattr(
