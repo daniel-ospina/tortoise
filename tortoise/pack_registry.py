@@ -3532,9 +3532,18 @@ class PackRegistry:
         # `migrate_kinds` is a manual, opt-in normaliser (tortoise/migrate_kinds.py,
         # run by hand), never a precondition for a READ, so bare-kinded data is a
         # state the read path must serve rather than assume away.
+        # ⚠ SINGLE-SEGMENT only. `bare_inherits` maps a bare kind name to that
+        # kind's `ns:kind` forms, and the closure relies on "a value is never
+        # itself a key" to close in ONE hop. A multi-segment name would break
+        # that: an `equivalentTo` target is only required to CONTAIN ':'
+        # (`_validate`), so `x:synth:team` splits to the tail `synth:team` — which
+        # IS a key, for the real `synth:team` kind — and the closure would chain
+        # an unrelated kind into the bucket — measured on a head WITHOUT this
+        # guard, `expand_kind("team")` gained `synth:widget`. Those names stay in
+        # `expansions`, unchained.
         bare_to_full: dict[str, list[str]] = {}
         for full in expansions:
-            if ":" in full:
+            if full.count(":") == 1:
                 _ns, _kind = full.split(":", 1)
                 bare_to_full.setdefault(_kind, []).append(full)
         for bare, fulls in bare_to_full.items():
@@ -3544,11 +3553,17 @@ class PackRegistry:
                         expansions[bare].append(f)
             else:
                 expansions[bare] = [bare, *fulls]
-            # ⚠ ONE-DIRECTIONAL on purpose: the bare form INHERITS from its
-            # namespaced forms (see the closure pass), but a namespaced bucket
-            # does not gain the bare name. That asymmetry is pre-existing (#6146
-            # keeps the bare form additive without making `dev:code` read a
+            # ⚠ ONE-DIRECTIONAL on purpose: through THIS map the bare form
+            # INHERITS from its namespaced forms (see the closure pass), and the
+            # namespaced bucket gains nothing back. That asymmetry is pre-existing
+            # (#6146 keeps the bare form additive without making `dev:code` read a
             # `code` row) and is the negative control's anchor.
+            # ⚠ It is a property of THIS MAP, not of "namespaced" in general: a
+            # bare/namespaced pair that is ALSO recorded as an equivalence is
+            # symmetric through `equivalences` — the `core:` alias seed does that
+            # for every alias, and `LEGACY_KIND_ALIASES` for its pairs, which is
+            # why `expand_kind("dev:deployment")` carries the bare `deployment`
+            # while `expand_kind("dev:issue")` carries no bare `issue`.
             bare_inherits.setdefault(bare, set()).update(fulls)
 
         # Legacy aliases (LEGACY_KIND_ALIASES): a kind whose spelling moved
@@ -3594,15 +3609,16 @@ class PackRegistry:
         # alias seed above) is symmetric and is traversed inside BOTH, because
         # equivalent kinds have the same extension.
         #
-        # ⚠ Two DIFFERENT bare↔namespaced relations live here, and conflating
-        # them is what made an earlier version of this comment false:
-        #   * bare ↔ `core:` IS an equivalence — it is the alias seed above — so
-        #     `expand_kind("core:team")` DOES carry the bare `team`.
-        #   * bare ↔ PACK-namespaced is NOT. It is the ONE-DIRECTIONAL
-        #     `bare_inherits` relation seeded above: a bare bucket gains its
-        #     pack-namespaced forms (`ns:kind`), an `ns:` bucket does not gain the
-        #     bare name. That is why `expand_kind("issue")` carries `dev:issue`
-        #     while `expand_kind("dev:issue")` carries no bare `issue`.
+        # ⚠ bare↔namespaced is NOT one relation, and sorting them matters — an
+        # earlier version of this comment flattened them and was false:
+        #   * bare ↔ `core:` IS an equivalence (the alias seed above), so
+        #     `expand_kind("core:team")` carries the bare `team`.
+        #   * bare ↔ PACK-namespaced is TWO things at once: the one-directional
+        #     `bare_inherits` map, AND an equivalence for the few pairs
+        #     `LEGACY_KIND_ALIASES` records. So `expand_kind("dev:deployment")`
+        #     carries the bare `deployment` through `equivalences`, while
+        #     `expand_kind("dev:issue")` carries no bare `issue` because that pair
+        #     is not one of them.
         #
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
@@ -3635,17 +3651,12 @@ class PackRegistry:
             # `test_core_prefixed_and_bare_spellings_are_one_kind` states they
             # are one kind.
             #
-            # ONE round is the whole closure, and the reason is an invariant of
-            # `bare_inherits`' CONSTRUCTION, not of this loop: it is filled from
-            # `bare_to_full`, whose keys are the part of a `ns:kind` name after
-            # the `:` and whose values are the full `ns:kind` names themselves.
-            # Neither a kind name nor a NAMESPACE may contain `:` (`_validate`
-            # refuses both, at `:1994` and `:2035`), so a full name carries exactly
-            # one colon, every key is colon-free and every value keeps its colon:
-            # a value is never itself a key, and no chain can exceed one hop. The
-            # `list(...)` snapshot below is deliberate for that reason — but a
-            # change that let `bare_inherits` carry key-shaped values must turn
-            # this into a worklist, or it will silently under-expand.
+            # `bare_inherits` is keyed by the BARE tail of a single-segment
+            # `ns:kind` name and valued by that full name — guaranteed by the
+            # `bare_to_full` guard above, not assumed here. So a key never contains
+            # ':' and a value always does: a value is never itself a key, and ONE
+            # round is the whole closure. That is a property of the map's
+            # CONSTRUCTION, and the guard is what keeps it true.
             for peer in list(sources):
                 sources |= bare_inherits.get(peer, set())
             for peer in sources:

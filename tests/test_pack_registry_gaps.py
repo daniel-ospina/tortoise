@@ -1895,6 +1895,47 @@ class TestCoreHierarchy:
             f"registered under an aliased core name: {sorted(bare - core)}")
         assert core <= bare, sorted(core - bare)
 
+    def test_a_multi_segment_equivalent_to_target_does_not_chain_into_a_bucket(
+            self, tmp_path):
+        """A colon-bearing `equivalentTo` target must not reach a bucket's closure.
+
+        The failure this prevents is a silent WRONG-WIDE read. `bare_inherits` is
+        keyed by the tail of a single-segment `ns:kind` name, and the closure
+        closes in one hop because a value is never itself a key. A multi-segment
+        target breaks that: `x:synth:team` has tail `synth:team`, which IS a key
+        (for the real `synth:team` kind), so the closure chained `synth:widget` —
+        a kind in no relation to `team` — into `expand_kind("team")` and
+        `expand_kind("core:team")`, i.e. into the read path's `IN` clause.
+
+        `equivalentTo` only has to CONTAIN ':' (an unresolved target is a warning
+        and the pack stays loaded), so this shape is accepted by the registry.
+        `bare_to_full` therefore admits single-segment names only; the rest stay
+        in `expansions` unchained.
+        """
+        (tmp_path / "synth").mkdir()
+        (tmp_path / "synth" / "manifest.yaml").write_text(
+            "name: Synthetic\n"
+            "namespace: synth\n"
+            "version: 1.0.0\n"
+            "tier: free\n"
+            "ontology:\n"
+            "  extends: core\n"
+            "  objectKinds: [team, widget]\n"
+            "  equivalentTo:\n"
+            "    widget: [x:synth:team]\n"
+        )
+        registry = PackRegistry(str(tmp_path))
+        assert registry.load_all() == 1, registry.errors
+
+        for kind in ("team", "core:team"):
+            bucket = set(registry.expand_kind(kind))
+            assert "synth:widget" not in bucket, (
+                f"an unrelated kind chained into the `{kind}` bucket through a "
+                f"multi-segment equivalentTo target: {sorted(bucket)}")
+            assert "x:synth:team" not in bucket, sorted(bucket)
+            # …and the round-trip this whole class exists for still holds.
+            assert "synth:team" in bucket, sorted(bucket)
+
     def test_get_subclasses_folds_the_core_prefix_like_expand_kind(self, shipped):
         """`get_subclasses` answers the `core:` spelling too, not a wrong-empty.
 
