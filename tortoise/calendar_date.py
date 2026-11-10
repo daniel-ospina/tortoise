@@ -419,8 +419,8 @@ def _string_instant(s: str) -> datetime | None:
     d = _date_only_shape(s)
     if d is not None:
         return datetime(d.year, d.month, d.day, tzinfo=UTC)
-    # ⛔ The instant view must accept every WHOLE-VALUE family the day view
-    # dates (cycle 6, finding 3) — the compact / ISO-week date carrying a TIME.
+    # ⛔ The instant view must accept the whole-value families THIS ARM owns —
+    # the compact / ISO-week date carrying a TIME (cycle 6, finding 3).
     # ``_string_date`` carries this arm because ``origin/main``'s assembly
     # parser read the family, and this module's own docstring points an
     # ordering consumer here. Without it
@@ -436,7 +436,16 @@ def _string_instant(s: str) -> datetime | None:
     # instant view must NOT widen to it. An unreadable tail means the INSTANT is
     # unknown while the stated DAY is known; deriving an instant there would
     # fabricate one, which is the whole distinction this module exists to keep.
-    # So: whole-value families only, in both views.
+    # So: the INSTANT view takes whole-value families only; the DAY view takes
+    # those AND the tolerant prefix.
+    #
+    # ⚠ The claim is scoped to THIS arm, not universal: the compact /
+    # ISO-week date with an OFFSET and no time is whole-value and day-dated
+    # (:func:`_compact_date_offset`) yet still NOT orderable —
+    # ``_created_sort_key``'s length-and-separator gate needs a ``-``, ``T`` or
+    # ``/``, which ``20230520+05:00`` does not have. That gap predates #11646,
+    # is untouched here, and is named rather than left to be rediscovered as a
+    # violation of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

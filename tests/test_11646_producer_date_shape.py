@@ -667,17 +667,33 @@ def test_an_offset_with_fractional_seconds_reaches_the_utc_truncation():
     assert _display_bound(value, "valid_from", {"id": "p"}) == "2023-05-19"
 
 
-def test_the_instant_view_accepts_every_shape_the_day_view_dates():
+def test_the_instant_view_accepts_every_whole_value_shape_the_day_view_dates():
     """Cycle 6, finding 3. ``calendar_datetime`` is documented as the view an
-    ORDERING consumer wants, so a family the day view dates must not be
-    un-orderable there — otherwise a later consumer silently drops rows this
-    module says are dated."""
+    ORDERING consumer wants, so the whole-value families the day view dates must
+    not be un-orderable there — otherwise a later consumer silently drops rows
+    this module says are dated.
+
+    ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
+    day view dates a value whose TAIL is unreadable, and the instant view must
+    refuse it. A narrow "just add the prefix fallback for these shapes" change
+    left every other test green, so these assertions are what make that
+    fabrication impossible to land quietly (review of PR 11705).
+    """
     assert calendar_date("20230520T02:21:00Z") == date(2023, 5, 20)
     assert calendar_datetime("20230520T02:21:00Z") is not None
     assert calendar_date("2023-W43-2T11:00:00") == date(2023, 10, 24)
     assert calendar_datetime("2023-W43-2T11:00:00") is not None
     # a stated-but-impossible offset is still refused, in BOTH views
     assert calendar_datetime("2023/05/20T02:00:00+25:00") is None
+    # ⛔ the DAY is known, the INSTANT is not: the day view dates these and the
+    # instant view must keep refusing them. Fabricating UTC midnight here would
+    # invent an instant from text that says none — the class #11646 exists to end.
+    for unreadable_tail in ("2023-05-20 02:21 PDT",
+                            "2023/05/20 (Sat) 02:21 (approx)",
+                            "2023-05-20T24:00:00",
+                            "2023-05-20T+05:00"):
+        assert calendar_date(unreadable_tail) == date(2023, 5, 20), unreadable_tail
+        assert calendar_datetime(unreadable_tail) is None, unreadable_tail
 
 
 def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
@@ -692,8 +708,10 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     the pair on every host. Now the bound IS orderable, so a window mixing it
     with an ISO bound is refused or accepted depending on where the read runs.
 
-    Recorded, not endorsed: fixing it means revisiting the ``#3982`` ruling, so
-    it is escalated as a decision instead of changed here. What this pin buys is
+    Recorded, not endorsed: fixing it means either revisiting the ``#3982``
+    ruling or giving the producer's shape its own deterministic anchor — the
+    separate decision recorded on #11646 — so it is escalated as a decision
+    instead of changed here. What this pin buys is
     a red test the day the divergence MOVES, and an explicit statement of the
     three zones the record names.
 
@@ -728,6 +746,9 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     assert all("(0," in k for k, _ in observed.values()), observed
     # the epoch — and therefore the window verdict — is decided by the HOST
     assert len({k for k, _ in observed.values()}) == 3, observed
+    # ⚠ scoped: only a pair this CLOSE diverges. Bounds further apart than the
+    # reader's zone offset agree everywhere, so this is not "a mixed window is
+    # host-dependent" in general (review of PR 11705, finding 4).
     assert observed["UTC"][1] == "refused"
     assert observed["Asia/Kolkata"][1] == "accepted"
     assert observed["America/Los_Angeles"][1] == "refused"

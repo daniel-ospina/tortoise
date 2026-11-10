@@ -512,11 +512,19 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
     read in the READER's zone. #11646 made that shape ORDERABLE here for the
     first time — before it, the value bucketed as unparseable and this guard
-    skipped the pair on every host — so a window mixing it with an ISO bound is
-    now refused or accepted depending on where the read runs. That is the
-    recorded #3982 reading meeting a newly-orderable shape, not a new rule:
-    changing it is a REOPEN of #3982, so it is escalated as a decision rather
-    than fixed here. The divergence is PINNED —
+    skipped the pair on every host — so a mixed pair whose two bounds fall
+    within the reader's zone offset of each other CAN now be refused on one
+    host and accepted on another (measured: the pair
+    ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
+    ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
+    ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three). That is the
+    recorded #3982 reading meeting a newly-orderable shape, not a new rule.
+    Changing that reading is a REOPEN of #3982; giving the producer's shape its
+    own deterministic anchor instead is the SEPARATE decision recorded on
+    #11646 (it would make this guard deterministic without touching #3982's
+    dashed date-TIME reading, at the cost of a slash-vs-dashed asymmetry), and
+    is not a reopen. Either way it is escalated as a decision rather than fixed
+    here. The divergence is PINNED —
     ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``
     asserts the verdict at three zones, so a change that moves it reds before it
     can move silently.
