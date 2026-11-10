@@ -82,6 +82,17 @@ _NARROW_PATTERN = r"\(\w*:Document"
 #: §5 states.
 _NARROW_CLAIM = re.compile(r"still matches \*\*(\w+)\*\*")
 
+#: §5's narrow clause as ONE anchored span: the lead-in phrase, the pattern named in
+#: backticks, and the bold count word — all three in the same match. Binding them
+#: together is what stops a DECOY; pinning each on its own let two independent
+#: searches be satisfied by two different sentences. Measured before this shape
+#: existed: reword the clause's lead-in and leave an earlier copy of the phrase naming
+#: `\(\w*:Document`, and §5 could state a pattern that matches ZERO lines as the one
+#: that "still matches **six**" with the whole suite green (43 passed).
+_NARROW_CLAUSE = re.compile(
+    r"one narrow enough.*?`([^`]*)`\)\s*still matches \*\*(\w+)\*\*", re.DOTALL
+)
+
 #: The SAME two numbers restated in §5 as the quoted `git grep` output — a second
 #: statement of the measurement, inside the same sentence and outside
 #: `_LABEL_CLAIM`'s shape, so a hand-edit there could contradict the bold claim
@@ -1727,27 +1738,37 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "silently read past; keep one statement, or pin each one"
     )
     word = narrow_claim.group(1).lower()
-    # Pin the PATTERN the six is a count OF, and pin it EXCLUSIVELY: `section.count(...)
+    # Pin the PATTERN the six is a count OF, IN THE SAME SPAN as the six: `section.count(...)
     # == 1` passed a document that ADDED a second, looser pattern to the same clause
-    # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green) while
-    # the sentence then asserted that a pattern matching every line matches six.
-    clauses = re.findall(r"one narrow enough(.*?)still matches", section, re.DOTALL)
+    # (measured: `(`\\(\\w*:Document`, or as a bare `:Document`)` left 43 green), and
+    # pinning the phrase and the pattern in SEPARATE searches still passed a decoy — an
+    # earlier copy of the phrase bound the right pattern while the sentence carrying the
+    # six named one matching zero lines (measured: 43 passed). One anchored span fixes
+    # both: the phrase, the pattern and the bold word must come from the same sentence.
+    #
+    # This is also why the decoy family cannot come back through the count word: a decoy
+    # rich enough to satisfy this span (`one narrow enough … still matches **N**`) is a
+    # second `_NARROW_CLAIM`, and that arm already requires exactly one.
+    clauses = _NARROW_CLAUSE.findall(section)
     assert clauses, (
-        "§5's 'one narrow enough … still matches' clause is gone — re-measure it rather "
-        "than dropping it; the six is the count FOR the pattern named in that clause"
+        "§5's 'one narrow enough … `(pattern)` … still matches **word**' clause is gone "
+        "or was reworded — re-measure it rather than dropping it; the six is the count "
+        "FOR the pattern named in that clause"
     )
     assert len(clauses) == 1, (
-        f"§5 states the 'one narrow enough … still matches' clause {len(clauses)} "
+        f"§5 states the 'one narrow enough … still matches **…**' clause {len(clauses)} "
         "times inside the anchored section — `findall` binds the FIRST, so an earlier "
-        "copy naming the right pattern would let the clause under the six name a "
-        "different one; keep one clause, or pin each one"
+        "copy could carry the pattern while the clause under the six names a different "
+        "one; keep one clause, or pin each one"
     )
-    stated_patterns = re.findall(r"`([^`]*)`", clauses[0])
-    assert stated_patterns == [_NARROW_PATTERN], (
-        "§5's narrow clause must name exactly one pattern, `"
-        f"{_NARROW_PATTERN}`, and it names {stated_patterns!r} — the 'six' below is "
-        "the count FOR THAT PATTERN, so anything else (a looser pattern, or a second "
-        "one alongside it) states evidence for a measurement nothing takes"
+    stated_pattern, clause_word = clauses[0]
+    assert (stated_pattern, clause_word.lower()) == (_NARROW_PATTERN, word), (
+        "§5's narrow clause must name the pattern `"
+        f"{_NARROW_PATTERN}` and the count word {word!r} in the SAME sentence; it "
+        f"names {stated_pattern!r} / {clause_word!r} — the six is the count FOR THAT "
+        "PATTERN, so anything else (a looser pattern, a second one alongside it, or a "
+        "phrase copied from another sentence) states evidence for a measurement "
+        "nothing takes"
     )
     assert word in _COUNT_WORDS, (
         f"§5 states the narrow count as {word!r}, which is not a count word this pin "
