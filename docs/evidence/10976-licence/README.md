@@ -48,14 +48,45 @@ cache under its byte ceiling answers `CLEAN` with an empty licence.
 
 ## The measurement (falkordb 4.20.6, private lane container, `noeviction`)
 
-`before.log` / `after.log` in this directory are the captured runs; the two differ only
-in whether `assess()` applies the population bound.
+`before.log` / `after.log` in this directory are the captured runs, **both produced by the
+committed probe at ONE head** (`b58c26e3495c`), differing only in whether `assess()` applies
+the population bound:
 
-| | before (no population bound) | after |
+```bash
+export TORTOISE_DB_URI=<a throwaway lane container>
+uv run python docs/evidence/10976-licence/repro_licence.py --uri "$TORTOISE_DB_URI" \
+    --without-population-bound --out /tmp/before.json   # exit 4 — licence issued
+uv run python docs/evidence/10976-licence/repro_licence.py --uri "$TORTOISE_DB_URI" \
+    --out /tmp/after.json                                # exit 0 — no licence
+```
+
+⛔ **`before.log` was previously captured from PRE-FIX code, and that made this section's
+claim false once #11720 landed.** The pre-fix tree also predated #11720's `measured_at` /
+`age_seconds` / `max_age_seconds`, so the old `before.log` printed a four-key licence that
+no run of the committed probe could produce at this head, at the merge base, or on `main` —
+and "the two differ only in whether `assess()` applies the population bound" was not true —
+they differed in two ways. `--without-population-bound` re-captures the pre-fix arm at the
+SAME head, so the sentence is true again. What it does: it makes the population read answer
+the report's own claim, which is the state the pre-fix code was in **for this comparison**
+(no demotion from that arm). It does not assert the graph holds 20,000 turns — the log
+states 500 on its own line — and it leaves the freshness arms and the whole-graph check
+running, both of which still pass here exactly as pre-fix. The seam prints itself into the
+log (`population bound OFF (pre-fix arm)`) and into the artifact's `population_bound` field.
+
+**This is now also the cleanest evidence that the two staleness bounds are NOT redundant.**
+The report is stamped fresh, so `age_seconds` reads **0.12** — #11720's age bound does not
+fire, and cannot fire. Under the population bound alone the same fresh report still
+licenses **20,000** turns against a population of **500**: 40x. The sweep is what shrinks
+the population, and it runs inside the age bound's own window, so "fresh" and "oversized"
+are independent — which is why adopting this bound *in addition to* #11720's was argued on the
+issue rather than assumed.
+
+| | before (no population bound, #11720's age bound ACTIVE) | after |
 |---|---|---|
 | graph nodes (`MATCH (n) RETURN count(n)`) | 25,000 | 25,000 |
 | `turn` population (`is_episodic = true`) | **500** | **500** |
 | report claims (CLEAN, `proves=True`) | 20,000 | 20,000 |
+| report `age_seconds` at assess time | **0.12** | 0.12 |
 | **verdict** | **`PLAN`** | **`REFUSED`** |
 | **`plan["evictable"]`** | `[{population: turn, nodes: 20000}]` | `[]` |
 | licence ÷ population | **40x** | — |
@@ -123,7 +154,7 @@ gated individually by the executor's per-node record probe.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (134 tests in the file, 240 passed across the four
+`tests/test_cache_eviction_census.py` (135 tests in the file, 241 passed across the four
 eviction suites, 0 skipped — measured, not asserted: `uv run python tools/test_lane.py run
 -- tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →

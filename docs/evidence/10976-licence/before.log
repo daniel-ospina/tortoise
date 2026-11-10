@@ -1,9 +1,10 @@
-graph                          licence_probe_bcc5e956
+graph                          licence_probe_fa50b9f6
+population bound               OFF (pre-fix arm)
 MATCH (n) RETURN count(n)      25000
 turn population (is_episodic)  500
 stale report claims            20000 (CLEAN, proves=True)
-ceiling                        1000000 B declared (resident 5136648 B)
+ceiling                        1000000 B declared (resident 5193048 B)
 verdict                        PLAN
-licence                        [{'population': 'turn', 'nodes': 20000, 'instrument': 'tools/turn_parity_census.py', 'label': 'turn (population)'}]
+licence                        [{'population': 'turn', 'nodes': 20000, 'instrument': 'tools/turn_parity_census.py', 'label': 'turn (population)', 'measured_at': '2026-11-10T14:41:00.829457Z', 'age_seconds': 0.12313652038574219, 'max_age_seconds': 3600.0}]
 licence / population           40x
   · Point (25000 node(s)): cannot-answer: no parity instrument covers the derived label 'Point' as a population, so nothing proves the record serves these 25000 node(s)

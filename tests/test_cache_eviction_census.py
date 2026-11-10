@@ -2895,3 +2895,74 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
         "the inflated ceiling"
     )
     assert g.mutated == []
+
+
+# --------------------------------------------------------------------------- #
+# The evidence artifact — the two arms must come from ONE probe at ONE head.
+# --------------------------------------------------------------------------- #
+
+_EVIDENCE = ROOT / "docs" / "evidence" / "10976-licence"
+
+
+def _evidence_log(name: str) -> str:
+    path = _EVIDENCE / name
+    assert path.is_file(), f"{path} is missing — the licence bound's evidence is gone"
+    return path.read_text(encoding="utf-8")
+
+
+def test_the_two_evidence_arms_come_from_ONE_probe_and_differ_only_in_the_bound():
+    """Fails if `before.log` drifts back to being a run of DIFFERENT code.
+
+    Reachable, and it WAS the shipped state (PR #11709 review, P2): `before.log` was
+    captured from PRE-FIX code, which also predated #11720's `measured_at` /
+    `age_seconds` / `max_age_seconds` on the licence entry. So it printed a FOUR-key
+    licence that no run of the committed probe could produce at this head, at the merge
+    base, or on `main` — and the README's *"the two differ only in whether `assess()`
+    applies the population bound"* was false: they differed in two ways. A reader
+    checking the claim could not see that, which is why it is pinned rather than reworded.
+
+    Both arms are now captured by the committed probe at the same head via
+    `--without-population-bound`, so the pin asserts the three things that make the
+    claim checkable: each log DECLARES which arm it is, the arms differ in the VERDICT
+    and the licence, and the `before` licence still carries #11720's three freshness
+    keys — i.e. the age bound was ACTIVE and silent, so the difference really is the
+    population bound and not the age one.
+    """
+    before = _evidence_log("before.log")
+    after = _evidence_log("after.log")
+
+    assert "population bound               OFF (pre-fix arm)" in before, (
+        "before.log must declare the pre-fix arm; without that line a reader cannot tell "
+        f"which of the two bounds produced it:\n{before}"
+    )
+    assert "population bound               ON (this branch)" in after, (
+        f"after.log must declare the shipped arm:\n{after}"
+    )
+
+    # The arm difference is the VERDICT and the licence — nothing else.
+    assert "verdict                        PLAN" in before, before
+    assert "verdict                        REFUSED" in after, after
+    assert "licence                        none" in after, after
+    assert "'nodes': 20000" in before, (
+        f"the pre-fix arm must issue the 20,000-node licence:\n{before}"
+    )
+    assert "licence / population           40x" in before, before
+
+    # ⛔ THE DEFECT ITSELF: the `before` licence must carry the keys the code emits,
+    # including #11720's freshness fields. A four-key licence here means the log was
+    # produced by a tree that predates the sibling bound, so the two logs are not a
+    # controlled comparison of ONE thing.
+    for key in ("measured_at", "age_seconds", "max_age_seconds"):
+        assert key in before, (
+            f"before.log's licence omits '{key}' — it was not produced by the committed "
+            f"probe (whose `assess()` emits every licence key unconditionally), so the two "
+            f"logs do not come from one head and the README's 'differ only in the "
+            f"population bound' claim is false again:\n{before}"
+        )
+
+    # And the graph shape is identical on both sides, so neither arm measured a
+    # different population — the comparison isolates the BOUND.
+    for log in (before, after):
+        assert "MATCH (n) RETURN count(n)      25000" in log, log
+        assert "turn population (is_episodic)  500" in log, log
+        assert "stale report claims            20000 (CLEAN, proves=True)" in log, log

@@ -34,6 +34,24 @@ about the guard this file is evidence for.
     uv run python docs/evidence/10976-licence/repro_licence.py \
         --uri "$TORTOISE_DB_URI" --out /tmp/licence.json
 
+BOTH ARMS AT ONE HEAD (`--without-population-bound`)
+---------------------------------------------------
+`before.log` was first captured by running PRE-FIX code, which is why it printed a licence
+of four keys: the pre-fix tree also predated #11720's `measured_at` / `age_seconds` /
+`max_age_seconds`. Once #11720 landed on `main` and this branch was rebased onto it, those
+two logs could no longer have come from one head, and the README's "the two differ only in
+whether `assess()` applies the population bound" became false — a claim/evidence mismatch
+(PR #11709 review, P2).
+
+`--without-population-bound` re-captures the pre-fix arm AT THIS HEAD, so the claim is true
+again and both logs are produced by one probe at one commit. It makes the population read
+answer the report's OWN claim (`CLAIM`), which is precisely the state the pre-fix code was
+in for this comparison: no demotion from that arm. It is NOT a claim that the graph holds
+20,000 turns — the graph holds 500, as the log states on its own line — and it does not
+touch the whole-graph check, which still passes here (20,000 < 25,000) exactly as it did
+pre-fix. The seam is named, printed in the log, and recorded in the JSON artifact's
+`population_bound` field, so no reader can mistake which arm they are holding.
+
 Exit codes, keyed on the LICENCE: 0 no licence was issued (the bound fired), 4 a
 licence WAS issued (the defect is still present). ⚠️ Not 2 — argparse exits 2 on a usage error, and a
 mistyped command must not read as the defect arm.
@@ -97,7 +115,8 @@ def _seed(graph) -> None:
         )
 
 
-def run(uri: str, *, out: Path | None = None) -> dict:
+def run(uri: str, *, out: Path | None = None,
+        population_bound: bool = True) -> dict:
     from falkordb import FalkorDB
 
     endpoint = resolve_db_endpoint(uri)
@@ -137,12 +156,32 @@ def run(uri: str, *, out: Path | None = None) -> dict:
         }), encoding="utf-8")
         payload["report_claim"] = CLAIM
         payload["report"] = str(report_path)
+        payload["population_bound"] = population_bound
 
         report = load_parity_report(str(report_path), graph_name=name)
         payload["report_proves"] = report.proves()
 
-        assessment = assess(db.connection, graph, name, ceiling_bytes=CEILING,
-                            parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+        # ⛔ THE PRE-FIX ARM, at THIS head. Patching the module global is deliberate and
+        # is the only way the two logs can come from one commit: `assess()` resolves
+        # `population_resident_count` from its own module globals at call time, so
+        # answering `CLAIM` here reproduces exactly the pre-fix state for this comparison
+        # — the bound cannot fire — while the freshness arms (#11720) and the whole-graph
+        # check still run unmodified. Unregistering the population instead would NOT
+        # reproduce it: an unregistered population is a REFUSAL (R3), a different behaviour
+        # that did not exist pre-fix.
+        original_count = None
+        if not population_bound:
+            import tortoise.cache_eviction as _ce
+
+            original_count = _ce.population_resident_count
+            _ce.population_resident_count = (
+                lambda _graph, _population: CLAIM)
+        try:
+            assessment = assess(db.connection, graph, name, ceiling_bytes=CEILING,
+                                parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+        finally:
+            if original_count is not None:
+                _ce.population_resident_count = original_count
         payload["verdict"] = assessment.verdict
         payload["evictable"] = assessment.plan.get("evictable", [])
         payload["licence_nodes"] = [
@@ -172,10 +211,20 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--uri", required=True,
                         help="a throwaway FalkorDB URI (tools/test_lane.py uri prints one)")
     parser.add_argument("--out", type=Path, help="write the full JSON artifact here")
+    parser.add_argument(
+        "--without-population-bound", action="store_false",
+        dest="population_bound", default=True,
+        help="capture the PRE-FIX arm at this head: make the population read answer the "
+             "report's own claim, so the population bound cannot fire. Records "
+             "population_bound=false in the artifact. The whole-graph check and the "
+             "freshness arms (#11720) still run — this reproduces what the pre-fix code "
+             "did for THIS comparison, it does not disable the guard's other bounds.")
     args = parser.parse_args(argv)
 
-    payload = run(args.uri, out=args.out)
+    payload = run(args.uri, out=args.out, population_bound=args.population_bound)
     print(f"graph                          {payload['graph']}")
+    print(f"population bound               "
+          f"{'ON (this branch)' if payload['population_bound'] else 'OFF (pre-fix arm)'}")
     print(f"MATCH (n) RETURN count(n)      {payload['graph_nodes_total']}")
     print(f"turn population (is_episodic)  {payload['turn_population_resident']}")
     print(f"stale report claims            {payload['report_claim']} "

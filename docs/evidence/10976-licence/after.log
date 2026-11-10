@@ -1,8 +1,9 @@
-graph                          licence_probe_31f0b3a8
+graph                          licence_probe_db8b4b6b
+population bound               ON (this branch)
 MATCH (n) RETURN count(n)      25000
 turn population (is_episodic)  500
 stale report claims            20000 (CLEAN, proves=True)
-ceiling                        1000000 B declared (resident 5136984 B)
+ceiling                        1000000 B declared (resident 5193048 B)
 verdict                        REFUSED
 licence                        none
   · Point (25000 node(s)): cannot-answer: no parity instrument covers the derived label 'Point' as a population, so nothing proves the record serves these 25000 node(s)
