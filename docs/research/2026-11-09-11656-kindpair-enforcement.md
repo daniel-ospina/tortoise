@@ -180,7 +180,7 @@ failure class.
 
 ⚠️ **There are TWO folds, not one, and the second is the direct door's.** `create_direct_edge`'s writes are
 replayed by the **`DirectEdgeCreated` fold** in `rebuild_all`'s pass-2b (`projection/__init__.py`, fold from
-`:16955`, edge MERGE at `:17109`, *"mirroring create_direct_edge byte-for-byte on the edge shape"*). It is not
+`:16956`, edge MERGE at `:17110`, *"mirroring create_direct_edge byte-for-byte on the edge shape"*). It is not
 a corner case: its records come from **two** producers, and the predicate is in a different key for each —
 
 - the **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py:12079`) journals `edge_type=rel`

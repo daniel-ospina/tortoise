@@ -82,7 +82,7 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
 6. `projection/__init__.py`, the **`DirectEdgeCreated` replay fold** (`rebuild_all` pass-2b, fold starts
-   `:16955`; it reads `etype = ev.get("edge_type")` at `:17027` and MERGEs it at `:17109`, *"mirroring
+   `:16956`; it reads `etype = ev.get("edge_type")` at `:17028` and MERGEs it at `:17110`, *"mirroring
    create_direct_edge byte-for-byte on the edge shape"*) — the second fold, for the **other** label door.
    ⛔ **Where the predicate lives in a record at this fold is PRODUCER-DEPENDENT, and getting it wrong
    makes the gate a no-op:**
@@ -199,7 +199,7 @@ alone is green over exactly the defect this paragraph forbids. Pins 15 and 15b t
 equality AND edge-presence equality** (the committed edge is still written); pin 18 cannot cover it either,
 because a fold that classifies then skips still "routes through" the rule.
 
-Endpoint kinds are normalised with **`status_folds.kind_forms_for` ∪ `PackRegistry.expand_kind`** — neither is
+Endpoint kinds are normalised with **`StatusFoldIndex.kind_forms_for` ∪ `PackRegistry.expand_kind`** — neither is
 a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issue`; `expand_kind` has
 `pm:issue` but not `issue`), both sides case-folded because kinds are stored **verbatim**
 (`domain_validators.py:562`).
@@ -342,10 +342,10 @@ the declared kinds; a read-side census reports the pre-existing population.
 |---|---|---|
 | `sdk.create_operator` / `sdk.create_direct_edge` | write path | §4 |
 | `projection/edges.py` `create_edge` / `create_about_edge` / `_create_edges` | write path | §4 (pin 15) |
-| `projection/__init__.py` `DirectEdgeCreated` fold (pass-2b, `:16955`/`:17109`) | write path | §4 (pin 15b) — the second replay fold |
+| `projection/__init__.py` `DirectEdgeCreated` fold (pass-2b, `:16956`/`:17110`) | write path | §4 (pin 15b) — the second replay fold |
 | `pack_state.resolved_pack_set_for_graph` | DB read | reused — its `graph_kind_namespaces` leg is **O(nodes)**; **must not** run per write (derive from the `:PackInstall` leg, or cache keyed on the data leg) |
 | `enforcement.resolve_enforcement` | decision seam | fixed in §5.4 |
-| `pack_registry.expand_kind` / `status_folds.kind_forms_for` | vocabulary | reused, union |
+| `pack_registry.expand_kind` / `StatusFoldIndex.kind_forms_for` (via `reg.status_fold_index`) | vocabulary | reused, union |
 | `extractor_v2.build_master_list` / `value_extractor._relation_endpoint_refs` | prompt guidance | §5.5 |
 | `docs/EXPANSION_PACKS.md` §"Declaring a relation" | docs | state that a declaration now **binds**, and what `unbound`/`unknown_kind` mean |
 | `docs/00_index.md` §5 | docs ledger | add this scope + the research brief |
