@@ -1,7 +1,7 @@
 {
  "_generated_by": "gen_placement_table/2",
  "_source": "docs/epics/2026-10-10-7879-postgres-record/02-identity-and-placement.md",
- "_source_sha256": "5cb869caec87591c3a08a3085977551514cef94fcbfc11c5e19677b1eb9c19f0",
+ "_source_sha256": "7b2c02a96c59e98d66656656bc8f660a5b8072139c100de08f154eb7628aa552",
  "_row_count": 221,
  "_note": "GENERATED — do not hand-edit. Regenerate with `uv run python tools/gen_placement_table.py`; the doc named in _source is the one declaration (#10663).",
  "rows": [
