@@ -186,7 +186,7 @@ cost of the wrong assumption compounds per lane.
 |---|---|---|---|---|
 | A-a | the `live-v4` baseline in §Feature is accurate | **high** | owner-measured 2026-11-04, per-kind breakdowns | C1's extended census re-derives it |
 | A-b | the packs *do* declare part-whole object relations; schema + writers admit them | **high** | tree: `packs/dev/manifest.yaml:142,148,193`; `projection/edges.py:621-630`; ONTOLOGY §3.7 | C3 |
-| A-c | the gap is the **declaration → consumer** seam, not a missing writer | **high** | tree: zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only (`pack_registry.py:1824-1838`) | C3 |
+| A-c | the gap is the **declaration → consumer** seam, not a missing writer | **high** | tree: zero `create_edge` in `extractor_v2.py`; `hierarchies` validated-only (`pack_registry.py:2341-2355`) | C3 |
 | A-d | a corpus reachable **through the door the fleet writes through** exists or is capturable | **medium** | ⚠️ **Transports, not lanes.** The committed arm *is* the **v2 lane** — `llm:deepseek-direct` is what `sdk.py:14203-14204` documents as *"the v2 path reports `extraction_mode: llm:<route>`"*, and `probes/capstone_measure.py` drives `TortoiseSDK.capture_session`. What **no committed capstone arm** exercises is the **hosted transport** the fleet's sessions actually use — `POST /v1/sessions` (`tortoise/pi-hooks/tortoise-capture.ts:938`, `hosted_api.py:16839`), with its quota/auth gates, and the registered corpus is a **fixture** (`tests/eval/write_path`, `pinned_by: fixtures_hash`). Also: **E1b's deterministic `m2` control has no committed artifact**. | C1 + C2 (the open decision is *which transport*, not *which lane*) |
 | A-e | `TAGGED edges: 0` is a gap | **rejected** | no extraction path writes `tags`; `_sync_tags` is the only writer | no child; recorded so it never becomes a target |
 | A-f | E1–E5 need a fresh instrument | **rejected** | `#9075` registration + `probes/capstone_measure.py` + verdict gate, all committed | C1 extends it |
@@ -233,7 +233,7 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
    > written — a later stage resolving a fork this stage opened is the pipeline working, not a contradiction;
    > read the ruling, not the fork.
 2. **ASK — §13.8 Q1**, to-graph connection by model or mechanically: recorded **OPEN**
-   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:1818`) while **D6 stands** (`:1200`, `:977`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
+   (`EXTRACTOR-V4-ARCHITECTURE.md:2085` — under §13.8's heading at `:2057` — and `:1818`) while **D6 stands** (`:1400`, `:1095`). **C5 measures conformance to D6** — the two connection sets are `#10999` (Job 1) and `#10998` (Job 2); C5 builds neither.
 3. **`#9736`** — E3's denominator. **CLOSED 2026-11-04T15:37Z** *before* this head; its amendment landed
    (`8c1151426`) and E3 is still RED at 157/397 because 193 of 354 Points cannot carry an anchor. Its
    closure leaves two owner-gated lines owed. `blocker-states.json` still says OPEN — a stale pointer of

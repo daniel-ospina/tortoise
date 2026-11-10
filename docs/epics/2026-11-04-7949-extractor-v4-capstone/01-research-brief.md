@@ -43,7 +43,7 @@ argument; it was re-run cleanly and is one of the five counted above. A quoting 
 that failed to run.)
 
 **Adoption gate (Step 5.6):** `owner question` for the cross-batch mechanism (§13.8 Q1) — the field
-converges on a **tiered** pipeline, but D6 (`EXTRACTOR-V4-ARCHITECTURE.md:1200`) records "both sets
+converges on a **tiered** pipeline, but D6 (`EXTRACTOR-V4-ARCHITECTURE.md:1400`) records "both sets
 model-proposed" as the decision that stands, and a converging standard cannot override a recorded decision;
 the finding is therefore **evidence for the reopen**, which is what §Cross-Phase Contradictions states.
 

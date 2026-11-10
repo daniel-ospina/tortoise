@@ -234,7 +234,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | subjects + 4 families + 2 readers |
 | `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | bindable subject slots |
 | `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | ≥5 slots · *constructibility* |
-| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and the checker refuses a numeric threshold on it (`capstone_preregistration_check.py:4011-4020`). The *rule* is what the verdict reads; the cell records that the bar is a rule | families non-zero **and** readers non-empty |
+| `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule> — decided by #<NNNN>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and `capstone_preregistration_check.py:3963-3968` refuses the cell I first wrote here because it names no `#NNNN` (*"a registered non-bar must state who decides it"*; `OWNER_DECISION` at `:563`). The separate reverse arm (`:4011-4020`) refuses a comparator on a pinned non-bar. The *rule* is what the verdict reads; the cell records that the bar is a rule **and who decided it** | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
 | floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | `a5_slots: 5` |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
@@ -274,7 +274,7 @@ nothing measures any more, which is the exact class of stale flag D-S4 exists to
 ⛔ **P1 from the substep-8 gate: the new floor keys must land in BOTH homes or C1's first commit is a hard red.** The
 checker fails closed on any record `denominator_floors` key with **no** counterpart in
 `PRE-REGISTRATION.md`'s fenced `preregistration-pins` block — *"the record may not invent a REFUSED boundary the
-document does not state"*. **That fence does not hold five keys; it holds fourteen** (`PRE-REGISTRATION.md:679`: four
+document does not state"*. **That fence does not hold five keys; it holds fourteen** (`PRE-REGISTRATION.md:679`: **five**
 E-keys at §3.6 plus **nine** A-row floors at §3.7) — an earlier revision of this paragraph said "exactly the five
 E-keys" and was simply wrong about the file. So the A-floors go into **the record's `denominator_floors` AND the
 document's `denominator_floors:` block, with `document_sha256` re-cut, in the same commit**. Without that clause,
@@ -283,7 +283,7 @@ pass on three objects"* returns.
 
 ⚠️ **Three of the five proposed keys are NEW and two already exist — the amendment is a rename, not an append.** At
 this head the record holds `a1_objects`, `a2_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points`,
-`a5_actors`, plus the four E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage`. So:
+`a5_actors`, plus the **five** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (5 + 9 = 14). So:
 `a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs`,
 `a4_labelled_nodes` and `a5_slots` are **new keys**; and `a4_typed_statements` must be **removed**, not left beside
 its replacement.
@@ -367,7 +367,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7) while the enum is `E1…E5` (5), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7) while the enum was `E1…E5` (5) when this section was first written and is now `CRITERIA + A_CRITERIA` (`capstone_verdict_check.py:144-145`, tested at `:920-922`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -416,11 +416,11 @@ load-bearing rather than decorative:
   `UNMEASURED(...)` is **refused** (*"drop it from `REGISTERED_NON_BAR_ROWS` or restore `UNMEASURED(...)`"*). So
   writing A4's §4.1 threshold cell as a comparator does not register a bar; it reds the gate.
 - `:376` — a module-level `assert not (REGISTERED_NON_BAR_ROWS & set(REQUIRED_CRITERIA))`. Adding A4 to
-  `REQUIRED_CRITERIA` (which the line above *does* move) fires **at import**, erroring the module and every test
+  `REQUIRED_CRITERIA` (which the note below says does **not** move) fires **at import**, erroring the module and every test
   that imports it — not reporting a finding.
 
 **A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
-2026-11-09 — relayed into §2 of this plan and `02-scope.md:5`/`:79-81`, and recorded on this PR — sets A4's bar as
+2026-11-09 — relayed into `02-scope.md:79-81`, and recorded on this PR — sets A4's bar as
 *"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
 reverse that ruling, which is a reopen, not a plan edit.
 
@@ -597,8 +597,8 @@ core**. So:
 
 | path | derivation | where |
 |---|---|---|
-| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:22253` |
-| **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader at `pack_registry.py:534` |
+| **operator / label path** | ✅ **already derived** from the packs: `declared \|= {r.get("predicate") for r in reg.list_relations()}` | `tortoise/sdk.py:23189` → `pack_registry.py:609` (`declared_relation_predicates()`) |
+| **structural path** | ⛔ **a static literal** — and it is **1 of FIVE declarations in one file**, and **not the one the verdict reads**: `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** (the union), while `create_edge` gates on `_VALID_EDGE_PREDICATES` | `projection/edges.py:621` (`_VALID_EDGE_PREDICATES`) · `:639` (`_VALID_ABOUT_EDGE_PREDICATES`) · `:655` (`STRUCTURAL_WRITE_PREDICATES`) · `:54` (`DERIVABLE_STRUCTURAL_RELS`) · `:1129` (`structural_edge_carrier`) · the reader `from .projection.edges import STRUCTURAL_WRITE_PREDICATES` at `pack_registry.py:723` (used `:729`) |
 | **per-graph gating** | ✅ **the resolver exists and is THREE-VALUED** — `pack_state.graph_installed_namespaces(sdk, *, graph_name=None)`: `None` ⇒ no `:PackInstall` records ⇒ **catalog union**; a `frozenset` ⇒ recorded ∪ already-in-data; an **empty** frozenset ⇒ a configured graph whose set is deliberately empty (`#2728`), where the union fallback **must not** apply. The SDK v2 master's write gate stays ungated (`#5202`) | `tortoise/pack_state.py:1170`; caveat in `docs/EXPANSION_PACKS.md` (`#2714`/`#2728`) |
 
 ⛔⛔ **P0 from the substep-8 `duplication-architecture` pass: a derivation on `_VALID_EDGE_PREDICATES` alone would be
@@ -607,7 +607,7 @@ wrong three ways.**
 1. **It is not the set the verdict reads.** `relation_write_paths` reads **`STRUCTURAL_WRITE_PREDICATES`** — the
    union — and its own comment says a predicate added or removed *"THERE moves this verdict with it"*. Deriving
    the literal instead leaves **writer accepts / verdict refuses**, silently (the verdict never raises).
-   ⚠️ This exact defect was already fixed once at another layer: `pack_registry.py:500-509` records that reading
+   ⚠️ This exact defect was already fixed once at another layer: the `#8285` review P1 at `pack_registry.py:667-669` / `:719-726` records that reading
    *"only `_VALID_EDGE_PREDICATES`"* under-reported `aboutPoint`/`extractedFrom` as unwritable — **#8285 review P1**.
 2. **A derived predicate must carry THREE facts, not one name**: (i) is it admitted by `core ∪ installed_packs`;
    (ii) **which verb** accepts it (`create_edge` / `create_about_edge` / `ingest`'s `extractedFrom` exemption);
@@ -686,7 +686,7 @@ nor the replay path. **The retry contract is the door's; the plan declares it, i
 
 ## 6 · Interfaces (contract-first)
 
-**Ten contracts** to freeze before implementation (I1, I2, I3, I4a, I4b, I5, I6, I7, I8 and **I9** — and **I10**,
+**Eleven contracts** to freeze before implementation — I1, I2, I3, I4a, I4b, I5, I6, I7, I8, **I9**, **I10** —
 the derived-vocabulary shape §5.3's C10 needs). Each names its consumers, so a change is visibly breaking. ⚠️
 *Corrected twice: the first version said "six" over a nine-row table and left I6 after I8; the second said "nine"
 over the eleven-row table below and counted I9 as the tenth while omitting I10 altogether.*
@@ -899,13 +899,13 @@ pack content. `#11083` says so explicitly and this plan adopts that reading.
 | R1 | **quota** (`#10976`) blocks every A-row | **high** (already at cap) | epic cannot close | `BLOCKED(402)` state; blocking precondition named; the epic reports rather than fakes |
 | R2 | **gold fitted to the query** by the same lane | medium | A1's headline claim is void | sealed + hash-pinned + **labeller ≠ rollup author**, checked (I3) |
 | R3 | **non-determinism** (D6) makes "green" unreproducible | high | a green run that cannot be re-derived | repeat policy + disagreement-vs-policy = failing run |
-| R4 | **enum drift** — an A-row the verdict gate refuses *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
-| R5 | **CI bloat** — nine children each adding a merge-gating test | medium | the suite the owner already called expensive | #11454's tier rule; **Tier-E marker required**; ~20 s recovered |
+| R4 | **enum drift** — an A-row the verdict gate refuses (`:920-922` tests `RECOGNISED_CRITERIA`) *(the LOUD half; the silent half is R8)* — ⚠️ **and a SECOND bundle, `5087-hypothesis`, shares `capstone-preregistration/v1` and is invoked in the same CI step**, so a schema rule written unbundled reds six sibling criteria | medium | the row cannot land at all | derive the enum (4.4) + CI pin; **I1's field set is bundle-scoped and `5087-hypothesis` is named as a consumer** |
+| R5 | **CI bloat** — ten children each adding a merge-gating test | medium | the suite the owner already called expensive | #11454's tier rule; **Tier-E marker required**; ~20 s recovered |
 | R6 | **stale copies** — a claim fixed in a summary, stale in its copies | **high** (hit 3× in this lane alone) | a green claim beside a refuted copy | one vocabulary (`I4`); the repo's existing double-copy pins |
 | R7 | **mechanism dependency** — `#11001`/`#10997`/`#10998`/`#10999` slip | medium | A1/A2/A3 unmeasurable | `blocked-by` by id, stated per child; the epic never builds them (except C4's argued half) |
-| **R8** | ⛔ **A-rows registered but NEVER EMITTED** — the silent P0 this plan's own §4.4/§8.5-F2 found, and which R4 (loud enum refusal) does not cover: `capstone_run.py:685`/`:748` and `capstone_measure.py:242` iterate a literal `("E1"…"E5")`, so an A-row is never emitted **while V2's "table is 5 rows" still passes** | **high** | **the epic closes 5/5 having measured no A-row** — the exact failure class it exists to prevent | derive all three row lists from `criteria[].id` **plus a sub-second source pin: "no literal E-row tuple under `docs/evidence/7949-capstone/probes/`"** — the three CI pins C1 was granted do **not** assert this |
+| **R8** | ⛔ **A-rows registered but NEVER EMITTED** — the silent P0 this plan's own §4.4/§8.5-F2 found, and which R4 (loud enum refusal) does not cover: `probes/capstone_run.py:687`/`:750` and `probes/capstone_measure.py:244` iterate a literal `("E1"…"E5")`, so an A-row is never emitted **while V2's "table is 5 rows" still passes** | **high** | **the epic closes 5/5 having measured no A-row** — the exact failure class it exists to prevent | derive all three row lists from `criteria[].id` **plus a sub-second source pin: "no literal E-row tuple under `docs/evidence/7949-capstone/probes/`"** — the three CI pins C1 was granted do **not** assert this |
 | **R9** | the fixture lane's **G1 refuses the committed record** (F1) | high | six E-rows unproducible | §4.2's token dispatch + the `CROSS_CHECKED_CORPUS_KEYS` companion (C1/C2) |
-| **R10** | the new Tier-E job **joins no runner register** (F5) | medium | a non-gating runner nothing can see; "Tier E" names three populations | C2 owns the register entry; `03-test-design.md` §5 amended |
+| **R10** | the new Tier-E job **joins no runner register** (F5) | medium | a non-gating runner nothing can see; "Tier E" names three populations | C2 owns the register entry. ⚠️ **Not yet mitigated in the tree**: §5.2a asks `03-test-design.md` to name the three Tier-E *populations*, and that file's §5 still names only the three *tiers* — so this is an owed amendment, not a landed one |
 | **R11** | ⛔ **the structural allowlist is a static literal** (`_VALID_EDGE_PREDICATES`), so a pack-declared object relation is rejected by `create_edge` and can only ride as an IMPL label — the object layer therefore cannot be expanded by a pack, which is the "map of the business" gap | **certain** (measured) | the epic goes green on hierarchy and the map claim stays unproven | **owner ruling recorded (§5.3a): the write vocabulary is DERIVED per graph from `core ∪ installed packs`** — **C10** owns the derivation, on the existing `list_relations()` + `:PackInstall` machinery, not a new one |
 
 ### 8.3 Improvement opportunities (advisory, recorded not adopted)
@@ -927,7 +927,7 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 | # | finding | verdict | disposition — folded into |
 |---|---|---|---|
 | **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py:1184` needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
-| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`capstone_run.py:681`, `:748`, `capstone_measure.py:242`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
+| **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:687`, `:750`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
 | **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` pointed at the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `:17288-17297` / `:17761` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
 | **F5** | **P2 — §5.2a's new job is a fourth non-gating runner joining no register**, and "Tier E" then names three unreconciled populations (`on_demand:` test files · script-driven runs · the new job) that `leg_coverage_issues()` cannot all see | `unify-contract-keep-drivers` | **§5.2a**: C2 owns the **register entry** (`config/ci-surfaces.yml` `on_demand:` + `docs/ci/affected-test-selection.md`); **`03-test-design.md` §5 must name all three populations** |
