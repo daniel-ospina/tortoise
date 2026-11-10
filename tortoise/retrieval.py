@@ -2507,7 +2507,8 @@ def _session_admission_key(
     does): a TRUTHY non-``str`` snake id
     (``session_id: 5`` used to key the int ``5``, and THREE callers then
     raised ``AttributeError`` on ``.startswith``: ``seeded_sessions``,
-    ``coverage_loop.coverage_gap`` (``coverage_loop.py``:488) and
+    ``coverage_loop.coverage_gap`` (whose ``.startswith("idx:")`` filter lives
+    in its ``win_sessions`` comprehension) and
     ``reader_window_displacement`` (its two ``.startswith("idx:")`` set
     comprehensions — cite them by symbol, not by line: an earlier revision of
     this docstring named line numbers that a later docstring edit moved); the

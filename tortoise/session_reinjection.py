@@ -432,8 +432,11 @@ def _merge_key(value: object) -> str:
     ``lme_session_index``): ``seeded_sessions`` drops every seed BEFORE any
     fetch (``[]`` — there is nothing left to collapse into a bucket), and
     ``reinjection_merge_order`` drops the groups too, returning the base pool's
-    own order. Pre-#11382 those keys matched and spliced, so the direction of
-    this change on that path is a DROP, not a fusion — and
+    own order. Pre-#11382 the two halves differed: ``seeded_sessions`` RAISED
+    ``AttributeError`` on such a key (it reaches ``.startswith`` through
+    ``_is_real_session_id``) while ``reinjection_merge_order`` matched and
+    spliced it, so the pair never "worked" together — the direction of this
+    change on that path is a DROP, not a fusion — and
     ``test_a_non_str_custom_key_is_dropped_not_stringified_11382`` pins it,
     because the stringifying alternative (``str(5)`` → a session literally
     named ``"5"``, which CAN fuse with a real one) passes every other test.

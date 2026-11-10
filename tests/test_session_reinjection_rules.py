@@ -2876,3 +2876,39 @@ def test_a_padded_phantom_snake_id_converges_and_goes_unseeded_11382():
     # ... and the loss that follows from it, on both spellings
     for spell in ("session_id", "sessionId"):
         assert seeded_sessions([{"id": "p1", spell: " idx:3 "}]) == [], spell
+
+
+def test_two_raw_spellings_of_one_session_both_deliver_11382():
+    """#11382: the merge's ``groups_in`` UNION is what makes "two raw spellings
+    of ONE session arrive as ONE group" true — and it is an arm of its own.
+
+    ``source_session_chunk_pass`` now emits one normalised key per group, so a
+    duplicate can only come from a BESPOKE caller that builds ``added_by_session``
+    itself. Measured on a copy with the union replaced by assignment
+    (``groups_in[sid] = list(rows or [])``): the whole 851-test seam batch stays
+    GREEN, and ``t1`` is silently LOST —
+
+        head   -> ['p1','t1','p2','t9','t2']   (both spellings delivered)
+        mutant -> ['p1','t2','p2','t9']        ('t1' dropped, no error)
+
+    which is the round-8 class again (a guard whose regression no test reds), so
+    it gets a row here rather than a comment.
+    """
+    def raw_key(hit: dict):
+        return hit.get("session_id") or ""
+
+    pool = [_chunk("p1", "  s1  "), _chunk("p2", "s2")]
+    added_by_session = {
+        "  s1  ": [{"id": "t1", "session_id": "  s1  ", "text": "t"}],
+        "s1": [{"id": "t2", "session_id": "s1", "text": "t"}],
+        "s2": [{"id": "t9", "session_id": "s2", "text": "t"}],
+    }
+    merged = reinjection_merge_order(
+        [dict(h) for h in pool], added_by_session,
+        seed_order=["  s1  ", "s2"], session_key=raw_key,
+        max_chunks_per_session=9)
+    ids = [h["id"] for h in merged]
+    assert ids == ["p1", "t1", "p2", "t9", "t2"], ids
+    assert "t1" in ids and "t2" in ids, (
+        "both raw spellings of one session must deliver their chunks: an "
+        "assignment instead of a union drops one silently")
