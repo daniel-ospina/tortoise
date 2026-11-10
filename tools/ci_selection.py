@@ -1509,9 +1509,10 @@ SOURCE_PATTERNS = {
 # member nobody has written yet, and it is what makes the completeness pin in
 # `tests/test_ci_selection.py` RUN on a migration-only diff: `core` is a surface,
 # so it arms the slow legs, whereas the tier-1 smoke set does not carry that test.
-# The per-migration `CORE_ALSO` entries stay — they are now redundant for
-# SELECTION and are kept for their rationale comments and their
-# `_selection_relevant()` keep-signal.
+# The per-migration `CORE_ALSO` entries stay, though they are now FULLY redundant
+# (selection AND the `_selection_relevant()` keep-signal both come from the rule
+# above): they are kept as the per-migration rationale, which the rule — one
+# regex — has no room to carry.
 RECORD_MIGRATION_DIR = "supabase/migrations/"
 # Deliberately the same family `pyproject.toml` ships as the migrate-apply include
 # (`*_record_*.sql`) — a file outside it is not applied by the shipped tooling
@@ -2242,14 +2243,14 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # placement.py` is tier1 (the early return carries it) and
              # `test_9078_record_written_by_production_path.py` runs on an
              # UNGATED job (`test-record-postgres`, no diff gate).
-             # ⚠️ This entry is now REDUNDANT for selection: the whole family is
-             # claimed structurally by `is_record_migration_path()` above, so a
-             # record migration selects `core` even with no entry here. It is kept
-             # for this rationale and as the `_selection_relevant()` keep-signal its
-             # siblings rely on — the completeness pin is
+             # ⚠️ This entry is now FULLY redundant: the whole family is claimed
+             # structurally by `is_record_migration_path()` above, so a record
+             # migration selects `core` (and keeps the path past the
+             # NON_PYTHON_PREFIXES filter) with no entry here at all. It is kept
+             # as this migration's rationale. The completeness pin is
              # tests/test_ci_selection.py::test_every_record_migration_selects_core_and_both_readers,
-             # which also asserts the structural claim (so the NEXT `*_record_*.sql`
-             # selects `core` AND runs the pin) rather than trusting this list.
+             # which asserts the structural claim (so the NEXT `*_record_*.sql`
+             # selects `core` AND runs the pin) and does not depend on this list.
              "supabase/migrations/20261109000001_record_embedding_vector.sql",
              # Re-stated at the migration pair, NOT replaced by it (#9638 review
              # P1): the DOC side is an independent member of this set. The

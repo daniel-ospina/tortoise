@@ -4651,6 +4651,18 @@ def test_record_schema_pin_runs_on_migration_or_doc_change():
     # the pin never running. Mutation check: removing ANY CORE_ALSO entry for a
     # path in this tuple fails its arm below (surfaces == []).
     #
+    # ⚠️ #10080 / #11728: that mutation check NO LONGER holds for the tuple's
+    # record-migration members — the family is now claimed structurally
+    # (`ci_selection.is_record_migration_path()`), so `core` is selected with
+    # any of their entries removed and this arm stays green. The entries are kept
+    # as the per-migration rationale — selection AND the `_selection_relevant()`
+    # keep-signal now come from the family rule, so they are fully redundant. The
+    # completeness of the family is pinned by
+    # `test_every_record_migration_selects_core_and_both_readers`, whose own
+    # mutation checks DO discriminate (disabling the structural rule, narrowing
+    # the glob, or narrowing the selector's regex each red it). The doc paths
+    # below are unaffected: nothing claims them structurally.
+    #
     # #9638 review P1: the doc arm was DELETED in the same PR that inserted the
     # #9555/R7 migration entry over the doc's `CORE_ALSO` slot — so the comment
     # above kept asserting a doc arm that no longer existed, and a
