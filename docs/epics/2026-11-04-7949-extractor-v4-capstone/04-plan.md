@@ -249,7 +249,7 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 ⛔ **P1 — A5's floor is the REGISTERED one, and `a5_slots` is not a floor key this plan may invent.** An earlier
 revision of this table gave A5 `a5_slots: 5` and called it a *new key* (§4.4 below), which collides with the record
 `A5` already carries: `preregistration.json` registers `"floor": "a5_actors"` with `"a5_actors": 30`, and its
-`denominator` cell is the *distinct actors the A-corpus names* (`PRE-REGISTRATION.md:669` states the same 30-actor
+`denominator` cell is the *distinct actors the A-corpus names* (`PRE-REGISTRATION.md:672` states the same 30-actor
 floor). `a5_slots` exists **nowhere else in the tree** — `git grep -n a5_slots` returns documentary hits in this
 file only, no `.py`, `.json` or `.yml` reader — so writing it here would either leave `a5_actors: 30` as the enforced
 floor while `a5_slots: 5` promises a REFUSED boundary nothing enforces, or silently move a hash-pinned registered
