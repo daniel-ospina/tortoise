@@ -166,7 +166,10 @@ def _expected_legs(manifest: dict) -> set[str]:
     the `test (a)`/`test (b)` names the rail subtracts (and NOT a rename past the
     first two labels — measured green), and
     `test_ci_selection.py::test_shard_count_is_stable_regardless_of_the_selection_size`
-    for the full positional sequence.
+    for the `a`..`i` positional sequence it builds (a NINE-shard matrix, so a
+    rename past the ninth label is caught by a THIRD seam, not this one —
+    measured: index 10 renamed leaves both of the above green and reds
+    `test_ci_selection.py::test_push_legs_partitions_every_classified_file`).
     What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
@@ -574,8 +577,11 @@ def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
     assert "test_perf_lane_volunteer_context.py" in lane
     assert {f for f in lane if f.startswith("eval/")} == {
         "eval/retrieval/test_integration.py"}, (
-        "only the LITERAL survives from the eval subtree in this runner — the "
-        "other 25 belong to eval-suite-manual.yml (docker shape), not here")
+        "only the LITERAL survives from the eval subtree in this runner — every "
+        "other `eval/` file belongs to eval-suite-manual.yml (docker shape), not "
+        "here. This assertion states the CLASS and deliberately not a total: it "
+        "drifts with every registration (it read 'the other 25' when #10198 "
+        "landed and 27 when measured at #11675) and the drift is unobservable.")
     # And the workflow must READ that function, not re-inline the subtraction.
     text = EMBEDDED_WORKFLOW.read_text()
     assert "on_demand_literal_runner_files" in text, (
