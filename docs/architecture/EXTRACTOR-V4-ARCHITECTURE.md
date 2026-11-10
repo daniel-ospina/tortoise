@@ -736,8 +736,8 @@ unfirable (block at the top of §10).
 > `tests/test_extractor_v4_step_list_consistency.py` asserts that the row names every stage the guard
 > can locate in `extract_session_v2`, in the same order the code runs them, that it places `S2.2 VET`
 > before the retry, and that it keeps `run_s4` between `S3` and `S5`. The row does not name `S0` (it
-> starts at `_arm_extract`), so `S0`'s order is pinned against the body by §4.1/§4.2 rather than by
-> this row.
+> starts at `_arm_extract`), so `S0`'s order is pinned against the body by §4.1's canonical list rather
+> than by this row (§4.2's ordering table carries no plain `S0` row, only `S0a`/`S0b`).
 >
 > **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. There is **no S4-specific off switch**: S4 is reached whenever the v2 pipeline runs a story, and on the route that reaches `extract_session_v2` it is skipped only as a **side effect of something else**. ⚠️ **Three such paths on that route, none of them an "S4 switch":** (i) **`TORTOISE_EXTRACTOR=v1`** routes to the legacy `value_extractor.extract_session` path, which has no S4 stage at all (`sdk.py`; `_commit_session_v1`); (ii) **passing `summary=`** takes that same v1 dispatch — `sdk.py` reads `if extractor == "v1" or summary is not None:`; (iii) **an empty conversation** returns before S1 (`if not edus: return {...}`, with `degraded: True`), so S4 is never reached. Other `capture_session` lanes — keyless/no-provider, already-captured replay, and `TORTOISE_SESSION_EXTRACTOR=m2` — never enter the v2 extractor at all, so they are not S4 skips of this route. ⚠️ **S4 is NOT bypassable only by leaving the v2 pipeline** — that would contradict the `if story:` row directly above, and missed paths (ii) and (iii).
 >

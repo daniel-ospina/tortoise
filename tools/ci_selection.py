@@ -2582,17 +2582,27 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # are `tools/**` entry points, so `tests/test_entry_point_python_guard.py`
              # (`core`, the #5128 census) is the pin that holds them — and neither
              # path matches a SOURCE_PATTERNS row while `tools/` is a flat
-             # NON_PYTHON_PREFIXES entry, so a tool-only diff returned `changed == []`,
-             # took the docs-only early return and selected NO surface. Measured at
+             # NON_PYTHON_PREFIXES entry, so a tool-only diff returns `changed == []`,
+             # takes the docs-only early return and selects NO surface. Measured at
              # PR #11733: `--changed-files tools/embedding_residual_scan.py` ->
-             # surfaces=[], guard file absent — which is how both merged to main with
-             # no guard at all and redded the `test` job (4 failed: the two pytest
-             # cases × the two files), naming `tools/embedding_residual_scan.py` and
-             # `tools/measure_11086_gate_rate.py` in the corpus assert. The
-             # per-file remedy the census entry above states — "the file that must
-             # carry it is now the file that selects its guard" — applied to both. ⚠️ This is per-file, NOT the corpus-wide reach gap the
-             # guard's own docstring declares (still filed separately): the next tool
-             # added lands unguarded again until that is closed. Pinned by
+             # surfaces=[], guard file absent.
+             #
+             # ⛔ WHAT THIS IS NOT, because the first draft of this comment claimed it
+             # and the claim is FALSE: this gap is NOT why the two tools landed
+             # unguarded. Their PRs were not tool-only, and #11658's own CI RAN the
+             # guard: run 42714341603, job `test (d)` (129500375789) failed BOTH
+             # `test_entry_point_python_guard.py` cases naming
+             # `tools/measure_11086_gate_rate.py` at 23:46Z, while the PR merged at
+             # 23:02Z — a red merged over, not a pin that never ran (#11660's shard was
+             # watchdog-killed before it reached the file, and its gate job had already
+             # failed on `test_bounded_raw_clients_3065`, which named that tool). So the
+             # recurrence has TWO causes and this entry closes ONE: a tools-only change
+             # can still land with no surface selected, and a shard that has not
+             # reported yet can carry a red past the merge. The per-file remedy below is
+             # the census entry's — "the file that must carry it is now the file that
+             # selects its guard" — applied to both. ⚠️ Per-file, NOT the corpus-wide
+             # reach gap the guard's own docstring declares (still filed separately).
+             # Pinned by
              # tests/test_ci_selection.py::test_the_11086_and_11642_tools_select_core.
              "tools/embedding_residual_scan.py",
              "tools/measure_11086_gate_rate.py",

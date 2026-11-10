@@ -20443,15 +20443,24 @@ def test_the_11086_and_11642_tools_select_core():
     # PR #11733: `tools/embedding_residual_scan.py` (#11642) and
     # `tools/measure_11086_gate_rate.py` (#11086) merged to main WITHOUT the #5128
     # inline interpreter guard, and main's `test` job redded on exactly the four
-    # `test_entry_point_python_guard.py` cases that name them. Neither PR's CI could
-    # see it: `tools/` is a flat NON_PYTHON_PREFIXES entry and neither path matches a
-    # SOURCE_PATTERNS row, so a tools-only diff came back `changed == []`, took the
-    # docs-only early return and selected NO surface — measured before the CORE_ALSO
-    # entries, `_sel(["tools/embedding_residual_scan.py"])` had surfaces=[] and the
-    # guard file absent. Same #1349/#3332/#3616 silent-drop class as the census entry
-    # above, and the same per-file remedy. Mutation check: removing either CORE_ALSO
-    # entry fails the corresponding arm below.
-    for rel in ("tools/embedding_residual_scan.py", "tools/measure_11086_gate_rate.py"):
+    # `test_entry_point_python_guard.py` cases that name them. ⛔ What that red was
+    # NOT: a pin that never ran. #11658's own CI ran it and failed both cases for
+    # `tools/measure_11086_gate_rate.py` (run 42714341603, job `test (d)`
+    # 129500375789, 23:46Z) while the PR merged at 23:02Z; #11660's shard was
+    # watchdog-killed before it reached the file and its gate job had already
+    # failed on `test_bounded_raw_clients_3065`, naming that tool. What THIS test
+    # pins is the other, still-open cause: `tools/` is a flat NON_PYTHON_PREFIXES
+    # entry and neither path matches a SOURCE_PATTERNS row, so a tools-only diff
+    # came back `changed == []`, took the docs-only early return and selected NO
+    # surface — measured before the CORE_ALSO entries, `_sel(["tools/embedding_residual_scan.py"])`
+    # had surfaces=[] and the guard file absent. Same #1349/#3332/#3616
+    # silent-drop class as the census entry above, and the same per-file remedy.
+    # Mutation check: removing either CORE_ALSO entry fails the corresponding arm
+    # below.
+    for rel in (
+        "tools/embedding_residual_scan.py",
+        "tools/measure_11086_gate_rate.py",
+    ):
         r = _sel([rel])
         assert r["full"] is False, (rel, r)
         assert r["surfaces"] == ["core"], (rel, r)
