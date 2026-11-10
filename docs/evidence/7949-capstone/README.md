@@ -226,8 +226,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:14105-14111` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:14115-14119` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:14217-14223` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:14227-14231` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -355,7 +355,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:13446-13450` — the classify block starts at `:13446`, the vet surface at `:13450` — and `:14105-14119`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:13446-13450` — the classify block starts at `:13446`, the vet surface at `:13450` — and `:14217-14231`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -383,7 +383,7 @@ to look.
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
 classify pass has its own flag (`classify_later`, `:13384`), its own early-return block
-(`:13338-13341`), its own gates — `if classify_later and embed_list:` (`:13868`) around `if items:`
+(`:13446-13449`), its own gates — `if classify_later and embed_list:` (`:13868`) around `if items:`
 (`:13871`), and `if classify_later and complete_list:` (`:14014`) around `if items:` (`:14024`) — and its
 own fail-open `except` (`:13884` / `:14035`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface

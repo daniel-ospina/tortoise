@@ -1870,8 +1870,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   two result blocks at `:14048` (closing `:14054`) and `:14058` (closing `:14062`), and
   `_run_vet_pass`'s S2.2 call at `:16229` (the post-S4 union call at `:13835`) — exactly the "new
   value" §10.18 measured.
-- **New value — measured at this head:** the same symbols at `:13871`/`:14024` (the two `if items:`
-  gates), `:13884`/`:14035` (the two fail-open `except` arms), the two result blocks at `:14105`
+- **New value — measured at this head:** the same symbols at `:13763`/`:13916` (the two `if items:`
+  gates), `:13776`/`:13927` (the two fail-open `except` arms), the two result blocks at `:14105`
   (closing `:14111`) and `:14115` (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16286`
   (the post-S4 union call at `:13892`). `_collect_classify_items` and its extent do not move:
   `:11402`, `:11402-11424`.
@@ -1895,8 +1895,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   superseded. (The field convention this mirrors — a registration is frozen at submission and a later
   change is a separate dated amendment, never a silent edit — is what `document_sha256` exists to
   enforce.)
-- **Verified by content, not by arithmetic.** `:13871`/`:14024` are the two `if items:` gates (one per
-  classify pass), `:13884`/`:14035` are the two fail-open `except` arms whose messages name
+- **Verified by content, not by arithmetic.** `:13763`/`:13916` are the two `if items:` gates (one per
+  classify pass), `:13776`/`:13927` are the two fail-open `except` arms whose messages name
   `classify(S2) failed` / `classify(union) failed`, `:14105`/`:14115` open
   `result["classify_later"]` and `result["vet"]` and close at `:14111`/`:14119`, and `:16286` is
   `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`. A pin now reads the NEWEST entry
@@ -1905,6 +1905,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   `test_the_newest_change_control_entry_describes_the_shipped_tree`).
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched. `document_sha256` is re-cut in this same commit, per §8's rule for *any* edit to this file.
+
+⛔ **10.20 is superseded for the shipped tree by §10.21** (the `#11654` move below).
 
 ### 10.20 — the merge of `#11523`, and the door-read pin re-pointed for THIS tree (2026-11-09, `#11534`)
 
@@ -1997,3 +1999,31 @@ which is the fail-open shape a gate may not have. The failure is visible: the ex
 and does not make the epic closeable: a run still has to produce five measured rows. It removes one
 **impossible** requirement from the step gate so that the gate can answer the question it was built
 to answer.
+
+### 10.21 — the §11 cite block re-pointed for `#11654`'s S3 narrative (+108 / +112) (2026-11-10, `#11654`)
+
+- **Baseline — measured at `6496f534c1f6`, this branch's head before the S3 narrative was threaded:**
+  the two `if items:` gates at `:13763`/`:13916`, the two fail-open `except` arms at
+  `:13776`/`:13927`, the two result blocks at `:14105` (closing `:14111`) and `:14115`
+  (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16286` (the post-S4 union call at
+  `:13892`) — exactly the "new value" §10.19 measured.
+- **New value — measured at this head:** the same symbols at `:13871`/`:14024` (the two `if items:`
+  gates), `:13884`/`:14035` (the two fail-open `except` arms), the two result blocks at `:14217`
+  (closing `:14223`) and `:14227` (closing `:14231`), and `_run_vet_pass`'s S2.2 call at `:16398`
+  (the post-S4 union call at `:14000`). §10.19's "`_collect_classify_items` and its extent do not
+  move" was true of `#11534`, whose insertions all sat BELOW the collector; `#11654` inserts ABOVE
+  it, so the collector moves too: `:11510`, `:11510-11532`.
+- **Why the delta is NOT one constant.** `#11654` inserts at four distinct points — +99 at
+  `_resolution_prompt`/`_bounded_narrative` (below `:5794`), +8 at `:5825`, +1 at `:5851` (so **+108**
+  for every line between `:5851` and `:13949`), and a further +4 at the `extract_session_v2` resolve
+  seam that hands the narrative to `resolve_entities` (so **+112** at and below `:13950`). Every
+  number in this entry was re-derived by content, not by adding a delta to §10.19.
+- **Verified by content, not by arithmetic.** `:13871`/`:14024` are the two `if items:` gates (one
+  per classify pass), `:13884`/`:14035` are the two fail-open `except` arms whose messages name
+  `classify(S2) failed` / `classify(union) failed`, `:14217`/`:14227` open
+  `result["classify_later"]` and `result["vet"]` and close at `:14223`/`:14231`, `:16398` is
+  `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(`, and `:14000` is
+  `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`.
+- **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
+  touched. The `#10360` switch's read-back is re-derived from `:10157` to `:10265` (the +108) in
+  `preregistration.json`'s live prose. `document_sha256` is re-cut in this same commit, per §8.
