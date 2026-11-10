@@ -142,6 +142,7 @@ exactly what produces that 422.
 """
 from __future__ import annotations
 
+import copy
 import math
 import re
 from collections.abc import Callable, Iterable, Mapping, MutableMapping, Sequence
@@ -1082,6 +1083,120 @@ def _referenced_entity_names(embed_list: object,
     return names
 
 
+def _layer1_reference_spellings(embed_list: object,
+                                discarded_ids: set[str]) -> dict[str, set[str]]:
+    """``_norm`` key → every VERBATIM spelling a surviving Layer-1 candidate uses.
+
+    The sibling of :func:`_referenced_entity_names`, which answers in ``_norm``
+    space only. Rule 4 reconciles a reference's SPELLING, so it needs the text a
+    reference actually carries: two references that normalise identically are
+    ONE key but are not the same string, and Layer-1 identity is EXACT.
+
+    Scans the same two surfaces as :func:`_referenced_entity_names`
+    (``about_entities`` and the non-``event`` role slots of every surviving
+    item) — a slot name is a Layer-1 reference exactly as much as an
+    ``about_entities`` entry is, and both are compared by exact string.
+    """
+    spellings: dict[str, set[str]] = {}
+    for section, index, item in _iter_items(embed_list):
+        if _item_id(section, index, item) in discarded_ids:
+            continue
+        refs = item.get("about_entities")
+        if isinstance(refs, Sequence) and not isinstance(refs, (str, bytes)):
+            for ref in refs:
+                if isinstance(ref, str) and ref.strip():
+                    spellings.setdefault(_norm(ref), set()).add(ref)
+        slots = item.get("slots")
+        if isinstance(slots, Mapping):
+            for role, slot_refs in slots.items():
+                if role == "event" or not isinstance(slot_refs, Sequence) \
+                        or isinstance(slot_refs, (str, bytes)):
+                    continue
+                for slot_ref in slot_refs:
+                    if isinstance(slot_ref, Mapping) \
+                            and isinstance(slot_ref.get("name"), str) \
+                            and slot_ref["name"].strip():
+                        spellings.setdefault(_norm(slot_ref["name"]),
+                                             set()).add(slot_ref["name"])
+    return spellings
+
+
+def _reconcile_held_layer1_spellings(
+        embed_list: object,
+        discarded_ids: set[str]) -> tuple[dict[str, str], list[str]]:
+    """Re-spell a Layer-1 reference whose ``_norm`` ALREADY matches a held name.
+
+    ⛔ This is the one class Rule 4's loop structurally cannot reach, which is
+    why it needs its own pass. That loop walks ``to_restore = referenced −
+    present``, and ``present`` (:func:`_entity_map`) is keyed by ``_norm`` — so
+    a reference that normalises identically to an emitted entity is subtracted
+    BEFORE the loop that reconciles spellings ever sees it. Measured
+    (``#10999`` review at ``4ff6f2310``, unchanged on ``main``):
+
+        entities[0].name = "Retry Storm";  point.about_entities = ["RETRY STORM"]
+        → apply_vet leaves "RETRY STORM", with NO warning
+        → commit_schema.validate_layer1 → ok=False
+          ``points[0].about_entities: about_entities reference unknown
+          entities: ['RETRY STORM']`` → the WHOLE session is rejected
+
+    Layer-1 compares ``about_entities`` and slot names by EXACT string, so the
+    reference is fatal; the pipeline's own matching fold (``_norm``) says it is
+    the same name. Reconciling is the fail-open direction this module's doctrine
+    requires — a wrong KEEP is noise, a rejected batch is memory loss — and it
+    is WARNED, because silence is what made the run look clean right up to the
+    rejection.
+
+    Ambiguity is refused, not guessed. When the emission holds MORE than one
+    spelling under the same ``_norm`` key (``"Billing"``/``"billing"`` are two
+    distinct Layer-1 Objects — identity is ``(name, kind)``) the reference
+    cannot be re-pointed without choosing between them, so it is left as
+    written and named: this module's doctrine is that guessing is worse than a
+    miss.
+
+    Returns ``(canonical, warnings)`` — the same ``_norm``-keyed map
+    :func:`_rewrite_entity_references` consumes, and the warnings it owes.
+    """
+    held: dict[str, set[str]] = {}
+    for entity in _section_items(embed_list, "entities"):
+        if not isinstance(entity, Mapping):
+            continue
+        key = _norm(entity.get("name"))
+        spelling = str(entity.get("name") or "").strip()
+        if key and spelling:
+            held.setdefault(key, set()).add(spelling)
+    if not held:
+        return {}, []
+    canonical: dict[str, str] = {}
+    warnings: list[str] = []
+    for key, used in sorted(_layer1_reference_spellings(
+            embed_list, discarded_ids).items()):
+        emitted = held.get(key)
+        if not emitted:
+            continue          # not held — Rule 4's restore leg owns this one
+        if len(emitted) > 1:
+            unresolved = sorted(used - emitted)
+            if unresolved:
+                warnings.append(
+                    f"vet: reference {unresolved[0]!r} matches "
+                    f"{len(emitted)} emitted entities that differ only in "
+                    f"spelling ({', '.join(sorted(map(repr, emitted)))}) — "
+                    "left as written; Layer-1 identity is EXACT, so the "
+                    "payload will fail unless the extractor disambiguates")
+            continue
+        (winner,) = emitted
+        mismatched = sorted(spelling for spelling in used
+                            if spelling != winner)
+        if not mismatched:
+            continue
+        canonical[key] = winner
+        warnings.append(
+            f"vet: reference {mismatched[0]!r} re-spelled {winner!r} — the "
+            "emission holds that entity and Layer-1 identity is EXACT"
+            + (f" ({len(mismatched)} spellings)" if len(mismatched) > 1
+               else ""))
+    return canonical, warnings
+
+
 def _item_content(section: str, item: Mapping[str, Any]) -> str:
     """The item's CONTENT — the surface ``execute_embed`` resolves operators on.
 
@@ -1399,6 +1514,16 @@ def apply_vet(embed_list: Mapping[str, Any],
        (the same-pass case). Both go through the same reconciliation. Fail-open:
        keep, never drop.
 
+       4b. **A reference whose ``_norm`` ALREADY equals a held name is
+       re-spelled too** — the leg Rule 4's loop structurally cannot reach,
+       because it walks ``referenced − present`` and ``present`` is
+       ``_norm``-keyed. It gets its own pass
+       (:func:`_reconcile_held_layer1_spellings`), which also runs on the
+       nothing-to-do early return below: that branch is what most batches
+       take, and gating the reconcile behind an unrelated DISCARD is why the
+       defect stayed invisible (#10999). It never touches a relation endpoint
+       — that channel is result-level and S5 owns its fold.
+
     The function is **total** on a malformed section shape (a non-sequence
     section, a non-sequence ``operators``, a non-mapping item, a non-iterable
     ``about_entities``, an immutable ``Mapping`` slot ref) and on a malformed
@@ -1430,7 +1555,26 @@ def apply_vet(embed_list: Mapping[str, Any],
         # points/events has an EMPTY ``removed_entities``, and early-returning
         # on that alone skipped the operator prune — `prior_texts` must be part
         # of the test.
-        return dict(base), warnings
+        #
+        # ⛔ ONE thing is still owed on this path, and it is not a VET verdict:
+        # the Layer-1 SPELLING reconcile (:func:`_reconcile_held_layer1_
+        # spellings`). It is computed in ``_norm`` space, where a reference
+        # that normalises to a held entity is subtracted out of every restore
+        # set, so NO other leg reaches it — and this branch is the one that runs
+        # whenever a batch discarded nothing, which is most batches. Gating the
+        # fix behind an unrelated DISCARD is how the residual stayed invisible.
+        # This path promises the caller's objects are never mutated, and
+        # ``_rewrite_entity_references`` mutates the item dicts it rewrites, so
+        # the reconcile runs on a COPY.
+        held_canonical, held_warnings = _reconcile_held_layer1_spellings(
+            base, discarded_ids)
+        if not held_canonical:
+            # Nothing to re-spell — but an AMBIGUOUS reference still owes its
+            # warning (refusing to guess is a decision the record must carry).
+            return dict(base), warnings + held_warnings
+        reconciled = copy.deepcopy(dict(base))
+        _rewrite_entity_references(reconciled, held_canonical)
+        return reconciled, warnings + held_warnings
 
     referenced = _referenced_entity_names(base, discarded_ids)
     # The Layer-1 half of the same set, and the ONLY half a downgrade may
@@ -1524,6 +1668,17 @@ def apply_vet(embed_list: Mapping[str, Any],
     # it were discarded.
     present_map = _entity_map(out)
     present = set(present_map)
+    # #10999 residual: the spelling reconcile for a reference whose ``_norm``
+    # ALREADY matches a held name — the class ``to_restore`` subtracts away
+    # below. Merged into ``canonical`` with ``setdefault`` so every OTHER leg's
+    # answer wins: the DISCARD downgrade above and the Rule-4 restore below both
+    # write an exact spelling a reference names, and their keys are disjoint
+    # from these anyway (they are in ``to_restore``, i.e. NOT in ``present``).
+    held_canonical, held_warnings = _reconcile_held_layer1_spellings(
+        out, discarded_ids)
+    warnings.extend(held_warnings)
+    for _held_key, _held_spelling in held_canonical.items():
+        canonical.setdefault(_held_key, _held_spelling)
     # #10999: relation endpoints DO count for the restore — a relation naming an
     # entity an earlier pass removed is exactly the cross-pass case Rule 4
     # exists for (S4 supplies the conclusion between the two passes). The

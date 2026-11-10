@@ -1838,3 +1838,160 @@ def test_an_unverified_field_loses_a_C1_or_unicode_line_boundary(monkeypatch):
         assert not any(ord(c) < 0x20 or 0x7F <= ord(c) <= 0x9F
                        or ord(c) in (0x2028, 0x2029) for c in kept), (bad, repr(kept))
         assert kept == "a b", (bad, repr(kept))
+
+
+# ── 11. the recorded residual (issue #10999 comment, review at 4ff6f2310) ──
+#
+# "a Layer-1 reference that differs from a held entity only by case-fold is
+# never reconciled (pre-existing, not fixed here)". Measured on `main` before
+# this change:
+#
+#   $ apply_vet({"entities":[{"name":"Retry Storm"}],
+#                "points":[{"about_entities":["RETRY STORM"]}]}, {}, prior={})
+#   → about_entities == ["RETRY STORM"], NO warning
+#   $ commit_schema.validate_payload_dict(<the payload execute_embed built>)
+#   → ok=False  "about_entities reference unknown entities: ['RETRY STORM']"
+#
+# i.e. THE WHOLE SESSION IS REJECTED and nothing commits. The mechanism is
+# `to_restore = _referenced_entity_names(...) - present`: `present` is keyed by
+# `_norm`, so a reference that normalises onto a held entity is subtracted
+# before Rule 4's spelling-reconcile loop can see it — and when the batch
+# discarded nothing, `apply_vet` early-returns before that loop anyway.
+
+def _held_and_ref(entity_name, ref, kind="core:event"):
+    """One held entity, one point naming it by a divergent spelling."""
+    return {
+        "entities": [{"name": entity_name, "kind": kind}],
+        "points": [{"content": "the storm made retries fail",
+                    "about_entities": [ref]}],
+        "events": [], "operators": [], "relations": [],
+    }
+
+
+@pytest.mark.parametrize("held,ref", [
+    ("Retry Storm", "RETRY STORM"),     # the review's own repro
+    ("Straße", "STRAßE"),               # `.lower()`-equal, `.casefold()`-equal
+    ("Retry Storm", "Retry  Storm"),    # a whitespace RUN — `_norm` collapses it
+    ("Retry Storm", " Retry Storm "),   # padding — `_norm` strips it
+])
+def test_a_hidden_case_variant_reference_is_re_spelled(held, ref):
+    """The class `to_restore` structurally cannot reach — no DISCARD, no prior.
+
+    Nothing was discarded here, so this is the `apply_vet` path that used to
+    return the emission untouched: the reference kept its divergent spelling and
+    `validate_layer1` rejected the batch on an EXACT-string compare.
+    """
+    emission = _held_and_ref(held, ref)
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["about_entities"] == [held], warns
+    assert any(ref in w and held in w and "re-spelled" in w
+               for w in warns), warns
+
+
+def test_the_no_op_reconcile_does_not_mutate_the_callers_emission():
+    """The early-return path's own contract: "the same object is never mutated".
+
+    The reconcile had to run there (it is the only path most batches take), and
+    `_rewrite_entity_references` mutates the item dicts it rewrites — so it runs
+    on a copy. Without the copy the caller's emission is silently re-spelled,
+    which is exactly the `prior`-less S2 pass whose input another stage re-reads.
+    """
+    emission = _held_and_ref("Retry Storm", "RETRY STORM")
+    snapshot = copy.deepcopy(emission)
+    out, _warns = vg.apply_vet(emission, {})
+    assert emission == snapshot, "the caller's emission was mutated in place"
+    assert out["points"][0]["about_entities"] == ["Retry Storm"]
+    assert out is not emission
+
+
+def test_an_exactly_spelled_reference_is_left_alone_and_silent():
+    """The reconcile fires only when a spelling actually diverges — a correct
+    reference must not grow a warning (a warning storm is its own defect)."""
+    emission = _held_and_ref("Retry Storm", "Retry Storm")
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["about_entities"] == ["Retry Storm"]
+    assert not [w for w in warns if "re-spelled" in w], warns
+
+
+def test_a_slot_name_is_reconciled_by_the_same_rule():
+    """`_rewrite_entity_references` rewrites slot names too — and Layer-1
+    compares `(name, kind)` by EXACT name, so a slot names an entity the same
+    way `about_entities` does. The reconcile must cover both surfaces or it
+    fixes half the 422."""
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"}],
+        "points": [{"content": "p",
+                    "slots": {"subject": [{"name": "RETRY STORM",
+                                           "kind": "core:event"}]}}],
+        "events": [], "operators": [], "relations": [],
+    }
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["slots"]["subject"][0]["name"] == "Retry Storm", warns
+
+
+def test_two_held_spellings_under_one_norm_key_are_not_guessed_at():
+    """`"Billing"`/`"billing"` are ONE `_norm` key but TWO Layer-1 Objects
+    (identity is `(name, kind)`), so a third spelling cannot be re-pointed
+    without choosing between them. Left as written and NAMED — this module's
+    doctrine is that guessing is worse than a miss — rather than silently
+    attributing the statement to whichever entity the emission listed first."""
+    emission = {
+        "entities": [{"name": "Billing", "kind": "core:rule"},
+                     {"name": "billing", "kind": "core:plan"}],
+        "points": [{"content": "p", "about_entities": ["BILLING"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["about_entities"] == ["BILLING"], warns
+    assert any("matches 2 emitted entities" in w and "BILLING" in w
+               for w in warns), warns
+
+
+def test_a_case_variant_relation_endpoint_is_left_to_s5():
+    """The reconcile must not reach the RESULT-level channel: `relations[].src`
+    is not a Layer-1 reference (it never enters the payload), and S5 resolves
+    endpoints on its own two-fold rule. Rewriting it here would be a second
+    owner of that decision."""
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"},
+                     {"name": "Deadline Rule", "kind": "core:rule"}],
+        "points": [], "events": [], "operators": [],
+        "relations": [{"src": "RETRY STORM", "dst": "Deadline Rule",
+                       "predicate": "IMPL"}],
+    }
+    out, _warns = vg.apply_vet(emission, {})
+    assert out["relations"][0]["src"] == "RETRY STORM", out["relations"]
+
+
+def test_the_reconciled_payload_no_longer_422s_end_to_end():
+    """The assertion that matters, read off the real pipeline order — not off
+    `apply_vet`'s return value.
+
+    The pipeline is `apply_vet` (S2/S4) → `execute_embed` (S5) →
+    `commit_schema.validate_payload_dict` (the Layer-1 gate that 422s), so the
+    test drives exactly that sequence offline. RED before this change: the
+    un-vetted payload fails with
+    ``points[0].about_entities: about_entities reference unknown entities:
+    ['RETRY STORM']`` — the whole session rejected, nothing committed. The
+    un-vetted control below is the pre-fix pipeline, kept so this test cannot
+    pass vacuously.
+    """
+    from tortoise import commit_schema as cs
+
+    emission = _held_and_ref("Retry Storm", "RETRY STORM")
+
+    # control — the reference as written is fatal (the measured pre-fix state)
+    raw = _run(emission)
+    assert raw["payload"]["points"][0]["about_entities"] == ["RETRY STORM"]
+    rejected, _ = cs.validate_payload_dict(copy.deepcopy(raw["payload"]))
+    assert not rejected.ok, "the control passed — this test would prove nothing"
+    assert "RETRY STORM" in str(rejected.errors), rejected.errors
+
+    # and the reconciled emission commits
+    vetted, _warns = vg.apply_vet(copy.deepcopy(emission), {})
+    result = v2.execute_embed(vetted, {}, session_id="s-10999")
+    point = result["payload"]["points"][0]
+    assert point["about_entities"] == ["Retry Storm"], point
+    layer1, payload = cs.validate_payload_dict(copy.deepcopy(result["payload"]))
+    assert payload is not None
+    assert layer1.ok, layer1.errors
