@@ -150,6 +150,16 @@
       "measurement_visible_to_author": false,
       "measurement_visible_to_author_basis": "no A-row was visible at the registration commit `a6085af84` (2026-10-21), which is the anchor this field uses (PRE-REGISTRATION.md section 10.3; E3 stays false on the same ground even though the amending author had seen its FAIL). ⛔ The ground is the ANCHOR, not 'no census exists': this row's Subject count and three of its four families are already readable on the PINNED corpus from docs/evidence/7949-capstone/capstone-measured-9152448d.log (committed 31f996f91, 2026-11-04 — `\"Subject\": 19` at :275, `relationship_counts` at :299-309, produced by a COMPLETE edge-type enumeration so an absent family is 0 and not uncounted), and RECONCILE-A1-A2-A5.md section 3 states that four-family reading. The bar was therefore written with a figure in view; that discount is disclosed in PRE-REGISTRATION.md section 0 and section 10.11, and #10987 (C6) owns the scoring run.",
       "floor": "a5_actors"
+    },
+    {
+      "id": "E6",
+      "metric": "declared relation rows that are **unbound and unexplained** — every `relations[]` / `hierarchies[]` row whose `relation_write_verdict` is `predicate-not-in-allowlist` and which is **not** marked `declarationOnly: true` with a reason, **plus** every row that binds a write path but reports no `effective_direction`",
+      "denominator": "**every** declared row across the installed packs, counted from the registry at the run's head — `population.declared` in `docs/evidence/11083/pack-relation-census.json`, **42** at the `#11083` stamp (36 relations + 6 hierarchy paths); a pack set that resolves to fewer than `e6_declared_rows` rows is REFUSED, never scored on an empty population",
+      "threshold": "`unbound_and_unexplained = 0` — and the census's `written` column (`direct` / `mediated` / `none`) is reported beside it, **never** the bar: `A1` already measures what the **written** graph answers",
+      "threshold_basis": "a zero-tolerance COUNT, so nothing could have been fitted to a measured value: the row registers that no declared relation lands unbound-and-unexplained. The issued baseline (#7949 comment 6664402530, 2026-11-05) was 32 of 36 declared relations writable with four unbound, all in packs/project-management/ declared with no `mechanism`; #11083's OWN landing (f5c69f7478, PR #11543) resolved them by editing packs/project-management/manifest.yaml — relation_write_verdict is purely declarative — so the census committed IN that commit already reads 42 declared rows (36 relations + 6 hierarchy paths), 41 `writable`, 1 `declaration-only` (pm's `onBoard`, retired WITH its reason), 0 `predicate-not-in-allowlist`, and an `effective_direction` on every row that binds a write path. So E6 is GREEN on both halves at registration — stated, not dressed as a near miss. ⛔ The census's `written` column is REPORTED BESIDE this row and is never its bar: A1 already measures what the written graph answers, and a bar on `written` would duplicate A1 and let one defect red two rows (PRE-REGISTRATION.md section 3.8, section 10.21).",
+      "measurement_visible_to_author": true,
+      "measurement_visible_to_author_basis": "TWO priors predate this row, and both are cited in `prior_measurements.E6`: the owner's 2026-11-05 baseline at #7949 comment 6664402530 (32 of 36 declared relations writable, four unbound) and the committed census docs/evidence/11083/pack-relation-census.json, added f5c69f7478 on 2026-11-08 by #11543, which carries the row's population, its verdicts and its direction cells. ⛔ #11673's own checklist proposed the OPPOSITE ('E6 is not post-visible: it had no prior measurement'); that is false at this head and is corrected in PRE-REGISTRATION.md section 0 and section 10.21. The discount is affordable because the bar is `= 0` — a bar fitted to the measured 4 would have read `<= 4`.",
+      "floor": "e6_declared_rows"
     }
   ],
   "prior_measurements": {
@@ -182,6 +192,12 @@
       "commit": "ecc7bc8ca",
       "date": "2026-10-19",
       "note": "PREDATES this registration; its population is 25 bound qualifiers and E5's is 29 marker sentences - recorded, not reconciled (#9738)"
+    },
+    "E6": {
+      "artifact": "docs/evidence/11083/pack-relation-census.json",
+      "commit": "f5c69f7478",
+      "date": "2026-11-08",
+      "note": "the per-pack declaration census (declared -> writable -> sense -> written), committed by #11543 and re-derivable with `uv run python tools/pack_relation_census.py --write-probe --json`; it PREDATES this row, so the row is disclosed as post-visible. The owner's 2026-11-05 baseline (#7949 comment 6664402530) is the row's second prior and its threshold_basis."
     }
   },
   "amendments": [
@@ -216,6 +232,14 @@
       "registration_added": "2026-10-21",
       "measurement_date": null,
       "kind": "five A-rows ADDED to the criteria table and to criteria[] — no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; required_criteria_rows stays [E1..E5], so the new rows are registered and reported, never demanded by the gate (a required row would red every existing verdict table for rows nobody has run); the superseded pins line and the table's E-only shape are quoted in PRE-REGISTRATION.md section 10.11. ⛔ Review round 2 corrected three things in this amendment: (a) `a1_relation_families` pinned the DECLARED spellings `decomposesInto`/`hasPart`, but `decomposesInto` is never a written label — both hierarchy entries are written `hasPart` (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513), so the '>= 1 edge for EACH family' bar was unsatisfiable; the pin is now the one WRITTEN family, with `a1_relation_family_fold` naming the declared spellings that fold onto it. (b) `measurement_visible_to_author` stays false for all five on the `a6085af84` anchor, and A1/A3/A4/A5 all had a figure in view, but the stated GROUND was the gate's blind spot rather than history: A1/A3/A4/A5 were written with the owner's 2026-11-04 hand reading in view, and A1/A5 are also readable on the pinned corpus from the committed capstone-measured-9152448d.log (31f996f91, 2026-11-04) — section 0 now carries the A-rows and states the post-visible discount. (c) the floors are SEVEN counts of 30 plus the two non-count refusal boundaries (`a1_rollup_queries: 1`, `a3_event_root_coverage: 0.50`) that existed only in section 3.1 prose and are now pinned."
+    },
+    {
+      "issue": 11673,
+      "criterion": "E6",
+      "amended": "2026-11-10",
+      "registration_added": "2026-10-21",
+      "measurement_date": "2026-11-08",
+      "kind": "the sixth capstone row ADDED to the criteria table, to criteria[] and to required_criteria_rows on the owner's 2026-11-05 ruling (#7949 comment 6664402530); no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; the census artefact (f5c69f7478, 2026-11-08) PRECEDES this registration, so measurement_visible_to_author stays true and is disclosed in PRE-REGISTRATION.md section 10.21"
     }
   ],
   "steps": {
@@ -253,7 +277,8 @@
     "a2_decided_candidates": 30,
     "a5_actors": 30,
     "a1_rollup_queries": 1,
-    "a3_event_root_coverage": 0.5
+    "a3_event_root_coverage": 0.5,
+    "e6_declared_rows": 30
   },
   "below_floor": "REFUSED, which is neither a pass nor a fail",
   "interface_note": "The field is written_before_any_scored_run, NOT the unqualified written_before_any_run: the latter is false at this commit because e1-e2.log exists, and a machine consumer keys on the name rather than on this prose (#9075 review P1). The capstone run probe (#9089, open) reads this path as its --prereg-artifact and freezes the corpus it is handed with --corpus. This record freezes the tests/eval/write_path corpus, which is the corpus #9075 pre-registers; a run handed a DIFFERENT corpus must mismatch G1 and be refused, never scored. Reconciling the two corpora is that PR's or a follow-up's job, not something this record may paper over.",
@@ -425,5 +450,5 @@
       "not_a_proof_of": "nothing yet — this registration pins NO fleet-capture corpus, and one must be registered BEFORE such a number is scored"
     }
   },
-  "document_sha256": "sha256:002a8c300290cbf94203122fb8056da1bc812e71576a5bbf1c7f143de4fe228f"
+  "document_sha256": "sha256:3c0196918c3a224393e35b9c798d11806a1d5326066cc17698052728751473e7"
 }
