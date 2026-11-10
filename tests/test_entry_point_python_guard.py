@@ -612,7 +612,19 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        # PLACEHOLDER-EXEMPTION-REMOVED
+        # #11744 follow-up: a MEASUREMENT transcript, not an instruction. The plan
+        # doc quotes the command that actually produced the recorded FAIL
+        # ("Measured, not argued — the re-take made the required check fail"), and
+        # the tool gained its guard afterwards, so rewriting the line to
+        # `uv run python` would falsify the record to clear a red — the failure
+        # mode this census's own doctrine forbids. Third instance of this class
+        # (#9118's comment, `tools/ci_check_repair.py`, this one), recorded on
+        # #9159.
+        (
+            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
+            "$ python3 tools/capstone_preregistration_check.py --dir "
+            "docs/evidence/7949-capstone \\",
+        ),
     }
 )
 
