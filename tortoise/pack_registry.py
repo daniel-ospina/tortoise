@@ -2780,8 +2780,8 @@ class PackRegistry:
                     )
                 # Parent shape: PascalCase core entity types / named object
                 # kinds (Subject…Source, Project, WorkItem, Problem) OR a
-                # canonical lowercase object kind from ONTOLOGY §5 (document,
-                # tag, strategy, plan, goal, target — #2727). The PascalCase
+                # canonical lowercase object kind from ONTOLOGY §5 (tag,
+                # strategy, plan, goal, target — #2727). The PascalCase
                 # heuristic predates the commitment-state family and would
                 # reject those valid parents; it is therefore scoped to refs
                 # that are NOT canonical object kinds, so camelCase typos like
@@ -3436,7 +3436,8 @@ class PackRegistry:
                 direct_parents.setdefault(full_child, set()).add(parent)
                 direct_children.setdefault(parent, set()).add(full_child)
 
-        # The `core:`-prefixed spelling is the fourth kind of equivalence, and a
+        # The `core:`-prefixed spelling is one of the three equivalence families
+        # (`equivalentTo`, `LEGACY_KIND_ALIASES`, and this seed), and a
         # first-class one: a core kind is spelled BARE (`WorkItem`) by pack
         # declarations and `core:`-prefixed (`core:WorkItem`) by the classifier's
         # candidate index (`extractor_v2.CORE_OBJECT_KEYS` / `SUBJECTS` /
@@ -3531,9 +3532,20 @@ class PackRegistry:
         # `migrate_kinds` is a manual, opt-in normaliser (tortoise/migrate_kinds.py,
         # run by hand), never a precondition for a READ, so bare-kinded data is a
         # state the read path must serve rather than assume away.
+        # ⚠ SINGLE-SEGMENT only. `bare_inherits` maps a bare kind name to that
+        # kind's `ns:kind` forms, and the closure relies on "a value is never
+        # itself a key" to close in ONE hop. A multi-segment name would break
+        # that: an `equivalentTo` target is only required to CONTAIN ':'
+        # (`_validate`), so `x:synth:team` splits to the tail `synth:team` — which
+        # IS a key, for the real `synth:team` kind — and the closure would chain
+        # an unrelated kind into the bucket — measured on a head WITHOUT this
+        # guard, `expand_kind("team")` gained `synth:widget`. Those names stay in
+        # `expansions` and remain reachable through `equivalences` — an
+        # `equivalentTo` peer is still chained to its declaration, which is
+        # correct — they simply never seed a `bare_inherits` chain.
         bare_to_full: dict[str, list[str]] = {}
         for full in expansions:
-            if ":" in full:
+            if full.count(":") == 1:
                 _ns, _kind = full.split(":", 1)
                 bare_to_full.setdefault(_kind, []).append(full)
         for bare, fulls in bare_to_full.items():
@@ -3543,11 +3555,17 @@ class PackRegistry:
                         expansions[bare].append(f)
             else:
                 expansions[bare] = [bare, *fulls]
-            # ⚠ ONE-DIRECTIONAL on purpose: the bare form INHERITS from its
-            # namespaced forms (see the closure pass), but a namespaced bucket
-            # does not gain the bare name. That asymmetry is pre-existing (#6146
-            # keeps the bare form additive without making `dev:code` read a
+            # ⚠ ONE-DIRECTIONAL on purpose: through THIS map the bare form
+            # INHERITS from its namespaced forms (see the closure pass), and the
+            # namespaced bucket gains nothing back. That asymmetry is pre-existing
+            # (#6146 keeps the bare form additive without making `dev:code` read a
             # `code` row) and is the negative control's anchor.
+            # ⚠ It is a property of THIS MAP, not of "namespaced" in general: a
+            # bare/namespaced pair that is ALSO recorded as an equivalence is
+            # symmetric through `equivalences` — the `core:` alias seed does that
+            # for every alias, and `LEGACY_KIND_ALIASES` for its pairs, which is
+            # why `expand_kind("dev:deployment")` carries the bare `deployment`
+            # while `expand_kind("dev:issue")` carries no bare `issue`.
             bare_inherits.setdefault(bare, set()).update(fulls)
 
         # Legacy aliases (LEGACY_KIND_ALIASES): a kind whose spelling moved
@@ -3589,11 +3607,20 @@ class PackRegistry:
         #   * DOWN — a root gathers all its descendants (`Object` gains
         #            `WorkItem`, then `dev:issue`/`dev:pullRequest`/…).
         #
-        # Equivalence (equivalentTo, LEGACY_KIND_ALIASES, bare↔namespaced) is
-        # symmetric and is traversed inside BOTH, because equivalent kinds have
-        # the same extension. That is also what makes the two spellings agree:
-        # `expand_kind("issue")` inherits everything `dev:issue` gained because
-        # the bare form is equivalent to it, not because a bare bucket copies.
+        # Equivalence (`equivalentTo`, `LEGACY_KIND_ALIASES`, and the `core:`
+        # alias seed above) is symmetric and is traversed inside BOTH, because
+        # equivalent kinds have the same extension.
+        #
+        # ⚠ bare↔namespaced is NOT one relation, and sorting them matters — an
+        # earlier version of this comment flattened them and was false:
+        #   * bare ↔ `core:` IS an equivalence (the alias seed above), so
+        #     `expand_kind("core:team")` carries the bare `team`.
+        #   * bare ↔ PACK-namespaced is TWO things at once: the one-directional
+        #     `bare_inherits` map, AND an equivalence for the few pairs
+        #     `LEGACY_KIND_ALIASES` records. So `expand_kind("dev:deployment")`
+        #     carries the bare `deployment` through `equivalences`, while
+        #     `expand_kind("dev:issue")` carries no bare `issue` because that pair
+        #     is not one of them.
         #
         # Termination is structural, not bounded by a counter: `direct_parents`
         # is acyclic (a pack kind is never a parent, and `CORE_SUBCLASSES` rows
@@ -3618,6 +3645,22 @@ class PackRegistry:
         for kind in list(expansions):
             gained: set[str] = set()
             sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
+            # A peer's bare-inherited members round-trip too, or one spelling of
+            # one kind answers narrower than the other: `bare_inherits` is keyed
+            # by the BARE name, so a pack that registers `objectKinds: [team]`
+            # puts `synth:team` in `expand_kind("team")` and, without this, NOT
+            # in `expand_kind("core:team")` — while
+            # `test_core_prefixed_and_bare_spellings_are_one_kind` states they
+            # are one kind.
+            #
+            # `bare_inherits` is keyed by the BARE tail of a single-segment
+            # `ns:kind` name and valued by that full name — guaranteed by the
+            # `bare_to_full` guard above, not assumed here. So a key never contains
+            # ':' and a value always does: a value is never itself a key, and ONE
+            # round is the whole closure. That is a property of the map's
+            # CONSTRUCTION, and the guard is what keeps it true.
+            for peer in list(sources):
+                sources |= bare_inherits.get(peer, set())
             for peer in sources:
                 gained.add(peer)
                 gained |= _ancestors(peer) | _descendants(peer)

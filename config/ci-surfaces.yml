@@ -2258,6 +2258,56 @@ surfaces:
   # matrix, where the same two legs still skip. Do not read the armed job as a
   # replacement for it — the DB-free legs run here.
   - test_9078_record_written_by_production_path.py
+  # #11642 / #4051 V1: the Postgres dense leg and the two-store erasure
+  # attestation. `core` because BOTH subjects are `core`-selected and neither
+  # matches a `SOURCE_PATTERN`: `tortoise/record_vector.py` and
+  # `tortoise/embedding_residual_scan.py` are new files with no entry in
+  # `SOURCE_PATTERNS`, so a diff to the ANN leg — or to the scan that has to
+  # reach both stores after an erasure — falls to the `core` fallback
+  # (`--changed-files tortoise/record_vector.py` -> `['core']`, measured).
+  # Unregistered until #11660 review F3, which `ci_selection.py --integrity`
+  # reported as MANIFEST DRIFT: the file collected nowhere, so every pin in it
+  # (the served set, the shortfall assertion, the residual verdict algebra) was
+  # green by never running — the #1349/#2938/#3154/#4367 silent-drop class.
+  # ⛔ THE GAP THIS FILE CLOSES IS ABOUT `test_11642_vector_move.py` ALONE — the
+  # DB-free half (the served set, the shortfall algebra, the residual verdict).
+  # The statement that carries production dense traffic is EXECUTED, by the LIVE
+  # half registered eleven lines below: `test_11642_vector_move_live.py` applies
+  # the migrations to `TEST_RECORD_DB_URI` (the `pgvector/pgvector:pg16`
+  # provisioner), writes vectors through the production projection, and asserts
+  # `vector_search` (`embedding_vec <=> %s`, the status predicates,
+  # `_recency_sql`, the shortfall `count(*)`) returns them in distance order.
+  # ⚠️ An earlier draft of THIS comment claimed that file did not exist and that
+  # nothing executed `vector_search` (#11660 review round 3 P2, corrected in
+  # round 6 P1-2): it has been tracked since commit `77e40ccb`, and the claim had
+  # already escaped into that commit's message as a stated reason to keep the
+  # cutover off. The reason that survives is the one that stands alone — the
+  # record is a journal fold with NO backfill, so arming it would drop every
+  # pre-existing point out of the dense pool (`record_vector.ARMING_ENV`).
+  # ⛔ THE DB-FREE HALF (`test_11642_vector_move.py`) proves the served set, the
+  # arming gate and the residual verdict algebra; it CANNOT execute
+  # `record_vector.vector_search`, whose failure mode is `RecordVectorError` ->
+  # the NAMED graph fallback — i.e. a broken query would ship green and look like
+  # a correctly-degrading store. The LIVE half that does execute it (applying the
+  # migrations to `TEST_RECORD_DB_URI` on the `pgvector/pgvector:pg16`
+  # provisioner, writing through the production projection, and asserting the
+  # returned order and the terminal-row exclusion) is
+  # `tests/test_11642_vector_move_live.py`, registered below and run by the
+  # `test-record-postgres` job. ⚠️ An earlier draft of THIS comment said that
+  # file did not exist: it did, one arm down in the same list, and the peer lane
+  # added it — the contradiction is what #11660 review round 4 flagged.
+  - test_11642_vector_move.py
+  # The LIVE half: it executes `record_vector.vector_search` against a real
+  # pgvector server (the SQL, the shortfall count, the status predicate, the
+  # canonical operator identity, the recency CASE). Registered on `core` for the
+  # same reason `test_9078_record_written_by_production_path.py` is — a diff to
+  # `tortoise/record_vector.py` selects `core` and nothing else, so an
+  # unregistered file would collect NOWHERE on the change that can break it.
+  # Here its DSN-gated legs SKIP (psycopg2 is absent from the fast matrix and
+  # `TEST_RECORD_DB_URI` is unset); they RUN in `test-record-postgres`, which
+  # provisions `pgvector/pgvector:pg16` and lists this file — and that job fails
+  # on ANY skip (#9551), so the armed run cannot pass by absence.
+  - test_11642_vector_move_live.py
   # #9192: the production caller of the record's tenant scope + the arming
   # gate. `core` is load-bearing for `tortoise/record_writer.py` (no
   # SOURCE_PATTERN → the `core` fallback); the companion `api` arm above is
@@ -5716,6 +5766,17 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520: the SDK dense-leg date anchor (C6, docker-lane)
   - test_time_aware_eval_2520.py  # #2520: the eval-lane reorder placement + census (C6, docker-lane)
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
+  # #11646: the producer's `YYYY/MM/DD (Day) HH:MM` calendar-date shape, read at
+  # every seam that previously assumed ISO — `assembly._norm_date`,
+  # `time_aware._as_date` / `_as_iso_date`, `validity.end_state`,
+  # `coverage_loop._calendar_date` and `search_engine._created_sort_key`, all of
+  # which route through the new `tortoise/calendar_date.py`. `core` is the right
+  # surface and needs no dual: `tortoise/calendar_date.py` matches no
+  # SOURCE_PATTERNS row (measured: `ci_selection.py --changed-files` over this
+  # diff yields `surfaces: ["core"]`), and the sibling date/temporal pins
+  # (`test_time_aware_*`, `test_calendar_anchors.py`) live here too. Hermetic
+  # (pure parsing, no DB, no URI).
+  - test_11646_producer_date_shape.py
   - test_retrieval.py
   # #7209: DUAL-REGISTERED with `sdk` (`tortoise/sdk.py` is a SHARED_MODULE, so
   # a change to it selects this file). `tortoise/exceptions.py` is a
