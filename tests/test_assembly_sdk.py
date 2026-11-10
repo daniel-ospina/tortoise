@@ -93,10 +93,20 @@ FakeReader, per the policy above. THREE golden records moved: the byte-golden
 ``CANARY_QUESTION`` and ``"which came first - the couch or the dog bed?"``. Each
 is a strict PERMUTATION of its predecessor (same rows, same multiplicity), so
 the drift is a re-ordering of evidence already present, not added or lost
-rows. Byte-identical and UNTOUCHED:
-``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` / ``_COMPARE`` and the other
-three ``_A4_OFF_ORDERED`` entries; the FIRED/HOSTED goldens are unaffected too
-(their spine is rendered from dated events, not from the fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
+rows. ⚠️ THE DIRECTION, stated rather than left as "a permutation" (#11706
+review): on ``GOLD_LEGACY_CANARY`` the out-of-subgraph distractor
+``sess-distract-8`` rises ABOVE "sold the old couch and ordered a new sofa
+instead" (line 10 → 8 while that row goes 8 → 10), and on both
+``_A4_OFF_ORDERED`` entries the "new sofa was delivered" row moves from
+position 3 to 5. That is a measured demotion of a correct row beneath a
+distractor on the fixture R16(b) uses for out-of-subgraph admission; it breaks
+no gate (``"reading lamp" in evidence`` and ``B=0`` are unchanged), and #11682's
+stated first task is to quantify the widening's gain, so the datum belongs in
+the record.
+Byte-identical and UNTOUCHED: ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO``
+/ ``_COMPARE`` and the other three ``_A4_OFF_ORDERED`` entries; the FIRED/HOSTED
+goldens are unaffected too (their spine is rendered from dated events, not from
+the fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
 edit accompanied this: those are the independent CONTENT record.
 
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
