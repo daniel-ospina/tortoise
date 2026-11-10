@@ -257,7 +257,7 @@ alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio
 ### 5.3 Layer-valued declarations (the `#11000` dependency has LANDED)
 
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
-core kind (`pack_registry.py::PackRegistry._validate`), and its `core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES` line (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
+core kind (`pack_registry.py::PackRegistry._validate`), and its `core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES` line already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
 
 ✅ **`#11000`'s §6 leg has landed** (`main` `a7da06cc`, *"`subclassOf` widens to its parent, and the CORE
@@ -345,11 +345,11 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **22 test functions / 23 collected**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **24 test functions / 26 collected**
 (one is parametrised over the two docs). The two populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
-(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔22 difference is the
+(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔24 difference is the
 reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
 table's row count against that file, and was stale on both.
 
@@ -414,7 +414,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
 | the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
 | §2.1's **"Recorded here"** for the `#1934` departure (revision 4) | the marker's **home is the ISSUE**, not this ledger: it is now on `#1934` itself (comment 6759287749 — the `OVERRIDES:` line naming #1934's warn-not-block), relayed with a cross-reference on `#11656` (comment 6759288785); this doc keeps the ledger copy | fresh review (P3-2) — `#1934` was CLOSED and held **0** `OVERRIDES` comments, so the departure read as an accident at the only artifact a lane reads |
-| "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`:631`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
+| "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row` (`pack_hierarchy.py::_matching_row`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
 
 ## 11. Downward-closure example correction (the brief's §4.3)
 

@@ -705,6 +705,43 @@ class TestTheDocsAreDiscoverableAndResolve:
                     "name — cite it with a path (0 means it resolves to nothing at all)"
                 )
 
+    def test_the_stated_pin_population_matches_this_file(self):
+        """The scope's §6 note states THIS file's population; that figure has already gone stale once.
+
+        It said "20 test functions / 21 collected" while the file held 22/23 — the review's F2, one of two
+        shipped sites carrying it (the other is this file's `config/ci-surfaces.yml` registration comment).
+        A hand-maintained count rots the moment a test is added, which is precisely what happened: the
+        commit that made it stale added the twelfth errata row in a *different* file. So the count is
+        DERIVED here and both stated copies are held to it — a new test that forgets to update them reds
+        this row instead of shipping a false coverage claim.
+        """
+        source = Path(__file__).read_text()
+        functions = len(re.findall(r"^    def test_", source, re.M))
+        # `collected` = functions + the extra cases of every `@pytest.mark.parametrize` arm.
+        extra = sum(
+            len(cases.split(",")) - 1
+            for cases in re.findall(r"@pytest\.mark\.parametrize\(\"[a-z_]+\", \[([^\]]+)\]", source)
+        )
+        collected = functions + extra
+
+        scope = SCOPE_DOC.read_text()
+        stated = set(re.findall(r"\*\*(\d+) test functions / (\d+) collected\*\*", scope))
+        assert len(stated) == 1, (
+            f"the scope must state this file's population exactly once as **N test functions / M collected**; "
+            f"found {sorted(stated)} — update it in the same commit that changes the count"
+        )
+        stated_f, stated_c = (int(x) for x in stated.pop())
+        assert (stated_f, stated_c) == (functions, collected), (
+            f"{SCOPE_DOC.name} says **{stated_f} test functions / {stated_c} collected**; this file holds "
+            f"{functions} / {collected}. The doc's number is what a reader uses to judge coverage."
+        )
+
+        surfaces = (REPO_ROOT / "config" / "ci-surfaces.yml").read_text()
+        assert f"{functions} test functions / {collected} collected" in surfaces, (
+            "this file's `config/ci-surfaces.yml` registration comment carries a different population than the "
+            f"file itself ({functions} / {collected}) — F2 named both sites, so both are held here"
+        )
+
     @pytest.mark.parametrize("doc", [SCOPE_DOC, BRIEF_DOC], ids=["scope", "brief"])
     def test_neither_doc_cites_a_python_line_number(self, doc):
         """A `file.py:<line>` citation is not a citation — it rots on the next `main` merge.

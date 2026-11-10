@@ -5598,7 +5598,7 @@ surfaces:
   # folds, FOUR pair readers, each CALLED rather than `callable()`-checked), and the three DOC defects: an
   # unregistered doc, a bare citation of an ambiguous basename, and line-keyed `.py:<line>` citations (banned:
   # 44 in the scope + 36 in the brief went stale on one `main` merge; cited by SYMBOL now).
-  # 22 test functions / 23 collected.
+  # 24 test functions / 26 collected.
   # Offline, no graph, ~5s. ⚠️ DUAL-REGISTERED with `tier1` (below): `core` is the not-found FALLBACK, so
   # this row alone leaves a docs-only diff running the pin zero times (#11656 review F1).
   - test_11656_endpoint_kind_binding_scope.py

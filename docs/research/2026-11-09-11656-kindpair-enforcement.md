@@ -26,8 +26,9 @@ that must be settled before a scope can converge.
 
 > **Citations are by SYMBOL, not by line number** (`path.py::symbol`), per this repo's recorded rule
 > (`docs/architecture/S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*). The COUNTS
-> below were first measured at `e809803e` and re-measured at the merge head (`3d63339d`) and again at
-> `59e27baa` — see the scope's §1 note for the count revision `main`'s pack edits forced. A line number
+> below were first measured at `e809803e` and re-measured at the merge head — and they are re-derived on
+> every run by `tests/test_11656_endpoint_kind_binding_scope.py`, so no sha has to be carried here. See the
+> scope's §1 note for the count revision `main`'s pack edits forced. A line number
 > would rot on the next `main` merge, which is why none is carried here.
 
 ---
