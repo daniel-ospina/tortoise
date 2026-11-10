@@ -1282,11 +1282,12 @@ def assess(
     #
     # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) never
     #   trips it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
-    # - Nor does a statement whose query SHAPE multiplies rows (a join, a second
-    #   `MATCH`, an `UNWIND`) — the comparison never reads the mirror's count, so a
-    #   multiplied count alone cannot trip it. A modest multiplication (population 500
-    #   counted as 2,000 on a 25,000-node graph, claim 1,500) passes BOTH guards: the
-    #   claim is validated against the inflated ceiling and is under the total. No
+    # - Nor does a multiplied count ALONE trip it (a join, a second `MATCH`, an
+    #   `UNWIND`): the comparison never reads the mirror's count, only the claim. What
+    #   lands here is a claim the multiplication pushed above the total; a claim that stays
+    #   at or below it passes BOTH guards, whatever the multiplier — the measured example
+    #   is population 500 counted as 2,000 on a 25,000-node graph with a 1,500 claim, and
+    #   the same graph with a 30,000 ceiling and a 25,000 claim is equally untouched. No
     #   total-based comparison can separate that from "the population grew since the
     #   report" — refusing on ``resident_population > report.total_nodes`` would block
     #   legitimate growth — so that class is covered SOLELY by
@@ -1294,21 +1295,30 @@ def assess(
     #   test that pins this residual. Keep the pin; this check does not replace it.
     #
     # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
-    # NARROWLY in BOTH directions, because each of the two sentences that have sat here
+    # NARROWLY in BOTH directions, because each of the three sentences that have sat here
     # was wrong in one of them:
     #
     # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
-    #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`.
-    # - It IS reachable on a QUIESCENT graph, via a count statement that multiplies rows
-    #   by ENOUGH. "A population is a subgraph" (``resident_population <= node_total``)
-    #   holds for an HONEST statement, not for an inflated one, so the population bound's
-    #   premise does not carry here. Measured in this worktree: with the `turn` statement
-    #   answering 30,000 on a 25,000-node graph and a CLEAN 30,000/30,000 report, the
-    #   population bound stays SILENT (30,000 > 30,000 is false) and THIS check refuses
-    #   (``claims 30000 node(s) but the graph holds only 25000``). So a LARGE
-    #   row-multiplication is caught here; the residual band
-    #   `test_a_row_multiplying_count_statement_is_a_documented_residual` pins is the
-    #   MODEST one, whose inflated ceiling still sits under the total.
+    #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`, so the claim
+    #   capped by it cannot either.
+    # - It IS reachable on a QUIESCENT graph, but the reach is set by the CLAIM, not by
+    #   how badly a count statement multiplies: the trigger is
+    #   ``resident_population >= claim > node_total``, so an inflated count statement lands
+    #   here only when the CLAIM it licenses ALSO sits above the total. "A population is a
+    #   subgraph" (``resident_population <= node_total``) holds for an HONEST statement
+    #   and not for an inflated one, so the population bound's premise does not carry —
+    #   measured in this worktree on a 25,000-node graph with `turn` answering 30,000 (a
+    #   60x multiplication on 500 turns):
+    #       claim 30,000 -> REFUSED here ("holds only 25000"), population bound SILENT
+    #       claim 25,000 -> PLAN, licence 25,000 — NEITHER guard fires
+    #   i.e. the size of the multiplication is IRRELEVANT; only ``claim <= node_total``
+    #   bounds the hole. ⛔ So "a LARGE multiplication is caught here" would be false, and
+    #   the residual band is NOT "the modest one": it is
+    #   ``true_population < claim <= node_total``, independent of the multiplier.
+    # - The residual band is what
+    #   `test_a_row_multiplying_count_statement_is_a_documented_residual` pins, and the
+    #   boundary of the band is pinned executably by
+    #   `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`.
     #
     # ⚠️ ITS OTHER REACHABLE TRIGGER IS READ SKEW, and the read order below is what keeps
     # that honest. The total is read HERE — AFTER every per-population count — rather than

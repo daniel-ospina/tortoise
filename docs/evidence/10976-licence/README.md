@@ -91,28 +91,28 @@ gated individually by the executor's per-node record probe.
 - **Mirror it exactly.** `is_episodic` is stamped on `:Source`/`:Object` nodes too
   (`graph-scripts/backfill_is_episodic.py`), so dropping the `:Point` half would *inflate*
   the ceiling and re-open this hole from the other side.
-- **The whole-graph check stays**, with its reach stated honestly: it compares the
-  REPORT's claim against every node the graph holds, so it fires only when a claim exceeds
-  the whole graph. A count statement whose predicate is too wide, or whose query shape
-  multiplies rows modestly, passes BOTH guards — no total-based comparison can tell that
-  apart from a population that grew since the report — so that class is covered **solely**
-  by the mirror pin above. The backstop's reach is stated narrowly, as
-  `cache_eviction.py`'s own comment does: it compares the REPORT's claim against every
-  node the graph holds, so it fires when a claim exceeds the whole graph — reachable via a
-  count statement that multiplies rows far enough to push the population (and a claim
-  capped by it) past the total, or via nodes REMOVED between the population read and the
-  total read. It is **not** a detector for a widened predicate (a subgraph count cannot
-  exceed the total), and a MODEST row-multiplication still passes both guards — which is
-  the residual band the characterisation test pins.
+- **The whole-graph check stays**, with its reach stated as the mechanical trigger it is,
+  in `cache_eviction.py`'s own comment: it compares the REPORT's claim against every node
+  the graph holds, so it fires when `resident_population >= claim > node_total` — reachable
+  from nodes REMOVED between the population read and the total read, or from a count
+  statement inflated enough that the CLAIM it licenses also lands above the total
+  (`test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement`). What
+  it can never see is a **widened predicate** (a subgraph count cannot exceed the total),
+  nor a claim at or below the total — whatever the multiplier
+  (`test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`). That last band is
+  the residual, and it is bounded by the CLAIM, not by how badly a statement multiplies:
+  `true_population < claim <= node_total`. No total-based comparison can tell it apart from
+  a population that grew since the report, so it is covered **solely** by the mirror pin
+  above plus the characterisation test that pins it.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
 
 ## Tests
 
-`tests/test_cache_eviction_census.py` (115 tests in the file, 221 across the four
+`tests/test_cache_eviction_census.py` (117 tests in the file, 223 across the four
 eviction suites — measured, not asserted: `uv run python tools/test_lane.py run --
 tests/test_cache_eviction_census.py tests/test_cache_eviction_evictor.py
 tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
-`221 passed`, recorded in `WORKTREE-REPORT.md`):
+`223 passed`, recorded in `WORKTREE-REPORT.md`):
 
 | arm | what it pins |
 |---|---|
@@ -125,8 +125,9 @@ tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
 | `test_the_shared_statement_check_can_actually_fire` | **proves the pin above is not vacuous** — the live assertion runs over ONE population and can never fail, so this drives the same helper with a REFLOWED copy (must report the collision) and a genuinely distinct predicate (must not), which is the only demonstration the guard would fire the day a second population is registered |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
-| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible because a mirror-vs-total check adds no detection the backstop lacks (for an honest mirror it fires only under removal skew; for an inflated one, exactly when the multiplication pushes the population past the total), and a report-total check would refuse legitimate growth. So that MODEST-multiplication class rests on the mirror pin alone |
-| `test_a_LARGE_row_multiplication_is_caught_by_the_whole_graph_backstop` | the **other side of the same claim, pinned**: a `turn` statement answering 30,000 on a 25,000-node graph is refused by the **graph-total** check, with the population bound silent (`30000 > 30000` is false). ⛔ Proves the backstop is reachable on a QUIESCENT graph — a comment that said it was unreachable there was wrong — and that the refusal comes from the right guard (the population bound's message must be absent, or the arm passes for the wrong one) |
+| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is `true_population < claim <= node_total`, bounded by the CLAIM and not by the multiplier, which is why the mirror pin is the only guard there |
+| `test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement` | `turn` answering 30,000 on a 25,000-node graph with a 30,000 claim is refused by the **graph-total** check, population bound silent. ⛔ Proves the backstop is reachable on a QUIESCENT graph — a comment claiming it was unreachable there was wrong — and that the refusal comes from the right guard |
+| `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total` | the **boundary of the residual band**: the SAME 30,000 ceiling on the same 25,000-node graph with a 25,000 claim licenses 25,000, neither guard firing. ⛔ Pins the correction in the direction the previous comment got wrong — the multiplier is irrelevant, only the claim's position against the total matters |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.
