@@ -248,6 +248,21 @@ _MIN_REPRESENTABLE_EPOCH_S = -62_135_596_800.0
 _MAX_REPRESENTABLE_EPOCH_S = 253_402_300_800.0
 
 
+def _unrepresentable_instant(raw: Any) -> CacheReadError:
+    """The refusal for a stamp outside the instants this process can render.
+
+    One message, two callers: :func:`_checked_instant`'s range arm and
+    :func:`parse_measured_at`'s INT arm, which range-checks *before* converting (see
+    there — an integer too large for `float` would otherwise raise `OverflowError`).
+    """
+    return CacheReadError(
+        f"parity report `measured_at` is {raw!r}, which is outside the instants "
+        f"this process can represent: epoch values are SECONDS, in "
+        f"[{_MIN_REPRESENTABLE_EPOCH_S:.0f}, {_MAX_REPRESENTABLE_EPOCH_S:.0f}) — a "
+        f"value ~1000x too large is usually a MILLISECOND stamp"
+    )
+
+
 def _checked_instant(value: float, raw: Any) -> float:
     """``value`` as an epoch-second instant, or a :class:`CacheReadError`.
 
@@ -267,12 +282,7 @@ def _checked_instant(value: float, raw: Any) -> float:
             f"them against a freshness bound"
         )
     if not _MIN_REPRESENTABLE_EPOCH_S <= value < _MAX_REPRESENTABLE_EPOCH_S:
-        raise CacheReadError(
-            f"parity report `measured_at` is {raw!r}, which is outside the instants "
-            f"this process can represent: epoch values are SECONDS, in "
-            f"[{_MIN_REPRESENTABLE_EPOCH_S:.0f}, {_MAX_REPRESENTABLE_EPOCH_S:.0f}) — a "
-            f"value ~1000x too large is usually a MILLISECOND stamp"
-        )
+        raise _unrepresentable_instant(raw)
     return value
 
 
@@ -300,6 +310,20 @@ def parse_measured_at(raw: Any) -> float | None:
             f"parity report `measured_at` is {raw!r} — that is not a measurement time"
         )
     if isinstance(raw, (int, float)):
+        # ⛔ AN INT IS RANGE-CHECKED BEFORE IT IS CONVERTED, and the comparison never
+        # converts. `json.load` reads ANY digit string as a Python int, so a 309-digit
+        # stamp is a valid JSON number that reaches this arm — and `float()` (and
+        # `math.isfinite()`) raise `OverflowError: int too large to convert to float`
+        # on it. That is NOT this module's refusal type, so it escaped
+        # :func:`load_parity_report`'s documented `CacheReadError` contract and reached
+        # `tools/cache_evict.py` as a traceback carrying exit 1 (its USAGE code —
+        # "retry your flags") instead of 3 (REFUSED). The ints that survive the range
+        # test convert EXACTLY (the window is ~1e11, far inside 2**53), so the check
+        # below costs no precision.
+        if isinstance(raw, int) and not (
+            _MIN_REPRESENTABLE_EPOCH_S <= raw < _MAX_REPRESENTABLE_EPOCH_S
+        ):
+            raise _unrepresentable_instant(raw)
         return _checked_instant(float(raw), raw)
     text = str(raw).strip()
     if not text:

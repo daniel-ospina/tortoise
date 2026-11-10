@@ -1455,6 +1455,20 @@ def test_parse_measured_at_refuses_a_stamp_it_cannot_age():
     assert parse_measured_at(-62_135_596_800.0) == -62_135_596_800.0
     assert parse_measured_at(1_700_000_000.0) == 1_700_000_000.0
 
+    # ⛔ A JSON INTEGER TOO LARGE FOR `float` IS A REFUSAL, NOT AN `OverflowError`.
+    # `json.load` reads ANY digit string as a Python int, so this shape is reachable
+    # from an operator artifact. Measured pre-fix: `parse_measured_at(10**309)` raised
+    # `OverflowError: int too large to convert to float` — not this module's refusal
+    # type, so it escaped the loader's documented contract and would have reached
+    # `tools/cache_evict.py` as a traceback with exit 1 (its USAGE code, "retry your
+    # flags") instead of 3 (REFUSED). The int arm range-checks BEFORE converting.
+    for huge in (10**309, -(10**309)):
+        with pytest.raises(CacheReadError, match="MILLISECOND"):
+            parse_measured_at(huge)
+    # …and an IN-RANGE int is still accepted, converted exactly (no range check drift).
+    assert parse_measured_at(1_700_000_000) == 1_700_000_000.0
+    assert parse_measured_at(-62_135_596_800) == -62_135_596_800.0
+
 
 def test_a_nan_stamp_in_the_report_FILE_is_a_refusal_not_a_licence(tmp_path):
     """The artifact seam: `json.load` accepts `NaN`, so the READER must not."""
@@ -1467,6 +1481,31 @@ def test_a_nan_stamp_in_the_report_FILE_is_a_refusal_not_a_licence(tmp_path):
         "utf-8",
     )
     with pytest.raises(CacheReadError):
+        load_parity_report(str(path), graph_name="tortoise")
+
+
+def test_an_int_stamp_too_large_for_the_clock_is_a_refusal_not_an_OverflowError(
+    tmp_path,
+):
+    """The artifact seam, for the one number shape `float()` cannot take.
+
+    Reachable and measured pre-fix: `json.load` reads a 309-digit literal as a Python
+    int, `float()` on it raises `OverflowError: int too large to convert to float`, and
+    that escaped `load_parity_report`'s documented `CacheReadError` contract. The
+    consequence is the one this loader exists to prevent: `tools/cache_evict.py`
+    classifies only `CacheReadError` as REFUSED, so this shape produced a traceback
+    with exit 1 — its USAGE code, which tells the operator to retry FLAGS against
+    evidence nobody could read.
+    """
+    path = tmp_path / "r.json"
+    path.write_text(
+        '{"instrument": "tools/turn_parity_census.py", "graph": "tortoise", '
+        '"verdict": "CLEAN", "measured_at": ' + "1" + "0" * 309 + ', '
+        '"population": {"episodic_graph_nodes": 5}, '
+        '"dry_run": {"would_delete_turn_nodes": 5}}',
+        "utf-8",
+    )
+    with pytest.raises(CacheReadError, match="MILLISECOND"):
         load_parity_report(str(path), graph_name="tortoise")
 
 
