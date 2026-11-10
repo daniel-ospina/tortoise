@@ -1260,6 +1260,55 @@ def test_padded_session_id_is_not_charged_then_dropped_11382():
     assert [h["id"] for h in unrelated] == ["p1"]
 
 
+def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
+    """#11382, the CUSTOM-KEY arm: a caller-supplied ``session_key`` that
+    returns the RAW stored id must not desynchronise the two halves of the
+    pair.
+
+    ``seeded_sessions`` normalises what it emits; before this PR
+    ``reinjection_merge_order`` keyed the pool with the raw custom key, so its
+    ``last_rank`` map never matched a normalised seed and the group fell to
+    the defensive TAIL. MEASURED on the pre-fix merge (pool
+    ``['p1','p2','p3']``, sessions ``'  s1  '`` and ``'s2'``, group for
+    ``s1``):
+
+        merged -> ['p1', 'p2', 'p3', 't1', 't2']     (group AFTER s2's hits)
+        wanted -> ['p1', 't1', 't2', 'p2', 'p3']     (after s1's last base rank)
+
+    That is reader-visible: the reader consumes a PREFIX of the pool, so a
+    tail-appended group is context the reader can lose. No in-repo caller
+    passes ``session_key=`` to this pair today (measured: only ``dedup_pool``
+    takes a custom key), so this pins the GUARANTEE rather than a live lane.
+    """
+    def raw_key(hit: dict) -> str:
+        return hit.get("session_id") or ""
+
+    pool = [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+            {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND},
+            {"id": "p3", "session_id": "s2", "point_kind": TURN_POINT_KIND}]
+    seeds = seeded_sessions(pool, window=9, limit=9, session_key=raw_key)
+    assert [(s.session_id, s.point_id) for s in seeds] == [
+        ("s1", "p1"), ("s2", "p2")]
+
+    added = {"s1": [{"id": "t1", "session_id": "  s1  "},
+                    {"id": "t2", "session_id": "  s1  "}]}
+    merged = reinjection_merge_order(
+        pool, dict(added), seed_order=[s.session_id for s in seeds],
+        session_key=raw_key, max_chunks_per_session=9)
+    assert [h["id"] for h in merged] == ["p1", "t1", "p2", "p3", "t2"]
+    # ... which IS the default key's answer on the same pool, so the custom
+    # key is normalised into the SAME namespace rather than a second one. (The
+    # guard still keeps s1 to `per_session_cap` in the window — t2 is pushed
+    # past it, which is the guard doing its job, not the seed/merge split.)
+    default_merged = reinjection_merge_order(
+        pool, dict(added), seed_order=["s1", "s2"],
+        max_chunks_per_session=9)
+    assert [h["id"] for h in default_merged] == [h["id"] for h in merged]
+    # the tail shape the raw merge used to produce is NOT what happened: the
+    # group starts at s1's own last base rank, not after every other session
+    assert [h["id"] for h in merged] != ["p1", "p2", "p3", "t1", "t2"]
+
+
 def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):
     # sentinel: coverage_loop must DELEGATE, not re-implement — reverting it
     # to the historical inline copy must fail this test

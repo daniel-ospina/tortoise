@@ -360,7 +360,15 @@ def seeded_sessions(pool: list[dict], *,
     and the group key comes from the GRAPH (``coalesce(p.session_id, s.id)``)
     while this one comes from the POOL HIT — two separately-produced strings.
     Normalising both sides is the fix; normalising one side is the bug. It is
-    also why a custom key cannot reintroduce the mismatch by being raw.
+    also why a custom key cannot reintroduce the mismatch by being raw: this
+    function normalises what it EMITS, and
+    :func:`reinjection_merge_order` normalises what it KEYS on (both the
+    splice anchor and the ``guard_and_recap_pool`` re-cap it hands the key
+    to), so a raw custom key is normalised on both halves of the pair rather
+    than on one. ⚠️ A caller that reaches a THIRD grain with the same raw key
+    (e.g. ``dedup_pool`` directly) makes its own decision — the default
+    ``session_key_of`` is normalised, and that is the only combination this
+    arm ships.
     """
     if not pool or window < 1 or limit < 1:
         return []
@@ -602,7 +610,24 @@ def reinjection_merge_order(
     """
     if not pool:
         return list(pool)
-    key = session_key if session_key is not None else session_key_of
+    # #11382: the merge is the SECOND half of the same comparison the seed
+    # makes, so it applies the same normalisation to whatever key produced it
+    # — including a caller-supplied one, and including the key handed on to
+    # ``guard_and_recap_pool``'s per-session re-cap. Without this a raw custom
+    # key would silently desynchronise the two halves: the SEED list is
+    # normalised by ``seeded_sessions``, so a raw ``last_rank`` never matches
+    # a seed and the group lands in the defensive TAIL instead of after its
+    # own session's base ranks (measured: pool ``['p1','p2','p3']`` with
+    # ``s1``/``s2`` seeded ⇒ ``['p1','p2','p3','t1','t2']`` rather than
+    # ``['p1','t1','t2','p2','p3']``), and the cap would then bucket a
+    # session's base chunks apart from its injected siblings. On the default
+    # key this is a no-op: ``session_key_of`` already returns the normalised
+    # form.
+    raw_key = session_key if session_key is not None else session_key_of
+
+    def key(hit: dict) -> str:
+        return normalize_session_key(raw_key(hit))
+
     order = list(seed_order) if seed_order is not None else list(added_by_session)
     last_rank: dict[str, int] = {}
     for i, hit in enumerate(pool):
