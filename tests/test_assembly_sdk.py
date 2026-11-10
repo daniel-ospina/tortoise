@@ -88,15 +88,15 @@ goldens failed the ORDER layer while the two CONTENT layers passed, i.e. the
 row SET was intact and only the sequence moved. Re-captured from the docker
 lane on ``tests/_assembly_graph.build_base_graph`` /
 ``build_out_of_subgraph_gold`` with ``question_date="2026-09-10"`` and a
-FakeReader, per the policy above: exactly TWO records moved — the byte-golden
-``GOLD_LEGACY_CANARY`` and the ``_A4_OFF_ORDERED`` entry for ``CANARY_QUESTION``
-— plus one more ``_A4_OFF_ORDERED`` entry,
-``"which came first - the couch or the dog bed?"`` (in both, the "new sofa
-delivered" row rotates from position 3 to 5: one causal event, not incidental
-churn); ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` / ``_COMPARE`` and the
-other three ``_A4_OFF_ORDERED`` entries were byte-identical and are untouched,
-and the FIRED/HOSTED goldens are unaffected (their spine is rendered from dated events, not from the
-fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
+FakeReader, per the policy above. THREE golden records moved: the byte-golden
+``GOLD_LEGACY_CANARY``, and two of the five ``_A4_OFF_ORDERED`` entries --
+``CANARY_QUESTION`` and ``"which came first - the couch or the dog bed?"``. Each
+is a strict PERMUTATION of its predecessor (same rows, same multiplicity), so
+the drift is a re-ordering of evidence already present, not added or lost
+rows. Byte-identical and UNTOUCHED:
+``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` / ``_COMPARE`` and the other
+three ``_A4_OFF_ORDERED`` entries; the FIRED/HOSTED goldens are unaffected too
+(their spine is rendered from dated events, not from the fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
 edit accompanied this: those are the independent CONTENT record.
 
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
