@@ -234,9 +234,16 @@ POPULATION_RESIDENT_COUNT: dict[str, str] = {
 #: report in any other verdict did NOT prove the record serves the class.
 PARITY_PROVEN_VERDICTS = frozenset({"CLEAN"})
 
-#: ⛔ HOW OLD A PARITY REPORT MAY BE AND STILL LICENSE A SWEEP. The one staleness
-#: bound on this path, and it is an EVIDENCE-AGE bound — the same class, and named
-#: the same way, as `allowance_gate.STALE_AFTER_SECONDS` (#5331).
+#: ⛔ HOW OLD A PARITY REPORT MAY BE AND STILL LICENSE A SWEEP. This is the AGE axis
+#: of staleness, and it is an EVIDENCE-AGE bound — the same class, and named the same
+#: way, as `allowance_gate.STALE_AFTER_SECONDS` (#5331).
+#:
+#: ⛔ IT IS NOT THE ONLY STALENESS BOUND ON THIS PATH, and reading it as though it were
+#: is how the SIZE axis gets deleted as "redundant": :data:`POPULATION_RESIDENT_COUNT`
+#: bounds the SAME licence by the population's own resident count, and neither subsumes
+#: the other. A report stamped a minute ago still over-claims if the population shrank
+#: since (eviction IS the shrink path, so the two move independently by design), while a
+#: report of exactly the right size still licenses a sweep when it is hours old.
 #:
 #: WHY IT IS NEEDED AT ALL (measured, #10976): the population `nodes` count a report
 #: carries IS the executor's runaway cap (`cache_evictor` gate 2,

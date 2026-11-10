@@ -262,7 +262,7 @@ files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:949`, which is also the one that lifted the file count,
+(`cache_eviction.py:956`, which is also the one that lifted the file count,
 being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring), and #9601's record backup
 (`tortoise/hosted_backup.py`, likewise a new file, whose six mentions are the
@@ -278,7 +278,7 @@ a docstring, a comment, a printed message, or an RST literal in
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
 lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:949` comment, plus three of `hosted_backup.py`'s
+`cache_eviction.py:956` comment, plus three of `hosted_backup.py`'s
 (`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
 literals. Six of sixty-three is still the exception, so the exclusion argument
 stands; a guard carrying a hand-maintained allowlist of
