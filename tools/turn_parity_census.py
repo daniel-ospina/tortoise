@@ -474,6 +474,7 @@ import os
 import re
 import struct
 from collections.abc import Iterable
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any
 
@@ -490,6 +491,17 @@ _TURN_ID_RE = re.compile(r"^(?P<sid>.+)_t(?P<idx>[0-9]+)$")
 #: not `__file__`-derived: the artifact must name the same instrument wherever it is
 #: copied to, and `PARITY_INSTRUMENTS` in the consumer keys on exactly this string.
 INSTRUMENT = "tools/turn_parity_census.py"
+
+
+def _utc_now_iso() -> str:
+    """This process's clock, as the ISO-8601 UTC instant the report is stamped with.
+
+    The consumer needs an instant it can AGE (`tortoise/cache_eviction.py`), so the
+    stamp is authored here rather than by whoever reads the artifact — the same rule
+    as ``instrument`` and ``graph`` above. ``Z`` (not ``+00:00``) because that is the
+    form the artifact's readers and docs use; the consumer parses both.
+    """
+    return datetime.now(UTC).isoformat().replace("+00:00", "Z")
 
 #: Keyset page size for the graph leg. Must sit well UNDER FalkorDB's
 #: `RESULTSET_SIZE` (default 10_000) so a page is never truncated; the
@@ -2201,7 +2213,8 @@ def read_local_record_turns(directory, node_keys: Iterable[str] | None = None
 
 
 def census(graph: dict, record: dict, *, sample: int,
-           graph_name: str | None = None) -> dict:
+           graph_name: str | None = None,
+           measured_at: str | None = None) -> dict:
     """The comparison and the classification. Pure: no I/O, no verdict I/O.
 
     ``graph_name`` is the graph the GRAPH leg actually read (:func:`resolve_graph_name`)
@@ -2211,8 +2224,19 @@ def census(graph: dict, record: dict, *, sample: int,
     left to compare — the binding then proves only that the operator typed one string
     (review P1 on PR #11004). The identity is therefore authored HERE, by the leg that
     opened the graph, and never by the consumer.
+
+    ``measured_at`` is the second thing the consumer will not have supplied by itself,
+    on the axis that closes STALENESS: the report's population count IS the egress
+    executor's runaway cap (``tortoise/cache_evictor.py`` gate 2), so a census of the
+    SAME graph taken in an EARLIER pass would otherwise size a sweep from a population
+    that no longer exists — measured: a stale report claiming 20,000 turns on a graph
+    holding 500 licenses 40x the population the cap exists to bound. The default is this
+    process's UTC clock at the instant the comparison is assembled (the reading's own
+    instant, never the consumer's), and it stays overridable so a test can pin it
+    instead of racing a clock.
     """
     nodes, rows = graph["nodes"], record["rows_by_key"]
+    measured_at = measured_at or _utc_now_iso()
     # The record's own declaration of what it cannot compare. It narrows the
     # comparison, so it is validated HERE and surfaces in the report — a
     # narrower comparison that looked exactly like the strong one would be the
@@ -2477,6 +2501,16 @@ def census(graph: dict, record: dict, *, sample: int,
         # an artifact that does not know its target must say so, not look like a shape
         # from before the field existed.
         "graph": graph_name,
+        # ⚠️ REQUIRED by the consumer for the same reason as `instrument`/`graph`, on the
+        # axis that closes STALENESS: the report's population count is the egress
+        # executor's runaway cap, so a census of THIS graph measured in an EARLIER pass
+        # would otherwise size a sweep from a population that no longer exists (measured:
+        # a stale report claiming 20,000 turns on a graph holding 500 licenses 40x the
+        # population it exists to bound).
+        # ``tortoise/cache_eviction.assess`` demotes a report that carries no measurement
+        # time, and one older than the pass's bound, so emitting it here is what keeps
+        # the honest path open without making freshness a caller's assertion.
+        "measured_at": measured_at,
         "compared_fields": compared_fields,
         "declared_absent": sorted(declared_absent),
         "population": {

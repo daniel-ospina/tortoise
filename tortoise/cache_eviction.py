@@ -89,8 +89,10 @@ from __future__ import annotations
 
 import os
 import re
+import time
 from collections.abc import Iterable
 from dataclasses import dataclass, field
+from datetime import UTC, datetime
 from typing import Any
 
 __all__ = [
@@ -100,8 +102,11 @@ __all__ = [
     "CACHE_EVICTION_EXIT_REFUSED",
     "CACHE_EVICTION_EXIT_UNBOUNDED",
     "CACHE_EVICTION_EXIT_USAGE",
+    "DEFAULT_PARITY_REPORT_MAX_AGE_S",
     "DERIVED_LABELS",
     "PARITY_INSTRUMENTS",
+    "PARITY_REPORT_FUTURE_SKEW_S",
+    "PARITY_REPORT_MAX_AGE_ENV",
     "TRUTH_LABELS",
     "Assessment",
     "CacheReadError",
@@ -114,7 +119,9 @@ __all__ = [
     "load_parity_report",
     "measure_state",
     "node_total",
+    "parse_measured_at",
     "resident_counts",
+    "resolve_max_report_age",
 ]
 
 #: Where a declared ceiling is read from. ⛔ ABSENT means "no ceiling declared", and
@@ -176,6 +183,39 @@ PARITY_INSTRUMENTS: dict[str, str] = {
 #: report in any other verdict did NOT prove the record serves the class.
 PARITY_PROVEN_VERDICTS = frozenset({"CLEAN"})
 
+#: ⛔ HOW OLD A PARITY REPORT MAY BE AND STILL LICENSE A SWEEP. The one staleness
+#: bound on this path, and it is an EVIDENCE-AGE bound — the same class, and named
+#: the same way, as `allowance_gate.STALE_AFTER_SECONDS` (#5331).
+#:
+#: WHY IT IS NEEDED AT ALL (measured, #10976): the population `nodes` count a report
+#: carries IS the executor's runaway cap (`cache_evictor` gate 2,
+#: `licence_remaining`), so a stale report claiming 20,000 nodes on a graph whose real
+#: turn population is 500 licenses sweeping 40x the population the instrument meant to
+#: bound. The graph-name binding cannot catch it — a census of the SAME graph measured
+#: earlier carries the same name by construction — and neither can the over-count check
+#: below, which only fires when a report claims MORE than the whole graph holds
+#: (`500 < 20,000 < 25,000` passes it).
+#:
+#: WHY ONE HOUR. A sweep is a measure-then-sweep pass, so the honest gap between the
+#: census and the sweep is minutes; 3600 s is far above any real gap and still bounds
+#: the claim by orders of magnitude. It is a BOUND, never a licence to reuse a report
+#: across passes — and there is deliberately no "unbounded" setting: a non-positive
+#: bound is REFUSED rather than read as "no bound" (see
+#: :func:`resolve_max_report_age`), because a gate whose off state looks like a
+#: configured state is the class this whole module exists to catch.
+PARITY_REPORT_MAX_AGE_ENV = "TORTOISE_PARITY_REPORT_MAX_AGE_S"
+DEFAULT_PARITY_REPORT_MAX_AGE_S = 3600.0
+
+#: How far AHEAD of this host's clock a report's stamp may be and still be believed.
+#: A limit, not a courtesy: the census and the sweep can run on different hosts, and
+#: NTP skew of a second or two must not read as evidence of a defect. Past it, a stamp
+#: is a CLOCK DISAGREEMENT rather than freshness, and the report is demoted — a stamp
+#: that claims to predate nothing cannot be shown to describe this pass. 300 s follows
+#: the direction of the repo's existing future-skew allowance (the skill-read register
+#: drops a stamp more than 60 s ahead); it is looser here because two hosts are
+#: involved rather than one file, and the number is quoted so it can be argued with.
+PARITY_REPORT_FUTURE_SKEW_S = 300.0
+
 
 def config_labels() -> frozenset[str]:
     """The preserved config classes — projection's registry, never a second copy.
@@ -196,6 +236,91 @@ def config_labels() -> frozenset[str]:
     return frozenset(cls.label for cls in _config_classes())
 
 
+def parse_measured_at(raw: Any) -> float | None:
+    """The instant a parity report was measured, as epoch seconds UTC — or ``None``.
+
+    Accepts the wire shapes an instrument plausibly emits (ISO-8601 with ``Z`` or an
+    offset; a bare epoch number) because the report is an OPERATOR ARTIFACT and the
+    reader's job is to read it, not to force a re-run over a format it did not expect.
+    A NAIVE ISO stamp is read as UTC: these reports are produced on a server whose own
+    default is UTC, and silently treating it as local would move the reading by hours —
+    the wrong direction on a freshness bound.
+
+    ⛔ A value that cannot be parsed is a :class:`CacheReadError`, NOT ``None``.
+    ``None`` means "this artifact carries no time" (a shape from before the field
+    existed); an unparseable one means the artifact DOES claim a time and the claim is
+    unreadable. Flattening the two would let a typo'd stamp read as undated and be
+    refused for the wrong reason, and the caller would go looking for a missing field
+    that is present.
+    """
+    if raw is None:
+        return None
+    if isinstance(raw, bool):  # bool is an int; a `true` stamp is not an instant
+        raise CacheReadError(
+            f"parity report `measured_at` is {raw!r} — that is not a measurement time"
+        )
+    if isinstance(raw, (int, float)):
+        return float(raw)
+    text = str(raw).strip()
+    if not text:
+        return None
+    iso = text[:-1] + "+00:00" if text.endswith(("Z", "z")) else text
+    try:
+        parsed = datetime.fromisoformat(iso)
+    except ValueError as exc:
+        raise CacheReadError(
+            f"parity report `measured_at` is {text!r}, which is neither an ISO-8601 "
+            f"instant nor an epoch number: {exc}"
+        ) from exc
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.timestamp()
+
+
+def resolve_max_report_age(value: float | None = None) -> float:
+    """The freshness bound this pass applies; ``value`` wins over the environment.
+
+    Resolution order is :data:`PARITY_REPORT_MAX_AGE_ENV`, then
+    :data:`DEFAULT_PARITY_REPORT_MAX_AGE_S`. A malformed, non-finite or NON-POSITIVE
+    bound is a :class:`CacheReadError` rather than a quietly-clamped number, for the
+    same reason :func:`measure_state` refuses a non-positive ceiling: a bound must be
+    greater than zero. A zero or negative bound would refuse every report — turning the
+    whole egress path off while looking configured — and a reader could not tell that
+    from a store where nothing is proven, which is the one failure mode this module
+    exists to detect everywhere else.
+    """
+    resolved: float
+    if value is not None:
+        try:
+            resolved = float(value)
+        except (TypeError, ValueError) as exc:
+            raise CacheReadError(
+                f"parity report age bound {value!r} is not a number of seconds"
+            ) from exc
+    else:
+        raw = os.environ.get(PARITY_REPORT_MAX_AGE_ENV)
+        if raw is None or raw.strip() == "":
+            resolved = DEFAULT_PARITY_REPORT_MAX_AGE_S
+        else:
+            try:
+                resolved = float(raw)
+            except ValueError as exc:
+                raise CacheReadError(
+                    f"{PARITY_REPORT_MAX_AGE_ENV}={raw!r} is not a number of seconds"
+                ) from exc
+    if resolved != resolved or resolved in (float("inf"), float("-inf")):
+        raise CacheReadError(
+            f"parity report age bound {resolved!r} is not a finite number of seconds"
+        )
+    if resolved <= 0:
+        raise CacheReadError(
+            f"parity report age bound {resolved} is not a positive number of seconds — "
+            f"a bound must be greater than zero (a non-positive bound refuses every "
+            f"report, which reads as a configured gate that can never pass)"
+        )
+    return resolved
+
+
 @dataclass(frozen=True)
 class ParityReport:
     """What a parity instrument said, for one population.
@@ -210,14 +335,22 @@ class ParityReport:
     (``tools/turn_parity_census.py::census`` emits it), :func:`load_parity_report`
     refuses a report that carries none, and a name that disagrees with the graph being
     measured is refused too. ⚠️ What that buys is a real comparison, not a proof: the
-    reader still trusts the instrument to name the graph it actually opened, the reader
-    cannot correlate a name with an INSTANCE (two hosts can both call a graph
-    ``tortoise``), and a census of the SAME graph measured EARLIER passes this check
-    untouched — time is not part of the identity (the only staleness guard downstream
-    is :func:`assess`'s over-count check). Stated here rather than overclaimed: an
-    earlier version of this docstring called the field "an OPERATOR ASSERTION" and the
-    loader filled in a missing name with the caller's own — which made the check unable
-    to fail at all (review P1 on #11004).
+    reader still trusts the instrument to name the graph it actually opened, and the
+    reader cannot correlate a name with an INSTANCE (two hosts can both call a graph
+    ``tortoise``). Stated here rather than overclaimed: an earlier version of this
+    docstring called the field "an OPERATOR ASSERTION" and the loader filled in a
+    missing name with the caller's own — which made the check unable to fail at all
+    (review P1 on #11004).
+
+    ``measured_at`` is the SECOND identity axis, and it is the one that closes
+    staleness: a census of the SAME graph measured EARLIER satisfies every name check
+    by construction, so before this field the population's size claim was undated and
+    a report from any prior pass could size the executor's cap (see
+    :data:`PARITY_REPORT_MAX_AGE_ENV` for the measured consequence). It is **epoch
+    seconds, UTC**, parsed from the instrument's ISO-8601 ``measured_at``; ``None``
+    means the report carries NO measurement time, and :func:`assess` treats that as
+    ``cannot-answer`` rather than as fresh — an artifact that cannot say WHEN it looked
+    cannot be shown to describe this pass.
     """
 
     instrument: str
@@ -225,6 +358,7 @@ class ParityReport:
     measured_nodes: int | None = None
     total_nodes: int | None = None
     graph_name: str | None = None
+    measured_at: float | None = None
 
     def proves(self) -> bool:
         """True only when the instrument RAN, was CLEAN, and covered EVERYTHING.
@@ -247,6 +381,20 @@ class ParityReport:
         if self.total_nodes <= 0 or self.measured_nodes < 0:
             return False
         return self.measured_nodes == self.total_nodes
+
+    def age_seconds(self, now: float) -> float | None:
+        """How long ago this report was measured, in seconds — or ``None`` if undated.
+
+        A NEGATIVE age (a report stamped in the future) is returned as-is rather than
+        clamped to 0: it is a datum that disagrees with this host's clock, and the
+        caller decides. :func:`assess` tolerates it up to
+        :data:`PARITY_REPORT_FUTURE_SKEW_S` and demotes past that — two hosts are
+        allowed a little NTP skew, and a report that claims to have been measured well
+        after the pass it licenses has not been shown to have been measured at all.
+        """
+        if self.measured_at is None:
+            return None
+        return now - self.measured_at
 
 
 @dataclass(frozen=True)
@@ -406,6 +554,20 @@ def _float_or_none(value: Any) -> float | None:
         return float(value)
     except (TypeError, ValueError):
         return None
+
+
+def _epoch_to_iso(epoch: float | None) -> str | None:
+    """Epoch seconds as an ISO-8601 UTC instant, for the artifact a human reads.
+
+    Epoch floats are the arithmetic form; an operator reading a census artifact should
+    not have to convert one to know when the licence was measured. ``None`` stays
+    ``None`` so "undated" is never rendered as the epoch zero, which would read as
+    1970 — a real instant.
+    """
+    if epoch is None:
+        return None
+    return datetime.fromtimestamp(epoch, UTC).isoformat().replace(
+        "+00:00", "Z")
 
 
 def measure_state(
@@ -690,6 +852,7 @@ def assess(
     *,
     ceiling_bytes: int | None = None,
     parity_reports: dict[str, ParityReport] | None = None,
+    max_report_age_seconds: float | None = None,
 ) -> Assessment:
     """Answer #10976's one gated question, and refuse when it cannot be answered.
 
@@ -698,6 +861,12 @@ def assess(
     only when its instrument supplied a report that :meth:`ParityReport.proves` — an
     instrument that did not run, was not CLEAN, or covered part of the population
     leaves the class ``cannot-answer``.
+
+    *max_report_age_seconds* bounds how old a proven report may be and still license a
+    sweep; ``None`` resolves :data:`PARITY_REPORT_MAX_AGE_ENV`, then
+    :data:`DEFAULT_PARITY_REPORT_MAX_AGE_S`. A report with NO ``measured_at``, or one
+    older than the bound, is demoted to ``cannot-answer`` exactly like an unbound one —
+    see :data:`PARITY_REPORT_MAX_AGE_ENV` for the measured defect this closes.
 
     The verdict is computed from the WRONG direction on purpose: **an unproven class
     is never evicted.** ``PLAN`` licenses ONLY the populations named in
@@ -721,6 +890,11 @@ def assess(
     total_nodes = node_total(graph)
     config = config_labels()
     reports = dict(parity_reports or {})
+    #: The instant THIS pass began, taken before any measurement is issued. It is the
+    #: reference the report ages are measured against, so a report stamped after it is a
+    #: clock disagreement rather than freshness (see :meth:`ParityReport.age_seconds`).
+    pass_started_at = time.time()
+    max_report_age = resolve_max_report_age(max_report_age_seconds)
 
     classes: list[ClassReading] = []
     problems: list[str] = []
@@ -800,6 +974,35 @@ def assess(
                       f"{report.measured_nodes}/{report.total_nodes} node(s)")
             measured = report.measured_nodes
             proven = True
+        # ⛔ STALENESS — the ONE guard this path did not have (#10976, review P2 on
+        # #11097). A census of the SAME graph measured EARLIER satisfies every name
+        # check by construction, and the population `nodes` count below IS the
+        # executor's runaway cap, so an undated or aged report sizes a destructive
+        # bound from a measurement nothing can place in time (measured: a stale report
+        # claiming 20,000 nodes on a graph whose real turn population is 500 licenses
+        # 40x the population it exists to bound). This demotes exactly like the unbound
+        # and mismatched arms above, and for the same reason: an artifact that cannot
+        # show it describes THIS pass is not evidence about this pass.
+        age = report.age_seconds(pass_started_at) if report is not None else None
+        if proven and age is None:
+            proven = False
+            reason = (f"cannot-answer: {instrument}'s report carries NO measurement "
+                      f"time (`measured_at`), so it cannot be shown to describe this "
+                      f"pass — a population size that cannot be dated cannot size a "
+                      f"sweep")
+        elif proven and age < -PARITY_REPORT_FUTURE_SKEW_S:
+            proven = False
+            reason = (f"cannot-answer: {instrument}'s report claims to have been "
+                      f"measured {-age:.0f}s AFTER this pass began, past the "
+                      f"{PARITY_REPORT_FUTURE_SKEW_S:.0f}s clock-skew tolerance — that "
+                      f"is a clock disagreement, not a fresh reading, so the report "
+                      f"cannot be placed in this pass at all")
+        elif proven and age > max_report_age:
+            proven = False
+            reason = (f"cannot-answer: {instrument}'s report was measured {age:.0f}s "
+                      f"ago, older than this pass's {max_report_age:.0f}s bound — a "
+                      f"stale report licenses evicting a population that no longer "
+                      f"has the size it measured")
         entry = ClassReading(
             label=f"{population} (population)",
             nodes=int(measured or 0),
@@ -818,6 +1021,14 @@ def assess(
     # instrument's report, so a stale report (or one about another graph) would
     # otherwise license evicting N nodes that this graph does not contain — the
     # plan's own node count is the only number a sweeper would size itself from.
+    #
+    # ⚠️ THIS IS THE COARSE SECOND CHECK, NOT THE STALENESS GUARD. It compares against
+    # the WHOLE graph (`node_total`, every label), so it only fires on a report claiming
+    # more nodes than exist AT ALL — a stale report claiming fewer passes it. The real
+    # bound is the report's own `measured_at` above; this stays because it is the one
+    # check that needs no clock and catches an outright impossible number (it is the
+    # guard that a report about ANOTHER graph of this instance trips even when that
+    # graph happens to be larger).
     resident_total = total_nodes
     checked: list[ClassReading] = []
     for entry in classes:
@@ -860,7 +1071,8 @@ def assess(
     # ⚠️ This does NOT widen what may be swept: every gate a consumer applies is
     # unchanged, and a `REFUSED` verdict (nothing proven) still yields an EMPTY
     # `evictable`, so the refusal is as sharp as it was.
-    licence = [
+    licence: list[dict[str, Any]] = []
+    for c in eligible:
         # ⛔ `population_name`, NEVER a fallback to `label`. A fallback re-merges the
         # two namespaces this PR separated: a label row and a population row that share
         # a word would collapse into ONE licence key, which is exactly the confusion the
@@ -868,10 +1080,25 @@ def assess(
         # here, and label rows are built `eligible=False`), but the day a label becomes
         # provable the fallback would silently re-merge them. `label` is emitted beside
         # it for display, so the fallback buys nothing.
-        {"population": c.population_name, "nodes": c.nodes,
-         "instrument": c.instrument, "label": c.label}
-        for c in eligible
-    ]
+        #
+        # ⚠️ The AGE is part of the licence, not decoration. `nodes` is the executor's
+        # cap, so an operator reading a plan is entitled to see WHEN the number that
+        # sizes a destructive bound was measured and against which bound — otherwise
+        # freshness is an assertion nobody can audit. Only `measured_at`-dated rows can
+        # reach here (an undated one is demoted above), so this is always populated.
+        source_report = reports.get(c.instrument or "")
+        licence.append({
+            "population": c.population_name,
+            "nodes": c.nodes,
+            "instrument": c.instrument,
+            "label": c.label,
+            "measured_at": _epoch_to_iso(
+                source_report.measured_at if source_report is not None else None),
+            "age_seconds": (
+                source_report.age_seconds(pass_started_at)
+                if source_report is not None else None),
+            "max_age_seconds": max_report_age,
+        })
     not_evictable = [c.label for c in classes if not c.eligible]
     if state.bound_bytes is None:
         # ⛔ The one state that most needs naming must not share the "bounded and
@@ -946,6 +1173,30 @@ def assess(
                 "`noeviction` for exactly that reason."
             ),
         }
+
+    # ⛔ THE PASS'S OWN EVIDENCE, on every verdict. A `REFUSED` because the report was
+    # aged out must not be indistinguishable from a `REFUSED` because the record cannot
+    # serve: an operator reading only `problems` can tell them apart, but a monitor that
+    # reads the artifact cannot. Emitting the bound and each report's age beside the
+    # verdict keeps the reason auditable without re-running anything.
+    plan["parity_evidence"] = {
+        "max_age_seconds": max_report_age,
+        "bound_source": (
+            "argument" if max_report_age_seconds is not None
+            else PARITY_REPORT_MAX_AGE_ENV if os.environ.get(PARITY_REPORT_MAX_AGE_ENV)
+            else "default"),
+        "reports": [
+            {"instrument": instrument,
+             "measured_at": _epoch_to_iso(report.measured_at),
+             "age_seconds": report.age_seconds(pass_started_at),
+             "verdict": report.verdict}
+            for instrument, report in sorted(reports.items()) if report is not None
+        ],
+        "unusable": [
+            {"instrument": instrument, "reason": "report demoted to unproven"}
+            for instrument, report in sorted(reports.items()) if report is None
+        ],
+    }
 
     return Assessment(state=state, classes=tuple(classes), verdict=verdict,
                       problems=problems, plan=plan)
@@ -1058,10 +1309,15 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
     # `--parity-graph` as the whole of the evidence (review P1 on #11004).
     # `tools/turn_parity_census.py::census` emits the identity, so the honest path is
     # open; a report without one is an artifact that cannot say what it measured.
-    # ⚠️ Neither this check nor any other on this path closes STALENESS: a census of
-    # the SAME graph measured earlier carries the same name and passes. The only
-    # downstream guard is `assess()`'s over-count check (a report claiming MORE nodes
-    # than the graph holds is refused); a report claiming fewer is accepted.
+    # ⚠️ The graph NAME alone does not close staleness: a census of the SAME graph
+    # measured earlier carries the same name and passes. That is why the report's own
+    # `measured_at` is read here and why it is REQUIRED evidence downstream —
+    # :func:`assess` refuses a report with no measurement time, or one older than the
+    # pass's bound (:data:`PARITY_REPORT_MAX_AGE_ENV`), because the population count a
+    # report carries is the executor's runaway cap. The over-count check
+    # (`entry.nodes > resident_total`) remains as the coarse, clock-free second guard:
+    # it fires on a report claiming more nodes than the graph holds AT ALL, and a stale
+    # report claiming FEWER is the shape only the timestamp can catch.
     if reported_graph is None or not str(reported_graph).strip():
         raise CacheReadError(
             f"parity report {path} names no graph — the field is REQUIRED "
@@ -1082,4 +1338,12 @@ def load_parity_report(path: str, *, graph_name: str) -> ParityReport:
         measured_nodes=_int_or_none(measured),
         total_nodes=_int_or_none(total),
         graph_name=str(reported_graph),
+        # ⛔ THE STALENESS DATUM. `tools/turn_parity_census.py::census` emits it, and
+        # ABSENT IS NOT TREATED AS FRESH: :func:`assess` demotes an undated report to
+        # `cannot-answer`, because the population size it carries is the executor's
+        # runaway cap and a cap that cannot be placed in time cannot bound a sweep.
+        # A report that DOES carry a time this loader cannot parse is refused HERE
+        # (CacheReadError), never flattened to `None` — the two are different findings
+        # and only one of them means "this artifact predates the field".
+        measured_at=parse_measured_at(payload.get("measured_at")),
     )
