@@ -1840,10 +1840,9 @@ a docs-only diff skips doc-subject guards, which is the opposite of what the sur
 collided again and the second time with a REGISTRY ROW. *"The carve-out is about CONTENT"* reads as
 `state_value_carve_out` (E2, `#1534`), which is a declared mechanism this same document carries at §7 (its marker
 sits on §7's second subsection, *"State values and numeric facts — the carve-out is NARROWER than it looks"*,
-`EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this
-same gate scans: at the FIRST-replacement head that sentence read `The carve-out is about CONTENT`, which made ten
-`carve-out` occurrences with nine naming that mechanism; this head has nine, all nine naming it — one of them in §3
-itself (`EXTRACTOR-V4-ARCHITECTURE.md:504`), which is why the reworded sentence must not add a tenth. The sentence now says
+`EXTRACTOR-V4-ARCHITECTURE.md:1345`) and this same gate scans: every `carve-out` in the document — §3's own included,
+at `:504` — names that mechanism, so a sentence about prompt content must not borrow the noun (do not re-derive an
+occurrence count here: it is a moving figure and this entry is not the place to hold it). The sentence now says
 *"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
 Loosening
 `MARKERS_ABSENT_BY_DESIGN` to a frame-aware
