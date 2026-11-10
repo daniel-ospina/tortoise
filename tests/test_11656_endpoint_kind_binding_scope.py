@@ -521,15 +521,13 @@ class TestThePairHasProductionReaders:
             "(`portfolio:valuationMark → venture:investment`) — §5.2's load-bearing case and §6 pin 10 rest "
             "on this reader reading the manifest"
         )
-        assert "_pack_relations()" in inspect.getsource(domain_validators._portfolio_mark_contract), (
-            "the reader stopped consulting the loaded pack and now returns the module constants, which is "
-            "the hardcoded-copy drift §5.5 says to reuse it to avoid"
-        )
-
-        # ⛔ **The derivation, not the fallback** — a source-text check is not enough: an early
-        # `return MARK_KIND, POSITION_KIND, MARK_RELATION` leaves the `_pack_relations()` call in place and
-        # stays green over a reader that can no longer follow a manifest edit. Swapping the pack's `marks`
-        # row must MOVE the answer (this is the same mechanism
+        # ⛔ **The derivation, not the fallback — and deliberately no `"_pack_relations()" in source`
+        # check beside it.** A source-text version of this was tried first and mutation 4a (an early
+        # `return MARK_KIND, POSITION_KIND, MARK_RELATION` placed BEFORE the loop) stayed GREEN under it,
+        # because the loop's text is still present and unreachable. A weaker assertion beside a
+        # behavioural one — whose message claims precedence it cannot earn — is the F3 class this round
+        # removed elsewhere in this file, so it is not kept "for completeness". Swapping the pack's `marks`
+        # row must MOVE the answer (same mechanism
         # `test_investment_portfolio_manager_pack.py::test_the_mark_contract_follows_a_manifest_edit` pins in
         # its own suite; here it is what makes §5.5's "reuse it" claim — and §6 pin 10 — non-vacuous).
         monkeypatch.setattr(
