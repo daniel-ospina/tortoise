@@ -7104,42 +7104,49 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    # ⛔ `the exemption` IS NOT HERE ANY MORE, and the MARKER stays live: it is a
-    # real denial phrase (the owner's decision — *"a counted writer may not be
-    # called **an exemption**"* — and a DEFINITE-articled counted writer is the same
-    # claim), so it remains in `DENIAL_MARKERS` above and the DENIAL frame still
-    # catches it. What was removed is the DECLARATION, because the one reason that
-    # justified it — "absent from both documents until someone writes it" — became
-    # false: `#11665` added EXTRACTOR §3's clause *"The exemption is about CONTENT,
-    # not the declaration site"*, and a marker declared absent-by-design that DOES
-    # appear is exactly the stale declaration the liveness half below reds on.
-    # ⚠️ That occurrence is the word in a DIFFERENT sense — a carve-out from the
-    # no-prompt-text rule, not a census row excused — which is why it also stays
-    # out of the census. Precisely: §3 is OUTSIDE `CORRECTED_SECTIONS`, so
-    # `test_no_corrected_passage_denies_a_verdict_the_census_counts` never reads
-    # the sentence at all, and `_denied_verdicts` could not attribute it anyway
-    # (its stated limit 2: a denial that names no census writer is invisible).
-    # Green by EXCLUSION, not by being read and found true — the difference the
-    # `:4252` block exists to keep visible. This is the same doctrine that DELETED the
-    # bare `exempt` stem from the marker tuples: its live effect is a FALSE RED,
-    # because a stem match cannot tell a denial from the non-denial prose both
-    # documents DO write — EXTRACTOR §3's carve-out *"The exemption is about
-    # CONTENT, not the declaration site"* (the occurrence quoted above) and
-    # STORAGE's *"exempts that statement exactly"* — so it was removed rather than
-    # kept as coverage that fires on true prose (`#10200` review, cycle 5). It is
-    # also the doctrine that deleted the `#10200` cycle-9 orphans ("the entries
-    # were deleted rather than left as dead coverage"). Removing the entry does not
-    # weaken the liveness tripwire — it strengthens it, since `unpinned` below now
-    # demands this marker appear, and will red the day a reword drops it.
-    # ⚠️ `main` reached the same deletion independently (the two sides agreed on
-    # the RESOLUTION and differed only in the note): its substance is kept below,
-    # because it names WHERE the red was first recorded.
-    # The marker's non-denial occurrence cannot hide a real denial either way —
-    # whether an OCCURRENCE is a denial is decided sentence-by-sentence by
-    # `DENIAL_PATTERNS` + `_class_marker_negated` — so this pin only asks that a
-    # marker is not DEAD, and it is not. Recorded on `#9066` as one more nodeid
-    # red on `main` because push-to-main legs never complete (that is why it
-    # reached a PR instead of `main`'s CI).
+    # ⛔ THIS KEY IS THE HALF THAT WAS APPLIED WITHOUT ITS PARTNER, and `main`
+    # is RED for it. The declaration and the §3 sentence are ONE decision; two
+    # different PRs each took the right half, in the wrong order, and the pair
+    # they produced is neither of them:
+    #   · `#11704` (`397a2d34b463`) DELETED this key. Correct against the corpus
+    #     it measured: `#11665` had added *"⚠️ **The exemption is about CONTENT,
+    #     not the declaration site**"* to `EXTRACTOR-V4-ARCHITECTURE.md` §3, so
+    #     the marker was written where this key declared it absent — the `stale`
+    #     half below red-ed, and deleting the key is the remedy its message names.
+    #   · `#11688` (`24e53f2b2256`) then REWORDED that sentence to *"The carve-out
+    #     is about CONTENT, not the declaration site"* — also correct, and for a
+    #     reason this file agrees with: `#10149` forbids calling a counted writer
+    #     "an/the exemption", and §3's subject is prompt CONTENT, not a census
+    #     row.
+    # The rewording FALSIFIED the deletion's premise — the spelling is no longer
+    # written — but the key was not restored, so the phrase is now in NEITHER
+    # flattened document AND undeclared. Measured on a clean `origin/main`
+    # worktree at `24e53f2b2256` (`TORTOISE_TEST_CARVE_OUT=1`, this very leg):
+    #
+    #   AssertionError: these markers appear in NEITHER flattened document and
+    #   are not declared absent-by-design: ["DENIAL_MARKERS: 'the exemption'"]
+    #
+    # So this key is RESTORED, beside `#11688`'s wording kept verbatim (this
+    # branch carried the same rewording as *"This clause is…"* and now defers to
+    # main's, which names the subject). Reverting §3 to *"The exemption is…"*
+    # instead would re-create the `stale` red `#11704` cleared: the halves are
+    # one decision, and landing one without the other is exactly what the two
+    # legs measure in opposite directions.
+    "the exemption": (
+        "contradiction vocabulary — the definite-articled form. Absent from both "
+        "documents: `#11665`'s §3 clause was reworded from *\"The exemption is "
+        "about CONTENT\"* to *\"The carve-out is about CONTENT\"* (`#11688`, "
+        "`24e53f2b2256`), because `#10149` forbids calling a counted writer "
+        "an/the exemption and that sentence is about prompt content, not a census "
+        "row — so the noun is not borrowed for prose the census denial vocabulary "
+        "does not own. `#11704` deleted this declaration while the sentence still "
+        "wrote the spelling; `#11688` then removed the spelling and did not "
+        "restore it, which is what red-ed `unpinned` on main — so the reason "
+        "stands and the key stays. The documents' only `exempt*` spellings are "
+        "`exempts` (STORAGE's map-shape rule), and `exemption` as *\"the last "
+        "exemption\"* / *\"the coordination exemption\"* / *\"a declared "
+        "exemption\"* — none of them the definite-articled denial form"
+    ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
