@@ -769,12 +769,22 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     # the sentence satisfied this pin while the block that actually describes the
     # set drifted (measured, #11754 review finding 3: decoy sentence above + prose
     # `three` over a four-member set PASSED).
-    run = re.search(r"((?:^#:.*\n)+)\Z", before, re.MULTILINE)
+    #
+    # The run is allowed to be followed by blank lines, because a spacer between
+    # the paragraph and the definition is a RE-WRAP of the block, not a deletion of
+    # the sentence — anchoring at `\Z` alone reported *"the comment block no longer
+    # carries the sentence"* over a present and correct sentence (#11754 review).
+    run = re.search(r"((?:^#:.*\n)+)(?:[ \t]*\n)*\Z", before, re.MULTILINE)
     # Each line is a `#:` comment and may be re-wrapped at any column, so strip the
-    # marker per line and join to one line rather than pinning a line break.
+    # marker per line and join to one line rather than pinning a line break. Lines
+    # whose body is EMPTY contribute nothing to the sentence — dropping them is what
+    # keeps a blank `#:` in the middle of the paragraph from reading as a broken
+    # sentence (`"while the"` + `"#:"` + `"four entries…"` joined naively yields
+    # `while the  four`, which no longer matches; measured, #11754 review).
     prose = " ".join(
         re.sub(r"\s+", " ", line[2:]).strip()
         for line in (run.group(1) if run else "").splitlines()
+        if line[2:].strip()
     )
     matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
     assert matches, (
