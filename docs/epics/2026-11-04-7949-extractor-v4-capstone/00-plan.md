@@ -417,10 +417,12 @@ fan-out respected; C8 holds.
 **The contradiction to adjudicate:** `#4889` ("the Subject layer is unpopulated in production") is
 **CLOSED**, and the owner measured **26 Subjects against 19,300 points**. One of those is false.
 **Produces:** the binder's attach rate (`bind_point_subjects`, `tortoise/subject_binding.py:341`, called
-from `sdk.py:16079`), the four subject-edge family counts, and the **customer-visible** consequence
+from `sdk.py`'s point-creation path at `:16848` — keyed by symbol: `bind_point_subjects(proj, self, point_id=pid`),
+the four subject-edge family counts, and the **customer-visible** consequence
 (search `subject`, `get_org_structure`). The three candidate explanations — the binder never runs (note
-`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4552` and
-consumed at `sdk.py:8766/8819` — ⚠️ `sdk.py:8952` is a *different* probe's docstring), the slots are absent in the
+`subject_binding_available` is a **fail-OPEN** probe, defined at `tortoise/search_engine.py:4598` and
+consumed at `sdk.py:9244`/`:9297` — ⚠️ another probe's docstring sits in the same region of `sdk.py`, which is why
+this pair is keyed by **symbol**), the slots are absent in the
 corpus, or the graph served is not the graph measured — are decided by evidence.
 **Proof:** Subjects `26 → N` on a real corpus, four families non-zero, both customer readers non-empty —
 or the honest finding that the corpus has no bindable subjects, recorded as such (**not** a pass).
@@ -476,7 +478,8 @@ peer.
 
 > ⚠️ **SUPERSEDED by the Test-Design Gate's own artifact:** `03-test-design.md`, filed as **#11454** —
 > 18 rows (1–17 plus `10a`, E6) each with a test layer **and a run tier** (`CI` · `Tier E` · `milestone`), a measured CI-cost
-> baseline (64.3 s of 12,734.8 s), and an existing-test audit. The table below is retained only as the
+> baseline (**re-derived: 155.5 s of 14,222.8 s = 1.093 %** — the `64.3 s of 12,734.8 s` this line first carried
+> was stale; see `03-test-design.md` §0, which names the sixteen files), and an existing-test audit. The table below is retained only as the
 > historical inline version; **children cite #11454**, not this section.
 
 The workflow's Test-Design Gate files a *separate* test-design issue. **Here its output is this table

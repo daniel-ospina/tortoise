@@ -29,18 +29,46 @@ map explicitly forbids as a layout input.
 | fact | value |
 |---|---|
 | whole suite, measured weight | **14,222.8 s over 1,317 files** (`durations_captured_at: 2026-11-09T09:15:00Z`) |
-| capstone-adjacent files | **16 files, 64.3 s total — 0.5 % of the suite** |
+| capstone-adjacent files | **16 files, 155.5 s total — 1.093 % of the suite** (Σ over the `durations:` rows matching `*capstone*` / `*7949*` / `*v4_declared*` / `*graph_census*`; the sixteen are named below, so the number is reproducible) |
 | heaviest three | `test_graph_census_7949.py` **21.5 s** · `test_v4_declared_mechanisms.py` **19.2 s** · `test_7949_capstone_verdict_check.py` **10.0 s** |
-| the eval lane already exists and is dispatch-only | `eval-suite-manual.yml` and `evals-on-demand.yml` — **both `workflow_dispatch` ONLY**, no `push`, no `pull_request`, no `schedule`; `on_demand:` in `ci-surfaces.yml` excludes `eval/**` + `longmem_eval/**` from merge gating (#10194, owner decision A 2026-10-27) |
+| the eval lane already exists and is dispatch-only | `eval-suite-manual.yml` and `evals-on-demand.yml` — **both `workflow_dispatch` ONLY**, no `push`, no `pull_request`, no `schedule`; `on_demand:` in `ci-surfaces.yml` excludes `eval/**` + `longmem_eval/**` from merge gating (#10194, owner decision A 2026-10-27). ⚠️ **Dispatch-only is not the same as able to run this epic's measurements** — neither workflow can execute an A-row (§5.2a of `04-plan.md`, restated in conclusion 2 below) |
 | capstone files in `carve_out:` / `uri_requiring:` / `slow_files:` | `carve_out:` holds **one**: `test_pack_logic_writeprobe_11083.py` (`config/ci-surfaces.yml:9224`) — the **E6** lane this artifact maps at §2 row `10a`, which builds a `TortoiseSDK(<tmpfile>)` and is carve-out for exactly that reason. `uri_requiring:` and `slow_files:` hold none |
+
+⛔ **The family row is re-derived here, and the sixteen files are named so the next reader can check it.**
+Rounds 4–5 re-derived every other figure in this table and left this one at a **stale 64.3 s** — which the rest
+of the artifact already refuted: §4 prices `21.5 + 19.2 + 10.0 + 20.9 + 4.1 = 75.7 s` across **five** of the
+sixteen, i.e. 1.18× the stated total for all of them. At `durations_captured_at` the same predicate returns **the
+same sixteen files, Σ = 155.5 s = 1.093 %**:
+
+| file | s | | file | s |
+|---|---:|---|---|---:|
+| `test_9664_capstone_verdict_ledger.py` | 39.0 | | `test_7949_capstone_verdict_check.py` | 10.0 |
+| `test_graph_census_7949.py` | 21.5 | | `test_7949_capstone_measure.py` | 4.1 |
+| `test_capstone_preregistration_9075.py` | 20.9 | | `test_7950_capstone_probe.py` | 3.9 |
+| `test_v4_declared_mechanisms.py` | 19.2 | | `test_capstone_1976_report_claims.py` | 1.1 |
+| `test_7949_c2_door.py` | 17.5 | | `test_9664_capstone_connector_to_record.py` | 0.9 |
+| `test_9567_record_capstone.py` | 15.5 | | `test_capstone_a_rows_10982.py` | 0.9 |
+| `test_graph_census_8882.py` | 0.6 | | `test_9889_capstone_probes.py` | 0.2 |
+| `test_7949_e5_section10_writeback.py` | 0.1 | | `test_7949_e5_population_reconcile.py` | 0.1 |
+
+Four of the sixteen postdate this artifact (`test_9664_capstone_verdict_ledger.py`, `test_7949_c2_door.py`,
+`test_capstone_a_rows_10982.py`, `test_7949_e5_population_reconcile.py`). The **twelve that predate it still sum
+to 98.0 s**, so the erratum is not "new tests arrived" — the row was wrong when it was written.
 
 ⇒ **Two conclusions up front, and they change the design:**
 
-1. **The capstone is not a CI-cost problem today** — 0.5 % of the suite. So the discipline below is about
-   **not creating one**, not about shrinking an existing one.
-2. **The right home for the expensive, non-deterministic work already exists**: the dispatch-only eval lane.
-   Adding the A-row measurements there costs merge-time CI **nothing**, and matches the owner's own ruling
-   that evals do not gate a merge.
+1. **The capstone is not a CI-cost problem today** — **1.1 %** of the suite (155.5 s of 14,222.8 s). So the
+   discipline below is about **not creating one**, not about shrinking an existing one. The direction of that
+   conclusion survives the corrected magnitude; only the number moved.
+2. **The right TIER for the expensive, non-deterministic work is already decided — the dispatch-only eval lane —
+   but that lane does not yet exist as a runnable home for this epic's measurements, and this artifact must not
+   send a child to it as if it did.** `04-plan.md` §5.2a establishes it from the workflows: `evals-on-demand.yml`
+   carries **no `secrets.` reference anywhere** and runs **pytest over test files** while `capstone_run.py` is a
+   script; `eval-suite-manual.yml` has a docker FalkorDB URI but **no hosted-door credentials**, so it cannot
+   reach `POST /v1/sessions`. **No existing workflow can run an A-row.** The tier rule stands (evals never gate a
+   merge — `#10194`), and **building the job that carries the hosted secret and the `corpus`/`head`/`budget`
+   inputs is C2's deliverable** (§5.2a); until it ships, a Tier-E run is a **credentialed operator lane with the
+   same gates**, not a workflow dispatch.
 
 ---
 
@@ -50,7 +78,7 @@ map explicitly forbids as a layout input.
 |---|---|---|---|
 | **the pinned registration** (`preregistration.json` + checker) | State / config | Read + Write (amended) | `capstone-preregistration/v1`; `criteria[].id`, `denominator_floors`, `below_floor`, `corpus`, `amendments`; the A-rows enter as a **versioned amendment** quoting superseded text |
 | **the verdict gate enum** (`capstone_verdict_check.py:135`) | State (closed vocabulary) | Read | `capstone-verdict-v1`; a **closed** `CRITERIA` tuple that refuses any id outside it (`:920-922`, testing `RECOGNISED_CRITERIA` — so A1–A5 are accepted) — two schemas move, not one |
-| **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py:1177`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
+| **the corpus pin** (fixture + A-corpus) | State | Read + Write | **three shapes already exist** (`fixtures_hash` in the record; `corpus.sha256`/`items` demanded by `capstone_run.py`'s G1 — the fail-closed read is `if not frozen.get("sha256")`, `:1186`; a derived `e1e2_corpus.json`) — the A-corpus must **unify the contract**, not add a fourth |
 | **the A-corpus capture** (`POST /v1/sessions`) | External service | Out → graph | request = curated payloads; response = receipt; **402 quota** at `hosted_api.py:18205` (`if count + est > max_points`) / `:18216` (`quota_refusal_payload`); harness resolution `#3681` |
 | **the graph the A-rows read** (hosted `live-v4` / per-run graph) | DB | Read | `:Object`/`:Event`/`:Point`/`:Subject` shapes; `hasPart` Object→Object (ONTOLOGY §3.7); `batch_id` on `RelationUpsert.attrs` |
 | **the pack declaration → write path** (`semantics`/`hierarchies`) | State | Read | `relation_write_verdict` returns `writable`; **unread legs**: `semantics` (surfaced at `pack_registry.py:456-459`), `hierarchies` (validated only, `:2341-2355`) |
@@ -72,8 +100,11 @@ wrong tier is how CI becomes unusable.
 composer goes to **Tier E** (the dispatch-only eval lane).
 
 **18 rows below — numbered `1…17` plus `10a`.** `10a` is **E6**, added by **`#11083`** after the table was
-numbered; it keeps its own label because that is the label `#11454` and the children cite for it. So the map is
-**18 surfaces**, not 17 — the figure the earlier summary and the siblings carried.
+numbered, and it keeps its own label so the children that already cite `10a` do not have to be renumbered — **not**
+because the tracker carries it: `#11454`'s body still reads *"17 surfaces mapped; 8 CI-eligible, 9 Tier E"* and
+names neither `10a` nor E6 (correction relayed to that issue, DECISION RELAY; the stale `17 / 8 / 9` is the issue's,
+not this artifact's). So the map is **18 surfaces — 7 CI, 10 Tier E, 1 split** — not 17, the figure the earlier
+summary and the siblings carried.
 
 | # | Surface | Test layer | **Runs where** | Why that tier | Key failure modes to test |
 |---|---|---|---|---|---|
@@ -108,7 +139,7 @@ the owner already ruled on (#10194).
 
 | flag | where | required verification |
 |---|---|---|
-| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:4552`, consumed `sdk.py:8766/8819`); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
+| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:4598`, consumed `sdk.py:9244`/`:9297` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
 | **Conditional guards** | `_capture_lane()` returns `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`; the whole door claim hangs on a conditional | a CI-level pin on the selector itself (cheap, file-level) + Tier E evidence that the named lane ran |
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
@@ -128,17 +159,23 @@ candidate for one).
 
 | file | measured weight | verdict | why |
 |---|---|---|---|
-| **`test_graph_census_7949.py`** | **21.5 s** (20 tests; **16 drive a real `capture_session`** on the embedded lane, 4 are offline) | ⛔ **REFACTOR — highest-value change** | An **integration test sitting in a fast shard**. Keep the **4** offline pins in CI (the census arithmetic) and move the **16** live-capture cases to **Tier E** — including the `:Object`-has-no-derivation-link case, which takes the `captured` fixture and therefore cannot stay an offline pin. Recovers ~8–9 s of merge-time CI and stops the fast shard paying for a live graph. |
-| **`test_v4_declared_mechanisms.py`** | **19.2 s** (133 defs) — second heaviest | 🔧 **REFACTOR — investigate imports first** | 133 cases over a YAML file should not cost 19.2 s. Likely per-test pack-registry reload / source re-parse. A session-scoped fixture (load packs + parse sources once) is the fix; **measure before and after** and take the weight from a junit sweep, never a local reading. |
-| **`test_7949_capstone_verdict_check.py`** | **10.0 s** (161 defs) | 🔧 **REFACTOR — share the throwaway repo** | Its own note says the subprocess-bound ancestry arms dominate and that a no-promisor throwaway repo took the file from 520 s → 6 s once. The remaining cost is one repo build **per test**; a session-scoped repo fixture should cut it. |
+| **`test_graph_census_7949.py`** | **21.5 s** (20 tests; **16 drive a real `capture_session`** on the embedded lane, 4 are offline) | ⛔ **REFACTOR — highest-value change** | An **integration test sitting in a fast shard**. Keep the **4** offline pins in CI (the census arithmetic) and move the **16** live-capture cases to **Tier E** — including the `:Object`-has-no-derivation-link case, which takes the `captured` fixture and therefore cannot stay an offline pin. ⛔ **No recovered-seconds figure is quoted, because none is measured**: the `durations` map prices the FILE (21.5 s), not its live/offline split, so the *"~8–9 s"* carried here from an older 11.1 s reading is **unsourced**, and a proportional guess (21.5 × 16/20 ≈ 17 s) would be a different unmeasured number — substituting it would repeat the defect. The move's point is that a live graph stops being paid for in the fast shard; measure the split before pricing it. |
+| **`test_v4_declared_mechanisms.py`** | **19.2 s** (**140** defs, AST-counted) — second heaviest | 🔧 **REFACTOR — investigate imports first** | 140 cases over a YAML file should not cost 19.2 s. Likely per-test pack-registry reload / source re-parse. A session-scoped fixture (load packs + parse sources once) is the fix; **measure before and after** and take the weight from a junit sweep, never a local reading. |
+| **`test_7949_capstone_verdict_check.py`** | **10.0 s** (**163** defs, AST-counted) | 🔧 **REFACTOR — share the throwaway repo** | Its own note says the subprocess-bound ancestry arms dominate and that a no-promisor throwaway repo took the file from 520 s → 6 s once. The remaining cost is one repo build **per test**; a session-scoped repo fixture should cut it. |
 | **`test_capstone_preregistration_9075.py`** | **20.9 s** | ✅ **KEEP** | It re-derives `fixtures_hash` over 7 sessions of fixtures + gold. That is the check that makes the whole record trustworthy; 20.9 s for the epic's foundation is correctly priced. |
 | **`test_7949_capstone_measure.py`** | **4.1 s** over **12,294 lines / 231 test functions** (the `0.2 s` in an earlier revision belongs to `test_9889_capstone_probes.py` — a duplicate-key episode left the two readings adjacent) | ⛔ **DO NOT REFACTOR FOR COST** | It is still one of the cheaper files in the family per line (4.1 s over 12,294 lines). Its length is *prose pins* (README/§10 sentences), and those pins have caught real re-staling. Splitting it for size would move ~0.2 s and risk losing a pin — the wrong trade. ⚠️ Its `durations` row history is contradictory (an earlier duplicate-key episode left `0.2` beside a note claiming `11.1` as an "upper bound"); **the pin that forbids a duplicate `durations` key is the thing to trust, and it is currently satisfied** (verified: zero duplicate keys). |
 | **`test_9889_capstone_probes.py`** (0.2 s) · **`test_7950_capstone_probe.py`** (3.9 s) | 4.1 s | 🔍 **AUDIT for overlap, do not delete blind** | Three "capstone probe" files exist for different bundles/epics (9889, 7950, 7949). Before adding the A-row pins, run an **overlap audit**: if two files pin the same sentence of the same bundle, unify; if they pin different bundles, leave them. Deleting a check that catches a real failure is worse than 2 s. |
-| `test_extractor_v4_citation_rot.py` (7.0 s) · `…_s4_stage_claims.py` (5.0 s) · the five 0.1 s doc guards | 12.5 s | ✅ **KEEP** | Citation-rot and doc-claim guards are the cheapest defence in the repo against the failure this epic keeps producing (a claim true in a summary, stale in its copies). |
+| `test_extractor_v4_citation_rot.py` (7.0 s) · `…_s4_stage_claims.py` (5.0 s) · the **four** 0.1 s doc guards (`…_step_list_consistency`, `…_doc_citations`, `…_failure_policy`, `…_redaction_reconciliation`) | **12.4 s** (7.0 + 5.0 + 4 × 0.1) | ✅ **KEEP** | Citation-rot and doc-claim guards are the cheapest defence in the repo against the failure this epic keeps producing (a claim true in a summary, stale in its copies). ⚠️ This row said *"the five 0.1 s doc guards"* and 12.5 s; the map prices **four** at 0.1 (`…_citation_rot` is 7.0 and `…_s4_stage_claims` 5.0 — they are the two named beside it, not part of the count). |
 
-**Aggregate proposal:** ~**20 s** of merge-time CI recoverable from two refactors (`graph_census_7949` live half →
-Tier E; one shared fixture in the verdict/pack tests), with **zero checks deleted**. The capstone would then cost
-~44 s of 14,222.8 s (0.31 %).
+**Aggregate proposal:** the two refactors (`graph_census_7949` live half → Tier E; one shared fixture in the
+verdict/pack tests) are proposed on their **shape**, not on a recovered-seconds figure — **no measured split exists
+for either** (see the two rows above), so this paragraph states none, and **zero checks are deleted**. ⛔ **§4
+prices a named population, and its rows must not be re-summed against §0's family total.** The rows above are
+`21.5 + 19.2 + 10.0 + 20.9 + 4.1 + (0.2 + 3.9) + 12.4` = **92.2 s**; that set **adds** the two doc-guard files
+(`…_citation_rot`, `…_s4_stage_claims` — neither matches §0's family predicate) and **omits nine family files**:
+`39.0 + 17.5 + 15.5 + 1.1 + 0.9 + 0.9 + 0.6 + 0.1 + 0.1` — the audited family rows sum to **79.8 s** and the
+unaudited ones to **75.7 s**, which is how 79.8 + 75.7 = **155.5 s** reconciles with §0's family row. Different
+populations, both stated; neither is a total for "the capstone".
 
 **What NOT to do, stated so it is refused in advance:** do not move the **contract/unit** pins to the eval lane to
 "keep CI clean" — they are the cheap early-warning system, and a schema drift found at a milestone instead of on
@@ -151,7 +188,7 @@ a PR is exactly the drift-cost the repo's own rules exist to avoid.
 | tier | what belongs | gate | budget |
 |---|---|---|---|
 | **CI (merge-gating)** | offline, deterministic, file/record-scanned: registration, verdict engine, corpus-pin map, declaration→predicate derivation, anchor boundary, registry guard, gold integrity, doc/citation guards | **blocks a merge** | *p95 per file < ~1 s target; no graph, no model, no quota* |
-| **Tier E — on-demand eval lane** (`evals-on-demand.yml` / `eval-suite-manual.yml`, `workflow_dispatch` only) | every A-row measurement, E1–E5 re-derivation, E4's unpatched leg, E5's raw arm, the rollup-vs-gold scoring | **never gates a merge** (#10194) | unbounded by CI; bounded by the point budget and `#10976`'s cap |
+| **Tier E — on-demand eval lane** (`evals-on-demand.yml` / `eval-suite-manual.yml`, `workflow_dispatch` only) | every A-row measurement, E1–E5 re-derivation, E4's unpatched leg, E5's raw arm, the rollup-vs-gold scoring | **never gates a merge** (#10194) | unbounded by CI; bounded by the point budget and `#10976`'s cap. ⚠️ **The tier exists; the runner does not yet.** Neither workflow today can execute an A-row (`04-plan.md` §5.2a: `evals-on-demand.yml` has no `secrets.` reference and runs pytest over test files while `capstone_run.py` is a script; `eval-suite-manual.yml` has no hosted-door credentials). **C2 owns the job**; until it ships, a Tier-E run is a credentialed operator lane with the same gates |
 | **Milestone eval** (roadmap completion) | performance and cost of the pipeline; the full A-row sweep re-run as a release gate | **gates a milestone, not a PR** | run when a roadmap milestone completes |
 
 **Rule for every new test this epic adds:** it lands in **CI** only if it is offline + deterministic + sub-second.
@@ -164,7 +201,7 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 | item | applies? | how it is covered |
 |---|---|---|
 | Contract defined? | ✅ | the registration schema + the verdict enum are the contracts; §2 rows 1–3 |
-| Boundary values | ✅ | floor/REFUSED arms: `≥30` labelled pairs, `n > 0` for A4, `≥5` slots for A5 — each with the below-floor arm as a **test**, not narration |
+| Boundary values | ✅ | floor/REFUSED arms: `≥30` labelled pairs, `n > 0` for A4, **`≥30` named actors for A5** (the registered floor `a5_actors`; *bindable subject slots* is A5's **metric**) — each with the below-floor arm as a **test**, not narration |
 | Empty vs null | ✅ | `REFUSED` ≠ `RED` ≠ `GREEN`; the record's own three-state vocabulary, pinned in CI |
 | Timeout / 429 / 503 / 400 / malformed response | ✅ for the capture door | the 402 quota arm is the one that actually fires; timeout/5xx are the eval lane's to report (Tier E) |
 | Atomic writes | ⚠️ N/A | the epic writes no multi-row transaction of its own (S6's atomicity is `#5087`'s) |

@@ -231,13 +231,29 @@ failure, not a skip — so the A-rows carry them too, and §6 I1 freezes the *co
 | field | A1 | A2 | A3 | A4 | A5 |
 |---|---|---|---|---|---|
 | `id` | `A1` | `A2` | `A3` | `A4` | `A5` |
-| `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | subjects + 4 families + 2 readers |
-| `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | bindable subject slots |
-| `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | ≥5 slots · *constructibility* |
+| `metric` | edges of declared types + rollup precision | attach/mint/held distribution | unlinked share + both S5 jobs | per-layer label coverage: the declared kinds present, and things/events carrying the label the ontology declares for them (the per-writer split and the typed/`statement`/`NULL` shares are reported **diagnostics**) | the `:Subject` count over the corpus's **bindable subject slots**, + 4 families + 2 readers |
+| `denominator` | transitive label set | definite-description candidates | statements written by the run | the things-and-events population of the named graph, counted per layer | **the distinct actors the A-corpus names** — the registered `a5_actors` (see the floor; *bindable subject slots* is this row's METRIC, not its denominator) |
+| `floor` (+ `kind`) | ≥30 pairs · *sample sufficiency* | ≥30 candidates · *sample sufficiency* | ≥30 statements · *sample sufficiency* | ≥1 labelled node · *non-vacuity* | **≥30 named actors** · *sample sufficiency* — A5's REGISTERED floor, unchanged |
 | `threshold` | precision ≥ 0.80 **and** direct-set reachability | attach > mint, 100 % classified | share lower **and** component arm positive | **appears + labelled** — the percentage is **reported, not chased**, and there is no `≥ X %` bar. ⛔ **Its registered cell therefore stays `UNMEASURED(<the rule> — decided by #<NNNN>)`, not a comparator**: A4 is a *registered non-bar* (`REGISTERED_NON_BAR_ROWS`), and `capstone_preregistration_check.py:3963-3968` refuses the cell I first wrote here because it names no `#NNNN` (*"a registered non-bar must state who decides it"*; `OWNER_DECISION` at `:563`). The separate reverse arm (`:4011-4020`) refuses a comparator on a pinned non-bar. The *rule* is what the verdict reads; the cell records that the bar is a rule **and who decided it** | families non-zero **and** readers non-empty |
 | `corpus_id` | `a-corpus` | `a-corpus` | `a-corpus` | `fleet-graph` | `a-corpus` |
-| floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | `a5_slots: 5` |
+| floor number (read from `denominator_floors`) | `a1_labelled_pairs: 30` | `a2_candidates: 30` | `a3_statements: 30` | `a4_labelled_nodes: 1` | **`a5_actors: 30`** (registered) |
 | `threshold_basis` | the ~10 pp resolution argument (`EXTRACTOR-V4-ARCHITECTURE.md:1397`, restated `:1533`) | same | the owner's own 9,910/15,534 baseline | "0 of 0 labelled is not coverage; a declared kind that is absent, or a node left unlabelled, is a failing run" | presence question, not a statistic |
+
+⛔ **P1 — A5's floor is the REGISTERED one, and `a5_slots` is not a floor key this plan may invent.** An earlier
+revision of this table gave A5 `a5_slots: 5` and called it a *new key* (§4.4 below), which collides with the record
+`A5` already carries: `preregistration.json` registers `"floor": "a5_actors"` with `"a5_actors": 30`, and its
+`denominator` cell is the *distinct actors the A-corpus names* (`PRE-REGISTRATION.md:669` states the same 30-actor
+floor). `a5_slots` exists **nowhere else in the tree** — `git grep -n a5_slots` returns documentary hits in this
+file only, no `.py`, `.json` or `.yml` reader — so writing it here would either leave `a5_actors: 30` as the enforced
+floor while `a5_slots: 5` promises a REFUSED boundary nothing enforces, or silently move a hash-pinned registered
+row's `floor`/`denominator` without saying so. Both are the *"record may not invent a REFUSED boundary"* class this
+section argues against.
+**Decision: A5 keeps its registered floor.** The constructibility question the `≥5 slots` was trying to ask (does the
+corpus have any *bindable subject slots* at all?) is **the metric's own reading**, not a REFUSED boundary: it lives in
+the `metric` cell, and `02-scope.md:235` already states the honest outcome — a run that finds none reports **why**
+("the binder did not run / the corpus has no bindable slots") instead of reading as a zero. A5 is therefore **not** a
+second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 12"* stays true, and no registered A5
+text moves.
 | `max_realizations` | 2 | 2 | 2 | 1 (read-only) | 2 |
 | `measurement_visible_to_author` | **`false`** — no prior A-row measurement exists (the honest answer) + the basis that says so | `false` + basis | `false` + basis | `false` + basis | `false` + basis |
 
@@ -260,7 +276,7 @@ precisely the risk D-S4 exists to close. So the A-floors are added **to that map
 
 ```json
 "denominator_floors": { "a1_labelled_pairs": 30, "a2_candidates": 30, "a3_statements": 30,
-                        "a4_labelled_nodes": 1, "a5_slots": 5 }
+                        "a4_labelled_nodes": 1, "a5_actors": 30 }
 ```
 
 and **one spelling**: `floor_kind` (never `kind`) — the field names the KIND of floor (*sample sufficiency* /
@@ -281,12 +297,14 @@ document's `denominator_floors:` block, with `document_sha256` re-cut, in the sa
 D-S4's purpose silently inverts: the A-floors are dropped to make the gate green and *"an A-row with no floor can
 pass on three objects"* returns.
 
-⚠️ **Three of the five proposed keys are NEW and two already exist — the amendment is a rename, not an append.** At
+⚠️ **Two of the five proposed keys are NEW, two already exist and one is the registered A5 floor — the amendment
+edits the set, it does not append five.** At
 this head the record holds `a1_objects`, `a2_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points`,
 `a5_actors`, plus the **five** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (5 + 9 = 14). So:
-`a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs`,
-`a4_labelled_nodes` and `a5_slots` are **new keys**; and `a4_typed_statements` must be **removed**, not left beside
-its replacement.
+`a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs` and
+`a4_labelled_nodes` are the **two** genuinely new keys; **A5's floor is the already-registered `a5_actors: 30`** (the
+collision above — `a5_slots` is dropped, not registered); and `a4_typed_statements` must be **removed**, not left
+beside its replacement.
 
 ⛔ **P1 from the substep 6–7 gate: a SECOND bundle shares `capstone-preregistration/v1`, and the checker runs on
 both in ONE CI step.** `python-ci.yml:512` invokes the checker with `--dir docs/evidence/7949-capstone … --dir
@@ -529,8 +547,12 @@ exactly the same gates** - not "CI". W2a's "the lane is `workflow_dispatch` only
   **Decision: one row - `failure_policy`.** C4 records the **shipped half** in its optional `code:`/`tests:`/
   `symbols:` (the registry's own header calls those fields *"how a row records the half that IS built"*) while the
   row stays `not-implemented`, and C4's acceptance names the **reddening pin** -
-  `tests/test_5095_s3_identity_policy.py::test_an_unresolved_lookup_still_mints`, whose own docstring says *"the day
-  a create gate lands ... this reds, and the row must flip to `implemented`"* - plus the flip condition. **Do not**
+  `tests/test_5095_s3_identity_policy.py::TestTheRemainingAbsence::test_an_unresolved_lookup_still_mints` (the full
+  id; a bare `::test_…` drops the class), whose own docstring says *"the day the model-emitted half is gated too, the
+  payload below is empty for an unresolved lookup, this reds, and `config/v4-mechanisms.yml`'s row must flip to
+  `implemented`"* - plus the flip condition. ⚠️ The *"if a create gate landed, flip `failure_policy` …"* wording is
+  that test's **assert message**, not its docstring, and *"the day a create gate lands"* appears in no test at all
+  (it is `docs/00_index.md:169`'s prose) — an earlier revision quoted the two as one docstring. **Do not**
   use `preconditions:` for composition: the file defines it as **ordering**, not "part of".
   The two planning docs disagreed (C3 vs C4); **C4 is the owner**, because `symbols:` can only be satisfied by the
   producer.
@@ -929,9 +951,9 @@ expansion the scope gate recorded; repo search carried every finding). Recorded 
 
 | # | finding | verdict | disposition — folded into |
 |---|---|---|---|
-| **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py:1184` needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
+| **F1** | ⛔ **P0 — the fixture lane's G1 REFUSES the committed record today** (`capstone_run.py`'s fail-closed `if not frozen.get("sha256")`, `:1186`, needs `corpus.sha256`; the record has none), so **all six fixture rows cannot be produced**; and the plan added two more pin kinds beside the one key the probe reads | `unify-contract-keep-drivers` | **§4.2**: G1 dispatches on `pinned_by`; the A-corpus key renamed **`posted_payload_sha256`** (the old spelling collides with `tortoise/export.py`'s envelope digest); owners C1 (record) / C2 (probe) |
 | **F2** | ⛔ **P0 — the enum invariant was arithmetically FALSE** (record ids − sub-rows = 4, not 5: there is **no plain `E2` row**); and **three hardcoded literals silently drop the A-rows** (`probes/capstone_run.py:687`, `:750`, `probes/capstone_measure.py:244`) while V2's "5 rows" still passes | `unify-contract-keep-drivers` | **§4.4**: the invariant gains `SUB_ROW_PARENT`; the three literals are in C1's scope; **and `PRE-REGISTRATION.md`'s table + `document_sha256` are re-cut in the same commit** |
-| **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` pointed at the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `:17288-17297` / `:17761` |
+| **F3** | ⛔ **P1 — §5.4 INVERTED the door's retry contract**: "fresh `session_id`" double-mints, while the door's TRUE retry is a **same-session** re-POST with `capture_ok=false`, and `409` carries `Retry-After: 30` (not terminal); the citation `:17212-17217` pointed at the 422 branch | `unify-contract-keep-drivers` | **§5.4**: the contract is the door's (`meta.mode`, `capture_ok`, `Retry-After`), cited at `hosted_api.py:1245-1254` (the `429` capacity refusal and the `409` in-flight refusal, both carrying `Retry-After: 30`), `retry_failed_capture` at `:18131`, its gate at `:18159`, and `"mode": "replayed"` at `:18717` |
 | **F4** | **P1 — a new `s3_attach` row would split a mechanism `failure_policy` already declares**, whose absence pin reds the day C4's create gate lands; `preconditions:` is ordering, not composition | `unify` | **§5.3 / I8**: **one row — `failure_policy`**; record the shipped half in `code:`/`tests:`/`symbols:`; name the reddening pin + the flip condition |
 | **F5** | **P2 — §5.2a's new job is a fourth non-gating runner joining no register**, and "Tier E" then names three unreconciled populations (`on_demand:` test files · script-driven runs · the new job) that `leg_coverage_issues()` cannot all see | `unify-contract-keep-drivers` | **§5.2a**: C2 owns the **register entry** (`config/ci-surfaces.yml` `on_demand:` + `docs/ci/affected-test-selection.md`); **`03-test-design.md` §5 must name all three populations** |
 | **F6** *(suppressed)* | I7 declared a budget **snapshot** that duplicates the door's live readers | `unify-contract-keep-drivers` | **I7** now points at `org_info` / `quota.count_org_usage` / the 402 payload, and declares only **when it was read** |
