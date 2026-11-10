@@ -4754,7 +4754,8 @@ class TestSiteIconAndSocialPreviewContract:
 
     @classmethod
     def _icon_ref(cls, href: str, *,
-                  origins: frozenset[str] | None = None) -> str:
+                  origins: frozenset[str] | None = None,
+                  base: str | None = None) -> str:
         """The PATH an icon href names when it is THIS site's; "" when it is not.
 
         The query is not part of what is served: `?v=2` on a favicon href is standard
@@ -4774,8 +4775,15 @@ class TestSiteIconAndSocialPreviewContract:
         `SITE_ORIGINS` deliberately does not carry (that set is what the marketing
         `og:image` guard holds a card to — widening IT would loosen a different check).
         Default `None` keeps every existing caller on `SITE_ORIGINS`.
+
+        ⛔ `base` IS THE PAGE'S OWN URL, NOT THE SITE ROOT (review round 3). A href is
+        resolved by the BROWSER against the page that carries it, so a page in a
+        subdirectory declaring `href="favicon.ico?v=…"` requests `<dir>/favicon.ico`. Every
+        href was resolved against `SITE_ROOT`, so such a page read GREEN for a file that does
+        not exist — measured on a new `apps/dashboard/public/settings/index.html` mutant,
+        reachable only because the app surface now `rglob`s for nested pages.
         """
-        url = urlsplit(urljoin(cls.SITE_ROOT, href))
+        url = urlsplit(urljoin(base or cls.SITE_ROOT, href))
         if url.hostname not in (origins if origins is not None else cls.SITE_ORIGINS):
             return ""
         return url.path
@@ -5932,9 +5940,10 @@ class TestSiteIconAndSocialPreviewContract:
         2. **The URL never moved when the artwork did.** `/favicon.ico` carries
            `max-age=14400` and a browser keeps a favicon far longer than any response
            header, so re-exporting the mark left old tabs — and old pages whose HTML was
-           cached — drawing the superseded slab indefinitely. Measured on this repo: a
-           DELETED `/blog/og-image.png` still answered 200 from the edge four hours later.
-           Every href therefore carries `?v=<sha256[:12]>`, and the version is asserted
+           cached — drawing the superseded slab indefinitely. The header is the measurable
+           part, and it is measured: `curl -sI https://tortoise.premiselabs.co/favicon.ico`
+           → `cache-control: public, max-age=14400, must-revalidate`. Every href therefore
+           carries `?v=<sha256[:12]>`, and the version is asserted
            against the file's OWN bytes below, so a re-export without a bump reds here.
 
         The `sizes` attributes are asserted for the marketing tree by
@@ -6008,7 +6017,8 @@ class TestSiteIconAndSocialPreviewContract:
             violations = []
             for page in pages:
                 violations += self._surface_icon_violations(
-                    label, page.name, page.read_text(), root, expected, origins)
+                    label, page.name, page.read_text(), root, expected, origins,
+                    page_url=self._page_url(page, root))
             assert not violations, "\n".join(violations)
 
         # ⛔ NO GLOB REACHES THESE — they are STRINGS in TypeScript, not pages on disk, so
@@ -6057,9 +6067,27 @@ class TestSiteIconAndSocialPreviewContract:
                 "self-rendered", source_label, rendered, root, expected, origins)
             assert not violations, "\n".join(violations)
 
+    def _page_url(self, page: Path, root: Path) -> str:
+        """The URL a page is SERVED at, or the site root when it cannot be derived.
+
+        The marketing site is served from `website/`, so `website/faq.html` is `/faq.html`
+        and `website/pricing/index.html` is `/pricing/`. A project whose staged root is not
+        the page's ancestor (the dashboard's `index.html` above `public/`) falls back to the
+        site root: every one of those pages uses root-relative hrefs, so the fallback cannot
+        silently accept a document-relative one.
+        """
+        try:
+            rel = page.parent.relative_to(root)
+        except ValueError:
+            return self.SITE_ROOT
+        if rel == Path("."):
+            return self.SITE_ROOT
+        return self.SITE_ROOT + rel.as_posix() + "/"
+
     def _surface_icon_violations(self, label: str, page_name: str, head: str,
                                  root: Path, expected: dict[str, str],
-                                 origins: frozenset[str]) -> list[str]:
+                                 origins: frozenset[str], *,
+                                 page_url: str | None = None) -> list[str]:
         """Every way ONE page on ONE origin breaks the icon contract; empty = it passes.
 
         Split out of the test above so the page-level application is DRIVEN BY AN
@@ -6116,7 +6144,8 @@ class TestSiteIconAndSocialPreviewContract:
             # this surface's own origin is accepted in both the absolute and
             # root-relative spellings. `test_the_app_tree_accepts_an_absolute_href_on_
             # its_own_origin` drives all four directions through a real app page.
-            resolved = self._icon_ref(href, origins=origins)
+            resolved = self._icon_ref(
+                href, origins=origins, base=page_url or self.SITE_ROOT)
             if not resolved:
                 violations.append(
                     f"{page_name} declares {href!r}, which resolves to no icon file on "
@@ -6259,6 +6288,85 @@ class TestSiteIconAndSocialPreviewContract:
         # The blog's head is a STRING in the SSR function, not a page on disk, so no glob
         # reaches it — it is graded in `test_every_surface_declares_the_same_versioned_icon_set`
         # alongside the other two self-rendered documents, where the whole surface is graded.
+
+    def test_an_extra_icon_link_is_allowed_and_a_stale_one_is_not(self, tmp_path):
+        """NON-VACUITY for the fourth-link arm — the OTHER half of round 2's P2.
+
+        Round 2 removed `len(hrefs) != 3`, which refused an honest fourth link. Round 3
+        measured that the arm behind it — "is not one of the three icon files" — still
+        refused BOTH forms the removal's own comment called honest: an SVG variant and a
+        second `sizes=` tile. That is the difference between deleting a count and closing
+        the case, and this test is what makes the difference observable.
+
+        Graded in a sandbox root so nothing here can be mistaken for a claim about the real
+        tree: the trio is copied in byte-for-byte (so `expected` still matches), an extra
+        192px-style tile and an SVG are created, and the four mutants below are driven
+        through the same predicate the guard uses on real pages.
+        """
+        expected = {f"/{name}": hashlib.sha256((self.WEB / name).read_bytes()).hexdigest()[:12]
+                    for name in self.ICON_FILES}
+        for name in self.ICON_FILES:
+            (tmp_path / name).write_bytes((self.WEB / name).read_bytes())
+        # a second raster tile and an SVG variant: neither is one of the trio's names
+        (tmp_path / "icon-256.png").write_bytes((self.WEB / self.ICON_PNG).read_bytes())
+        (tmp_path / "favicon.svg").write_text("<svg xmlns='http://www.w3.org/2000/svg'/>")
+        tile_v = hashlib.sha256((tmp_path / "icon-256.png").read_bytes()).hexdigest()[:12]
+        svg_v = hashlib.sha256((tmp_path / "favicon.svg").read_bytes()).hexdigest()[:12]
+        page = (self.WEB / "apps" / "dashboard" / "public" / "signup.html").read_text()
+
+        def grade(html: str, *, page_url: str | None = None) -> list[str]:
+            return self._surface_icon_violations(
+                "sandbox", "signup.html", html, tmp_path, expected, self.ICON_ORIGINS,
+                page_url=page_url)
+
+        assert grade(page) == [], (
+            "the unmutated page must grade clean against a byte-identical sandbox root:\n"
+            + "\n".join(grade(page)))
+
+        def with_extra(href: str) -> str:
+            return page.replace(
+                "</head>", f'  <link rel="icon" href="{href}">\n</head>', 1)
+
+        # THE HONEST CASES — each was RED before this contract allowed an extra at all.
+        for href, label in (
+            (f"/icon-256.png?v={tile_v}", "a second raster tile, versioned with its own bytes"),
+            (f"/favicon.svg?v={svg_v}", "an SVG variant, versioned with its own bytes"),
+        ):
+            assert grade(with_extra(href)) == [], (
+                f"{label} ({href}) is an honest extra icon and must not be refused:\n"
+                + "\n".join(grade(with_extra(href))))
+
+        # THE FAILURE PATH — an extra is ALLOWED, not EXEMPT: it is still an icon on a tab,
+        # so the two rules that keep a tab correct bind it exactly as they bind the trio.
+        unversioned = with_extra("/favicon.svg")
+        red = grade(unversioned)
+        assert red, "an extra icon with no version must red — it goes stale the same way"
+        assert "with NO `?v=`" in red[0], red[0]
+
+        stale = with_extra("/icon-256.png?v=ffffffffffff")
+        red = grade(stale)
+        assert red, "an extra icon with a stale `?v=` must red"
+        assert "bump the `?v=` with the bytes" in red[0] or "bump its `?v=`" in red[0], red[0]
+
+        missing = with_extra("/icon-512.png?v=ffffffffffff")
+        red = grade(missing)
+        assert red, "an extra icon pointing at a file that does not exist must red"
+        assert "does not exist under" in red[0], red[0]
+
+        # AND THE DOCUMENT-RELATIVE ARM (`page_url`): a page in a SUBDIRECTORY resolves a
+        # bare `favicon.ico` against its OWN directory, which is where the browser asks.
+        nested = page.replace('href="/favicon.ico?v=' + expected["/favicon.ico"] + '"',
+                              'href="favicon.ico?v=' + expected["/favicon.ico"] + '"', 1)
+        assert nested != page
+        assert grade(nested, page_url=self.SITE_ROOT + "settings/"), (
+            "a document-relative href on a page served from /settings/ requests "
+            "/settings/favicon.ico, which does not exist — resolving it against the SITE "
+            "ROOT reads green for a tab request that 404s")
+        (tmp_path / "settings").mkdir()
+        for name in self.ICON_FILES:
+            (tmp_path / "settings" / name).write_bytes((self.WEB / name).read_bytes())
+        assert grade(nested, page_url=self.SITE_ROOT + "settings/") == [], (
+            "with the files present in the page's own directory the same href is correct")
 
     def test_the_app_tree_accepts_an_absolute_href_on_its_own_origin(self):
         """NON-VACUITY for `origins` — it must CHANGE AN ANSWER, in both directions.
