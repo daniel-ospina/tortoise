@@ -3,7 +3,7 @@
 
 This is the first half of the issue's own acceptance command. It exists because
 the epic owns no implementation and its closing rule is an *execution*:
-*"Close this epic only when E1–E5 all have evidence attached to this issue —
+*"Close this epic only when E1–E6 all have evidence attached to this issue —
 not when the children close. A child closing is a claim; this epic is where the
 claim is checked against the pipeline running end to end."*
 

@@ -1489,7 +1489,10 @@ def check(record: dict, *, repo: Path,
     # "E1–E6 all have evidence", so a table that is 5/5 GREEN without an `E6` row is NOT a
     # closeable epic — the row that is absent is not green, and an absent row here is exactly the
     # "5/5" close the issue forbids. Over `CRITERIA` this arm answered "closeable" to that table
-    # while `E6` sat RED in the census: a false PASS at the only gate that decides the close.
+    # while `E6` was UNSCORED ENTIRELY — the census emits its CELLS, no scored log carried its ROW
+    # (`#11695`), and an absent row is not a green one — a false PASS at the only gate that
+    # decides the close. ⛔ Not "E6 sat RED": nothing has ever carried an E6 verdict, and this
+    # registration states E6 GREEN at registration (#11673 review P2).
     if require_green:
         red = [c for c in CLOSING_CRITERIA
                if (by_id.get(c) or {}).get("verdict") != "GREEN"]

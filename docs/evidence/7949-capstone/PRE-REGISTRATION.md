@@ -739,12 +739,17 @@ defect red two rows. `A1`'s own §3.7 bullet states the same boundary from its s
 relation writable, no edge ever written by the pipeline), and `A1` can be GREEN while `E6` is RED (the
 one written family satisfied by a caller while a declared row binds no path).
 
-**The bar's basis, and why a count and not a ratio.** The measured state at `#11083`'s stamp was 32 of
-36 declared relations writable with four unbound — all four in `packs/project-management/`, declared in
-the legacy `from`/`to` shape with no `mechanism`. `#11237`'s relations write path then bound them, and
-at this head the census reads **42 declared rows, 41 `writable`, 1 `declaration-only` (with its
-reason), 0 `predicate-not-in-allowlist`**, with an `effective_direction` on every row that has a write
-path. So `E6` is **GREEN on both halves at registration**, and that is stated rather than dressed as a
+**The bar's basis, and why a count and not a ratio.** The **issued baseline** is 32 of 36 declared
+relations writable with four unbound (`#7949` comment `6664402530`, 2026-11-05) — all four in
+`packs/project-management/`, declared in the legacy `from`/`to` shape with no `mechanism`. ⛔ **What
+resolved them is `#11083`'s OWN landing** (`f5c69f7478`, PR `#11543`), not a later writer: that commit
+edits `packs/project-management/manifest.yaml` directly — `blocks` / `partOfSprint` / `assignedTo` gain
+`mechanism` + `semantics`, `onBoard` gains `declarationOnly: true` with its reason — and
+`relation_write_verdict` is purely DECLARATIVE (`tortoise/pack_registry.py`), so `writable` is decided
+by that edit alone. `#11237`/`#11548` is the runtime relations **WRITER** (the `written` column, a day
+later), which is exactly the column this row forbids as its bar. ⇒ the census reads **42 declared rows,
+41 `writable`, 1 `declaration-only` (with its reason), 0 `predicate-not-in-allowlist`** **at
+`f5c69f7478` and at this head**, with an `effective_direction` on every row that has a write path. So `E6` is **GREEN on both halves at registration**, and that is stated rather than dressed as a
 near miss: the bar is not fitted to a gap, it is the invariant the row exists to keep true — that no
 NEW declaration lands unbound or direction-less. A rate over 42 rows would be a second way to report
 the same count and would let 41/42 read as a pass.
@@ -1206,7 +1211,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 | **6,533 / 2,614 / 402** on **7,870** Objects and **27,324** reference edges (A2 basis) | `tortoise/definite_description_backfill.py:15-23` — re-derivable |
 | **64** Objects / **19** Subjects / **21** `aboutSubject` (the A-row figures §10.11 discloses) | `capstone-measured-9152448d.log:271` (`"Object": 64`), `:275`, `:299-309` — re-derivable |
 | the **nine** A-row floors (§3.7) | `pins.denominator_floors` in this file, cross-checked against `preregistration.json` **both ways** by `tools/capstone_preregistration_check.py` |
-| **42** declared rows · **41** `writable` · **1** `declaration-only` · **0** `predicate-not-in-allowlist` · **41 of 42** carrying an `effective_direction` (E6's population and its state at this head) | `docs/evidence/11083/pack-relation-census.json` — re-derivable with `uv run python tools/pack_relation_census.py --write-probe --json`; the `written` family is a GRAPH fact and needs the probe, the declaration half is hermetic. ⚠️ The issued baseline for this row was **32 of 36 writable, 4 unbound** (`#7949` comment `6664402530`, 2026-11-05); `#11237` bound those four, so the figures here are re-measured, not inherited (§10.21) |
+| **42** declared rows · **41** `writable` · **1** `declaration-only` · **0** `predicate-not-in-allowlist` · **41 of 42** carrying an `effective_direction` (E6's population and its state at this head) | `docs/evidence/11083/pack-relation-census.json` — re-derivable with `uv run python tools/pack_relation_census.py --write-probe --json`; the `written` family is a GRAPH fact and needs the probe, the declaration half is hermetic. ⚠️ The issued baseline for this row was **32 of 36 writable, 4 unbound** (`#7949` comment `6664402530`, 2026-11-05); **`#11083`'s own landing** (`f5c69f7478`, PR `#11543`) bound those four by editing `packs/project-management/manifest.yaml` — `relation_write_verdict` is declarative — so the figures here are re-measured at the census commit itself, not inherited and not attributable to `#11237` (that PR owns the runtime WRITER, `written`) (§10.21) |
 | §1.6.4's censuses — v2 `Object 1 / Point 27 / Event 2 / Session 1 / Operator 0`, m2 `0 / 149 / 1 / 1 / 0` — and the `5.5×` ratio | `tests/test_7949_c2_door.py` (`test_the_negative_control_is_measured_and_the_two_lanes_DISAGREE`), measured on `wp01_quarry_debug` under `TORTOISE_SESSION_LLM_MOCK=1`, one embedded graph per arm |
 | 5 of 15 operator edges (§1.6.3, E4) | `tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json` — the receipt `select_e4_receipt()` selects at the frozen `fixtures_hash` `dd7e8520…` (`operator_audit.edge_correct = 5`, extractor `tortoise.extractor_v2::extract_session_v2`) |
 
@@ -2074,9 +2079,16 @@ zero-tolerance count, so there is no measured value it could have been fitted to
 measured 4 would have read `<= 4`.
 
 **The measured state at this head, re-derived and not remembered.** `#11083`'s body quoted 32 of 36
-writable with four unbound; that is **provenance-stale**. `#11237`'s relations write path bound those
-four, and the committed census now reads **42 declared rows — 41 `writable`, 1 `declaration-only`, 0
-`predicate-not-in-allowlist`** — with an `effective_direction` on all 41 rows that bind a write path.
+writable with four unbound; that figure is the owner's **2026-11-05** reading (`#7949` comment
+`6664402530`) and it is **already superseded by `#11083`'s own landing** — `f5c69f7478` (PR `#11543`)
+edits `packs/project-management/manifest.yaml` to give the three legacy `from`/`to` rows a `mechanism`
+and `semantics` and to retire `onBoard` as `declarationOnly` with its reason, and
+`relation_write_verdict` is declarative, so the census committed IN that commit already reads **42
+declared rows — 41 `writable`, 1 `declaration-only`, 0 `predicate-not-in-allowlist`** — with an
+`effective_direction` on all 41 rows that bind a write path. (`#11237`/`#11548` owns the runtime
+WRITER, i.e. `written`, and landed 2026-11-09 — it is not what bound these rows. **SPECIAL:** the
+`verdicts` aggregate in that artifact sum over `relations[]` only; the 41 is the per-row count across
+both surfaces, verified 2026-11-10: 35 `relations[]` cells + 6 per-pack hierarchy cells.
 The one `declaration-only` row is `pm`'s `onBoard`, retired **with** its reason recorded in the pack
 (a board is a VIEW over cards), which is exactly the shape the metric excludes rather than the defect
 it counts. ⇒ **`E6` is GREEN on both halves at registration.** That is disclosed, not dressed as a
