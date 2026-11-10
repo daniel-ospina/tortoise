@@ -295,9 +295,13 @@ def main(argv: list[str] | None = None) -> int:
                               "that name must match this one: a report naming no "
                               "graph is REFUSED, so a CLEAN census of another graph "
                               "cannot be re-badged by repeating --graph here. "
-                              "⚠️ The check is NAME-ONLY: a graph of the same name "
-                              "on a different INSTANCE, or measured EARLIER, is "
-                              "NOT detected here."))
+                              "⚠️ The NAME check is name-only: a graph of the same "
+                              "name on a different INSTANCE is NOT detected here. "
+                              "STALENESS is detected separately, by the report's own "
+                              "`measured_at`: a report that carries no measurement "
+                              "time, or one measured EARLIER than this pass's bound "
+                              "($TORTOISE_PARITY_REPORT_MAX_AGE_S, default 3600 s), "
+                              "is demoted to cannot-answer and licenses nothing."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
@@ -343,13 +347,18 @@ def main(argv: list[str] | None = None) -> int:
         # other — `load_parity_report` refuses a report that names no graph, so a
         # FOREIGN census cannot be re-badged by repeating `--graph` here
         # (review P1 on #11004; the `--parity-graph` help carries the same rule).
-        # ⚠️ What is NOT closed, here or anywhere on this path: a census of the SAME
-        # graph measured EARLIER. Its `graph` matches by construction, so the name
-        # comparison passes it, and the only staleness guard downstream is
-        # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
-        # only when the report's population EXCEEDS the resident node count
-        # (review P2 on #11097). Stated in `--parity-graph`'s help as well, where the
-        # operator reads it at the moment of choosing the flag.
+        # ⚠️ What is NOT closed here: a census of the SAME graph measured EARLIER.
+        # Its `graph` matches by construction, so the name comparison passes it — which
+        # is why STALENESS is closed one layer down, on the report's own `measured_at`:
+        # `assess()` demotes an undated report, and one older than the pass's bound
+        # (`TORTOISE_PARITY_REPORT_MAX_AGE_S`, default 3600 s), to `cannot-answer`. The
+        # over-count check (`entry.nodes > resident_total`) stays as the coarse,
+        # clock-free second guard; it only fires when a report claims MORE nodes than
+        # the whole graph holds, so it could not catch a stale claim that was smaller
+        # than the graph but far larger than the population (measured: 20,000 claimed
+        # against 500 real turns on a 25,000-node graph — `cache_evictor` gate 2 would
+        # have capped the sweep at 20,000). Stated in `--parity-graph`'s help as well,
+        # where the operator reads it at the moment of choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

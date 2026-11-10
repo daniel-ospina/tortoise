@@ -1554,7 +1554,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
     moved to **57** lines across **18** files, in two moves, one per workstream:
-    `cache_eviction.py:635` (the #10976 census's note on why labels do not partition
+    `cache_eviction.py:894` (the #10976 census's note on why labels do not partition
     the node set) is one, and #8447's ingest door (`tortoise/ingest.py`, the
     `REFUSED_NOT_FOUND` enum docstring) is the other. That move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
@@ -1562,7 +1562,7 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
     matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
-    plus that same `cache_eviction.py:635` comment — is what makes *"a guard would
+    plus that same `cache_eviction.py:894` comment — is what makes *"a guard would
     have needed a hand-maintained allowlist"* a measurement rather than an assertion,
     and it moved 2 → 3 with the line count. The pin is exact for the same reason the
     first one is: a narrow pattern that starts matching most of the prose is the day
@@ -1594,6 +1594,120 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     )
 
 
+#: A `cache_eviction.py:<n>` pointer, and the window after it searched for the commit a
+#: HISTORICAL pointer names. The distinction is the one a reader makes: a citation that
+#: says where the prose is NOW is a claim about this head and is checked against the tree;
+#: a citation that names the commit it was true at points at HISTORY and is deliberately
+#: not checked (that is the convention docs and `git blame` readers already use — the
+#: remedy for a citation that must not move is to pin it to a sha, not to update it
+#: forever). §5 keeps the strict rule (see the pin below): only this file's docstrings,
+#: which legitimately RECITE the moves, get the exemption.
+_CACHE_EVICTION_POINTER = re.compile(r"cache_eviction\.py:(\d+)")
+_HISTORICAL_WINDOW = 60
+_COMMIT_AFTER_POINTER = re.compile(r"\bat\s+`[0-9a-f]{7,40}`")
+
+
+def _current_citations(text: str, *, allow_historical: bool = True) -> set[int]:
+    """The `cache_eviction.py:<n>` line numbers *text* cites as claims about THIS head.
+
+    Fails-closed the way the pin does: a pointer is only excused as historical when a
+    commit sha follows it within `_HISTORICAL_WINDOW` characters, so adding prose cannot
+    silently exempt a pointer unless it also names the commit the pointer was true at.
+    """
+    cited: set[int] = set()
+    for match in _CACHE_EVICTION_POINTER.finditer(text):
+        if allow_historical:
+            tail = text[match.end():match.end() + _HISTORICAL_WINDOW]
+            if _COMMIT_AFTER_POINTER.search(tail):
+                continue
+        cited.add(int(match.group(1)))
+    return cited
+
+
+def _docstrings_in_this_file() -> list[str]:
+    """Every docstring in this module, so a pin can read the file's own citations."""
+    tree = ast.parse(Path(__file__).read_text(encoding="utf-8"))
+    found = [ast.get_docstring(tree) or ""]
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            found.append(ast.get_docstring(node) or "")
+    return found
+
+
+def _prose_citations() -> dict[str, set[int]]:
+    """The current-head `cache_eviction.py:<n>` pointers, per population that carries one.
+
+    TWO populations, because ONE measurement was stated twice and the two halves drifted:
+    §5 (already pinned) and this file's own docstrings (NOT pinned, which is how the
+    shipped state happened — `8b4297afa2c8` moved the `:Document` line 870 → 894 and
+    re-measured only the markdown). The defect is not the number: it is that a pointer
+    nobody re-reads is decoration, so the population that can carry one is pinned too.
+    """
+    return {
+        "§5": _current_citations(_doc(), allow_historical=False),
+        "this file's docstrings": set().union(
+            *(_current_citations(text) for text in _docstrings_in_this_file())),
+    }
+
+
+def test_the_docstring_pointer_pins_both_halves_of_the_one_measurement() -> None:
+    """Fails if this file's own `cache_eviction.py:<n>` pointer drifts off its prose.
+
+    Reachable — and it WAS the shipped state at `8b4297afa2c8`: that commit added 24 net
+    lines above the `:Document` comment in `tortoise/cache_eviction.py` and re-measured
+    only `docs/architecture/SUBSTRATE-REBUILD-MAP.md` (870 → 894), leaving the same
+    number in the two docstrings here. A reader following this file's pointer landed on
+    `tortoise/graph_key_restore.py` prose — verbatim the failure the sibling pin records
+    ("§5 cited `cache_eviction.py:611` — correct at `52c15ebca` — and it lands on `)`"),
+    open again by a different door because that pin reads `_doc()` and never this file.
+
+    The historical pointers this file recites (each followed by the commit it was true
+    at) are deliberately out of scope: they are claims about a past head, and the pin
+    asserts the CURRENT ones land on the prose they name.
+    """
+    source_lines = (REPO / "tortoise" / "cache_eviction.py").read_text(
+        encoding="utf-8"
+    ).splitlines()
+    for where, cited in _prose_citations().items():
+        assert cited, (
+            f"{where} carries no `cache_eviction.py:<line>` pointer any more — re-state "
+            "the evidence pointer rather than dropping it silently"
+        )
+        for line_no in sorted(cited):
+            assert 1 <= line_no <= len(source_lines), (
+                f"{where} cites `cache_eviction.py:{line_no}`, but the file has only "
+                f"{len(source_lines)} lines"
+            )
+            assert ":Document" in source_lines[line_no - 1], (
+                f"{where} cites `cache_eviction.py:{line_no}` as the `:Document` prose "
+                f"line, but that line is {source_lines[line_no - 1]!r} — the pointer "
+                f"drifted when lines moved above it; re-measure EVERY place that states "
+                f"the pointer (both halves of one measurement), never widen this "
+                f"assertion. A pointer that must not move for historical reasons names "
+                f"the commit it was true at."
+            )
+
+
+def test_a_historical_pointer_is_excused_only_by_the_commit_it_was_true_at() -> None:
+    """Fails if the pointer pin's historical exemption can be claimed by prose alone.
+
+    Reachable: the exemption is what keeps this file's recitation of `611 → 874 → 894`
+    from reddening the pin above. If it were a bare `if "at " in text`-style test (or a
+    window wide enough to reach an unrelated sha two sentences away), a CURRENT pointer
+    could be exempted — and the pin would read as coverage while checking nothing, the
+    `:Document`-pointer class that has now drifted twice in this file.
+    """
+    assert _current_citations("`cache_eviction.py:611`, which was correct at `52c15ebca`") == set()
+    assert _current_citations("`cache_eviction.py:894` is the `:Document` line") == {894}
+    assert _current_citations("`cache_eviction.py:894` is it", allow_historical=False) == {
+        894
+    }, "§5 keeps the strict rule: no exemption is available in the document"
+    assert _current_citations("`cache_eviction.py:894` (see `52c15ebca`)") == {894}, (
+        "a sha that does NOT follow the pointer as `at <sha>` must not excuse it — the "
+        "exemption is the commit the pointer was true at, not any sha on the line"
+    )
+
+
 def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes() -> None:
     """Fails if a `cache_eviction.py:<n>` pointer drifts off the line it names.
 
@@ -1614,7 +1728,7 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
     prose moves, this reds and §5 is re-measured rather than read past.
     """
     doc = _doc()
-    cited = sorted({int(n) for n in re.findall(r"cache_eviction\.py:(\d+)", doc)})
+    cited = sorted(_current_citations(doc, allow_historical=False))
     assert cited, (
         "§5's `cache_eviction.py:<line>` citation is gone — re-state the evidence "
         "pointer rather than dropping it silently"

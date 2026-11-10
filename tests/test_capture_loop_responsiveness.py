@@ -349,6 +349,46 @@ def test_capture_sessions_gate_carry_rides_its_own_substrate_lane(
                         ("graph", "check_org_limit.sessions")], (relevant, seen)
 
 
+def test_the_capture_door_hands_the_carry_its_own_503_factory(client,
+                                                             monkeypatch):
+    """#10967: the WIRING half — the DOOR passes its factory down.
+
+    The seam half lives in ``tests/test_allowance_gate.py``
+    (``test_the_capture_door_gets_a_capture_shaped_503_not_the_sign_in_copy``):
+    that the carry HONOURS a factory it is handed. This is the other half.
+    Neither half existed before this change: ``_carry_allowances_off_loop`` had
+    no ``unavailable`` parameter at all (so no seam-level test COULD have pinned
+    the capture copy) and the door therefore had nothing to pass. ``_cp_offload``
+    is what already accepted a factory; the carry never handed it one, which is
+    why this route kept rendering a quota stall as a sign-in failure.
+
+    Why a spy rather than the response body: this suite runs
+    registry/self-host mode, where the carry legitimately rides the GRAPH pool
+    and answers ``_graph_unavailable`` — the Supabase-mode carry (the only leg
+    that can emit the sign-in copy) is not buildable behind a whole
+    authenticated route here. The body the factory produces is pinned by the
+    sibling seam test; this one pins that the capture route reaches it.
+
+    Mutation this REDs: drop ``unavailable=_capture_control_plane_unavailable``
+    from the door's ``_check_org_limit_off_loop`` call and ``seen["sessions"]``
+    is ``[None]``.
+    """
+    import tortoise.hosted_api as ha
+
+    seen: dict[str, list] = {}
+    real = ha._carry_allowances_off_loop
+
+    async def _spy(org, resource, **kwargs):
+        seen.setdefault(resource, []).append(kwargs.get("unavailable"))
+        return await real(org, resource, **kwargs)
+
+    monkeypatch.setattr(ha, "_carry_allowances_off_loop", _spy)
+
+    resp = client.post("/v1/sessions", json={"conversation": _CONV})
+    assert resp.status_code in (200, 201), resp.text[:300]
+    assert seen.get("sessions") == [ha._capture_control_plane_unavailable], seen
+
+
 def test_stalled_capture_does_not_freeze_the_event_loop(client, monkeypatch):
     """The invariant: while a capture is stalled, the API keeps answering.
 

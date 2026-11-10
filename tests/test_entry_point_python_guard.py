@@ -1295,3 +1295,53 @@ def test_the_site_icon_guard_names_an_invocation_that_actually_resolves(
         "the bare path must stay a USAGE error (argparse, `--source` is "
         f"required) — if it stops being one, this guard's advice is no longer the "
         f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+
+
+def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#11744 review (round 3) — the same unpinned-claim defect, one tool over.
+
+    `tools/embedding_residual_scan.py` gained the `#5128` guard with a refusal
+    naming the BARE path, which does not resolve: the tool takes `--org`,
+    `--graph-id` and `--graph-name` as `required=True`, so the bare form exits 2
+    on argparse's own usage error. The census pins only that an invocation is
+    named at all (`test_guard_refuses_an_old_interpreter_and_passes_the_floor`
+    asserts the `uv run python <path>` prefix), and that prefix is satisfied by
+    BOTH the bare path and the `--help` form — so reverting this message to the
+    bare path leaves the whole census green, which is exactly the shape
+    `test_the_site_icon_guard_names_an_invocation_that_actually_resolves`
+    (#11507 round 7) was written for.
+
+    Pinned by PROVING the claim rather than by reading the string alone: the form
+    the refusal names must resolve, and the bare path must NOT.
+    """
+    path = (Path(__file__).resolve().parents[1]
+            / "tools" / "embedding_residual_scan.py")
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    # `raise SystemExit(<str>)` carries the message on the exception, not on
+    # stdout/stderr — the census reads it the same way (`str(refusal.value)`).
+    captured = capsys.readouterr()
+    message = str(refusal.value) + captured.out + captured.err
+
+    assert "tools/embedding_residual_scan.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `--org` / "
+        f"`--graph-id` / `--graph-name` token: {message!r}")
+
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--org` is "
+        f"required) — if it stops being one, this guard's advice is no longer the "
+        f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")

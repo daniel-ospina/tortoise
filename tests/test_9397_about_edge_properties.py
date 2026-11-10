@@ -7131,6 +7131,15 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     # were deleted rather than left as dead coverage"). Removing the entry does not
     # weaken the liveness tripwire — it strengthens it, since `unpinned` below now
     # demands this marker appear, and will red the day a reword drops it.
+    # ⚠️ `main` reached the same deletion independently (the two sides agreed on
+    # the RESOLUTION and differed only in the note): its substance is kept below,
+    # because it names WHERE the red was first recorded.
+    # The marker's non-denial occurrence cannot hide a real denial either way —
+    # whether an OCCURRENCE is a denial is decided sentence-by-sentence by
+    # `DENIAL_PATTERNS` + `_class_marker_negated` — so this pin only asks that a
+    # marker is not DEAD, and it is not. Recorded on `#9066` as one more nodeid
+    # red on `main` because push-to-main legs never complete (that is why it
+    # reached a PR instead of `main`'s CI).
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
