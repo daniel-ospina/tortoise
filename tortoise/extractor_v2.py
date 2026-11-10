@@ -5494,7 +5494,7 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     point's own quote holds a DIFFERENT value in the same slot, i.e. only on a
     value that is not the verbatim one. And it cannot RECOVER a value the model
     never emitted — that loss is upstream of every mechanical rule in this
-    module (the capstone E2a class, 1 of 14, is that class), which is why the
+    module (the capstone E2a class — 8 of 14, bar >= 13; `1 of 14` was the SUPERSEDED #9775 reading, #10610 — is that class), which is why the
     registry row keeps that residual named.
 
     The refusal is deliberate and REPORTED: the warning quotes both values and

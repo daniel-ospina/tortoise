@@ -6182,3 +6182,378 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
         ("the trip is 3000 km", "the trip is 3k"),
     ):
         assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+
+# ── 24. the FAIL-OPEN half, measured: a detection gap is not a lost value ───
+#
+# `test_the_residual_is_measured_on_the_committed_census_corpus` (§5) pins the
+# rule's REACH — 62 judged, 0 refused. This section pins what the other 50 are,
+# because the registry row's (b) reads "50 of the 112 … fail open on slot
+# layout", and a lane improving that number has to know whether it is looking at
+# 50 LOST VALUES (a retention defect — #10360's Target 2) or at values the
+# rule's own slot projection cannot ALIGN (a detection gap, nothing lost). The
+# two readings license OPPOSITE work — the first a wider rule, the second a
+# narrower one — and nothing measured the difference, so the row could only
+# state the count.
+#
+# ⛔ THE ANSWER ON THIS CORPUS IS THE SECOND READING. Of the 50:
+#    * 29 state EVERY value their own quote states — under a slot layout
+#      `_value_slot_divergence` cannot align, so it fails open on a RETAINED
+#      value. (This is what the row's "fail open on slot layout" means.)
+#    * 2 differ only on the determiner `one` — the quote's slot is the word
+#      "one", which the engine binds as a quantity. Neither is a state value;
+#      both are the SAME sentence in the two arms.
+#    * 7 state the value in a form the row EXCLUDES BY DESIGN (residual (c)):
+#      4 carry a clock (`2am`, `02:00`, `9:40am`/`1:05pm`) and 3 an ISO date
+#      (`2026-11-02`, `2026-11-09`, `2026-10-09`). ⛔ The class is assigned from
+#      the CONTENT alone — it says the value is stated in a FORM the rule
+#      excludes, NEVER that it was checked against the quote; residual (c) is
+#      exactly that a clock/ISO REWRITE is not caught, so quote agreement is not
+#      something this class may claim (6 of the 7 do restate the quote's value —
+#      3 in a NORMALISED form (`02:00` for `2am`, `2026-11-02` for `November 2`,
+#      `2026-11-09` for `November 9`) and 3 in the quote's OWN spelling; the
+#      seventh's quote binds no value at all, `last night`).
+#      This is why the row's STATED figure is 91 (62 ALIGNED + 29
+#      LAYOUT_RETAINED) and NOT 98: the 7 are form-excluded, not checkable.
+#    * 8 state no value at all, and 7 of those quote no STATE value either (a
+#      determiner, or an empty slot).
+#    * 4 have no slot on the QUOTE side — nothing to retain.
+# ⇒ exactly ONE of the 112 value-bearing points drops a state value its own
+# quote carries. One, not fifty.
+#
+# ⚠️ SCOPE, so this is not read as a survival figure: this is the COMMITTED
+# census corpus (7 sealed sessions × 2 arms, real `deepseek-v4-flash`
+# extractions) measured through the SHIPPED helpers. It is NOT the flags-on E2
+# arm, so it neither confirms nor contradicts the 54.4% baseline in the row's
+# (b2) — that number needs an E2 LLM arm run and stays `UNMEASURED`.
+#
+# The classifier is deliberately THIN and reuses the shipped predicates
+# (`_carries_value`, `_value_slots_scaled`, `_write_span`) rather than minting a
+# second value layer — the discipline `_value_slot_divergence` is held to. The
+# clock/ISO detector is LOCAL to this section on purpose: it classifies a
+# residual the row already declares, and is not a new value predicate.
+#
+# ⛔ WHAT IT DELIBERATELY CANNOT JUDGE: a MAGNITUDE difference. The engine has no
+# magnitude table (`#2817` rules one out; residual (m) records that `12 million`
+# against `12 billion` is unfused), so `12 million` and `12 thousand` bind the
+# SAME core and differ only on the slot's scale — and `12000000` binds a
+# different core from `12 million` with no scale at all. Neither pair is a value
+# this classifier can call LOST or RETAINED without adding the very table the
+# recorded ruling excludes, so both land in `LAYOUT_UNJUDGED`.
+
+_CLOCK_FORM = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b",
+                         re.IGNORECASE)
+_ISO_DATE_FORM = re.compile(r"\b(?:19|20)\d{2}-\d{2}-\d{2}\b")
+
+#: A bare count of the sentence's own nouns ("one risk", "two workers") is not a
+#: state value: the engine binds it as a quantity, which is why the determiner
+#: rows are pinned by IDENTITY below rather than filtered on this shape alone —
+#: a bare `1`/`2` that IS a state value ("the retry limit is 2") has the same
+#: core, so a shape-only skip would hide its drop.
+_DETERMINER_CORES = ("('', '1', None)", "('', '2', None)")
+
+#: Every row on this census whose quote's ONLY value is a determiner, pinned by
+#: identity. `_DETERMINER_CORES` skips these from the dropped-value count, so the
+#: skip itself is pinned: a new bare `1`/`2` row that is a real state value
+#: appears here and reds, instead of vanishing behind the shape filter.
+DETERMINER_ROWS = frozenset({
+    ("wp01_quarry_debug", "narrative", "claiming", "('', '1', None)"),
+    ("wp01_quarry_debug", "narrative", "prevents", "('', '2', None)"),
+    ("wp04_aurora_perf", "narrative", "point", "('', '1', None)"),
+    ("wp04_aurora_perf", "raw", "", "('', '1', None)"),
+    ("wp06_quarry_rollout", "narrative", "flag", "('', '1', None)"),
+    ("wp07_bluepeak_followup", "narrative", "instead", "('', '1', None)"),
+})
+
+
+def _census_row(point: dict) -> tuple[str, str]:
+    """The pair the WRITE stores for a committed point (the §5 inputs)."""
+    return (v2._write_span(str(point.get("content") or "").strip(),
+                           v2._MAX_CONTENT),
+            v2._write_span(str(point.get("quote") or "").strip(),
+                           v2._MAX_QUOTE))
+
+
+def _value_pairs(text: str) -> list[tuple[str, str]]:
+    """``(anchor, core)`` for every slot, as strings, for identity pins."""
+    return [(anchor, str(core)) for anchor, core, _scale
+            in v2._value_slots_scaled(text)]
+
+
+def _retention_class(content: str, quote: str) -> str | None:
+    """Which half of the census a value-bearing point falls in.
+
+    ALIGNED               — the rule judges it (`_value_slots_scaled` agrees).
+    LAYOUT_RETAINED       — the layouts differ, but every value the quote binds
+                            is still stated in the content (a DETECTION gap).
+    LAYOUT_LOST           — the layouts differ and a value the quote binds is
+                            not stated in the content.
+    LAYOUT_UNJUDGED       — the layouts differ and a MAGNITUDE is in play, which
+                            this projection cannot compare (#2817 rules out a
+                            magnitude table; residual (m)). Neither retained nor
+                            lost: unjudged.
+    CONTENT_EXCLUDED_FORM — the content binds no slot, but states the value in
+                            a CLOCK/ISO form the row excludes by design ((c)).
+                            ⛔ NOT counted as STATED: the class reads the
+                            content's FORM, never its agreement with the quote.
+    CONTENT_NO_VALUE      — the content binds no slot and carries no excluded form.
+    QUOTE_NO_SLOT         — the quote binds no slot: nothing to retain.
+
+    ``None`` for a value-free point — the census counts value-bearing points only.
+    """
+    if not v2._carries_value(content, quote):
+        return None
+    content_slots = v2._value_slots_scaled(content)
+    quote_slots = v2._value_slots_scaled(quote)
+    if not content_slots:
+        if _CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content):
+            return "CONTENT_EXCLUDED_FORM"
+        return "CONTENT_NO_VALUE"
+    if not quote_slots:
+        return "QUOTE_NO_SLOT"
+    if (tuple((a, s) for a, _, s in content_slots)
+            == tuple((a, s) for a, _, s in quote_slots)):
+        return "ALIGNED"
+    stated = {(str(core), scale) for _a, core, scale in content_slots}
+    if any((str(core), scale) not in stated for _a, core, scale in quote_slots):
+        # ⛔ A MAGNITUDE is not comparable here: `12 million` against
+        # `12 billion` binds the same core (residual (m)), and `12000000`
+        # against `12 million` binds two, with no magnitude table to fold them
+        # (#2817 rules one out). Calling either LOST would accuse a truthful
+        # point; calling it RETAINED would certify a six-orders drop. Unjudged.
+        if any(scale for _a, _c, scale in content_slots + quote_slots):
+            return "LAYOUT_UNJUDGED"
+        return "LAYOUT_LOST"
+    return "LAYOUT_RETAINED"
+
+
+def _census_rows() -> list[tuple[str, str, str, str, str]]:
+    """``(session, arm, class, content, quote)`` over the committed census."""
+    rows = []
+    for session in SESSIONS:
+        blob = json.loads((RECEIPTS / f"{session}.arms.json").read_text())
+        for arm in ARMS:
+            for point in blob["embed_list"][arm]["points"]:
+                content, quote = _census_row(point)
+                klass = _retention_class(content, quote)
+                if klass is None:
+                    continue
+                rows.append((session, arm, klass, content, quote))
+    return rows
+
+
+#: The split, measured at this head through the shipped helpers. Re-run
+#: `_census_rows()` before touching a number: a lower ALIGNED or a higher
+#: LAYOUT_LOST is the finding, never a constant to loosen.
+RETENTION_SPLIT = {
+    "ALIGNED": 62,
+    "LAYOUT_RETAINED": 29,
+    "LAYOUT_LOST": 2,
+    "LAYOUT_UNJUDGED": 0,
+    "CONTENT_EXCLUDED_FORM": 7,
+    "CONTENT_NO_VALUE": 8,
+    "QUOTE_NO_SLOT": 4,
+}
+
+#: The only two LAYOUT_LOST rows, pinned by IDENTITY rather than counted: both
+#: are the determiner `one` ("… the one that added …") read as a quantity, in
+#: the two arms of the SAME session — nothing here is a state value. A third
+#: entry is a real loss, and it reds here before it reaches the row.
+LAYOUT_LOST_ROWS = frozenset({
+    ("wp04_aurora_perf", "raw", ("release", "('', '1', None)")),
+    ("wp04_aurora_perf", "narrative", ("release", "('', '1', None)")),
+})
+
+#: The ONE point on the committed census that drops a state value its own quote
+#: carries: the quote sizes a lease grace to thirty seconds; the point states the
+#: policy and never the duration. Named, because a residual of ONE is actionable
+#: and a residual of "50" is not.
+THE_ONE_CONTENT_MISSING_VALUE = (
+    "wp07_bluepeak_followup", "narrative", "grace", "('', '30', 's')")
+
+
+def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
+    """50 fail open; 29 of them retain the value, and 1 of 112 drops one.
+
+    This is the difference the row could not state: the fail-open count is a
+    DETECTION figure. Reading it as retention (62 of 112) leaves 29 rows of
+    retention unstated — 25.9 points, 62/112 against the 91/112 STATED — and
+    would license widening a rule that is already accused of over-refusal.
+    """
+    rows = _census_rows()
+    assert len(rows) == 112, (
+        f"the value-bearing population moved: {len(rows)} rows, pinned 112 by "
+        "test_the_residual_is_measured_on_the_committed_census_corpus")
+    split: dict[str, int] = {key: 0 for key in RETENTION_SPLIT}
+    for _session, _arm, klass, _content, _quote in rows:
+        assert klass in split, f"a class the constants do not know: {klass!r}"
+        split[klass] += 1
+    assert split == RETENTION_SPLIT, (
+        f"the retention split moved: {split} != {RETENTION_SPLIT}")
+
+    # The reading the row must not lose: the value is STATED — through the
+    # shipped slot projection — in ALIGNED + LAYOUT_RETAINED. ⛔ The 7
+    # CONTENT_EXCLUDED_FORM rows are NOT added here: their class reads the
+    # content's FORM and never its agreement with the quote, so counting them
+    # as stated would make the figure a claim nothing checks (that is residual
+    # (c)'s own class, declared).
+    stated = RETENTION_SPLIT["ALIGNED"] + RETENTION_SPLIT["LAYOUT_RETAINED"]
+    # ⛔ PINNED TO THE ROW, not to a constant beside the split (a number the test
+    # derives from its own constants asserts nothing — `split` above is already
+    # pinned): the registry row publishes this figure, so the figure and the
+    # measurement cannot drift apart.
+    row_text = (pathlib.Path(__file__).resolve().parent.parent
+                / "config" / "v4-mechanisms.yml").read_text(encoding="utf-8")
+    assert f"{stated} of 112 STATED" in row_text, (
+        f"the registry row does not publish the measured {stated} of 112 STATED")
+
+    lost = set()
+    retained = []
+    for session, arm, klass, content, quote in rows:
+        if klass == "LAYOUT_RETAINED":
+            retained.append((content, quote))
+        if klass != "LAYOUT_LOST":
+            continue
+        stated_cores = {(core, scale) for _a, core, scale in
+                        v2._value_slots_scaled(content)}
+        for anchor, core, scale in v2._value_slots_scaled(quote):
+            if (str(core), scale) not in {(str(c), s) for c, s in stated_cores}:
+                lost.add((session, arm, (anchor, str(core))))
+    assert lost == LAYOUT_LOST_ROWS, (
+        "the LAYOUT_LOST set moved — a state value was dropped, which is the "
+        f"finding this pin exists to surface: {sorted(lost)}")
+
+    # ⛔ AND THE RETAINED HALF IS CHECKED AGAINST THE OTHER ARTEFACT, not
+    # re-derived from the classifier: the shipped rule fails open on EVERY row
+    # this class calls retained — that is what "a detection gap, not a loss"
+    # means. A rule widened to flag a layout mismatch reds here, which is the
+    # direction the row's next lane would move it.
+    # The loop's own population — the rows the split above already counts, so
+    # this guards the loop (it cannot measure the census); what the loop ASSERTS
+    # is the other artefact, and THAT is the load-bearing pin.
+    assert len(retained) == RETENTION_SPLIT["LAYOUT_RETAINED"], len(retained)
+    for content, quote in retained:
+        assert v2._value_slot_divergence(content, quote) == (), (content, quote)
+
+
+def test_the_ONE_dropped_state_value_on_the_census_is_NAMED():
+    """A residual of ONE is actionable; "50 fail open" is not.
+
+    No rule acting on an emitted point can recover a value the point never
+    stated — but the points that DID drop one can be counted, and here there is
+    exactly one: the lease grace the quote sizes as `thirty seconds`, whose
+    point states the policy and not the duration. Its content carries no
+    excluded form, so it is not residual (c) in disguise.
+    """
+    dropped = []
+    skipped = set()
+    for session, arm, klass, _content, quote in _census_rows():
+        if klass != "CONTENT_NO_VALUE":
+            continue
+        for anchor, core in _value_pairs(quote):
+            if core in _DETERMINER_CORES:
+                skipped.add((session, arm, anchor, core))
+                continue
+            dropped.append((session, arm, anchor, core))
+    assert skipped == DETERMINER_ROWS, (
+        "the determiner skip moved — a bare 1/2 that is a real state value would "
+        f"be hidden by the shape filter: {sorted(skipped)}")
+    assert len(dropped) == 1, (
+        "the dropped-state-value set moved: "
+        f"{sorted(dropped)}")
+    assert dropped[0] == THE_ONE_CONTENT_MISSING_VALUE, dropped[0]
+
+    session, arm, _anchor, core = THE_ONE_CONTENT_MISSING_VALUE
+    # Keyed on the identity pinned above, never on the (session, arm, class)
+    # triple: two rows of this session share that triple.
+    content, quote = next(
+        (c, q) for s, a, _k, c, q in _census_rows()
+        if (s, a) == (session, arm)
+        and c.startswith("Any lease expiry landing inside the grace window"))
+    # Selected by the point's OWN TEXT, which is independent of the class — so
+    # this is a claim about the row, not a restatement of the branch that
+    # assigned it. ⛔ And the SAME session's sibling point, which states the
+    # same `thirty seconds` (`The lease grace period is sized to thirty
+    # seconds…`), must NOT be in this class: that contrast is the pin.
+    assert _retention_class(content, quote) == "CONTENT_NO_VALUE"
+    sibling = next(
+        (c, q) for s, a, _k, c, q in _census_rows()
+        if (s, a) == (session, arm)
+        and c.startswith("The lease grace period is sized to thirty seconds"))
+    assert _retention_class(*sibling) == "LAYOUT_RETAINED", sibling[0][:80]
+    assert "second" not in content.lower(), content
+    assert _ISO_DATE_FORM.search(content) is None, content
+    assert _CLOCK_FORM.search(content) is None, content
+
+
+def test_the_classifier_DISCRIMINATES_in_both_directions():
+    """The split above is only a MEASUREMENT if it can move.
+
+    Every assert is a direction the classifier must take, on inputs built from
+    the carve-out's own examples — so a regression reds here rather than
+    silently re-labelling the census.
+    """
+    # 1. A RETAINED value under a layout the rule cannot align is NOT a loss.
+    #    Built from a REAL census row, so the class is not hypothetical, and the
+    #    assertion that carries the weight is the OTHER artefact's: the shipped
+    #    rule fails open on it. (Re-running `_retention_class` on rows it selected
+    #    would be `f(x) == f(x)`.)
+    retained = [
+        (content, quote) for _s, _a, klass, content, quote in _census_rows()
+        if klass == "LAYOUT_RETAINED"]
+    assert len(retained) == 29, len(retained)
+    for content, quote in retained:
+        assert v2._value_slot_divergence(content, quote) == (), (
+            content[:80], quote[:80])
+    # 2. A DROPPED value, in both shapes the "content_missing" class takes: the
+    #    content binds another anchor's value (a layout the rule cannot align, so
+    #    `_value_slot_divergence` fails open on it), or it binds none at all.
+    assert _retention_class("we set the limit to 30 minutes",
+                            "the TTL is 20 minutes") == "LAYOUT_LOST"
+    assert v2._value_slot_divergence("we set the limit to 30 minutes",
+                                     "the TTL is 20 minutes") == ()
+    assert _retention_class("the deploy uses a short TTL",
+                            "the TTL is 20 minutes") == "CONTENT_NO_VALUE"
+    # 2b. A MAGNITUDE difference is UNJUDGED, not LOST and not RETAINED — the
+    #    engine has no magnitude table (`#2817` rules one out; residual (m)), so
+    #    neither direction can be read without adding the table the ruling
+    #    excludes. Both directions are pinned, or the class is unpinned.
+    assert _retention_class("we have 12 thousand events",
+                            "we have 12 million events") == "LAYOUT_UNJUDGED"
+    assert _retention_class("we have 12000000 events",
+                            "we have 12 million events") == "LAYOUT_UNJUDGED"
+    assert v2._value_slot_divergence("we have 12 thousand events",
+                                     "we have 12 million events") == ()
+    # 3. An excluded FORM is its own class — residual (c) is not a loss.
+    assert _retention_class("we cut over at 2am",
+                            "we cut over at 2am") == "CONTENT_EXCLUDED_FORM"
+    assert _retention_class("due 2026-11-09", "due November 9") == (
+        "CONTENT_EXCLUDED_FORM")
+    # 3b. The excluded-form class is a MEASURED class on the census, not only a
+    #     synthetic shape: those 7 rows really do carry a clock or ISO token and
+    #     really are rows the shipped slot projection finds nothing to align in.
+    #     (Entailed by the class, kept so the census rows are visible at the
+    #     point of assertion — the split assert above is the real pin.)
+    excluded = [
+        (content, quote) for _s, _a, klass, content, quote in _census_rows()
+        if klass == "CONTENT_EXCLUDED_FORM"]
+    assert len(excluded) == 7, len(excluded)
+    for content, _quote in excluded:
+        assert v2._value_slots_scaled(content) == (), content[:80]
+        assert (_ISO_DATE_FORM.search(content)
+                or _CLOCK_FORM.search(content)), content[:80]
+    # 4. A value-free point is not a row at all.
+    assert _retention_class("the team prefers intervals",
+                            "the team prefers intervals") is None
+    # 5. And the class the census calls ALIGNED is the class the SHIPPED rule
+    #    judges — a same-slot pair, whose rewrite the rule REFUSES. So the
+    #    classifier is not a second opinion about the rule: ALIGNED is where the
+    #    rule looks, and the divergence both sides see is the same one.
+    assert _retention_class("the TTL is 20 hours",
+                            "the TTL is 20 minutes") == "ALIGNED"
+    assert v2._value_slot_divergence("the TTL is 20 hours",
+                                     "the TTL is 20 minutes")
+    assert _retention_class("the TTL is 20 minutes",
+                            "the TTL is 20 minutes") == "ALIGNED"
+    assert v2._value_slot_divergence("the TTL is 20 minutes",
+                                     "the TTL is 20 minutes") == ()

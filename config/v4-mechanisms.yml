@@ -822,12 +822,35 @@ mechanisms:
       halves together.
       ⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number:
       (a) a value the model never EMITS is unrecoverable by any rule in this
-      module; the capstone E2a class (1 of 14, bar >= 13) is that class, and it
-      is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
+      module; the capstone E2a class (8 of 14, bar >= 13 — the record's own
+      count, `docs/evidence/9889/e2a-value-units.json` `value_survived`; the
+      `1 of 14` that stood here is the SUPERSEDED `#9775` reading, #10610) is
+      that class, and it is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
       the committed census receipts fail open on slot layout, so the rule judges
       62 and refuses 0 today — re-derived by
       `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
-      from the sealed receipts (produced, not quoted). ⚠️ Unchanged by (ii-bis):
+      from the sealed receipts (produced, not quoted). ⛔ FAIL OPEN IS A
+      DETECTION GAP, NOT A LOST VALUE — measured, not assumed, by
+      `tests/test_state_value_verbatim_10360.py::test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS`:
+      of those 50, 29 state EVERY value their own quote states (under a layout
+      the rule cannot align), 2 differ only on the determiner `one`, 7 state the
+      value in a CLOCK/ISO form this row EXCLUDES BY DESIGN (residual (c) — their
+      class reads the content's FORM and never its agreement with the quote, so
+      they are form-excluded, NOT checkable), 4 have no slot on the quote side,
+      and 8 state no value — of which exactly ONE drops a state value the quote
+      carries (the `thirty seconds` lease grace,
+      `wp07_bluepeak_followup`/narrative, named by
+      `test_the_ONE_dropped_state_value_on_the_census_is_NAMED`). Retention on the
+      committed census is therefore **91 of 112 STATED (62 ALIGNED + 29
+      LAYOUT_RETAINED), 7 form-excluded (not checkable) and 1 DROPPED** —
+      the remaining 13 carry no state value to state (6 a determiner-only quote,
+      1 whose quote binds no slot at all, 2 a determiner-only quote under a
+      divergent layout, 4 no slot on the quote side); the 62 is the rule's REACH, not its retention. ⚠️ A MAGNITUDE
+      difference (`12 million` against `12 billion`, or `12000000` against
+      `12 million`) is UNJUDGED here, not lost: `#2817` rules out the magnitude
+      table such a comparison needs (residual (m)), so the class is stated and
+      empty on this corpus rather than silently folded into either direction. ⚠️ That split is the census
+      corpus, NOT the flags-on E2 arm, so it does not move (b2); ⚠️ Unchanged by (ii-bis):
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
