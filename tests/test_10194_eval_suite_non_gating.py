@@ -123,11 +123,12 @@ _TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
 
 #: The leg KINDS, which stay LITERAL — the DECLARED side of the equality, so a
 #: kind `_gating_sets()` starts producing without a matching entry here reds.
-#: ⚠️ The reverse cases are guarded elsewhere, not here: a producer KEY the
-#: selector gains is refused by `_WALKED_LEG_KEYS`/`_NON_GATING_LEG_KEYS` in
-#: `test_no_subtree_file_is_in_any_gating_leg`, and a leg whose CONTENT is
-#: emptied or filtered while its name survives is refused by that test's coverage
-#: assertions (union vs `fast_pool()`, and non-emptiness).
+#: ⚠️ The reverse cases are guarded elsewhere, not here, and only for
+#: `push_legs()` keys: a key the selector gains is refused by
+#: `_WALKED_LEG_KEYS`/`_NON_GATING_LEG_KEYS` in the leak test, and a leg whose
+#: CONTENT is emptied or filtered while its name survives is refused by that
+#: test's non-emptiness and map-vs-producer arms. A gating set gained through
+#: `select()` (the PR/tier-2 surface) is NOT covered by either.
 _LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
                         "push slow_selected"})
 
@@ -168,20 +169,30 @@ def _expected_legs(manifest: dict) -> set[str]:
     in the same direction (each version claiming a guard for a class the guard
     could not see):
 
-    1. A producer KEY the selector gains that `_gating_sets()` never reads appears
-       on neither side. Its measured counterexample was a new `"telemetry": []`
-       key on `push_legs()`' return, which left all 8 tests in this file green.
-       That class is now refused by the producer-key assertion in
+    1. A `push_legs()` KEY the selector gains that `_gating_sets()` never reads
+       appears on neither side. Its measured counterexample was a new
+       `"telemetry": []` key on `push_legs()`' return, which left all 8 tests in
+       this file green. That class is now refused by the producer-key assertion in
        `test_no_subtree_file_is_in_any_gating_leg`, which diffs
        `set(push_legs(manifest))` against `_WALKED_LEG_KEYS |
-       _NON_GATING_LEG_KEYS` (the same mutant now reds, naming `telemetry`).
+       _NON_GATING_LEG_KEYS` (the same mutant now reds, naming `telemetry`), and
+       both constants are pinned so neither can grow as a quiet one-liner.
     2. A leg that keeps its NAME but loses its CONTENT — `_gating_sets()` emptying
-       a shard, or filtering the guarded subtree out of every fast shard — reds
-       neither this equality nor `leg_coverage_issues()` (measured: 8 passed).
-       That one is refused by the coverage assertions in the same test, which
-       compare the shards' union against `fast_pool()` and require every gating
-       leg to be non-empty — two accessors, so a filter applied inside the map
-       cannot satisfy both.
+       a shard, or dropping a file from every fast shard — reds neither this
+       equality nor `leg_coverage_issues()` (measured at #11675: 8 passed). That
+       one is now refused by three arms in the same test: every gating leg must
+       be non-empty (only `tier-2 slow_selected [...]` is exempt, and for a stated
+       reason), and the fast-shard legs are read back against the shards
+       `push_legs()` produced, so a map-side filter reds even though the leg
+       names survive.
+
+       ⛔ Two things this docstring must NOT be read as claiming, because they
+       were measured false: it does not refuse a SWAP of two shards' contents
+       (the union is unchanged, and nothing walks per-shard membership against a
+       producer), and its arms cover `push_legs()` keys only — a gating set the
+       selector gains through `select()` (the PR/tier-2 surface) is still
+       unguarded. Both are outside the class this pin exists for (a leak), which
+       is why they are stated rather than enforced.
 
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
@@ -298,30 +309,55 @@ def test_no_subtree_file_is_in_any_gating_leg():
         f"and does not declare non-gating: {sorted(unaccounted)}. A gating set "
         "added on the PRODUCER side is invisible to the equality below, which "
         "compares only the sets `_gating_sets()` built itself — so it would "
-        "read as a pass over a set nobody walked (failure mode (a)). THREE "
-        "edits are needed, not two: walk it in `_gating_sets()`, add the key to "
-        "`_WALKED_LEG_KEYS`, and declare its legs here — or add it to "
-        "`_NON_GATING_LEG_KEYS` with the reason it gates nothing.")
+        "read as a pass over a set nobody walked (failure mode (a)). A new "
+        "gating leg needs THREE deliberate edits: walk it in `_gating_sets()`, "
+        "add its key to `_WALKED_LEG_KEYS` (pinned immediately below, so it "
+        "cannot be a quiet one-liner), and its legs then join the equality — "
+        "or declare it in `_NON_GATING_LEG_KEYS` with the reason it gates "
+        "nothing, which is pinned too.")
+    assert set(_WALKED_LEG_KEYS) == {
+        "shards", "slow_shards", "carve_shards", "slow", "env_broken",
+        "carve_out"}, (
+        "`_WALKED_LEG_KEYS` changed. It is the silent half of the assertion "
+        "above: adding a key here without ALSO walking it in `_gating_sets()` "
+        f"clears the check (now {sorted(_WALKED_LEG_KEYS)}). Change this list "
+        "deliberately, in the same commit that walks the new leg.")
     # A leg that keeps its NAME but loses its CONTENT is invisible to the
-    # equality above (`legs` and `expected` are both built from this map). Measured
-    # before these two assertions: emptying a shard, or subtracting the guarded
-    # subtree from every fast shard, left all 8 tests green — the one-line edit
-    # that disarms failure mode (a) inside this file's own map.
-    #
-    # `tier-2 ...` legs are exempt from the non-emptiness arm ON PURPOSE: each is
-    # keyed by a SYNTHETIC changed file, so one that selects no slow set is the
-    # probe's answer about that surface, not an empty lane.
-    empty = sorted(k for k, v in legs.items() if not v and not k.startswith("tier-2 "))
+    # equality above (`legs` and `expected` are both built from this map).
+    # Measured at #11675: emptying a shard in `_gating_sets()`, or dropping a file
+    # from every fast shard, left all 8 tests green.
+    empty = sorted(k for k, v in legs.items()
+                   if not v and not k.startswith("tier-2 slow_selected "))
     assert not empty, (
         f"gating leg(s) with NO files: {empty}. An empty leg is a lane that "
         "runs nothing while reading as coverage — and the declared-side "
-        "equality cannot see it, because both sides are built from this map.")
+        "equality cannot see it, because both sides are built from this map. "
+        "(Only `tier-2 slow_selected [...]` is exempt: it is keyed by a "
+        "SYNTHETIC changed file, so one that selects no slow set is the "
+        "probe's ANSWER about that surface, not an empty lane. A "
+        "`tier-2 test_files [...]` leg is a real gating file list and must "
+        "not be empty.)")
+    # Content that is FILTERED while the name survives, for the fast shards —
+    # the map's side read back against THIS map's own legs, so unlike the pool
+    # comparison it can actually see a filter applied inside `_gating_sets()`.
+    map_shards = {f for k, v in legs.items() if k.startswith("test (") for f in v}
+    producer_shards = set(cs.all_shard_files(cs.push_legs(manifest)))
+    assert map_shards == producer_shards, (
+        "the fast-shard legs do not carry exactly the shards `push_legs()` "
+        "produced — a filter applied inside `_gating_sets()` while the leg NAMES "
+        "survive reds here, and the union-with-`fast_pool()` arm below cannot "
+        "see it because that arm reads the producer, not this map. (A SWAP of "
+        "two shards' contents is NOT caught: the union is unchanged.)"
+        f"\nonly-in-map: {sorted(map_shards - producer_shards)[:8]}\n"
+        f"only-in-producer: {sorted(producer_shards - map_shards)[:8]}")
     shard_union = {_bare(f) for f in cs.all_shard_files(cs.push_legs(manifest))}
     pool = {_bare(f) for f in cs.fast_pool(manifest)}
     assert shard_union == pool, (
-        "the fast shards do not carry exactly `fast_pool()` — two independent "
-        "accessors, so a filter applied inside `_gating_sets()` cannot satisfy "
-        f"both.\nonly-in-shards: {sorted(shard_union - pool)[:8]}\n"
+        "the fast shards do not carry `fast_pool()` (plus any documented "
+        "`push_extra`). This arm is about the PRODUCER's packing, not about "
+        "`_gating_sets()` — it reads two producer calls, so a map-side filter "
+        "cannot reach it; that is the arm above."
+        f"\nonly-in-shards: {sorted(shard_union - pool)[:8]}\n"
         f"only-in-pool: {sorted(pool - shard_union)[:8]}")
     assert set(legs) == expected, (
         "the leg list this test walks changed — a new gating set was added to "
