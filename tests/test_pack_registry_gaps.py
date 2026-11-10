@@ -7,7 +7,6 @@ Covers (#7864, #7863):
 """
 from __future__ import annotations
 
-import ast
 import os
 import sys
 import types
@@ -2463,35 +2462,35 @@ class TestCoreHierarchy:
         # measurement then false) leaves a single bare `kind_0` here.
         class _FilterGraph:
             def __init__(self):
-                self.params: list[dict] = []
+                self.calls: list[tuple[str, dict]] = []
 
             def query(self, cypher, params=None, timeout=None, **kw):
-                self.params.append(dict(params or {}))
+                self.calls.append((cypher, dict(params or {})))
                 return _Result()
 
         filter_graph = _FilterGraph()
-        observed_expansion: set[str] = set()
 
-        def _kind_values(params: dict) -> set[str]:
-            """Every kind-ish string a filter call carries — BY VALUE, not by name.
+        def _kind_values(params: dict, expected: set[str]) -> set[str]:
+            """The EXPANSION's members a filter call carries — BY VALUE, not by name.
 
             Deliberately form-insensitive: the read may spell the set as
-            `kind_0..n` scalars, as one `kinds` list, or as `kind` alone. Reading
-            the parameter NAMES would make a semantics-preserving consolidation
-            of that filter a FALSE RED whose message claims the widening was
+            `kind_0..n` scalars, as one `kinds` list, or as `kind` alone, and the
+            result pool may be called anything. Reading the parameter NAMES
+            would make a semantics-preserving consolidation of that filter (or a
+            rename of the pool) a FALSE RED whose message claims the widening was
             deleted — the exact false-diagnosis path this pin was rewritten to
-            avoid (see the docstring above). `ids` is the result pool, not the
-            kind set, so it is excluded.
+            avoid (see the docstring above). Intersecting with `expected` is what
+            drops the pool ids and any other incidental string without weakening
+            the deletion check: a deleted widening yields no intersection, and a
+            collapsed one yields the bare kind only.
             """
             out: set[str] = set()
-            for key, value in params.items():
-                if key == "ids":
-                    continue
+            for value in params.values():
                 if isinstance(value, str):
                     out.add(value)
                 elif isinstance(value, (list, tuple, set, frozenset)):
                     out.update(v for v in value if isinstance(v, str))
-            return out
+            return out & expected
 
         def _one_hit(graph_, query, struct_kind, query_vec, strategies, **kw):
             # a non-empty fused pool is what makes the filter block run at all
@@ -2507,8 +2506,13 @@ class TestCoreHierarchy:
             sdk.tortoise_fts_query(
                 "widget", kind="Object", entity_type="object")
             expected = set(sdk._expand_kind("Object"))
-            for params in filter_graph.params:
-                observed_expansion |= _kind_values(params)
+            # ONE call must carry the expansion. Asserting the union across every
+            # recorded call would let an auxiliary call that happens to carry
+            # `expand_kind(...)` MASK a filter narrowed back to the bare kind —
+            # the fail-open direction this pin exists to close.
+            carriers = [
+                (cypher, values) for cypher, params in filter_graph.calls
+                if (values := _kind_values(params, expected))]
         finally:
             search_engine.degradation_chain = original_chain
             if sdk is not None:
@@ -2517,50 +2521,51 @@ class TestCoreHierarchy:
         assert len(expected) > 1, (
             "`expand_kind('Object')` collapsed to the bare kind, so this pin "
             f"cannot distinguish an expansion from its head: {sorted(expected)}")
+        assert len(carriers) == 1, (
+            "exactly one call must hand the filter the EXPANSION; "
+            f"{len(carriers)} did: {[c for c, _ in carriers]}")
+        filter_cypher, observed_expansion = carriers[0]
         assert observed_expansion == expected, (
             "the post-retrieval kind filter was handed "
             f"{sorted(observed_expansion)}, not the EXPANSION "
             f"{sorted(expected)} — the text-query read no longer widens, and "
             "the measurement DM4 records is false again")
+        assert "n.objectKind IN" in filter_cypher, filter_cypher
 
-        # ── and the GATE itself, anchored on the AST ───────────────────────
-        # The capture above proves the two forms differ in `query`; it cannot
-        # prove the post-retrieval expansion is still gated ON that difference.
-        # Dropping the `query is not None` conjunct makes the KIND-ONLY read
-        # widen too — the exact claim this docstring makes false — so the gate is
-        # asserted as a statement SHAPE. An AST dump, not a text anchor: it is
-        # immune to a reflow and to a comment quoting the line, and it names the
-        # mutation it catches.
+        # ── and the GATE itself, DRIVEN rather than shape-anchored ─────────
+        # The captures above pin the arguments; they do not pin that the
+        # expansion filter is REACHABLE ONLY on a text query. Dropping the
+        # `query is not None` conjunct makes the KIND-ONLY read widen too — the
+        # exact claim this docstring makes false — and that IS drivable without a
+        # DB: give the kind-only read a non-empty pool and assert NO call carries
+        # any of the expansion. A gate that dropped the conjunct issues the
+        # filter, and this reds with the right message.
         #
-        # ⚠️ The conjuncts are compared as a SET, not as a whole `BoolOp` dump.
-        # Reordering `kind and query is not None and result_ids` is
-        # semantics-preserving (three truthiness loads, no side effects), so an
-        # ordered comparison would be a FALSE RED whose message claims
-        # `query is not None` was dropped — a behaviour change that did not
-        # occur, which is the same false-diagnosis class the text tripwire above
-        # was removed for. A dropped or duplicated conjunct still changes the
-        # set, so the mutation this pin exists to catch is unaffected.
-        gate = ast.parse(
-            "kind and query is not None and result_ids", mode="eval").body
+        # ⛔ An earlier version anchored the AST instead, and its docstring
+        # claimed this "cannot be driven without a DB". That claim was FALSE (the
+        # assertion below drives it), and the anchor it justified was
+        # shape-coupled: hoisting the condition to a local, or renaming `kind` in
+        # a 40k-line module, was a false red whose message asserted a behaviour
+        # change that had not happened.
+        kind_only_graph = _FilterGraph()
+        sdk = None
+        search_engine.degradation_chain = _one_hit
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope_gate.db"),
+                namespace=f"form_scope_gate_{os.urandom(6).hex()}")
+            sdk._get_proj = lambda: types.SimpleNamespace(g=kind_only_graph)
+            sdk.tortoise_fts_query(kind="Object", entity_type="object")
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
 
-        def _conjuncts(expr: ast.expr) -> set[str]:
-            """The `and` conjuncts of a test, order-insensitively."""
-            if isinstance(expr, ast.BoolOp) and isinstance(expr.op, ast.And):
-                out: set[str] = set()
-                for value in expr.values:
-                    out |= _conjuncts(value)
-                return out
-            return {ast.dump(expr)}
-
-        wanted = _conjuncts(gate)
-        tree = ast.parse(
-            Path(sdk_module.__file__).read_text(encoding="utf-8"))
-        hits = [
-            node for node in ast.walk(tree)
-            if isinstance(node, ast.If) and _conjuncts(node.test) == wanted
-        ]
-        assert len(hits) == 1, (
-            "the post-retrieval expansion gate `kind and query is not None and "
-            "result_ids` is gone or duplicated — without `query is not None` "
-            "the KIND-ONLY object read widens too, which is what this "
-            f"docstring says it does not ({len(hits)} hits)")
+        leaked = [
+            (cypher, sorted(values))
+            for cypher, params in kind_only_graph.calls
+            if (values := _kind_values(params, expected))]
+        assert not leaked, (
+            "the KIND-ONLY object read issued the expansion filter "
+            f"({leaked}) — `query is None` must gate it out, or the read this "
+            "docstring says does NOT widen does widen")

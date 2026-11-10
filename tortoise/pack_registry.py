@@ -3654,7 +3654,7 @@ class PackRegistry:
         # as written, so `subjectKind IN expand_kind("team")` now also returns a
         # root-kinded Subject row — the read widens by a join on the layer root
         # whenever that `IN` clause is the filter that runs.
-        # ⚠️ FORM-SCOPED, exactly like the `Object` read below — measured, not
+        # ⚠️ FORM-SCOPED, exactly like the `Object` read — measured on BOTH, not
         # generalised: the `IN` clause is the POST-retrieval filter, so a
         # text-query read widens while a kind-only read (`query=None`, i.e.
         # `is_full_scan`) runs only the structural leg (`n.subjectKind = $kind`)
@@ -3668,7 +3668,9 @@ class PackRegistry:
         # …and that is CORRECT, because the `Object` row has had exactly this
         # property since the §6 table was first read: `create_object(objectKind=
         # "Object")` is likewise accepted and STORED, so `objectKind IN
-        # expand_kind("dev:issue")` returns it. The Subject row was the anomaly,
+        # expand_kind("dev:issue")` returns it — under the SAME form-scope as the
+        # Subject `IN` above (a text-query read only; #11690 owes the full scan).
+        # The Subject row was the anomaly,
         # not the Object row. Declining the seed would leave the stated contract
         # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
         # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
