@@ -128,7 +128,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 
 **⛔ Registry statement (required by the architecture review, F3).** C4 builds a **write-path mechanism**
 (A2's attach/resolve half) and `config/v4-mechanisms.yml` — *"the ONE PLACE the declared set lives"* (`#5064`),
-13 rows, guarded by `tests/test_v4_declared_mechanisms.py` — has **no row for it**. `failure_policy` owns only
+14 rows (13 when this finding was measured; `#11717` added `mention_record`), guarded by `tests/test_v4_declared_mechanisms.py` — has **no row for it**. `failure_policy` owns only
 the HOLD half and is `not-implemented`. So after C4 the write path would implement a mechanism the registry
 cannot see: the `#5064` defect running **inverted**, in the epic whose own instrument extends that registry.
 **The scope requires one of two statements in C4's child, not silence:** (a) C4 adds a row (a new `s3_attach`,
@@ -424,7 +424,7 @@ mechanism).
 **Coherence opinion (the reviewer's, recorded):** the epic **stays a capstone**, conditional on F1–F3. Its
 one-line risk statement, worth carrying into the plan: *"the instability is in **four declarations that live
 outside the epic bundle** — the verdict gate's closed enum, the corpus pin's three shapes, `RelationUpsert.attrs`'
-writer set, and the registry's 13 rows. Each forks cleanly; none was named in the scope. That is the whole risk,
+writer set, and the registry's 14 rows. Each forks cleanly; none was named in the scope. That is the whole risk,
 and it is cheap to close."*
 
 ---

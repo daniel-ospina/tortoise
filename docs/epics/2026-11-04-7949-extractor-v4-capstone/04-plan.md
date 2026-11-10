@@ -259,7 +259,7 @@ section argues against.
 corpus have any *bindable subject slots* at all?) is **the metric's own reading**, not a REFUSED boundary: it lives in
 the `metric` cell, and `02-scope.md`'s **E2E-4** already states the honest outcome — a run that finds none reports **why**
 ("the binder did not run / the corpus has no bindable slots") instead of reading as a zero. A5 is therefore **not** a
-second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 12"* stays true, and no registered A5
+second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 13"* stays true, and no registered A5
 text moves.
 
 ⛔ **P1 from the substep 6–7 gate: `pinned_by` was about to recreate the P0 it just fixed.** The **retained**
@@ -390,7 +390,7 @@ pin proves *who*. And `sealed_before_any_scored_run` carries its own `_basis`, m
 `capstone_verdict_check.py`'s `CRITERIA` is a **closed** tuple that refuses unknown ids.
 
 ⛔ **Corrected after review — "record ids == enum minus declared sub-rows" is FALSE today.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers** — 12 total while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:964-970`), and the check's own `SUB_ROW_CRITERIA` is
+`E1, E1b, E2a, E2b, E3, E4, E5` (7 E-rows) **plus `A1…A5`, which the record already registers**, **plus `E6`** — 13 total (`#11673` added the `E6` criteria entry; 12 when this section was first written) while the enum was `E1…E5` (5) when this section was first written and is now `(*CRITERIA, *E6_CRITERIA, *A_CRITERIA)` (`capstone_verdict_check.py:191`, tested at `:964-970`), and the check's own `SUB_ROW_CRITERIA` is
 `("E2",)` — which answers a **different** question ("may stand in for E2"), not "is not a verdict row". So the
 subtraction set is declared **literally, in one place**:
 
@@ -400,8 +400,8 @@ SUB_ROW_PARENT    = {"E1b": "E1", "E2a": "E2", "E2b": "E2"}   # which row carrie
 ```
 
 ⛔ **P0 from the `duplication-architecture` review: the invariant as first written is FALSE.** The record's ids are
-`E1, E1b, E2a, E2b, E3, E4, E5` — **there is no plain `E2` row** — so `record ids − NON_VERDICT_ROWS` = **9**, not 5 — 4 E-rows plus the 5 already-registered A-rows. The
-amendment adds **no** ids; it re-authors A4's row, so the set stays 12. The correct invariant adds the **parent** of every sub-row back:
+`E1, E1b, E2a, E2b, E3, E4, E5` — **there is no plain `E2` row** — so `record ids − NON_VERDICT_ROWS` = **10**, not 5 — 5 E-rows (`E1`, `E3`, `E4`, `E5`, `E6`) plus the 5 already-registered A-rows. The
+amendment adds **no** ids; it re-authors A4's row, so the set stays 13. The correct invariant adds the **parent** of every sub-row back:
 
 ```text
 (record ids − NON_VERDICT_ROWS) ∪ SUB_ROW_PARENT.values() == enum ids
