@@ -35,8 +35,10 @@ edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 ca
 > 34 `IMPL` + 1 `NAND`, 28 Object→Object (33 direct-shape), 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
-> they were measured on. Reproduce with the one-liner in the research brief §2.1. The `.py:line` citations
-> below are verified at the same merged head; they are line numbers, so a later `main` will move them.
+> they were measured on. Reproduce with the one-liner in the research brief §2.1. Code citations below are **symbol-keyed** (`path.py::symbol`), never by line
+> number, per this repo's recorded rule (`docs/architecture/S2-DECISION-SEAM.md`: *"assertions by NAME —
+> never by line number"*) — a line number rots on the next `main` merge, which is how 24 of them went
+> stale in an earlier revision of this document.
 
 ### 1.1 Three doors, not one — and the direct door is the dominant one
 
@@ -47,24 +49,24 @@ issue's own target.** Measured:
 |---|---|
 | `create_operator` | `create_operator(op_type, src, [dst], label=<predicate>)` — and `ingest`'s reified arm |
 | `create_edge` / `create_about_edge` | the structural predicates only |
-| **`create_direct_edge`** | **`link_entities` `sdk.py:18070-18078`**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py:28497`, the "operator-less per §8" arm) |
+| **`create_direct_edge`** | **`link_entities` (`sdk.py::TortoiseSDK.link_entities`)**: `if upper in ("IMPL","NAND") and operator is not True:` → `create_direct_edge(upper, from, to, …, label=label, …)`. **`ingest` reaches it too** (`sdk.py::TortoiseSDK.ingest`, the "operator-less per §8" arm) |
 
 `create_direct_edge` takes `label` and validates **nothing** about declarations or kinds — its guards are
 `op_type ∈ {IMPL,NAND}`, endpoints differ, confidence range, direction, endpoint exists / not-operator /
 not-terminal, and the claim-class override. `undeclared_relation` fires only in `create_operator`
-(`sdk.py:23196`).
+(`sdk.py::TortoiseSDK.create_operator`).
 
-**And the direct door is the *dominant* shape, not a corner.** `_point_mediated_route` (`sdk.py:25041`)
+**And the direct door is the *dominant* shape, not a corner.** `_point_mediated_route` (`sdk.py::TortoiseSDK._point_mediated_route`)
 reifies only when a `:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is
 operator-mediated … `Subject`/`Event` endpoints are not Point-bearing and take the Object path"*
-(`sdk.py:25058-25060`) — and the 35 kind-bearing declarations partition as **28 Object↔Object**, **5 more
+(`sdk.py::TortoiseSDK._point_mediated_route`, its docstring) — and the 35 kind-bearing declarations partition as **28 Object↔Object**, **5 more
 direct-shape but not Object↔Object** (3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2
 Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-strategy:addresses`
 `useCase→feature` via `pointKinds: useCase`) — so **33 of the 35** take the direct shape through
 `link_entities` and through `ingest` alike, and **the other 2 are reified by `ingest` only**. ⛔ The Point gate
 is `ingest`'s, not `create_direct_edge`'s: `_effective_route` is called only inside `ingest`/its helpers
-(`sdk.py:27455`, `:28378`, `:28445`), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
-terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py:29066-29067`). So
+(`sdk.py::TortoiseSDK.ingest` and its `_check_endpoints` / `_check_endpoint_race` helpers), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
+terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py::TortoiseSDK.create_direct_edge`, its docstring). So
 `link_entities` writes those 2 as direct edges today — one `Object→Point`, one `Point→Object` — which is why pin 14's
 `link_entities` arm must cover a Point-bearing pair in **both** directions. ⚠️ The earlier "32 of 35" figure was the
 **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows.
@@ -77,23 +79,23 @@ So a declared IMPL label over a mismatched **direct-shape** pair is writable tod
 2. `sdk.create_direct_edge` — and `link_entities` + `ingest`'s plain-operator arm inherit it.
 3. `projection/edges.py::_EdgeHandlers.create_edge`
 4. `projection/edges.py::_EdgeHandlers.create_about_edge`
-5. `projection/edges.py::_EdgeHandlers._create_edges` (**the operator replay fold**, `:1497`, from
-   `projection/entities.py:3021`) — it MERGEs operator edges directly and never calls `create_edge`. A
+5. `projection/edges.py::_EdgeHandlers._create_edges` (**the operator replay fold**, reached from
+   `projection/entities.py::_EdgeHandlers._upsert_point_edges`) — it MERGEs operator edges directly and never calls `create_edge`. A
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
 6. `projection/__init__.py`, the **`DirectEdgeCreated` replay fold** (`rebuild_all` pass-2b, fold starts
-   `:16956`; it reads `etype = ev.get("edge_type")` at `:17028` and MERGEs it at `:17110`, *"mirroring
+   in `_rebuild_all_replay`; it reads `etype = ev.get("edge_type")` and MERGEs it, *"mirroring
    create_direct_edge byte-for-byte on the edge shape"*) — the second fold, for the **other** label door.
    ⛔ **Where the predicate lives in a record at this fold is PRODUCER-DEPENDENT, and getting it wrong
    makes the gate a no-op:**
-   - **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py:12079`) journals `edge_type=rel`
-     (`sdk.py:12142`), so `edge_type` **is** the declared predicate — `ownedBy`/`hasPart`/`dependsOn`, which
+   - **structural-edge lane** (`sdk._record_structural_edge`, `sdk.py::TortoiseSDK._record_structural_edge`) journals `edge_type=rel`
+     (the journal call in that same method), so `edge_type` **is** the declared predicate — `ownedBy`/`hasPart`/`dependsOn`, which
      the fold's own code names (*"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/… (#9553
-     class 4)"*, `:17065`);
+     class 4)"*, `projection/__init__.py::_rebuild_all_replay`);
    - **`create_direct_edge`** does **not** put its label in the rel type: it writes
-     `rel_type = op_type  # IMPL / NAND` (`sdk.py:29214`) and carries the declared predicate as an edge
-     **property** — `attrs["label"] = label` (`sdk.py:29238`), restored by this fold through
-     `DIRECT_EDGE_ATTR_KEYS` (`edges.py:90-91`, applied at `__init__.py:17127`).
+     `rel_type = op_type  # IMPL / NAND` (`sdk.py::TortoiseSDK.create_direct_edge`) and carries the declared predicate as an edge
+     **property** — `attrs["label"] = label` (`sdk.py::TortoiseSDK.create_direct_edge`), restored by this fold through
+     `DIRECT_EDGE_ATTR_KEYS` (`projection/edges.py::DIRECT_EDGE_ATTR_KEYS`, applied in the fold at `projection/__init__.py::_rebuild_all_replay`).
 
    ⇒ the rule at this fold must read the predicate as **`ev["label"]` when present, else `ev["edge_type"]`**.
    A gate keyed on `edge_type` alone sees `IMPL`/`NAND` — a predicate no pack declares — returns `unbound`, and
@@ -205,17 +207,17 @@ because a fold that classifies then skips still "routes through" the rule.
 Endpoint kinds are normalised with **`StatusFoldIndex.kind_forms_for` ∪ `PackRegistry.expand_kind`** — neither is
 a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issue`; `expand_kind` has
 `pm:issue` but not `issue`), both sides case-folded because kinds are stored **verbatim**
-(`domain_validators.py:562`).
+(`domain_validators.py::validate_portfolio_shape`).
 
 **Where each call site gets its kinds — no extra round trip at any of them:**
 
 | site | source |
 |---|---|
-| `create_operator` | the existing per-label probe (`sdk.py:23460`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
-| `create_direct_edge` | its own existing probe (`sdk.py:29142-29146`) returns `id, is_operator, status, claimClass` — add the kind property |
-| `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `edges.py:2933`) |
+| `create_operator` | the existing per-label probe (`sdk.py::TortoiseSDK.create_operator`) — add the kind property to its `RETURN`, the same zero-extra-round-trip shape `#2351` uses for `claimClass` |
+| `create_direct_edge` | its own existing probe (`sdk.py::TortoiseSDK.create_direct_edge`) returns `id, is_operator, status, claimClass` — add the kind property |
+| `create_edge` / `create_about_edge` | `_resolve_entity` already returns `properties` (consumed for the `aboutDocument` refusal at `projection/edges.py::_EdgeHandlers.create_edge`) |
 | `_create_edges` (operator fold) | it already resolves the descriptor's endpoints |
-| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py:17091-17094`) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
+| **`DirectEdgeCreated` fold** | its per-label endpoint probe (`projection/__init__.py::_rebuild_all_replay`, the pass-2b `DirectEdgeCreated` fold) returns **only `p.id`** — the label sweep supplies the node LABEL (`Point`/`Object`/`Subject`/`Event`), not the kind property. It must add the kind property to that `RETURN`, the same shape as the two rows above; without it the rule is called with no kind and the fold's gate reports `unknown_kind` for every record |
 
 **`create_operator`'s synthetic node carries no kind** — the pair is `(source_id, each target_id)` from the
 **arguments**; never read it off the stored typed edges.
@@ -226,7 +228,7 @@ a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issu
 
 `list_relations()` is whole-catalog and already reached on every labelled `create_operator` — through
 `pack_registry.declared_relation_predicates()` (#2766), which `create_operator` calls at
-`sdk.py:23188` when it builds the declared set —
+`sdk.py::TortoiseSDK.create_operator` when it builds the declared set —
 so the rows are free; the missing piece is `relations_for_namespaces(names) -> rows`, honouring
 `ResolvedPackSet`'s **tri-state** (`None` ⇒ catalog union; `frozenset()` ⇒ deliberately empty; a set ⇒
 recorded ∪ data). Reuse `pack_state.resolved_pack_set_for_graph` — it exists for bare-graph seams.
@@ -250,12 +252,12 @@ venture:holds                venture:investment     -> Subject          (a LAYER
 **Rule:** a declaration binds when each endpoint kind resolves into **the namespaces the declaration itself
 names** — the declaring pack ∪ any namespace it names explicitly (`core:` counts) — not the declaring pack
 alone. `portfolio:marks` is the load-bearing case: `domain_validators._portfolio_mark_contract`
-(`:396-410`) reads it.
+(`domain_validators.py::_portfolio_mark_contract`) reads it.
 
 ### 5.3 Layer-valued declarations (the `#11000` dependency has LANDED)
 
 `Subject` is a **layer** (`CORE_ENTITY_TYPES`), not a kind; the manifest validator already accepts it as a
-core kind (`pack_registry.py:2127`), and `:2814` (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
+core kind (`pack_registry.py::PackRegistry._validate`), and its `core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES` line (`core_parents = CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`) already treats entity types as hierarchy parents — so the
 reading is *"a Subject or any subtype"* (W3C SHACL UCR, verbatim).
 
 ✅ **`#11000`'s §6 leg has landed** (`main` `a7da06cc`, *"`subclassOf` widens to its parent, and the CORE
@@ -270,38 +272,38 @@ turning every layer-valued declaration `unbound` again.
 ### 5.4 Severity — reuse, and fix the seam's scope
 
 Read `enforcement.relations[predicate]` through the existing seam (§2.1). ⚠️ **Fix in the same change:**
-`resolve_enforcement` (`enforcement.py:56`) iterates `reg.packs.values()` — the **whole catalog** — and takes
+`resolve_enforcement` (`enforcement.py::resolve_enforcement`) iterates `reg.packs.values()` — the **whole catalog** — and takes
 the **max** severity, so one pack's `block` would block another pack's unrelated edge on the same predicate.
 Resolve over the **installed** set. Both arms are affected, differently: the max-severity arm
-(`enforcement.py:92-108`) scans `reg.packs.values()` for a **bare** kind or relation and has **no
-production caller today**; the two live `kind=` callers (`projection/entities.py:341`,
-`kind_classifier.py:364`) pass **namespaced** kinds and so resolve exclusively through
-`reg.get_pack(ns)` (`enforcement.py:83-91`) — still against the **whole catalog**, so a pack this graph
+(`enforcement.py::resolve_enforcement`, the bare-kind max-severity arm) scans `reg.packs.values()` for a **bare** kind or relation and has **no
+production caller today**; the two live `kind=` callers (`projection/entities.py::_emit_fold_violation`,
+`kind_classifier.py::KindClassifier.classify_items`) pass **namespaced** kinds and so resolve exclusively through
+`reg.get_pack(ns)` (`enforcement.py::resolve_enforcement`, the namespaced arm) — still against the **whole catalog**, so a pack this graph
 does not install still decides the level. The label leg never reaches this seam at all:
-`create_operator` does its own inline membership check (`enforcement.py:6`).
+`create_operator` does its own inline membership check (`enforcement.py`, its module docstring).
 
 ### 5.5 The prevention half (D5) — extend the resolver that already exists
 
 ⚠️ **Revision 1 said `fromKind`/`toKind` are "acted on in exactly one place". That is false** — there are
 **four** production readers, and two of them are D5's own job:
 
-- `domain_validators.py:396-410` — one pack's portfolio shape.
-- `sdk._resolve_traversal_path` (`sdk.py:42773`; the live call is `sdk.py:38605`) — **kind pair → `{predicate, fromKind, toKind}`**,
+- `domain_validators.py::_portfolio_mark_contract` — one pack's portfolio shape.
+- `sdk._resolve_traversal_path` (`sdk.py::TortoiseSDK._resolve_traversal_path`; the live call is in `sdk.py::TortoiseSDK.tortoise_fts_query`) — **kind pair → `{predicate, fromKind, toKind}`**,
   i.e. exactly `allowed_relations(from_kind, to_kind)`. ⛔ **Not reusable as the gate** (bare-suffix,
   first-match-wins, returns one relation) — but it must be **named**, or a lane will implement D5 twice.
-- `value_extractor._relation_endpoint_refs` (`:44`) — the kind→kind adjacency, called twice inside
-  `compile_value_brief` (`:395`, `:458`); its output rides `pack_refs` and is consumed by
-  `extractor_v2._select_pack_kinds` (`extractor_v2.py:999`, called at `:1322`) to choose **which kinds to offer together**. **Wired**,
+- `value_extractor._relation_endpoint_refs` (`value_extractor.py::_relation_endpoint_refs`) — the kind→kind adjacency, called twice inside
+  `compile_value_brief` (twice, `value_extractor.py::compile_value_brief`); its output rides `pack_refs` and is consumed by
+  `extractor_v2._select_pack_kinds` (`extractor_v2.py::_select_pack_kinds`) to choose **which kinds to offer together**. **Wired**,
   for a narrower job than this issue needs.
-- ⛔ **`pack_hierarchy._matching_row` (`:194-210`) + `_binding` (`:213`) — the pair→WRITER resolver, and it
+- ⛔ **`pack_hierarchy._matching_row` (`pack_hierarchy.py::_matching_row`) + `_binding` (`pack_hierarchy.py::_binding`) — the pair→WRITER resolver, and it
 already exists.** `_matching_row` joins a hierarchy entry to its `relations[]` row on the declared
   `(fromKind, toKind)` (plus `predicate`/`semantics` — `decomposesInto` with `semantics: hasPart` is one
   declaration written twice), and `_binding` turns the match into a write-path verdict. It is
   **production-reachable on the live path**: `relation_write.apply_relation_edges`
-  (`relation_write.py:791`, imported inside `_extract_session_v2` at `sdk.py:17200` and called at `:17201`)
-  → `plan_relation_edges` (`:823`) → `declared_hierarchy(registry)` (`:594`) → `_resolve`
-  (`pack_hierarchy.py:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). ⛔ The **join** is in
-  `_resolve`, **not** in `plan_hierarchy_edges` (`relation_write.py:631`), which matches on the
+  (`relation_write.py::apply_relation_edges`, imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`)
+  → `plan_relation_edges` → `declared_hierarchy(registry)` → `_resolve`
+  (`pack_hierarchy.py::_resolve`) → `_binding` + `_matching_row` (both in `pack_hierarchy.py`). ⛔ The **join** is in
+  `_resolve`, **not** in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`), which matches on the
   already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges`
   — `TortoiseSDK` has no such method. **Reuse its join — this is the "do not add a fourth resolver" rule
   applied to itself, and the pin over this chain lives in `tests/test_11656_endpoint_kind_binding_scope.py`.**
@@ -343,11 +345,11 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **20 test functions / 21 collected**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **22 test functions / 23 collected**
 (one is parametrised over the two docs). The two populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
-(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔20 difference is the
+(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔22 difference is the
 reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
 table's row count against that file, and was stale on both.
 
@@ -366,7 +368,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 |---|---|---|
 | `sdk.create_operator` / `sdk.create_direct_edge` | write path | §4 |
 | `projection/edges.py` `create_edge` / `create_about_edge` / `_create_edges` | write path | §4 (pin 15) |
-| `projection/__init__.py` `DirectEdgeCreated` fold (pass-2b, `:16956`/`:17110`) | write path | §4 (pin 15b) — the second replay fold |
+| `projection/__init__.py` `DirectEdgeCreated` fold (pass-2b, `_rebuild_all_replay`) | write path | §4 (pin 15b) — the second replay fold |
 | `pack_state.resolved_pack_set_for_graph` | DB read | reused — its `graph_kind_namespaces` leg is **O(nodes)**; **must not** run per write (derive from the `:PackInstall` leg, or cache keyed on the data leg) |
 | `enforcement.resolve_enforcement` | decision seam | fixed in §5.4 |
 | `pack_registry.expand_kind` / `StatusFoldIndex.kind_forms_for` (via `reg.status_fold_index`) | vocabulary | reused, union |
@@ -412,7 +414,7 @@ the declared kinds; a read-side census reports the pre-existing population.
 | "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries declared predicates from **two** producers: rel type for the structural-edge lane, a `label` property for `create_direct_edge`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
 | the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |
 | §2.1's **"Recorded here"** for the `#1934` departure (revision 4) | the marker's **home is the ISSUE**, not this ledger: it is now on `#1934` itself (comment 6759287749 — the `OVERRIDES:` line naming #1934's warn-not-block), relayed with a cross-reference on `#11656` (comment 6759288785); this doc keeps the ledger copy | fresh review (P3-2) — `#1934` was CLOSED and held **0** `OVERRIDES` comments, so the departure read as an accident at the only artifact a lane reads |
-| "reached from `sdk.apply_relation_edges` (`sdk.py:17200`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py:791`), imported inside `_extract_session_v2` at `sdk.py:17200` and called at `:17201`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`:631`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py:339`) → `_resolve` (`:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py:17200`, which is an *import* |
+| "reached from `sdk.apply_relation_edges` (`sdk.py::TortoiseSDK._extract_session_v2`)" (revision 3) | **that symbol does not exist** — `TortoiseSDK` has no such method. It is `tortoise.relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`), imported and called inside `sdk.py::TortoiseSDK._extract_session_v2`. And the pair→writer **join** is not in `plan_hierarchy_edges` (`:631`, which matches the already-resolved `edge.from_kind`/`edge.to_kind`): it is in `declared_hierarchy` (`pack_hierarchy.py::declared_hierarchy`) → `_resolve` (`:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). Fixed by §5.5, and pinned by `test_the_fourth_reader_is_the_pair_to_writer_resolver` inside `_resolve`'s own source | fresh review (P2) — found by opening `sdk.py::TortoiseSDK._extract_session_v2`, which is an *import* |
 
 ## 11. Downward-closure example correction (the brief's §4.3)
 

@@ -21,7 +21,7 @@ Each number below is re-measured from `packs/*/manifest.yaml` (offline: no graph
 network; the pack registry is loaded from `packs/`), so a manifest edit that makes a scope claim false reds here instead of rotting in prose. This is
 the "dogfood the repo's own declared relations" pin the brief's CI shape asks for.
 
-It also pins the two DEFECTS the review found in the docs themselves — both are cheap, mechanical, and would
+It also pins the three DEFECTS the review found in the docs themselves — all are cheap, mechanical, and would
 have shipped because nothing reads prose:
 
   * neither #11656 doc was registered in `docs/00_index.md` (the repo's ledger — how the next lane finds a
@@ -30,6 +30,13 @@ have shipped because nothing reads prose:
     named `04-plan.md`), so the reference did not resolve from the citing document. ⛔ No hard count is
     carried here on purpose: the count rotted the moment this PR stopped adding an eighth `04-plan.md`,
     and the assertion's own message derives it.
+  * the two docs carried **line-keyed `.py:<line>` citations**, and the branch's own final `main` merge moved
+    every one of them into unrelated code (`sdk.py` +44…+62, `projection/__init__.py` +128) while both docs
+    asserted the numbers were verified at the merge head. They are now **symbol-keyed** (`path.py::symbol`),
+    per this repo's recorded rule (`S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*), and
+    the ban below is what keeps a later edit from reintroducing the class. ⛔ Same reasoning as above: no
+    count is written into an assertion, but this header says 44 in the scope and 36 in the brief at the
+    pre-fix head, because that is the size of the defect the ban covers.
 """
 from __future__ import annotations
 
@@ -174,7 +181,7 @@ class TestTheInventoryTheScopeCites:
         ⚠️ This pins a figure that has already been got wrong once: the first revision said "32 of the 35 are
         Object→Object", which is the **non-`Subject`** count (35 − 3) relabelled — it absorbed the four
         non-`Subject` non-Object rows, and two of those are Point-involved. `_point_mediated_route` reifies
-        only on `:Point` (`sdk.py:25058-25060`), so the direct-shape population is "not Point-involved", which
+        only on `:Point` (`sdk.py::TortoiseSDK._point_mediated_route`), so the direct-shape population is "not Point-involved", which
         is 33, not 32. An implementer building pin 14's fixture from the richest documented predicate
         (`addresses`, 6 declarations) would pick the `useCase→feature` row, watch it reify, and conclude the
         direct door is not the dominant shape.
@@ -445,7 +452,8 @@ class TestTheThirdDoorExists:
         unrelated places. A file-wide assertion would stay green if the creation fold were deleted.
 
         The predicate is in a DIFFERENT key per producer: `edge_type` for a structural-lane record
-        (`sdk.py:12142`), a `label` property for a `create_direct_edge` record (`sdk.py:29214`/`:29238`,
+        (the journal call in `sdk.py::TortoiseSDK._record_structural_edge`), a `label` property for a
+        `create_direct_edge` record (`sdk.py::TortoiseSDK.create_direct_edge`,
         restored through `DIRECT_EDGE_ATTR_KEYS`). That distinction is the scope's §1.2 item 6.
         """
         lines = (REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text().splitlines()
@@ -486,15 +494,16 @@ class TestThePairHasProductionReaders:
         hierarchy entry to its `relations[]` row on `(fromKind, toKind)` (plus `predicate`/`semantics`).
 
         ⛔ **The chain, named correctly (review finding 6).** Production reach is
-        `relation_write.apply_relation_edges` (`relation_write.py:791`; imported inside `_extract_session_v2` at
-        `sdk.py:17200`, called at `:17201`) → `plan_relation_edges` (`:823`) → `declared_hierarchy` (`:594`) →
-        `_resolve` (`pack_hierarchy.py:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). The **join is in
-        `_resolve`**, not in `plan_hierarchy_edges` (`relation_write.py:631`), which matches on the
+        `relation_write.apply_relation_edges` (`relation_write.py::apply_relation_edges`; imported and called
+        inside `sdk.py::TortoiseSDK._extract_session_v2`) → `plan_relation_edges` → `declared_hierarchy` →
+        `_resolve` (`pack_hierarchy.py::_resolve`) → `_binding` (`pack_hierarchy.py::_binding`) + `_matching_row`
+        (`pack_hierarchy.py::_matching_row`). The **join is in
+        `_resolve`**, not in `plan_hierarchy_edges` (`relation_write.py::plan_hierarchy_edges`), which matches on the
         already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges` —
         `TortoiseSDK` has no such method, so a reader following the old sentence found an import.
 
         ⛔ **Every assertion below must be able to FAIL.** `callable(module_level_function)` is a tautology: it
-        stayed green if the `_binding` call at `pack_hierarchy.py:306` or the `_matching_row` call at `:333`
+        stayed green if the `_binding` call at `pack_hierarchy.py::_binding` or the `_matching_row` call at `pack_hierarchy.py::_matching_row`
         were deleted, while §5.5's "already IS the pair→writer resolver" became false (review finding 6, the
         same defect class as P2-4). So the two calls are pinned INSIDE `_resolve`'s own source, and the live
         path is pinned by the symbol that actually exists.
@@ -695,3 +704,33 @@ class TestTheDocsAreDiscoverableAndResolve:
                     f"{doc.name} cites `{token}` bare, but {basenames[token]} files under docs/ carry that "
                     "name — cite it with a path (0 means it resolves to nothing at all)"
                 )
+
+    @pytest.mark.parametrize("doc", [SCOPE_DOC, BRIEF_DOC], ids=["scope", "brief"])
+    def test_neither_doc_cites_a_python_line_number(self, doc):
+        """A `file.py:<line>` citation is not a citation — it rots on the next `main` merge.
+
+        Measured, not assumed: this branch's own final `main` merge (`59e27baa`) shifted `sdk.py` by +44 in
+        the bulk and by +56/+62 around `_resolve_traversal_path`, and `projection/__init__.py` by +128 — so a
+        reader cannot even shift by a constant, and the offsets differ per file. Both docs nonetheless stated
+        the numbers were *"verified at the same merged head"*. 24 of them pointed at unrelated code: a lane
+        implementing #11656 opened `create_direct_edge`'s citation and landed in `list_batch`'s docstring.
+
+        The repo's recorded convention is the opposite of line-keyed (`docs/architecture/S2-DECISION-SEAM.md`:
+        *"assertions by NAME — never by line number"*; `tortoise/hosted_api.py`: *"Cited by SYMBOL, not line
+        number"*), and nothing read these two docs' numbers, so the rot was silent. Fixing one number would
+        re-rot on the next merge; this ban removes the class. The count is DERIVED for the message, never
+        hard-coded in the assertion — a hard number here is the same rot in a new costume.
+        """
+        text = doc.read_text()
+        offenders = re.findall(r"[A-Za-z_/]+\.py:[0-9]+(?:-[0-9]+)?", text)
+        assert not offenders, (
+            f"{doc.name} carries {len(offenders)} line-keyed `.py:<line>` citation(s) "
+            f"({sorted(set(offenders))}). Cite the SYMBOL instead (`path.py::symbol`): a line number rots on "
+            "the next `main` merge and sends the reader to unrelated code."
+        )
+        # The ban must not be vacuous in the other direction either: the doc DOES cite python files, by symbol.
+        symbols = re.findall(r"`[A-Za-z_/]+\.py::[A-Za-z_.]+", text)
+        assert symbols, (
+            f"{doc.name} cites no python symbol at all — the doc's mechanism is code citations, so either "
+            "the scanner is broken or the citations were deleted rather than re-keyed"
+        )
