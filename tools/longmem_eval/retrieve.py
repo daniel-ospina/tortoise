@@ -1058,13 +1058,29 @@ def _tr_complete_sessions(
     what makes "admitted session" mean "whole session". Fail-open: any
     failure returns the ORIGINAL pool and a report with ``ok=False`` (never a
     partial splice, never an exception into the measurement).
+
+    Two report keys exist so a "charged then dropped" fetch is VISIBLE
+    instead of silent (#11382): ``total`` is the fetch's own DISTINCT-item
+    count, so ``total > injected`` names the case where the budget was spent
+    and the group never reached the pool, and ``sessions`` is the number of
+    base sessions a group was actually spliced onto. ⚠️ Read ``sessions == 0``
+    ONLY together with ``total > 0``: a seed whose session is ALREADY complete
+    in the pool fetches nothing, which is the healthy ``seeded == 1,
+    total == 0, sessions == 0`` shape — the same numbers as a dropped group
+    except that nothing was charged. The padded-id mismatch that motivated
+    them is fixed at the comparison seam
+    (:func:`retrieval.normalize_session_key`): this function makes no call of
+    its own — it joins a group to its base hits through
+    ``retrieval.session_key_of``, which inherits that normalisation, and the
+    fetch's group key is normalised on the graph side. These report keys keep
+    the NEXT version of the mismatch diagnosable from the report alone.
     """
     from tortoise import session_reinjection as _sr
 
     report: dict[str, Any] = {
         "on": True, "applied": False, "seeded": 0, "injected": 0,
         "dropped_by_cap": 0, "total_cap_hit": False, "sessions": 0,
-        "ok": False,
+        "ok": False, "total": 0,
     }
     if not pool:
         report["ok"] = True
@@ -1084,6 +1100,7 @@ def _tr_complete_sessions(
             per_session_cap=per_session_cap, total_cap=total_cap,
         )
         report["ok"] = bool(fetch.get("ok"))
+        report["total"] = int(fetch.get("total") or 0)
         report["dropped_by_cap"] = int(fetch.get("dropped_by_cap") or 0)
         report["total_cap_hit"] = bool(fetch.get("total_cap_hit"))
         added: dict[str, list[dict]] = {}
@@ -1148,15 +1165,21 @@ def _tr_complete_sessions(
         # loop admitted, so ``last_index.get(sid)`` is ``None`` for every key
         # the guard rejects and ``None == i`` is False for every ``int i``.
         # A copy there is not merely redundant — it is REACHED before the
-        # lookup, so a pool hit with a truthy non-``str`` snake id (the
-        # untyped-pool seam ``retrieval.session_key_of`` documents) would
-        # raise ``AttributeError`` on ``.startswith`` inside the guarded
-        # expression here and turn a completing run into the fail-open
-        # no-op this block exists to avoid. That is not hypothetical: on the
+        # lookup, so it re-tests a value the loop has already accepted.
+        # ⚠️ SUPERSEDED as the reason, kept so the shape is not re-added (the
+        # R11 probe below measured it on the round-10 tree, before #11382):
+        # that copy used to RAISE — ``retrieval.session_key_of`` returned a
+        # truthy non-``str`` snake id verbatim, so ``.startswith`` met an
+        # ``int`` and a completing run became the fail-open no-op. Since
+        # #11382 ``session_key_of`` normalises to a ``str`` (``""`` for a
+        # non-``str``, then the index / wire / per-hit leg), so the raising
+        # hazard is gone — the one-place rule stands on the redundancy
+        # argument above, not on this one. The probe that found it, kept
+        # because it is what makes the shape non-hypothetical: on the
         # round-10 tree (guard in BOTH loops) a pool hit with ``session_id:
         # 5`` reported ``ok=False`` and completed nothing, while removing
         # only the splice copy returned ``ok=True, sessions=1,
-        # injected=1`` (R11 mutation probe).
+        # injected=1``.
         last_index: dict[str, int] = {}
         for i, h in enumerate(pool):
             sid = session_key_of(h)

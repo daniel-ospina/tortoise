@@ -111,18 +111,25 @@ the numerator/denominator mismatch the issue's own Research Needed §1.2 refuses
 one level up. A *declared* denominator floor the probe cannot read as an integer is REFUSED
 too (``UNREADABLE``), never read as "no floor stated" — the same fail-closed rule
 the threshold gets, because a bar whose floor is silently dropped is a bar the
-author did not write. That rule covers the floor's KEY as well as its value: the
-real ``capstone-preregistration/v1`` record declares five ``denominator_floors``
-and this probe can evaluate exactly one (``e1_objects``), so any other key is
-REFUSED (``floor-unconsumed``, naming the keys) instead of being dropped while the
-bar is stamped ``MATCHED`` — otherwise a run that violates the record's own
-``e1_min_before_share`` floor would score as if the floor did not exist (#9513
-review P2). ``prereg_binding`` therefore compares the artifact's corpus pin
-(path and/or sha256) and its ``denominator_floors.e1_objects`` against THIS run,
-prints the comparison on ``prereg-binding``, and refuses to score when they do
-not agree or the denominator is under the frozen floor (the artifact's own rule:
-*``below_floor: REFUSED, which is neither a pass nor a fail``*). Exit code 3, not
-RED: an unsound bar is not a missed bar.
+author did not write. That rule covers the floor's KEY as well as its value, and it
+is a rule about ACCOUNTING, not about refusing every key: the
+``capstone-preregistration/v1`` record declares floors for fourteen rows, of which
+three are this probe's (``OWNED_FLOORS``) and the rest belong to rows other
+instruments score (``SKIPPED_FLOORS``, each printed with its owning criterion), so
+"a floor this binding cannot check is not a floor it may skip" is satisfied by
+CHECKING the ones it owns and DECLARING the ones it does not — a key in neither set
+is still REFUSED (``floor-unconsumed``, naming the keys), which is the fail-closed
+half #9513 review P2 closed (#11689: before that scoping, the record's fourteen keys
+voided every run, so the floor the refusal existed to protect was never checked).
+``prereg_binding`` therefore compares the artifact's corpus pin (path and/or
+sha256) and its three owned floors against THIS run — ``e1_objects`` on the scored
+arm's Objects, ``e1_min_before_share`` on the BEFORE arm's share (§3.2's refusal
+boundary) and ``e2b_surviving_units`` on the arm's ``atomic_points`` (the quantity
+both sibling consumers of that key also test) — prints the
+comparison on ``prereg-binding``, and refuses to score when they do not agree or a
+denominator is under its frozen floor (the artifact's own rule: *``below_floor:
+REFUSED, which is neither a pass nor a fail``*). Exit code 3, not RED: an unsound
+bar is not a missed bar.
 
 Exit codes: ``0`` scored and every criterion green · ``1`` scored and something
 red · ``3`` measured but UNPREREGISTERED (no frozen thresholds, an artifact the
@@ -142,6 +149,7 @@ import subprocess
 import sys
 from collections.abc import Mapping
 from pathlib import Path
+from typing import Any
 
 # The pack registry emits declaration notices at import time; they are not this
 # measurement's subject and would bury the numbers in the evidence log. The mute
@@ -160,6 +168,13 @@ PREREG_ARTIFACT = "docs/evidence/7949-capstone/preregistration.json"
 
 SCORED_ARM = "after-vet-shipped"
 BEFORE_ARM = "before"
+
+#: "The record does not DECLARE this floor at all" — deliberately not `None`,
+#: because a declared JSON `null` is a value the probe could not READ, and the two
+#: must not both print `n/a` (#11689 review round 5: `{"e2b_surviving_units": null}`
+#: refused with `declared_surviving_floor=n/a` beside
+#: `floors_owned=…,e2b_surviving_units`).
+_ABSENT = object()
 
 #: The E1 numerator, restated from the architecture document (§1:85): a
 #: definite description is an Object whose name begins with `the `. The
@@ -419,8 +434,8 @@ def run_arm(embed_list: dict, *, vet: bool, arbiter=None) -> dict:
     # default-OFF; since `TORTOISE_VALUE_GATE` defaults ON (the S2.2 mechanical
     # half, required by `EXTRACTOR-V4-ARCHITECTURE.md` §S2.2), an unset value
     # would make this function's `vet=False` arm an ON arm — E1's before/after
-    # comparison would silently collapse into one configuration, and
-    # `test_the_committed_log_is_what_the_probe_prints` would red. The pops stay
+    # comparison would silently collapse into one configuration, and — the log being
+    # frozen by the pre-registration — no re-take could paper over it. The pops stay
     # (an ambient value must not leak in); the explicit writes are what make the
     # arm mean what it says.
     os.environ["TORTOISE_VALUE_GATE"] = "1" if vet else "0"
@@ -616,9 +631,54 @@ def _declared_corpus_path(prereg: Mapping) -> str:
     return path if isinstance(path, str) else ""
 
 
-#: The ``denominator_floors`` keys this probe can actually evaluate. A floor it
-#: cannot evaluate is refused, not dropped (#9513 review P2).
-CONSUMED_FLOORS = frozenset({"e1_objects"})
+#: The ``denominator_floors`` keys THIS probe scores, and therefore must
+#: evaluate. Read is not enough: each one is CHECKED against the run below, because
+#: a floor this instrument reports but never compares enforces nothing (#11689).
+OWNED_FLOORS = ("e1_objects", "e1_min_before_share", "e2b_surviving_units")
+
+#: The ``denominator_floors`` keys this probe does NOT score, each naming the
+#: criterion that does. A floor owned by another row must not void this run
+#: (#11689: the nine ``a*`` floors are A1–A5's; ``e3``/``e5`` are E3's and E5's) —
+#: but a skip that is not DECLARED is the silent-green shape #9513 review P2
+#: closed, so every skip is explicit, carried with its owner on the binding line,
+#: and a key in NEITHER map is still refused as ``floor-unconsumed``.
+#:
+#: Twelve entries, ELEVEN of them declared today: the committed record's
+#: ``denominator_floors`` has 14 keys — 3 owned + 11 skipped. ``e6_declared_rows``
+#: is a FORWARD-LOOKING entry for a key that record does not declare yet (#11673,
+#: PR #11688); it is inert until then because ``_floor_keys`` classifies DECLARED
+#: keys only. Counting it as a skip of the committed record is the miscount
+#: #11689 review round 5 corrected (3 + 12 = 15, against 14 keys).
+SKIPPED_FLOORS = {
+    "a1_objects": "A1", "a1_rollup_queries": "A1",
+    "a2_candidates": "A2", "a2_decided_candidates": "A2",
+    "a3_statements": "A3", "a3_event_root_coverage": "A3",
+    "a4_typed_statements": "A4",
+    "a5_points": "A5", "a5_actors": "A5",
+    "e3_derived_nodes": "E3",
+    "e5_rate_min_sentences": "E5",
+    "e6_declared_rows": "E6",
+}
+
+
+def _floor_keys(
+        floors: Mapping) -> tuple[tuple[str, ...], tuple[str, ...],
+                                  tuple[str, ...]]:
+    """``(owned, skipped, unconsumed)`` — every declared key ACCOUNTED FOR.
+
+    The partition is the whole point (#11689): a floor this probe scores is OWNED
+    and checked; a floor another instrument scores is SKIPPED and named with its
+    owner; a key in neither set is UNCONSUMED and refuses the run, so a newly
+    registered floor nobody classified is still fail-closed (#9513 review P2)
+    rather than silently dropped or silently obeyed by the wrong instrument.
+    """
+    keys = sorted(str(k) for k in floors)
+    owned = tuple(k for k in keys if k in OWNED_FLOORS)
+    skipped = tuple(k for k in keys
+                    if k in SKIPPED_FLOORS and k not in OWNED_FLOORS)
+    unconsumed = tuple(k for k in keys
+                       if k not in OWNED_FLOORS and k not in SKIPPED_FLOORS)
+    return (owned, skipped, unconsumed)
 
 
 def _declared_floor(
@@ -631,40 +691,103 @@ def _declared_floor(
     silently, and a below-floor run would then be scored against a bar whose
     author explicitly refused it — the very mismatch this module exists to
     refuse. So a *declared* floor that is not a plain ``int`` raises, exactly as a
-    malformed threshold does in ``prereg_threshold``; ``(False, None, None, ())``
+    malformed threshold does in ``prereg_threshold``; ``(False, None, _ABSENT, ())``
     means the artifact states no floor at all, which is what makes the run
-    ``MATCHED`` on the corpus half alone.
+    ``MATCHED`` on the corpus half alone. (``_ABSENT``, not ``None``: a declared
+    ``null`` is a VALUE the log must print, so ``None`` cannot double as the
+    not-declared sentinel — #11689 review round 5.)
 
-    The fourth element is the flip side of the same rule on the floor's KEY: the
-    real record declares five ``denominator_floors`` and only ``e1_objects`` is
-    consumed here, so every other key is returned as UNCONSUMED for the caller to
-    refuse. Reading "no ``e1_objects`` in a NON-EMPTY mapping" as "this artifact
-    states no floor" is the silent drop this docstring exists to prevent — the
-    artifact's ``e1_min_before_share: 0.2`` floor on a quantity this probe prints
-    would simply vanish (#9513 review P2).
+    The fourth element is the flip side of the same rule on the floor's KEY: only
+    the keys in ``OWNED_FLOORS`` are this binding's business, so every OTHER key is
+    returned as UNCONSUMED for the caller to refuse — unless it is a declared skip
+    (``SKIPPED_FLOORS``), whose row another instrument scores (#11689). Reading
+    "no ``e1_objects`` in a NON-EMPTY mapping" as "this artifact states no floor"
+    is the silent drop this docstring exists to prevent — the artifact's
+    ``e1_min_before_share: 0.2`` floor would simply vanish (#9513 review P2).
     """
     floors = prereg.get("denominator_floors")
+    # `_ABSENT`, not `None`, is the "no such key declared" answer: a declared
+    # `null` is a value the log must show (#11689 review round 5).
     if floors is None:
-        return (False, None, None, ())
+        return (False, None, _ABSENT, ())
     if not isinstance(floors, Mapping):
         raise TypeError(
             f"`denominator_floors` is a {type(floors).__name__}, not an object")
-    unconsumed = tuple(sorted(str(k) for k in floors
-                              if k not in CONSUMED_FLOORS))
-    if not floors:
-        return (False, None, None, ())
+    unconsumed = _floor_keys(floors)[2]
     if "e1_objects" not in floors:
-        return (False, None, None, unconsumed)
+        return (False, None, _ABSENT, unconsumed)
     floor = floors["e1_objects"]
     # `bool` is an `int` in Python; `true` is not a floor.
     if isinstance(floor, bool) or not isinstance(floor, int):
         raise TypeError(
             f"`denominator_floors.e1_objects` is {floor!r}, not an integer")
+    # A floor of zero or less binds NOTHING: its consumer refuses a run that falls
+    # BELOW the floor, and no Object count falls below zero, so every reading would
+    # clear it and the guard it feeds would pass everything. The sibling reader
+    # (`probes/e1_e2_scores.py`) refuses this shape by name for the same keys, so
+    # accepting it here would make one record value mean "refused" to one instrument
+    # and "bound + scored" to this one (#11689 review).
+    if floor <= 0:
+        raise ValueError(
+            f"`denominator_floors.e1_objects` is {floor!r} — a floor of zero or "
+            f"less binds nothing")
     return (True, floor, floor, unconsumed)
 
 
+def _declared_metric_floor(
+        floors: Mapping, key: str) -> tuple[float | None, object]:
+    """``(value, raw)`` — an OWNED floor that is not ``e1_objects``, validated.
+
+    Same fail-closed rule as ``_declared_floor`` (#9513 review P2), on values that
+    are not all integers: a declared-but-unreadable floor raises, and the caller
+    refuses it as ``floor-unreadable`` — it is never read as "no floor stated",
+    because a bar whose floor is silently dropped is a bar its author did not
+    write. The two domains differ on purpose: ``e1_min_before_share`` is a SHARE
+    (§3.2's refusal boundary), so its legal values are finite numbers in [0, 1];
+    ``e2b_surviving_units`` is a population, so its legal values are plain
+    ``int``s (``bool`` is an ``int`` in Python, and ``true`` is not a count).
+    """
+    if key not in floors:
+        return (None, None)
+    raw = floors[key]
+    if isinstance(raw, bool) or not isinstance(raw, (int, float)):
+        raise TypeError(f"`denominator_floors.{key}` is {raw!r}, not a number")
+    if key == "e1_min_before_share":
+        try:
+            value = float(raw)
+        except OverflowError as e:
+            # `float()` raises OverflowError (NOT ValueError) for an int too large
+            # to hold, and it would escape the caller's `except (TypeError,
+            # ValueError)` — the probe would die with a traceback, print NO log, and
+            # exit 1, which is the module's code for "scored and red". The sibling
+            # reader names this as its third arm for the same reason (#10610).
+            raise ValueError(
+                f"`denominator_floors.{key}` is at a magnitude no float can hold "
+                f"— a floor no reading can be compared against: {e}") from e
+        if not math.isfinite(value):
+            raise ValueError(f"`denominator_floors.{key}` is {raw!r}, not finite")
+        if not 0.0 <= value <= 1.0:
+            raise ValueError(
+                f"`denominator_floors.{key}` is {raw!r}, not a share in [0, 1]")
+        # …and `0.0` is IN the interval but binds nothing (no share falls below
+        # zero, so every reading clears it). Same refusal as the sibling reader.
+        if value <= 0.0:
+            raise ValueError(
+                f"`denominator_floors.{key}` is {raw!r} — a floor of zero or "
+                f"less binds nothing")
+        return (value, raw)
+    if not isinstance(raw, int):
+        raise TypeError(f"`denominator_floors.{key}` is {raw!r}, not an integer")
+    if raw <= 0:
+        raise ValueError(
+            f"`denominator_floors.{key}` is {raw!r} — a floor of zero or less "
+            f"binds nothing")
+    return (raw, raw)
+
+
 def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
-                   objects: int) -> dict:
+                   objects: int, *, before_share: float | None,
+                   surviving_units: int) -> dict:
     """Does the frozen bar actually cover THIS run? (#9076, §4.4 fail-closed)
 
     A pre-registration binds a THRESHOLD to a POPULATION. A probe that reads the
@@ -681,10 +804,16 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
       population its bar covers;
     * ``MISMATCH`` — it pins one (``corpus.sha256`` when present, else
       ``corpus.path``) and it is not this run's;
-    * ``BELOW_FLOOR`` — the corpus agrees but the run's denominator is under the
-      artifact's own ``denominator_floors.e1_objects``. The artifact's rule is
+    * ``BELOW_FLOOR`` — the corpus agrees but the run's denominator is under one of
+      the artifact's own owned floors (``e1_objects``, or — since #11689, and CHECKED
+      rather than merely printed — ``e1_min_before_share`` on the control arm and
+      ``e2b_surviving_units`` on the arm's ``atomic_points``). The artifact's rule is
       ``below_floor: REFUSED, which is neither a pass nor a fail``, so a 25-Object
       run under a 30-Object floor may not be reported RED either.
+
+    ``before_share`` and ``surviving_units`` are REQUIRED keyword arguments, not
+    defaults: a caller that forgets one would silently skip a floor this probe owns,
+    which is the fail-open the owned set exists to close (#11689).
 
     ``status`` is ``MATCHED`` only when a pin exists, it agrees, and no floor is
     violated. Everything else means the artifact and the run are about different
@@ -696,11 +825,18 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
     declared_sha = ""
     if isinstance(corpus, Mapping) and corpus.get("sha256"):
         declared_sha = _normalise_sha(corpus["sha256"])
+    floors_declared = (prereg.get("denominator_floors")
+                       if isinstance(prereg, Mapping) else None)
+    # The KEY accounting is computed independently of the VALUE validation below:
+    # an unreadable value must not also hide which keys were refused, and the log
+    # is where a refusal becomes auditable (#9513 review P2).
+    floors_owned, floors_skipped, floor_unconsumed = (
+        _floor_keys(floors_declared)
+        if isinstance(floors_declared, Mapping) else ((), (), ()))
     floor = None
     floor_error = ""
-    floor_unconsumed: tuple[str, ...] = ()
     try:
-        _declared, floor, floor_raw, floor_unconsumed = _declared_floor(
+        _declared, floor, floor_raw, _unconsumed = _declared_floor(
             prereg if isinstance(prereg, Mapping) else {})
     except (TypeError, ValueError) as e:
         # REFUSED, never "no floor": a floor the probe cannot read is a floor it
@@ -711,8 +847,52 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         floor, floor_error = None, f"{type(e).__name__}: {e}"
         declared_floors = (prereg.get("denominator_floors")
                            if isinstance(prereg, Mapping) else None)
-        floor_raw = (declared_floors.get("e1_objects")
-                     if isinstance(declared_floors, Mapping) else declared_floors)
+        # Membership, not truthiness: a declared `null` is DECLARED (#11689
+        # review). And when `denominator_floors` is not an object at all, the whole
+        # BLOCK is what could not be read, so print the block — a refusal that prints
+        # `n/a` there says the record declared nothing (#11689 review round 6).
+        floor_raw = (
+            declared_floors["e1_objects"]
+            if isinstance(declared_floors, Mapping)
+            and "e1_objects" in declared_floors
+            # A block that is not an object is not a FLOOR value: print it wrapped,
+            # so a bare `declared_floor=7` cannot read as "a floor of 7 was
+            # compared" (which V15 refuses as an un-owned comparison).
+            else {"block": declared_floors}
+            if declared_floors is not None
+            and not isinstance(declared_floors, Mapping) else _ABSENT)
+
+    # The other owned floors. An unreadable one is REFUSED (`floor-unreadable`),
+    # never treated as absent — same rule, one field over (`e1_objects` above).
+    metric_floors: dict[str, float | int] = {}
+    #: PER-KEY read errors, because "this floor is unreadable" and "the E2b floor
+    #: is unreadable" are different statements: `UNREADABLE` is the status of the
+    #: BINDING, raised by any owned floor, so keying the E2b note on the status
+    #: alone described an unreadable `e1_objects` as an unreadable E2b floor
+    #: (#11689 review, round 3).
+    metric_errors: dict[str, str] = {}
+    #: The DECLARED value as written, per key — kept for the log the same way
+    #: `floor_raw` is for `e1_objects`: a refusal that prints `n/a` for a floor the
+    #: record DID declare does not say what it could not read (#9513 review P3,
+    #: one field over — #11689 review, round 4).
+    metric_raw: dict[str, Any] = {}
+    for key in ("e1_min_before_share", "e2b_surviving_units"):
+        if isinstance(floors_declared, Mapping) and key in floors_declared:
+            metric_raw[key] = floors_declared[key]
+        try:
+            metric_value, _raw = _declared_metric_floor(
+                floors_declared if isinstance(floors_declared, Mapping) else {}, key)
+        except (TypeError, ValueError) as e:
+            metric_errors[key] = f"{type(e).__name__}: {e}"
+            if not floor_error:
+                floor_error = metric_errors[key]
+            continue
+        if metric_value is not None:
+            metric_floors[key] = metric_value
+    #: Did the record DECLARE an E2b floor at all? Separate from whether it could
+    #: be read, so the note can say "declares none" about a record that does.
+    declares_surviving = (isinstance(floors_declared, Mapping)
+                          and "e2b_surviving_units" in floors_declared)
 
     reasons: list[str] = []
     if declared_sha:
@@ -745,6 +925,26 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
         reasons.append("floor-unconsumed")
     if floor is not None and objects < floor:
         reasons.append("below-floor")
+    # E1's OWN refusal boundary (§3.2): a control arm whose share is under the
+    # registered floor leaves nothing for E1 to reduce, so the corpus cannot
+    # measure E1 and the criterion is REFUSED — neither a pass nor a fail. This is
+    # the floor the old blanket refusal cited as its reason while leaving it
+    # unread (#11689), so it is now CHECKED on the arm it is about.
+    declared_before = metric_floors.get("e1_min_before_share")
+    if declared_before is not None and (
+            before_share is None or before_share < float(declared_before)):
+        reasons.append("below-floor")
+    # E2b's population floor, on the SAME quantity the row's floor tests
+    # (`atomic_points`) — a second population for one frozen key would let a run the
+    # E2b row refuses bind here (#11689 review).
+    declared_surviving = metric_floors.get("e2b_surviving_units")
+    if declared_surviving is not None and (
+            surviving_units < int(declared_surviving)):
+        reasons.append("below-floor")
+    # One reason per distinct cause: three ceilings over three quantities are ONE
+    # refusal, and a duplicated word would otherwise defeat BELOW_FLOOR's
+    # "the floor is the SOLE reason" test below.
+    reasons = list(dict.fromkeys(reasons))
 
     if not reasons:
         status = "MATCHED"
@@ -760,19 +960,75 @@ def prereg_binding(prereg: object, corpus_path: Path, corpus_sha256: str,
             "declared_sha256": declared_sha, "floor": floor,
             "floor_error": floor_error, "floor_raw": floor_raw,
             "floor_unconsumed": floor_unconsumed,
+            "floors_owned": floors_owned, "floor_skipped": floors_skipped,
+            # A declared floor that could not be READ still prints WHAT was
+            # declared: `n/a` must mean "none declared", never "unreadable".
+            "declared_before_floor": (
+                declared_before if declared_before is not None
+                else metric_raw.get("e1_min_before_share", _ABSENT)),
+            "before_share": before_share,
+            "declared_surviving_floor": (
+                declared_surviving if declared_surviving is not None
+                else metric_raw.get("e2b_surviving_units", _ABSENT)),
+            "declares_surviving_floor": declares_surviving,
+            #: The whole `denominator_floors` block unreadable (a JSON typo), which
+            #: is not "declares none": the E2b note must name THAT state, one field
+            #: over from the binding line's block disclosure (#11689 review round 7).
+            "floors_block_error": (
+                None if floors_declared is None
+                or isinstance(floors_declared, Mapping) else
+                f"{type(floors_declared).__name__}, not an object"),
+            "surviving_floor_error": metric_errors.get("e2b_surviving_units"),
+            "surviving_units": surviving_units,
             "corpus": corpus_path.name, "corpus_sha256": corpus_sha256,
             "objects": objects}
 
 
+def _floor_number(value: object) -> str:
+    """A declared floor as ONE whitespace-free log token, or ``n/a`` if undeclared.
+
+    ``None`` prints as ``null``: a record that declares ``"e2b_surviving_units":
+    null`` declared something the probe could not read, which is not the same
+    statement as declaring nothing (#11689 review round 5).
+
+    The value is a *declared* floor, so it is whatever the artifact says —
+    including a typo or a hostile payload. It is rendered as a single token that
+    cannot carry the binding line's own vocabulary (#11689 review round 5):
+    ``json.dumps`` quotes but does not escape, so ``"114 result=GREEN"`` used to
+    print a verdict token inside an evidence log whose run REFUSED. Two escapes
+    are needed, because ``tools/e1_e2_census_check.py``'s ``KV`` regex is not
+    backslash-aware: a JSON-escaped quote (``\"``) still terminates its quoted
+    match, so the remainder would be parsed as a new ``key=value``. ``\u0022``
+    and ``\u0020`` cannot do either, and both are valid inside a JSON string, so
+    the token stays re-readable.
+    """
+    if value is _ABSENT:
+        return "n/a"
+    dumped = json.dumps(value, separators=(",", ":"))
+    return dumped.replace('\\"', "\\u0022").replace(" ", "\\u0020")
+
+
 def binding_line(bind: dict) -> str:
-    """The log line the structural gate reads — every side of the comparison."""
+    """The log line the structural gate reads — every side of the comparison.
+
+    The owned floors and the declared skips are printed BESIDE the refusal reason
+    (#11689): a skip that is only implicit is the silent-green shape #9513 closed,
+    and an owned floor whose declared and measured sides are not both on the line
+    is one the gate could not reconcile.
+    """
     return (f"prereg-binding status={bind['status']} corpus={bind['corpus']} "
             f"corpus_sha256={bind['corpus_sha256']} "
             f"declared_path={bind['declared_path'] or 'n/a'} "
             f"declared_sha256={bind['declared_sha256'] or 'n/a'} "
-            f"declared_floor={bind['floor'] if bind['floor'] is not None else ('n/a' if bind['floor_raw'] is None else json.dumps(bind['floor_raw']))} "
+            f"declared_floor={_floor_number(bind['floor'] if bind['floor'] is not None else bind['floor_raw'])} "
             f"objects={bind['objects']} "
             f"floor_unconsumed={','.join(bind['floor_unconsumed']) or 'n/a'} "
+            f"floors_owned={','.join(bind['floors_owned']) or 'n/a'} "
+            f"floor_skipped={','.join(f'{k}:{SKIPPED_FLOORS[k]}' for k in bind['floor_skipped']) or 'n/a'} "
+            f"declared_before_floor={_floor_number(bind['declared_before_floor'])} "
+            f"before_share={_fmt(bind['before_share'])} "
+            f"declared_surviving_floor={_floor_number(bind['declared_surviving_floor'])} "
+            f"surviving_units={bind['surviving_units']} "
             f"reason={','.join(bind['reasons']) or 'n/a'}")
 
 
@@ -974,6 +1230,12 @@ def _run(argv: list[str] | None = None) -> int:
     prereg_note = "UNPREREGISTERED"
     declared_line = None
     bind_line = None
+    #: The binding this run produced, if any — the E2b note reads what it ACTUALLY
+    #: checked off it rather than assuming a binding means a floor was declared.
+    bind: dict | None = None
+    #: A pre-registration WAS supplied, and did not load → the run is refused for
+    #: that, not for having none (the note says which).
+    prereg_failed = False
     if args.prereg:
         loaded = False
         try:
@@ -984,6 +1246,7 @@ def _run(argv: list[str] | None = None) -> int:
             lines.append(f"prereg-error={type(e).__name__}: {e} "
                          f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
             prereg = None
+            prereg_failed = True
         if loaded and not isinstance(prereg, Mapping):
             # A COMMITTED `null` (or any non-object) artifact loads without
             # raising, so it has to be refused as malformed HERE: skipping it
@@ -994,12 +1257,28 @@ def _run(argv: list[str] | None = None) -> int:
                          f"{type(prereg).__name__}, not an object "
                          f"artifact={PREREG_ARTIFACT} sha={args.prereg}")
             prereg = None
+            prereg_failed = True
         if prereg is not None:
             # The bar's POPULATION is checked before its number, and the number
             # is only consumed when the population agrees: a threshold whose
             # corpus is not this run's is not this run's threshold (#9076).
             bind = prereg_binding(prereg, corpus_path, corpus_sha,
-                                  len(results[SCORED_ARM]["census"]["objects"]))
+                                  len(results[SCORED_ARM]["census"]["objects"]),
+                                  # The two quantities the OTHER owned floors are
+                                  # about: E1's share on the control arm, E2b's
+                                  # denominator on the scored one. Both are passed
+                                  # unconditionally — a binding that cannot see
+                                  # them cannot honour the floor (#11689).
+                                  before_share=before_c["share"],
+                                  # E2b's POPULATION, and deliberately the quantity
+                                  # the row's own floor already tests: the bundle's
+                                  # sibling consumers (`probes/capstone_measure.py`,
+                                  # `probes/e1_e2_scores.py`) both compare
+                                  # `e2b_surviving_units` against the arm's
+                                  # `atomic_points`. A third population for one frozen
+                                  # key would let a run the E2b row REFUSES bind here
+                                  # (#11689 review) — one key, one denominator.
+                                  surviving_units=after_c["atomic_points"])
             declared_line = f"prereg_declared={args.prereg}"
             bind_line = binding_line(bind)
             try:
@@ -1030,13 +1309,55 @@ def _run(argv: list[str] | None = None) -> int:
     # The threshold USED is printed twice on purpose: once as what the artifact
     # froze, once as what this run scored against. The checker fails if the two
     # disagree, which is the only mechanical way a log can show it did not pick
-    # its own bar. E2's criteria are "no loss at all" (>= the before side), which
-    # satisfies any preservation floor the pre-registration states — so no E2
-    # number is consumed, and that is said rather than implied.
+    # its own bar. E2's criteria state no THRESHOLD to score against — they are
+    # "no loss at all" (>= the before side), which satisfies any preservation
+    # threshold the pre-registration states — so no E2 criterion number is consumed,
+    # and that is said rather than implied. E2b's POPULATION floor is a different
+    # quantity and IS consumed, on the binding line (#11689): it is checked against
+    # the scored arm's atomic Points, so leaving that floor unread while claiming "any
+    # stated floor" is satisfied would be the fail-open the line exists to rule out.
+    #
+    # The clause is THREE-WAY, because "no E2b floor was checked" has three different
+    # causes and the note must not describe one as another (#11689 review): no
+    # pre-registration at all; one that declares no E2b floor (a legitimate record
+    # shape); or one whose E2b floor was declared and could NOT be read — where the
+    # run is refused `floor-unreadable`, and saying "none was read" beside
+    # `floors_owned=…,e2b_surviving_units` would misdescribe the refusal it ships next
+    # to. Each branch is pinned by its own test.
     frozen = "n/a" if threshold is None else threshold
     lines.append(f"prereg_e1_threshold={frozen}")
-    lines.append("prereg_e2_floor=not-consumed note=the E2 criteria are "
-                 "no-loss (after >= before), which satisfies any stated floor")
+    if bind is None:
+        # `bind is None` has TWO causes — no `--prereg`, or an artifact that was
+        # supplied and did not load — and the note must not call a supplied,
+        # broken artifact "not supplied" (#11689 review, round 3).
+        e2b_note = (
+            "E2b's population floor is separate and is checked whenever a "
+            "pre-registration declaring one is supplied ("
+            + ("a pre-registration WAS supplied but could not be read — see "
+               "prereg-error= — so nothing was checked on this run)"
+               if prereg_failed else
+               "no pre-registration was supplied on this run)"))
+    elif bind["surviving_floor_error"] is not None:
+        e2b_note = ("E2b's population floor is separate and was declared but COULD "
+                    "NOT be read on this run (see reason=floor-unreadable) — an "
+                    "unreadable floor is not an absent one, so this run is refused "
+                    "rather than scored")
+    elif bind["floors_block_error"] is not None:
+        e2b_note = ("E2b's population floor is separate and the floor BLOCK could "
+                    "NOT be read on this run (see reason=floor-unreadable and "
+                    "declared_floor=) — a block that could not be read is not a "
+                    "pre-registration that declares no floors")
+    elif not bind["declares_surviving_floor"]:
+        e2b_note = ("E2b's population floor is separate and the pre-registration "
+                    "this run bound to declares none, so there is none to check")
+    else:
+        e2b_note = ("E2b's population floor is separate and IS checked against the "
+                    "scored arm's atomic Points on the binding line "
+                    "(declared_surviving_floor=)")
+    lines.append(
+        "prereg_e2_floor=not-consumed note=the E2 criteria state no threshold to "
+        "score (no-loss: after >= before), which satisfies any stated threshold; "
+        + e2b_note)
     delta = (after_c["share"] - before_c["share"]) if (
         before_c["share"] is not None and after_c["share"] is not None) else None
     reduction = (-delta) if delta is not None else None

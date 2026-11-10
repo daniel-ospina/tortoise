@@ -167,7 +167,8 @@
 # while the seven-entry gate stayed green. So every mechanism this registry knows
 # about carries a `<!-- v4-mechanism: <id> state: <state> -->` marker in each
 # scanned document
-# (`docs/architecture/**/*.md`, recursive) that its row names, and
+# (`docs/architecture/**/*.md` and `docs/epics/**/*.md`, both recursive) that its
+# row names, and
 # `membership_errors()` in the gate fails closed in BOTH directions — a marker
 # with no row, and a row with no marker — AND holds each row to its OWN declared
 # documents: every scanned document a row names must carry its marker (a marker
@@ -183,7 +184,8 @@
 # ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
 # here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
 # policy source) is YAML, and the marker convention is a markdown-comment
-# convention over `docs/architecture/**/*.md`. A row that declares such a source
+# convention over the two markdown surfaces (`docs/architecture/**/*.md`,
+# `docs/epics/**/*.md`). A row that declares such a source
 # must ALSO declare a scanned document carrying its marker — `membership_errors`
 # refuses a row whose every declaring document is outside the surface, because
 # an unfindable declaration must not read as a marked one. So the "every
@@ -220,8 +222,10 @@ version: 1
 # the v4 design declares and classify each as built / unbuilt / descriptive —
 # this enumeration does not exist and is the first deliverable of Scope"*). The
 # eight came from the issue's O/I/T indicator (1) plus the carve-out; the five
-# added here were declared by a canonical ENUMERATION in
-# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row:
+# added then were declared by a canonical ENUMERATION in
+# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row. THE FOURTEENTH CAME FROM A
+# SURFACE NONE OF THEM WERE READ FROM (see below), so the current set is
+# fourteen — read the count off `mechanisms:`, never off this paragraph:
 #
 #   - §4.1's step list / §4.2's "resulting order" block declare `S2.2a-α EXACT
 #     DEDUP` and `S2.2a-β NEAR-DUP DETECT` as steps with a named rule; the
@@ -241,12 +245,22 @@ version: 1
 #     status (*"a SPEC, not a description of what runs"*): `failure_policy`,
 #     `not-implemented`, pointing at the epic the design itself names.
 #
-# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that these thirteen are
-# every mechanism either document names. It is the set that carries a MARKER (see
+# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that the fourteen rows below
+# are every mechanism the SCANNED DOCUMENTS name. It is the set that carries a MARKER (see
 # the limits above) plus the one structure this file can compare mechanically
 # (§4.2's table). A mechanism declared only in unmarked prose is still invisible;
 # the markers are the convention that makes the comparison possible, and adding a
 # row is how a lane that FINDS such a declaration makes it visible from then on.
+#
+# ⭐ AND THAT IS HOW THE FOURTEENTH ARRIVED — `mention_record` (DM1, #11239), from
+# a SURFACE this registry did not scan. Every row above was declared in
+# `docs/architecture/`; DM1 (*"a mention is a property on the claim Point that
+# carried it"*) is declared in the epic plan
+# (`docs/epics/2026-11-05-5087-extractor-v4/05-plan.md` §4), and the write path
+# persists nothing, so the design declared a home the code does not have — #5064's
+# root, one directory outside the scan. `docs/epics/**/*.md` is a declaration
+# surface now, for the same reason the architecture docs are: it is where this
+# substrate's design is written down.
 mechanisms:
   - id: vet
     name: "S2.2 VET — adversarial candidate review (validity + coverage)"
@@ -822,12 +836,54 @@ mechanisms:
       halves together.
       ⛔ WHAT IS STILL NOT ENFORCED — read this before improving a number:
       (a) a value the model never EMITS is unrecoverable by any rule in this
-      module; the capstone E2a class (1 of 14, bar >= 13) is that class, and it
-      is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
+      module; the capstone E2a class (8 of 14, bar >= 13 — the record's own
+      count, `docs/evidence/9889/e2a-value-units.json` `value_survived`; the
+      `1 of 14` that stood here is the SUPERSEDED `#9775` reading, #10610) is
+      that class, and it is UPSTREAM of selection (#9775); (b) 50 of the 112 value-bearing points in
       the committed census receipts fail open on slot layout, so the rule judges
       62 and refuses 0 today — re-derived by
       `tests/test_state_value_verbatim_10360.py::test_the_residual_is_measured_on_the_committed_census_corpus`
-      from the sealed receipts (produced, not quoted). ⚠️ Unchanged by (ii-bis):
+      from the sealed receipts (produced, not quoted). ⛔ FAIL OPEN IS A
+      DETECTION GAP, NOT A LOST VALUE — measured, not assumed, by
+      `tests/test_state_value_verbatim_10360.py::test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS`:
+      of those 50, 29 state EVERY value their own quote states (under a layout
+      the rule cannot align), 2 differ only on the determiner `one`, 7 state the
+      value in a CLOCK/ISO form this row EXCLUDES BY DESIGN (residual (c) — their
+      class reads the content's FORM and never its agreement with the quote, so
+      they are form-excluded, NOT checkable; the same class also covers the third
+      excluded form, a SEPARATOR-bearing numeral `1,234` — `#2817`'s "no
+      separator rule at all" — and a fourth, an ACCOUNTING PARENTHETICAL `($4)`,
+      which voids the whole side's slots (`_PAREN_NUMERAL_RE`) so nothing on it is
+      read; this corpus carries no row of either), 4 have no
+      slot on the quote side,
+      and 8 state no value — of which exactly ONE drops a state value the quote
+      carries (the `thirty seconds` lease grace,
+      `wp07_bluepeak_followup`/narrative, named by
+      `test_the_ONE_dropped_state_value_on_the_census_is_NAMED`). ⛔ The DROPPED
+      count has TWO stated denominators and neither is 112: it is 1 of the **10**
+      rows where a dropped value is VISIBLE at all (8 `CONTENT_NO_VALUE` + 2
+      `LAYOUT_LOST`), and 1 of the **105** rows this projection can CHECK (112 −
+      the 7 form-excluded). A value dropped while the content keeps its clock is
+      invisible to a projection that binds no clock slot at all, so the 7 are
+      declared residual (c) — with a measured limit rather than a claim: of the
+      7, exactly 2 bind any quote-side slot and both bind an ISO date, which the
+      content is asserted to RESTATE by month-and-day agreement (a clock-only
+      drop stays invisible, and that blind spot's size is pinned). Retention on the
+      committed census is therefore **91 of 112 STATED (62 ALIGNED + 29
+      LAYOUT_RETAINED), 7 form-excluded (not checkable) and 1 DROPPED** —
+      the remaining 13 carry no state value to state (6 a determiner-only quote,
+      1 whose quote binds no slot at all, 2 a determiner-only quote under a
+      divergent layout, 4 no slot on the quote side); the 62 is the rule's REACH, not its retention. ⚠️ A MAGNITUDE the projection cannot
+      FOLD is UNJUDGED here, not lost: `2000 thousand` against `2 million` and
+      `12000000` against `12 million` are ONE number spelled two ways, and
+      `#2817` rules out the magnitude table such a comparison needs (residual
+      (m)) — the class is stated and empty on this corpus rather than silently
+      folded into either direction. ⛔ TWO scale words under the SAME mantissa is
+      NOT that case and is LOST: if `m1 == m2` and the words differ then
+      `m1·s1 ≠ m2·s2` always, so `12 thousand` against `12 million` (and
+      `12 million` against `12 billion`) is a 1000× rewrite the projection
+      DECIDES by string comparison alone — no table, no ruling crossed. ⚠️ That split is the census
+      corpus, NOT the flags-on E2 arm, so it does not move (b2); ⚠️ Unchanged by (ii-bis):
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have
       to move; (b2) STRICT VERBATIM
@@ -1515,3 +1571,55 @@ mechanisms:
       would turn the registry into a pipeline-step list — the scope line the
       design draws at the head of §4.3 (*"The step list is the SHAPE, not a
       complete specification"*).
+
+  - id: mention_record
+    name: "DM1 — the mention record is a property on the claim Point"
+    declared_in:
+      - docs/epics/2026-11-05-5087-extractor-v4/05-plan.md  # §4 DM1
+    state: not-implemented
+    tracking_issue: 11239
+    pins:
+      - tests/test_referentiality_11021.py::test_the_mention_record_is_payload_only_and_says_so
+    code:
+      - tortoise/commit_schema.py
+    tests:
+      - tests/test_referentiality_11021.py
+    symbols:
+      - Mention
+    note: >-
+      DM1 declares the mention as *"a property on the claim Point that carried
+      it"* (`05-plan.md` §4, closed 2026-11-05 against the Postgres branch), and
+      this row exists because that declaration lives in the EPIC PLAN rather than
+      in `docs/architecture/` — one directory outside the surface this gate used
+      to walk, which is how a declared-and-absent mechanism kept reading as
+      shipped (#5064's root, with one directory of margin).
+      ⚠️ WHAT IS BUILT (the PAYLOAD half): `commit_schema.Mention` carries
+      `surface`, `span_start`/`span_end` and `kind_guess` and bounds the fields it
+      DECLARES a bound on (`surface`, `quote`, `kind_guess`, the span offsets);
+      `claim_ref` and `rule_id` carry NO schema bound — they are cut by the
+      producer (`_mention_ref` / `_mention_rule`). It has no list-level validator,
+      so it neither clamps nor dedupes the list either. The clamp and the dedupe
+      live in the PRODUCER — `extractor_v2._clamped_mention` and
+      `extractor_v2._dedupe_mentions` — reached from `_mentions_for_claim` (both),
+      `execute_embed` (both — the `mentions_recorded` accounting the next
+      paragraph is about) and `extract_session_v2` (both — the evidence block),
+      and from `route_mentions`, which builds through `_mention_record` and then
+      dedupes (`_clamped_mention` does NOT run on that path) — and the producer
+      channel publishes the result (`result["embed_list"]["mentions"]` /
+      `result["s2_embed"]["mentions"]`). A future write door that persists the
+      payload VERBATIM therefore stores what it was handed; it must not assume
+      the commit shape will have cleaned it.
+      ⚠️ WHAT IS NOT BUILT (the PERSISTENCE half, and why this row is not
+      `implemented`): NO declared write door carries `mentions` — the REST
+      `CreatePointRequest` has no such field, the SDK capture whitelist
+      (`sdk._CAPTURE_PASSTHROUGH_ORDER`) is
+      `quote/when/search_keys/source_turn_id/span_start/span_end` only, and
+      neither `hosted_api` nor `selfhost_api` names it. So a capture's
+      `stats["mentions_recorded"]` counts records the write DISCARDS, on either
+      deployment, and a graph read after a capture holds the claim and no mention
+      on it — DM1's home on the Point is declared but unfulfilled. `#11239`
+      tracks persisting it (or an explicit session-evidence-only ruling, which
+      would move the DECLARATION instead). Pinned by
+      `test_the_mention_record_is_payload_only_and_says_so`, which asserts the
+      payload-only shape and says so — the day a write door persists the record
+      it reds and this row must flip.

@@ -9619,12 +9619,31 @@ def _check_org_limit(org: dict, resource: str, *,
 
 
 async def _carry_allowances_off_loop(org: dict, resource: str, *,
-                                     op: str = "check_org_limit.points") -> dict:
+                                     op: str = "check_org_limit.points",
+                                     unavailable=None) -> dict:
     """Run ``_carry_allowances`` on the lane its OWN substrate lives in, off-loop.
 
     Returns the carried dict with ``CARRIED_MARKER_KEY`` stamped, so a caller can
     hand it to ``_check_org_limit`` (which runs on the graph lane, or inside a
     LOCKED region) without a second resolver read.
+
+    ``unavailable`` (#10967) is the fail-closed error FACTORY, forwarded verbatim
+    to ``_cp_offload`` (``None`` = the repo-standard ``_control_plane_unavailable``,
+    the SIGN-IN copy). It exists for the same reason ``_cp_offload`` has it: on a
+    door whose refusal is recorded where a USER reads it, the sign-in copy
+    misdescribes the cause. Two callers, two answers — the ``/v1/sessions/commit``
+    lane keeps the default, the CAPTURE door passes its own
+    (``_capture_control_plane_unavailable``). The ``error_code`` is unchanged
+    either way: only the human-readable ``message`` is lane-shaped.
+
+    ⚠️ It reaches the SUPABASE/PostgREST branch ONLY. The registry/self-host
+    branch below rides ``_graph_offload``, which passes its own
+    ``_graph_unavailable`` unconditionally — correct for that mode, because there
+    the registry IS the graph connection (#3718) and "graph service unavailable"
+    names the dependency that actually failed. Do NOT "harmonise" that branch by
+    threading this factory into it: a graph-pool bound miss is a graph-capacity
+    fact, and relabelling it a control-plane one would swap one misdescription
+    for another.
 
     A helper rather than two copies because TWO doors need it for the same
     reason: ``_check_org_limit_off_loop`` (the points doors AND the capture
@@ -9646,6 +9665,10 @@ async def _carry_allowances_off_loop(org: dict, resource: str, *,
             # ladder is a control-plane read, not a graph one).
             org = await _cp_offload(
                 lambda: _carry_allowances(org, resource),
+                # #10967: forwarded, never swallowed — ``_cp_offload`` owns the
+                # None-means-default decision, so a caller that passes nothing
+                # keeps the sign-in body byte-for-byte.
+                unavailable=unavailable,
                 op=f"{op}.allowance_carry")
         else:
             # Registry/self-host mode → the graph pool, because the registry IS
@@ -9667,8 +9690,26 @@ async def _carry_allowances_off_loop(org: dict, resource: str, *,
 
 async def _check_org_limit_off_loop(org: dict, resource: str, *,
                                     op: str = "check_org_limit.points",
-                                    sdk=None) -> None:
+                                    sdk=None, unavailable=None) -> None:
     """``_check_org_limit`` for an ``async def`` door — each read on ITS lane.
+
+    ``unavailable`` (#10967) reaches the CARRY only (``_carry_allowances_off_loop``,
+    and through it ``_cp_offload``): the count half rides ``_graph_offload``,
+    which passes its own ``_graph_unavailable`` unconditionally because a graph
+    bound miss is a graph-capacity fact, not a control-plane one. Of the two
+    reads this seam submits, only the CARRY's own submission is a control-plane
+    read whose copy could name the wrong dependency — which is why only the
+    carry takes a factory.
+
+    ⚠️ ⛔ That is a property of those two reads, NOT of the pools they run on.
+    For ``resource="sessions"`` a THIRD, CONTROL-PLANE read — the
+    ``capture_extraction`` meter — rides INSIDE the count's ``_graph_offload``
+    submission this seam itself makes, so it can refuse with the graph copy.
+    It is latent today (no production resolver arms a token allowance) and it is
+    the capture door's declared residual **#10949**. Do not read the sentence
+    above as proof that the counting half cannot misdescribe its dependency, and
+    do not try to fix #10949 by handing the count this factory — the fix belongs
+    in `quota.enforce_org_limit`'s meter threading.
 
     The gate's two ALLOWANCE reads belong to two different pools (and, for
     `sessions`, a THIRD — the extractor's meter, riding inside the count's graph
@@ -9723,7 +9764,8 @@ async def _check_org_limit_off_loop(org: dict, resource: str, *,
     omitted-sdk fallback, which stays ``_gate_sdk_for``'s business inside
     ``_check_org_limit`` — this seam only forwards.
     """
-    carried = await _carry_allowances_off_loop(org, resource, op=op)
+    carried = await _carry_allowances_off_loop(org, resource, op=op,
+                                              unavailable=unavailable)
     await _graph_offload(
         lambda: _check_org_limit(carried, resource, sdk=sdk), op=op)
 
@@ -11165,6 +11207,71 @@ def _graph_unavailable(_exc: object | None = None) -> HTTPException:
         detail={
             "error_code": "graph_unavailable",
             "message": "The graph service is temporarily unavailable — try again in a moment.",
+        },
+    )
+
+
+def _capture_control_plane_unavailable() -> HTTPException:
+    """#10967: the CAPTURE door's own control-plane 503 copy.
+
+    The mirror of ``_graph_unavailable``'s reason ("deliberately NOT
+    ``_control_plane_unavailable``: that body's copy is sign-in specific and
+    would mislead a client"), on the door that can dress a QUOTA failure as a
+    LOGIN failure.
+
+    ``_control_plane_unavailable``'s message is the unified sign-in line — a
+    copy-string contract with ``website/apps/dashboard/public/signup.html`` and
+    every control-plane door that feeds a sign-in flow. That is right for those
+    doors and wrong for this one: ``capture_session`` records a refused
+    capture's ``detail`` into the org-visible last-error slot
+    (``_record_capture_last_error``, which stringifies a dict detail via
+    ``message``), and the dashboard renders that line under the capture status.
+    So a tenant whose capture was refused by a control-plane stall during the
+    allowance CARRY was shown *"Sign-in is temporarily unavailable"* — a true
+    statement about a dependency and a false one about their session.
+
+    ``error_code`` stays ``control_plane_unavailable`` on purpose: the failing
+    dependency really is the control plane, and a caller branching on the code
+    must not read a new category out of a copy fix. Only ``message`` is
+    lane-shaped, and only this door's.
+
+    The wording claims only what is provable here.
+
+    * It is raised ABOVE every write on the capture path — the gate sits after
+      the probe and before the first write (the ``:Session`` MERGE /
+      ``_write_session_and_turns``) — so "not stored" is a fact about this
+      request, not a guess.
+    * The retry it advertises is safe because the off-loaded unit is a READ
+      (``quota.resolve_org_limits``, a query-only helper): a bound miss can let
+      the worker finish the lookup, and a finished lookup has no side effect, so
+      a retry cannot duplicate anything.
+
+    It makes NO claim about which upstream reads ran first, and none about the
+    tenant's stored data — only that the plan limits could not be read and
+    nothing was stored. Do not add such a claim back: two review cycles each
+    falsified one (§ the copy shape below is the only rule stated here, and it is
+    about punctuation, not about what the sentence may assert).
+
+    Copy shape: the dashboard's capture-status line already supplies the
+    separator (`Last attempt — ${detail}` in
+    `website/apps/dashboard/src/*harnesses*`), so this message uses a COLON after
+    its first clause rather than a second em dash, which would render as two
+    separators in one sentence.
+
+    ⛔ That is a fact about THIS message, not a house rule — do not generalise it.
+    Two existing strings in the same per-harness last-error slot keep an em dash
+    of their own: ``_capture_outcome_last_error``'s "session stored, extraction
+    failed — …" and the unexpected-500 arm's "internal capture error — …". They
+    are deliberate and render as two separators on purpose; do NOT "fix" them to
+    match this one.
+    """
+    return HTTPException(
+        status_code=503,
+        detail={
+            "error_code": "control_plane_unavailable",
+            "message": (
+                "The capture was not stored: this team's plan limits could "
+                "not be read. Try again in a moment."),
         },
     )
 
@@ -18356,7 +18463,12 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # re-arms #8906 on this door. Count on the handle the capture writes through.
     # The seam forwards `sdk` verbatim to the count.
     #
-    # ⚠️ DECLARED RESIDUAL (main-repair review cycle 1, P2): in Supabase mode the
+    # ✅ RESOLVED (#10967) — retitled deliberately. This block used to be headed
+    # "⚠️ DECLARED RESIDUAL", and a reader scanning the gate for open residuals
+    # rightly stopped at the warning; the diagnosis that follows is still exact,
+    # so it is kept, with the fix appended rather than substituted.
+    #
+    # [was: DECLARED RESIDUAL, main-repair review cycle 1, P2] In Supabase mode the
     # carry's bound miss now raises `_control_plane_unavailable()`, whose
     # `message` is the SIGN-IN copy ("Sign-in is temporarily unavailable …", the
     # copy-string contract with website/apps/dashboard/public/signup.html) — and
@@ -18370,6 +18482,11 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # dashboard line. Filed as #10967 (review cycle 6 required the id next to
     # the claim, not only the diagnosis). The `error_code`
     # (`control_plane_unavailable`) is correct either way.
+    #
+    # ✅ FIXED (#10967): that factory now exists — `_capture_control_plane_unavailable`,
+    # passed below — so this door's stall says the capture was not stored instead
+    # of blaming sign-in. Kept as the record of WHY the body is lane-shaped; do
+    # not re-widen it to the shared sign-in copy to "simplify" the seam.
     #
     # ⚠️ SECOND DECLARED RESIDUAL (main-repair review cycle 3, P1): for
     # `resource="sessions"` the gate has a THIRD read, and it is a control-plane
@@ -18391,7 +18508,8 @@ async def _capture_session_impl(body: SessionRequest, request: Request | None,
     # `enforce_allowances(limits, org_id=…, resource=…)` with no meter
     # override). Filed rather than absorbed: #10949.
     await _check_org_limit_off_loop(org, "sessions",
-                                    op="check_org_limit.sessions", sdk=sdk)
+                                    op="check_org_limit.sessions", sdk=sdk,
+                                    unavailable=_capture_control_plane_unavailable)
 
     # #4051 §3.1 — the per-org ingest allowance, on the CAPTURE lane too.
     #

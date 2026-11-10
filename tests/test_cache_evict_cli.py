@@ -14,6 +14,7 @@ node count of a graph that may not have been reached at all.
 from __future__ import annotations
 
 import json
+from datetime import UTC, datetime
 
 import pytest
 
@@ -392,6 +393,13 @@ def _parity_report(tmp_path, *, instrument: str):
     path.write_text(json.dumps({
         "instrument": instrument,
         "graph": "tortoise",
+        # ⛔ REQUIRED evidence, not decoration: the population count below IS the
+        # executor's runaway cap (`licence_remaining`), so a report that cannot be
+        # dated cannot bound a sweep (`tortoise/cache_eviction.py`'s staleness bound).
+        # A fixture without it now produces `cannot-answer` — which is the point of
+        # that guard, and why this helper writes a fresh stamp rather than the field
+        # being optional.
+        "measured_at": datetime.now(UTC).isoformat().replace("+00:00", "Z"),
         "verdict": "CLEAN",
         "population": {"episodic_graph_nodes": 4},
         "dry_run": {"would_delete_turn_nodes": 4, "held_back_turn_nodes": 0},

@@ -497,7 +497,7 @@ A GitHub PR already **is** an ontology shape — title, body, state, number, tim
 
 ⚛ **The seams that ALREADY vary the prompt — and why the rule has to name them.** Pack-scoped prompt text is not fixed today, and **none of the routes below is a branch, a registry or a fork, so none of the three disclaimers above excludes them**: `memory_granularity` reaches **S1** through `_granularity_text()` (this document states it at `§S2.2`: *"That string is rendered into the S1 prompt and not enforced"*), and reaches **S2/S4** through the `MEMORY GRANULARITY` block the core-only and verbose master renders always emit — the **compact** render emits it only for a story that matches a `dev:` or `product-strategy:` trigger (`extractor_v2.py:1330-1336`), so on that path a pack's granularity need not reach S2/S4 at all; `extraction.promptFragments` — with `extraction.valueGate` — reaches S1 and S2/S4 through `_pack_hints_text()`. A pack declaring `sourceTypes: [conversation]` **and** `promptFragments` satisfies every other sentence of this passage and still ships exactly the source-branded prompt set the decision rules out. **So, plainly: pack-scoped prompt text keyed on the source type counts as varying the prompt.** A source-type profile may emit **labels and units**; it may not emit prompt text.
 
-⚠️ **This carve-out is about CONTENT, not the declaration site — and this matters, because "declared for a *domain*" distinguishes nothing.** Every pack hint in the schema is declared per pack, and a pack *is* a domain: the renderer's own banner describes these hints as declared by the installed packs **for their own domain**, and `packs/agent-ops/manifest.yaml` already declares **both** `sourceTypes: [conversation]` **and** `memory_granularity`, so a meeting pack would satisfy "declared for a domain" too. What this rule does **not** reach is text stating the **domain's policy** — `memory_granularity`'s durable/ephemeral rule, a `valueGate` keep/drop list. What it **does** reach is text that tells the extractor how to read **this kind of source** — a meeting's speakers, a call's action items — and that is prompt text keyed on the source type whichever pack declares it, and however the pack names its domain.
+⚠️ **The carve-out is about CONTENT, not the declaration site — and this matters, because "declared for a *domain*" distinguishes nothing.** Every pack hint in the schema is declared per pack, and a pack *is* a domain: the renderer's own banner describes these hints as declared by the installed packs **for their own domain**, and `packs/agent-ops/manifest.yaml` already declares **both** `sourceTypes: [conversation]` **and** `memory_granularity`, so a meeting pack would satisfy "declared for a domain" too. What this rule does **not** reach is text stating the **domain's policy** — `memory_granularity`'s durable/ephemeral rule, a `valueGate` keep/drop list. What it **does** reach is text that tells the extractor how to read **this kind of source** — a meeting's speakers, a call's action items — and that is prompt text keyed on the source type whichever pack declares it, and however the pack names its domain.
 
 ⚠️ **That list is NOT exhaustive, and must not be read as one.** The master render also carries pack-authored prose by the same route: in the **verbose** render every `_group(...)` entry is emitted as `- <key> — <description>` (`extractor_v2.py:1354`), and in the **compact** render as `- <key> — <description>` only where the gloss disambiguates, bare `- <key>` otherwise (`:1314`, `_needs_gloss` at `:986`). **Any field a render emits is in scope, not only the two named above** — but which fields a given path emits differs: the **core-only** render is the verbose base *minus PACK KINDS and CHAINS* (`:1228`, stated again at `:1254`), and `render_s2_prompt`/`render_s4_prompt` pass `chains = ""` on that path (`:2185`, `:3639`), so pack-kind descriptions and chain notes do **not** reach S2/S4 when classify-later is on.
 
@@ -544,6 +544,10 @@ S2.2a-β NEAR-DUP       DETECT the pair and apply the §16.4 never-across guard 
                        NOTHING IS FUSED HERE (constraint 2)               ← NEW (proposal, §4.2)
 S2.2b VET      the gate: adversarial review (validity + coverage) + the identifier-only
                DISCARD; may FLAG a merge (`MERGE`), never perform one        [Jev]
+S2.2b-RE-NARRATE  the gate's ONE action: re-narrate ONCE with the pack's
+               `memory_granularity` emphasised, re-extract, UNION the arms  [LLM]  ← #11002
+S2.2b-ADD      the ADD-capable gap fill: emit candidates for the narrative spans
+               no candidate covers — BEFORE `run_s4`, the stage it fills   [LLM]  ← #11534
 S2.3 CLASSIFY  each SURVIVOR → its pack kind, against the declared vocabulary      [Jev + kNN]
 S3  RESOLVE    look up what exists for these candidates → disambiguate (narrative as
                context) → AND ATTACH the new context to the surviving entity — and the
@@ -556,7 +560,7 @@ S6a EMBED-DECISION   per row, INSIDE S6 and before that row's write clause is
 S6  COMMIT     create entities + connections + metadata/lifecycle
 ```
 
-**Eight steps.** No S4 and no S1.5 — both fail the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0, `S2.2a`/`S2.2b` sub-steps of S2.2 and `S6a` a sub-step of S6, so a sub-step does not make a ninth step. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists; the two must never drift apart. ⚠️ **The numbering gap is deliberate for now:** the S-numbers are fixed identifiers, so **renumber only once the design settles.**
+**Eight steps.** No S4 and no S1.5 — both fail the purpose test in §4.0. ⚠️ **The count is the TOP-LEVEL steps** (S0 · S1 · S2.1 · S2.2 · S2.3 · S3 · S5 · S6): `S0a`/`S0b` are sub-steps of S0, `S2.2a`/`S2.2b` sub-steps of S2.2 and `S6a` a sub-step of S6, so a sub-step does not make a ninth step. ⚠️ **`S2.2b-RE-NARRATE` and `S2.2b-ADD` are two of the S2.2 sub-steps the shipped pipeline runs** (`_renarrate_pick` / `_renarrate_trigger` and `run_partial_gap_fill` in `extract_session_v2`), and both blocks declare them for that reason: a stage the code runs but the list omits is a step the declaration does not describe. ⚠️ **The list is not claimed exhaustive over S2.2's sub-steps** — the referentiality pass (`route_mentions`, `#11021`) has no row either, and this clause does not add one. ⚠️ **§4.2's ordering table is the SAME list** — this block carries every id §4.2 lists; the two must never drift apart. ⚠️ **The numbering gap is deliberate for now:** the S-numbers are fixed identifiers, so **renumber only once the design settles.**
 
 ### S0 — READ  *(mechanical — no LLM)*
 
@@ -665,7 +669,7 @@ Normalises the shape **and applies the declared field→type mapping** (§3). Pa
 
 This is v2's S2, with priors in hand. Still proposes only; decides nothing.
 
-**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:16597-16600`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
+**✅ FINDING (2026-09-23) — the code hands extraction the raw alongside the story.** The call is `run_s2(model, story, master, session_date=…, edus=edus, …)` (`extractor_v2.py:16709-16712`) — ⚠️ **this row is the one passage cited HEAD-relative, not at a pin**; `tests/test_7949_capstone_measure.py` resolves it against the tree, so it moves with the code. **`edus` is the raw segmented input, passed together with the computed story.** **⇒ D3-Option 4 holds: the narrative is a **focus**, and the raw is present too.**
 
 > ⚠️ **What this does to D3.** The open question is not *"may extraction consult the raw?"* — it does. It is the much smaller **"what does the narrative add that the raw does not?"** The measurement (§10) compares **narrative + raw** against **raw alone** — ⛔ **and that shape cannot test loss-by-replacement**, so the D3 question is now two: *what the narrative ADDS* (measured, §10) and *what it LOSES when it replaces the raw* (**not yet measured**). §10's verdict says so. **This paragraph named the ADD question correctly; the error was downstream** — the
 registration then fixed the contrast with *"the same `edus`"* for both arms, which is what makes the falsifier
@@ -726,7 +730,14 @@ unfirable (block at the top of §10).
 > | S4 | *"There is no S4"* | `merge_embed_lists(s2, s4)` in `extractor_v2.py`, whose union the embed pass consumes; `run_s4` is called in the v2 pipeline |
 > | gating | removed from the design | the call sits under `if story:` with **no flag gate** — S4 runs whenever a story exists |
 > | the S4 flag | — | ⚠️ `TORTOISE_S4_DELTA` selects the **delta vs complete-list contract of S4's OUTPUT**, **not** whether S4 runs |
-> | stage order | the eight steps above | `run_s1` → `run_s2` → `S2.2 VET` → `S3 search_graph` → **`run_s4`** → `S5` |
+> | stage order | the eight steps above | `_arm_extract` (S1 → S2 → **`S2.2 VET`**) → **`S2.2b-RE-NARRATE`** (`_renarrate_trigger`, on a poor batch verdict — §4.4) → **`S2.2b-ADD`** (`run_partial_gap_fill`, **armed OFF by default**) → `S2.3 CLASSIFY` → `S3 search_graph` → **`run_s4`** → `S5 execute_embed` |
+>
+> ⚠️ **This row is a claim about the shipped pipeline, and it is READ, not merely written:**
+> `tests/test_extractor_v4_step_list_consistency.py` asserts that the row names every stage the guard
+> can locate in `extract_session_v2`, in the same order the code runs them, that it places `S2.2 VET`
+> before the retry, and that it keeps `run_s4` between `S3` and `S5`. The row does not name `S0` (it
+> starts at `_arm_extract`), so `S0`'s order is pinned against the body by §4.1's canonical list rather
+> than by this row (§4.2's ordering table carries no plain `S0` row, only `S0a`/`S0b`).
 >
 > **⚠️ `TORTOISE_S4_DELTA=0` does NOT disable S4** — it selects the legacy complete-list contract. There is **no S4-specific off switch**: S4 is reached whenever the v2 pipeline runs a story, and on the route that reaches `extract_session_v2` it is skipped only as a **side effect of something else**. ⚠️ **Three such paths on that route, none of them an "S4 switch":** (i) **`TORTOISE_EXTRACTOR=v1`** routes to the legacy `value_extractor.extract_session` path, which has no S4 stage at all (`sdk.py`; `_commit_session_v1`); (ii) **passing `summary=`** takes that same v1 dispatch — `sdk.py` reads `if extractor == "v1" or summary is not None:`; (iii) **an empty conversation** returns before S1 (`if not edus: return {...}`, with `degraded: True`), so S4 is never reached. Other `capture_session` lanes — keyless/no-provider, already-captured replay, and `TORTOISE_SESSION_EXTRACTOR=m2` — never enter the v2 extractor at all, so they are not S4 skips of this route. ⚠️ **S4 is NOT bypassable only by leaving the v2 pipeline** — that would contradict the `if story:` row directly above, and missed paths (ii) and (iii).
 >
@@ -771,7 +782,12 @@ unfirable (block at the top of §10).
 > 3/7 on that arm in the re-run, 5/7 across their union — **and 2/7 on either run of the
 > `delta` arm, which is DEFAULT-ON** (`_s4_delta_enabled` resolves `env_flag(…, True)`), so
 > `run_s4` **stays** on both readings and the removal (and the partial-gap stage it needs)
-> moved to **#11534**. ⛔ **The arm must be named, because the number is arm-specific:** the
+> moved to **#11534**. ⛔ **What that stage's trigger reaches on the F3 population is 8 of the 12
+> `points` and 1 of the 9 `operators` this record totals — 21 S4 additions;
+> `docs/evidence/11534-partial-gap/README.md` §3 pins the totals: 8 of the 9 operator
+> additions GENERALISE a claim the batch already covers,
+> so no narrative span is uncovered for them and neither a coverage detector nor a coverage-triggered
+> stage can reach that 8. The removal is therefore blocked by MEASUREMENT on that half.** ⛔ **The arm must be named, because the number is arm-specific:** the
 > two artifacts are one replay holding both arms, and the arms are different CONTRACTS (`legacy`
 > re-emits, `delta` emits only what is missing), so their `added_by_s4` counts are not the same
 > quantity. `docs/evidence/1789-s4-reeemit-tax/README.md` compares them as evidence about the gap
@@ -948,6 +964,8 @@ S2.2a-β NEAR-DUP       DETECT + apply the §16.4 never-across guard — NO FUSI
 S2.2b VET              the gate (identifier-only DISCARD) + adversarial      [Jev]
                        ↳ may record the VERDICT `MERGE` for a flagged pair; never the
                          ACTION `MERGE-INTO-EXISTING` — the fusion is S3's (§S2.2)
+S2.2b-RE-NARRATE       ONCE on a poor batch verdict; the arms UNION           [LLM]  ← #11002
+S2.2b-ADD              emits candidates for uncovered narrative spans        [LLM]  ← #11534
 S2.3 CLASSIFY          kNN fast path → Jev tail, on SURVIVORS only            [kNN + Jev]
 S3  RESOLVE + D-d      lookup → against-priors semantic dedup
 S5  CONNECT

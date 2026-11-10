@@ -588,7 +588,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: three entries below do not.
+#: four entries below do not.
 #:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
@@ -611,6 +611,27 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "docs/research/2026-09-25-4503-edge-accounting/measurement.md",
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
+        ),
+        # #11744 follow-up: a MEASUREMENT transcript, not an instruction. The plan
+        # doc quotes the command that produced the recorded FAIL ("Measured, not
+        # argued — the re-take made the required check fail"), and that command DID
+        # resolve where it ran: the box's `python3` was >= 3.12. The census flags
+        # the FORM, because a reader on a pre-3.12 ambient gets the tool's refusal
+        # instead — so rewriting this line to `uv run python` would falsify the
+        # record in order to clear a red, which is the failure mode this census's
+        # own doctrine forbids.
+        # ⛔ NOT because the guard arrived later: the guard landed 2026-10-21
+        # (`a6085af8459`) and the doc-scan leg 2026-10-08 (`21617e6222`), both
+        # BEFORE this doc (2026-11-10). The line was a census red from the day it
+        # appeared; the exemption is what makes the record keepable.
+        # Third tracked instance of the class on #9159 — after
+        # `tools/ci_check_repair.py`'s #9118 comment and then
+        # `docs/plans/2026-10-18-7951-delete-point-outbox.md:210` — recorded there
+        # as a comment rather than filed as a peer.
+        (
+            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
+            "$ python3 tools/capstone_preregistration_check.py --dir "
+            "docs/evidence/7949-capstone \\",
         ),
     }
 )
@@ -1295,3 +1316,70 @@ def test_the_site_icon_guard_names_an_invocation_that_actually_resolves(
         "the bare path must stay a USAGE error (argparse, `--source` is "
         f"required) — if it stops being one, this guard's advice is no longer the "
         f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+
+
+def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#11744 review (round 3) — the same unpinned-claim defect, one tool over.
+
+    `tools/embedding_residual_scan.py` gained the `#5128` guard with a refusal
+    naming the BARE path, which does not resolve: the tool takes `--org`,
+    `--graph-id` and `--graph-name` as `required=True`, so the bare form exits 2
+    on argparse's own usage error. The census pins only that an invocation is
+    named at all (`test_guard_refuses_an_old_interpreter_and_passes_the_floor`
+    asserts the `uv run python <path>` prefix), and that prefix is satisfied by
+    BOTH the bare path and the `--help` form — so reverting this message to the
+    bare path leaves the whole census green, which is exactly the shape
+    `test_the_site_icon_guard_names_an_invocation_that_actually_resolves`
+    (#11507 round 7) was written for.
+
+    Pinned by PROVING the claim rather than by reading the string alone: the form
+    the refusal names must resolve, and the bare path must NOT.
+
+    ⚠️ `rc == 2` alone does not measure "a USAGE error" here: `2` is also this
+    tool's documented NO-VERDICT (`tortoise/embedding_residual_scan.py:78`
+    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making all
+    three required arguments optional would leave the bare form parsing, refusing
+    the graph half, and still exiting 2 — green on the code while the property the
+    message states is false. (One of the three alone is not enough: the other two
+    still fail at parse time, which is why the assert looks redundant until you
+    read the tool's exit contract.) The CAUSE is pinned too (`#11744` review,
+    round 4).
+    """
+    path = (Path(__file__).resolve().parents[1]
+            / "tools" / "embedding_residual_scan.py")
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    # `raise SystemExit(<str>)` carries the message on the exception, not on
+    # stdout/stderr — the census reads it the same way (`str(refusal.value)`).
+    captured = capsys.readouterr()
+    message = str(refusal.value) + captured.out + captured.err
+
+    assert "tools/embedding_residual_scan.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `--org` / "
+        f"`--graph-id` / `--graph-name` token: {message!r}")
+
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--org` is "
+        f"required) — if it stops being one, this guard's advice is no longer the "
+        f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+    # `2` is not unique to argparse on this tool (it is also `EXIT_UNAVAILABLE`),
+    # so the CODE above cannot distinguish "usage error" from "a store could not
+    # be read". Pin argparse's own text, which only the missing-token path emits.
+    assert "the following arguments are required" in bare.stderr, (
+        "the bare path exited 2, but not on argparse's missing-token error — `2` "
+        "is also this tool's NO-VERDICT exit, so the code alone does not prove "
+        f"the bare path is unusable: {bare.stderr[-300:]!r}")
