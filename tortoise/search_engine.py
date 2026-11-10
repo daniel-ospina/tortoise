@@ -3662,11 +3662,13 @@ _DECORATION_TIMEOUT_MS = 200
 #:
 #: which makes consumers of this key answer DIFFERENTLY per host. The key
 #: itself is host-dependent for the value above, and the guards order with it,
-#: so their verdict is the predicate ``reader_offset < (value - bound)``: two
-#: hosts disagree only when the pair's separation falls BETWEEN their two UTC
-#: offsets. That is not a bound on the pair's own distance — two hosts 1h apart
-#: disagree about a pair 13h30 apart, while a pair 20h apart is refused on every
-#: host — and it affects not only ``sdk.supersede_point``'s inversion guard
+#: so which hosts disagree is decided by the pair's separation against their two
+#: OFFSETS, not against the pair's own distance: refusal is
+#: ``reader_offset < (naive - other)`` when the naive value is the START (the
+#: sign INVERTS for an END), and when BOTH bounds are naive the offsets CANCEL
+#: and every host agrees. Measured: two hosts 1h apart disagree about a pair
+#: 13h30 apart, while a pair 20h apart answers the same on every host. That
+#: affects not only ``sdk.supersede_point``'s inversion guard
 #: (inverted on UTC and ``America/Los_Angeles``, not inverted on
 #: ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
 #: write door reached by ``create_point`` / ``update_point`` /

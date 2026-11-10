@@ -512,15 +512,24 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
     read in the READER's zone. #11646 made that shape ORDERABLE here for the
     first time — before it, the value bucketed as unparseable and this guard
-    skipped the pair on every host — so for this shape the verdict is the
-    predicate ``reader_offset < (validFrom - validTo)``: two hosts disagree only
-    when the pair's separation falls BETWEEN their two UTC offsets, which is not
-    a bound on the pair's own distance (measured: the pair
+    skipped the pair on every host. What it decides now depends on which bound
+    is the naive one, so state it exactly rather than as one predicate:
+
+    * producer as the START, other bound a stated instant (the pinned pair):
+      refusal is ``reader_offset < (validFrom - validTo)``;
+    * producer as the END: the sign INVERTS —
+      ``reader_offset > (validTo - validFrom)``;
+    * BOTH bounds producer-shaped: the offsets CANCEL, so the verdict is the
+      same on every host.
+
+    Two hosts therefore disagree only when one host's offset is below the pair's
+    separation and the other is not — a condition on the OFFSETS, not on the
+    pair's distance (measured: the pair
     ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
     ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
-    ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three; and two hosts
-    1h apart disagree about a pair 13h30 apart, while a pair 20h apart is refused
-    on every host). That is the recorded #3982 reading meeting a
+    ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three; two hosts
+    1h apart disagree about a pair 13h30 apart, and a pair 20h apart answers
+    the same on every host). That is the recorded #3982 reading meeting a
     newly-orderable shape, not a new rule.
     Changing that reading is a REOPEN of #3982; giving the producer's shape its
     own deterministic anchor instead is the SEPARATE decision recorded on
