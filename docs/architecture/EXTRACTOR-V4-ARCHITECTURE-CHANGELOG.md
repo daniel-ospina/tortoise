@@ -1890,8 +1890,9 @@ return `({}, [])`, i.e. the state half of the gate compared nothing and reported
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
-registry header said *"the thirteen rows above"* (there are fourteen, and `mechanisms:` starts below it) and
-`test_ci_selection.py`'s tier-1 failure message still asserted the pre-change surface — both corrected. Cycle 3 found
+registry header said *"these thirteen are every mechanism either document names"* (there are fourteen, and
+`mechanisms:` starts below it) and `test_ci_selection.py`'s tier-1 failure message still asserted the pre-change
+surface — both corrected. Cycle 3 found
 one **inherited** claim in the text this change adds: the row said `commit_schema` *"clamps and dedupes the list"*,
 but that shape has **no list-level validator** — it bounds each `Mention` field, while the clamp
 (`extractor_v2._clamped_mention`) and the dedupe (`extractor_v2._dedupe_mentions`, via `route_mentions` /
@@ -1900,12 +1901,21 @@ lane: a write door told the schema dedupes can persist a payload verbatim and st
 schema never refuses. Corrected in the registry note, the module docstring and the plan sentence. Cycle 3 also
 re-measured the two stale `select()` counts in `config/ci-surfaces.yml` (78 → **84** for an architecture-doc-only
 diff, 155 → **165** for a STORAGE-only diff; an epic-plan-only diff takes the same early return at 84) — pre-existing
-drift inside the comment block this change edits, kept correct rather than carried.
+drift inside the comment block this change edits, kept correct rather than carried. Cycle 4 (over the head cycle 3
+produced) found four more: the registry's headline still said *"eight to thirteen"* while the block below it
+narrates the fourteenth; this entry QUOTED text the base blob does not contain (*"the thirteen rows above"* — the
+blob says *"these thirteen are every mechanism either document names"*), which is the unverifiable-citation class;
+the row named 2 of the 4 call sites that run the clamp/dedupe (missing `execute_embed` — the `mentions_recorded`
+accounting this row is about — and `extract_session_v2`); and a typo (`carriers`). All corrected, and the
+relay this entry claims is now a fact rather than a plan — **the disposition is recorded on `#5064` as comment
+`6759903508`**, not only here.
 
 **Provenance.** Review cycle 1 (reviewer B: the two fail-opens above, both measured; reviewer A: the disposition had
-to be relayed onto #5064, and five records still described a one-directory surface — all corrected here). Cycle 2
-(a fresh reviewer over the corrected artifact: the two documentation-truth defects above). Cycle 3 (a fresh reviewer
-over the final head: the clamp/dedupe attribution and the stale selection counts — both measured against
-`extractor_v2` and `tools/ci_selection.py`). The mechanism's absence is unchanged and still tracked by `#11239`;
-`#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism that is
-built.
+to be relayed onto `#5064` rather than stated only in this narrative, and five records still described a
+one-directory surface — the records are corrected here and the relay is the comment cited above). Cycle 2 (a fresh
+reviewer over the corrected artifact: the two documentation-truth defects above). Cycle 3 (a fresh reviewer over the
+final head: the clamp/dedupe attribution and the stale selection counts — both measured against `extractor_v2` and
+`tools/ci_selection.py`). Cycle 4 (a fresh reviewer over cycle 3's head: a stale headline count, a quote the base
+blob does not carry, two unlisted call sites and a typo). The mechanism's absence is unchanged and still tracked by
+`#11239`; `#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism
+that is built.
