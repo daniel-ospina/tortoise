@@ -103,7 +103,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_leg_names()` below asserts this map's leg list, so a silent
+    which is why `_expected_legs()` below asserts this map's leg list, so a silent
     omission is impossible to mistake for a pass.
     """
     legs = cs.push_legs(manifest)

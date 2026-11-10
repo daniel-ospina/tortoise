@@ -743,15 +743,26 @@ exec {real} "$@"
         self.assertIn("unreadable store(s): cmux-session-store", out)
 
     def test_the_holder_read_note_does_not_claim_the_whole_answer(self):
-        """⛔ THE NOTE IS THE BOARD'S HOLDER ARM, NOT "this answer" (#11681 review, P2).
+        """⛔ THE HEADING NAMES THE ROW, NOT THE ANSWER AND NOT ITS OWN CONTENTS.
 
-        Measured on #11678: a pushed branch made the answer `1 holder(s) across 1
-        surface(s)` — the holder being a REMOTE BRANCH — while the claim gate's own
-        note read `NO lane is mechanically attributed`. With the heading worded "the
-        note for the holder read behind this answer", a reader taking the tail lines
-        saw "nobody" three lines under a holder count: the tail-line misread #11202
-        is about, reintroduced by the disclosure that exists to prevent it. The
-        heading names the surface and says the hits above are separate.
+        The heading over-claimed twice, and this test pins the SECOND, which the
+        first wording did not reach (#11681 review, P2 in two cycles):
+
+        • "the note for the holder read behind this answer" claimed holders THE
+          ANSWER has. Measured on #11678: a pushed branch made the answer
+          `1 holder(s) across 1 surface(s)` — the holder being a REMOTE BRANCH —
+          while the claim gate's own note read `NO lane is mechanically
+          attributed`. A reader taking the tail lines saw "nobody" three lines
+          under a holder count: the tail-line misread #11202 is about.
+        • "the gate's own note for the BOARD's holder read" claimed the note's
+          CONTENTS. `scan_issue_surface` appends an `issue state=…` sentence to
+          the same `surface.note`, so on a LANDED answer the heading sat over a
+          clause that is not part of that read and duplicated the LANDED block.
+
+        ⛔ `assertNotIn("behind this answer")` is NOT enough on its own and never
+        was: that wording was already gone before the heading was narrowed, so it
+        was true both before and after the fix — a vacuous pin. The `assertIn`
+        below is the discriminating half.
         """
         self._write_fleet_board(liveness_source="process-table",
                                 liveness_unreadable=["cmux-session-store"])
@@ -764,7 +775,19 @@ exec {real} "$@"
             "used to misdescribe"))
         self.assertIn("CLAIM GATE [issue assignee/holder]", out)
         self.assertIn("separate from any surface hit", out)
+        # ⛔ THE DISCRIMINATING ASSERTION (#11681 review, P2). Reverting the heading
+        # to "the BOARD's holder read" (or to "behind this answer") must red HERE.
+        # `assertNotIn` alone cannot do that: it is satisfied by BOTH the old and the
+        # new wording above, which is how the first pin was vacuous.
+        self.assertIn(
+            "the gate's own note for the `issue assignee/holder` row", out, (
+                "the heading must name the ROW it belongs to — see this test's "
+                "docstring: 'the BOARD's holder read' over-claims the note's "
+                "contents (it also carries an `issue state=…` sentence), and "
+                "'behind this answer' over-claims the ANSWER (its holders can "
+                "come from other surfaces)"))
         self.assertNotIn("behind this answer", out)
+        self.assertNotIn("for the BOARD's holder read", out)
 
     def test_a_board_with_no_liveness_keys_prints_no_store_claim(self):
         """ABSENT IS NOT EMPTY, on this verb too (#11678).
