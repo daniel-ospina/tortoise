@@ -6205,7 +6205,9 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     bundle's own entry point told a reader the opposite of the table beside it.
     (The number moved 69 -> 85 across `#11673`'s two README additions — the closing-rule
     paragraph and the E6-producer disclosure
-    above the table; it is re-derived against the tree, never carried across a merge.)
+    above the table; it is re-derived against the tree, never carried across a merge. It
+    moved again 83 -> 85 in the forward merge of `origin/main` `2bb22d9e14`, which added
+    two lines above this table — re-derived, per the same rule.)
     The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
     below, which takes the LINE NUMBER from this docstring: review at `7c03efc1d`
     found the previous revision had re-pointed it at `README.md:65`, which is `>` — a

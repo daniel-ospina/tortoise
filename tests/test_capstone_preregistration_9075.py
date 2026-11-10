@@ -6261,8 +6261,18 @@ def _bundle_with_published_registration(tmp_path, monkeypatch):
 
 
 def _measurement_only(monkeypatch):
-    """Strip the halves that are not under test, so the ORDERING claim is the only variable."""
-    monkeypatch.setattr(check, "parse_pins", lambda text: {"e4_denominator": 15})
+    """Strip the halves that are not under test, so the ORDERING claim is the only variable.
+
+    ⛔ The fake pins must still DECLARE the required set, and the FULL one: these fixtures build
+    their bundle from the REAL document, whose §3.1 carries the `E6` row, so a core-only declaration
+    would be the define-without-require shape the gate now refuses on this path too (#11688 review
+    P1 — while the declaration limbs lived inside `check_pins`, `use_corpus=False` skipped them and an
+    absent declaration went unnoticed; measured: `required_criteria_rows is []` reds all six arms).
+    """
+    monkeypatch.setattr(check, "parse_pins", lambda text: {
+        "e4_denominator": 15,
+        "required_criteria_rows": list(check.REQUIRED_CRITERIA),
+    })
     monkeypatch.setattr(check, "check_machine_record", lambda directory, pins: [])
     # …and the #10215 step-set arm, which is the THIRD subject these tests do not measure. It is
     # scoped by PATH (`check_step_partition_applies` asks whether the bundle IS `DEFAULT_PREREG_DIR`)
@@ -7429,6 +7439,54 @@ def test_a_table_that_DEFINES_the_sixth_row_without_REQUIRING_it_is_refused():
     assert not any("the criteria table carries" in f for f in failures), failures
 
 
+def test_the_two_declaration_refusals_fire_on_the_invocation_CI_actually_runs(tmp_path):
+    """REGRESSION (#11688 review P1): both declaration limbs must fire under `--no-corpus`.
+
+    While they lived inside `check_pins`, `run()` reached them only through `if use_corpus:`, and the
+    gate's own CI step is `--no-corpus` (`.github/workflows/python-ci.yml:512`). So a record-only edit
+    that un-required `E6` while §3.1 still defined its row passed the GATING path — the exact
+    `#11083` artefact the two limbs exist to refuse, refused only on a path no merge ever takes.
+
+    Driven through `run()` (not `check_pins`) on purpose: the defect was the CALL SITE, so an arm
+    that calls the helper cannot see it. Measured before the fix — a bundle whose pins were narrowed
+    to the core set with the `E6` row left in the table, `document_sha256` re-cut so nothing else was
+    red: `run(..., use_corpus=False)` reported `OK` and exit 0; after, the reverse-shape finding.
+    """
+    directory = tmp_path / "bundle"
+    directory.mkdir()
+    (directory / "PRE-REGISTRATION.md").write_text(PREREG.read_text())
+    (directory / "preregistration.json").write_text(
+        (PREREG_DIR / "preregistration.json").read_text())
+
+    doc = directory / "PRE-REGISTRATION.md"
+    lines = doc.read_text().splitlines(keepends=True)
+    block = [i for i, line in enumerate(lines)
+             if line.strip().startswith("required_criteria_rows:")]
+    # the YAML pins block, not the prose copies of the same sentence (§7, §10.21)
+    assert len(block) > 1 and block[0] < 2000, block
+    lines[block[0]] = "required_criteria_rows: [E1, E2, E3, E4, E5]\n"
+    doc.write_text("".join(lines))
+    # re-cut the digest, so the ONLY finding left is the shape this arm is about (an author who
+    # edits the declaration and re-cuts the record is the reachable shape, not a contrived one)
+    record = json.loads((directory / "preregistration.json").read_text())
+    record["document_sha256"] = "sha256:" + hashlib.sha256(doc.read_bytes()).hexdigest()
+    (directory / "preregistration.json").write_text(json.dumps(record, indent=2))
+
+    report = check.run(directory, use_git=False, use_corpus=False)
+    assert any("the criteria table carries ['E6']" in f for f in report["failures"]), \
+        report["failures"]
+    assert report["ok"] is False, report
+
+    # non-vacuity: the SAME skipped-corpus run over the un-narrowed declaration is clean, so the arm
+    # is not simply always-firing and the refusal is about the declaration rather than the run mode.
+    (directory / "PRE-REGISTRATION.md").write_text(PREREG.read_text())
+    record["document_sha256"] = "sha256:" + hashlib.sha256(PREREG.read_bytes()).hexdigest()
+    (directory / "preregistration.json").write_text(json.dumps(record, indent=2))
+    report = check.run(directory, use_git=False, use_corpus=False)
+    assert not any("the criteria table carries" in f for f in report["failures"]), \
+        report["failures"]
+
+
 def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelling():
     """The reverse-shape refusal binds on the SLOT, not on how the row spells itself (#11688 r1).
 
@@ -7439,12 +7497,17 @@ def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelli
     passed: the guard was inert for one character of edit. Non-vacuity is the last leg — the same
     declaration over a table with no sixth row is still not refused, so the arm is not simply
     always-firing.
+
+    ⛔ SEPARATORS ARE SPELLING TOO, and the first fix of this arm's subject missed them: measured at
+    `01a73846ad70`, `E.6` / `E-6` / `E 6` were still NOT refused (`family='e.6'`), because `_plain`
+    strips markdown emphasis but leaves an INTERIOR separator. They are in the loop below, so the
+    mutant is any one of them — the guard's claim is *whatever the row calls itself*.
     """
     pins = check.parse_pins(PREREG.read_text())
     rows = check.parse_criteria_rows(PREREG.read_text())
     derived = check.derive_corpus_facts(pins)
     pins["required_criteria_rows"] = list(check.CORE_REQUIRED_CRITERIA)
-    for spelling in ("E6", "E6a", "e6", "E6 (declared)", "**E6**"):
+    for spelling in ("E6", "E6a", "e6", "E6 (declared)", "**E6**", "E.6", "E-6", "E 6"):
         respelled = [dict(r) for r in rows]
         for row in respelled:
             if row["id"] == "E6":
@@ -7455,6 +7518,29 @@ def test_the_define_without_require_refusal_is_NOT_defeated_by_the_row_ID_spelli
     # non-vacuity: the refusal is about the ROW, not about the declaration being core
     failures = check.check_pins(pins, derived, [r for r in rows if r["id"] != "E6"])
     assert not any("the criteria table carries" in f for f in failures), failures
+
+
+def test_criterion_family_normalizes_only_what_it_claims_to():
+    """`criterion_family` is what the reverse-shape guard binds on, so its contract is pinned.
+
+    Sub-rows collapse to their slot (`E2a`/`E2b` → `e2`), markdown emphasis and INTERIOR separators
+    are irrelevant (`E.6` → `e6`), and a DIGIT RUN stays whole — `E10` is not `E1`, which is what
+    keeps a future tenth row from being read as the first one's slot. A cell that is not a
+    criterion id at all keeps its normalized text (`sixth` → `sixth`), so the guard's control leg
+    (a table with no sixth row) cannot be satisfied by mapping everything to one slot.
+    """
+    assert check.criterion_family("E6") == "e6"
+    assert check.criterion_family("`E6`") == "e6"
+    assert check.criterion_family("E6a") == "e6"
+    assert check.criterion_family("e6") == "e6"
+    assert check.criterion_family("E6 (declared)") == "e6"
+    assert check.criterion_family("E.6") == "e6"
+    assert check.criterion_family("E-6") == "e6"
+    assert check.criterion_family("E 6") == "e6"
+    assert check.criterion_family("E2a") == "e2"
+    assert check.criterion_family("A4") == "a4"
+    assert check.criterion_family("E10") == "e10"
+    assert check.criterion_family("sixth") == "sixth"
 
 
 def test_the_capstone_is_refused_when_the_sixth_row_is_absent():

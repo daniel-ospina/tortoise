@@ -628,12 +628,19 @@ def is_placeholder(cell: str) -> bool:
 #: on purpose, because the refusal below is about the slot being DEFINED while the gate never
 #: demands it, not about the row's label. ⛔ #11688 review, issue 1: the exact-membership test this
 #: replaces was defeated by spelling the row `E6a` — one character, and the guard was inert.
-_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)", re.IGNORECASE)
+#:
+#: ⛔ AND SEPARATORS COUNT AS SPELLING TOO. `_plain` removes markdown emphasis but leaves an
+#: INTERIOR `.`/`-`/space, so `E.6` / `E-6` / `E 6` still read as a family of their own and the
+#: refusal stayed inert for them — measured at `01a73846ad70` (refused=False for all three, while
+#: `E6a`/`e6`/`E6 (declared)`/`**E6**` were refused). The cell is a LABEL, not a path or a number,
+#: so every non-alphanumeric is dropped before the slot is read: `E.6` → `e6`. A digit run stays
+#: whole, so `E10` is never `E1`.
+_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)")
 
 
 def criterion_family(row_id: str) -> str:
-    """The slot a criterion row names: markdown-stripped, casefolded, sub-row suffix removed."""
-    plain = _plain(row_id).casefold()
+    """The slot a criterion row names: markdown- and separator-stripped, casefolded, no sub-row."""
+    plain = re.sub(r"[^a-z0-9]", "", _plain(row_id).casefold())
     match = _CRITERION_FAMILY.match(plain)
     return match.group(1) if match else plain
 
@@ -4193,6 +4200,24 @@ def check_pins(pins: dict, derived: dict,
         cmp("split.tune_counts", split.get("tune_counts"), _half_counts(derived, tune))
         cmp("split.held_out_counts", split.get("held_out_counts"), _half_counts(derived, held))
 
+    failures += check_declared_criteria(pins, rows)
+    return failures
+
+
+def check_declared_criteria(pins: dict,
+                            rows: list[dict[str, str]] | None = None) -> list[str]:
+    """The two DECLARATION limbs: what `required_criteria_rows` may say, and the reverse shape.
+
+    ⛔ These read only `pins` and `rows` — never the corpus — so they are a function of their own and
+    not a limb of `check_pins` (#11688 review P1). While they lived inside `check_pins` they were
+    unreachable on the ONLY invocation CI runs: `run()` called `check_pins` inside `if use_corpus:`
+    (:4450), and the gate's own step is `--no-corpus` (`.github/workflows/python-ci.yml:512`), so a
+    record-only edit that un-required `E6` while keeping its row passed the gating path GREEN — the
+    exact artefact class the reverse limb exists to refuse. `run()` now calls this on BOTH paths;
+    `check_pins` still calls it too, so a direct caller (the suite's arms do this) keeps the
+    behaviour and no invocation gets it twice.
+"""
+    failures: list[str] = []
     # ⛔ TWO SANCTIONED SETS, AND A DECLARATION OUTSIDE THEM IS REFUSED (#11673). The core set is
     # what every bundle shares; the full set adds the capstone's sixth row (§10.21). A third set —
     # invented, or the core set with an `E`-row quietly dropped — is the shape that would let a
@@ -4468,6 +4493,11 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
         }
         failures += check_pins(pins, derived, rows)
     else:
+        # ⛔ THE DECLARATION LIMBS RUN ON THE SKIPPED-CORPUS PATH TOO (#11688 review P1). They read
+        # only the pins and the table, and `--no-corpus` is the invocation the gate's own CI step
+        # uses, so leaving them inside `check_pins` made both new refusals unreachable where it
+        # counts. Exactly one call per invocation: the corpus path gets them through `check_pins`.
+        failures += check_declared_criteria(pins, rows)
         # A skipped half must SAY it was skipped: `--no-corpus` is what the CI ordering step uses
         # (the corpus leg needs the package deps, and the test suite owns it), and a report that
         # reads as fully checked while one half never ran is the silent-green shape this tool
