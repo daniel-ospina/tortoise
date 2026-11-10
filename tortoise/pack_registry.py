@@ -3594,11 +3594,15 @@ class PackRegistry:
         # 17 declared pairs had a parent that is an `Object` child, and
         # `expand_kind("Object")` carried NONE of them — half-fixing the very
         # defect #11000 is. ⚠️ The instrument that reads `kind=` for OBJECTS is the
-        # object entity read path (`tortoise_fts_query(..., entity_type="object")`
-        # / `search` with `kind_field='objectKind'`), **NOT `sdk.query()`**:
-        # `query` is `MATCH (n:Point)` (`sdk.py`), so it can never return an
-        # Object and its answer is `[]` before AND after this fix. Naming `query`
-        # here would be a claim no measurement can distinguish.
+        # object entity read path — `tortoise_fts_query(..., entity_type="object")`
+        # (the `tortoise_search` surface), whose object kind field is `objectKind`.
+        # **NOT `sdk.query()`**, which is `MATCH (n:Point)` (`sdk.py`): it can
+        # never return an `:Object`, so citing it as evidence that the widening
+        # happened is vacuous. ⚠️ It is not inert either — `query(kind=…)` filters
+        # `n.pointKind IN expand_kind(kind)` (`sdk.py`), so once `expand_kind(
+        # "Object")` carries `goal`/`target` a `query(kind="Object")` DOES return
+        # `:Point` rows with those `pointKind`s. It answers a DIFFERENT question
+        # (`:Point` rows), before and after this fix — see DM4.
         #
         # ⛔ The closure must be DIRECTIONAL. A plain "add the members of every
         # member's bucket" fixpoint is WRONG: `WorkItem`'s bucket contains all
@@ -3658,8 +3662,9 @@ class PackRegistry:
         # not the Object row. Declining the seed would leave the stated contract
         # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
         # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
-        # declares only `Object`/`Document`/`Subject`, so `Point` is this module's
-        # extension) while the other three already behave this way. Applied
+        # declares only `Object`/`Document`/`Subject`, so `Point` AND `Event` are
+        # this module's extension) while the other three already behave this way.
+        # Applied
         # for UNIFORMITY, with the widening named rather than denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
