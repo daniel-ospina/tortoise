@@ -746,12 +746,12 @@ jobs:
     strategy:
       fail-fast: false
       # #6744: BOUND THE FAN-OUT. Unset, a matrix ADMITS its whole shard set at
-      # once — a PR that selects all three lanes requests 18 matrix jobs at the
-      # same instant (10 fast + 5 slow + 3 carve-out). The `test-slow` and
+      # once — a PR that selects all three lanes requests 19 matrix jobs at the
+      # same instant (11 fast + 5 slow + 3 carve-out). The `test-slow` and
       # `test-carve-out` matrices are `if:`-guarded on the diff, but `test` is
       # NOT conditionally skippable: `changes` writes `python=true` on every
       # pull request (`# tier-1 smoke runs on every PR`), so every PR hands the
-      # pool all 10 fast legs at once — which is the fan-out this bounds.
+      # pool all 11 fast legs at once — which is the fan-out this bounds.
       # Measured over 9 `python-ci` runs (2026-10-30T21:48Z ..
       # 2026-10-31T02:54Z, jobs API `filter=all`, completed jobs only): ONE PR's
       # peak simultaneous jobs was p50 11 / **max 18** against a 12-runner pool
