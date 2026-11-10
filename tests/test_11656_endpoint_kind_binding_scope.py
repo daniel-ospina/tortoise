@@ -52,6 +52,28 @@ BRIEF_DOC = REPO_ROOT / "docs" / "research" / "2026-11-09-11656-kindpair-enforce
 INDEX_DOC = REPO_ROOT / "docs" / "00_index.md"
 
 
+def _call_window(source: str, marker: str) -> str:
+    """The text of the FIRST call that opens at `marker`, up to its matching `)`.
+
+    Exists so a source-shape pin can assert a property of ONE call instead of a whole function: `link_entities`
+    is 270 lines carrying `label=label` at three sites, and `ingest` is 955 lines carrying it at four, so a
+    function-wide `in` check stays green when the argument passed at the door is deleted.
+    """
+    start = source.index(marker)
+    open_paren = start + len(marker) - 1
+    assert source[open_paren] == "(", f"`{marker}` does not end at an open paren in this source"
+    depth = 0
+    for idx in range(open_paren, len(source)):
+        char = source[idx]
+        if char == "(":
+            depth += 1
+        elif char == ")":
+            depth -= 1
+            if depth == 0:
+                return source[start: idx + 1]
+    raise AssertionError(f"the call opened at `{marker}` never closes — the source this pin reads is malformed")
+
+
 def _declared_relations() -> list[dict]:
     """Every `ontology.relations[]` row across the shipped packs, keyed by its namespace."""
     rows: list[dict] = []
@@ -300,16 +322,27 @@ class TestTheThirdDoorExists:
 
         Both pass the caller's `label` straight through and neither is kind-checked, so the door is reachable
         with a DECLARED predicate from two surfaces — not from one internal primitive.
+
+        ⛔ **Every `label=label` assertion below is scoped to the `create_direct_edge(...)` CALL, not to the
+        whole function.** `link_entities` is 270 lines with `label=label` at three sites and `ingest` is 955
+        lines with it at four; a function-wide `in` check stays green when the pass-through at the door is
+        deleted, which is the exact removal this pin exists to catch (review P2-4).
         """
         from tortoise.sdk import TortoiseSDK
 
         linking = inspect.getsource(TortoiseSDK.link_entities)
         assert 'upper in ("IMPL", "NAND") and operator is not True' in linking
-        assert "label=label" in linking
+        assert "label=label" in _call_window(linking, "self.create_direct_edge("), (
+            "`link_entities` no longer passes the caller's `label` into `create_direct_edge` — the door would "
+            "then be reachable with no declared predicate, and §1.1's 33-of-35 direct-shape count is void"
+        )
 
         ingest = inspect.getsource(TortoiseSDK.ingest)
         assert '_route == "direct"' in ingest, "the bundle writer's direct route — the second public path"
-        assert "self.create_direct_edge(" in ingest and "label=label" in ingest
+        assert "label=label" in _call_window(ingest, "self.create_direct_edge("), (
+            "`ingest`'s direct route no longer passes `label` into `create_direct_edge` — the second public "
+            "path to the door is gone and the delta §1.1 counts would have to be re-derived"
+        )
 
     def test_point_mediated_route_only_reifies_a_point_pair(self):
         """Object↔Object keeps the direct shape; the partition is pinned above (28 / 33 / 2)."""
@@ -343,7 +376,7 @@ class TestTheThirdDoorExists:
         starts = [i for i, ln in enumerate(lines) if "fold ``DirectEdgeCreated``" in ln]
         assert len(starts) == 1, f"expected exactly one DirectEdgeCreated fold marker, found {len(starts)}"
         # The window ENDS at the next leg: `DirectEdgeRepoint` reads `etype = ev.get("edge_type")`
-        # too, at `:17305` (inside 400 lines of the marker). Without this bound the assertion
+        # too, at `:17306` (inside 400 lines of the marker). Without this bound the assertion
         # below could not fail — the copy it means to exclude satisfies it.
         ends = [i for i in range(starts[0], len(lines)) if "for ev in direct_repoint_events" in lines[i]]
         assert ends, "the DirectEdgeRepoint leg is gone — the window's end bound has to be re-derived"
@@ -374,24 +407,65 @@ class TestThePairHasProductionReaders:
         """`pack_hierarchy._matching_row` matches on the DECLARED pair; `_binding` resolves the writer.
 
         §5.5's rule is "do not add a fourth resolver". The fourth *reader* is already that resolver: it joins a
-        hierarchy entry to its `relations[]` row on `(fromKind, toKind)` (plus `predicate`/`semantics`) and is
-        reachable on the live write path (`relation_write.plan_relation_edges` ← `sdk.apply_relation_edges`).
-        A lane that re-implements this join builds the thing the section forbids.
+        hierarchy entry to its `relations[]` row on `(fromKind, toKind)` (plus `predicate`/`semantics`).
+
+        ⛔ **The chain, named correctly (review finding 6).** Production reach is
+        `relation_write.apply_relation_edges` (`relation_write.py:791`; imported inside `_extract_session_v2` at
+        `sdk.py:17200`, called at `:17201`) → `plan_relation_edges` (`:823`) → `declared_hierarchy` (`:594`) →
+        `_resolve` (`pack_hierarchy.py:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). The **join is in
+        `_resolve`**, not in `plan_hierarchy_edges` (`relation_write.py:631`), which matches on the
+        already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges` —
+        `TortoiseSDK` has no such method, so a reader following the old sentence found an import.
+
+        ⛔ **Every assertion below must be able to FAIL.** `callable(module_level_function)` is a tautology: it
+        stayed green if the `_binding` call at `pack_hierarchy.py:306` or the `_matching_row` call at `:333`
+        were deleted, while §5.5's "already IS the pair→writer resolver" became false (review finding 6, the
+        same defect class as P2-4). So the two calls are pinned INSIDE `_resolve`'s own source, and the live
+        path is pinned by the symbol that actually exists.
         """
-        from tortoise import pack_hierarchy
+        from tortoise import pack_hierarchy, relation_write
+        from tortoise.sdk import TortoiseSDK
 
         source = inspect.getsource(pack_hierarchy._matching_row)
         assert 'rel.get("fromKind") != from_kind' in source, (
             "`_matching_row` no longer matches on the declared fromKind — re-derive §5.5's reader list"
         )
         assert 'rel.get("toKind") != to_kind' in source, "`_matching_row` no longer matches on the declared toKind"
-        assert callable(pack_hierarchy._binding)
-        assert callable(pack_hierarchy.declared_hierarchy)
+
+        # ⛔ The resolver's own call sites, not `callable()` on the functions they call.
+        resolver = inspect.getsource(pack_hierarchy._resolve)
+        assert "_binding(pack, predicate, from_kind, to_kind)" in resolver, (
+            "`_resolve` no longer calls `_binding` — the hierarchy entry is then resolved without a "
+            "write-path verdict, and §5.5's 'the pair→writer resolver already exists' is false"
+        )
+        assert "_matching_row(" in resolver, (
+            "`_resolve` no longer calls `_matching_row` — `restates_relation` would be a second, "
+            "re-derived answer to the join this module exists to own"
+        )
+
+        # ⛔ The symbol the docs must name. `sdk.apply_relation_edges` does not exist; this does.
+        assert callable(relation_write.apply_relation_edges), (
+            "`tortoise.relation_write.apply_relation_edges` is gone — re-derive §5.5's live-path claim"
+        )
+        assert not hasattr(TortoiseSDK, "apply_relation_edges"), (
+            "`TortoiseSDK.apply_relation_edges` now exists — the docs' old symbol has become real, so the "
+            "§5.5 correction (and this pin) must be re-derived rather than left claiming it is absent"
+        )
+        capture = inspect.getsource(TortoiseSDK._extract_session_v2)
+        assert "from tortoise.relation_write import apply_relation_edges" in capture, (
+            "`_extract_session_v2` no longer imports `apply_relation_edges` — the hierarchy reader is then "
+            "not on the capture write path at all, and §5.5's reachability claim has to be re-derived"
+        )
 
         registry = PackRegistry(PACKS_DIR)
         registry.load_all()
         declared = pack_hierarchy.declared_hierarchy(registry)
-        assert len(declared) == 6, [type(d).__name__ for d in declared]
+        rows = sorted((d.pack, d.path, d.predicate) for d in declared)
+        assert len(rows) == 6, (
+            "the shipped packs declare a different number of hierarchies than §5.5 measured. The rows are "
+            f"{rows} — re-derive the count in the scope and in `tools/pack_relation_census.py`'s census, "
+            "do not just move the number here"
+        )
 
     def test_the_readers_exist_and_the_catalog_carries_the_pair(self):
         from tortoise.sdk import TortoiseSDK

@@ -294,9 +294,14 @@ does not install still decides the level. The label leg never reaches this seam 
 already exists.** `_matching_row` joins a hierarchy entry to its `relations[]` row on the declared
   `(fromKind, toKind)` (plus `predicate`/`semantics` — `decomposesInto` with `semantics: hasPart` is one
   declaration written twice), and `_binding` turns the match into a write-path verdict. It is
-  **production-reachable on the live path**: `relation_write.plan_relation_edges` (`:631`) calls
-  `plan_hierarchy_edges` over `declared_hierarchy(registry)`, reached from `sdk.apply_relation_edges`
-  (`sdk.py:17200`). **Reuse its join — this is the "do not add a fourth resolver" rule applied to itself.**
+  **production-reachable on the live path**: `relation_write.apply_relation_edges`
+  (`relation_write.py:791`, imported inside `_extract_session_v2` at `sdk.py:17200` and called at `:17201`)
+  → `plan_relation_edges` (`:823`) → `declared_hierarchy(registry)` (`:594`) → `_resolve`
+  (`pack_hierarchy.py:263`) → `_binding` (`:306`) + `_matching_row` (`:333`). ⛔ The **join** is in
+  `_resolve`, **not** in `plan_hierarchy_edges` (`relation_write.py:631`), which matches on the
+  already-resolved `edge.from_kind`/`edge.to_kind`; and the symbol is **not** `sdk.apply_relation_edges`
+  — `TortoiseSDK` has no such method. **Reuse its join — this is the "do not add a fourth resolver" rule
+  applied to itself, and the pin over this chain lives in `tests/test_11656_endpoint_kind_binding_scope.py`.**
 
 **The delta:** use that same map to choose **which relation labels to offer for a pair**, derived from
 `ontology.relations[]` (36 declared relations, **35 of them kind-bearing** — `pm:onBoard` is `declarationOnly`
@@ -333,6 +338,15 @@ undeclared.
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
 | 17 | the prevention guidance lists the declared pairs for an endpoint pair and omits none | a silent gap between gate and guidance |
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
+
+⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **20 test functions / 21 collected**
+(one is parametrised over the two docs). The two populations are deliberately different: the file pins the
+**scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
+(§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
+(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔20 difference is the
+reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
+table's row count against that file, and was stale on both.
 
 **Do not** assert on `create_edge` only — it covers 2 of 35 and leaves **33** untested. **Do not** gate one
 replay fold: there are **two** (pins 15, 15b), and each covers a different door. **No** extractor call counts
@@ -374,8 +388,8 @@ the declared kinds; a read-side census reports the pre-existing population.
 - Retro-active repair of existing edges (R1).
 - Any change to `docs/ONTOLOGY.md` (owner-gated by its own `CRITICAL RULE`).
 - Choosing between the epic's route (A) operator-emission and (B) structural-emission for business relations
-  — `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` §5.3a reserves that for the owner; this
-  scope is route-independent.
+  — the epic plan §5.3a (**carried by `#11685`**) reserves that for the owner; this scope is
+  route-independent.
 - `#11484`'s I10 (`predicate -> {admitted_by, verb, record_carried}`) supplies the predicate→verb/namespace
   map **only**; it carries **no** `fromKind`/`toKind` field, so the pair map is derived **inside this issue**
   from `list_relations()`. Not a blocking dependency.

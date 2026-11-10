@@ -43,8 +43,15 @@ that must be settled before a scope can converge.
   `value_extractor._relation_endpoint_refs` (`:44`), the kind→kind adjacency wired to kind co-selection; and
   `pack_hierarchy._matching_row` (`:194-210`) + `_binding` (`:213`) — the pair→**WRITER** resolver (it joins a
   hierarchy entry to its `relations[]` row on the declared `(fromKind, toKind)` plus `predicate`/`semantics`),
-  production-reachable on the live path via `relation_write.plan_relation_edges` (`:631`) ←
-  `sdk.apply_relation_edges` (`sdk.py:17200`). **This one already exists — reuse its join.**
+  production-reachable on the live path. ⚠️ **Correction (revision 3):** this said
+  `sdk.apply_relation_edges` — that symbol does not exist. `TortoiseSDK` has no such method; the function is
+  `tortoise.relation_write.apply_relation_edges` (`relation_write.py:791`), imported inside
+  `_extract_session_v2` at `sdk.py:17200` and called at `:17201`, which reaches `plan_relation_edges`
+  (`:823`) and hence `declared_hierarchy` (`:594`). The **join** is not in `plan_hierarchy_edges` (`:631`,
+  which matches on the already-resolved `edge.from_kind`/`edge.to_kind`): it is one call deeper, in
+  `declared_hierarchy` (`pack_hierarchy.py:339`) → `_resolve` (`:263`) → `_binding` (`:306`) +
+  `_matching_row` (`:333`), which match on the **declared** `(fromKind, toKind)`. **This one already exists —
+  reuse its join.**
 - The rule belongs on the write path, not in a per-pack validator: a customer's pack ships tomorrow and
   has no validator.
 
@@ -68,9 +75,8 @@ declare `mechanism: IMPL`; they are the only two that **additionally** bind the 
 
 ⇒ **A gate at `create_edge` alone binds at most 2 of 35 declared relations — 6 % — while `create_operator`
 and `create_direct_edge` together reach all 35.** The issue's target ("zero declared relations writable on
-mismatched endpoint kinds") would be satisfiable on paper and false in practice. The epic's
-`docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md` §5.3a point 3 already states this routing; this
-is its consequence for #11656.
+mismatched endpoint kinds") would be satisfiable on paper and false in practice. The epic plan §5.3a point 3
+— **carried by `#11685`, not by this PR** — already states this routing; this is its consequence for #11656.
 
 ### 2.2 On the operator path the declared pair is not on any edge
 
@@ -392,7 +398,7 @@ replay one.
 | gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`sdk.py:18070-18078`) and `ingest` reaches it too (`sdk.py:28497`), it validates nothing about declarations, and `_point_mediated_route` keeps `Object↔Object` on the direct shape while `Subject`/`Event` take the same path (`sdk.py:25058-25060`) — so **33 of the 35** declarations are reachable through it by the public routes (28 `Object↔Object`, 3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and the other 2 are Point-involved (`agent-ops:groundedIn`, `product-strategy:addresses` `useCase→feature`) — `ingest` reifies those 2 while `link_entities` and a raw `create_direct_edge` call both still write them direct, since the Point gate is `ingest`'s alone (`sdk.py:29066-29067`). See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + **both** replay folds (`_create_edges` **and** `projection/__init__.py`'s pass-2b `DirectEdgeCreated` fold); `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; **both** folds (`_create_edges` and the pass-2b `DirectEdgeCreated` fold) must call it too — and the second must read the predicate from `ev["label"]` when present, else `ev["edge_type"]` (§3.3) — or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
-| depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:632` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 35/35 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (**36** declared relations, **35** of them kind-bearing — `pm:onBoard` is `declarationOnly` and maps no pair — over **34** distinct `(fromKind, toKind)` pairs; `venture:asset→venture:program` is declared twice). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |
+| depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** The epic plan §5.3a (carried by `#11685`) defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 35/35 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (**36** declared relations, **35** of them kind-bearing — `pm:onBoard` is `declarationOnly` and maps no pair — over **34** distinct `(fromKind, toKind)` pairs; `venture:asset→venture:program` is declared twice). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |
 | `domain_validators` as a component | it is the **pattern to follow** (call-time read, fail-open-but-named, manifest-pinned test), for a *read-side* grader; a write gate must not fail open to a stale constant | keep both: the validator catches pre-existing damage, the gate prevents new |
 
 **Existing capability to reuse rather than re-implement** (duplication review, file:line evidence in the
