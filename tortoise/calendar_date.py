@@ -431,7 +431,8 @@ def _string_instant(s: str) -> datetime | None:
     # ⚠ NOT the same shape set as the day view, and the difference is
     # DELIBERATE (cycle 7, finding 1 — an earlier version of this comment
     # claimed parity, which would invite the one change this module forbids).
-    # TWO kinds of divergence, and they have different mechanisms:
+    # TWO kinds of divergence IN THIS ARM (not a closed count of the whole
+    # module — see the exceptions named below), with different mechanisms:
     #
     # 1. the day view's TOLERANT PREFIX fallback dates a value whose tail is
     #    unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T+05:00``), and
@@ -448,22 +449,25 @@ def _string_instant(s: str) -> datetime | None:
     #    roll 24:00 to the next midnight: that invents an instant from an hour
     #    the value does not have.
     #
-    # So: the INSTANT view takes whole-value families whose instant it can
-    # actually state; the DAY view takes everything whose calibrated day is
-    # readable, by whole-value grammar OR by prefix.
+    # So: the INSTANT view takes whole-value families whose instant it can state
+    # AND that no recorded ruling refuses; the DAY view takes everything whose
+    # calendar day is readable, by whole-value grammar OR by prefix. TWO stated
+    # exceptions keep "whole-value" from being sufficient:
     #
-    # ⚠ The claim is scoped to THIS arm, not universal: the compact /
-    # ISO-week date with an OFFSET and no time is whole-value and day-dated
-    # (:func:`_compact_date_offset`) yet NOT always orderable, and WHICH
-    # spellings are is decided by ``_created_sort_key``'s length-and-separator
-    # gate (it needs a ``-``, ``T`` or ``/``). A ``+``-spelled COMPACT form has
-    # none — ``20230520+05:00`` and ``2026W243+05:00`` never reach the gate and
-    # bucket as ``(1, text)`` — while ``20230520-05:00`` arrives because the
-    # NEGATIVE offset supplies the ``-``, and the DASHED ISO-week
-    # ``2023-W43-2+05:00`` arrives by its own dashes. So the gap is
-    # sign-and-spelling dependent, not a uniform class. It predates #11646, is
-    # untouched here, and is named rather than left to be rediscovered as a
-    # violation of this comment.
+    # * an EPOCH SPELLED AS A STRING is day-dated here and refused by
+    #   ``calendar_datetime`` BY RULING (#9202 — the asymmetry is stated in the
+    #   module docstring), so it is not orderable however whole-value it looks;
+    # * the SEPARATOR-FREE compact / ISO-week date carrying an offset or ``Z``
+    #   and no time is whole-value and day-dated (:func:`_compact_date_offset`)
+    #   yet NOT orderable — ``_created_sort_key``'s gate is a substring test for
+    #   a ``-``, ``T`` or ``/`` ANYWHERE in the value, and ``20230520+05:00``,
+    #   ``20230520Z``, ``2026W243+05:00``, ``2023W206Z`` contain none. ⚠ It is a
+    #   SEPARATOR asymmetry, NOT a sign one: the extended ISO-week form
+    #   ``2023-W43-2+05:00`` carries ``-`` in the DATE and orders (key 0) despite
+    #   its positive offset, while in the separator-free form the offset's own
+    #   sign is what decides (``2026W243-05:00`` orders, ``2026W243+05:00`` does
+    #   not). Both predate #11646, are untouched here, and are named rather than
+    #   left to be rediscovered as violations of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

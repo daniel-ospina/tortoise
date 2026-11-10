@@ -676,10 +676,17 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     Scoped to the DATE+TIME families on purpose: whole-value shapes the day view
     dates but this view deliberately refuses are an EPOCH spelled as a STRING
     (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s module
-    docstring) and a compact / ISO-week date + offset with no time
-    (``20230520+05:00``, ``2026W243-05:00`` — the gap named on #11646/#11708).
-    A description claiming every whole-value shape would invite the widening
-    this module forbids.
+    docstring), a SEPARATOR-FREE compact / ISO-week date carrying an offset or
+    ``Z`` with no time (``20230520+05:00``, ``20230520Z``, ``2026W243+05:00`` —
+    the gap named on #11646/#11708; the sort gate is a substring test for ``-``,
+    ``T`` or ``/`` ANYWHERE, so the extended ``2023-W43-2+05:00`` orders despite
+    its positive offset, and only in the separator-free form does the offset's
+    sign decide: ``2026W243-05:00`` orders, ``2026W243+05:00`` does not), and an
+    HOUR-24 spelling
+    (``2023-05-20T24:00:00``, which the day view dates by the whole-value
+    grammar and the instant view refuses at ``_match_naive``). A description
+    claiming every whole-value shape would invite the widening this module
+    forbids.
 
     ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
     day view dates a value whose TAIL is unreadable, and the instant view must
