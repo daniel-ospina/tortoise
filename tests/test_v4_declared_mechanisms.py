@@ -905,27 +905,37 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
         if rel.name.endswith(CHANGELOG_SUFFIX):
             continue  # the same exclusion the marker scan makes
         for surface in _surfaces(docs_dir):
-            # Resolved against the surface's OWN root (`<root>/docs/epics`
-            # -> `<root>`): an entry is repo-relative, so the root its surface
-            # belongs to is the base every `declared_in:` path is written from.
-            # ⚠️ STATED ASSUMPTION: every surface sits exactly TWO levels below
-            # the root, so `parent.parent` IS that root. True for both surfaces
-            # today (`docs/architecture`, `docs/epics`), and a third surface at
-            # a different depth would resolve entries against the wrong root and
-            # report the row's declaring document as UNNAMED — a FALSE RED, whose
-            # remedy names a document that is in fact on disk and marked, never a
-            # silent pass. So: add a surface here only at this depth, or derive
-            # the root from the surface instead of counting its parents.
-            surface_root = surface.parent.parent
-            try:
-                resolved = (surface_root / rel).resolve()
-            except (OSError, RuntimeError, ValueError):
-                continue  # unresolvable: not attributable
-            try:
-                if resolved.is_relative_to(surface.resolve()):
-                    targets.add(resolved)
-            except (OSError, RuntimeError, ValueError):
-                continue
+            # ⛔ THE ENTRY'S ROOT IS DERIVED FROM THE SURFACE, not counted off it
+            # (review cycle 7, P2). The previous form hard-coded
+            # `surface.parent.parent` — "every surface sits exactly two levels
+            # below the root" — so a surface at ANY other depth resolved its
+            # entries against the wrong root, every one of them landed outside
+            # the surface, and they were dropped from `targets`. The comment
+            # there called that "a FALSE RED …, never a silent pass"; MEASURED it
+            # is the fail-open instead: with a correctly-rooted surface also in
+            # `targets`, `scanned_targets` stays non-empty, so the per-document
+            # "carries no marker" branch still runs — for the OTHER surface — and
+            # a declared-but-UNMARKED document in the deeper surface is reported
+            # NOWHERE (`membership_errors -> []` on a tree where the deeper
+            # document carries no marker at all).
+            #
+            # Matching the surface's trailing components against the entry's
+            # LEADING ones (longest match first) makes the document simply
+            # `surface / <the rest of the entry>`, so the root never has to be
+            # guessed and a third surface at any depth is attributable. A
+            # surface whose own trailing components do not prefix the entry owns
+            # no part of it, which is what keeps `docs/architecture/a.md` out of
+            # the `docs/epics` surface.
+            for depth in range(min(len(surface.parts), len(rel.parts) - 1), 0, -1):
+                if surface.parts[-depth:] != rel.parts[:depth]:
+                    continue
+                try:
+                    resolved = (surface / Path(*rel.parts[depth:])).resolve()
+                    if resolved.is_relative_to(surface.resolve()):
+                        targets.add(resolved)
+                except (OSError, RuntimeError, ValueError):
+                    pass  # unresolvable: not attributable
+                break
     return targets
 
 
@@ -7825,6 +7835,42 @@ def test_two_surfaces_sharing_a_DIRECTORY_NAME_are_a_verdict(tmp_path) -> None:
     row = _row("x", declared_in=[str(one / "x.md")])
     assert membership_errors([row], surfaces), "an aliased pair must not pass membership"
     assert any("share the directory name" in e for e in membership_errors([row], surfaces))
+
+
+def test_a_surface_at_another_DEPTH_is_still_attributable(tmp_path) -> None:
+    """The entry's root is DERIVED from the surface, never counted off it.
+
+    Measured before the fix (review cycle 7, P2): `_scanned_targets` computed
+    `surface_root = surface.parent.parent`, so a surface sitting at any other
+    depth resolved its entries against the WRONG root, every one of them landed
+    outside the surface, and they were dropped from `targets`. The comment there
+    called that consequence "a FALSE RED … never a silent pass" — measured, it is
+    the fail-open: with a correctly-rooted surface also in `targets`,
+    `scanned_targets` stays non-empty, so the per-document branch still runs for
+    the OTHER surface and a declared-but-UNMARKED document in the deeper surface
+    is reported NOWHERE.
+
+    Both real surfaces sit at depth 2, which is exactly why this was latent, so
+    the pin has to build the depth itself.
+    """
+    arch = tmp_path / "docs" / "architecture"
+    deep = tmp_path / "x" / "y" / "z" / "deepdocs"
+    arch.mkdir(parents=True)
+    deep.mkdir(parents=True)
+    (arch / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    (deep / "d.md").write_text("NO MARKER\n", encoding="utf-8")
+    surfaces = (arch, deep)
+    row = _row("x", declared_in=["docs/architecture/a.md", "x/y/z/deepdocs/d.md"])
+    # the precondition: before the fix the deeper entry never reached `targets`.
+    targets = _scanned_targets(row["declared_in"], surfaces)
+    assert (deep / "d.md").resolve() in targets, sorted(str(t) for t in targets)
+    assert targets == {(arch / "a.md").resolve(), (deep / "d.md").resolve()}
+    errors = membership_errors([row], surfaces)
+    assert any("rotted away" in e and "d.md" in e for e in errors), errors
+    # …and the marker being present clears it, so the rule did not merely get
+    # louder: the same tree with the deep document marked is clean.
+    (deep / "d.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    assert membership_errors([row], surfaces) == []
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
