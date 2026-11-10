@@ -133,7 +133,7 @@ the HOLD half and is `not-implemented`. So after C4 the write path would impleme
 cannot see: the `#5064` defect running **inverted**, in the epic whose own instrument extends that registry.
 **The scope requires one of two statements in C4's child, not silence:** (a) C4 adds a row (a new `s3_attach`,
 or a `preconditions:` edge onto `failure_policy`), or (b) C4 records **why** the registry cannot express it,
-citing `00-plan.md:369`'s criterion ("only if the registry's contract can express it"). Silence is the defect.
+citing `00-plan.md`'s *evidence*-seam criterion ("only if the registry's contract can express it"). Silence is the defect.
 
 ### Boundary Rationale
 

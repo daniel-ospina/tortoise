@@ -257,7 +257,7 @@ row's `floor`/`denominator` without saying so. Both are the *"record may not inv
 section argues against.
 **Decision: A5 keeps its registered floor.** The constructibility question the `≥5 slots` was trying to ask (does the
 corpus have any *bindable subject slots* at all?) is **the metric's own reading**, not a REFUSED boundary: it lives in
-the `metric` cell, and `02-scope.md:236` already states the honest outcome — a run that finds none reports **why**
+the `metric` cell, and `02-scope.md`'s **E2E-4** already states the honest outcome — a run that finds none reports **why**
 ("the binder did not run / the corpus has no bindable slots") instead of reading as a zero. A5 is therefore **not** a
 second re-authored row: §4.4's *"it re-authors A4's row, so the set stays 12"* stays true, and no registered A5
 text moves.
@@ -443,7 +443,7 @@ load-bearing rather than decorative:
   that imports it — not reporting a finding.
 
 **A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
-2026-11-09 — relayed into `02-scope.md:76-82`, and recorded on `#4432` comment `6751932659`, which is its home — sets A4's bar as
+2026-11-09 — relayed into `02-scope.md` §A4, and recorded on `#4432` comment `6751932659`, which is its home — sets A4's bar as
 *"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
 reverse that ruling, which is a reopen, not a plan edit.
 
