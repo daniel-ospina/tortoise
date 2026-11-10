@@ -1034,9 +1034,15 @@ def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
 def test_wire_identity_never_moves_an_existing_key():
     """#10540's inertness claim, and the reason the camel source sits AFTER
     the ``lme_session_index`` bucket: **every key an IDENTIFIED hit already
-    had stays byte-identical** (a snake ``session_id``; an
+    had that is not PADDED stays byte-identical** (a snake ``session_id``; an
     ``lme_session_index`` bucket), so the census #8713 measured cannot move.
-    Only the PHANTOM keys change — those are the defect being fixed.
+
+    ⚠️ #11382 scoped that sentence: a PADDED-but-real snake id is an
+    IDENTIFIED key and it DOES move (``'  s1  '`` → ``'s1'``), on purpose —
+    that is the defect, not a phantom (`retrieval.session_key_of`'s own page
+    says so, and the flagged key below skips it for exactly that reason).
+    What stays byte-identical is every key that is a real identity already in
+    normal form; the PHANTOM keys are the other class that changes.
 
     The eval's pool hits carry the snake ``session_id``
     (``tools/longmem_eval/retrieve.py``: ``{"session_id": p.get("session_id",
@@ -1059,8 +1065,64 @@ def test_wire_identity_never_moves_an_existing_key():
     assert session_key_of({"id": "e4", "sessionId": None}) == "idx:point:e4"
     assert session_key_of({"id": "e5", "sessionId": ""}) == "idx:point:e5"
     # non-str spellings are refused by the isinstance guard, not stringified
+    # — on BOTH spellings (#11382). Before #11382 only the camel leg had the
+    # guard: the snake leg returned the value verbatim, so
+    # ``{"session_id": 5}`` keyed the int ``5`` and all three key-reading
+    # callers then raised ``AttributeError`` on ``.startswith``
+    # (``seeded_sessions`` through ``_is_real_session_id``,
+    # ``reader_window_displacement``'s ``idx:`` set comprehensions, and
+    # ``coverage_loop.coverage_gap``). ⚠️ For an UNHASHABLE value (``[1]``) the
+    # exception CLASS depends on which runs first: ``coverage_gap`` raises
+    # ``TypeError: unhashable type`` where it builds a set around the key,
+    # while the other two reach the ``.startswith`` ``AttributeError`` before
+    # any hash is taken — measured on the pre-fix tree, so do not read the
+    # ``TypeError`` as universal. The loop runs both spellings on purpose: two
+    # per-branch blocks would let a one-sided regression pass, which is the
+    # shape #11382 exists to close.
     for junk in (0, 5, True, {"a": 1}, ["s"]):
-        assert session_key_of({"id": "e6", "sessionId": junk}) == "idx:point:e6"
+        for spell in ("sessionId", "session_id"):
+            assert session_key_of({"id": "e6", spell: junk}) == (
+                "idx:point:e6"), spell
+
+
+def test_a_non_str_session_identity_is_discarded_not_keyed_11382():
+    """#11382, the NO-`id` half of the non-str arm: a non-str identity is
+    DISCARDED, so the hit falls all the way to the identity-less bucket.
+
+    Its own test, not a tail of the arm above, so each guard has an
+    attributable mutation row: in one function the id-bearing loop fails
+    first and this assert could never be the row that goes red.
+
+    ⚠️ This is the one place the fail-closed leg FUSES two distinct values:
+    with no ``id`` and no ``lme_session_index``, ``{"session_id": 5}`` and
+    ``{"session_id": 6}`` are the SAME ``idx:-1`` bucket — and so is a hit
+    carrying no identity at all. Pinned deliberately rather than left silent,
+    because the alternative (keying the raw int) is the shape this arm
+    replaces: pre-#11382 the two were distinct dict keys, and the callers that
+    read the key as TEXT crashed on them — ``seeded_sessions`` (through
+    ``_is_real_session_id``'s ``.startswith``), ``coverage_loop.coverage_gap``
+    and ``reader_window_displacement``. ⚠️ Not EVERY caller did: measured on
+    the pre-fix tree, ``dedup_pool``, ``session_diverse_order`` and
+    ``reinjection_merge_order`` only DICT-KEY the value and returned normally
+    — which is why the hazard was a crash on three callers, not a universal
+    one. It binds only the untyped seam
+    ``retrieval.session_key_of`` documents — no in-repo pool carries a
+    non-``str`` session id — and it is the same answer the camel leg has given
+    since #10540, now spelled by both.
+
+    An ``id`` changes the answer, which is why the arm above asserts
+    ``idx:point:e6``: the per-hit bucket is per-ID, and only a hit with no id
+    at all reaches the shared ``idx:-1``.
+    """
+    for spell in ("sessionId", "session_id"):
+        assert session_key_of({spell: 5}) == "idx:-1", spell
+        # ... a SECOND distinct value lands in the same bucket, which is the
+        # fusion this test exists to pin: 5 and 6 are one identity-less bucket.
+        assert session_key_of({spell: 6}) == "idx:-1", spell
+        # ... and an explicit index still outranks the phantom bucket, so the
+        # collapse above cannot swallow an eval hit's own ``idx:{n}``.
+        assert session_key_of({spell: 5, "lme_session_index": 3}) == (
+            "idx:3"), spell
 
 
 def test_wire_identity_is_stripped_like_the_reader_names_it():
@@ -1078,21 +1140,25 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     that is the neighbouring test's baseline, not this one's.)
 
     ⛔ Scope — what the strip does NOT do (corrected: the earlier wording
-    argued this backwards). The fetch groups by
-    ``coalesce(p.session_id, s.id)`` — the RAW STORED spelling. So if a
-    stored ``:Session`` id carried surrounding whitespace, the *stripped*
-    seed key is the one that could never equal it, and the strip would
-    CAUSE a charged-then-dropped group rather than prevent it. What makes
-    it unreachable is the WRITER'S SPELLING, not the index: #9599 indexes
-    the TRIMMED term, so a padded ``:Session`` IS findable by its trimmed
-    spelling, and a writer that names the id TRIMMED wires the
-    ``CONTAINS`` edge onto a padded node — the fetch then returns the RAW
-    padded key. It is unreachable only while every writer spells the id
-    exactly as stored, and normalising both sides is #9599's decision. On a
-    REAL product hit the strip is also a no-op, because
-    ``sdk.tortoise_fts_query`` sanitises the wire value at the producer.
-    What this test therefore pins is exactly the hand-built half: the pool
-    and the reader agree on whether a hit HAS an identity, and on which.
+    argued this backwards, and #11382 then closed it). The fetch groups by
+    ``coalesce(p.session_id, s.id)`` — the RAW STORED spelling — so a
+    *stripped* seed key ALONE could never equal it, and a one-sided strip
+    CAUSES a charged-then-dropped group rather than preventing it. That is
+    why #11382 normalises BOTH sides (the fetch's group key through the same
+    ``retrieval.normalize_session_key``) instead of tightening one; the
+    one-sided shape is pinned as the red case by
+    ``test_padded_session_id_is_not_charged_then_dropped_11382``. What is
+    still UNSETTLED is the STORED spelling, i.e. whether the write door
+    should refuse or normalise a padded id, and whether two nodes (``s1`` /
+    ``  s1  ``) can coexist — an OPEN OWNER QUESTION recorded on the CLOSED
+    #9599, whose home is ``tortoise/ids.py``; do not read that issue's closure
+    as a decision about padding. The key normalisation neither merges nor
+    rejects
+    what the write door accepted. On a REAL product hit the strip is a
+    no-op, because ``sdk.tortoise_fts_query`` sanitises the wire value at
+    the producer. What this test therefore pins is exactly the hand-built
+    half: the pool and the reader agree on whether a hit HAS an identity, and
+    on which.
 
     Stripping is not filtering: the reader's ALLOWLIST is deliberately not
     applied here (``session_key_of``'s docstring says why), so this pins the
@@ -1141,6 +1207,273 @@ def test_injected_group_anchors_on_its_own_sessions_product_base_ranks():
     # additive, never evicting: every base hit survives, in order
     assert sorted(h["id"] for h in merged) == [
         "A_t0", "A_t1", "B_t0", "B_t1"]
+
+
+def test_one_session_id_resolves_to_one_key_whichever_spelling_11382():
+    """#11382 red-first: ONE session id, ONE key — whichever spelling and
+    whichever whitespace it arrives with.
+
+    The two halves of the source-session arm read a session identity from
+    two DIFFERENTLY-PRODUCED strings: the seed key comes from the pool HIT
+    (stripped at the wire producer, ``_safe_session_tag``), the group key
+    from the GRAPH (``coalesce(p.session_id, s.id)``, never stripped at the
+    write door). Before this fix the snake leg was raw and the camel leg was
+    stripped, so a padded-but-REAL id — a shape ``tortoise/ids.py``
+    explicitly does NOT refuse (PADDED-but-REAL, #9599) — resolved to
+    ``"  s1  "`` through one spelling and ``"s1"`` through the other.
+    MEASURED at ``origin/main``:
+
+        session_key_of({"session_id": "s1"})  -> "s1"
+        session_key_of({"sessionId":  "s1"})  -> "s1"
+        session_key_of({"session_id": "  s1  "}) -> "  s1  "   (raw)
+        session_key_of({"sessionId":  "  s1  "}) -> "s1"       (stripped)
+    """
+    spellings = [
+        {"id": "p1", "session_id": "s1"},
+        {"id": "p1", "session_id": "  s1  "},
+        {"id": "p1", "sessionId": "s1"},
+        {"id": "p1", "sessionId": "  s1  "},
+    ]
+    assert {session_key_of(h) for h in spellings} == {"s1"}
+
+    # ⛔ NOT over-normalised — the other direction of the same test. Stripping
+    # must not FUSE distinct sessions into one bucket, and must not blank a
+    # real id into the phantom namespace:
+    assert session_key_of({"id": "p", "session_id": "s2"}) == "s2"
+    assert session_key_of({"id": "p", "sessionId": "s2"}) == "s2"
+    assert session_key_of({"id": "p", "session_id": "s 1"}) == "s 1"
+    # a whitespace-only value is still NOT an identity (it fails closed to the
+    # per-hit bucket on both spellings, as #10540 pinned on the camel leg)
+    for junk in ("  ", "\t\n"):
+        assert session_key_of({"id": "p", "session_id": junk}) == (
+            "idx:point:p")
+        assert session_key_of({"id": "p", "sessionId": junk}) == (
+            "idx:point:p")
+    # ... and the per-session cap therefore treats the four spellings as ONE
+    # session. Measured: pre-fix the two buckets survived one chunk each —
+    # ``['c0', 'c3']`` (raw ``'  s1  '`` and stripped ``'s1'``) — and after
+    # the fix ONE bucket survives at cap=1.
+    pool = [_chunk(f"c{i}", "  s1  ") for i in range(3)] + [
+        _chunk("c3", "s1")]
+    assert [h["id"] for h in dedup_pool(pool, max_chunks_per_session=1)] == [
+        "c0"]
+
+
+# ── the group side: the fetch's key is the SAME key as the seed's ───────
+def test_padded_session_id_is_not_charged_then_dropped_11382():
+    """#11382, the arm-level direction: a padded id must be SEEDED, FETCHED
+    and SPLICED — not charged and dropped.
+
+    The fetch groups by ``coalesce(p.session_id, s.id)``, the RAW stored
+    spelling, while the SEED key on the wire side is stripped. MEASURED at
+    ``origin/main`` (a577d0e25c) with one base hit and TWO fetched turns
+    ``('t1', '  s1  ', 0)`` / ``('t2', '  s1  ', 1)``, and the two spellings
+    land in DIFFERENT places — which is the whole point, and is why the
+    drop arm is spelled as the CAMEL pool hit:
+
+        pool hit {session_id: '  s1  '}   (snake — the RAW side of the pair)
+            by_session -> ['  s1  ']   seeds -> ['  s1  ']
+            merged     -> ['p1','t1','t2']   NOTHING dropped: both sides
+                                            were raw, so they agreed on a
+                                            RAW key
+        pool hit {sessionId: '  s1  '}    (camel — the STRIPPED side)
+            by_session -> ['  s1  ']   seeds -> ['s1']
+            merged     -> ['p1']        sessions=0, injected=0
+                                        with fetch['total'] == 2 CHARGED
+
+    The group key is RAW under BOTH spellings (one ``coalesce``, one stored
+    id); what varies is the POOL HIT / seed side, and that is the divergence:
+    one session, two keys, and only the raw one can ever equal the group.
+
+    So the pre-fix defect is not "a padded id is always dropped": it is that
+    the SAME session resolves to two keys and only one of them can ever match
+    the graph — the snake spelling gets the raw key, the camel (and any wire
+    caller) the stripped one. Both spellings are asserted below, and each one
+    fails on its own at ``origin/main`` (snake: ``['  s1  '] != ['s1']`` on
+    the group key; camel: the dropped merge). ⚠️ This is also why the fix is
+    NOT "normalise the seed" alone (what #10540 did for the camel leg): that
+    one-sided strip is what CAUSES the drop, so the group key is normalised
+    too.
+    """
+    rows = [("t1", "  s1  ", 0), ("t2", "  s1  ", 1)]
+    fetch = source_session_chunk_pass(
+        _FakeProj(rows=rows), ["p1"], pool_ids={"p1"})
+    assert list(fetch["by_session"]) == ["s1"]   # ONE normalised group key
+    assert [r["session_id"] for r in fetch["by_session"]["s1"]] == [
+        "s1", "s1"]
+    assert fetch["total"] == 2
+
+    for spell in ("session_id", "sessionId"):
+        padded_pool = [{"id": "p1", spell: "  s1  ",
+                        "point_kind": TURN_POINT_KIND}]
+        seeds = seeded_sessions(padded_pool, window=5, limit=5)
+        assert [s.session_id for s in seeds] == ["s1"], spell
+
+        merged = reinjection_merge_order(
+            padded_pool, fetch["by_session"],
+            seed_order=[s.session_id for s in seeds],
+            max_chunks_per_session=10)
+        # both turns spliced: charged AND delivered, whichever spelling
+        assert [h["id"] for h in merged] == ["p1", "t1", "t2"], spell
+
+    # ⛔ NOT over-widened, and this arm DISCRIMINATES against the tempting
+    # "just normalise harder" (#11382 review): dropping EVERY space would fuse
+    # `'  s 1  '` (pool hit) with `'s1'` (group key), so the group would be
+    # ANCHORED after that base hit. Under `strip` they are two identities and
+    # the unanchored group falls to the defensive TAIL — which is the only
+    # place the difference is visible, hence TWO base hits (with one, an
+    # anchored splice and a tail append produce the same list).
+    spaced = {"id": "p1", "session_id": "  s 1  ",
+              "point_kind": TURN_POINT_KIND}
+    assert session_key_of(spaced) == "s 1"
+    tail = reinjection_merge_order(
+        [spaced, {"id": "p2", "session_id": "s2",
+                  "point_kind": TURN_POINT_KIND}],
+        {"s1": [{"id": "x1", "session_id": "s1"}]},
+        seed_order=["s1"], max_chunks_per_session=10)
+    assert [h["id"] for h in tail] == ["p1", "p2", "x1"]
+    # ... and a group whose session is not in ``seed_order`` at all is not
+    # spliced into someone else's block (groups are built over ``order``, so
+    # an inconsistent caller/group pair contributes nothing — pre-existing
+    # behaviour, pinned so the normalisation cannot widen it)
+    other = reinjection_merge_order(
+        [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+         {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND}],
+        {"s2": [{"id": "x2", "session_id": "s2"}]},
+        seed_order=["s1"], max_chunks_per_session=10)
+    assert [h["id"] for h in other] == ["p1", "p2"]
+
+
+def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
+    """#11382, the CUSTOM-KEY arm: a caller-supplied ``session_key`` that
+    returns the RAW stored id must not desynchronise the two halves of the
+    pair.
+
+    ``seeded_sessions`` normalises what it emits; before this PR
+    ``reinjection_merge_order`` keyed the pool with the raw custom key, so its
+    ``last_rank`` map never matched a normalised seed. MEASURED, three trees,
+    same fixture (pool ``['p1'('  s1  '), 'p2'('s2'), 'p3'('s2')]``, group for
+    ``s1`` = ``['t1','t2']``, ``seed_order`` from ``seeded_sessions``):
+
+        origin/main                      -> ['p1','p2','p3']
+                                           (group DROPPED: the raw seed key
+                                           matches neither ``order`` nor
+                                           ``last_rank``, so ``groups`` is
+                                           empty and the merge short-circuits)
+        one-sided (seeds normalised,
+          merge raw)                     -> ['p1','p2','p3','t1','t2']
+                                           (group in the defensive TAIL —
+                                           the shape this test exists for)
+        both-sided (this PR)             -> ['p1','t1','p2','p3','t2']
+                                           (= the assertion below; the guard
+                                           still pushes ``t2`` past its window
+                                           cap, which is the guard working,
+                                           not the seed/merge split)
+
+    The tail is reader-visible: the reader consumes a PREFIX of the pool, so
+    a tail-appended group is context it can lose. No shipped caller supplies
+    ``session_key=`` here (this file's ``raw_key`` tests are what pin the
+    contract; ``dedup_pool``'s own custom-key path is shipped in
+    ``tortoise/ask_lane.py`` etc.), so this pins the GUARANTEE rather than a
+    live lane.
+    """
+    def raw_key(hit: dict) -> str:
+        return hit.get("session_id") or ""
+
+    pool = [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+            {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND},
+            {"id": "p3", "session_id": "s2", "point_kind": TURN_POINT_KIND}]
+    seeds = seeded_sessions(pool, window=9, limit=9, session_key=raw_key)
+    assert [(s.session_id, s.point_id) for s in seeds] == [
+        ("s1", "p1"), ("s2", "p2")]
+
+    added = {"s1": [{"id": "t1", "session_id": "  s1  "},
+                    {"id": "t2", "session_id": "  s1  "}]}
+    merged = reinjection_merge_order(
+        pool, dict(added), seed_order=[s.session_id for s in seeds],
+        session_key=raw_key, max_chunks_per_session=9)
+    assert [h["id"] for h in merged] == ["p1", "t1", "p2", "p3", "t2"]
+    # ... which IS the default key's answer on the same pool, so the custom
+    # key is normalised into the SAME namespace rather than a second one. (The
+    # guard still keeps s1 to `per_session_cap` in the window — t2 is pushed
+    # past it, which is the guard doing its job, not the seed/merge split.)
+    default_merged = reinjection_merge_order(
+        pool, dict(added), seed_order=["s1", "s2"],
+        max_chunks_per_session=9)
+    assert [h["id"] for h in default_merged] == [h["id"] for h in merged]
+    # the tail shape the raw merge used to produce is NOT what happened: the
+    # group starts at s1's own last base rank, not after every other session
+    assert [h["id"] for h in merged] != ["p1", "p2", "p3", "t1", "t2"]
+
+
+def test_a_self_consistent_raw_caller_still_anchors_its_groups_11382():
+    """#11382, the RAW-CONSISTENT arm: a caller whose ``session_key``, its
+    ``seed_order`` AND its ``added_by_session`` keys are ALL raw and mutually
+    consistent keeps working.
+
+    Normalising only the POOL side of the merge is not a partial fix — it is a
+    REGRESSION for that caller, and nothing errors. MEASURED by reviewing the
+    one-sided version of this change:
+
+        pool ['p1'('  s1  '), 'p2'('s2'), 'p3'('s2')]
+        added {'  s1  ': ['t1'], 's2': ['t9']}   seed_order ['  s1  ', 's2']
+        one-sided -> ['p1','p2','p3','t1','t9']   (BOTH groups in the tail)
+        both-sided -> ['p1','t1','p2','p3','t9']  (each after its own session)
+
+    Reader-visible: the reader consumes a PREFIX of the pool, so a
+    tail-appended group is context it can lose.
+    """
+    def raw_key(hit: dict) -> str:
+        return hit.get("session_id") or ""
+
+    pool = [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+            {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND},
+            {"id": "p3", "session_id": "s2", "point_kind": TURN_POINT_KIND}]
+    added = {"  s1  ": [{"id": "t1", "session_id": "  s1  "}],
+             "s2": [{"id": "t9", "session_id": "s2"}]}
+    merged = reinjection_merge_order(
+        pool, dict(added), seed_order=["  s1  ", "s2"], session_key=raw_key,
+        max_chunks_per_session=10)
+    assert [h["id"] for h in merged] == ["p1", "t1", "p2", "p3", "t9"]
+
+
+def test_the_merge_passes_phantom_keys_through_untouched_11382():
+    """#11382: the merge's normalisation must NOT reach the phantom ``idx:``
+    namespace — that payload is an IDENTITY, not a session id.
+
+    ``session_key_of`` interpolates the raw ``id`` into ``idx:point:{id}`` and
+    the raw index into ``idx:{index}``, deliberately: a Point id carrying
+    boundary whitespace is a DIFFERENT Point, so stripping it fuses two
+    distinct hits into one bucket and lets the C5 cap drop a base hit.
+    MEASURED with a blind strip applied to the produced key:
+
+        dedup_pool(max_chunks_per_session=1) via the authority -> ['p1','p1 ']
+        with the merge's key wrapped blindly                  -> ['p1']
+
+    So this pins that the merge's key IS the authority on the default path —
+    including the phantom legs — which is what ``_merge_key`` exists for.
+    """
+    # two DISTINCT points, no session identity — RAW CHUNKS, because the C5
+    # cap is the only thing that can DROP on a fused bucket (`is_raw_chunk`),
+    # and a non-chunk fixture would pass this arm for the wrong reason
+    # (measured: it did, before this line set the kind).
+    a, b = _chunk("p1", ""), _chunk("p1 ", "")
+    assert session_key_of(a) == "idx:point:p1"
+    assert session_key_of(b) == "idx:point:p1 "
+    assert dedup_pool([dict(a), dict(b)], max_chunks_per_session=1) == [a, b]
+    # the merge keyed by the authority keeps them apart too. The pool needs a
+    # REAL seeded session as well, otherwise the merge short-circuits before
+    # the C5 re-cap (`if not groups: return list(pool)`) and the key is never
+    # used at all.
+    pool = [dict(a), dict(b), {"id": "x1", "session_id": "s1",
+                               "point_kind": TURN_POINT_KIND}]
+    merged = reinjection_merge_order(
+        pool, {"s1": [{"id": "t1", "session_id": "s1"}]}, seed_order=["s1"],
+        max_chunks_per_session=1)
+    ids = [h["id"] for h in merged]
+    assert "p1" in ids and "p1 " in ids, ids   # nothing fused, nothing capped
+    # ... and a phantom bucket is not a REAL seed, so it never anchors a group
+    assert seeded_sessions([dict(a)], window=5, limit=5) == []
 
 
 def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):
@@ -2481,3 +2814,122 @@ def test_the_population_scan_excludes_the_guards_own_body():
         "guard's `def` prefix instead of the END of its body, so this pin can "
         "grade its own commentary (the round-10/11 self-grading class, returned "
         "one block down)")
+
+
+def test_a_non_str_custom_key_is_dropped_not_stringified_11382():
+    """#11382: the merge's ``_merge_key`` FAILS CLOSED on a non-``str`` key —
+    it does not stringify it into a session name.
+
+    Why this needs its own pin: the two directions are behaviourally opposite
+    and only one is right. ``_merge_key(5)`` returning ``""`` (not a session,
+    so the group is dropped) and returning ``"5"`` (a session literally named
+    "5", which can FUSE with a real one) both leave every other test green —
+    measured: the one-line ``else str(value)`` mutant passed the entire
+    six-file seam batch with only this test red once it existed (before it, the
+    batch was green: 849 on the head of the round that found the gap, 851 when
+    the pin landed — the batch's size moves with every test added, so the figure
+    that matters is "nothing else reds"). So the arm needed a row of its own, exactly like the fail-closed
+    snake-id arm one helper over.
+
+    ⚠️ And the docstring's story is the MEASURED one, not the tidy one: with a
+    custom key that returns an ``int``, ``seeded_sessions`` drops every seed
+    BEFORE any fetch (``[]`` — there is nothing to collapse into a bucket), and
+    ``reinjection_merge_order`` drops the groups as well, returning the base
+    pool unchanged. Pre-#11382 the two halves DIFFERED: ``seeded_sessions``
+    RAISED ``AttributeError`` (it reaches ``.startswith`` through
+    ``_is_real_session_id``) while ``reinjection_merge_order`` matched and
+    spliced such a key, so the pair never "worked" together — the direction of
+    this change is a DROP, not a fusion. ⚠️ ``session_reinjection._merge_key``'s
+    own docstring carries the same correction: keep the two copies in step, or
+    the PR ships a claim and the correction of it.
+    """
+    from tortoise.session_reinjection import _merge_key
+
+    assert _merge_key(5) == ""
+    assert _merge_key(True) == ""
+    assert _merge_key(None) == ""
+    # ... a str key is still stripped, so the fail-closed arm cannot be
+    # "return the value unchanged" either
+    assert _merge_key("  5  ") == "5"
+    assert _merge_key("idx:3 ") == "idx:3 "
+
+    def int_key(hit: dict):
+        return hit.get("lme_session_index")
+
+    pool = [_chunk("p1", ""), _chunk("p2", "")]
+    for rank, hit in enumerate(pool):
+        hit["lme_session_index"] = rank
+    # seeds are dropped before the fetch — not stringified into "0"/"1"
+    assert seeded_sessions(pool, session_key=int_key) == []
+    # ... and the merge drops the groups too, returning the base pool's order
+    merged = reinjection_merge_order(
+        [dict(h) for h in pool],
+        {0: [{"id": "t1", "text": "t"}], 1: [{"id": "t2", "text": "t"}]},
+        seed_order=[0, 1], session_key=int_key, max_chunks_per_session=9)
+    assert [h["id"] for h in merged] == ["p1", "p2"], (
+        "a non-str custom key must not acquire an identity: under a "
+        "stringifying mutant these groups splice as '0'/'1'")
+
+
+def test_a_padded_phantom_snake_id_converges_and_goes_unseeded_11382():
+    """#11382, the disclosed CONVERGENCE — pinned, because it loses something.
+
+    An id whose STRIPPED form lands inside the ``idx:`` namespace
+    (``' idx:3 '`` → ``'idx:3'``) now resolves to the phantom key. Two
+    consequences, both measured and both asserted here:
+
+    * the snake spelling now agrees with the camel/wire spelling (which already
+      behaved that way at ``origin/main``, because ``_safe_session_tag``
+      strips) and with an unrelated ``lme_session_index: 3`` bucket;
+    * ⚠️ the snake spelling is consequently NOT SEEDED — at ``8ad61c2ba1``
+      ``seeded_sessions([{"id":"p1","session_id":" idx:3 "}])`` returned
+      ``[(' idx:3 ', 'p1')]`` and spliced; at this head it returns ``[]``,
+      because the strip lands the key on ``_is_real_session_id``'s phantom
+      rejection. So a shape the write door should not have produced stops
+      working BY ACCIDENT, which is the half the fix's prose previously
+      disclosed without a pin.
+    """
+    # the convergence: three spellings, ONE phantom key
+    assert session_key_of({"id": "p", "session_id": " idx:3 "}) == "idx:3"
+    assert session_key_of({"id": "p", "sessionId": " idx:3 "}) == "idx:3"
+    assert session_key_of({"id": "p", "lme_session_index": 3}) == "idx:3"
+    # ... and the loss that follows from it, on both spellings
+    for spell in ("session_id", "sessionId"):
+        assert seeded_sessions([{"id": "p1", spell: " idx:3 "}]) == [], spell
+
+
+def test_two_raw_spellings_of_one_session_both_deliver_11382():
+    """#11382: the merge's ``groups_in`` UNION is what makes "two raw spellings
+    of ONE session arrive as ONE group" true — and it is an arm of its own.
+
+    ``source_session_chunk_pass`` now emits one normalised key per group, so a
+    duplicate can only come from a BESPOKE caller that builds ``added_by_session``
+    itself. Measured on a copy with the union replaced by assignment
+    (``groups_in[sid] = list(rows or [])``): the whole six-file seam batch stays
+    GREEN (851 at the head that found the gap; only this test reds once it
+    exists), and ``t1`` is silently LOST —
+
+        head   -> ['p1','t1','p2','t9','t2']   (both spellings delivered)
+        mutant -> ['p1','t2','p2','t9']        ('t1' dropped, no error)
+
+    which is the round-8 class again (a guard whose regression no test reds), so
+    it gets a row here rather than a comment.
+    """
+    def raw_key(hit: dict):
+        return hit.get("session_id") or ""
+
+    pool = [_chunk("p1", "  s1  "), _chunk("p2", "s2")]
+    added_by_session = {
+        "  s1  ": [{"id": "t1", "session_id": "  s1  ", "text": "t"}],
+        "s1": [{"id": "t2", "session_id": "s1", "text": "t"}],
+        "s2": [{"id": "t9", "session_id": "s2", "text": "t"}],
+    }
+    merged = reinjection_merge_order(
+        [dict(h) for h in pool], added_by_session,
+        seed_order=["  s1  ", "s2"], session_key=raw_key,
+        max_chunks_per_session=9)
+    ids = [h["id"] for h in merged]
+    assert ids == ["p1", "t1", "p2", "t9", "t2"], ids
+    assert "t1" in ids and "t2" in ids, (
+        "both raw spellings of one session must deliver their chunks: an "
+        "assignment instead of a union drops one silently")

@@ -689,6 +689,61 @@ SESSION_TRANSCRIPT_KIND = "session-transcript"
 TURN_POINT_KIND = "event"
 
 
+def normalize_session_key(value: object) -> str:
+    """THE one normalisation of a session identity into a COMPARISON key
+    (#11382), or ``""`` when the value names no session.
+
+    Used by every equality the SOURCE-SESSION arm makes between two session
+    identities: the pool hit's key (:func:`session_key_of`, both spellings),
+    the seed key (:func:`tortoise.session_reinjection.seeded_sessions`, which
+    also covers a caller-supplied key function), the graph's group key
+    (:func:`tortoise.session_reinjection.source_session_chunk_pass`) and the
+    merge's two — the splice anchor and the key it hands to
+    ``guard_and_recap_pool`` (via ``session_reinjection._merge_key``, which
+    passes the phantom ``idx:`` namespace through untouched because that
+    payload is an identity, not a session id). They
+    are SEPARATE reads of separately-produced values, so normalising at only
+    one of them is not a fix: it MOVES the mismatch instead of removing it.
+    #10540 measured exactly that — it stripped the camel leg alone and
+    recorded, correctly, that the stricter key could then never equal the raw
+    ``coalesce(p.session_id, s.id)`` group key, so the seed would be spent
+    and its group dropped. Both sides therefore strip together.
+
+    ⚠️ Scope, stated so this is not read as a universal law of the repo:
+    ``_session_admission_key`` carries its own equivalent ``.strip()`` (it is
+    a different grain's key, and it keeps its own encoding), and seams such
+    as ``session_source_migration._move_in`` and
+    ``tools/longmem_eval/context_assembly_arms.metric9_present`` compare ids raw — each is its
+    own decision, and none of them is a side of THIS arm's comparison.
+
+    The rule is ``.strip()``, and it is deliberately NOT
+    :func:`_safe_session_tag`'s allowlist. Two jobs are being kept apart:
+    ``_safe_session_tag`` decides whether an id is *renderable* into a
+    bracketed annotation zone (blanking it when it is not), while this
+    decides whether two ids are the *same session*. Folding them would let a
+    rendering policy silently drop a real identity out of the comparison —
+    and would move the key of every odd-shaped id on every lane at once,
+    which #10540 ruled a backlog item rather than a rider on its fix.
+
+    Why strip at all: the wire identity a point fetch hands back is built
+    with :func:`_safe_session_tag`, i.e. ALREADY stripped (``sdk.py`` entity
+    branch), while neither ``p.session_id`` nor the ``:Session`` id is
+    stripped at the write door. Whether the write door should refuse or
+    normalise a padded id is NOT settled here, and ⚠️ #9599 is not the
+    tracker item to read for it: that issue is **CLOSED** (it landed the BLANK
+    half), and the PADDED position it deliberately left alone remains an
+    **OPEN OWNER QUESTION recorded in a comment on it**, whose home is
+    ``ids.py`` (three candidate answers, already cited there). Do
+    not read #9599's closure as a decision about padding. So this helper
+    settles nothing about storage. It makes the READ/COMPARE seam agree
+    whichever way that question lands, and a padded-but-real id (``"  s1  "``) keeps
+    its identity rather than becoming nameless.
+    """
+    if not isinstance(value, str):
+        return ""
+    return value.strip()
+
+
 def session_key_of(hit: dict) -> str:
     """A hit's pool session identity — the AUTHORITY for the retrieval
     pool's bucket key (C4 #2517). ``session_id`` when present, else the
@@ -701,15 +756,22 @@ def session_key_of(hit: dict) -> str:
 
     Identity semantics, in precedence order (#3591, #10540):
 
-    * ``session_id`` present and truthy ⇒ that id;
+    * ``session_id`` — through :func:`normalize_session_key` — present,
+      truthy and a ``str`` ⇒ that id (a truthy NON-``str`` is not an identity
+      and falls through to the legs below, #11382);
     * else ``lme_session_index`` PRESENT (an explicit ``-1`` included) ⇒
       ``idx:{n}``, the eval lane's own index bucket. Distinct indices are
       distinct buckets even when ``session_id`` is absent/empty (``""`` is
       falsy but not identity-less), and an explicit ``-1`` is an explicit
       sentinel rather than indistinguishability — which is why it keeps the
       historical key and is NOT rerouted to the per-hit bucket below;
-    * else ``sessionId`` (the CAMEL wire spelling) when a non-blank ``str`` ⇒
-      that id (**#10540**). This is the spelling the product's own point fetch
+    * else ``sessionId`` (the CAMEL wire spelling) — through the SAME
+      :func:`normalize_session_key` as the snake leg — when non-blank ⇒
+      that id (**#10540**, normalised alike by **#11382**). Its position
+      AFTER the index bucket is #10540's deliberate choice and is unchanged
+      here: it keeps every key an already-identified eval hit had
+      BYTE-IDENTICAL, so #8713's receipt cannot move. This is the spelling
+      the product's own point fetch
       emits: ``tortoise_fts_query`` resolves a Point's session from
       ``n.sessionId`` / the snake prop / the ``:Session`` ``CONTAINS`` edge
       and then POPs the snake key — for EVERY point hit it returns, turn and
@@ -775,75 +837,109 @@ def session_key_of(hit: dict) -> str:
     hit used to get IS the defect, not the bucket it names.
 
     Precedence — why ``sessionId`` sits AFTER the index bucket (#10540):
-    every key an identified hit already had stays BYTE-IDENTICAL — a hit
-    carrying ``session_id`` keeps that id, and a hit carrying
-    ``lme_session_index`` keeps its index bucket (the eval's pool hits carry
-    BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured before
-    this change — #8713's, which this arm must not disturb — cannot move).
-    The keys that DO change are exactly the PHANTOM ones — ``idx:point:{id}``,
-    and the ``idx:-1`` bucket that a hit carrying no ``id`` falls to — which
-    is the defect: a hit that reaches that branch today falls back only
-    because it carries no identity in a spelling this function reads.
+    on that change every key an identified hit already had stayed
+    BYTE-IDENTICAL — a hit carrying ``session_id`` kept that id, and a hit
+    carrying ``lme_session_index`` kept its index bucket (the eval's pool hits
+    carry BOTH, ``tools/longmem_eval/retrieve.py``, so a census measured
+    before it — #8713's, which this arm must not disturb — could not move).
+    The keys #10540 changed were exactly the PHANTOM ones — ``idx:point:{id}``,
+    and the ``idx:-1`` bucket that a hit carrying no ``id`` fell to — which
+    was the defect: a hit reached that branch only because it carried no
+    identity in a spelling the function read.
 
-    ⛔ Not FILTERED — but the camel leg IS ``strip()``ped, and the two are
-    different questions. ⚠️ On a REAL product hit this ``strip()`` is a
-    no-op, because the wire value was already sanitised at its PRODUCER:
-    ``sdk.tortoise_fts_query`` runs the resolved id through
-    ``_safe_session_tag`` (strip + allowlist) before it lands on the hit,
-    so an id outside the allowlist arrives as ``""`` and falls through to
-    the per-hit bucket on the reader's and the pool's read alike. So the
-    strip binds the HAND-BUILT shapes only: NEITHER annotator writes
+    ⚠️ #11382 SUPERSEDES the "byte-identical" half of that paragraph, and
+    does it on purpose: normalising BOTH legs moves THREE CLASSES of shape,
+    and the first is a REAL identity, not a phantom. Every move measured
+    pre-fix → post-fix is inside these three classes, and ⚠️ no COUNT is
+    published on purpose — a count is a property of the probe's shape list,
+    not of the rule (different natural shape lists give different totals), so
+    the claim worth making is the classes, and each is pinned behaviourally —
+    the padded and whitespace-only classes by
+    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``, and
+    the non-``str`` class by ``test_wire_identity_never_moves_an_existing_key``
+    (id-bearing: ``idx:point:e6`` in its fixture — ``idx:point:{id}`` in general)
+    together with
+    ``test_a_non_str_session_identity_is_discarded_not_keyed_11382`` (no id:
+    ``idx:-1``). The shapes are:
+    ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
+    — #9599's shape — whose key moves because it is the defect: it could only
+    ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
+    the index / wire leg (then the per-hit leg: ``idx:point:p`` with an id,
+    ``idx:-1`` without); ``session_id='   '`` ⇒ ``'   '`` → the same per-hit
+    leg. The last two are the fail-closed direction
+    :func:`_session_admission_key`'s divergence list records, and no in-repo
+    pool carries either. Everything else — every #8713 census key included
+    (snake + index, unpadded; product turns, whose identity is camel-only) —
+    is byte-identical, because the strip is a NO-OP on a real product hit
+    (the wire value was already sanitised at its producer) and on every eval
+    id. The fully measured surface is the #11382 land description; this page
+    states the one that decides measurements.
+
+    ⛔ Neither leg is FILTERED, but BOTH are ``strip()``ped through ONE
+    helper — :func:`normalize_session_key` — and (#11382) the two legs are
+    normalised by the SAME rule on purpose. ⚠️ On a REAL product hit the
+    strip is a no-op, because the wire value was already sanitised at its
+    PRODUCER: ``sdk.tortoise_fts_query`` runs the resolved id through
+    ``_safe_session_tag`` (strip + allowlist) before it lands on the hit, so
+    an id outside the allowlist arrives as ``""`` and falls through to the
+    per-hit bucket on the reader's and the pool's read alike. So the strip
+    binds the HAND-BUILT shapes only: NEITHER annotator writes
     ``sessionId`` (``annotate_ask_hits`` and ``_annotate_hits`` both stamp
     the SNAKE key), so an annotated hit carrying the camel key got it from
     the sanitising fetch, where the strip is already a no-op.
 
-    What the strip actually closes is therefore narrow and worth stating
-    exactly: a whitespace-only camel value would otherwise key a session
-    the reader calls UNKNOWN (``hit_session_id`` → ``""``) while the pool
-    seeded it — it now falls through to the per-hit bucket, i.e. it fails
-    CLOSED. It moves NO existing key (a padded or whitespace-only camel
-    value was a PHANTOM before this leg existed) and refuses nothing the
-    reader can name. The ALLOWLIST half is deliberately NOT applied here:
-    folding the render sanitizer into the pool identity would silently
-    move the key of every odd-shaped id on every lane at once — a backlog
-    item, not a rider on this fix. There is no injection surface to close
-    either way: this key is a DICT KEY and a comparison operand, never
+    What the strip closes, stated exactly (#10540 + #11382): a
+    whitespace-only value would otherwise key a session the reader calls
+    UNKNOWN (``hit_session_id`` → ``""``) while the pool seeded it — it now
+    falls through, i.e. it fails CLOSED. And a padded-but-REAL id must
+    resolve to ONE key whichever spelling carries it: before #11382 the
+    camel leg stripped and the snake leg did not, so ``{"session_id": "  s1
+    "}`` and ``{"sessionId": "  s1  "}`` — one session, two spellings —
+    keyed ``"  s1  "`` and ``"s1"``. The ALLOWLIST half is deliberately NOT
+    applied here: folding the render sanitizer into the pool identity would
+    silently move the key of every odd-shaped id on every lane at once — a
+    backlog item, not a rider on this fix. There is no injection surface to
+    close either way: this key is a DICT KEY and a comparison operand, never
     interpolated into Cypher and never rendered (the render and the wire go
     through ``hit_session_id``).
 
-    ⛔ And it does NOT close the reverse case — do not read it as doing so.
-    The fetch groups by ``coalesce(p.session_id, s.id)``: the RAW stored
-    spelling. A stored session id carrying surrounding whitespace would
-    therefore have a group key this stripped key can never equal, so the
-    seed would be spent and its group DROPPED (groups are built over
-    ``seed_order``: ``session_reinjection.reinjection_merge_order``) — the
-    strip would CAUSE that, not prevent it. What makes it unreachable is the
-    WRITER'S SPELLING, not the index: #9599 indexes the TRIMMED term, so a
-    padded ``:Session`` IS findable by its trimmed spelling — the engine's
-    own record says a padded row had no findability by its own spelling and
-    gains it by the trimmed one. So every writer that names the id TRIMMED
-    wires the ``CONTAINS`` edge onto a padded node, and the fetch then
-    returns the RAW padded key. It is unreachable only while every writer
-    spells the id exactly as stored. #9599's normalise-both-sides decision
-    is therefore not moot, and this strip is no substitute for it.
+    ⛔ The REVERSE case — the fetch's group key — is CLOSED by #11382, and
+    the earlier note here said it was not. Recorded because it is the
+    measurement that decided the shape of this fix: the fetch groups by
+    ``coalesce(p.session_id, s.id)``, the RAW stored spelling, so while only
+    the SEED key was stripped a stored id carrying surrounding whitespace
+    had a group key the seed key could never equal — the seed was spent and
+    its group DROPPED (groups are built over ``seed_order``:
+    ``session_reinjection.reinjection_merge_order``), i.e. the one-sided
+    strip CAUSED that drop instead of preventing it. So #11382 applies the
+    normalisation to BOTH sides rather than tightening one: the fetch
+    normalises the group key through this same helper, and the splice lookup
+    that joins a group back to its base hits does too. The comparison is now
+    one function applied to every side of it, which is the only shape in
+    which the keys cannot drift. ⚠️ What this does NOT settle, untouched: the
+    STORED spelling, and therefore whether two nodes (``s1`` and ``  s1  ``)
+    can both exist. That is an OPEN OWNER QUESTION recorded on the CLOSED
+    #9599 — ``ids.py`` is its home — not a decision this key makes.
+    This key maps both to one identity; it does not merge or
+    reject what the write door accepted.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
     matches_the_historical_bucket_key`` (the three historical cases, all
     unchanged), ``::test_identity_less_hits_get_a_per_hit_bucket_3591``
-    (the #3591 case) and
+    (the #3591 case),
     ``::test_wire_session_identity_keys_the_pool_and_seeds_the_session``
-    (the #10540 case)."""
-    session_id = hit.get("session_id")
+    (the #10540 case) and
+    ``::test_one_session_id_resolves_to_one_key_whichever_spelling_11382``
+    (the #11382 case — both spellings, padded and not, ONE key)."""
+    session_id = normalize_session_key(hit.get("session_id"))
     if session_id:
         return session_id
     index = hit.get("lme_session_index")
     if index is not None:
         return f"idx:{index}"
-    wire_id = hit.get("sessionId")
-    if isinstance(wire_id, str):
-        wire_id = wire_id.strip()
-        if wire_id:
-            return wire_id
+    wire_id = normalize_session_key(hit.get("sessionId"))
+    if wire_id:
+        return wire_id
     point_id = hit.get("id")
     if point_id:
         return f"idx:point:{point_id}"
@@ -2365,8 +2461,10 @@ def _session_admission_key(
 
     ⛔ The camel leg is here so this grain AGREES with the pool authority
     (:func:`session_key_of`) on every hit whose identity BOTH grains read in
-    the SAME spelling AND the same normalisation (neither padded nor
-    whitespace-only; the divergences below are where they part) — before
+    the SAME spelling AND the same normalisation — the classes where they
+    still part are enumerated further down as the remaining divergences, and
+    a PADDED id used to be one of them until #11382 normalised both sides
+    (the same docstring records that removal) — before
     it, a camel-only pool was N per-hit phantom buckets whose cap never bound
     and which ``seeded_sessions`` read as NO session, while ``session_blocks``
     built N singleton blocks, so ``assemble_session_context`` degraded to the
@@ -2378,38 +2476,58 @@ def _session_admission_key(
     falls through to the per-hit singleton.
 
     ⚠️ Scoped to IDENTIFIED hits — do NOT read the line above as "cannot
-    disagree". Measured, the two shapes a real pool REACHES still diverge: a
+    disagree". Measured, the ONE shape a real pool REACHES still diverges: a
     hit carrying ``lme_session_index: -1`` keys ``idx:-1`` in the pool (the
     sentinel keeps its historical bucket) but a per-hit block here —
     ``idx >= 0`` skips the sentinel, and with a wire id present this leg now
-    groups those hits into one block that is still not the pool's ``idx:-1``
-    — and a padded snake id is raw in the pool, stripped here. Neither is a
-    defect in either grain: a BUCKET and a BLOCK answer different questions,
-    and fusing identity-less hits is exactly what #3591 and the rule above
-    refuse. No module under ``tortoise/`` imports ``session_reinjection``
-    (measured: ``grep -rn 'import session_reinjection' tortoise/`` → none),
-    so the ``-1`` shape arrives only through the EVAL annotator
-    (``session_id: ""`` plus ``lme_session_index`` defaulted to ``-1``,
-    ``tools/longmem_eval/retrieve.py``).
+    groups those hits into one block that is still not the pool's ``idx:-1``.
+    That is not a defect in either grain: a BUCKET and a BLOCK answer
+    different questions, and fusing identity-less hits is exactly what #3591
+    and the rule above refuse. The PADDED snake id used to be a second
+    divergence — "raw in the pool, stripped here"; #11382 removed it by
+    normalising the pool leg through :func:`normalize_session_key` too, the
+    same ``.strip()`` this function applies, so both grains now read a padded
+    id as the one identity it is. No module under ``tortoise/`` imports
+    ``session_reinjection`` (measured by AST over ``tortoise/**/*.py``: zero
+    ``Import``/``ImportFrom`` nodes naming it — an AST result rather than a
+    text search, because the name also appears in prose cross-references in
+    this package, so a text hit is not an import; the only importers are
+    ``tools/longmem_eval/retrieve.py`` and four test modules), so the ``-1``
+    shape arrives only through the EVAL
+    annotator (``session_id: ""`` plus ``lme_session_index`` defaulted to
+    ``-1``, ``tools/longmem_eval/retrieve.py``). ⚠️ The symbol is NAMED above,
+    not called "it": this paragraph sits in :func:`_session_admission_key`'s
+    docstring, whose own importer count is one test file, and the nearest
+    other symbol (:func:`normalize_session_key`) has one importer under
+    ``tortoise/`` — so a bare pronoun made a reviewer audit the wrong symbol
+    and read this (true) list as false.
 
-    ⚠️ "Two shapes" is the REACHED enumeration, NOT a proof of
-    exhaustiveness — five further seams diverge too, and none of them FUSES
-    in an in-repo pool (measured: item 4's id IS writer-producible, its
-    bucket partner is not): a non-``int`` ``lme_session_index``
+    ⚠️ "ONE shape" is the REACHED enumeration, NOT a proof of
+    exhaustiveness — further seams diverge too, and none of them FUSES in an
+    in-repo pool (measured: the WIRE ``idx:``-spelling seam's id IS
+    writer-producible, its bucket partner is not — named rather than numbered,
+    because #11382 reordered this enumeration and the old "item 4" ordinal
+    pointed at nothing). Two of them USED to diverge on the pool side and no
+    longer do, both closed by #11382's normalisation (marked, so neither is
+    read as a live divergence — see the reached shape above for what still
+    does): a TRUTHY non-``str`` snake id
+    (``session_id: 5`` used to key the int ``5``, and THREE callers then
+    raised ``AttributeError`` on ``.startswith``: ``seeded_sessions``,
+    ``coverage_loop.coverage_gap`` (whose ``.startswith("idx:")`` filter lives
+    in its ``win_sessions`` comprehension) and
+    ``reader_window_displacement`` (its two ``.startswith("idx:")`` set
+    comprehensions — cite them by symbol, not by line: an earlier revision of
+    this docstring named line numbers that a later docstring edit moved); the
+    pool leg now returns ``""`` for a non-``str``, i.e. falls through to its
+    index / wire / per-hit leg, so those three callers get a ``str`` — the
+    untyped shape stops being an identity and is no longer a raising seam —
+    and a whitespace-only snake id, which the pool used to key RAW because it
+    is truthy while this grain DISCARDS it; the pool leg now discards it too,
+    the same fail-closed direction). The seams that still diverge: a
+    non-``int`` ``lme_session_index``
     (the pool keys ``idx:{value}``, this grain skips the index leg — and a
     ``bool`` IS an ``int`` in Python, which is why this grain excludes it
-    explicitly while the pool does not); a TRUTHY non-``str`` snake id
-    (``session_id: 5`` keys the int ``5`` — the pool leg is untyped and can
-    return a non-``str``, and THREE callers then raise ``AttributeError`` on
-    ``.startswith``: ``seeded_sessions``, ``coverage_loop.coverage_gap``
-    (``coverage_loop.py``:497) and ``reader_window_displacement``
-    (``session_reinjection.py``:750-753) — while ``dedup_pool`` /
-    ``session_diverse_order`` / ``reinjection_merge_order`` only dict-key it,
-    and dict-keying is safe only for a HASHABLE non-``str`` (``5``,
-    ``True``): a TRUTHY unhashable (``[1]``/``{1: 2}``) raises ``TypeError``
-    there too, measured; a whitespace-only snake id (the
-    pool keys it RAW because it is truthy, while this grain DISCARDS it
-    rather than stripping); a WIRE id that
+    explicitly while the pool does not); a WIRE id that
     spells the ``idx:`` namespace — ``_SAFE_SESSION_TAG_RE`` permits ``:``,
     so a session literally named ``idx:3`` keys ``idx:3`` and FUSES, in the
     pool, with another hit's ``lme_session_index: 3`` bucket while this

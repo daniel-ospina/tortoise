@@ -7102,6 +7102,19 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
+    # ⛔ `"the exemption"` WAS a key here and is deleted — its declaration went
+    # stale on `main`, and this leg is the thing that caught it. `#11665` added
+    # *"⚠️ **The exemption is about CONTENT, not the declaration site**"* to
+    # `EXTRACTOR-V4-ARCHITECTURE.md` §3 — prose about prompt-pack hints, NOT a
+    # denial about a counted writer — so the definite-articled form is now PRESENT
+    # in the flattened document and *"absent from both documents"* became false.
+    # Deleting the key is what this leg asks for. The marker stays live in
+    # `DENIAL_MARKERS`: whether an OCCURRENCE is a denial is decided
+    # sentence-by-sentence by `DENIAL_PATTERNS` + `_class_marker_negated`, so the
+    # phrase showing up in unrelated prose cannot hide a real denial — this pin
+    # only asks that a marker is not DEAD, and it is not.
+    # Recorded on `#9066` as one more nodeid red on `main` because push-to-main
+    # legs never complete (that is why it reached a PR instead of `main`'s CI).
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"

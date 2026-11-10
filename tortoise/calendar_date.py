@@ -80,9 +80,11 @@ TWO DAY SEMANTICS, both required, so the caller states which it wants:
 
 :func:`calendar_datetime` is the instant view, for a consumer that ORDERS
 rather than buckets (``search_engine._created_sort_key``). It mirrors the
-#3982 anchoring rule: a date-only value is UTC midnight (a stated offset
-wins), while a zone-less date-TIME keeps the LOCAL reading that rule
-deliberately left alone.
+#3982 anchoring rule: a date-only value is UTC midnight, and a stated offset
+wins where this view accepts the form (it refuses a COMPACT or ISO-week
+DATE-ONLY value carrying an offset — no time — see the note on
+``_string_instant``), while a zone-less
+date-TIME keeps the LOCAL reading that rule deliberately left alone.
 
 ⛔ THE EPOCH ASYMMETRY IS A RECORDED RULING, not an oversight. A NUMERIC epoch
 is a date to both functions. An epoch spelled as a STRING (``"1900000000"``)
@@ -419,13 +421,135 @@ def _string_instant(s: str) -> datetime | None:
     d = _date_only_shape(s)
     if d is not None:
         return datetime(d.year, d.month, d.day, tzinfo=UTC)
-    # ⛔ The instant view must accept the SAME shape set as the day view
-    # (cycle 6, finding 3): ``_string_date`` carries this arm because
-    # ``origin/main``'s assembly parser read the family, and this module's own
-    # docstring points an ordering consumer here. Without it
+    # ⛔ The instant view must accept the whole-value families THIS ARM owns —
+    # the compact / ISO-week date carrying a TIME (cycle 6, finding 3).
+    # ``_string_date`` carries this arm because ``origin/main``'s assembly
+    # parser read the family, and this module's own docstring points an
+    # ordering consumer here. Without it
     # ``calendar_datetime("20230520T02:21:00Z")`` is None while
     # ``calendar_date`` dates it — a later consumer would read a dated family as
     # un-orderable.
+    #
+    # ⚠ NOT the same shape set as the day view, and the difference is
+    # DELIBERATE — except for the compact / ISO-week DATE + OFFSET family, which
+    # is a GAP tracked as #11708 and must NOT be preserved as a ruling (cycle 7,
+    # finding 1 — an earlier version of this comment claimed parity, which would
+    # invite the one change this module forbids for the OTHER families).
+    # THREE MECHANISMS of divergence, described here — plus TWO further
+    # divergences in this same arm that have NO mechanism at all (a RULING and a
+    # missing ARM), named in A below. So this list is not a count of the arm's
+    # refusals, only of the ones that have a mechanism to explain:
+    #
+    # 1. the day view's TOLERANT PREFIX fallback dates a value whose tail is
+    #    unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T+05:00``), and
+    #    the instant view must NOT widen to it. An unreadable tail means the
+    #    INSTANT is unknown while the stated DAY is known; deriving an instant
+    #    there would fabricate one, which is the whole distinction this module
+    #    exists to keep;
+    # 2. an OUT-OF-RANGE CLOCK FIELD in a WHOLE-VALUE shape also diverges, and it
+    #    is NOT the prefix: ``2023-05-20T24:00:00`` matches BOTH views' grammar —
+    #    and so do ``…T25:00:00``, ``…T02:61:00`` and ``…T02:00:99``. The day view
+    #    takes the stated DATE (``_match_date``), while the instant view refuses
+    #    the clock (``_match_naive`` → ``None``) — no clock reading, so no instant
+    #    to name. Verified by patching ``_prefix_date`` out:
+    #    the day is still dated. ⛔ Do not "fix" this by letting ``_match_naive``
+    #    roll 24:00 to the next midnight: that invents an instant from an hour
+    #    the value does not have.
+    # 3. a STATED-BUT-IMPOSSIBLE OFFSET also diverges, through a DELIBERATE
+    #    GUARD: ``_match_offset`` returns ``None`` for BOTH "no offset stated"
+    #    and "offset stated and refused", so without the guard at the top of
+    #    this function a value naming a bad offset (``+25:00``, ``+00:99``)
+    #    would fall through to the naive reading and be dated. The DAY view
+    #    dates it (its calendar day is stated); the INSTANT cannot be computed,
+    #    so it is refused. Not a ruling and not a gap — removing the guard
+    #    would make ``validity._names_an_instant`` return ``True`` (it is a
+    #    boolean predicate) and therefore ``validity.end_state`` report
+    #    ``END_KNOWN`` for a bound whose instant cannot be computed, the exact
+    #    false PASS #9202 exists to deny.
+    #
+    # So, in TWO separate statements — they are different gates, and conflating
+    # them is how this comment went wrong before:
+    #
+    # A. ACCEPTANCE. The INSTANT view takes a whole-value family when the
+    #    value's own grammar yields a coherent CLOCK READING — or, for a
+    #    date-only family with NO STATED OFFSET, no clock at all, which is taken
+    #    as UTC midnight (``_date_only_shape``; the CALENDAR date-only spelling is
+    #    armed instead by ``_INSTANT_RE``'s date-only branch, which HONOURS a
+    #    stated offset — ``2023-05-20+05:00`` is that offset's midnight, not UTC
+    #    midnight; see the FORM axis below). A ZONE-less reading is still taken
+    #    and left NAIVE for #3982 to place in the READER's zone — which is what
+    #    ``2023/05/20 (Sat) 02:21`` gets — so an unstated ZONE is never a
+    #    refusal here. What IS refused is an unreadable clock (hour 24, an
+    #    impossible offset) or a family with no arm at all.
+    #    The DAY view is the WIDER view, but only for the families this note
+    #    enumerates: it dates by whole-value grammar, by its tolerant prefix, by
+    #    the compact / ISO-week date+offset family and by an epoch string
+    #    (the epoch bullet below). ⚠ NOT "everything with a readable calendar
+    #    day": the PREFIX arm matches DASHED / SLASHED prefixes only, so a
+    #    COMPACT or ISO-week spelling whose tail is unreadable is undated by BOTH
+    #    views (``20230520T24:00:00``, ``2023-W43-2T11:00:00+25:00`` and
+    #    ``2023-W43-2x`` are ``None`` from ``calendar_date`` too, while the
+    #    dashed ``2023-05-20T24:00:00`` is dated). FOUR whole-value families are
+    #    refused by ``calendar_datetime`` — an OUT-OF-RANGE CLOCK (``T24:00:00``,
+    #    and equally ``T25:00:00`` or a 61st minute/second) is the first (item 2
+    #    above), the other three follow — and they are NOT the same kind of
+    #    refusal:
+    #      * an EPOCH SPELLED AS A STRING — refused BY RULING (#9202; the
+    #        asymmetry is stated in the module docstring);
+    #      * a COMPACT / ISO-week DATE + OFFSET (or ``Z``) carrying NO TIME —
+    #        ``20230520-05:00``, ``2026W243-05:00``, ``2023-W43-2+05:00`` and
+    #        ``20230520Z`` are all day-dated (:func:`_compact_date_offset`) and
+    #        all refused here, because the only arm that accepts a compact /
+    #        ISO-week value CARRYING AN OFFSET (``_COMPACT_DATETIME_RE``) REQUIRES
+    #        A TIME: it reads ``20230520T02:21:00Z`` and ``2023-W43-2T11:00:00``,
+    #        while the DATE-ONLY offset-or-``Z`` spelling has no arm. (A BARE
+    #        compact / ISO-week date is armed earlier, by ``_date_only_shape``, as
+    #        UTC midnight — ``20230520`` and ``2023-W43-2`` ARE accepted.)
+    #        ⚠ The axis is the FORM, NOT the separators: the CALENDAR form is
+    #        armed by ``_INSTANT_RE``'s date-only branch, so
+    #        ``2023-05-20+05:00``, ``2023-05-20Z`` and ``2023/05/20+05:00`` ARE
+    #        accepted as that offset's midnight — while the DASHED ISO-WEEK
+    #        spelling ``2023-W43-2+05:00`` is refused like the rest of its
+    #        family. That is a GAP for the compact/ISO-week family, not a ruling
+    #        — tracked as #11708 — and it is not the out-of-range-clock case
+    #        above, whose grammar both views share;
+    #      * a STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``,
+    #        ``…+00:99``) — refused by a DELIBERATE GUARD, neither a ruling nor a
+    #        gap: the DAY is stated and dated, the INSTANT cannot be computed,
+    #        and refusing it is what keeps ``END_UNKNOWN`` honest (see item 3
+    #        above). ⚠ EVERY spelling of the CALENDAR family reaches this guard —
+    #        dashed and slashed alike: ``2023-05-20T02:00:00+00:99`` and the
+    #        ``/`` form are both ``None``. The COMPACT DATE+TIME form does NOT: it
+    #        never reaches this guard — neither ``_INSTANT_RE`` nor
+    #        ``_BASIC_TIME_INSTANT_RE`` matches it, so its own arm below
+    #        (``_COMPACT_DATETIME_RE``) accepts it, and that arm's
+    #        ``fromisoformat`` NORMALISES an out-of-range MINUTES field
+    #        (``+00:99`` → ``+01:39``) instead of refusing it, so for the compact
+    #        spelling the #9202 false PASS is live on BOTH gates. The DASHED
+    #        spelling keeps it on the OTHER gate: ``_created_sort_key`` parses it
+    #        with its own ``fromisoformat`` arm and the same normalisation, so
+    #        ``validity._names_an_instant`` reports ``True`` and ``end_state``
+    #        says ``END_KNOWN``. The ``/`` form does NOT: ``fromisoformat``
+    #        rejects the slash separator, so that arm buckets and ``end_state``
+    #        stays ``END_UNKNOWN`` — the slashed spelling has NO false PASS.
+    #        Tracked as #11735. (The COMPACT DATE-ONLY + impossible offset —
+    #        ``20230520+00:99`` — is the time-less family above: no arm at all, so
+    #        BOTH gates refuse it and ``end_state`` stays ``END_UNKNOWN``.)
+    #
+    # B. ORDERABILITY. A DIFFERENT gate, and it is about ``_created_sort_key``,
+    #    not about acceptance: its gate is ``s[0].isdigit() and len(s) >= 10
+    #    and ("-" in s or "T" in s or "/" in s)``. So ``20230520+05:00``,
+    #    ``20230520Z`` and ``2026W243+05:00`` never reach it, while the extended
+    #    ISO-week ``2023-W43-2+05:00`` does (its DATE carries ``-``) despite its
+    #    positive offset, and ``2026W243-05:00`` does because its negative
+    #    offset supplies the ``-``. So the gate is a CHARACTER-PRESENCE test, not
+    #    a sign one: what counts is whether the value CONTAINS ``-``/``T``/``/``
+    #    anywhere, which a negative offset supplies and a positive one does not —
+    #    except where the DATE itself carries a separator, as the dashed forms
+    #    above do. The ``-``/``T`` form of that gate predates #11646 — its ``/``
+    #    arm is #11646's own, and is what made the producer's shape orderable at
+    #    all. Both gaps are untouched by THIS PR, and are named rather than left
+    #    to be rediscovered as violations of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

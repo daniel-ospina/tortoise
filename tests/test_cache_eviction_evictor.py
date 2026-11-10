@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -205,6 +206,11 @@ def _plan_assessment(client, graph, graph_name: str):
         measured_nodes=total,
         total_nodes=total,
         graph_name=graph_name,
+        # ⚠️ The report must be DATED. `assess` demotes an undated (or aged) report to
+        # `cannot-answer`, because the population count it carries is the executor's
+        # runaway cap — so this fixture stamps "measured now" rather than leaving the
+        # field out, which would silently turn this PLAN fixture into a REFUSAL.
+        measured_at=time.time(),
     )
     assessment = assess(
         client, graph, graph_name,

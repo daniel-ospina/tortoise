@@ -62,6 +62,7 @@ import contextlib
 import json
 import secrets
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[3]))
@@ -223,6 +224,12 @@ def run(uri: str, *, seed: int = SEED_NODES, keep: bool = False) -> dict:
                     measured_nodes=before_nodes,
                     total_nodes=before_nodes,
                     graph_name=graph_name,
+                    # ⚠️ DATED, because `assess` demotes an undated report: the
+                    # population count it carries IS the executor's runaway cap, so a
+                    # licence without a measurement instant cannot bound a sweep. This
+                    # report is synthesised by this probe (there is no census file
+                    # here), so the probe stamps the instant it measured.
+                    measured_at=time.time(),
                 )
             },
         )
