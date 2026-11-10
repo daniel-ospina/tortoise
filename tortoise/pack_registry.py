@@ -3347,18 +3347,89 @@ class PackRegistry:
             `core:`-prefixed and rows are stored either way.
 
         INVARIANT (#6146): the argument is ALWAYS in its own expansion —
-        ``kind in expand_kind(kind)``. Expansion is additive: it widens a kind to
+        ``kind in expand_kind(kind)``, and the same holds for
+        :meth:`read_filter_kinds`. Expansion is additive: it widens a kind to
         its subclasses and equivalents, it never replaces the caller's kind with
-        namespace forms. Read paths (``query``/``paginated_query`` build
-        ``n.pointKind IN [...]`` from this list) must not turn a valid kind into
-        an empty result set, because a wrong-empty is indistinguishable from a
-        true-empty to the caller.
+        namespace forms. Whichever set a caller filters with must not turn a
+        valid kind into an empty result set, because a wrong-empty is
+        indistinguishable from a true-empty to the caller.
+
+        ⛔ This is the **MEMBERSHIP** set, not the read-filter set. It answers
+        "is this kind a `<parent>`?" and therefore carries a child's ANCESTORS.
+        A read filter asks the opposite question — "rows whose stored kind is
+        this kind or NARROWER" — and feeding these values to
+        ``n.pointKind IN [...]`` makes a narrow filter match broader-kinded
+        rows. Read paths use :meth:`read_filter_kinds` (#11679).
 
         Pre-computed at load_all() time, O(1) dict lookup at query time.
         """
         if not hasattr(self, '_kind_expansions'):
             self._build_kind_expansions()
         return self._kind_expansions.get(kind, [kind])
+
+    def read_filter_kinds(self, kind: str) -> list[str]:
+        """The READ-FILTER set: every stored kind value a filter for ``kind``
+        must match — the kind, its declared DESCENDANTS, its equivalents, and
+        every stored spelling of those. **Never an ancestor.**
+
+        ⚠️ One pre-existing asymmetry survives and is pinned, so the sentence
+        above is not a guarantee it makes: a BARE parent kind reaches its
+        namespaced children (``"dev:issue" in read_filter_kinds("issue")``), but
+        a namespaced kind does not pick up the bare spelling
+        (``"issue" not in read_filter_kinds("dev:issue")``). That direction
+        predates #11679 — it is #6146-adjacent, is unchanged by this split, and
+        is out of this PR's scope — but a reader auditing a wrong-empty should
+        know it is still there
+        (``test_a_bare_kind_filter_keeps_its_namespaced_rows``).
+
+        Why this is a second surface and not a parameter on ``expand_kind``:
+        the two callers of the kind hierarchy need opposite directions, and one
+        list cannot be correct for both (#11679).
+
+        * ``expand_kind`` — **membership**: ``"operator" in expand_kind(kind)``
+          (``sdk._operator_scope_clauses``), i.e. "is this kind a `parent`?".
+          Needs UP: the child's bucket must carry its ancestors.
+        * ``read_filter_kinds`` — **read filter**: ``n.pointKind IN [...]``
+          (``query``/``paginated_query``/``tortoise_fts_query``,
+          ``domain_validators._expand``), i.e. "which rows are this kind or
+          narrower?". Needs DOWN only.
+
+        Two methods rather than one with a ``direction=`` argument on purpose: a
+        boolean the next caller forgets is exactly how the two idioms collapsed
+        into one list. The regression this closes was measured at ``d26f3c6d``:
+        ``search(kind="product-strategy:feature", entity_type="object")``
+        filtered ``objectKind IN [… 'WorkItem', 'core:WorkItem' …]`` and returned
+        every ``core:WorkItem`` object the classifier had labelled.
+
+        The set is GROWN from a snapshot of the DOWN-clean buckets taken before
+        the closure (``down_base``) by the descendants walk only, then closed
+        over equivalence — it is never derived by subtracting ancestors from
+        the membership bucket. It happens to EQUAL
+        ``expand_kind(kind)`` minus its ancestors (and their stored spellings),
+        but that identity is a consequence of the construction, not the
+        construction: subtraction would couple this table to the closure's
+        source expression, so a third inheritance relation could put an ancestor
+        in a bucket this table never walks up to notice. What the set BUYS is
+        unchanged — everything that is not broader survives untouched: it
+        equals the pre-#11667 read behaviour for a pack child
+        (``read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]``) while
+        a root with no ancestors (``Object``, ``Subject``, ``Point``, ``Event``,
+        ``Document``) is unchanged.
+
+        The contract is over SET membership, not list order: the bucket is a
+        list, but its ordering is an artefact, not a guarantee. Two mechanisms,
+        measured over the 311 buckets: a bucket's PREFIX is pre-closure snapshot
+        order (``down_base``: declaration, ``equivalentTo``, alias/bare append
+        order), and only the buckets the closure actually grows gain a
+        ``sorted(...)`` tail — 163 of 311 gain nothing at all, the example above
+        among them (``gained.difference(bucket)`` is empty for it, so its order
+        is written entirely by the ``equivalentTo`` block). ``sorted()`` could
+        not order a bucket anyway: it sorts only the members being APPENDED, so
+        they always land after what was already there. Compare with ``set(...)``.
+        """
+        if not hasattr(self, '_kind_read_filters'):
+            self._build_kind_expansions()
+        return self._kind_read_filters.get(kind, [kind])
 
     def _build_kind_expansions(self) -> None:
         """Build the pre-computed kind expansion table.
@@ -3421,6 +3492,55 @@ class PackRegistry:
 
         def _descendants(kind: str) -> set[str]:
             return _walk(kind, _children_of)
+
+        def _closure(kind: str, *, down_only: bool) -> set[str]:
+            """Everything `kind` inherits or gathers, through the relations
+            below and the equivalence class of every result.
+
+            ONE home for the source expression (#11679 cycle 2). The two tables
+            this builder produces differ ONLY in `down_only`: the membership set
+            takes ancestors and descendants, the read-filter set takes
+            descendants only. Keeping the expression in one function is what
+            stops a future directional source being added to one walk and not
+            the other — the harmful direction being a filter that silently drops
+            a descendant (a wrong-empty, #6146).
+            """
+            gained: set[str] = set()
+            sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
+            # A peer's bare-inherited members round-trip too, or one spelling of
+            # one kind answers narrower than the other: `bare_inherits` is keyed
+            # by the BARE name, so a pack that registers `objectKinds: [team]`
+            # puts `synth:team` in `expand_kind("team")` and, without this, NOT
+            # in `expand_kind("core:team")` — while
+            # `test_core_prefixed_and_bare_spellings_are_one_kind` states they
+            # are one kind.
+            #
+            # `bare_inherits` is keyed by the BARE tail of a single-segment
+            # `ns:kind` name and valued by that full name — guaranteed by the
+            # `bare_to_full` guard above, not assumed here. So a key never contains
+            # ':' and a value always does: a value is never itself a key, and ONE
+            # round is the whole closure. That is a property of the map's
+            # CONSTRUCTION, and the guard is what keeps it true.
+            #
+            # It lives HERE, in the one home, and not at either call site: the
+            # round-trip is part of the SOURCE expression, so the membership set
+            # and the read-filter set must both see it. Applied to one walk only,
+            # a read keyed on `core:team` would miss a row stored as `synth:team`
+            # while `expand_kind("core:team")` carries it — a wrong-empty, which
+            # is the failure direction `down_only` must never acquire (#6146).
+            for peer in list(sources):
+                sources |= bare_inherits.get(peer, set())
+            for peer in sources:
+                gained.add(peer)
+                gained |= _descendants(peer)
+                if not down_only:
+                    gained |= _ancestors(peer)
+            # …and the equivalence class of everything just gained, so an
+            # ancestor's (or descendant's) stored legacy spelling arrives with it
+            # (`expand_kind("Event")` gains `deployment` AND `dev:deployment`).
+            for member in list(gained):
+                gained |= _equivalence_class(member)
+            return gained
 
         # ONTOLOGY §6's core rows are the first half of the subclass relation.
         for core_parent, core_children in CORE_SUBCLASSES.items():
@@ -3649,72 +3769,93 @@ class PackRegistry:
         # kinds sit in no canonical set, so nothing before the walk created their
         # bucket. This seed is now the only thing that creates it: the post-walk
         # `core:`-alias copy loop that also used to do so was measured inert and
-        # deleted (see the `_equivalent` seed above), so nothing runs after the
-        # snapshot any more.
-        # ⛔ The COST, measured rather than assumed — a first version of this note
-        # claimed "no writer stores `subjectKind='Subject'`", which is FALSE:
-        # `create_subject(subjectKind="Subject")` and
-        # `create_subject(subjectKind="core:Subject")` are both accepted and STORED
-        # as written, so `subjectKind IN expand_kind("team")` now also returns a
-        # root-kinded Subject row — the read widens by a join on the layer root
-        # whenever that `IN` clause is the filter that runs.
-        # ⚠️ FORM-SCOPED, exactly like the `Object` read — measured on BOTH, not
-        # generalised: the `IN` clause is the POST-retrieval filter, so a
-        # text-query read widens while a kind-only read (`query=None`, i.e.
-        # `is_full_scan`) runs only the structural leg (`n.subjectKind = $kind`)
-        # and does NOT. One `:Subject` with `subjectKind='team'` and one with
-        # `subjectKind='Subject'`: `tortoise_fts_query(kind="team",
-        # entity_type="subject")` returned the `team` row only;
-        # `tortoise_fts_query("widget", kind="team", entity_type="subject")`
-        # returned both. Widening the full scan is a BEHAVIOUR change owed by
-        # #11690, not a doc fix.
+        # deleted (see the `_equivalent` seed above), so this seed is the last
+        # thing that creates a MEMBERSHIP bucket any more. The #11679 read-filter
+        # build at the end of this builder runs after this point but creates no
+        # key either: it grows from `down_base`, the bucket snapshot taken before
+        # the closure below.
+        # ⛔ The STORED-ROW fact this seed's cost rests on, measured rather than
+        # assumed — a first version of this note claimed "no writer stores
+        # `subjectKind='Subject'`", which is FALSE: `create_subject(subjectKind=
+        # "Subject")` and `create_subject(subjectKind="core:Subject")` are both
+        # accepted and STORED as written, so a root-kinded Subject row exists for
+        # `expand_kind("team")`'s `Subject` member to reach.
+        # ⚠️ The READ-PATH consequence that fact was written to name is
+        # SUPERSEDED, and the split is the point: this widening was observable
+        # through `n.subjectKind IN expand_kind(...)` until `#11684` gave reads
+        # `read_filter_kinds` (DOWN only — measured at this head:
+        # `read_filter_kinds("team") == ["team", "core:team"]`, no `Subject`), so
+        # a `kind="team"` subject read no longer returns the root-kinded row in
+        # either form. What the seed still buys is the MEMBERSHIP contract —
+        # `expand_kind(child) ⊇ {child, parent}`, transitive — and an `IN` clause
+        # must take `read_filter_kinds` (#11684): feeding it `expand_kind` is
+        # exactly what made a narrow filter match broader-kinded rows.
         #
-        # …and that is CORRECT, because the `Object` row has had exactly this
-        # property since the §6 table was first read: `create_object(objectKind=
-        # "Object")` is likewise accepted and STORED, so `objectKind IN
-        # expand_kind("dev:issue")` returns it — under the SAME form-scope as the
-        # Subject `IN` above (a text-query read only; #11690 owes the full scan).
-        # The Subject row was the anomaly,
+        # …and seeding it is CORRECT on the membership side, because the `Object`
+        # row has had exactly this property since the §6 table was first read:
+        # `create_object(objectKind="Object")` is likewise accepted and STORED, so
+        # `"Object"` is a member of `expand_kind("dev:issue")` just as `Subject` is
+        # a member of `expand_kind("team")`. The Subject row was the anomaly,
         # not the Object row. Declining the seed would leave the stated contract
         # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
         # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
         # declares only `Object`/`Document`/`Subject`, so `Point` AND `Event` are
         # this module's extension) while the other three already behave this way.
-        # Applied for UNIFORMITY, with the widening named rather than denied.
+        # Applied for UNIFORMITY, with the membership widening named rather than
+        # denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])
 
+        # The buckets are DOWN-clean at this point: `self` + a canonical root's
+        # declared children (`get_subclasses`), equivalences, and the bare/legacy
+        # spellings — the UP direction is added only by the closure below. Snapshot
+        # them: the read-filter table is grown from THIS snapshot (see the end of
+        # the builder), which is what makes it structurally incapable of carrying
+        # an ancestor, rather than correct-by-subtraction.
+        down_base: dict[str, list[str]] = {
+            kind: list(bucket) for kind, bucket in expansions.items()}
+
         for kind in list(expansions):
-            gained: set[str] = set()
-            sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
-            # A peer's bare-inherited members round-trip too, or one spelling of
-            # one kind answers narrower than the other: `bare_inherits` is keyed
-            # by the BARE name, so a pack that registers `objectKinds: [team]`
-            # puts `synth:team` in `expand_kind("team")` and, without this, NOT
-            # in `expand_kind("core:team")` — while
-            # `test_core_prefixed_and_bare_spellings_are_one_kind` states they
-            # are one kind.
-            #
-            # `bare_inherits` is keyed by the BARE tail of a single-segment
-            # `ns:kind` name and valued by that full name — guaranteed by the
-            # `bare_to_full` guard above, not assumed here. So a key never contains
-            # ':' and a value always does: a value is never itself a key, and ONE
-            # round is the whole closure. That is a property of the map's
-            # CONSTRUCTION, and the guard is what keeps it true.
-            for peer in list(sources):
-                sources |= bare_inherits.get(peer, set())
-            for peer in sources:
-                gained.add(peer)
-                gained |= _ancestors(peer) | _descendants(peer)
-            # …and the equivalence class of everything just gained, so an
-            # ancestor's stored legacy spelling arrives with the ancestor
-            # (`expand_kind("Event")` gains `deployment` AND `dev:deployment`).
-            for member in list(gained):
-                gained |= _equivalence_class(member)
+            gained = _closure(kind, down_only=False)
             bucket = expansions[kind]
             for member in sorted(gained.difference(bucket)):
                 bucket.append(member)
+
+        # ── #11679: the READ-FILTER table, the other direction ─────────────
+        # `expand_kind` is a MEMBERSHIP set (it carries a child's ANCESTORS, so
+        # `"operator" in expand_kind(kind)` answers "is this kind a parent?").
+        # A read filter asks the opposite question — "rows stored as this kind
+        # or NARROWER" — so feeding ancestor names to `n.pointKind IN [...]`
+        # made a narrow filter match broader-kinded rows.
+        #
+        # ⛔ Grown from `down_base` with the DOWN walk only — never by
+        # subtracting the ancestors from the membership bucket. Subtraction
+        # reads correct today but couples this table to the closure's `sources`
+        # expression: a third inheritance relation would put an ancestor in a
+        # bucket this table never walks up to notice, and `filter ⊆ membership`
+        # plus `kind ∈ filter` both stay true while it happens. A positive walk
+        # cannot produce an ancestor at all, whatever relation is added later.
+        #
+        # Same three ingredients as the UP walk, so the two tables agree on
+        # everything that is not a direction: the equivalence class (§7
+        # `equivalentTo`, bare↔namespaced, `core:` spellings, LEGACY_KIND_ALIASES)
+        # and `bare_inherits`, then `_descendants` of each source, then the
+        # equivalence class of everything gained (an ancestor's stored legacy
+        # spelling rides the equivalence class, and so does a descendant's).
+        # A COPY of the snapshot, not `dict(down_base)`: that is shallow, so the
+        # growth loop below would append into `down_base`'s own lists and the
+        # snapshot would no longer be the DOWN-clean one this comment promises.
+        # Nothing reads `down_base` afterwards today, so this is not a live bug —
+        # it keeps the structural guarantee true for the next reader.
+        read_filters: dict[str, list[str]] = {
+            kind: list(bucket) for kind, bucket in down_base.items()}
+        for kind in list(read_filters):
+            gained = _closure(kind, down_only=True)
+            bucket = read_filters[kind]
+            for member in sorted(gained.difference(bucket)):
+                bucket.append(member)
+        self._kind_read_filters = read_filters
 
         self._kind_expansions = expansions
 

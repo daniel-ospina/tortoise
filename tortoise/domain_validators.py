@@ -59,13 +59,26 @@ def _bare(kind: str) -> str:
 
 
 def _expand(kind: str) -> list[str]:
-    """Pack-aware kind expansion (subclasses + equivalents) for Cypher IN
-    clauses — mirrors sdk._expand_kind via the same cached registry, so the
-    migrated validator resolves kinds IDENTICALLY to the legacy check_structure.
-    Falls back to [kind] when packs are unavailable (ponytail)."""
+    """Read-filter kind expansion (descendants + equivalents) for Cypher IN
+    clauses — mirrors sdk._read_filter_kinds via the same cached registry.
+
+    ⛔ NOT ``expand_kind``: that is the MEMBERSHIP set and it carries a child's
+    ANCESTORS, so a vocabulary built from it would accept a broader kind than
+    the rule names (#11679).
+
+    ⚠️ That means this is NOT identical to the legacy ``check_structure``
+    reference in ``tests/test_domain_validators.py``, which resolves through
+    ``expand_kind``. Measured, the two agree for the rule kinds with no
+    ancestors (``useCase``/``jobToBeDone``/``userJourney``) and DIVERGE for the
+    two that have one: ``workflow`` gains ``Object`` under the legacy set, and
+    ``requirement`` gains ``Object`` and ``WorkItem``. Those are exactly the
+    over-wide matches #11679 removes, so the divergence is the fix, not a
+    regression — but a lane auditing #405 behaviour-equivalence must not read
+    the two as identical. Falls back to [kind] when packs are unavailable
+    (ponytail)."""
     try:
         from .sdk import _get_kind_expander
-        return _get_kind_expander().expand_kind(kind)
+        return _get_kind_expander().read_filter_kinds(kind)
     except Exception:
         return [kind]
 
