@@ -1002,9 +1002,12 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     finds no `def` line, and deriving the body by text search instead would be worse than
     useless — an earlier draft of this test searched for the marker STRING, which occurs
     twice (the `def`, and the literal in this assertion), so a rename made it derive its
-    own tail and report "it has its own copy of the extraction again" about a pin that was
-    fine (#11777 review round 3, finding 1). So the lookup is anchored on a `def` at the
-    start of a line, and the missing case is its own failure with its own remedy.
+    own tail and red on the assertion that forbids `re.findall` — "the cardinality pin
+    does its own matching again" — about a pin that was fine (measured, #11777 review
+    round 4, finding 1: that tail carries `_cardinality_claims_in(` as this test's own
+    assertion text, so the "has its own copy of the extraction" assertion before it
+    cannot fire). So the lookup is anchored on a `def` at the start of a line, and the
+    missing case is its own failure with its own remedy.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     name = "test_the_record_exemption_prose_counts_the_set_it_describes"
