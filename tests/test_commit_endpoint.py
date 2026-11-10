@@ -5545,8 +5545,29 @@ def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client
     DELETED the stored record. The fix adds the key only when the payload
     carries a record (first-writer).
 
-    Mutant this reds on: `point_props["mentions"] = _mention_props or None`, or
-    any `mentions=_mention_props or None` kwarg on the create legs.
+    ⚠️ The re-commit MUST use a different payload point id. Measured while
+    writing this row: re-submitting the SAME id with the same content never
+    reaches `_execute_commit_writes`' point write at all (the receipt says
+    `nodes_merged: 2`, `create_point` is never called, and the row would prove
+    nothing — the class of vacuous pin this whole review round is about). A
+    DIFFERENT id with the SAME content is what takes the dedup path:
+    `create_point(dedup=True, id=<new>)` → dedup hit → `update_point(<old>)`,
+    which is exactly where a forwarded `None` deletes the record.
+
+    MUTATION ATTRIBUTION (measured; `…` = this row):
+
+    * `if _mention_props:` → `if False and _mention_props:` on both create
+      legs → `…test_the_commit_payload_carries_its_mentions…` REDs (this row
+      stays green: the record is never stored, so nothing is cleared).
+    * `point_props["mentions"] = _mention_props or None` (unconditional) →
+      this row REDs **when the create door's own `mentions is None` guard is
+      also removed**. Alone it does not: `sdk.create_point` refuses to forward
+      a `None` mention into the dedup fold, so the record survives by the
+      second guard. That layering is deliberate (two independent doors cannot
+      delete a record the caller did not restate) and it is why the SDK guard
+      has its own discriminating row —
+      `test_mention_write_11239.py::test_a_recommit_passing_mentions_none_does_not_clear_the_record`,
+      which REDs for that guard alone.
     """
     pid = "pt_11239_recommit_door"
     content = "the claim keeps its mention across a re-commit"
@@ -5559,13 +5580,15 @@ def test_a_recommit_whose_payload_has_no_mentions_keeps_the_stored_record(client
     stored = _point_mentions(pid)
     assert stored is not None, "the first commit did not store the record"
 
-    # The re-commit: same claim, and the payload says NOTHING about mentions
-    # (the cue-off capture — `[]`, which `_mention_props` turns into the empty
-    # list the old `or None` made destructive). A new session so it is a real
-    # commit rather than an L1 duplicate replay.
+    # The re-commit: same CONTENT, a DIFFERENT payload point id (the dedup
+    # path — the same id never reaches this write at all, see the docstring),
+    # and the payload says NOTHING about mentions (the cue-off capture — `[]`,
+    # which `_mention_props` turns into the empty list the old `or None` made
+    # destructive). A new session so it is a real commit, not an L1 replay.
     second = _raw_payload(
         0, session_id="s11239-recommit-2",
-        points=[_point(0, id=pid, content=content, mentions=[])])
+        points=[_point(0, id="pt_11239_recommit_b", content=content,
+                       mentions=[])])
     assert _commit(client, second).status_code == 200
 
     after = _point_mentions(pid)
