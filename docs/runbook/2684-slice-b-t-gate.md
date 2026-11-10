@@ -66,9 +66,9 @@ explicitly or the numbers below are simply not re-read.
 |---|---|---|
 | "extend the value-fidelity discipline … in extraction" | **landed** — `_value_verbatim_span` stamps only a VERBATIM anchor whose addressed text carries a value; the two absence routes are reported, not silent | `tortoise/extractor_v2.py:4472` (`_verbatim_span_in_turn`), `:4500` (`_carries_value`), `:5542` (`_value_verbatim_span`), call site `:10367-10370`; commits `2312845b6` (#8659), `fda19cf93` (#8966) |
 | "a span-carrying schema field" | **landed** — `Point.span_start`/`span_end`, all-or-nothing, `end > start`, `>= 0`, validated on the model AND every write path | `tortoise/commit_schema.py:678-705` (fields + `_span_is_an_address`), `tortoise/commit_schema.py:445` (`validate_span`) — the field itself is #5007's (`2ff8c3c88`) |
-| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:1004-1006`; `tortoise/sdk.py:39006` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:39000`); `e70a5ff17` (#8658 / #9543) |
+| "the assembly surfaces the span with the point" | **landed on the read path** — the eval lane annotates the offsets onto the hit the package reads, and `package_evidence_pool` copies the kept anchor's keys; the product ask lane's hit carries `quote`/`source_turn_id`/`span_*` since #8658 | `tools/longmem_eval/retrieve.py:1004-1006`; `tortoise/sdk.py:38774` (the four columns are read — the `RETURN` continuation that appends `n.quote, n.source_turn_id, n.span_start, n.span_end`, six lines past the `rows = graph.query(` opener at `tortoise/sdk.py:38768`); `e70a5ff17` (#8658 / #9543) |
 | "Requires ONE extractor re-ingest (~4 h) then cached cycles" | **true for T-2 only**; the per-question leg needs **no** re-ingest — the committed receipts + fixtures are the population (§2) | this runbook §2 |
-| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:38967-38983` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
+| the `⛔` residual: the two DEGRADED fallback tiers keep lean projections | **confirmed, and it is a DECLARED boundary** — `fallback_snapshot`/`fallback_tfidf` return before the provenance fetch, so a degraded hit carries no `quote`/`span_*` and Slice A's own-source leg is inert there | `tortoise/sdk.py:38735-38751` (the `⛔ KNOWN LIMITATION` comment: it names #8658's four columns and the declared boundary) |
 
 **Nothing in the ontology or the SDK/MCP surface is touched by this slice.**
 
@@ -221,7 +221,7 @@ restated as "this corpus has no near-duplicates".
 
 ⛔ **That zero is about ONE route — and the population it is measured over is the
 other half of the same trap.** `_same_fact` has a second, content-overlap-
-INDEPENDENT route (`retrieval.py:3288-3298`): same `source_turn_id` **and** quote
+INDEPENDENT route (`retrieval.py:3321-3331`): same `source_turn_id` **and** quote
 overlap ≥ 0.75, with `_pkg_differ_value_critical(qa, qb)` consulted on the
 **quotes** first. Over the population dedupe actually sees — **every** extracted
 point of a session-arm, not the value-bearing narrowing this census otherwise
@@ -237,7 +237,7 @@ reachable **and decisive**:
 §2.1's rule, one leg over. Production overwrites the model's advisory index with
 the resolver's answer before the point is committed (`extractor_v2.py:10342` →
 `:10349`), and `_same_fact` groups on the committed field
-(`retrieval.py:3288-3290` — the `_pkg_turn_key` pair and its equality test).
+(`retrieval.py:3321-3323` — the `_pkg_turn_key` pair and its equality test).
 Grouping by the advisory index instead gives
 `43 / 26 / 1 / 2` over all extracted points — a population no package holds, and
 this section's third population error. That reading is **published here and
@@ -251,7 +251,7 @@ counts themselves, not merely on the divergence.
 §2.1's rule one field over. The write path rewrites a point's `quote` to the
 `_MAX_QUOTE` span at that point's own commit (`extractor_v2.py:10119`, carried
 into `pt_entry` at `:10347`) and `_same_fact` compares the committed hit
-(`retrieval.py:3292-3293`), so the census reads its quotes through
+(`retrieval.py:3325-3326`), so the census reads its quotes through
 `_stamp_inputs` — the same clamp the span half applies. The population differs on
 **3 of the 217 points** (exactly the three carrying a >200-char quote) and
 **every published count is clamp-invariant on it**: the table above
@@ -267,7 +267,7 @@ corpus that cannot tell the two apart.
 **The one decisive pair is `wp07_bluepeak_followup`/narrative, turn 14**: a
 value-bearing point paired with a strict SUB-quote that carries no value, at quote
 overlap **1.00**. Delete `if _pkg_differ_value_critical(qa, qb): return False`
-(`retrieval.py:3296-3297`) and the overlap gate collapses those two into one slot
+(`retrieval.py:3329-3330`) and the overlap gate collapses those two into one slot
 — so the guard changes exactly one outcome on this corpus, and that outcome is a
 value-bearing claim losing its own words. ⚠️ The value-bearing-only row is the
 **weaker** reading and its zero is a property of the narrowing, not of the
@@ -411,7 +411,7 @@ each of the 11 carries a warning the census attributes to its class, pinned by
 "no resolvable source turn" string, so for those two the class is carried by the
 census's derivation from `quote`/`turn_idx`, not by the warning text); the
 obvious relaxation is measured on both readings and refused; the degraded-tier
-boundary is declared (@ `sdk.py:38967-38983`), not an oversight.
+boundary is declared (@ `sdk.py:38735-38751`), not an oversight.
 
 **Not settled, and it needs a home.** The accuracy movement (T-2, re-homed to
 **#8486**), the *observed* — rather than re-derived — stamping rate (needs an

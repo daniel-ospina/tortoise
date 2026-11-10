@@ -499,8 +499,17 @@ def assert_capture_lane(sdk=None) -> None:
     if sdk is None:
         from tortoise.sdk import TortoiseSDK
         sdk = TortoiseSDK
-    if not hasattr(sdk, "capture_session"):
-        refuse("s3-ablation: REFUSED — #4282 retired the PUBLIC TortoiseSDK.capture_session "
+    # ⛔ TWO names are tested, because the two halves of this arm use DIFFERENT ones:
+    # the refusal is about the PUBLIC door the arm was pre-registered against, and the
+    # drive call reads the PRIVATE body. Testing only the public name meant an object
+    # that carried it (an adapter, a future SDK, a test double) passed the gate and then
+    # died on a missing private attribute — `tests/test_s3_prior_ablation.py`'s `FakeSDK`
+    # hit exactly that until it defined both. A gate that cannot detect the state its own
+    # next line requires is not a gate.
+    missing = [n for n in ("capture_session", "_capture_session") if not hasattr(sdk, n)]
+    if missing:
+        refuse(f"s3-ablation: REFUSED — the entry point this arm drives ({', '.join(missing)}) "
+               "is absent. #4282 retired the PUBLIC TortoiseSDK.capture_session "
                "name (owner ruling 2026-10-27), the entry point this arm drives, so no arm "
                "can be measured through it. The surviving in-process door is the private "
                "`TortoiseSDK._capture_session` — main's whole capture body (`:Session`, the "
