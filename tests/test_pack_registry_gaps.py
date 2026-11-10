@@ -2468,6 +2468,27 @@ class TestCoreHierarchy:
         filter_graph = _FilterGraph()
         observed_expansion: set[str] = set()
 
+        def _kind_values(params: dict) -> set[str]:
+            """Every kind-ish string a filter call carries — BY VALUE, not by name.
+
+            Deliberately form-insensitive: the read may spell the set as
+            `kind_0..n` scalars, as one `kinds` list, or as `kind` alone. Reading
+            the parameter NAMES would make a semantics-preserving consolidation
+            of that filter a FALSE RED whose message claims the widening was
+            deleted — the exact false-diagnosis path this pin was rewritten to
+            avoid (see the docstring above). `ids` is the result pool, not the
+            kind set, so it is excluded.
+            """
+            out: set[str] = set()
+            for key, value in params.items():
+                if key == "ids":
+                    continue
+                if isinstance(value, str):
+                    out.add(value)
+                elif isinstance(value, (list, tuple, set, frozenset)):
+                    out.update(v for v in value if isinstance(v, str))
+            return out
+
         def _one_hit(graph_, query, struct_kind, query_vec, strategies, **kw):
             # a non-empty fused pool is what makes the filter block run at all
             return {"fts": [("obj-1", 1.0)]}
@@ -2483,9 +2504,7 @@ class TestCoreHierarchy:
                 "widget", kind="Object", entity_type="object")
             expected = set(sdk._expand_kind("Object"))
             for params in filter_graph.params:
-                observed_expansion |= {
-                    value for key, value in params.items()
-                    if key.startswith("kind_")}
+                observed_expansion |= _kind_values(params)
         finally:
             search_engine.degradation_chain = original_chain
             if sdk is not None:
