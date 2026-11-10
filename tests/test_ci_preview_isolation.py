@@ -1060,18 +1060,23 @@ def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
         _reap(victim.pid)
 
 
-def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
+def test_both_exit_code_lists_name_every_cause_their_sentences_produce():
     """The two exit-code lists are PROSE, and nothing pinned them, so they drifted
     from the code twice in one review (`#11675` rounds 13 and 15).
 
-    `cmd_alive` returns `9` for four on-disk facts, and its sentence names each: no
+    Two clauses are checked, because the same drift happened in both: `9` (four causes)
+    and `12` (three). `cmd_alive` returns `9` for four on-disk facts, and its sentence
+    names each: no
     port file; a file that is EMPTY; a file holding content that is not a port number
     (which is where a whitespace-only file lands — `$(cat …)` strips only trailing
     newlines, so `"   "` survives as a non-empty non-number and used to reach exit 7);
     and a file whose content could not be read. The header table and the
     `cmd_alive` list each enumerate those causes independently; both have now been
     wrong in both directions, and the in-code list even says it "must not drift from"
-    the header table — which is exactly what happened.
+    the header table — which is exactly what happened. The `12` clause had the same
+    defect: both lists said the pid file "could not be read" while the code also
+    returns `12` for a READABLE file that is empty or holds a non-number, and its own
+    message already says "unreadable, empty, or not numeric".
 
     ⛔ Each check is scoped to the `9 …` CLAUSE, not the whole comment block, because
     the same block also carries `12 the pid FILE itself could not be read`: a
@@ -1084,7 +1089,10 @@ def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
     for line in SCRIPT.read_text().splitlines():
         stripped = line.lstrip()
         if stripped.startswith("#"):
-            current.append(stripped)
+            # Drop the comment MARKER as well as the newline: a phrase this pin
+            # requires ("not numeric") can straddle a line wrap, and leaving `#` in
+            # would make it read "not # numeric" (measured).
+            current.append(re.sub(r"^#+\s?", "", stripped))
             continue
         if current:
             blocks.append(" ".join(current))
@@ -1112,6 +1120,22 @@ def test_both_exit_code_lists_name_every_no_port_cause_the_sentence_produces():
             "an exit-code list omits the ABSENT cause (no port file at all), which is "
             "the one `alloc`-never-ran state the whole code exists to report: "
             + clause[:400])
+
+        # …and the SAME class one clause away: `12` is returned for an unreadable pid
+        # file, an EMPTY one, and one whose content is not a number — as the code's own
+        # `PID FILE UNREADABLE` message says. Both lists said only "could not be read",
+        # which is one of three and the wrong one for the other two.
+        pid_clauses = [c for c in block.split("\u00b7") if "no pid could be read" in c.lower()]
+        assert len(pid_clauses) == 1, (
+            "the pid-unreadable state must be described by exactly one `\u00b7`-separated "
+            f"clause of an exit-code list, found {len(pid_clauses)}: {block[:300]}")
+        pid_clause = pid_clauses[0].lower()
+        for cause in ("unreadable", "empty", "not numeric"):
+            assert cause in pid_clause, (
+                f"an exit-code list enumerates the `12` causes without naming "
+                f"{cause!r}, which the code produces and its own message states — a "
+                "reader is sent to a permissions hunt for a file that was read fine: "
+                + pid_clause[:400])
 
 
 def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None:

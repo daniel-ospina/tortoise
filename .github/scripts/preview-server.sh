@@ -81,8 +81,8 @@
 #   probes) · 9 alive, but NO port is KNOWN (none was recorded — or a port file that
 #   is EMPTY, holds content that is not a port number, or could not be read), so
 #   SERVING was not checked ·
-#   12 the pid FILE itself could not be read, so the dump took NO verdict at all
-#   (never reported as GONE — it measured nothing). 0 is
+#   12 no pid could be read from the pid FILE (unreadable, EMPTY, or not numeric), so
+#   the dump took NO verdict at all (never reported as GONE — it measured nothing). 0 is
 #   therefore never returned when the SERVING leg was not taken; the IDENTITY leg
 #   may be untaken on a serving verdict, and the message says so — see `alive`
 #   above. The MESSAGE carries the same fact; the step only decides whether to
@@ -423,8 +423,8 @@ cmd_ready() {
 # then stopped · 6 never recorded · 10 record attempted and REFUSED · 1 gone ·
 # 9 alive but no port is KNOWN (none recorded, or the port file is EMPTY, holds
 #   content that is not a port number, or could not be read), so SERVING was not
-#   checked · 12 the pid FILE
-# itself could not be read, so NO verdict was taken (never reported as gone).
+#   checked · 12 no pid could be read from the pid FILE (unreadable, EMPTY, or not
+# numeric), so NO verdict was taken (never reported as gone).
 cmd_alive() {
   local name
   name="$(name_flag alive "$@")"
