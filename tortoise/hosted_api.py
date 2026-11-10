@@ -11235,20 +11235,22 @@ def _capture_control_plane_unavailable() -> HTTPException:
     must not read a new category out of a copy fix. Only ``message`` is
     lane-shaped, and only this door's.
 
-    The wording claims only what is provable here. This refusal is raised ABOVE
-    every write on the capture path — the gate sits after the probe and BEFORE
-    the first write (the ``:Session`` MERGE / ``_write_session_and_turns``) — so
-    "nothing was stored" is a fact about this request, not a guess. The sentence
-    is about WRITING, never about READING, and that distinction is deliberate:
-    the probe always reads first, but the points count and the cohort-cost cap
-    are gated on ``(not session_existed or retry_failed_capture) and not
-    store_only``, so on a replay and on the store-only lanes those two are
-    skipped and this gate is the ONLY org-limit read — a message about reading
-    would be false on exactly those paths. The retry it
-    advertises is safe because the off-loaded unit is a READ
-    (``quota.resolve_org_limits``): a bound miss can still let the worker finish
-    the lookup, and a finished lookup has no side effect, so a retry cannot
-    duplicate anything.
+    The wording claims only what is provable here.
+
+    * It is raised ABOVE every write on the capture path — the gate sits after
+      the probe and before the first write (the ``:Session`` MERGE /
+      ``_write_session_and_turns``) — so "not stored" is a fact about this
+      request, not a guess.
+    * The retry it advertises is safe because the off-loaded unit is a READ
+      (``quota.resolve_org_limits``, a query-only helper): a bound miss can let
+      the worker finish the lookup, and a finished lookup has no side effect, so
+      a retry cannot duplicate anything.
+
+    It makes NO claim about which upstream reads ran first, and none about the
+    tenant's stored data — only that the plan limits could not be read and
+    nothing was stored. Do not add such a claim back: two review cycles each
+    falsified one (§ the copy shape below is the only rule stated here, and it is
+    about punctuation, not about what the sentence may assert).
 
     Copy shape: the dashboard's capture-status line already supplies the
     separator (`Last attempt — ${detail}` in
