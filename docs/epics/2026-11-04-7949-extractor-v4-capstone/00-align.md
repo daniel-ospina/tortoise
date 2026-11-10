@@ -235,8 +235,8 @@ Two recorded decisions and one closed-but-unsettled metric sit under the owner's
 ## §5 · Recommendation
 
 **PROCEED to research.** Research's first jobs: (a) a *gated* research brief — this stage's substitute was
-repo facts, which is not the `epic-research` artifact; (b) confirm the unconsumed `semantics`/`hierarchies`
-seam against the tree; (c) reconcile "the registered corpus is a fixture" with "the acceptance must run
+repo facts, which is not the `epic-research` artifact; (b) confirm the unconsumed `semantics` seam against the
+tree, and for `hierarchies` the unconsumed **emitter** (the declaration itself IS read on the live write path); (c) reconcile "the registered corpus is a fixture" with "the acceptance must run
 through the fleet's door"; (d) put the D3 reopen in front of the owner.
 
 ---

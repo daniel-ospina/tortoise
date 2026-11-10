@@ -11,7 +11,9 @@ produced the same way: asserted from a partial reading instead of re-measured.
   * "`hasPart` is declared 4 different ways" — it is declared **once** (`dev:theme → dev:epic`). The "four"
     counted `semantics: hasPart`, which rides four *different predicates*. A `semantics:` value is not a
     declaration.
-  * "`fromKind`/`toKind` are acted on in exactly one place" — there are **three** production readers.
+  * "`fromKind`/`toKind` are acted on in exactly one place" — there are **four** production readers (the
+    fourth — `pack_hierarchy._matching_row` + `_binding` — is the pair→writer resolver §5.5 says to reuse,
+    not rebuild).
   * "a `create_edge`-only pin leaves 31 untested" — 2 declarations also bind the structural path, so 33
     (the corpus is 35 kind-bearing at this head; this line read "31 → 30" before `main` added three).
 

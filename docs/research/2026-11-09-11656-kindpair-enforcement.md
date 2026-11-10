@@ -35,12 +35,16 @@ that must be settled before a scope can converge.
 
 - The enforcement chain is broken, and this is the third link. Confirmed at `origin/main`:
   `create_edge` validates the **predicate** (`projection/edges.py:2910-2911`) and never reads a kind.
-- `fromKind`/`toKind` are acted on in **three** places, and none of them is a general write gate.
-  ⚠️ **Correction (revision 2):** this said "exactly one place". The three are —
+- `fromKind`/`toKind` are acted on in **four** places, and none of them is a general write gate.
+  ⚠️ **Correction (revision 2):** this said "exactly one place". The four are —
   `domain_validators.py:396-410` (one pack's portfolio-shape rule); `sdk._resolve_traversal_path`
   (`:42773`, live at `:38605`) which resolves a **kind pair → `{predicate, fromKind, toKind}`**, i.e. D5's own
   job (but by bare suffix, first-match-wins, so unusable as a gate); and
-  `value_extractor._relation_endpoint_refs` (`:44`), the kind→kind adjacency wired to kind co-selection.
+  `value_extractor._relation_endpoint_refs` (`:44`), the kind→kind adjacency wired to kind co-selection; and
+  `pack_hierarchy._matching_row` (`:194-210`) + `_binding` (`:213`) — the pair→**WRITER** resolver (it joins a
+  hierarchy entry to its `relations[]` row on the declared `(fromKind, toKind)` plus `predicate`/`semantics`),
+  production-reachable on the live path via `relation_write.plan_relation_edges` (`:631`) ←
+  `sdk.apply_relation_edges` (`sdk.py:17200`). **This one already exists — reuse its join.**
 - The rule belongs on the write path, not in a per-pack validator: a customer's pack ships tomorrow and
   has no validator.
 
