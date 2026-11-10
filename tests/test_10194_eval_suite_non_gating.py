@@ -251,8 +251,9 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_expected_legs()` above asserts this map's leg KIND list, so a
-    KIND missing there reds. ⚠️ Two ways this map can go wrong, stated so a
+    which is why the equality below (`assert set(legs) == expected`) compares this
+    map's leg KIND list to `_expected_legs()`'s, so a KIND missing there reds.
+    ⚠️ Two ways this map can go wrong, stated so a
     reader does not infer a guard that is not there: a leg whose CONTENT is
     emptied, filtered or swapped reds in the per-family read-backs — but a key
     `select()` newly RETURNS is enumerated by nothing (the leak check below walks
@@ -602,7 +603,7 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
     text = GATING_WORKFLOW.read_text()
     assert "--non-gating-report" in text, (
         "the gating run must log the non-gating lane and the shard → file-count "
-        "map, so the 42 absent files are visible rather than inferred")
+        "map, so the non-gating files are visible rather than inferred")
     report = cs.non_gating_report(_manifest())
     assert "eval/**" in report and "longmem_eval/**" in report
     assert "test (i)" in report, "the report must list every gating fast shard"
@@ -659,5 +660,6 @@ def test_mutation_m1_one_eval_path_back_on_the_gate_reddens_the_guard():
         "with `eval/**` removed from the lane an eval file must reappear on a "
         "gating leg — if this passes, the guard test next door cannot fail for "
         "the regression it names")
-    assert "eval/ask/test_ask_corpus" in {f for files in leaks.values() for f in files}, (
-        f"the mutant must name the file, got {leaks}")
+    assert "eval/ask/test_ask_corpus" in {
+        f for files in leaks.values() for f in files
+    }, f"the mutant must name the file, got {leaks}"
