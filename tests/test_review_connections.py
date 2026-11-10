@@ -941,3 +941,28 @@ def test_registry_entry_readonly_and_sdk_method(sdk_factory, tmp_path):
     # SDK surface: the method exists and returns the documented shape.
     sdk = sdk_factory(tmp_path)
     assert callable(sdk.review_connections)
+
+
+def test_mcp_description_states_the_same_document_exclusion():
+    """#9923: the surface an MCP client reads must not under-describe add-mode.
+
+    The exclusion is implemented in ``_review_add`` and documented on the SDK
+    method, but ``FastMCPAdapter.register_all`` passes ``entry.description``
+    from this registry to ``FunctionTool.from_function`` — so the registry
+    literal is the ONLY description an MCP client ever sees. Without it a
+    shorter/empty ``add`` list is indistinguishable from "this graph has
+    nothing left to connect", which is the wrong reading the exclusion
+    creates.
+
+    The capture-session half is part of the same fact and is why the clause
+    cannot be shortened to "same-source pairs are excluded": every point of
+    one capture shares ``session:<id>``, so a reader taking that literally
+    would conclude the whole capture door is excluded (see
+    ``test_add_keeps_pairs_that_share_only_a_session_source``).
+    """
+    from tortoise.tool_registry import TOOL_REGISTRY
+    td = next(t for t in TOOL_REGISTRY if t.name == "tortoise_review_connections")
+    desc = td.description
+    assert "SAME DOCUMENT Source are EXCLUDED" in desc, desc
+    assert "shared provenance is not a missing connection" in desc, desc
+    assert "capture-session Source is a window, not a document" in desc, desc
