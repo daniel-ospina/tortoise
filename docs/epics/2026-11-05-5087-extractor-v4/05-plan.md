@@ -91,6 +91,18 @@ turns ──► S0 READ ──► S1 NARRATE ──► S2.1 EXTRACT ──► S2
 | **DM5** | **hierarchy edge** | `(:Object)-[:predicate]->(:Object)` from the pack's `relations` **and** its `hierarchies:`, carrying `mechanism` + **`semantics`** (which is what fixes the direction) | the existing edge writer + a named replay route + **the per-edge `direction` field ruling 3 depends on (OWED, not present)** | the pack declares it, and the writer already admits `:Object` endpoints (`#7902`). ⚠️ **`semantics` is not optional:** no pack declares `direction:` — direction is keyed on the meaning via `SEMANTICS_DIRECTIONS`, so a writer that drops `semantics` cannot know which way confidence runs. ⚠️ **And that is a gap, not just a caveat:** ruling 3 makes the per-edge direction the carrier of the ownership sense, but `pack_registry` reads no `direction` key from a relation (it validates `fromKind`/`toKind` only) and `SEMANTICS_DIRECTIONS['ownedBy']` is `->`, so a `holds`→`ownedBy` declaration resolves the **wrong way** until that field exists. **`#11001` owes it**; until then no lane resolves `holds` through the table. |
 | **DM6** | **census artifact** | per door × step: points by kind, objects + bare-definite share, operator edges, object→object edges, spans, minted vs attached, `step_witness`; **plus per pack: declared / writable / written, and the direction per hierarchy row** | a committed artifact + a pin | a datum with two readers is the drift `#5064` prevents |
 
+**State of DM1's home, stated where the shape is declared:**
+
+<!-- v4-mechanism: mention_record state: not-implemented -->
+⛔ **DM1's home on the `Point` is DECLARED AND UNBUILT** (`#11239`): the record is
+built as a payload (`commit_schema.Mention`, clamped and deduped) and **no write
+door persists it** — the REST `CreatePointRequest`, the SDK capture whitelist
+(`sdk._CAPTURE_PASSTHROUGH_ORDER`) and both `hosted_api`/`selfhost_api` omit
+`mentions` — so a capture counts records the write DISCARDS, and a graph read
+after a capture holds the claim and no mention on it. Read this row as the TARGET
+shape, not as current state, until a door carries it (or an explicit
+evidence-only ruling moves the declaration).
+
 **Integrity constraints:** no mention row without its claim; no held item silently dropped; every committed node must walk to its `Source` (§2.4.1 — value-bearing today, the widening is `#2684`); the hierarchy edge must replay.
 
 ## §5 — Architecture
