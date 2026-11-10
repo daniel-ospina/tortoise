@@ -162,16 +162,50 @@ def _axis_partition() -> Counter:
     return partition
 
 
+def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
+    """Names of the MODULE-LEVEL classes pytest collects as `unittest.TestCase` subclasses.
+
+    ⛔ pytest collects a `unittest.TestCase` subclass **regardless of its name**. Its own docs (rung 3,
+    `https://docs.pytest.org/en/stable/how-to/unittest.html`): "pytest will automatically collect
+    `unittest.TestCase` subclasses and their test methods in `test_*.py` or `*_test.py` files" — nothing
+    about `python_classes`. So counting only `Test*` classes reported **0** functions for a
+    `class FoldCase(unittest.TestCase)` holding four `test_` methods where `--collect-only` collects **4**
+    (measured) — an UNDERCOUNT, the direction that agrees with a stale doc number and stays green.
+    """
+    by_name = {n.name: n for n in module_body if isinstance(n, ast.ClassDef)}
+    case_classes: set[str] = set()
+
+    def _is_case(node: ast.ClassDef, seen: frozenset[str]) -> bool:
+        for base in node.bases:
+            leaf = ast.unparse(base).split(".")[-1]
+            if leaf == "TestCase":
+                return True
+            parent = by_name.get(leaf)
+            if parent is not None and leaf not in seen and _is_case(parent, seen | {leaf}):
+                return True
+        return False
+
+    for node in by_name.values():
+        if _is_case(node, frozenset({node.name})):
+            case_classes.add(node.name)
+    return case_classes
+
+
 def _collected_test_nodes(source: str) -> list[ast.AST]:
-    """The test functions pytest would collect from `source`: module level + class methods.
+    """The test functions pytest would collect from `source` — the collector's own model.
+
+    Module-level `def test_*`; methods of a `Test*` class (recursing into its nested `Test*` classes); and
+    methods of a module-level `unittest.TestCase` subclass, **whatever that class is called**.
 
     ⛔ Not `^    def test_`. That regex silently assumed every test is a 4-space-indented method, so a
     module-level `def test_...` — which pytest DOES collect — left the population pin GREEN while the
     real population grew. A nested `def test_` is not collected and is not counted here either.
     """
+    tree = ast.parse(source)
+    case_classes = _unittest_case_classes(tree.body)
     nodes: list[ast.AST] = []
 
-    def _walk(body: list[ast.stmt]) -> None:
+    def _walk(body: list[ast.stmt], *, module_level: bool) -> None:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 nodes.append(node)
@@ -181,9 +215,21 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
                 # ⛔ But ONLY into `Test*` classes: pytest's default `python_classes = Test`, so a
                 # `class Helpers:` holding a `test_` method is collected by NOBODY (measured) and counting
                 # it is the OVERCOUNT direction — the one whose tempting "fix" is to falsify the document.
-                _walk(node.body)
+                _walk(node.body, module_level=False)
+            elif module_level and isinstance(node, ast.ClassDef) and node.name in case_classes:
+                # A `unittest.TestCase` subclass is collected by name-independent discovery — but only at
+                # MODULE level, and its own body is NOT walked as a container: a `Test*` class nested inside
+                # `FoldCase(unittest.TestCase)` is collected by nobody (measured — `--collect-only` lists
+                # only `FoldCase::test_outer`), so recursing here would over-count in the direction whose
+                # tempting fix is to falsify the document.
+                nodes.extend(
+                    member
+                    for member in node.body
+                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+                    and member.name.startswith("test_")
+                )
 
-    _walk(ast.parse(source).body)
+    _walk(tree.body, module_level=True)
     return nodes
 
 
@@ -207,6 +253,8 @@ def _derive_population(source: str) -> tuple[int, int]:
       * an `argname` driven by a module-level `@pytest.fixture(params=...)` (the case count is the fixture's)
       * an **empty** case list (pytest collects 0, so the function itself is not a collected case)
       * a case list that is not an inline list/tuple literal
+      * a `pytestmark` binding, at module or class level — it applies a mark to EVERY test in its scope,
+        so whether it multiplies cases cannot be answered without modelling per-module/class marks
     """
     tree = ast.parse(source)
     nodes = _collected_test_nodes(source)
@@ -215,7 +263,7 @@ def _derive_population(source: str) -> tuple[int, int]:
     # as a decorator (`@pt(...)`) is an arm this derivation cannot see by name — measured: pytest collects
     # its cases, the derivation reported (1, 1). Aliased arms are therefore an ERROR, not an absence.
     parametrize_aliases: set[str] = set()
-    for node in ast.parse(source).body:
+    for node in tree.body:
         if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
             if "parametrize" not in ast.unparse(node.value):
                 continue
@@ -223,6 +271,24 @@ def _derive_population(source: str) -> tuple[int, int]:
             for target in targets:
                 if isinstance(target, ast.Name):
                     parametrize_aliases.add(target.id)
+
+    # ⛔ `pytestmark` is pytest's documented way to apply a mark to EVERY test in a module — its own docs
+    # (rung 3, `https://docs.pytest.org/en/stable/how-to/parametrize.html`): "To parametrize all tests in a
+    # module, you can assign to the `pytestmark` global variable" — and pytest honours it as a CLASS
+    # attribute too. Measured: `pytestmark = pytest.mark.parametrize("x", [1, 2, 3])` over two tests collects
+    # SIX, where this derivation reported (2, 2). The previous revision registered `pytestmark` in
+    # `parametrize_aliases` (its value does contain `parametrize`) and then tested that name only against
+    # DECORATORS — where a module-level name can never appear — so the arm was collected and never applied:
+    # the same silent zero, one level up. A `usefixtures` mark pulling in a `params=` fixture is equally
+    # unreadable here, so the whole binding is an ERROR rather than a number this function cannot stand behind.
+    pytestmark_bindings: list[str] = []
+    for body in [tree.body, *(node.body for node in ast.walk(tree) if isinstance(node, ast.ClassDef))]:
+        for node in body:
+            if not isinstance(node, (ast.Assign, ast.AnnAssign)) or node.value is None:
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            if any(isinstance(target, ast.Name) and target.id == "pytestmark" for target in targets):
+                pytestmark_bindings.append(ast.unparse(node.value)[:72])
 
     # A `Test*` class inheriting another `Test*` class in this module re-collects the parent's methods, which
     # are not in the subclass AST — measured: pytest collects both, the derivation saw only one.
@@ -259,6 +325,11 @@ def _derive_population(source: str) -> tuple[int, int]:
 
     extra = 0
     unreadable: list[str] = []
+    for rendered in pytestmark_bindings:
+        unreadable.append(
+            f"a `pytestmark` binding (`{rendered}`) applies a mark to EVERY test in its scope, so whether "
+            "it multiplies cases cannot be read here — this derivation models no per-module/class mark"
+        )
     for node in nodes:
         arms = [
             decorator
@@ -1307,9 +1378,17 @@ class TestTheDocsAreDiscoverableAndResolve:
         product, a class-level arm = per-method, a fixture-`params` argname, an empty list = 0 collected).
         A silent zero in that direction agrees with a stale doc number, which is green and wrong, so each of
         those is now a `pytest.raises` case rather than an assumption.
+
+        Two more shapes measured as silently counted rather than rejected, one in each direction: a
+        **module- or class-level `pytestmark`** (multiplies every test in its scope — the module form collects
+        6 where the derivation reported `(2, 2)`, and the alias scan had already registered the name and then
+        only ever compared it against DECORATORS) is now an ERROR; and a **`unittest.TestCase` subclass whose
+        name does not start with `Test`** is collected by pytest regardless of name (measured: 4 tests where
+        the `Test*`-only walk reported 0) and is now COUNTED.
         """
         module = tmp_path / "synthetic_mod.py"
         module.write_text(
+            "import unittest\n"
             "import pytest\n"
             "\n"
             "def test_module_level():\n"
@@ -1327,6 +1406,17 @@ class TestTheDocsAreDiscoverableAndResolve:
             "def test_tuple_argnames_two_cases(a, b):\n"
             "    pass\n"
             "\n"
+            "class FoldCase(unittest.TestCase):\n"
+            "    def test_one(self):\n"
+            "        pass\n"
+            "\n"
+            "    def test_two(self):\n"
+            "        pass\n"
+            "\n"
+            "    class TestNested:\n"
+            "        def test_not_collected(self):\n"
+            "            pass\n"
+            "\n"
             "def helper_with_a_local():\n"
             "    local_name = 1\n"
             "    return local_name\n"
@@ -1335,13 +1425,18 @@ class TestTheDocsAreDiscoverableAndResolve:
         # --- ISSUE 3: a module-level test IS collected, and so is a nested-class method (both measured
         # with `--collect-only`). A `^    def test_` regex reports 2 of these 4; a one-level class walk
         # reports 3. Only the recursive walk gets 4. ---
+        # --- The name-independent `unittest.TestCase` shape (measured: `--collect-only` lists
+        # `FoldCase::test_one`/`test_two` and NOT `FoldCase::TestNested::test_not_collected`) adds 2 more,
+        # and the `TestNested` class inside it must stay uncounted — pytest collects no nested class out of
+        # a `TestCase`, so walking it would over-count. ---
         functions, collected = _derive_population(module.read_text())
-        assert functions == 4, (
-            f"expected 4 collected test functions (2 module-level, 1 method, 1 nested-class method), got "
-            f"{functions} — `^    def test_` reports 2 and a one-level class walk reports 3"
+        assert functions == 6, (
+            f"expected 6 collected test functions (2 module-level, 1 method, 1 nested-class method, 2 "
+            f"`unittest.TestCase` methods), got {functions} — `^    def test_` reports 2, a one-level class "
+            "walk reports 3, and a `Test*`-only walk reports 4"
         )
-        assert collected == 5, (
-            f"expected 5 collected cases, got {collected} — `[(1, 2), (3, 4)]` is 2 cases on a function that "
+        assert collected == 7, (
+            f"expected 7 collected cases, got {collected} — `[(1, 2), (3, 4)]` is 2 cases on a function that "
             "would otherwise be 1, and the old `split(\",\")` derivation counts the comma INSIDE each tuple"
         )
 
@@ -1408,6 +1503,21 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "def three(request):\n    return request.param\n"
                 "@pytest.mark.parametrize('z', [1, 2])\n"
                 "def test_mixed(z, three):\n    pass\n"
+            ),
+            # The two shapes that were still collected-and-never-applied: a module-level `pytestmark`
+            # multiplies EVERY test's cases (pytest's own docs); a class-level one multiplies every
+            # method's. Measured: the module form collects 6 where the derivation reported (2, 2).
+            "module-level `pytestmark` (multiplies EVERY test)": (
+                "import pytest\n"
+                "pytestmark = pytest.mark.parametrize('x', [1, 2, 3])\n"
+                "def test_a(x):\n    pass\n"
+                "def test_b(x):\n    pass\n"
+            ),
+            "class-level `pytestmark` (multiplies every method)": (
+                "import pytest\n"
+                "class TestMarked:\n"
+                "    pytestmark = pytest.mark.parametrize('x', [1, 2])\n"
+                "    def test_a(self, x):\n        pass\n"
             ),
         }
         for label, source in unmodellable.items():
