@@ -358,23 +358,34 @@ def test_write_door_still_canonicalises_a_date_variant():
 # the exact defect #11646 exists to remove, reintroduced through another input.
 
 
-@pytest.mark.parametrize("value", [
-    "2023-05-20 02:21 PDT",             # a zone ABBREVIATION is not an offset
-    "2023/05/20 (Sat) 02:21 (approx)",  # producer shape + an unreadable tail
-    "2023-05-20T+05:00",                # an offset with no time-of-day
-    "2023-05-20T02",                    # hour-only (fromisoformat accepts it)
-    "2023-05-20T02:21:00.1234567",      # >6 fractional digits
-    "2023-05-20T02:21:00,123",          # comma decimal separator
+@pytest.mark.parametrize("value,written,utc_day", [
+    # (value, the WRITTEN calendar day, the day the assembly boundary sees)
+    ("2023-05-20 02:21 PDT", "2023-05-20", "2023-05-20"),   # zone abbreviation
+    ("2023/05/20 (Sat) 02:21 (approx)", "2023-05-20", "2023-05-20"),
+    ("2023-05-20T+05:00", "2023-05-20", "2023-05-20"),      # offset, no time
+    ("2023-05-20T02", "2023-05-20", "2023-05-20"),          # hour-only
+    ("2023-05-20T02:21:00.1234567", "2023-05-20", "2023-05-20"),
+    ("2023-05-20T02:21:00,123", "2023-05-20", "2023-05-20"),  # comma decimal
+    ("2023-05-20T02:00+05", "2023-05-20", "2023-05-19"),    # +HH offset
+    ("2023-05-20T02:21:00+05", "2023-05-20", "2023-05-19"),
+    ("20230520T02:21:00Z", "2023-05-20", "2023-05-20"),     # compact + time
+    ("2023-W43-2T11:00:00", "2023-10-24", "2023-10-24"),    # ISO week + time
 ])
-def test_a_value_that_parsed_before_still_names_its_day(value):
-    expected = "2023-05-20"
-    for name, seam in (("calendar_date", calendar_date), ("_norm_date", _norm_date),
+def test_a_value_that_parsed_before_still_names_its_day(value, written, utc_day):
+    """Every one of these read a calendar-date PREFIX (or was as tolerant as
+    ``datetime.fromisoformat``) before #11646, so a strictly anchored
+    whole-value grammar made a REAL date silently undated — the defect the issue
+    exists to remove, on another input (review cycles 1 and 2)."""
+    for name, seam in (("calendar_date", calendar_date),
                        ("_as_date", time_aware._as_date),
                        ("_calendar_date", _calendar_date),
                        ("_as_iso_date", time_aware._as_iso_date)):
         got = seam(value)
         assert got is not None, f"{name} lost a value it used to parse: {value!r}"
-        assert str(got).startswith(expected), f"{name}({value!r}) -> {got!r}"
+        assert str(got).startswith(written), f"{name}({value!r}) -> {got!r}"
+    # the assembly boundary is the ONE seam that truncates an aware instant in
+    # UTC; it must reach the grammar (not a written-day fallback) to do so
+    assert _norm_date(value) == date.fromisoformat(utc_day), value
 
 
 def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
@@ -396,3 +407,22 @@ def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
     # and no seam fabricates a day for them either
     assert time_aware._as_date("202305201112") is None
     assert _calendar_date("202305201112") is None
+
+
+def test_every_shape_that_used_to_parse_still_parses_at_the_assembly_boundary():
+    """The assembly boundary is the ONE caller that truncates an aware instant
+    in UTC, so the offset spellings must reach the grammar (not a prefix
+    fallback that would silently keep the written day) — review cycle 2,
+    finding 1. ``datetime.fromisoformat`` accepts ``+05`` and ``+00:00:30``;
+    both must land on the UTC day, as they did before #11646."""
+    assert _norm_date("2023-05-20T02:00+05") == date(2023, 5, 19)
+    assert _norm_date("20230520T02:21:00+05") == date(2023, 5, 19)
+    # …while the written-day seams keep the written day
+    assert calendar_date("2023-05-20T02:00+05") == date(2023, 5, 20)
+    assert time_aware._as_date("2023-05-20T02:00+05") == "2023-05-20"
+    # a compact / ISO-week date carrying a TIME keeps its day too (review
+    # cycle 2, finding 2): fromisoformat reads these whole, so they must not
+    # become UNDATED on the spine
+    assert _norm_date("20230520T02:21:00Z") == date(2023, 5, 20)
+    assert _norm_date("2023-W43-2T11:00:00") == date(2023, 10, 24)
+    assert time_aware._as_date("2023-W43-2T11:00:00") == "2023-10-24"

@@ -67,7 +67,13 @@ is BOUNDED by DIGIT COUNT, so a pure number is never guessed: 8 digits is a
 compact DATE (``20230520``), 9-10 digits is a SECONDS epoch
 (``1684549260``), and 11+ digits is undated — that is the millisecond shape
 ``validity`` names and refuses at the write door (#10079), not something this
-module should turn into a year-8380 date.
+module should turn into a year-8380 date. Two consequences stated rather than
+left to be discovered: **1-7 digit strings are undated** (a bare ``"2023"`` is
+not a year-shaped date; the NUMBER ``2023`` is still the epoch it always was, as
+``time_aware._as_date`` reads it), and a 10-digit ``YYYYMMDDHH`` spelling
+(``2023052011``) is read as an EPOCH, not as a date-with-hour — the old
+``_norm_date`` read it as 2023-05-20 while ``_as_date`` read it as the epoch, so
+the two disagreed; one documented rule (digits, not ambiguity) settles it.
 
 The undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``) is a
 POSITIVE date that means "no date". It is EXPORTED, never applied: callers
@@ -131,7 +137,7 @@ _INSTANT_RE = re.compile(
     r"(?:\s*\([A-Za-z]{2,9}\))?"
     r"(?:[T\s]+(?P<hour>\d{2})"
     r"(?::(?P<minute>\d{2})(?::(?P<second>\d{2})(?:[.,](?P<fraction>\d+))?)?)?)?"
-    r"\s*(?P<offset>[Zz]|[+-]\d{2}:?\d{2})?\s*\Z"
+    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?\s*\Z"
 )
 
 #: The date-only spellings ``date.fromisoformat`` accepts beyond the dashed
@@ -144,7 +150,20 @@ _INSTANT_RE = re.compile(
 #: bound read fourteen years early.
 _COMPACT_OR_WEEK_RE = re.compile(r"^(?:\d{8}|\d{4}-?W\d{2}(?:-?\d)?)\Z")
 
-_OFFSET_RE = re.compile(r"^(?P<sign>[+-])(?P<hours>\d{2}):?(?P<minutes>\d{2})$")
+#: A COMPACT / ISO-week date carrying a TIME (``20230520T02:21:00Z``,
+#: ``2023-W43-2T11:00:00``). ``datetime.fromisoformat`` reads these whole, so
+#: they are the one family the whole-value grammar above cannot express (it needs
+#: dashed separators) while the pre-#11646 assembly parser did read them (its
+#: ``T`` branch went straight to ``fromisoformat``). Without this arm such a row
+#: becomes UNDATED on the spine — the very failure #11646 removes, on another
+#: input. Pure-digit strings are excluded by construction (no ``T``/space/``W``
+#: tail), so the digit-count EPOCH rule below keeps them.
+_COMPACT_DATETIME_RE = re.compile(
+    r"^(?:(?:\d{8})|(?:\d{4}-?W\d{2}(?:-?\d)?))[T\s]+")
+
+_OFFSET_RE = re.compile(
+    r"^(?P<sign>[+-])(?P<hours>\d{2})"
+    r"(?::?(?P<minutes>\d{2})(?::?(?P<seconds>\d{2}))?)?$")
 
 #: A pure-number string in the SECONDS-epoch range (9-10 digits, optional
 #: fraction). 8 digits is a compact date; 11+ is a millisecond epoch.
@@ -230,6 +249,9 @@ def _string_date(s: str, *, utc_truncate: bool) -> date | None:
     d = _date_only_shape(s)
     if d is not None:
         return d
+    d = _compact_datetime_date(s, utc_truncate=utc_truncate)
+    if d is not None:
+        return d
     epoch = _as_epoch(s)
     if epoch is not None:
         return _date_from_epoch(epoch)
@@ -265,6 +287,25 @@ def _date_only_shape(s: str) -> date | None:
         return date.fromisoformat(match.group(0))
     except ValueError:
         return None
+
+
+def _compact_datetime_date(s: str, *, utc_truncate: bool) -> date | None:
+    """The day of a COMPACT / ISO-week date that carries a time.
+
+    ``datetime.fromisoformat`` (the reader the assembly ladder used before
+    #11646) accepts these whole, so they must not become undated here. An
+    offset-bearing value truncates in UTC when the caller asks for it, exactly
+    like the dashed form.
+    """
+    if _COMPACT_DATETIME_RE.match(s) is None:
+        return None
+    try:
+        stamp = datetime.fromisoformat(s.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if utc_truncate and stamp.tzinfo is not None:
+        return stamp.astimezone(UTC).date()
+    return stamp.date()
 
 
 def _prefix_date(s: str) -> date | None:
@@ -330,7 +371,6 @@ def _match_naive(match: re.Match[str]) -> datetime | None:
     except ValueError:
         return None
 
-
 def _match_offset(match: re.Match[str]) -> timezone | None:
     raw = match.group("offset")
     if not raw:
@@ -340,8 +380,10 @@ def _match_offset(match: re.Match[str]) -> timezone | None:
     parts = _OFFSET_RE.match(raw)
     if parts is None:
         return None
-    hours, minutes = int(parts.group("hours")), int(parts.group("minutes"))
-    if hours > 23 or minutes > 59:
+    hours = int(parts.group("hours"))
+    minutes = int(parts.group("minutes") or 0)
+    seconds = int(parts.group("seconds") or 0)
+    if hours > 23 or minutes > 59 or seconds > 59:
         return None
-    delta = timedelta(hours=hours, minutes=minutes)
+    delta = timedelta(hours=hours, minutes=minutes, seconds=seconds)
     return timezone(-delta if parts.group("sign") == "-" else delta)
