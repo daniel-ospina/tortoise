@@ -449,25 +449,33 @@ def _string_instant(s: str) -> datetime | None:
     #    roll 24:00 to the next midnight: that invents an instant from an hour
     #    the value does not have.
     #
-    # So: the INSTANT view takes whole-value families whose instant it can state
-    # AND that no recorded ruling refuses; the DAY view takes everything whose
-    # calendar day is readable, by whole-value grammar OR by prefix. TWO stated
-    # exceptions keep "whole-value" from being sufficient:
+    # So, in THREE separate statements — they are different gates, and
+    # conflating them is how this comment went wrong before:
     #
-    # * an EPOCH SPELLED AS A STRING is day-dated here and refused by
-    #   ``calendar_datetime`` BY RULING (#9202 — the asymmetry is stated in the
-    #   module docstring), so it is not orderable however whole-value it looks;
-    # * the SEPARATOR-FREE compact / ISO-week date carrying an offset or ``Z``
-    #   and no time is whole-value and day-dated (:func:`_compact_date_offset`)
-    #   yet NOT orderable — ``_created_sort_key``'s gate is a substring test for
-    #   a ``-``, ``T`` or ``/`` ANYWHERE in the value, and ``20230520+05:00``,
-    #   ``20230520Z``, ``2026W243+05:00``, ``2023W206Z`` contain none. ⚠ It is a
-    #   SEPARATOR asymmetry, NOT a sign one: the extended ISO-week form
-    #   ``2023-W43-2+05:00`` carries ``-`` in the DATE and orders (key 0) despite
-    #   its positive offset, while in the separator-free form the offset's own
-    #   sign is what decides (``2026W243-05:00`` orders, ``2026W243+05:00`` does
-    #   not). Both predate #11646, are untouched here, and are named rather than
-    #   left to be rediscovered as violations of this comment.
+    # A. ACCEPTANCE. The INSTANT view takes a whole-value family only when it can
+    #    state the instant; the DAY view takes everything whose calendar day is
+    #    readable, by whole-value grammar OR by prefix. Two whole-value families
+    #    are refused by ``calendar_datetime``, and they are NOT the same kind of
+    #    refusal:
+    #      * an EPOCH SPELLED AS A STRING — refused BY RULING (#9202; the
+    #        asymmetry is stated in the module docstring);
+    #      * a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY spelling —
+    #        ``20230520-05:00``, ``2026W243-05:00``, ``2023-W43-2+05:00`` and
+    #        ``20230520Z`` are all day-dated (:func:`_compact_date_offset`) and
+    #        all refused here, because ``_string_instant`` has no arm for the
+    #        family at all. That is a GAP, not a ruling — tracked as #11708 —
+    #        and it is not the hour-24 case above, whose grammar both views
+    #        share.
+    #
+    # B. ORDERABILITY. A DIFFERENT gate, and it is about ``_created_sort_key``,
+    #    not about acceptance: its gate is a substring test for a ``-``, ``T``
+    #    or ``/`` ANYWHERE in the value. So ``20230520+05:00``, ``20230520Z``
+    #    and ``2026W243+05:00`` never reach it, while the extended ISO-week
+    #    ``2023-W43-2+05:00`` does (its DATE carries ``-``) despite its positive
+    #    offset, and ``2026W243-05:00`` does because its negative offset
+    #    supplies the ``-``. A SEPARATOR asymmetry, not a sign one. Both
+    #    predate #11646, are untouched here, and are named rather than left to
+    #    be rediscovered as violations of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

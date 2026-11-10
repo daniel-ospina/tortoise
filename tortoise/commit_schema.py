@@ -523,8 +523,8 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
       same on every host.
 
     Two hosts therefore disagree only when one host's offset is below the pair's
-    separation and the other is not — a condition on the OFFSETS, not on the
-    pair's distance (measured: the pair
+    separation and the other is not — the OFFSETS decide it, and the distance
+    alone decides nothing (measured: the pair
     ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
     ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
     ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three; two hosts

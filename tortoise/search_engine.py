@@ -3662,8 +3662,8 @@ _DECORATION_TIMEOUT_MS = 200
 #:
 #: which makes consumers of this key answer DIFFERENTLY per host. The key
 #: itself is host-dependent for the value above, and the guards order with it,
-#: so which hosts disagree is decided by the pair's separation against their two
-#: OFFSETS, not against the pair's own distance: refusal is
+#: so which hosts disagree is decided by where the pair's separation falls
+#: against their two OFFSETS — the distance alone decides nothing: refusal is
 #: ``reader_offset < (naive - other)`` when the naive value is the START (the
 #: sign INVERTS for an END), and when BOTH bounds are naive the offsets CANCEL
 #: and every host agrees. Measured: two hosts 1h apart disagree about a pair

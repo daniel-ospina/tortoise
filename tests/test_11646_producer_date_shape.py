@@ -673,20 +673,21 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     must not be un-orderable there — otherwise a later consumer silently drops
     rows this module says are dated.
 
-    Scoped to the DATE+TIME families on purpose: whole-value shapes the day view
-    dates but this view deliberately refuses are an EPOCH spelled as a STRING
-    (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s module
-    docstring), a SEPARATOR-FREE compact / ISO-week date carrying an offset or
-    ``Z`` with no time (``20230520+05:00``, ``20230520Z``, ``2026W243+05:00`` —
-    the gap named on #11646/#11708; the sort gate is a substring test for ``-``,
-    ``T`` or ``/`` ANYWHERE, so the extended ``2023-W43-2+05:00`` orders despite
-    its positive offset, and only in the separator-free form does the offset's
-    sign decide: ``2026W243-05:00`` orders, ``2026W243+05:00`` does not), and an
-    HOUR-24 spelling
+    Scoped to the DATE+TIME families on purpose: the whole-value shapes the day
+    view dates but this view deliberately refuses are an EPOCH spelled as a
+    STRING (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s
+    module docstring) and a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY
+    spelling — ``20230520+05:00``, ``20230520-05:00``, ``20230520Z``,
+    ``2026W243+05:00`` and ``2023-W43-2+05:00`` are all day-dated and all
+    refused here (the gap named on #11708), and an HOUR-24 spelling
     (``2023-05-20T24:00:00``, which the day view dates by the whole-value
-    grammar and the instant view refuses at ``_match_naive``). A description
-    claiming every whole-value shape would invite the widening this module
-    forbids.
+    grammar and the instant view refuses at ``_match_naive``).
+
+    ORDERABILITY is a separate gate (``_created_sort_key``'s substring test for
+    ``-``, ``T`` or ``/``): the extended ``2023-W43-2+05:00`` orders despite its
+    positive offset, ``20230520+05:00`` does not, and ``2026W243-05:00`` does
+    only because its negative offset supplies the ``-``. A description claiming
+    every whole-value shape would invite the widening this module forbids.
 
     ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
     day view dates a value whose TAIL is unreadable, and the instant view must
@@ -730,8 +731,8 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     ``reader_offset < (validFrom - validTo)``, producer as the END inverts the
     sign, and with BOTH bounds producer-shaped the offsets cancel so every host
     agrees. Two hosts therefore disagree only when one host's offset is below
-    the pair's separation and the other is not — not a bound on the pair's own
-    distance: two hosts 1h apart can disagree about a pair 13h30 apart, and a
+    the pair's separation and the other is not — the distance alone decides
+    nothing: two hosts 1h apart can disagree about a pair 13h30 apart, and a
     pair 20h apart answers the same on every host.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
