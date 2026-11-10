@@ -367,14 +367,17 @@ def main(argv: list[str] | None = None) -> int:
         # is compared against `POPULATION_RESIDENT_COUNT` for its population, so a stale
         # report claiming more nodes than that population now holds is demoted even
         # within the age bound (eviction shrinks a population between two fresh-looking
-        # reads). The whole-graph over-count check (`entry.nodes > resident_total`) stays
-        # as a one-integer backstop whose only reachable trigger is read skew — NOT a
-        # second detector for a bad mirror, since a subgraph count cannot exceed the graph
-        # total. It could never catch the measured shape here either: 20,000 claimed
-        # against 500 real turns on a 25,000-node graph, where `cache_evictor` gate 2
-        # would have capped the sweep at 20,000 (review P2 on #11097; #10976 residual
-        # comment 6689914601). Stated in `--parity-graph`'s help as well, where the
-        # operator reads it at the moment of choosing the flag.
+        # reads). The whole-graph over-count check (`entry.nodes > resident_total`) remains
+        # as a one-integer backstop comparing the REPORT's claim against the graph total:
+        # it fires on a claim above every node the graph holds — reachable from a count
+        # statement that multiplies rows far enough to push the population past the total,
+        # or from removals between the two reads. It is NOT a detector for a widened
+        # PREDICATE (a subgraph count cannot exceed the total), and a modest
+        # row-multiplication passes both guards — nor could it catch the measured shape
+        # here: 20,000 claimed against 500 real turns on a 25,000-node graph (review P2
+        # on #11097; #10976 residual comment 6689914601). Stated in
+        # `--parity-graph`'s help as well, where the operator reads it at the moment of
+        # choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "
