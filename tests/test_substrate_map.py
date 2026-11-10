@@ -65,39 +65,27 @@ _LABEL_CLAIM = re.compile(
 #: green, and a bare `(?=\s*\()` left `files under `tortoise/` (and `tests/`)` green
 #: — a false sentence with every number green both times.
 #:
-#: ⚠️ What this closes is the population named BEFORE the quote. It cannot see one
-#: named AFTER it, inside the same parenthetical, so `_NO_SECOND_POPULATION` (below,
-#: applied to that tail) closes that half; the two are pinned together because either
-#: alone leaves a false sentence green.
+#: ⚠️ What THIS lookahead closes is the population named BEFORE the quote. It cannot see
+#: one named after it, nor one inside a third command, nor a `..` path — so this pin does
+#: not stop at the lookahead: `_PATH_TOKEN` (below) reads every path in the whole clause
+#: and requires each to be the measured population, and the two are read together because
+#: either alone leaves a false sentence green.
 _POPULATION_CLAIM = re.compile(
     r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
     r"`([^`]+)`(?=\s*\(`git grep)"
 )
 
-#: Any backticked span in the measurement sentence other than the two `git grep`
-#: commands and the pinned population itself. A second population named AFTER the quote
-#: lives there, and it is measured GREEN without this: "… the file count is not the line
-#: count, and `tests/` is counted in both figures)" — and `tests` / `graph-scripts` without
-#: a trailing slash were GREEN too, so this rule allowlists by VALUE (the one population
-#: this pin measures) instead of requiring a `/`, which a population name need not carry.
-#: ⛔ No lookahead inside the pattern: a `(?!git grep)` there shifts the scan by one
-#: backtick when it rejects the first command, and the span pairing then swallows the
-#: NEXT population instead of reading it ("`tests/`" came back as part of a longer
-#: non-population span, measured GREEN). Extract every span positionally, then filter.
-_NO_SECOND_POPULATION = re.compile(r"`([^`]+)`")
-
-#: What a population can be spelled as. ⛔ NOT "one segment with an optional trailing
-#: slash" — that exempted a second population carrying an INTERIOR slash before it ever
-#: reached the comparison (`tests/unit/`, `docs/architecture/` were measured GREEN while
-#: `tests/` redded), i.e. the shape filter quietly became a hole in the pin. A candidate
-#: is any backticked span with no whitespace and no arrow: the two `git grep` commands are
-#: excluded by prefix, node labels by their leading `:`, and the POPULATION this pin
-#: measures is exempted by VALUE (itself, a trailing slash, or anything under it) rather
-#: than by shape, so a second population cannot dodge the comparison by spelling.
-_NON_POPULATION_SPAN = re.compile(r"[^\s→]+")
-
-#: The pathspec a quoted `git grep` in §5's measurement clause must carry.
-_PATHSPEC = re.compile(r"--\s+(\S+)\s*$")
+#: Any path spelled in §5's measurement clause — with or without backticks, in the prose
+#: or inside a command — is read by its PATH, not by its spelling.
+#:
+#: ⛔ Every earlier version of this rule tested populations by SPELLING and was defeated by
+#: a spelling it did not enumerate, each measured GREEN on a sentence that was false about
+#: the repo: a negative lookahead of connectors (`+`, `&`, "as well as" slipped past); a bare
+#: `(?=` some-paren; a backtick-pair scan (a `git -C . grep … -- tests/` span, a PROSE
+#: `tests/` with no backticks, an unbalanced backtick); and a shape filter that exempted a
+#: nested `tests/unit/` before it was compared. A population always contains a `/`, so the
+#: clause's path tokens are the thing to read — one rule, and every spelling is covered.
+_PATH_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]*)+")
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1781,28 +1769,16 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "cannot be paired — a half-quoted population would be dropped silently. Fix the "
         "backticks"
     )
-    spans = _NO_SECOND_POPULATION.findall(tail)
-    # A `git grep` span is judged by its PATHSPEC: `_QUOTED_GREP` requires the two pinned
-    # commands to carry `-- tortoise/`, but a THIRD command added to the clause was read by
-    # nothing, so `git grep -n ':Document' -- tests/` sat green beside the correct pair.
-    wrong_pathspec = []
-    for span in spans:
-        if not span.startswith("git grep"):
-            continue
-        pathspec = _PATHSPEC.search(span)
-        if pathspec is None or pathspec.group(1).rstrip("/") != _TRACKED_DIR:
-            wrong_pathspec.append(span)
-    extra = wrong_pathspec + [
+    # Every path in the clause must be the population this pin measures. `tortoise/`
+    # itself, and anything under it, pass; anything else — a second population in prose,
+    # a third command with a different pathspec, a `..` that starts inside the directory
+    # and resolves outside it — is a false scope with every number still green.
+    clause = section[population_match.start() : close_at + 1]
+    extra = [
         token
-        for token in spans
-        if not token.startswith(("git grep", ":"))
-        and _NON_POPULATION_SPAN.fullmatch(token)
-        # Exempt the measured population by VALUE — but never through a `..` segment:
-        # `tortoise/../tests/` starts with the pinned directory and resolves somewhere else.
-        and not (
-            ".." not in token
-            and (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
-        )
+        for token in _PATH_TOKEN.findall(clause)
+        if ".." in token
+        or not (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
     ]
     assert not extra, (
         f"§5's measurement parenthetical names another path after the quote — "
