@@ -4,7 +4,14 @@ Covers:
   - link_source_to_entity (FalkorProjection + TortoiseSDK facade)
   - Action rejection (dissolved v3.0)
   - Backfill idempotency (MERGE semantics)
-  - get_provenance_chain completeness (previously phantom query)
+
+⛔ #4282 retired the three provenance-chain tests that used to live below
+(`test_get_provenance_chain_complete`,
+`test_provenance_chain_returns_data_for_ingested_document`,
+`test_provenance_chain_returns_document_without_source_url`): each drove
+`get_provenance_chain`, one of the 26 dead public methods #4282 deleted (see
+`tortoise/sdk_retired.py`), so no subject survives to re-point them at. The
+provenance-chain section headers below are kept as the ledger for them.
 
 All tests use TortoiseSDK (not direct FalkorProjection) because
 conftest.py sets TORTOISE_DB_URI for the Docker FalkorDB container;
@@ -262,9 +269,12 @@ def test_backfill_references_idempotent():
 
 
 # ── get_provenance_chain completeness ──────────────────────────────────────
-
-
 # ── provenance chain via ingest path (#205) ────────────────────────────────
+#
+# EMPTY BY DESIGN (#4282): the three tests that lived under these two headers all
+# drove `get_provenance_chain`, which this PR deleted. See the module docstring
+# for the per-test ledger. The chain query itself survives in the projection; no
+# test in this file reaches it any more.
 
 
 def test_link_source_to_entity_source_kind_passthrough():

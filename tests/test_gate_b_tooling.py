@@ -2,8 +2,18 @@
 calibration milestone marker.
 
 Covers the DE2E-4 grounding snapshot contract (mean over ``confidence`` of
-live non-operator Points, #780 live-only semantics) and the DE2E-7 local
-``calibration_passed()`` marker contract.
+live non-operator Points, #780 live-only semantics).
+
+⛔ #4282 retired the five tests that covered the DE2E-7 local
+``calibration_passed()`` marker (`test_calibration_marker_persists_across_restart`,
+`test_calibration_passed_false_then_true`,
+`test_record_calibration_enforces_gate_targets`,
+`test_record_calibration_is_idempotent`,
+`test_record_calibration_validation`): every one of them drove
+`record_calibration`, one of the 26 dead public methods #4282 deleted (see
+`tortoise/sdk_retired.py`), so no subject survives to re-point them at. The
+`calibration_passed()` read accessor itself survives — it is simply no longer
+covered here, and nothing in this file pretends otherwise.
 """
 from __future__ import annotations  # noqa: I001
 
@@ -214,5 +224,10 @@ def test_grounding_drift_ceiling_constants_pinned(sdk):
 
 
 # ── Calibration milestone marker: DE2E-7 local contract ───────────
+#
+# EMPTY BY DESIGN (#4282): the five marker tests that lived here all drove
+# `record_calibration`, which this PR deleted. See the module docstring for the
+# per-test ledger; `calibration_passed()` itself survives and is exercised
+# nowhere in this file.
 
 

@@ -1,6 +1,12 @@
-# #4282: the tests below were removed with the methods they pin — `test_dense_leg_returns_the_captured_turn`, `test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired` — which this
-# PR deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is
-# driven by the rest of this file under its private name `_capture_session`.
+# #4282: `test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired`
+# drove `sdk.retrieval_legs`, one of the 26 public methods this PR retired (see
+# `tortoise/sdk_retired.py`). It is REBUILT on the surface that survives —
+# `recall_state(..., leg_trace=)` plus `declared_degraded_read` and the
+# `require_hybrid_read` predicate — rather than dropped with the wrapper, so the
+# module docstring's "degradation stays visible" promise stays testable. The
+# surviving capture door is driven under its private name `_capture_session`.
+# (`test_dense_leg_returns_the_captured_turn` is NOT removed — it drives
+# `run_vector_query` directly, never the retired wrapper, and is present below.)
 """#4194 — a captured turn Point must carry the embedding its dense leg searches.
 
 The measured defect (read-only census on a copy of the real store: 55 Points,
@@ -44,8 +50,13 @@ from tests._provider_env import pin_provider_routing_env
 from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel, compute_embedding
+from tortoise.exceptions import HybridReadUnavailableError
 from tortoise.sdk import TortoiseSDK
-from tortoise.search_engine import run_vector_query
+from tortoise.search_engine import (
+    declared_degraded_read,
+    require_hybrid_read,
+    run_vector_query,
+)
 
 
 class _FakeEmbedder:
@@ -193,8 +204,11 @@ def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
 
     ``run_vector_query`` is the vector leg in isolation — no lexical leg is
     involved — so its returning the turn proves the leg now has material. The
-    leg trace records it as ran/not-degraded with a non-zero count, and the
-    product declaration surface reports the read as hybrid.
+    leg trace records it as ran/not-degraded with a non-zero count.
+
+    The product's own DECLARATION half is deliberately not asserted here: its
+    driver (`sdk.retrieval_legs`) is one of the 26 methods #4282 retired. The
+    note under these assertions records where that pin moved to.
     """
     _keyless(monkeypatch)
     sdk._capture_session(CONV, session_id="sess-4194-dense")
@@ -218,17 +232,66 @@ def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
     assert vec["degraded"] is False, vec
     assert vec["count"] >= 1, vec
 
-    # ⛔ The product's own declaration half of this pin (`sdk.retrieval_legs`) went
-    # WITH ITS DRIVER: `retrieval_legs` is one of the 26 methods #4282 retired (see
-    # `tortoise/sdk_retired.py`), so nothing at this head can ask the SDK to
-    # declare the read hybrid. The unit-level declaration is still pinned by
-    # `tests/test_2952_degraded_read.py::declared_degraded_read`, which drives the
-    # same value directly. What survives here is the part this test was the only
-    # pin for — that the captured turn is REACHABLE through the dense leg at all.
+    # ⛔ The product's own declaration half of this pin used to be driven through
+    # `sdk.retrieval_legs`, which went WITH ITS DRIVER: `retrieval_legs` is one of
+    # the 26 methods #4282 retired (see `tortoise/sdk_retired.py`). The declaration
+    # is NOT unpinned — it moved onto the surface that survives:
+    # `tests/test_2952_degraded_read.py::declared_degraded_read` drives the unit,
+    # and `test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired`
+    # below drives the end-to-end `no_embedder` marker through
+    # `recall_state(leg_trace=)`. What this test is the only pin for is that the
+    # captured turn is REACHABLE through the dense leg at all.
 
 
 # ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──
 
+def test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired(
+        sdk, monkeypatch):
+    """Degradation stays VISIBLE: no embedder must never read as ``available``.
+
+    The turn is still stored (the capture is unconditional, #3892) with NO
+    vector — never a junk one. The read path then declares its vector leg
+    not-run under the shared vocabulary (``no_embedder`` /
+    ``vector_leg_unavailable``) and reports ``hybrid: False``.
+
+    #4282 retired ``sdk.retrieval_legs``, so the declaration half is driven here
+    through the surface that survives: ONE ``recall_state`` call carrying the
+    observational ``leg_trace``, then ``declared_degraded_read`` for the marker
+    and the ``require_hybrid_read`` gate predicate for ``hybrid``. The pin moves
+    with the behaviour, never with the retired name.
+    """
+    _keyless(monkeypatch)
+    monkeypatch.setattr(
+        EmbeddingModel, "get",
+        classmethod(lambda cls, load_timeout=None: None))
+    EmbeddingModel._reset()
+
+    res = sdk._capture_session(CONV, session_id="sess-4194-noemb")
+    assert res["turns"] == len(CONV), res
+
+    rows = _turn_rows(sdk, "sess-4194-noemb")
+    assert [r[0] for r in rows] == [
+        f"sess-4194-noemb_t{i}" for i in range(len(CONV))]
+    for tid, content, stored in rows:
+        assert content, (tid, "the turn must still be stored")
+        assert stored is None, (
+            f"{tid}: no embedder yet a vector was written — a fabricated "
+            "vector is worse than an honest NULL")
+
+    trace: list[dict] = []
+    sdk.recall_state("auth dead-end", limit=5, leg_trace=trace)
+    marker = declared_degraded_read(trace)
+    assert marker is not None, (
+        "a vector leg that never ran was reported as available")
+    assert marker["vector_leg_unavailable"] is True, marker
+    assert marker["missing_legs"] == ["vector"], marker
+    assert marker["reason"] == "no_embedder", marker
+    assert marker["degraded_read"] is True, marker
+    assert marker["hybrid"] is False, marker
+    # The same predicate `retrieval_legs` used to derive its ``hybrid`` field:
+    # it must REFUSE here, which is what makes ``hybrid: False`` above true.
+    with pytest.raises(HybridReadUnavailableError):
+        require_hybrid_read(trace or None)
 
 
 def test_recapture_without_an_embedder_preserves_the_stored_vector(

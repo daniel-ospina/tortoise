@@ -1385,12 +1385,18 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
 #
 # The residual a refusal was aimed at is NOT covered by those tests, so nothing
 # here buys it back: a re-key rewriting the MERGE key, so a rebuild splits the
-# `:Source` (two nodes) and the Point's `get_provenance_chain` returns EMPTY —
-# re-measured live at this head with a 1517-byte `url`. It is PRE-EXISTING to #3998
-# and it is #4649's structural issue (the outer label loop takes the FIRST matching
-# label), recorded on #4649 — which is CLOSED, so it is neither open-tracked nor
-# test-pinned. That is a real gap, stated rather than papered over: the structural
-# fix belongs with #4649's loop, not with a guard on this write.
+# `:Source` (two nodes) and a provenance-chain read over the Point returns EMPTY —
+# measured live on the pre-#4282 head with a 1517-byte `url`. ⚠️ It cannot be
+# re-measured from THIS tree: the chain read that produced that number was
+# `get_provenance_chain`, one of the 26 public methods #4282 retired
+# (`tortoise/sdk_retired.py`). What survives is the projection query underneath it,
+# and the residual is still reachable through that — the number is retained as the
+# record of a measurement, not as a claim reproducible at this head. It is
+# PRE-EXISTING to #3998 and it is #4649's structural issue (the outer label loop
+# takes the FIRST matching label), recorded on #4649 — which is CLOSED, so it is
+# neither open-tracked nor test-pinned. That is a real gap, stated rather than
+# papered over: the structural fix belongs with #4649's loop, not with a guard on
+# this write.
 
 
 

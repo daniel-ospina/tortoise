@@ -1,3 +1,14 @@
+# #4282: `test_backfill_seam_anchors_the_events_recorded_version` was removed WITH
+# its driver `backfill_sources`, one of the 26 dead public methods #4282 retired
+# (`tortoise/sdk_retired.py`). It deliberately drove the real repair ROUTING
+# (`backfill_sources` -> `_backfill_link`) rather than the writer, to prove a legacy
+# Event anchors the version IT was read from, never the Source's current hash. With
+# the public door gone there is no routing left to pin, so it cannot be re-pointed
+# the way the tests below were (their subject, the projection-time anchor, survives).
+# The two private steps it drove — `_backfill_probe` and `_backfill_link` — remain in
+# `tortoise/sdk.py` with no caller left; that unreferenced pair is recorded here
+# rather than silently carried, and the anchoring property itself stays pinned at
+# the projection seam (`link_source_to_legacy_event`).
 """#5199 — the version anchor on DERIVATION ``references`` links.
 
 Owner-approved 2026-09-25 (option A): an **optional** ``sourceVersion`` on the

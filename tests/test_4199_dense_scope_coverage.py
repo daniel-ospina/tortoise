@@ -1,6 +1,11 @@
-# #4282: the tests below were removed with the methods they pin — `test_a_terminal_in_scope_object_arm_cannot_launder_the_read`, `test_an_out_of_scope_object_arm_cannot_launder_the_read`, `test_empty_kind_scope_read_is_not_refused`, `test_fully_embedded_turn_corpus_still_reports_hybrid`, `test_partial_turn_corpus_read_is_declared_degraded`, `test_unscoped_read_keeps_reporting_hybrid` — which this
-# PR deletes outright (see `tortoise/sdk_retired.py`). The surviving capture door is
-# driven by the rest of this file under its private name `_capture_session`.
+# #4282: six tests here drove `sdk.retrieval_legs`, one of the 26 public methods this
+# PR retired (`tortoise/sdk_retired.py`). The METHOD was a three-line wrapper over
+# surface that SURVIVES — `recall_state(..., leg_trace=)` plus `declared_degraded_read`
+# and `require_hybrid_read` — so they are REBUILT on that surface (`_retrieval_legs`
+# below) rather than dropped with the wrapper. Dropping them would leave the read
+# path's own `scope_kinds=scope_kinds` forwarding (`tortoise/sdk.py`) pinned by
+# nothing, which is the exact defect #4199 exists to prevent. The surviving capture
+# door is driven under its private name `_capture_session`.
 """#4199 — the dense leg's health is judged against the READ's own scope.
 
 THE DEFECT (reproduced on this branch before the fix — see ``## Proof`` below)
@@ -171,12 +176,209 @@ def _vector_entry(trace: list[dict]) -> dict:
     return entries[0]
 
 
+def _retrieval_legs(sdk, query: str, *, kind: str | None = None,
+                    limit: int = 10, lane: str | None = None) -> dict:
+    """The retired ``sdk.retrieval_legs`` probe, rebuilt on SURVIVING surface.
+
+    #4282 deleted the SDK wrapper; everything it composed survives, so the pin
+    moves here instead of going with it — ONE ``recall_state`` call carrying the
+    observational ``leg_trace``, the C1 declaration from
+    ``declared_degraded_read``, and ``hybrid`` from the one gate predicate
+    ``require_hybrid_read`` so the two fields cannot disagree. The wrapper's
+    ``require_hybrid`` fail-loud arm had no caller left in the tree and is not
+    reproduced.
+    """
+    leg_trace: list[dict] = []
+    sdk.recall_state(query, kind=kind, limit=limit, leg_trace=leg_trace)
+    marker = declared_degraded_read(leg_trace)
+    refusal_reason: str | None = None
+    try:
+        require_hybrid_read(leg_trace or None, lane=lane)
+        hybrid = True
+    except HybridReadUnavailableError as exc:
+        hybrid = False
+        refusal_reason = exc.reason
+    return {
+        "legs": leg_trace,
+        "declared_degraded_read": marker,
+        "hybrid": hybrid,
+        "hybrid_refusal_reason": refusal_reason,
+    }
+
+
 # ── 1. The falsifier: a partially-embedded corpus reads DEGRADED ───────────
 
+def test_partial_turn_corpus_read_is_declared_degraded(
+        sdk_factory, embedder, monkeypatch):
+    """The #4199 defect, end to end: turns un-embedded, extracted embedded.
+
+    The read is scoped to the turn material (``kind='event'`` — the turn
+    ``pointKind``). Before the fix this returned ``hybrid: True`` with
+    ``declared_degraded_read() is None`` while every turn hit's ``vector``
+    score was ``None``. The dense leg must not be reported as serving a scope
+    it has no material for.
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        turn_ids = _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-part")
+        # Extracted Points ARE embedded (the "partially embedded" half).
+        _embedder(monkeypatch, embedder)
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        sdk.create_point("statement", "website config root cause claim", id="ext-2")
+
+        census = sdk._get_proj().g.query(
+            "MATCH (n:Point) RETURN count(n), count(n.embedding)").result_set[0]
+        assert census[1] > 0, "the corpus must carry SOME dense material"
+        in_scope = sdk._get_proj().g.query(
+            "MATCH (n:Point) WHERE n.pointKind='event' "
+            "RETURN count(n), count(n.embedding)").result_set[0]
+        assert in_scope[0] > 0 and in_scope[1] == 0, (
+            "the fixture must build the measured partial state (scope HAS "
+            f"nodes, NONE embedded), got {in_scope}")
+
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "a read whose dense leg has NO material for its own scope was "
+        f"declared healthy: {legs['legs']}")
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["degraded_read"] is True, marker
+    assert marker["hybrid"] is False, marker
+    assert marker[VECTOR_LEG_UNAVAILABLE] is True, marker
+    assert marker["missing_legs"] == ["vector"], marker
+    assert legs["hybrid"] is False, legs
+    assert legs["hybrid_refusal_reason"] == "no_embeddings", legs
+    # The Point query's own vector entry says WHY — the leg ran, and the
+    # scope had nothing for it. Asserted over ALL vector entries so the pin
+    # holds in both the index (docker) and scan (embedded) lanes.
+    vecs = _vector_entries(legs["legs"])
+    assert vecs, legs["legs"]
+    assert any(v["ran"] and v["degraded"] and v["reason"] == "no_embeddings"
+               for v in vecs), vecs
+    assert not any(v["ran"] and not v["degraded"] for v in vecs), (
+        f"a vector entry still reads healthy over an un-embedded scope: {vecs}")
+    # …and the returned material really is keyword-only for the turns.
+    assert turn_ids, "sanity: the turn fixtures exist"
 
 
+def test_an_out_of_scope_object_arm_cannot_launder_the_read(
+        sdk_factory, embedder, monkeypatch):
+    """#4199 review P1: the Object arm must not launder the Point arm.
+
+    ``recall_state(object_centric=True)`` submits a Point arm AND an Object
+    arm. With ``kind='event'`` the Object arm's ``objectKind`` scope is EMPTY
+    (the production "plus any embedded Object" shape), so it is NEUTRAL — but
+    before the review fix its unscoped scan still returned the out-of-scope
+    Object, recorded ``ran=True, degraded=False, reason='ok'``, and
+    ``_vector_leg_healthy`` accepted that as proof the read was hybrid while
+    the Point arm — the arm that actually carries the read's material — had no
+    embeddings in scope. The declaration must be honest per scope: an arm made
+    neutral by an empty scope can neither prove nor disprove the read.
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-obj")
+        _embedder(monkeypatch, embedder)
+        # Extracted Points ARE embedded (the in-scope half of the corpus).
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        # An embedded Object OUTSIDE the read's objectKind scope — the
+        # production "plus any embedded Object" shape that laundered.
+        obj = sdk.create_object("website config", objectKind="other")
+
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    vecs = _vector_entries(legs["legs"])
+    assert len(vecs) == 2, (
+        f"expected a Point arm and an Object arm, got {vecs}")
+    in_scope = [v for v in vecs if v.get(VECTOR_SCOPE_KEY) != VECTOR_SCOPE_EMPTY]
+    neutral = [v for v in vecs if v.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY]
+    assert len(in_scope) == 1 and len(neutral) == 1, (
+        f"the Object arm's empty scope must be marked neutral: {vecs}")
+    # The Point arm (the read's own material) is the degraded one.
+    assert in_scope[0]["ran"] is True, in_scope
+    assert in_scope[0]["degraded"] is True, in_scope
+    assert in_scope[0]["reason"] == "no_embeddings", in_scope
+    # The Object arm scanned a row but measured an EMPTY scope — NEUTRAL, not
+    # proof of a hybrid read.
+    assert neutral[0]["ran"] is True, neutral
+    assert neutral[0]["reason"] == "ok", neutral
+
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "an out-of-scope Object arm laundered the Point arm's degradation: "
+        f"{legs['legs']}")
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["hybrid"] is False, marker
+    assert legs["hybrid"] is False, legs
+    assert obj["id"], "sanity: the Object fixture exists"
 
 
+def test_a_terminal_in_scope_object_arm_cannot_launder_the_read(
+        sdk_factory, embedder, monkeypatch):
+    """#5287 P2: the STATUS axis of the Object-arm laundering.
+
+    The sibling of ``test_an_out_of_scope_object_arm_cannot_launder_the_read``
+    with the Object IN scope. With ``kind='event'`` the Object arm's scope is
+    ``objectKind='event'``, so a ``retracted`` Object of that kind IS in scope
+    — but its embedding is excluded by the Object arm's OWN retrieval status
+    clause (``_status_vocab_for("Object")`` -> ``OBJECT_TERMINAL_STATUSES``),
+    so the leg returns nothing.
+
+    Before the fix the scope probe applied the terminal-status predicate ONLY
+    for ``label == "Point"``, so it counted that excluded embedding as
+    material and the Object arm recorded ``empty_results``/healthy.
+    ``_vector_leg_healthy`` then accepted the arm as proof the read was hybrid
+    while the Point arm — the read's own material — had ``no_embeddings`` in
+    scope. The probe must apply the SAME ``_status_vocab_for(label)`` predicate
+    the retrieval legs use, so the two cannot drift (that drift IS the bug).
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _capture_unembedded_turns(sdk, monkeypatch, "sess-5287-term")
+        _embedder(monkeypatch, embedder)
+        # An embedded Object IN the read's objectKind scope but TERMINAL: the
+        # Object leg's own status clause excludes it, so it is NOT material
+        # for this read even though it physically holds a dense vector.
+        obj = sdk.create_object("auth dead-end website config",
+                                objectKind="event", status="retracted")
+        rows = sdk._get_proj().g.query(
+            "MATCH (o:Object {id: $i}) "
+            "RETURN o.status, o.embedding IS NOT NULL",
+            params={"i": obj["id"]}).result_set
+        assert rows and rows[0][0] == "retracted" and rows[0][1] is True, rows
+
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    vecs = _vector_entries(legs["legs"])
+    assert len(vecs) == 2, (
+        f"expected a Point arm and an Object arm, got {vecs}")
+    # The Object arm's scope is IN scope by kind but terminal-only, so its own
+    # status clause leaves a scope with NO material: the probe must see that
+    # and the arm must be a hollow/neutral arm, never a healthy ``ok``.
+    assert not any(
+        v["ran"] and not v["degraded"] and v.get(VECTOR_SCOPE_KEY)
+        != VECTOR_SCOPE_EMPTY for v in vecs), (
+        "a vector arm still reads healthy by counting a terminal embedding "
+        f"its own leg excludes: {vecs}")
+    marker = legs["declared_degraded_read"]
+    assert marker is not None, (
+        "a terminal-in-scope Object arm laundered the Point arm's "
+        f"degradation: {legs['legs']}")
+    assert marker["reason"] == "no_embeddings", marker
+    assert marker["degraded_read"] is True, marker
+    assert marker["hybrid"] is False, marker
+    assert legs["hybrid"] is False, legs
+    assert obj["id"], "sanity: the Object fixture exists"
 
 
 def test_the_returned_material_is_keyword_only_for_the_turns(
@@ -205,10 +407,90 @@ def test_the_returned_material_is_keyword_only_for_the_turns(
 
 # ── 2. Anti-overfix guards: the fix is scope-precise, not a blanket degrade ─
 
+def test_fully_embedded_turn_corpus_still_reports_hybrid(
+        sdk_factory, embedder, monkeypatch):
+    """A turn scope that IS embedded must keep reading as hybrid.
+
+    Guards against "fixing" #4199 by degrading every kind-scoped read: the
+    verdict is a measurement of the scope, not a pessimistic default.
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _embedder(monkeypatch, embedder)
+        assert sdk._capture_session(
+            CONV, session_id="sess-4199-full")["turns"] == 2
+        rows = sdk._get_proj().g.query(
+            "MATCH (t:Point) WHERE t.is_episodic=true RETURN t.embedding"
+        ).result_set
+        assert rows and all(r[0] is not None for r in rows), rows
+
+        legs = _retrieval_legs(sdk, "auth dead-end", kind="event", limit=5)
+    finally:
+        sdk.close()
+
+    assert legs["declared_degraded_read"] is None, legs["legs"]
+    assert legs["hybrid"] is True, legs
+    assert legs["hybrid_refusal_reason"] is None, legs
+    vecs = _vector_entries(legs["legs"])
+    assert any(v["ran"] and not v["degraded"] and v["reason"] == "ok"
+               for v in vecs), vecs
 
 
+def test_unscoped_read_keeps_reporting_hybrid(
+        sdk_factory, embedder, monkeypatch):
+    """No kind scope ⇒ the whole label is the scope, and it HAS dense material.
+
+    A partially-embedded corpus is not globally degraded: the extracted
+    Points genuinely serve an unscoped read, so ``hybrid`` stays true. This
+    pins that the fix does not over-reach from "this scope" to "the corpus".
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _capture_unembedded_turns(sdk, monkeypatch, "sess-4199-noscope")
+        _embedder(monkeypatch, embedder)
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+
+        legs = _retrieval_legs(sdk, "auth dead-end", limit=5)
+    finally:
+        sdk.close()
+
+    assert legs["declared_degraded_read"] is None, legs["legs"]
+    assert legs["hybrid"] is True, legs
 
 
+def test_empty_kind_scope_read_is_not_refused(
+        sdk_factory, embedder, monkeypatch):
+    """#4199 review P1 (end to end): an empty scope is not a refusal.
+
+    ``kind="kind-nobody-wrote"`` selects no nodes for the read's own scope,
+    so EVERY vector arm measured an EMPTY scope. C1 declares nothing (#2952's
+    empty-scope rule), but before the review fix C2 fell through to
+    ``_degraded_read_marker("leg_absent", ...)`` and refused — ``hybrid`` came
+    back False with ``refusal_reason="leg_absent"`` on a read whose dense leg
+    RAN. (Regression on head ``104f746e5``; ``67980bea`` returned
+    ``hybrid=True`` here.)
+    """
+    _offline_llm(monkeypatch)
+    sdk = sdk_factory()
+    try:
+        _embedder(monkeypatch, embedder)
+        sdk.create_point("statement", "auth dead-end top issue claim", id="ext-1")
+        legs = _retrieval_legs(
+            sdk, "auth dead-end", kind="kind-nobody-wrote", limit=5)
+    finally:
+        sdk.close()
+
+    assert legs["declared_degraded_read"] is None, legs["legs"]
+    assert legs["hybrid"] is True, (
+        "C2 refused a read whose every vector arm measured an EMPTY scope "
+        f"({legs['hybrid_refusal_reason']!r}): {legs['legs']}")
+    assert legs["hybrid_refusal_reason"] is None, legs
+    vecs = _vector_entries(legs["legs"])
+    assert vecs, legs["legs"]
+    assert all(v.get(VECTOR_SCOPE_KEY) == VECTOR_SCOPE_EMPTY for v in vecs), (
+        f"the fixture must build the all-empty-scope shape: {vecs}")
 
 
 # ── 3. The guard, hermetically: scope-aware counts, fail-closed probe ──────
