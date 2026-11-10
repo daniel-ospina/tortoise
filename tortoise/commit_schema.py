@@ -507,6 +507,20 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     change outside this issue. Equality is well-formed: a zero-length
     ``[t, t]`` window is legal.
 
+    ⚠ HOST-DEPENDENT FOR A ZONE-LESS DATE-TIME (#11646, recorded not endorsed).
+    A producer-shaped bound (``2023/05/20 (Sat) 02:21``) is a zone-less
+    date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
+    read in the READER's zone. #11646 made that shape ORDERABLE here for the
+    first time — before it, the value bucketed as unparseable and this guard
+    skipped the pair on every host — so a window mixing it with an ISO bound is
+    now refused or accepted depending on where the read runs. That is the
+    recorded #3982 reading meeting a newly-orderable shape, not a new rule:
+    changing it is a REOPEN of #3982, so it is escalated as a decision rather
+    than fixed here. The divergence is PINNED —
+    ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``
+    asserts the verdict at three zones, so a change that moves it reds before it
+    can move silently.
+
     #6140 — an unorderable START is not refused here, and this function does
     not warn about it either. Its caller
     ``sdk._refuse_inverted_point_window`` is what MERGES a caller's bound with

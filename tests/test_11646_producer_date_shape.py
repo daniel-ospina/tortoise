@@ -678,3 +678,56 @@ def test_the_instant_view_accepts_every_shape_the_day_view_dates():
     assert calendar_datetime("2023-W43-2T11:00:00") is not None
     # a stated-but-impossible offset is still refused, in BOTH views
     assert calendar_datetime("2023/05/20T02:00:00+25:00") is None
+
+
+def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
+    """#11646 exposes a HOST-DEPENDENT verdict, and this pin exists so that it
+    cannot move silently — not because the behaviour is desirable.
+
+    A producer-shaped bound is a ZONE-LESS date-TIME, and ``#3982`` recorded
+    that a zone-less date-TIME stays NAIVE, so its epoch is read through
+    ``datetime.timestamp()`` in the READER'S zone. That was invisible before
+    #11646: ``_created_sort_key`` bucketed the shape as unparseable, so
+    ``validate_validity_window`` (which orders with the SAME measure) skipped
+    the pair on every host. Now the bound IS orderable, so a window mixing it
+    with an ISO bound is refused or accepted depending on where the read runs.
+
+    Recorded, not endorsed: fixing it means revisiting the ``#3982`` ruling, so
+    it is escalated as a decision instead of changed here. What this pin buys is
+    a red test the day the divergence MOVES, and an explicit statement of the
+    three zones the record names.
+
+    Subprocesses are used because ``TZ`` must be set before the first
+    ``import time`` for ``datetime.timestamp()``/``astimezone`` to see it; each
+    child re-derives both the sort key and the write door's verdict.
+    """
+    import subprocess
+    import sys
+    from pathlib import Path
+
+    script = (
+        "from tortoise.search_engine import _created_sort_key as k\n"
+        "from tortoise.commit_schema import validate_validity_window as v\n"
+        "print(k('" + PRODUCER_SESSION_DATE + "'))\n"
+        "try:\n"
+        "    v('" + PRODUCER_SESSION_DATE + "', '2023-05-20')\n"
+        "    print('accepted')\n"
+        "except ValueError:\n"
+        "    print('refused')\n"
+    )
+    env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
+        Path(__file__).resolve().parent.parent)}
+    observed = {}
+    for zone in ("UTC", "Asia/Kolkata", "America/Los_Angeles"):
+        out = subprocess.run([sys.executable, "-c", script], capture_output=True,
+                             text=True, timeout=120,
+                             env={**env_base, "TZ": zone}, check=True).stdout
+        key, verdict = out.strip().splitlines()[-2:]
+        observed[zone] = (key, verdict)
+    # all three order the value now (before #11646 every one of them bucketed)
+    assert all("(0," in k for k, _ in observed.values()), observed
+    # the epoch — and therefore the window verdict — is decided by the HOST
+    assert len({k for k, _ in observed.values()}) == 3, observed
+    assert observed["UTC"][1] == "refused"
+    assert observed["Asia/Kolkata"][1] == "accepted"
+    assert observed["America/Los_Angeles"][1] == "refused"

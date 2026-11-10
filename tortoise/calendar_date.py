@@ -419,13 +419,24 @@ def _string_instant(s: str) -> datetime | None:
     d = _date_only_shape(s)
     if d is not None:
         return datetime(d.year, d.month, d.day, tzinfo=UTC)
-    # ⛔ The instant view must accept the SAME shape set as the day view
-    # (cycle 6, finding 3): ``_string_date`` carries this arm because
-    # ``origin/main``'s assembly parser read the family, and this module's own
-    # docstring points an ordering consumer here. Without it
+    # ⛔ The instant view must accept every WHOLE-VALUE family the day view
+    # dates (cycle 6, finding 3) — the compact / ISO-week date carrying a TIME.
+    # ``_string_date`` carries this arm because ``origin/main``'s assembly
+    # parser read the family, and this module's own docstring points an
+    # ordering consumer here. Without it
     # ``calendar_datetime("20230520T02:21:00Z")`` is None while
     # ``calendar_date`` dates it — a later consumer would read a dated family as
     # un-orderable.
+    #
+    # ⚠ NOT the same shape set as the day view, and the difference is
+    # DELIBERATE (cycle 7, finding 1 — an earlier version of this comment
+    # claimed parity, which would invite the one change this module forbids):
+    # the day view's TOLERANT PREFIX fallback dates values whose tail is
+    # unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T24:00``), and the
+    # instant view must NOT widen to it. An unreadable tail means the INSTANT is
+    # unknown while the stated DAY is known; deriving an instant there would
+    # fabricate one, which is the whole distinction this module exists to keep.
+    # So: whole-value families only, in both views.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
             return datetime.fromisoformat(s.replace("Z", "+00:00"))

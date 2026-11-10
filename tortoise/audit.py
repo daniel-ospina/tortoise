@@ -917,6 +917,16 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # bound buckets as (1, <text>) and is a DIFFERENT concern (#5360) — not
     # reported here.
     #
+    # ⚠ #11646 made the ingest producer's shape (``2023/05/20 (Sat) 02:21``)
+    # ORDERABLE, and a zone-less date-TIME is read in the READER's zone (#3982),
+    # so this check's VERDICT can differ across hosts for a window that mixes
+    # that shape with an ISO bound — not a new asymmetry, but a newly reachable
+    # one (the shape used to bucket as unparseable, so the pair was skipped
+    # everywhere). It is RECORDED and PINNED rather than changed: flipping it is
+    # a reopen of #3982, and the pin is
+    # ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``,
+    # which asserts ``validate_validity_window``'s verdict at three zones.
+    #
     # ⛔ The `fix` is LIFECYCLE-AWARE (#7819), and the scan deliberately keeps
     # terminal rows. It must not drop them: the population this check exists
     # for is the #4021 legacy supersession inversion, whose damaged row is the
