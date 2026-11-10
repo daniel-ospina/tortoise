@@ -6164,6 +6164,47 @@ class TestSiteIconAndSocialPreviewContract:
                     f"{page_name} links {href!r} but the file's sha256 starts "
                     f"{want!r} — bump the `?v=` with the bytes, or a browser "
                     "holding the old icon keeps drawing it (that is the stale-icon bug)")
+
+        # ⛔ AN EXTRA MAY NOT RE-DECLARE A TRIO FILE UNDER THE OTHER TRIO RELATION.
+        # Allowing extras is right (round 4: refusing an honest SVG variant / second
+        # `sizes=` was a false red), but `_icon_hrefs` above STRIPS the rel — it returns a
+        # flat list of hrefs — so that loop cannot tell WHICH relation an extra carries.
+        # Measured, before this rule: adding
+        #   `<link rel="apple-touch-icon" href="/favicon.png?v=<its own digest>">`
+        # to an otherwise-correct page PASSED every assertion — the file exists, it is one
+        # of the trio, and its `?v=` is its real digest. But iOS resolves competing
+        # `apple-touch-icon` links to ONE of them and this site declares no `sizes=` on
+        # that link, so the saved home-screen mark could become the ROUNDED, TRANSPARENT
+        # 256 px `favicon.png` — the double-rounding §6.7 says the opaque 180 px asset
+        # exists to prevent. `rel="icon"` naming `apple-touch-icon.png` is the same hole
+        # and is refused for the same reason: a relation names an ASSET here, not a size
+        # preference, so a cross-relation extra silently swaps a mark instead of adding
+        # one. Non-trio extras (an SVG variant, a 192 px slot, a repeat of the same file
+        # under the same rel) are untouched, so round 4's false red does not come back.
+        # Residual, stated rather than implied: a `sizes=` declared on a non-trio PNG/ICO
+        # extra is not compared with that file's real pixels — closing that needs a byte
+        # probe per extra, and no extra exists today.
+        apple_asset = f"/{self.ICON_APPLE}"
+        for link in self._links(self._head(head)):
+            tokens = link.get("rel", "").lower().split()
+            if not any(token in self.ICON_RELS for token in tokens):
+                continue
+            href = link.get("href", "")
+            resolved = self._icon_ref(href, origins=origins)
+            if not resolved:
+                continue  # data:/foreign/not-a-URL is already reported above
+            if "apple-touch-icon" in tokens and resolved != apple_asset:
+                violations.append(
+                    f"{page_name} declares {href!r} under rel=\"apple-touch-icon\", but "
+                    f"that relation names {apple_asset} — iOS keys the saved home-screen "
+                    "mark off this relation and resolves competing links to one, so a "
+                    "cross-relation extra can replace the opaque 180 px tile with a "
+                    "rounded/transparent one (#11407)")
+            elif "icon" in tokens and resolved == apple_asset:
+                violations.append(
+                    f"{page_name} declares {href!r} under rel=\"icon\", but that is the "
+                    "apple-touch-icon asset — a relation names an ASSET here, so a "
+                    "cross-relation extra swaps a mark rather than adding one (#11407)")
         return [f"{label}: {v}" for v in violations]
 
     def test_the_app_tree_grades_the_icon_rel_by_name(self):
