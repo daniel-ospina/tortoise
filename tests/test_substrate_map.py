@@ -57,55 +57,42 @@ _LABEL_CLAIM = re.compile(
 #: quoted `git grep` still carried `-- tortoise/`, so only the prose population was
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
-#: ⛔ The lookahead requires the QUOTED-COMMAND clause ("… files under `tortoise/`
-#: (`git grep …") to follow the population IMMEDIATELY — not merely *some*
-#: parenthesis. Two earlier versions were measured fail-open, one after the other:
-#: a negative lookahead enumerating the separators a second population could be
-#: joined with (`,`, `and`, `or`, `plus`) left `files under `tortoise/` + `tests/``
-#: green, and a bare `(?=\s*\()` left `files under `tortoise/` (and `tests/`)` green
-#: — a false sentence with every number green both times.
+#: §5's `:Document` measurement SENTENCE, pinned as ONE canonical form.
 #:
-#: ⚠️ What THIS lookahead closes is the population named BEFORE the quote. It cannot see
-#: one named after it, nor one inside a third command, nor a `..` path — so this pin does
-#: not stop at the lookahead: `_PATH_TOKEN` (below) reads every path in the whole clause
-#: and requires each to be the measured population, and the two are read together because
-#: either alone leaves a false sentence green.
-_POPULATION_CLAIM = re.compile(
-    r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
-    r"`([^`]+)`(?=\s*\(`git grep)"
+#: ⛔ Every earlier version of this pin tried to ENUMERATE the ways a second population
+#: could be smuggled into the sentence — connectors, parens, backtick pairs, path shapes,
+#: slashless words, command spellings — and each version was defeated by a spelling it had
+#: not listed (seven rounds, each measured GREEN on a sentence that was false about the
+#: repo). The list approach cannot win: there is always another spelling.
+#:
+#: So the sentence is pinned VERBATIM instead, with only the four figures free. Anything
+#: inserted anywhere in it — a second population, a third command, a dotted filename, a
+#: differently-cased word, a prose phrase like "the whole repository" — breaks the match,
+#: because the match is the whole sentence and not a scan of its parts. The cost is
+#: deliberate and fail-closed: a reworded sentence REDS, and the fix is to re-measure and
+#: update this constant together with the sentence, which is exactly the re-measure the
+#: document exists to force.
+_MEASUREMENT_TEMPLATE = (
+    "`:Document` occurs on **{lines}** lines across **{files}**\n"
+    "files under `{pop}/` (`git grep -n ':Document' -- {pop}/` → {{quoted_lines}} lines,\n"
+    "`git grep -l ':Document' -- {pop}/` → {{quoted_files}} files — "
+    "the file count is not the line count)."
 )
 
-#: Any path spelled in §5's measurement clause — with or without backticks, in the prose
-#: or inside a command — is read by its PATH, not by its spelling.
-#:
-#: ⛔ Every earlier version of this rule tested populations by SPELLING and was defeated by
-#: a spelling it did not enumerate, each measured GREEN on a sentence that was false about
-#: the repo: a negative lookahead of connectors (`+`, `&`, "as well as" slipped past); a bare
-#: `(?=` some-paren; a backtick-pair scan (a `git -C . grep … -- tests/` span, a PROSE
-#: `tests/` with no backticks, an unbalanced backtick); and a shape filter that exempted a
-#: nested `tests/unit/` before it was compared. A population always contains a `/`, so the
-#: clause's path tokens are the thing to read — one rule, and every spelling is covered.
-_PATH_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]*)+")
 
-#: A bare word that could be a population spelled WITHOUT a slash (`tests`, `docs`).
-#: The earlier "a population always contains a `/`" premise was a spelling assumption —
-#: the class this pin exists to stop — and it left `and tests is counted in both figures`
-#: green. Words are matched against the index's own top-level directory names, so the rule
-#: is derived from the tree rather than from a list someone has to remember to extend.
-_BARE_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
-
-
-def _top_level_dirs() -> frozenset[str]:
-    """Every top-level directory that holds a tracked file.
-
-    `git ls-files -z -- .` yields repo-relative paths, so the first segment is the
-    top-level entry; files at the root have one segment and are skipped.
-    """
-    return frozenset(
-        path.relative_to(REPO).parts[0]
-        for path in _tracked_files_under(".")
-        if len(path.relative_to(REPO).parts) > 1
+def _measurement_sentence() -> re.Pattern[str]:
+    """§5's measurement sentence as a pattern, with only the four figures free."""
+    literal = _MEASUREMENT_TEMPLATE.format(
+        lines="{lines}", files="{files}", pop=_TRACKED_DIR
     )
+    pieces = re.split(r"(\{lines\}|\{files\}|\{quoted_lines\}|\{quoted_files\})", literal)
+    pattern = ""
+    for piece in pieces:
+        if piece in ("{lines}", "{files}", "{quoted_lines}", "{quoted_files}"):
+            pattern += r"(\d+)"
+        else:
+            pattern += re.escape(piece)
+    return re.compile(pattern)
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1731,115 +1718,30 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         "— `search` binds the first, so a second statement is drift this pin would "
         "silently read past; keep one statement, or pin each one"
     )
-    claimed_lines = int(match.group(1))
-    claimed_files = int(match.group(2)) if match.group(2) else None
+    # ── The sentence, verbatim ────────────────────────────────────────────────
+    # Everything about "one population, one reproducible command pair, nothing else" is
+    # enforced by ONE anchored match on the sentence's canonical form (see
+    # `_MEASUREMENT_TEMPLATE`): only the four figures are free, so no second population,
+    # third command, dotted filename, differently-cased word or prose scope phrase can be
+    # inserted without the match failing.
+    sentence = _measurement_sentence().search(section)
+    assert sentence, (
+        "§5's `:Document` measurement sentence is gone or was reworded — this pin reads it "
+        "VERBATIM, with only the four figures free. Re-measure the tree, then update §5's "
+        "sentence and `_MEASUREMENT_TEMPLATE` together; do not paraphrase it, because a "
+        "paraphrase is where a second population hides"
+    )
+    claimed_lines, claimed_files, quoted_lines, quoted_files = (
+        int(group) for group in sentence.groups()
+    )
     lines, files, narrow = _label_hits()
-    assert claimed_files is not None, (
-        f"§5 states {claimed_lines} lines but no file count — the tree has {lines} "
-        f"lines across {files} files; state BOTH, because confusing the two is the "
-        "defect this pins"
-    )
-    populations = _POPULATION_CLAIM.findall(section)
-    assert populations, (
-        "§5 no longer states the population its `:Document` figure is measured over — "
-        "re-state it as `files under ``tortoise/``` so this pin can read it, rather "
-        "than leaving the figure unattributed"
-    )
-    # The population named BEFORE the quote is pinned above; this pins the half the
-    # lookahead cannot read — the tail of the same parenthetical, where a second
-    # population ("…, and `tests/` is counted in both figures)") states a false scope
-    # while every number stays green.
-    population_match = _POPULATION_CLAIM.search(section)
-    rest = section[population_match.end():]
-    assert rest.lstrip().startswith("("), (
-        "§5's population is not followed by the quoted-measurement parenthetical this "
-        "pin reads its tail from — re-state it as `files under ``tortoise/``` "
-        "immediately followed by `(`git grep …``"
-    )
-    open_at = population_match.end() + rest.index("(")
-    depth = 0
-    for close_at in range(open_at, len(section)):
-        if section[close_at] == "(":
-            depth += 1
-        elif section[close_at] == ")":
-            depth -= 1
-            if depth == 0:
-                break
-    else:
-        raise AssertionError(
-            "§5's measurement parenthetical is never closed — the tail of that clause "
-            "is where a second population would be stated, so this pin cannot read it"
-        )
-    # Not to the parenthetical's close: a second population can sit AFTER it and still be
-    # the same sentence (measured GREEN: "… count)" and `tests/` is counted in both
-    # figures."). Nor to the end of the LINE — this section is hard-wrapped, so a
-    # population wrapped onto the next line was GREEN too. The slice runs to the sentence's
-    # period, falling back to the end of the PARAGRAPH, and the parenthetical's close is
-    # only where the quote's own text provably stops.
-    sentence_end = section.find(".", close_at + 1)
-    if sentence_end == -1:
-        paragraph_end = section.find("\n\n", close_at + 1)
-        sentence_end = len(section) if paragraph_end == -1 else paragraph_end
-    tail = section[open_at + 1 : sentence_end]
-    # ⛔ ODD PARITY fails closed. Positional pairing cannot read a span whose backticks
-    # are unbalanced, and the unbalanced span is then dropped by the filters below — so a
-    # stray backtick was a way to name a second population and stay green.
-    assert tail.count("`") % 2 == 0, (
-        "§5's measurement clause has an unbalanced backtick, so the spans this pin reads "
-        "cannot be paired — a half-quoted population would be dropped silently. Fix the "
-        "backticks"
-    )
-    # Every path in the clause must be the population this pin measures. `tortoise/`
-    # itself, and anything under it, pass; anything else — a second population in prose,
-    # a third command with a different pathspec, a `..` that starts inside the directory
-    # and resolves outside it — is a false scope with every number still green.
-    # The sentence, not just the parenthetical: a second population can sit BEFORE the
-    # quote ("… `:Document`, as in `tests/`, occurs on **63** lines …") or AFTER the
-    # parenthetical's close, and both were measured GREEN on slices anchored at the match.
-    sentence_start = section.rfind(". ", 0, population_match.start())
-    sentence_start = 0 if sentence_start == -1 else sentence_start + 2
-    clause = section[sentence_start:sentence_end]
-    # A third `git grep` is unjudged by the path rule alone when it names NO pathspec —
-    # and a pathless `git grep` measures the WHOLE repo, so the sentence goes false with
-    # every number green. The clause carries exactly the two pinned commands; a third is
-    # a different measurement, not a re-statement.
-    assert clause.count("git grep") == 2, (
-        f"§5's measurement clause quotes {clause.count('git grep')} `git grep` commands, "
-        "and this pin reads exactly the two in `_QUOTED_GREP`'s shape — a third measures "
-        "something else (a pathless one measures the whole repo) while the figures stay "
-        "green. State the one reproducible pair"
-    )
-    top_level = _top_level_dirs()
-    extra = [
-        token
-        for token in _PATH_TOKEN.findall(clause)
-        if ".." in token
-        or not (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
-    ]
-    # A population can be spelled WITHOUT a slash too; that is a spelling, not an
-    # exemption, so a bare word that is a real top-level directory is judged the same way.
-    extra += [
-        word
-        for word in _BARE_WORD.findall(clause)
-        if word in top_level and word != _TRACKED_DIR
-    ]
-    assert not extra, (
-        f"§5's measurement clause names another path — {extra!r} — so the figure is "
-        "stated over a population this pin does not measure, while every number stays "
-        "green. State the figure over one population, or measure the one you name"
-    )
-    assert populations == [_TRACKED_DIR + "/"], (
-        f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
-        f"`{_TRACKED_DIR}/` — the count and the file count are only true for the "
-        f"population they were measured over, so naming a different one (or a second "
-        "one alongside it) makes the sentence false "
-        "while every number here stays green. State `files under "
-        f"`{_TRACKED_DIR}/`` followed by the quoted measurement, or measure the "
-        "population you name"
-    )
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
+    )
+    assert (quoted_lines, quoted_files) == (lines, files), (
+        f"§5's quoted `git grep` output claims {quoted_lines} lines / {quoted_files} files, "
+        f"and the tree has {lines} / {files} — re-measure the quote (§5)"
     )
     quoted = _QUOTED_GREP.findall(section)
     assert quoted, (
