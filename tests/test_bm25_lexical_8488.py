@@ -1391,8 +1391,9 @@ class TestServableFamilies:
     """Which families the leg serves is ONE decision, and it is the early return.
 
     ``run_bm25_query`` scores ``index_text(coalesce(content, _searchText),
-    search_keys)``. That is a declared FTS field on ``Point`` (content +
-    search_keys) and on ``:Source``/``:Document`` (_searchText) — and it is on
+    search_keys)`` — plus ``quote`` on a Point since #11682, through
+    ``point_index_text``. That is a declared FTS field on ``Point`` (content +
+    search_keys + quote) and on ``:Source``/``:Document`` (_searchText) — and it is on
     NEITHER ``:Event`` (declared FTS fields: subject, name) nor ``:Subject``
     (name). The canonical writers put neither ``content`` nor ``_searchText``
     on those labels, so every row would tokenise to ``[]``, the leg would exit

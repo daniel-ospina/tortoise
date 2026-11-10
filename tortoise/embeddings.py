@@ -1467,7 +1467,8 @@ def search_points(
             model = None
     if model is None:
         # #2678: this is the deterministic SPARSE leg — content ∪ search_keys
-        # was already applied by the caller's ``index_text`` where required.
+        # (∪ quote, #11682) was already applied by the caller's
+        # ``point_index_text`` where required.
         try:
             TfidfVectorizer = import_tfidf_vectorizer()
             tv = TfidfVectorizer()

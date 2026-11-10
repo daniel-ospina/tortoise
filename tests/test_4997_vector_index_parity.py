@@ -408,7 +408,7 @@ def test_a_FRESH_store_with_no_replacement_still_GETS_its_ANN_index(monkeypatch)
 def _is_vector_drop(statement: str) -> bool:
     """Is this the #11642 retirement DROP, and not the fulltext drop→recreate?
 
-    `_fix_point_search_keys` also drops an index on `Point` (the fulltext one),
+    `_fix_point_array_fts_props` also drops an index on `Point` (the fulltext one),
     so a bare `"DROP INDEX" in statement` would pass on a store that holds no
     VECTOR index at all — the exact vacuous assertion this pin exists to avoid.
     """

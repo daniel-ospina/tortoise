@@ -252,7 +252,7 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`, at this head — `1584` at
+`_DOC_RETIRED_KEYS` (`projection/entities.py:2005`, at this head — `1584` at
 `4f68a2aa7`) and the graph migration `relabel_legacy_documents`
 (`migrate_kinds.py:167`).
 
@@ -274,18 +274,20 @@ it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and 
 reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **63** lines across **19**
-files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 63 lines,
+and the reason is measured: `:Document` occurs on **64** lines across **19**
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 64 lines,
 `git grep -l ':Document' -- tortoise/` → 19 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-three moves have since been made, one per workstream: the #10976
+four moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
 (`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring), and #11729's prose lines in
+`REFUSED_NOT_FOUND` enum docstring), #11729's prose lines in
 `tortoise/hosted_backup.py` — a file the population had not previously reached,
 carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
-the pre-D10 dump/restore refusal and repair prose. All three are the point rather than an
+the pre-D10 dump/restore refusal and repair prose — and #11682's BM25 corpus-join
+comment (`tortoise/search_engine.py:2107`, one added line in an existing file).
+All four are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
 and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**

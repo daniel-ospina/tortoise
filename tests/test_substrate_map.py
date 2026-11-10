@@ -1669,13 +1669,15 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to the figure §5 states, in three moves, one per workstream:
+    moved to the figure §5 states, in four moves, one per workstream:
     `cache_eviction.py:956` (the #10976 census's note on why labels do not partition
     the node set), #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+    `REFUSED_NOT_FOUND` enum docstring), #11729's runtime-label writers
     (`tortoise/hosted_backup.py` — a file the population had not previously reached,
     carrying no `:Document` mention at `4f68a2aa7`; its added mentions are the
-    dump-and-restore prose about pre-D10 artifacts). That move is the mechanism
+    dump-and-restore prose about pre-D10 artifacts), and #11682's own
+    `tortoise/search_engine.py:2107` corpus-join comment (one line, an existing
+    file). Each move is the mechanism
     working: the census landed, this check reddened, and §5 was re-measured instead
     of the number being quietly widened or the guard loosened.
 
@@ -2059,10 +2061,10 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
 
 
 #: §5 introduces some of its evidence with the SYMBOL the line declares:
-#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) ``. Those pointers rot the
+#: `` `_DOC_RETIRED_KEYS` (`projection/entities.py:2005`) ``. Those pointers rot the
 #: same way the `:Document` ones did — and one already had: §5 cited
 #: `projection/entities.py:1584` for `_DOC_RETIRED_KEYS`, which was right when the
-#: map was cut at `438a8924d1` and is at **1974** at this head, so the citation
+#: map was cut at `438a8924d1` and is at **2005** at this head, so the citation
 #: pointed at an unrelated comment about `_ingestedAtStored`. No pin noticed, because
 #: the guard above reads only `cache_eviction.py` citations.
 _SYMBOL_POINTER = re.compile(r"`([A-Za-z_][\w.]*)`\s*\(\s*`([\w./-]+\.py):(\d+(?:,\d+)*)`")
@@ -2073,7 +2075,7 @@ def test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names() -> Non
 
     Reachable — and it WAS the shipped state: §5's D10 evidence cited
     `projection/entities.py:1584` as `_DOC_RETIRED_KEYS`, whose declaration is at
-    1974 (it was 1584 when the map was cut; that module has grown since). The
+    2005 (it was 1584 when the map was cut; that module has grown since). The
     citation therefore sent a reader re-examining the retirement mechanism to a
     comment about `_ingestedAtStored` — the exact class of stale evidence pointer
     the `:Document` pin next door closes for one file, still open for the rest.

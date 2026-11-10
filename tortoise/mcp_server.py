@@ -746,7 +746,7 @@ def _claim_wait_bound_count() -> bool:
 #: can read absent, and both create. The other two members do not share that
 #: mechanism and are not covered by this caveat: ``create_source`` converges in ONE
 #: conditional statement, `_upsert_source`'s `MERGE (s:Source {url: $url})`
-#: (`projection/entities.py:6503`; that function's own note there is "pin d").
+#: (`projection/entities.py:6534`; that function's own note there is "pin d").
 #: ⛔ ``onboarding_demo_create`` is NOT one of them, though its seed is
 #: sentinel-gated: the handler then writes its RECEIPT unconditionally
 #: (`_update_onboarding_state(org_id, demo_created=True)`), `demo_created` is an

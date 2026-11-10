@@ -537,7 +537,7 @@ def test_the_four_subject_families_are_counted_per_family_and_only_statements_ca
 def test_object_object_edges_are_reported_by_type_and_by_objectKind():
     """FAILS IF the census reports a bare count, or reads a property the writer never stamps.
 
-    ⛔ `:Object` carries `objectKind` (`tortoise/projection/entities.py:4699`); reading `kind`
+    ⛔ `:Object` carries `objectKind` (`tortoise/projection/entities.py:4730`); reading `kind`
     returned NULL on every real graph while the row reported the "by endpoint kind" half as
     measured (#10982 review, finding 3).
     """

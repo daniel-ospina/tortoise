@@ -1022,7 +1022,12 @@ def _is_repeated_schema_work(cypher: str) -> bool:
             or "fulltext.createNodeIndex" in cypher
             or "fulltext.drop" in cypher
             or cypher.startswith("MERGE (m:Meta")
-            or "SET n.search_keys" in cypher)
+            or "SET n.search_keys" in cypher
+            # #11682: the second declared flatten key. A repeat sweep that ran
+            # the repair for it would be the same owed-fixup churn this arm
+            # exists to catch, so it is classified here too rather than left to
+            # a key-specific matcher someone has to remember to widen.
+            or "SET n.quote" in cypher)
 
 
 #: The ONLY extra statement the fast path may issue (#5444): the cap-immune
@@ -1033,9 +1038,18 @@ def _is_repeated_schema_work(cypher: str) -> bool:
 #: than by prefix: a prefix match classifies ANY reworded
 #: statement as a permitted "read" — including a destructive one such as
 #: ``MATCH (n:Point) WHERE n.search_keys IS NOT NULL DETACH DELETE n``.
+#:
+#: #11682: ``quote`` is a declared FULLTEXT field now, so the probe asks the
+#: WHOLE declared set in ONE statement (an ``OR`` of per-key ``typeof``
+#: disjuncts) rather than one statement per key — that keeps this budget at ONE
+#: read as the set widens. The literal below is the exact one that ships; its
+#: coverage of `_POINT_FLATTEN_LIST_PROPS` is pinned separately in
+#: ``tests/test_11682_quote_indexed.py``.
 _FAST_PATH_READS = (
-    "MATCH (n:Point) WHERE n.search_keys IS NOT NULL "
-    "AND typeof(n.search_keys) = 'List' RETURN 1 LIMIT 1",
+    "MATCH (n:Point) WHERE "
+    "(n.search_keys IS NOT NULL AND typeof(n.search_keys) = 'List') "
+    "OR (n.quote IS NOT NULL AND typeof(n.quote) = 'List') "
+    "RETURN 1 LIMIT 1",
 )
 
 #: Cypher DESTRUCTIVE verbs. A repeat sweep must issue none: the fixup — the
@@ -1250,7 +1264,7 @@ def test_probe_detects_an_owed_search_keys_fixup(graph_factory):
     controls that marker, so "marker present" is not "fixup done".
 
     Mutation check (must stay true): removing the
-    ``_array_valued_search_keys_exist()`` arm from ``_schema_is_current``
+    ``_array_valued_fts_prop_exists()`` arm from ``_schema_is_current``
     fails assertion (a) below — with the arm gone the early-return condition
     is ``required <= present and fts_required``, which is True for a
     fully-indexed graph, so the probe would report a healthy graph as
@@ -1330,8 +1344,15 @@ def test_legacy_single_field_point_index_is_upgraded_with_flat_data(graph_factor
     sweep (#4465's churn, permanently) and ``search_keys`` was never indexed.
 
     Mutation check (must stay true): dropping
-    ``or self._point_fts_search_keys_field_missing()`` from that gate leaves the
+    ``or self._point_fts_field_missing()`` from that gate leaves the
     index single-field and fails the ``search_keys in fields`` assertion.
+
+    #11682 note: the probe now asks about the WHOLE declared set
+    (``_POINT_FTS_TARGET_FIELDS``) rather than ``search_keys`` alone — this
+    test still passes, because the migration it triggers now recreates the
+    THREE-field index; ``tests/test_11682_quote_indexed.py`` pins the wider
+    case (a two-field index whose only missing field is ``quote``), which a
+    ``search_keys``-only probe could never have migrated.
     """
     proj = graph_factory()
     g = proj.g
