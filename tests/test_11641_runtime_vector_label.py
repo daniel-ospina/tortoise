@@ -1577,6 +1577,41 @@ def test_a_vector_in_a_FOREIGN_property_is_refused_by_the_door() -> None:
         "MATCH (e:Event {eventId:'seed'}) SET e += $props") == ()
 
 
+@pytest.mark.parametrize("statement, fragment", [
+    # ⛔ A property name QUOTED in backticks is `` `[^`]*` `` — not the bare-identifier character
+    # class with optional quotes around it. Neo4j's naming rules make any quoted name legal ("must be
+    # quoted using backticks") and the engine executes it, so a reader that assumed identifier
+    # characters INSIDE the quotes could not see either of these: both were ACCEPTED and landed a
+    # `Vectorf32` in a property no `run_vector_query` call reaches (#11641 review round 9).
+    ("MATCH (e:Event {eventId:'seed'}) SET e.`1vector` = vecf32($embedding)", "not `embedding`"),
+    ("MATCH (e:Event {eventId:'seed'}) SET e += {`vector prop`: vecf32($embedding)}",
+     "property-MAP key"),
+])
+def test_a_QUOTED_property_name_outside_the_IDENTIFIER_class_is_REFUSED(
+        statement: str, fragment: str) -> None:
+    """The last spelling family: a quoted target the identifier class could not read.
+
+    The dotted leg used to treat an unparseable dot target as a whole-alias write and `continue` —
+    which is a FAIL-OPEN, not a conservative skip. Both legs now read the quoted form as `` `[^`]*` ``
+    and compare its UNQUOTED content, and a dot target that still cannot be parsed is refused rather
+    than skipped.
+    """
+    assert fragment in (statement_write_target_problem(statement, {"Event"}) or ""), (
+        statement_write_target_problem(statement, {"Event"}))
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "VECTOR" in str(refused.value), str(refused.value)
+
+    # …and the CANONICAL spelling, quoted or bare, is still accepted: a guard that refused every
+    # backticked name would break a spelling the engine accepts (and the product's own writers use).
+    for ok in (
+        "MATCH (e:Event {eventId:'seed'}) SET e.`embedding` = vecf32($embedding)",
+        "MATCH (e:Event {eventId:'seed'}) SET e.embedding = vecf32($embedding)",
+    ):
+        assert statement_write_target_problem(ok, {"Event"}) is None, ok
+
+
 @pytest.mark.parametrize("statement", [
     # `SET <alias> = {…}` — a whole-alias map write whose key IS in the statement text.
     "MATCH (e:Event {eventId:'seed'}) SET e = {vector: vecf32($embedding)}",

@@ -900,8 +900,19 @@ _VECTOR_EXPR_RE = re.compile(
 
 #: The target property of a ``SET`` item — ``e.`embedding` = …`` reads ``embedding``, and a
 #: whole-alias write (``SET e += $props`` / ``SET e = {…}``) reads ``None`` (no single property).
+#: ⛔ A QUOTED name is `` `[^`]*` `` — NOT the bare-identifier character class inside optional
+#: backticks. Neo4j's naming rules make any quoted name legal (`` `1vector` ``, `` `vector prop` ``),
+#: the engine executes it, and a reader that assumed identifier characters *inside* the quotes could
+#: not see it: measured, ``SET e.`1vector` = vecf32($embedding)`` was ACCEPTED and landed a
+#: `Vectorf32` in a property no read path queries (#11641 review round 9). Both spellings capture
+#: their UNQUOTED content, and the comparison is against that.
 _SET_ITEM_PROPERTY_RE = re.compile(
-    r"^\s*\.\s*`?(?P<prop>[A-Za-z_][A-Za-z_0-9]*)`?")
+    r"^\s*\.\s*(?:`(?P<quoted>[^`]*)`|(?P<prop>[A-Za-z_][A-Za-z_0-9]*))")
+
+#: A whole-alias write — ``SET e = …`` / ``SET e += …`` — the ONE shape with no single target
+#: property. Anything else after the alias is a target this reader could NOT parse, and a target it
+#: cannot parse must be REFUSED rather than skipped: a skip is a fail-open (round 9).
+_SET_ITEM_WHOLE_ALIAS_RE = re.compile(r"^\s*(?:\+=|=)")
 
 
 def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
@@ -963,8 +974,17 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
                 continue
             match = _SET_ITEM_PROPERTY_RE.match(head[1])
             if match is None:
-                continue  # a whole-alias write — no single property, see the warning above
-            if match.group("prop") == EMBEDDING_PROPERTY:
+                if _SET_ITEM_WHOLE_ALIAS_RE.match(head[1]):
+                    continue  # a whole-alias write — no single property, see the warning above
+                # ⛔ A dot target this reader could not parse. Skipping it is a fail-open (round 9:
+                # ``SET e.`1vector` = vecf32($embedding)`` landed unreadable); refuse it instead.
+                if _VECTOR_EXPR_RE.search(head[1]):
+                    foreign.append(statement[span_start:span_end].strip())
+                continue
+            target = match.group("quoted")
+            if target is None:
+                target = match.group("prop")
+            if target == EMBEDDING_PROPERTY:
                 continue
             if _VECTOR_EXPR_RE.search(head[1]):
                 foreign.append(statement[span_start:span_end].strip())
@@ -977,7 +997,7 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
 #: dotted ``SET`` item, which is exactly the axis :func:`statement_vector_in_a_foreign_property`
 #: cannot see, and the key does NOT arrive from data (that is the `#4520` residual above).
 _MAP_ENTRY_KEY_RE = re.compile(
-    r"[{,]\s*`?(?P<key>[A-Za-z_][A-Za-z_0-9]*)`?\s*:")
+    r"[{,]\s*(?:`(?P<quoted_key>[^`]*)`|(?P<key>[A-Za-z_][A-Za-z_0-9]*))\s*:")
 
 
 def _map_entry_value_end(text: str, depths: list[int], start: int, base: int) -> int:
@@ -1029,7 +1049,9 @@ def statement_vector_in_a_foreign_map_key(statement: str) -> tuple[str, ...]:
     depths = _depths(text)
     foreign: list[str] = []
     for match in _MAP_ENTRY_KEY_RE.finditer(text):
-        key = match.group("key")
+        key = match.group("quoted_key")
+        if key is None:
+            key = match.group("key")
         if key == EMBEDDING_PROPERTY:
             continue
         if match.end() >= len(depths):
@@ -1047,7 +1069,7 @@ def statement_vector_in_a_foreign_map_key(statement: str) -> tuple[str, ...]:
 #: RELATIONSHIP, which no `entity_type` reaches (#11641 review round 3 — both ACCEPTED and both
 #: landed a `Vectorf32` where no read path can reach it).
 _EMBEDDING_MAP_KEY_RE = re.compile(
-    rf"[{{,]\s*`?{re.escape(EMBEDDING_PROPERTY)}`?\s*:")
+    rf"[{{,]\s*(?:`{re.escape(EMBEDDING_PROPERTY)}`|{re.escape(EMBEDDING_PROPERTY)})\s*:")
 
 
 def statement_stores_embedding_in_a_map(statement: str) -> bool:
