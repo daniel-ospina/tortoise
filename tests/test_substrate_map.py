@@ -85,9 +85,11 @@ _LABEL_CLAIM = re.compile(
 #:     For `tests/`: ⚠️ **The claim "`:Document` is not minted" …             -> GREEN
 #:
 #: The first two are now inside the match (they break the lead-in literal); the third is
-#: caught by the paragraph-boundary assertion, because it no longer ends the line in front
-#: of the span. `search` can always be preceded by text, so the boundary — not the literal
-#: alone — is what makes "the whole sentence" true.
+#: caught by the line anchor the pattern carries (`^`, `re.MULTILINE` — the span must start
+#: a LINE) together with the paragraph-boundary assertion in the pin (that line must start
+#: the PARAGRAPH, so a scope phrase on its own line above the span is read too). `search`
+#: can always be preceded by text, so the boundary — not the literal alone — is what makes
+#: "the whole sentence" true.
 _MEASUREMENT_TEMPLATE = (
     '⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,\n'
     "and the reason is measured: `:Document` occurs on **{lines}** lines across **{files}**\n"
@@ -107,7 +109,10 @@ def _measurement_paragraph() -> re.Pattern[str]:
             pattern += r"(\d+)"
         else:
             pattern += re.escape(piece)
-    return re.compile(pattern)
+    # Anchored at a LINE START on purpose: the template begins at the sentence's own
+    # lead-in, so text inserted between that lead-in and the figure — "measured: as in
+    # `tests/`, `:Document` occurs …" — breaks the match instead of sliding in before it.
+    return re.compile("^" + pattern, re.MULTILINE)
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1871,6 +1876,9 @@ _MEASURED_PREFIXES = (
     ),
     # in front of the span's first character, on the same line
     ("⚠️ **The claim", "For `tests/`: ⚠️ **The claim"),
+    # a scope phrase on its own line above the span: the line anchor alone admits it, so
+    # this is the case ONLY the paragraph boundary catches.
+    ("\n\n⚠️ **The claim", "\n\nin `tests/`:\n⚠️ **The claim"),
 )
 
 
