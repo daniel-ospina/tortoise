@@ -28,9 +28,9 @@ map explicitly forbids as a layout input.
 
 | fact | value |
 |---|---|
-| whole suite, measured weight | **12,734.8 s over 1,208 files** |
+| whole suite, measured weight | **14,222.8 s over 1,317 files** (`durations_captured_at: 2026-11-09T09:15:00Z`) |
 | capstone-adjacent files | **16 files, 64.3 s total — 0.5 % of the suite** |
-| heaviest three | `test_v4_declared_mechanisms.py` **17.8 s** · `test_graph_census_7949.py` **11.1 s** · `test_7949_capstone_verdict_check.py` **11.1 s** |
+| heaviest three | `test_graph_census_7949.py` **21.5 s** · `test_v4_declared_mechanisms.py` **19.2 s** · `test_7949_capstone_verdict_check.py` **10.0 s** |
 | the eval lane already exists and is dispatch-only | `eval-suite-manual.yml` and `evals-on-demand.yml` — **both `workflow_dispatch` ONLY**, no `push`, no `pull_request`, no `schedule`; `on_demand:` in `ci-surfaces.yml` excludes `eval/**` + `longmem_eval/**` from merge gating (#10194, owner decision A 2026-10-27) |
 | capstone files in `carve_out:` / `uri_requiring:` / `slow_files:` | **none** — they are classified DB-free, URI-free and fast |
 
@@ -128,17 +128,17 @@ candidate for one).
 
 | file | measured weight | verdict | why |
 |---|---|---|---|
-| **`test_graph_census_7949.py`** | **11.1 s** (19 tests; **15 drive a real `capture_session`** on the embedded lane) | ⛔ **REFACTOR — highest-value change** | An **integration test sitting in a fast shard**. Keep 3–4 offline pins in CI (the census arithmetic and the `:Object`-has-no-derivation-link fact) and move the 15 live-capture cases to **Tier E**. Recovers ~8–9 s of merge-time CI and stops the fast shard paying for a live graph. |
-| **`test_v4_declared_mechanisms.py`** | **17.8 s** (133 defs) — heaviest of the 16 | 🔧 **REFACTOR — investigate imports first** | 133 cases over a YAML file should not cost 17.8 s. Likely per-test pack-registry reload / source re-parse. A session-scoped fixture (load packs + parse sources once) is the fix; **measure before and after** and take the weight from a junit sweep, never a local reading. |
-| **`test_7949_capstone_verdict_check.py`** | **11.1 s** (161 defs) | 🔧 **REFACTOR — share the throwaway repo** | Its own note says the subprocess-bound ancestry arms dominate and that a no-promisor throwaway repo took the file from 520 s → 6 s once. The remaining cost is one repo build **per test**; a session-scoped repo fixture should cut it. |
-| **`test_capstone_preregistration_9075.py`** | **9.1 s** | ✅ **KEEP** | It re-derives `fixtures_hash` over 7 sessions of fixtures + gold. That is the check that makes the whole record trustworthy; 9.1 s for the epic's foundation is correctly priced. |
-| **`test_7949_capstone_measure.py`** | **0.2 s** though **6,904 lines / 159 cases** | ⛔ **DO NOT REFACTOR FOR COST** | It is already the cheapest file in the family. Its length is *prose pins* (README/§10 sentences), and those pins have caught real re-staling. Splitting it for size would move ~0.2 s and risk losing a pin — the wrong trade. ⚠️ Its `durations` row history is contradictory (an earlier duplicate-key episode left `0.2` beside a note claiming `11.1` as an "upper bound"); **the pin that forbids a duplicate `durations` key is the thing to trust, and it is currently satisfied** (verified: zero duplicate keys). |
+| **`test_graph_census_7949.py`** | **21.5 s** (19 tests; **15 drive a real `capture_session`** on the embedded lane) | ⛔ **REFACTOR — highest-value change** | An **integration test sitting in a fast shard**. Keep 3–4 offline pins in CI (the census arithmetic and the `:Object`-has-no-derivation-link fact) and move the 15 live-capture cases to **Tier E**. Recovers ~8–9 s of merge-time CI and stops the fast shard paying for a live graph. |
+| **`test_v4_declared_mechanisms.py`** | **19.2 s** (133 defs) — second heaviest | 🔧 **REFACTOR — investigate imports first** | 133 cases over a YAML file should not cost 19.2 s. Likely per-test pack-registry reload / source re-parse. A session-scoped fixture (load packs + parse sources once) is the fix; **measure before and after** and take the weight from a junit sweep, never a local reading. |
+| **`test_7949_capstone_verdict_check.py`** | **10.0 s** (161 defs) | 🔧 **REFACTOR — share the throwaway repo** | Its own note says the subprocess-bound ancestry arms dominate and that a no-promisor throwaway repo took the file from 520 s → 6 s once. The remaining cost is one repo build **per test**; a session-scoped repo fixture should cut it. |
+| **`test_capstone_preregistration_9075.py`** | **20.9 s** | ✅ **KEEP** | It re-derives `fixtures_hash` over 7 sessions of fixtures + gold. That is the check that makes the whole record trustworthy; 9.1 s for the epic's foundation is correctly priced. |
+| **`test_7949_capstone_measure.py`** | **4.1 s** over **12,294 lines / 231 test functions** (the `0.2 s` in an earlier revision belongs to `test_9889_capstone_probes.py` — a duplicate-key episode left the two readings adjacent) | ⛔ **DO NOT REFACTOR FOR COST** | It is still one of the cheaper files in the family per line (4.1 s over 12,294 lines). Its length is *prose pins* (README/§10 sentences), and those pins have caught real re-staling. Splitting it for size would move ~0.2 s and risk losing a pin — the wrong trade. ⚠️ Its `durations` row history is contradictory (an earlier duplicate-key episode left `0.2` beside a note claiming `11.1` as an "upper bound"); **the pin that forbids a duplicate `durations` key is the thing to trust, and it is currently satisfied** (verified: zero duplicate keys). |
 | **`test_9889_capstone_probes.py`** (2.0 s) · **`test_7950_capstone_probe.py`** (3.1 s) | 5.1 s | 🔍 **AUDIT for overlap, do not delete blind** | Three "capstone probe" files exist for different bundles/epics (9889, 7950, 7949). Before adding the A-row pins, run an **overlap audit**: if two files pin the same sentence of the same bundle, unify; if they pin different bundles, leave them. Deleting a check that catches a real failure is worse than 2 s. |
 | `test_extractor_v4_citation_rot.py` (3.2 s) · `…_s4_stage_claims.py` (3.0 s) · the five 0.1 s doc guards | 6.6 s | ✅ **KEEP** | Citation-rot and doc-claim guards are the cheapest defence in the repo against the failure this epic keeps producing (a claim true in a summary, stale in its copies). |
 
 **Aggregate proposal:** ~**20 s** of merge-time CI recoverable from two refactors (`graph_census_7949` live half →
 Tier E; one shared fixture in the verdict/pack tests), with **zero checks deleted**. The capstone would then cost
-~44 s of 12,734.8 s (0.35 %).
+~44 s of 14,222.8 s (0.31 %).
 
 **What NOT to do, stated so it is refused in advance:** do not move the **contract/unit** pins to the eval lane to
 "keep CI clean" — they are the cheap early-warning system, and a schema drift found at a milestone instead of on

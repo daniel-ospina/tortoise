@@ -763,7 +763,8 @@ Each is implementable as an automated test, names its **tier**, and its assertio
   asserted an **issue state** (`#4889` confirmed or reopened). A test cannot assert issue state, and every outcome
   satisfied one branch — the case was unfalsifiable. `#4889`'s adjudication is **row metadata**, outside the
   assertion.
-- **And** `#4889` is confirmed or **reopened** — "neither" is not an outcome
+- **And** the row records `#4889`'s adjudication as **metadata** (confirmed / reopened / neither, as of a named
+  date) — it is **not** asserted by the test, because a test cannot read GitHub issue state
 
 ### E2E-5 · reproducible from the door, with a control — **Tier E**
 
