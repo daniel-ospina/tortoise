@@ -342,6 +342,29 @@ class TestTheOtherArms:
             f"`new` still licenses a create for a name it also holds: {res}")
         assert set(res["new"]) & set(held) == set(), res
 
+    def test_an_alias_spelling_of_a_held_identity_is_not_new(self):
+        """`new` must not license a create for a DIFFERENT SPELLING of what it holds.
+
+        Review F2 on #11693's last cycle: F4's subtraction compared RAW names,
+        while F3's gate keys on `_norm` — so two spellings of one identity
+        (`Acme` held, `ACME` declared new) left the published ADD licence
+        permitting exactly the create the run itself refused. Measured before
+        the fix: `new == ['ACME']` beside `held == [{'name': 'Acme', …}]`.
+        Identity is one predicate or it is two contracts.
+        """
+        res = v2.resolve_entities(
+            [{"name": "Acme", "kind": "core:organisation"},
+             {"name": "ACME", "kind": "core:person"}],
+            _search({"id": "a1", "name": "Acme", "kind": "dev:person"},
+                    {"id": "a2", "name": "Acme", "kind": "ops:person"}),
+            model=_Says({"resolutions": [], "new": ["Acme", "ACME"]}))
+        held = _held_names(res)
+        assert held, res["held"]
+        norm = v2._norm
+        assert not ({norm(n) for n in res["new"]} & {norm(n) for n in held}), (
+            f"`new` licenses an alias spelling of a held identity: {res}")
+        assert set(res["new"]) & set(held) == set(), res
+
 
 class TestTheHoldRemovesOneNodeNotTheSession:
     """⛔ The held entity's name must not be left dangling in the payload.

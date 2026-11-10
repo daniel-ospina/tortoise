@@ -6020,8 +6020,8 @@ def resolve_entities(entity_refs: list[dict], search: dict,
         warnings.append(
             f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
             "created (§4.4 I1, #11653)")
-    return {"map": resolved, "records": records, "held": held,  # F4: `new` below is filtered
-            "new": [n for n in new if n not in {h["name"] for h in held}], "warnings": warnings}
+    return {"map": resolved, "records": records, "held": held,  # F4: `new` below is filtered on `_norm` — the SAME identity F3's gate keys on, so the ADD licence cannot publish an alias spelling of an identity this call holds (measured, review F2 on #11693)
+            "new": [n for n in new if _norm(n) not in {_norm(h["name"]) for h in held}], "warnings": warnings}
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:

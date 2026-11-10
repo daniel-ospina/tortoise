@@ -115,7 +115,7 @@ re-run. `fixtures_hash` is the pin, and `tools/capstone_preregistration_check.py
 
 ### 1.2 The before-figure, and the mismatch this section exists to prevent
 
-`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:85` states **62.3% of Objects are `the <X>`**. Its
+`docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md:108` states **62.3% of Objects are `the <X>`**. Its
 method is reconstructable from the tree, and it is a **different denominator** from the one E1 will
 use — which is precisely the defect `#9075` exists to prevent:
 
@@ -1119,7 +1119,7 @@ except where noted; the alternative was to omit the provenance and let a reader 
 
 | number | re-derived at `3f2f4893` from |
 |---|---|
-| 62.27% (4,901 / 7,870) | `tortoise/definite_description_backfill.py` docstring; `EXTRACTOR-V4-ARCHITECTURE.md:85` |
+| 62.27% (4,901 / 7,870) | `tortoise/definite_description_backfill.py` docstring; `EXTRACTOR-V4-ARCHITECTURE.md:108` |
 | ≈48% delete precision | `tortoise/definite_description_backfill.py:20` |
 | 25 / 15 / 9 / 6 / 1 | `tests/eval/write_path/salience_labels.jsonl` + `tests/test_salience_labels_4917.py` predicated run |
 | 4 must-keep overlaps | `docs/engineering/1026-calibration-set.jsonl` ∩ `salience_labels.jsonl` |
