@@ -1061,12 +1061,18 @@ def test_wire_identity_never_moves_an_existing_key():
     # non-str spellings are refused by the isinstance guard, not stringified
     # — on BOTH spellings (#11382). Before #11382 only the camel leg had the
     # guard: the snake leg returned the value verbatim, so
-    # ``{"session_id": 5}`` keyed the int ``5`` and THREE callers then raised
-    # ``AttributeError`` on ``.startswith`` (``seeded_sessions``,
-    # ``coverage_loop.coverage_gap``, ``reader_window_displacement``), while an
-    # UNHASHABLE one (``[1]``) raised ``TypeError`` at the first dict-key. The
-    # loop runs both spellings on purpose: two per-branch blocks would let a
-    # one-sided regression pass, which is the shape #11382 exists to close.
+    # ``{"session_id": 5}`` keyed the int ``5`` and all three key-reading
+    # callers then raised ``AttributeError`` on ``.startswith``
+    # (``seeded_sessions`` through ``_is_real_session_id``,
+    # ``reader_window_displacement``'s ``idx:`` set comprehensions, and
+    # ``coverage_loop.coverage_gap``). ⚠️ For an UNHASHABLE value (``[1]``) the
+    # exception CLASS depends on which runs first: ``coverage_gap`` raises
+    # ``TypeError: unhashable type`` where it builds a set around the key,
+    # while the other two reach the ``.startswith`` ``AttributeError`` before
+    # any hash is taken — measured on the pre-fix tree, so do not read the
+    # ``TypeError`` as universal. The loop runs both spellings on purpose: two
+    # per-branch blocks would let a one-sided regression pass, which is the
+    # shape #11382 exists to close.
     for junk in (0, 5, True, {"a": 1}, ["s"]):
         for spell in ("sessionId", "session_id"):
             assert session_key_of({"id": "e6", spell: junk}) == (
