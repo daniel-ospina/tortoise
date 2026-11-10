@@ -220,7 +220,8 @@ def _axis_partition() -> Counter:
 def _unittest_case_classes(module_body: list[ast.stmt]) -> set[str]:
     """Names of the classes in ONE body pytest collects as `unittest.TestCase` subclasses.
 
-    ⛔ Passed `tree.body` for the module scope, and called once per nested body by `_collected_test_nodes`:
+    ⛔ Passed `tree.body` for the module scope, and called once per nested body by
+    `_nodes_collected_from_body`'s own recursion:
     a `unittest.TestCase` nested inside a collected `Test*` class IS collected (measured round-30 P3:
     `TestOuter::CaseInner::test_b`, 2 collected for that module), so a module-level-only scan was an
     UNDERCOUNT of exactly the direction this file names as the dangerous one.
@@ -267,37 +268,93 @@ def _is_test_named(node: ast.AST) -> bool:
     )
 
 
+#: The `abc` spellings whose presence makes a class ABCMeta-metaclassed, by LEAF name.
+_ABC_METACLASS_LEAVES = ("ABC", "ABCMeta")
+#: Every `abc` decorator that sets `__isabstractmethod__ = True`, by LEAF name.
+#: ⛔ FOUR, not one: `abstractclassmethod`, `abstractstaticmethod` and `abstractproperty` all mark a member
+#: abstract and all populate `__abstractmethods__` (measured — each shape below collects **0**). Matching
+#: only `abstractmethod` lost them, and `"abstractmethod"` is not even a SUBSTRING of
+#: `"abstractclassmethod"`, so the suffix refusal could not catch them either.
+_ABSTRACT_MARKER_LEAVES = (
+    "abstractmethod",
+    "abstractclassmethod",
+    "abstractstaticmethod",
+    "abstractproperty",
+)
+
+
+def _decorator_leaf(decorator: ast.expr) -> str:
+    """The last dotted component of a decorator's CALLABLE — `@pytest.fixture(...)` -> `fixture`.
+
+    ⛔ The LEAF, and the caller compares it for EQUALITY. A suffix match (`endswith("fixture")`) models a
+    SPELLING, but both `fixtures.getfixturemarker(obj)` and `getattr(obj, "__isabstractmethod__", False)`
+    read the OBJECT — so `@myfixture` and `@myabstractmethod` are ordinary decorators (round-31 P2/P3,
+    measured: `def myfixture(fn): …` used as `@myfixture` collects **1** where the derivation said 0).
+    """
+    return ast.unparse(decorator).split("(")[0].split(".")[-1]
+
+
 def _is_fixture_function(node: ast.AST) -> bool:
-    """True if `@pytest.fixture` (or an alias ending in `fixture`) decorates it.
+    """True if `@pytest.fixture` (or an import-alias of it) decorates it — by EXACT leaf name.
 
     `istestfunction` ends `and fixtures.getfixturemarker(obj) is None`, so a fixture named `test_*` is NOT
     collected. Round-31 P3, measured: `@pytest.fixture def test_fixture` + `def test_a` collects **1**
     where the derivation counted **2**.
+
+    ⛔ EXACT, never `endswith("fixture")` (round-31 P3): the suffix form fired on any decorator whose name
+    merely ends that way, so `@myfixture` made the decorated `test_a` vanish from the count (derived
+    `(0, 0)` where pytest collects **1**). A suffix-only spelling is refused as unreadable by
+    `_derive_population` rather than guessed at here.
     """
     return isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and any(
-        ast.unparse(decorator).split("(")[0].split(".")[-1].endswith("fixture")
-        for decorator in node.decorator_list
+        _decorator_leaf(decorator) == "fixture" for decorator in node.decorator_list
     )
 
 
+def _abstract_ingredients(node: ast.ClassDef) -> tuple[bool, bool]:
+    """`(abc_metaclassed, has_abstractmember)` — the TWO ingredients `inspect.isabstract` consumes.
+
+    ⛔ Neither alone is the predicate. `inspect.isabstract(obj)` is `bool(obj.__abstractmethods__)`, and
+    ABCMeta computes that set from an `@abstractmethod`-marked member **and** an ABCMeta metaclass: with
+    EITHER ingredient alone the set is EMPTY and pytest collects the class normally. Round-31 P2,
+    measured with `--collect-only`: `class TestConcrete(abc.ABC)` holding only concrete methods collects
+    **1**, and an `@abc.abstractmethod` member on a plain `class TestX:` collects **1** — where the
+    spelling model ("an `ABC` base OR an `@abstractmethod` member") reported **0** for both, a silent
+    UNDERCOUNT of exactly the shape a caller writes when it wants a real test class.
+    """
+    abc_metaclassed = any(
+        ast.unparse(base).split(".")[-1] in _ABC_METACLASS_LEAVES for base in node.bases
+    ) or any(
+        keyword.arg == "metaclass"
+        and ast.unparse(keyword.value).split(".")[-1] in _ABC_METACLASS_LEAVES
+        for keyword in node.keywords
+    )
+    has_abstractmember = any(
+        isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
+        and any(_decorator_leaf(d) in _ABSTRACT_MARKER_LEAVES for d in member.decorator_list)
+        for member in node.body
+    )
+    return abc_metaclassed, has_abstractmember
+
+
 def _is_abstract_class(node: ast.ClassDef) -> bool:
-    """True if the class is abstract by the AST — an `ABC` base or an `@abstractmethod` member.
+    """True if `inspect.isabstract` would see a non-empty `__abstractmethods__` for this class.
 
     `PyCollector.istestclass` and `unittest`'s `pytest_pycollect_makeitem` both end on
     `inspect.isabstract(obj)` and refuse. Round-31 P3, measured: an abstract `Test*` class collects **0**
     where the derivation counted **1**, on BOTH collection paths.
+
+    ⛔ BOTH ingredients (`_abstract_ingredients`), never one: see that helper for the two one-ingredient
+    shapes round-31 P2 measured as COLLECTED. The shapes this still cannot answer — an explicit
+    `__abstractmethods__` override, an unknown `metaclass=` — are refused in `_derive_population` rather
+    than modelled here.
     """
-    if any(ast.unparse(base).split(".")[-1] in ("ABC", "ABCMeta") for base in node.bases):
-        return True
-    return any(
-        isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-        and any("abstractmethod" in ast.unparse(d) for d in member.decorator_list)
-        for member in node.body
-    )
+    abc_metaclassed, has_abstractmember = _abstract_ingredients(node)
+    return abc_metaclassed and has_abstractmember
 
 
-def _collected_test_nodes(source: str) -> list[ast.AST]:
-    """The test functions pytest would collect from `source` — the collector's own model.
+def _nodes_collected_from_body(body: list[ast.stmt]) -> list[ast.AST]:
+    """The nodes pytest collects from ONE body — the collector's own model, run per body.
 
     Module-level `def test_*`; methods of a `Test*` class (recursing into its nested `Test*` classes); and
     methods of a module-level `unittest.TestCase` subclass, **whatever that class is called**.
@@ -305,20 +362,19 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
     ⛔ Not `^    def test_`. That regex silently assumed every test is a 4-space-indented method, so a
     module-level `def test_...` — which pytest DOES collect — left the population pin GREEN while the
     real population grew. A nested `def test_` is not collected and is not counted here either.
-    """
-    return _nodes_collected_from_body(ast.parse(source).body)
-
-
-def _nodes_collected_from_body(body: list[ast.stmt]) -> list[ast.AST]:
-    """The nodes pytest collects from ONE body — the recursion `_collected_test_nodes` runs.
 
     Split out so a class FORCED into collection from outside its own body (`helper.__test__ = True`) is
     expanded into what pytest actually yields for it. Counting the class itself as one node was both a
     crash and a silent undercount; see the forced-selection arm in `_derive_population`.
+
+    ⛔ Run on the SAME tree the caller holds, never on a second `ast.parse` (round-31 P2): the
+    out-of-body `__test__` arms key their refusals by node IDENTITY, and nodes from a sibling parse share
+    none of the caller's identities. A `str`-parsing wrapper lived here and was the bug — it was deleted
+    rather than kept as an unreachable second entry point to this walk (round-31 P3).
     """
     nodes: list[ast.AST] = []
 
-    def _walk(body: list[ast.stmt], *, module_level: bool) -> None:
+    def _walk(body: list[ast.stmt]) -> None:
         # ⛔ Per BODY, not per module: a TestCase nested in a collected `Test*` class is collected too, and
         # its name only exists in the enclosing class's body.
         case_classes = _unittest_case_classes(body)
@@ -389,9 +445,9 @@ def _nodes_collected_from_body(body: list[ast.stmt]) -> list[ast.AST]:
                 # to falsify the document.
                 # ⛔ Recurse, because pytest collects a nested-class method
                 # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
-                _walk(node.body, module_level=False)
+                _walk(node.body)
 
-    _walk(body, module_level=True)
+    _walk(body)
     return nodes
 
 
@@ -500,7 +556,7 @@ def _classes_in_collection_scope(body: list[ast.stmt]) -> list[ast.ClassDef]:
 
     ⛔ NOT a function-local class: nothing collects one, so a refusal aimed at it would over-block a module
     pytest collects without complaint — the direction round-30 P3 measured as a defect of its own, not a
-    safe failure. Recursion follows class bodies only, mirroring `_collected_test_nodes`' own walk.
+    safe failure. Recursion follows class bodies only, mirroring `_nodes_collected_from_body`'s own walk.
     """
     found: list[ast.ClassDef] = []
     for node in body:
@@ -548,18 +604,21 @@ def _conditional_test_dunder_binds(body: list[ast.stmt]) -> list[str]:
                 targets = (
                     stmt.targets if isinstance(stmt, ast.Assign) else [stmt.target] if stmt.value else []
                 )
-                names = [
-                    name
-                    for target in targets
-                    for name in (
-                        [target]
-                        if isinstance(target, ast.Name)
-                        else list(target.elts)
-                        if isinstance(target, ast.Tuple)
-                        else []
-                    )
-                ]
-                if any(isinstance(name, ast.Name) and name.id == "__test__" for name in names):
+                # ⛔ The target may be an ATTRIBUTE (`TestX.__test__ = False`). Flattening an `ast.Attribute`
+                # to `[]` covered the conditional attribute form with NEITHER arm (round-31 P3, measured:
+                # `if FLAG: TestX.__test__ = False` collects **0** where the derivation returned `(1, 1)` —
+                # an OVERCOUNT). An attribute target binds `__test__` on the object it names, exactly like
+                # the bare-name form, so both spellings are read here.
+                bound_names: list[str] = []
+                for target in targets:
+                    for leaf_target in (
+                        list(target.elts) if isinstance(target, ast.Tuple) else [target]
+                    ):
+                        if isinstance(leaf_target, ast.Name):
+                            bound_names.append(leaf_target.id)
+                        elif isinstance(leaf_target, ast.Attribute):
+                            bound_names.append(leaf_target.attr)
+                if "__test__" in bound_names:
                     found.append(ast.unparse(stmt)[:72])
             if isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
                 continue
@@ -594,6 +653,15 @@ def _derive_population(source: str) -> tuple[int, int]:
       * a case list that is not an inline list/tuple literal
       * a `pytestmark` binding, at module or class level — it applies a mark to EVERY test in its scope,
         so whether it multiplies cases cannot be answered without modelling per-module/class marks
+      * an out-of-body `__test__` binding on an object this module does not declare, a non-literal value,
+        or the SAME object bound both truthy and falsy (which of them pytest reads is source order)
+      * a `__test__` bound under a conditional/loop/try/with block — whether the binding runs is a runtime
+        fact, and at module level it decides every test in the file
+      * an explicit `__abstractmethods__` assignment, or a `metaclass=` this file does not model — both
+        move `inspect.isabstract`'s set out of a static read
+      * a decorator that merely ENDS in `fixture`, or mentions `abstract` without being one of `abc`'s
+        four abstract markers — the spelling is not the object pytest reads (`getfixturemarker`,
+        `__isabstractmethod__`), so the shape is refused
     """
     tree = ast.parse(source)
 
@@ -605,7 +673,13 @@ def _derive_population(source: str) -> tuple[int, int]:
     if module_dunder is not _UNBOUND and module_dunder is not _NOT_CONSTANT and not module_dunder:
         return 0, 0
 
-    nodes = _collected_test_nodes(source)
+    # ⛔ Derive the nodes from THIS parse, never from a second `ast.parse(source)` (round-31 P2): the
+    # out-of-body `__test__` arms below key refusals by node IDENTITY, and nodes from a sibling parse have
+    # none of the `tree` identities — so `TestX.__test__ = False` matched nothing and the class was still
+    # counted (`1, 1` where pytest collects **0**). `_nodes_collected_from_body(tree.body)` is that call on
+    # THIS parse (the `str`-parsing wrapper was the bug and is gone).
+    # parse, so the collector model is unchanged; only the identity is shared now.
+    nodes = _nodes_collected_from_body(tree.body)
 
     # A module-level name bound to something `parametrize`-shaped (`pt = pytest.mark.parametrize`) then used
     # as a decorator (`@pt(...)`) is an arm this derivation cannot see by name — measured: pytest collects
@@ -663,7 +737,7 @@ def _derive_population(source: str) -> tuple[int, int]:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
         for decorator in node.decorator_list:
-            if not isinstance(decorator, ast.Call) or not ast.unparse(decorator.func).endswith("fixture"):
+            if not isinstance(decorator, ast.Call) or _decorator_leaf(decorator) != "fixture":
                 continue
             # The fixture's NAME is the decorated function's name; `params=` is a keyword, never positional.
             if any(keyword.arg == "params" for keyword in decorator.keywords):
@@ -705,14 +779,38 @@ def _derive_population(source: str) -> tuple[int, int]:
     # object, a TRUE constant SELECTS it (`isnosetest` reads `__test__ IS True`, so `helper.__test__ = True`
     # makes pytest collect `helper` — measured 2 for that module). Only a non-literal is unreadable,
     # because its truthiness is a runtime fact.
-    _bindable = {
-        n.name
-        for _b in [tree.body, *(c.body for c in ast.walk(tree) if isinstance(c, ast.ClassDef))]
-        for n in _b
-        if isinstance(n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-    }
-    _refused_out_of_body: set[str] = set()
-    _forced_out_of_body: set[str] = set()
+    #: Every object an `X.__test__ = …` binding can name, keyed by its QUALIFIED path (`TestA.test_b`,
+    #: `TestA`, `test_x`). ⛔ Keyed by PATH, never by bare name (round-31 P2, measured): pytest sets
+    #: `__test__` on the OBJECT the attribute names, so `TestA.test_b.__test__ = False` must drop
+    #: `TestA::test_b` and NOTHING else. The bare-name key dropped `TestC::test_b` too — two classes with a
+    #: same-named method is ordinary — and reported `(0, 0)` where `--collect-only` collects **1**.
+    _declared: dict[str, ast.AST] = {}
+
+    def _index_scope(scope_body: list[ast.stmt], prefix: str) -> None:
+        for _n in scope_body:
+            if not isinstance(_n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
+                continue
+            _path = f"{prefix}{_n.name}"
+            _declared[_path] = _n
+            if isinstance(_n, ast.ClassDef):
+                _index_scope(_n.body, _path + ".")
+
+    _index_scope(tree.body, "")
+
+    def _attribute_path(target: ast.expr) -> list[str] | None:
+        """`TestA.test_b` -> `["TestA", "test_b"]`; `None` for a chain this scan cannot resolve."""
+        parts: list[str] = []
+        node: ast.expr = target
+        while isinstance(node, ast.Attribute):
+            parts.append(node.attr)
+            node = node.value
+        if not isinstance(node, ast.Name):
+            return None
+        parts.append(node.id)
+        return list(reversed(parts))
+
+    _refused_paths: set[str] = set()
+    _forced_paths: set[str] = set()
     _case_names: set[str] = set()
     for _body in [tree.body, *(n.body for n in ast.walk(tree) if isinstance(n, ast.ClassDef))]:
         _case_names |= _unittest_case_classes(_body)
@@ -728,22 +826,39 @@ def _derive_population(source: str) -> tuple[int, int]:
                 if not isinstance(scan_target, ast.Attribute) or scan_target.attr != "__test__":
                     continue
                 # The bound object is `scan_target.value`: a bare `Name` for `TestX.__test__`, or an
-                # `Attribute` for `TestX.test_b.__test__` — where the bound name is the ATTRIBUTE, not the
-                # last Name in the chain (reading the Name instead bound `TestX` and left `test_b` counted).
-                bound = scan_target.value
-                if isinstance(bound, ast.Name):
-                    obj_name = bound.id
-                elif isinstance(bound, ast.Attribute):
-                    obj_name = bound.attr
-                else:
+                # `Attribute` for `TestX.test_b.__test__` — resolved to the object's QUALIFIED path so the
+                # refusal lands on that one object (round-31 P2; see `_declared`).
+                parts = _attribute_path(scan_target.value)
+                if parts is None:
+                    unreadable.append(
+                        f"`{ast.unparse(scan_target)}` binds `__test__` on a target this scan cannot "
+                        "resolve to a name chain, so the object it selects cannot be read here"
+                    )
                     continue
-                if obj_name not in _bindable and not isinstance(bound, ast.Attribute):
+                obj_path = ".".join(parts)
+                if obj_path not in _declared:
+                    # ⛔ FAIL CLOSED, never "not one of ours, so ignore it": an owner that is imported, an
+                    # attribute reached through a module or a subscript names an object whose `__test__`
+                    # pytest DOES read, and nothing here can enumerate what that object holds.
+                    unreadable.append(
+                        f"`{ast.unparse(scan_target)}` binds `__test__` on `{obj_path}`, which this "
+                        "module does not declare — the object it names cannot be resolved here"
+                    )
                     continue
                 if isinstance(scan_node.value, ast.Constant):
-                    if scan_node.value.value:
-                        _forced_out_of_body.add(obj_name)
-                    else:
-                        _refused_out_of_body.add(obj_name)
+                    # ⛔ IDENTITY selects, TRUTHINESS refuses (round-31 P3, measured both ways).
+                    # `isnosetest` is `safe_getattr(obj, "__test__", False) is True`, so `helper.__test__ = 1`
+                    # on a non-`test`-named object selects NOTHING (pytest: *no tests collected*) while a
+                    # truthiness test forced it and reported `(1, 1)` — the overcount direction. The
+                    # falsy arm stays TRUTHINESS because that is what pytest's `Class.collect`/
+                    # `UnitTestCase` guard reads (`if not getattr(cls, "__test__", True)`), and the two
+                    # non-literal states agree on every falsy literal.
+                    if scan_node.value.value is True:
+                        _forced_paths.add(obj_path)
+                    elif not scan_node.value.value:
+                        _refused_paths.add(obj_path)
+                    # A truthy NON-`True` literal (`1`, `"yes"`) neither selects nor refuses: the object is
+                    # collected iff its own NAME already selects it, which is the walk's job — no arm here.
                 else:
                     unreadable.append(
                         f"`{ast.unparse(scan_target)}` is assigned from OUTSIDE the object's body to a "
@@ -755,48 +870,65 @@ def _derive_population(source: str) -> tuple[int, int]:
     for _cls in ast.walk(tree):
         if isinstance(_cls, ast.ClassDef):
             _scan_out_of_body(_cls.body)
-    # ⛔ A refused CLASS also drops its METHODS: `nodes` holds the method nodes, not the class, so a
-    # name filter over `nodes` alone left `TestX.__test__ = False` still counting `test_a`.
-    _refused_members: set[str] = set()
-    for _cls in ast.walk(tree):
-        if isinstance(_cls, ast.ClassDef) and _cls.name in _refused_out_of_body:
-            _refused_members |= {
-                m.name
-                for m in _cls.body
-                if isinstance(m, (ast.FunctionDef, ast.AsyncFunctionDef))
-            }
-    nodes = [
-        node
-        for node in nodes
-        if not (
-            isinstance(node, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef))
-            and (node.name in _refused_out_of_body or node.name in _refused_members)
+    # ⛔ SOURCE ORDER decides this, and the first revision threw it away (round-31 P3, measured):
+    # `TestX.__test__ = True` followed by `TestX.__test__ = False` leaves pytest reading the LAST binding
+    # (`--collect-only` -> **0**), while two UNORDERED sets dropped the class and then the forced loop
+    # re-added it, reporting `(1, 1)` — an OVERCOUNT. The two bindings may sit in different bodies this
+    # scan cannot order against each other, so a disagreement is refused rather than guessed.
+    for _path in sorted(_forced_paths & _refused_paths):
+        unreadable.append(
+            f"`{_path}.__test__` is bound out of body to BOTH a truthy and a falsy value, so which one "
+            "pytest reads is a source-order fact in a scope this scan cannot order"
         )
-    ]
-    for _all_bodies in [tree.body, *(c.body for c in ast.walk(tree) if isinstance(c, ast.ClassDef))]:
-        for _cand in _all_bodies:
-            if getattr(_cand, "name", None) not in _forced_out_of_body:
-                continue
-            if (
-                _cand in nodes
-                or _is_fixture_function(_cand)
-                or (isinstance(_cand, ast.ClassDef) and _is_abstract_class(_cand))
-            ):
-                continue
-            # `__test__ = True` is a POSITIVE selection at `istestclass`/`istestfunction`, so a name the
-            # walk skipped for its SPELLING must still be counted — measured: `helper.__test__ = True`
-            # makes pytest collect `helper` even though it is not `test`-named.
-            # ⛔ A CLASS is not one case. pytest yields the same members it would for a `Test*` class:
-            # `class helper: test_h, test_i` + `helper.__test__ = True` collects **2**
-            # (`helper::test_h`, `helper::test_i`), and one holding a nested `TestInner` collects **2** as
-            # well (`helper::TestInner::test_x`, `helper::test_h`) — measured round-31 P3. Appending the
-            # ClassDef itself reported **1** for both (the silently-low direction) and then CRASHED the
-            # parametrize-arm loop below with `'ClassDef' object has no attribute 'args'`, because that
-            # loop reads `node.args` off what `nodes` holds. Expanding it through the walk fixes both.
-            if isinstance(_cand, ast.ClassDef):
-                nodes.extend(_nodes_collected_from_body(_cand.body))
-            else:
-                nodes.append(_cand)
+    # ⛔ A refused object drops EVERY node beneath it: `nodes` holds methods, not classes, so filtering on
+    # the class's own name left `TestX.__test__ = False` still counting `TestX::test_a`. Path prefixes do
+    # that, and they also keep an unrelated class's same-named method (round-31 P2).
+    _path_of: dict[int, str] = {id(_node): _path for _path, _node in _declared.items()}
+
+    def _refused(node: ast.AST) -> bool:
+        """True when this node IS a refused object or lives under one (`TestX` refuses `TestX::test_a`)."""
+        path = _path_of.get(id(node))
+        if path is None:
+            return False
+        return any(path == refused or path.startswith(refused + ".") for refused in _refused_paths)
+
+    nodes = [node for node in nodes if not _refused(node)]
+    _already_counted = {id(node) for node in nodes}
+    for _path, _cand in sorted(_declared.items()):
+        if _path not in _forced_paths:
+            continue
+        if (
+            id(_cand) in _already_counted
+            or _is_fixture_function(_cand)
+            or (isinstance(_cand, ast.ClassDef) and _is_abstract_class(_cand))
+        ):
+            continue
+        # `__test__ = True` is a POSITIVE selection at `istestclass`/`istestfunction`, so a name the
+        # walk skipped for its SPELLING must still be counted — measured: `helper.__test__ = True`
+        # makes pytest collect `helper` even though it is not `test`-named.
+        # ⛔ A CLASS is not one case. pytest yields the same members it would for a `Test*` class:
+        # `class helper: test_h, test_i` + `helper.__test__ = True` collects **2**
+        # (`helper::test_h`, `helper::test_i`), and one holding a nested `TestInner` collects **2** as
+        # well (`helper::TestInner::test_x`, `helper::test_h`) — measured round-31 P3. Appending the
+        # ClassDef itself reported **1** for both (the silently-low direction) and then CRASHED the
+        # parametrize-arm loop below with `'ClassDef' object has no attribute 'args'`, because that
+        # loop reads `node.args` off what `nodes` holds. Expanding it through the walk fixes both.
+        if isinstance(_cand, ast.ClassDef):
+            nodes.extend(_nodes_collected_from_body(_cand.body))
+        else:
+            nodes.append(_cand)
+
+    # ⛔ The refusal filter runs BEFORE the forced expansion, so it has to run AGAIN after it (round-31
+    # P3, measured): `helper.__test__ = True` re-admits every member through `_nodes_collected_from_body`,
+    # including one a `helper.test_i.__test__ = False` (or `helper.TestInner.__test__ = False`) already
+    # dropped — pytest collects **1**, the derivation reported `(2, 2)`. This is finding 4's mechanism in
+    # the other dimension: which OBJECT the refusal names, not which ORDER the bindings ran.
+    nodes = [node for node in nodes if not _refused(node)]
+    # ⛔ And dedupe by IDENTITY: a column that the walk ALREADY collected (a `Test*` class, a
+    # `unittest.TestCase`) has only its methods in `nodes`, never the ClassDef, so the guard in the forced
+    # loop above is inert for exactly the object type the arm expands — `class TestX: test_a` +
+    # `TestX.__test__ = True` collects **1** (measured) and was expanded twice into `(2, 2)`.
+    nodes = list({id(node): node for node in nodes}.values())
 
     # ⛔ A `__test__` bound under a CONDITION (round-31 P3, measured both ways). `__test__ = True` followed
     # by `if FLAG: __test__ = False` collects **0** when `FLAG` is true and **1** when it is false: the value
@@ -832,6 +964,58 @@ def _derive_population(source: str) -> tuple[int, int]:
                     "the methods and `__init__`/`__new__` refusals it contributes cannot be read here"
                 )
                 break
+    # ⛔ `inspect.isabstract` is `bool(__abstractmethods__)`, and TWO shapes keep that set out of a static
+    # read even with both ingredients present. An explicit `__abstractmethods__` assignment in the class
+    # body REPLACES the set ABCMeta computed (so an otherwise-abstract class becomes collectable, or the
+    # reverse), and a `metaclass=` this derivation does not know may compute it, add members, or refuse the
+    # class outright. Both are runtime facts, so they are refused rather than guessed — the same contract
+    # the two-ingredient model in `_abstract_ingredients` rests on (round-31 P2).
+    for _node in ast.walk(tree):
+        if not isinstance(_node, ast.ClassDef):
+            continue
+        for _stmt in _node.body:
+            if not isinstance(_stmt, (ast.Assign, ast.AnnAssign)):
+                continue
+            _targets = _stmt.targets if isinstance(_stmt, ast.Assign) else [_stmt.target]
+            if any(
+                isinstance(_t, ast.Name) and _t.id == "__abstractmethods__" for _t in _targets
+            ):
+                unreadable.append(
+                    f"class `{_node.name}`: it assigns `__abstractmethods__` explicitly, replacing the set "
+                    "ABCMeta computes, so whether `inspect.isabstract` refuses it is a runtime fact"
+                )
+        for _keyword in _node.keywords:
+            if _keyword.arg != "metaclass":
+                continue
+            _meta_leaf = ast.unparse(_keyword.value).split(".")[-1]
+            if _meta_leaf not in _ABC_METACLASS_LEAVES and _meta_leaf != "type":
+                unreadable.append(
+                    f"class `{_node.name}`: `metaclass={ast.unparse(_keyword.value)}` is not one this "
+                    "derivation models, so the members and the `__abstractmethods__` set it computes "
+                    "cannot be read here"
+                )
+    # ⛔ A decorator matched by SUFFIX is a spelling guess, and both predicates read the OBJECT:
+    # `fixtures.getfixturemarker(obj)` and `getattr(member, "__isabstractmethod__", False)`. So `@myfixture`
+    # and `@myabstractmethod` are ordinary decorators — round-31 P2/P3 measured the fixture form as
+    # COLLECTED (**1**) where the suffix model derived `(0, 0)`. An exact leaf is the only spelling this
+    # derivation stands behind; anything else that merely ENDS that way is refused.
+    for _node in ast.walk(tree):
+        if not isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for _decorator in _node.decorator_list:
+            _leaf = _decorator_leaf(_decorator)
+            if _leaf.endswith("fixture") and _leaf != "fixture":
+                unreadable.append(
+                    f"`{_node.name}` is decorated with `{ast.unparse(_decorator)[:48]}`, which merely ENDS "
+                    "in `fixture` — it is not `@pytest.fixture`, so whether it marks a fixture (and hides "
+                    "this function) cannot be read here"
+                )
+            if "abstract" in _leaf and _leaf not in _ABSTRACT_MARKER_LEAVES:
+                unreadable.append(
+                    f"`{_node.name}` is decorated with `{ast.unparse(_decorator)[:48]}`, which mentions "
+                    "`abstract` without being one of `abc`'s four abstract markers, so whether the member "
+                    "makes its class abstract cannot be read here"
+                )
     # ⛔ A `unittest.TestCase` whose `__init__` cannot take the argument pytest passes is a collection ERROR,
     # not a count (`UnitTestCase.newinstance` calls `self.obj("runTest")`) — measured: `no tests collected,
     # 1 error`, rc=2. Failing closed is the honest answer; `(0, 0)` would read as a clean empty population.
@@ -2362,6 +2546,47 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "    def __init__(self):\n        super().__init__()\n"
                 "    def test_a(self):\n        pass\n"
             ),
+            # ⛔ Round-31 P2/P3 — the SIX shapes the delta review measured as silent numbers, re-measured
+            # with `pytest --collect-only` at the fix head before being pinned here. Shapes 1-3 are MODELLED
+            # below; 4-6 are RUNTIME facts and are refused.
+            # 4. `if FLAG: TestX.__test__ = False` — pytest 0, and whether the flag is true decides it.
+            "`__test__` bound on an ATTRIBUTE target under an `if`": (
+                "FLAG = True\nclass TestX:\n    def test_a(self):\n        pass\n"
+                "if FLAG:\n    TestX.__test__ = False\n"
+            ),
+            # 5. `__test__ = True` then `__test__ = False` out of body — pytest 0, LAST binding wins.
+            "out-of-body `__test__` bound twice, truthy then falsy": (
+                "class TestX:\n    def test_a(self):\n        pass\n"
+                "TestX.__test__ = True\nTestX.__test__ = False\n"
+            ),
+            # 6. `@myfixture` is an ordinary decorator — pytest collects the function, so a suffix match
+            #    that hid it was an UNDERCOUNT. The spelling is a guess; the shape is refused.
+            "a decorator that merely ENDS in `fixture`": (
+                "def myfixture(fn):\n    return fn\n@myfixture\ndef test_a():\n    pass\n"
+            ),
+            "a decorator that merely CONTAINS `abstractmethod`": (
+                "def myabstractmethod(fn):\n    return fn\n"
+                "class TestX:\n    @myabstractmethod\n    def test_a(self):\n        pass\n"
+            ),
+            # ⛔ Round-31 P2 — the two shapes that keep `inspect.isabstract`'s set out of a static read.
+            "class assigning `__abstractmethods__` explicitly": (
+                "import abc\nclass TestX(abc.ABC):\n    __abstractmethods__ = frozenset()\n"
+                "    @abc.abstractmethod\n    def test_a(self):\n        pass\n"
+            ),
+            # ⛔ Round-31 P3 — DISCRIMINATING: a `metaclass=` this file does not model must be the ONLY
+            # possible refusal, so the class declares NO local base. The first version of this pin used
+            # `class MyMeta(type)`, which trips the PRE-EXISTING imported-base refusal (`type` is not a
+            # known base) whether or not the metaclass arm exists — it stayed green with the arm neutered.
+            # pytest collects **1** here (`type("M", (type,), {})` is a plain metaclass), so a silent
+            # number would read as agreement.
+            "class with an unknown `metaclass=`": (
+                'class TestX(metaclass=type("M", (type,), {})):\n    def test_a(self):\n        pass\n'
+            ),
+            # ⛔ Round-31 P2 — an out-of-body `__test__` on an object this module does not declare names
+            # something pytest DOES read, and nothing here can enumerate what it holds.
+            "out-of-body `__test__` on an object this module does not declare": (
+                "class TestX:\n    def test_a(self):\n        pass\nother.TestX.__test__ = False\n"
+            ),
         }
         for label, source in unmodellable.items():
             with pytest.raises(AssertionError, match="cannot derive the collected count"):
@@ -2419,6 +2644,130 @@ class TestTheDocsAreDiscoverableAndResolve:
         assert _derive_population(
             "class Helpers:\n    def test_not_collected(self):\n        pass\n"
         ) == (0, 0), "a non-`Test*` class's `test_` method is not collected by pytest"
+
+        # --- Round-31 P3 finding 6 — `_nodes_collected_from_body`'s `module_level` parameter was declared
+        # and never read, and this delta added a call site passing `module_level=True` for a CLASS body: a
+        # distinction the walk does not have, asserted at a call site and implemented nowhere. A dead
+        # parameter has no behavioural pin, so the pin is STRUCTURAL — read off the compiled walk, so a
+        # comment mentioning the name cannot satisfy or break it. ---
+        _walk_code = next(
+            const
+            for const in _nodes_collected_from_body.__code__.co_consts
+            if isinstance(const, type(_nodes_collected_from_body.__code__))
+            and const.co_name == "_walk"
+        )
+        assert "module_level" not in _walk_code.co_varnames, (
+            "`module_level` is back on the collection walk. It was declared and never read, while a call "
+            "site passed `module_level=True` for a CLASS body — a rule nothing implemented. Remove it, or "
+            "implement the distinction it names."
+        )
+
+        # --- Round-31 P2 — the three shapes the delta review measured as UNDERCOUNTS, re-measured with
+        # `pytest --collect-only` before this pin was written. Each is MODELLED, not refused: they are
+        # answerable, and refusing them would over-block modules pytest collects without complaint. ---
+        for label, source, expected in (
+            (
+                # pytest collects `TestConcrete::test_a` (**1**): an `abc.ABC` base with only concrete
+                # methods has an EMPTY `__abstractmethods__`, so `inspect.isabstract` is False.
+                "1. `abc.ABC` base with NO `@abstractmethod` member is COLLECTED",
+                "import abc\nclass TestConcrete(abc.ABC):\n    def test_a(self):\n        pass\n",
+                (1, 1),
+            ),
+            (
+                # pytest collects `TestX::test_a` (**1**): without an ABCMeta base the marker alone
+                # populates nothing.
+                "2. `@abc.abstractmethod` on a non-ABCMeta class is COLLECTED",
+                "import abc\nclass TestX:\n    @abc.abstractmethod\n    def test_a(self):\n        pass\n",
+                (1, 1),
+            ),
+            (
+                # pytest collects `TestC::test_b` (**1**) — `TestA`'s refusal must not reach it.
+                "3. `TestA.test_b.__test__ = False` drops ONLY `TestA::test_b`",
+                "class TestA:\n    def test_b(self):\n        pass\n"
+                "class TestC:\n    def test_b(self):\n        pass\n"
+                "TestA.test_b.__test__ = False\n",
+                (1, 1),
+            ),
+            (
+                # pytest collects **0**: BOTH ingredients through the `metaclass=` keyword.
+                "`metaclass=abc.ABCMeta` + `@abstractmethod` is REFUSED by pytest",
+                "import abc\nclass TestX(metaclass=abc.ABCMeta):\n"
+                "    @abc.abstractmethod\n    def test_a(self):\n        pass\n",
+                (0, 0),
+            ),
+            # ⛔ Round-31 P3 — `abc` has FOUR markers that set `__isabstractmethod__`, and matching only
+            # `abstractmethod` lost the other three (`"abstractmethod"` is not even a substring of
+            # `"abstractclassmethod"`). pytest collects **0** for each: all three populate
+            # `__abstractmethods__` on an ABCMeta class.
+            (
+                "`@abc.abstractclassmethod` also makes the class abstract",
+                "import abc\nclass TestX(abc.ABC):\n    @abc.abstractclassmethod\n"
+                "    def test_a(cls):\n        pass\n",
+                (0, 0),
+            ),
+            (
+                "`@abc.abstractstaticmethod` also makes the class abstract",
+                "import abc\nclass TestX(abc.ABC):\n    @abc.abstractstaticmethod\n"
+                "    def test_a():\n        pass\n",
+                (0, 0),
+            ),
+            (
+                "`@abc.abstractproperty` also makes the class abstract",
+                "import abc\nclass TestX(abc.ABC):\n    @abc.abstractproperty\n"
+                "    def test_a(self):\n        pass\n",
+                (0, 0),
+            ),
+            # ⛔ Round-31 P3 — a FORCED class the walk ALREADY collected must not be expanded twice. The
+            # first guard tested membership in `nodes`, which only ever holds a class's METHODS, so it was
+            # inert for the very object type the arm expands: pytest collects **1** for `TestX` + its own
+            # `__test__ = True`, and the double expansion reported `(2, 2)`.
+            (
+                "`TestX.__test__ = True` on an already-collected `Test*` class",
+                "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = True\n",
+                (1, 1),
+            ),
+            (
+                "`FoldCase.__test__ = True` on an already-collected TestCase",
+                "import unittest\nclass FoldCase(unittest.TestCase):\n"
+                "    def test_a(self):\n        pass\nFoldCase.__test__ = True\n",
+                (1, 1),
+            ),
+            # ⛔ Round-31 P3 — the refusal filter ran BEFORE the forced expansion and was never re-applied,
+            # so a member refused out of body was re-admitted by its own class's `__test__ = True`.
+            # pytest collects **1** (`helper::test_h`), the derivation reported `(2, 2)`.
+            (
+                "a forced class does not re-admit a member refused out of body",
+                "class helper:\n    def test_h(self):\n        pass\n    def test_i(self):\n        pass\n"
+                "helper.__test__ = True\nhelper.test_i.__test__ = False\n",
+                (1, 1),
+            ),
+            (
+                "a forced class does not re-admit a nested class refused out of body",
+                "class helper:\n    class TestInner:\n        def test_x(self):\n            pass\n"
+                "    def test_h(self):\n        pass\n"
+                "helper.__test__ = True\nhelper.TestInner.__test__ = False\n",
+                (1, 1),
+            ),
+            # ⛔ Round-31 P3 — the out-of-body SELECTION is IDENTITY, not truthiness (`isnosetest` reads
+            # `… is True`). `helper.__test__ = 1` forces NOTHING: pytest collects **0**. The refusal arm
+            # keeps truthiness because that is what pytest's own guard reads.
+            (
+                "`helper.__test__ = 1` does NOT force a non-`test`-named class",
+                "class helper:\n    def test_h(self):\n        pass\nhelper.__test__ = 1\n",
+                (0, 0),
+            ),
+            (
+                "`test_a.__test__ = 1` leaves the name-collected function in place",
+                "def test_a():\n    pass\ntest_a.__test__ = 1\n",
+                (1, 1),
+            ),
+            (
+                "`TestX.__test__ = 1` leaves the name-collected class in place",
+                "class TestX:\n    def test_a(self):\n        pass\nTestX.__test__ = 1\n",
+                (1, 1),
+            ),
+        ):
+            assert _derive_population(source) == expected, f"{label}: {_derive_population(source)}"
 
     def test_the_inventory_in_the_LEDGER_matches_the_pinned_copies(self):
         """`docs/00_index.md` restates the headline inventory — so it is a copy that must be pinned too.
