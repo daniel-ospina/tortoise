@@ -1093,7 +1093,14 @@ def _layer1_reference_spellings(embed_list: object) -> dict[str, set[str]]:
     Scans the same two surfaces as :func:`_referenced_entity_names`
     (``about_entities`` and the non-``event`` role slots of every surviving
     item) — a slot name is a Layer-1 reference exactly as much as an
-    ``about_entities`` entry is, and both are compared by exact string.
+    ``about_entities`` entry is. ⛔ The COMPARE differs, and the difference is
+    not cosmetic: ``about_entities`` is matched by EXACT STRING against the
+    emitted names, while a slot ref is matched on the exact ``(name,
+    _bare_kind(kind))`` PAIR (``commit_schema.validate_layer1``). So re-spelling
+    a slot's NAME does not by itself make the slot resolve — a ``kind`` naming
+    no entity still fails Layer-1, and that refusal belongs to S5/the schema,
+    not to this pass. "The name is now valid" and "the slot now resolves" are
+    different claims (review at ``c79fa84a3e``, P3).
 
     ⛔ **NO ``discarded_ids`` PARAMETER, DELIBERATELY.** Both call sites pass a
     list that ALREADY holds only survivors — the nothing-to-do branch requires
@@ -1219,8 +1226,9 @@ def _reconcile_held_layer1_spellings(
           ``points[0].about_entities: about_entities reference unknown
           entities: ['RETRY STORM']`` → the WHOLE session is rejected
 
-    Layer-1 compares ``about_entities`` and slot names by EXACT string, so the
-    reference is fatal; the pipeline's own matching fold (``_norm``) says it is
+    Layer-1 compares ``about_entities`` by EXACT string (a slot ref on the exact
+    ``(name, kind)`` pair), so the reference is fatal; the pipeline's own
+    matching fold (``_norm``) says it is
     the same name. Reconciling is the fail-open direction this module's doctrine
     requires — a wrong KEEP is noise, a rejected batch is memory loss — and it
     is WARNED, because silence is what made the run look clean right up to the
@@ -1466,6 +1474,37 @@ def _operator_endpoint_text(op: Mapping[str, Any]) -> set[str]:
     return content | entity
 
 
+def _identity_survives(section: str, item: Mapping[str, Any],
+                       after: object) -> bool:
+    """Whether the same IDENTITY and CONTENT is still present in ``after``.
+
+    The companion of :func:`_survives` for :func:`removal_pool`, and the
+    difference is deliberate: ``_survives`` asks value equality, which a
+    surviving item FAILS as soon as a pass rewrites one of its reference
+    spellings (the #10999 reconcile does exactly that, in place). A removal is
+    an absent ITEM — so an item is still there when ``after`` carries one with
+    the same ``_item_text`` (identity, the extractor's own ``name or content``
+    rule) and the same ``_item_content`` (the surface ``execute_embed``
+    resolves an endpoint on).
+
+    Safe in the fail-open direction: this can only ever UN-record a text, and a
+    text present in ``after`` is shielded from the operator prune anyway (a
+    surviving item resolves its own content), so nothing that would have been
+    pruned disappears from the pool's reach. :func:`_survives` is left alone
+    because :func:`applied_discards` reads it to answer a different question
+    ("was this DISCARD actually applied?").
+    """
+    text = _item_text(section, item)
+    content = _item_content(section, item)
+    for other in _section_items(after, section):
+        if not isinstance(other, Mapping):
+            continue
+        if _item_text(section, other) == text \
+                and _item_content(section, other) == content:
+            return True
+    return False
+
+
 def removal_pool(before: object, after: object) -> dict:
     """The carry-forward record of one pass's removals.
 
@@ -1479,9 +1518,25 @@ def removal_pool(before: object, after: object) -> dict:
     Derived by diff, not by re-reading the verdicts, so a *downgraded* discard
     (the Layer-1 guard) correctly contributes nothing to the pool.
 
+    ⛔ **A REFERENCE RE-SPELLING IS NOT A REMOVAL.** Value equality alone is not
+    enough to call an item gone: the #10999 reconcile rewrites a surviving
+    item's ``about_entities``/slot spelling IN PLACE, so that survivor has no
+    value-equal counterpart in ``after`` and would be recorded as removed while
+    it is still present — a false member in a record whose contract is exactly
+    "a removal is an absent ITEM". That was reachable on ``main``'s working path
+    and became the common case once the reconcile ran on the nothing-to-do path
+    most batches take (review at ``c79fa84a3e``, P3), where it also kept the
+    pool non-empty and lost the caller's early exit. An item whose IDENTITY and
+    CONTENT (``_item_text`` + ``_item_content``) still have a counterpart is a
+    survivor, whatever happened to its reference spellings; the shield in
+    :func:`apply_vet` would have ignored the text anyway, because a surviving
+    item resolves its own content.
+
     **A removal is an absent ITEM, not a text missing from a surface.** Every
-    collected text is the identity *and* content of an item with no value-equal
-    counterpart in ``after``, because the #2552 mint materialises whichever form
+    collected text is the identity *and* content of an item with no counterpart
+    in ``after`` — no value-equal one, and none matching its identity and content
+    either (a survivor whose reference spellings were rewritten still counts as
+    present, see above) — because the #2552 mint materialises whichever form
     an operator wrote. Each text is keyed with :func:`_resolution_variants` (the
     mint's RESOLUTION keys); the ENTITY-closure arm belongs to
     :func:`_norm_variants` and must not leak onto this CONTENT surface. Deriving
@@ -1514,8 +1569,13 @@ def removal_pool(before: object, after: object) -> dict:
         for item in _section_items(before, section):
             if not isinstance(item, Mapping):
                 continue
-            if not _survives(section, item, after):
-                removed_texts |= _item_text_variants(section, item)
+            if _survives(section, item, after):
+                continue
+            if _identity_survives(section, item, after):
+                # Same item, only its reference SPELLINGS were rewritten — the
+                # text is present in `after`, so it is not a removal.
+                continue
+            removed_texts |= _item_text_variants(section, item)
     return {
         "removed_texts": removed_texts,
         "removed_entities": {n: it for n, it in before_entities.items()
@@ -1569,9 +1629,10 @@ def _rewrite_entity_references(embed_list: Mapping[str, Any],
                                restored: Mapping[str, str]) -> None:
     """Re-spell a reference to the emitted entity's exact name.
 
-    ``validate_layer1`` compares ``about_entities`` and slot names by EXACT
-    string, so an entity named ``pytest`` does not satisfy a point naming
-    ``PyTest`` — the session still 422s. Rewriting is a KEEP action
+    ``validate_layer1`` compares ``about_entities`` by EXACT string (a slot ref
+    on the exact ``(name, kind)`` pair), so an entity named ``pytest`` does not
+    satisfy a point naming ``PyTest`` — the session still 422s. Rewriting is a
+    KEEP action
     (fail-open): the reference means the same entity; only its spelling is
     canonicalised. Immutable mappings are skipped rather than raising.
     """
@@ -1634,7 +1695,8 @@ def apply_vet(embed_list: Mapping[str, Any],
        the two passes and can reference an entity the S2 pass removed; that
        cross-pass reference is invisible to a per-pass guard and produces a
        Layer-1 422. ``validate_layer1`` compares ``about_entities``
-       and slot names by EXACT string, so an entity named ``pytest`` with a
+       by EXACT string (a slot ref on the exact ``(name, kind)`` pair), so an
+       entity named ``pytest`` with a
        point naming ``PyTest`` 422s — whether the entity was *restored* (S4's
        reference arrived after the removal) or *downgraded to KEEP* by Rule 2
        (the same-pass case). Both go through the same reconciliation. Fail-open:
@@ -1794,17 +1856,6 @@ def apply_vet(embed_list: Mapping[str, Any],
     # it were discarded.
     present_map = _entity_map(out)
     present = set(present_map)
-    # #10999 residual: the spelling reconcile for a reference whose ``_norm``
-    # ALREADY matches a held name — the class ``to_restore`` subtracts away
-    # below. Merged into ``canonical`` with ``setdefault`` so every OTHER leg's
-    # answer wins: the DISCARD downgrade above and the Rule-4 restore below both
-    # write an exact spelling a reference names, and their keys are disjoint
-    # from these anyway (they are in ``to_restore``, i.e. NOT in ``present``).
-    held_canonical, held_warnings = _reconcile_held_layer1_spellings(
-        out, settled=canonical)
-    warnings.extend(held_warnings)
-    for _held_key, _held_spelling in held_canonical.items():
-        canonical.setdefault(_held_key, _held_spelling)
     # #10999: relation endpoints DO count for the restore — a relation naming an
     # entity an earlier pass removed is exactly the cross-pass case Rule 4
     # exists for (S4 supplies the conclusion between the two passes). The
@@ -1922,6 +1973,35 @@ def apply_vet(embed_list: Mapping[str, Any],
         # else: a relation endpoint naming an entity no pass emitted restores
         # nothing and warns nothing — it cannot 422 (result-level channel), and
         # S5 names the dropped relation itself.
+
+    # #10999 residual: the spelling reconcile for a reference whose ``_norm``
+    # ALREADY matches a held name — the class ``to_restore`` subtracts away.
+    # ⛔ COMPUTED **AFTER** THE RESTORE LOOP, not before it. The casefold stage
+    # writes its answer on the REFERENCE's ``_norm`` key, which for that class is
+    # exactly a ``to_restore`` key (``_norm('STRASSE')`` is ``'strasse'`` while
+    # the held entity's key is ``'straße'``) — so running it first let the restore
+    # leg overwrite the same key afterwards, and the run kept a "re-spelled
+    # 'Straße'" warning for a rewrite the single ``_rewrite_entity_references``
+    # below never performed: it applied the RESTORED spelling instead. Reading
+    # the held set only after the restores have landed makes the record and the
+    # rewrite the same fact — the restored spelling is then simply held, so the
+    # arm has nothing to claim (review at ``c79fa84a3e``, P2).
+    #
+    # Merged with ``setdefault`` so every OTHER leg's answer wins, and the two
+    # legs do NOT have disjoint keys — that was the claim here once, and it is
+    # false for the arm it names first: Rule 2's DISCARD-downgrade writes
+    # ``canonical[_norm(kept name)]`` for an entity this pass KEEPS, so its key
+    # IS in ``present`` (measured at ``c79fa84a3e``: ``settled`` was
+    # ``{'billing': 'billing'}`` while ``_entity_map(out)`` held ``['billing']``).
+    # ``setdefault`` is load-bearing for exactly that arm; only the restore leg's
+    # keys live in ``to_restore`` (∉ ``present``). ``settled`` is what lets the
+    # ambiguity branch report the rewrite that key will really get, so dropping
+    # either the ``setdefault`` or ``settled`` makes the record lie again.
+    held_canonical, held_warnings = _reconcile_held_layer1_spellings(
+        out, settled=canonical)
+    warnings.extend(held_warnings)
+    for _held_key, _held_spelling in held_canonical.items():
+        canonical.setdefault(_held_key, _held_spelling)
     if canonical:
         _rewrite_entity_references(out, canonical)
 

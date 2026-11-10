@@ -2180,3 +2180,90 @@ def test_the_casefold_only_class_is_reconciled_without_a_discard(held, ref):
     out, warns = vg.apply_vet(emission, {})
     assert out["points"][0]["about_entities"] == [held], warns
     assert any("re-spelled" in w and held in w for w in warns), warns
+
+
+def test_a_restore_wins_the_record_and_not_just_the_rewrite():
+    """Finding 1 (P2) of the review at `c79fa84a3e`: the casefold arm wrote its
+    "re-spelled" warning on the REFERENCE's `_norm` key — which for that class is
+    exactly a `to_restore` key (`_norm('STRASSE')` is `'strasse'` while the held
+    entity's key is `'straße'`) — so Rule 4's restore leg overwrote the same
+    canonical entry afterwards and the single `_rewrite_entity_references`
+    applied the RESTORED spelling. The run then kept a record asserting a
+    rewrite that never happened. `main` produces the same refs and entities
+    with ONLY the restore warning; the false record was this PR's.
+
+    The reconcile now runs after the restores have landed, so the spelling it
+    would have claimed is simply HELD and there is nothing to claim.
+    """
+    emission = {
+        "entities": [{"name": "Straße", "kind": "core:event"},
+                     {"name": "Z", "kind": "core:rule"}],
+        "points": [{"content": "p", "about_entities": ["STRASSE"]}],
+        "events": [], "operators": [], "relations": [],
+    }
+    prior = {"removed_texts": set(),
+             "removed_entities": {"strasse": {"name": "STRASSE",
+                                              "kind": "core:event"}}}
+    out, warns = vg.apply_vet(emission, _discard_entity(emission, 1),
+                              prior=prior)
+    # the restore supplies the EXACT spelling the reference already carries
+    assert out["points"][0]["about_entities"] == ["STRASSE"], warns
+    assert [e["name"] for e in out["entities"]] == ["Straße", "STRASSE"], out
+    assert any("restored" in w for w in warns), warns
+    # … so no leg may claim it re-spelled anything
+    assert not [w for w in warns if "re-spelled" in w], warns
+
+
+def test_the_no_op_reconcile_does_not_mutate_a_shared_slot_ref():
+    """Finding 2 (P2) of the review at `c79fa84a3e`: `_copy_for_rewrite`'s
+    deepest level — the slot refs — was unpinned. Deleting the per-slot ref copy
+    (so the copied item's slot list still holds the CALLER's ref dicts) left the
+    whole suite green (`169 passed`) while `_rewrite_entity_references`
+    re-spelled the caller's own emission in place — breaking the early-return
+    path's documented "the same object is never mutated".
+
+    The slot list is SHARED between two points on purpose: aliasing is exactly
+    what a per-item copy alone does not fix, and it is the shape the earlier
+    fixtures (`about_entities` only) could not see.
+    """
+    shared = [{"name": "RETRY STORM", "kind": "core:event"}]
+    emission = {
+        "entities": [{"name": "Retry Storm", "kind": "core:event"}],
+        "points": [{"content": "p", "slots": {"subject": shared}},
+                   {"content": "q", "slots": {"subject": shared}}],
+        "events": [], "operators": [], "relations": [],
+    }
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["slots"]["subject"][0]["name"] == "Retry Storm", warns
+    assert out["points"][1]["slots"]["subject"][0]["name"] == "Retry Storm", warns
+    # the caller's ref dict, reachable through BOTH points, is untouched
+    assert shared[0]["name"] == "RETRY STORM", (
+        "the caller's shared slot ref was mutated in place")
+    assert emission["points"][1]["slots"]["subject"][0]["name"] == "RETRY STORM"
+
+
+def test_a_re_spelled_reference_is_not_recorded_as_a_removal():
+    """Finding 5 (P3) of the review at `c79fa84a3e`: `removal_pool` derived
+    removals by VALUE equality, so an item whose only change is a re-spelled
+    reference had no value-equal counterpart in `after` and was recorded as
+    removed — a false member in a record whose contract is "a removal is an
+    absent ITEM" — while the item is still there and resolves its own content.
+
+    Reachable on `main`'s working path; wiring the reconcile onto the
+    nothing-to-do early return made it the common case (most batches discard
+    nothing), where it also kept the pool non-empty and lost the early exit.
+
+    A GENUINE removal in the same call is still recorded — the fix must not
+    swing to "nothing is ever a removal".
+    """
+    emission = _held_and_ref("Retry Storm", "RETRY STORM")
+    out, warns = vg.apply_vet(emission, {})
+    assert out["points"][0]["about_entities"] == ["Retry Storm"], warns
+    assert vg.removal_pool(emission, out)["removed_texts"] == set()
+
+    with_drop = copy.deepcopy(emission)
+    with_drop["points"].append({"content": "dropped"})
+    dropped, _w = vg.apply_vet(
+        with_drop, {vg._item_id("points", 1, with_drop["points"][1]):
+                    {"outcome": "DISCARD"}})
+    assert vg.removal_pool(with_drop, dropped)["removed_texts"] == {"dropped"}
