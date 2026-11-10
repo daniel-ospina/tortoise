@@ -2111,8 +2111,9 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
     # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
     # says the switch is "read PER EMITTED POINT at `extractor_v2.py:10508`", and until this
-    # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/`
-    # returned the field itself and no pin (measured). That is the exact asymmetry #10274
+    # arm nothing bound that number to anything — `grep 9944` over `tests/ tools/ docs/` at
+    # the head it was measured at (`8212c41eff`, where the field still carried `9944`)
+    # returned the field itself and no pin. That is the exact asymmetry #10274
     # exists to remove, and it was recorded as a residual by a fresh-context review at
     # `33109a66184a`: the number was right at that head, and the next merge could rot it
     # silently. `tortoise/extractor_v2.py` is the most-edited file any row here cites, so it
