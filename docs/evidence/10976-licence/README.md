@@ -96,8 +96,11 @@ gated individually by the executor's per-node record probe.
   the whole graph. A count statement whose predicate is too wide, or whose query shape
   multiplies rows modestly, passes BOTH guards — no total-based comparison can tell that
   apart from a population that grew since the report — so that class is covered **solely**
-  by the mirror pin above. The backstop catches the worst case: a claim above every node
-  the graph holds.
+  by the mirror pin above. The backstop's reach is stated narrowly, as
+  `cache_eviction.py`'s own comment does: it fires on a claim above every node the graph
+  holds, and on a quiescent graph the population bound already excludes that — so its
+  only reachable trigger is REMOVAL skew between the population read and the total read.
+  It is a one-integer backstop, **not** a second detector for a misplaced predicate.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
 
 ## Tests
@@ -119,16 +122,23 @@ tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
 | `test_the_shared_statement_check_can_actually_fire` | **proves the pin above is not vacuous** — the live assertion runs over ONE population and can never fail, so this drives the same helper with a REFLOWED copy (must report the collision) and a genuinely distinct predicate (must not), which is the only demonstration the guard would fire the day a second population is registered |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
-| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible (a mirror-vs-total check cannot tell inflation from a live cache gaining nodes, and a report-total check would refuse legitimate growth), so that class rests on the mirror pin alone |
+| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible (a mirror-vs-total check cannot tell inflation from a cache that LOST nodes between the two reads, and a report-total check would refuse legitimate growth), so that class rests on the mirror pin alone |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.
 
 ## ⛔ What this does NOT measure
 
-- **It does not make the cache bounded in production.** While the record cannot serve
-  (`#10593`, `#7879` open) the licence is empty and the executor issues no mutating
-  statement. ⚠️ **Which gate refuses matters:** it is the executor's gate 2 (no population
+- **It does not make the cache bounded in production.** The licence is issued only where
+  a parity instrument both RAN and was CLEAN over the entire population
+  (`ParityReport.proves()`) **and** the report survived this bound — and nothing schedules
+  that instrument: the census and the sweep are operator-invoked (the periodic sweep is
+  `#11167`'s remaining step). ⚠️ **Record readiness is not what withholds it, and this
+  README said otherwise for four days:** `#10593` closed **COMPLETED** on 2026-11-06 on a
+  non-vacuous measurement (`applied=665 failures={} …`, 30+ min in one process), so the
+  record can serve; only `#7879` (the epic) is still open. What withholds the licence is
+  the absence of a CLEAN census report for the graph being swept.
+  ⚠️ **Which gate refuses matters:** it is the executor's gate 2 (no population
   is proven record-served), *not* the census's verdict word — the census's verdict is its
   BYTE state, so a production cache under its byte ceiling answers `CLEAN` with
   `plan["evictable"] == []` (`tortoise/cache_evictor.py`'s header states why reading this
