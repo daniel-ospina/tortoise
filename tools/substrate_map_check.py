@@ -133,6 +133,11 @@ INTERFACE_SYMBOLS: tuple[tuple[str, str], ...] = (
     ("def build_master_list", "tortoise/extractor_v2.py"),
     ("def compile_vocab", "tortoise/commit_schema.py"),
     ("def compile_value_brief", "tortoise/value_extractor.py"),
+    # §5's aggregator row names this as the replay entrypoint beside
+    # `_ensure_indexes`, and a lane plans a rebase on that cell — but it was
+    # absent from this tuple, so renaming it left `--check` CLEAN and the row's
+    # claim false with every guard green. Measured before adding it here.
+    ("def _ensure_indexes", "tortoise/projection/__init__.py"),
 )
 
 _FRONTMATTER_SHA = re.compile(r"^measured_at_commit:\s*([0-9a-f]{7,40})\s*$", re.M)
