@@ -5927,6 +5927,22 @@ class TestSiteIconAndSocialPreviewContract:
                 return part[2:]
         return None
 
+    @staticmethod
+    def _head_element_count(rendered: str) -> int:
+        """How many `<head>` ELEMENTS a source renders — `<header>` is not one.
+
+        ⛔ SPLIT OUT SO THE COUNT IS DRIVEN BY AN ASSERTION, not only by the surface test.
+        The first cut was `rendered.count("<head")`, which counts a `<header>` element as a
+        second `<head>`: `<header>` starts with the substring `<head`, and every one of the
+        three self-rendered sources could legitimately gain one. It refused an honest page
+        with a diagnosis ("a SECOND document … grade each one") describing a document that
+        does not exist — a false red, and the class this file's `_icon_trio_violations`
+        docstring says must not ship. `\\b` is the discipline the tag scanners already use
+        (`:582-583`, `:761`, `HEADING_TAG_RE`): it ends the match at a word boundary, so
+        `<head>`, `<head `, `<head\n` and `<head/>` count and `<header>`/`<heading>` do not.
+        """
+        return len(re.findall(r"<head\b", rendered))
+
     def test_every_surface_declares_the_same_versioned_icon_set(self):
         """ONE mark on every origin — and a URL that changes when the bytes do.
 
@@ -6055,8 +6071,10 @@ class TestSiteIconAndSocialPreviewContract:
             # `re.findall(r"<head\b")`, not `count("<head")`: a `<header>` element would
             # have counted as a second `<head>` and refused an honest page with a diagnosis
             # ("grade each one, or list the new document") that describes a document that
-            # does not exist. `\b` is the same discipline the icon matchers already use.
-            heads = len(re.findall(r"<head\b", rendered))
+            # does not exist. `\b` is the discipline the tag scanners already use
+            # (see `_head_element_count`, which is what `test_a_header_element_is_not_a_
+            # second_head_document` drives in both directions).
+            heads = self._head_element_count(rendered)
             assert heads == 1, (
                 f"{source_label} renders {heads} <head> element(s), but this guard grades ONE "
                 "document per source (it slices the first `<head>…</head>`). A SECOND "
@@ -6443,3 +6461,56 @@ class TestSiteIconAndSocialPreviewContract:
             "every one of the three foreign hrefs must be reported, not just the first — "
             "an icon served from another host is not ours and one defect must not hide "
             f"the rest. Got: {caught}")
+
+    def test_a_header_element_is_not_a_second_head_document(self):
+        """NON-VACUITY for `_head_element_count`: `<header>` is not a second `<head>`.
+
+        The count exists to fail closed when one file renders TWO documents — the guard
+        slices the first `<head>…</head>`, so a second document would ship with no icon
+        while every assertion stayed green. The first cut was `rendered.count("<head")`,
+        and `<header>` begins with that substring: an honest page that gained a `<header>`
+        (a nav bar — nothing to do with `<head>`) was refused with "a SECOND document …
+        grade each one", a diagnosis that describes a document nobody wrote. That is a
+        FALSE RED, i.e. a guard the next person weakens instead of fixes.
+
+        Both directions, on the three REAL self-rendered sources (none of which carries a
+        `<header>` today, so the fixture is the only thing that exercises it):
+        """
+        sources = {
+            "website/functions/blog/_lib.ts":
+                self.WEB / "functions" / "blog" / "_lib.ts",
+            "website/apps/dashboard/functions/auth/confirm.ts":
+                self.DASHBOARD_ROOT.parent / "functions" / "auth" / "confirm.ts",
+            "website/apps/dashboard/functions/admin/[[path]].ts":
+                self.DASHBOARD_ROOT.parent / "functions" / "admin" / "[[path]].ts",
+        }
+        for label, source in sources.items():
+            text = source.read_text()
+            assert source.is_file(), f"fixture drift: {label} is gone"
+            assert self._head_element_count(text) == 1, (
+                f"{label} renders {self._head_element_count(text)} <head> element(s); this "
+                "test assumes exactly one, or the directions below grade nothing")
+            assert "<header" not in text, (
+                f"fixture drift: {label} already has a <header>, so the mutation below is "
+                "not the only one and cannot be attributed")
+
+            # Direction 1 — the FALSE RED. A `<header>` element must not be counted.
+            with_header = text.replace("</head>", "</head>\n<header>site</header>", 1)
+            assert with_header != text, f"fixture drift: {label} no longer closes </head>"
+            assert self._head_element_count(with_header) == 1, (
+                f"{label} gained a <header> (a nav bar — not a head) and the count says it "
+                "renders a second DOCUMENT, refusing an honest page: "
+                f"count={self._head_element_count(with_header)}, "
+                "substring hits=" + repr(with_header.count("<head")))
+
+            # Direction 2 — a genuine SECOND document is still counted, so the loosening is
+            # by tag boundary and not "stop counting": this is the red the guard exists for.
+            assert self._head_element_count(text + "<head>") == 2, (
+                f"{label} plus a real second <head> must count 2 — otherwise the guard "
+                "covers the first document and reports green for both")
+
+            # Direction 3 — every opening spelling of the ONE element still counts exactly
+            # one: `<head>`, `<head `, `<head\n`, `<head/>` are the same element.
+            for spelling in ("<head>", "<head >", "<head\n>", "<head/>"):
+                assert self._head_element_count(spelling) == 1, (
+                    f"{spelling!r} must count as one <head> element")
