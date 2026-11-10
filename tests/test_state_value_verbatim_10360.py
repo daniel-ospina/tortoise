@@ -6315,13 +6315,25 @@ def _retention_class(content: str, quote: str) -> str | None:
             == tuple((a, s) for a, _, s in quote_slots)):
         return "ALIGNED"
     stated = {(str(core), scale) for _a, core, scale in content_slots}
-    if any((str(core), scale) not in stated for _a, core, scale in quote_slots):
+    missing = [(anchor, core, scale) for anchor, core, scale in quote_slots
+               if (str(core), scale) not in stated]
+    if missing:
         # ⛔ A MAGNITUDE is not comparable here: `12 million` against
         # `12 billion` binds the same core (residual (m)), and `12000000`
         # against `12 million` binds two, with no magnitude table to fold them
         # (#2817 rules one out). Calling either LOST would accuse a truthful
         # point; calling it RETAINED would certify a six-orders drop. Unjudged.
-        if any(scale for _a, _c, scale in content_slots + quote_slots):
+        #
+        # ⛔ AND THE SCALE TEST IS SCOPED TO THE MISSING SLOT'S OWN ANCHOR, never
+        # the whole row: a scale word anywhere used to launder an ordinary drop
+        # into "unjudged" — `we shipped 3 million events` against `… and 4
+        # batches` loses `4 batches` outright, and the unrelated `million` must
+        # not turn that into a magnitude question. A row is a magnitude question
+        # only where the MISSING slot shares its anchor with a slot carrying a
+        # scale on either side (#11730 review finding 1).
+        if any(content_anchor == quote_anchor and (content_scale or quote_scale)
+               for quote_anchor, _core, quote_scale in missing
+               for content_anchor, _cc, content_scale in content_slots):
             return "LAYOUT_UNJUDGED"
         return "LAYOUT_LOST"
     return "LAYOUT_RETAINED"
@@ -6498,8 +6510,10 @@ def test_the_ONE_dropped_state_value_on_the_census_is_NAMED():
         and c.startswith("The lease grace period is sized to thirty seconds"))
     assert _retention_class(*sibling) == "LAYOUT_RETAINED", sibling[0][:80]
     assert "second" not in content.lower(), content
-    assert _ISO_DATE_FORM.search(content) is None, content
-    assert _CLOCK_FORM.search(content) is None, content
+    # ⛔ NOT `_ISO_DATE_FORM.search(content) is None` / `_CLOCK_FORM…` beside the
+    # class assert: `CONTENT_NO_VALUE` is returned only from the branch that
+    # already tested both, so those two could never fail (#11730 review finding
+    # 2, same class as the `CONTENT_EXCLUDED_FORM` block below).
 
 
 def test_the_classifier_DISCRIMINATES_in_both_directions():
@@ -6538,6 +6552,15 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we have 12 million events") == "LAYOUT_UNJUDGED"
     assert _retention_class("we have 12000000 events",
                             "we have 12 million events") == "LAYOUT_UNJUDGED"
+    # 2c. ⛔ AND THE MAGNITUDE TEST IS SCOPED TO THE MISSING SLOT'S OWN ANCHOR.
+    #    A scale word ANYWHERE in the row must not launder an ordinary drop into
+    #    "unjudged": here `4 batches` is lost outright while an UNRELATED slot
+    #    says `million`, which is a `content_missing` loss, not residual (m).
+    #    Without this pin the boundary is unpinned in exactly the direction that
+    #    hides a drop behind a magnitude question (#11730 review finding 1).
+    assert _retention_class("we shipped 3 million events",
+                            "we shipped 3 million events and 4 batches") == (
+        "LAYOUT_LOST"), "a scale word on ANOTHER anchor must not excuse a loss"
     assert v2._value_slot_divergence("we have 12 thousand events",
                                      "we have 12 million events") == ()
     # 3. An excluded FORM is its own class — residual (c) is not a loss.
