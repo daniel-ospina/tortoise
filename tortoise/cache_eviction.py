@@ -920,15 +920,27 @@ def assess(
     # report claim 40x its own population (measured, #10976 comment 6689906625 /
     # `docs/evidence/10976-licence/`).
     #
-    # ⛔ WHAT THIS CANNOT CATCH — stated because the obvious claim is FALSE: a count
-    # statement whose PREDICATE is too wide (dropping the `:Point` half) still returns a
-    # SUBGRAPH count, and a subgraph can never exceed `MATCH (n) RETURN count(n)`, so
-    # this comparison can never fire for that mistake. That mistake is caught by
-    # `test_the_population_count_mirrors_the_instrument` (identity with the instrument's
-    # own constant, plus the `:Point` assertion). What this DOES catch is a statement
-    # whose query SHAPE multiplies rows (a join, a second `MATCH`, an `UNWIND`) — a count
-    # that can exceed the node total it claims to count, which is a licence to evict more
-    # than exists. Cheap, independent of any predicate, so it stays.
+    # ⛔ WHAT THIS CATCHES, EXACTLY — and it is narrower than it looks. The comparison is
+    # ``entry.nodes`` (the REPORT's claim) against the graph's whole node count, so it
+    # fires only when a claim exceeds EVERY node the graph holds. Two things follow, and
+    # the second is why the sentence that used to be here was wrong:
+    #
+    # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) can
+    #   never trip it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
+    # - Nor can a statement whose query SHAPE multiplies rows (a join, a second `MATCH`,
+    #   an `UNWIND`) — unless that inflation is large enough to exceed the whole graph.
+    #   A modest multiplication (population 500 counted as 2,000 on a 25,000-node graph)
+    #   passes BOTH guards: the claim is validated against the inflated ceiling, and the
+    #   claim is under the total. No total-based comparison can separate that from "the
+    #   population grew since the report" — refusing on ``resident_population >
+    #   report.total_nodes`` would block legitimate growth — so it is covered SOLELY by
+    #   `test_the_population_count_mirrors_the_instrument` (identity with the
+    #   instrument's executed constant, plus the `:Point` assertion). Keep that pin; this
+    #   check does not replace it.
+    #
+    # What this DOES catch is the worst case: a claim above every node the graph holds,
+    # whatever produced it. One integer compare, independent of any predicate, so it
+    # stays.
     resident_total = total_nodes
     checked: list[ClassReading] = []
     for entry in classes:

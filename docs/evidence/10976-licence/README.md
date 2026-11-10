@@ -75,20 +75,27 @@ bound, not equality — a claim **below** the population still licenses a *small
 (the safe direction), and turns that arrived since the report are growth, each still
 gated individually by the executor's per-node record probe.
 
-- **The predicate has one owner of the RECORD, and four textual carriers.**
+- **The predicate has one owner of the RECORD, and four other textual carriers.**
   `tools/turn_parity_census.py::_GRAPH_EPISODIC_COUNT_CYPHER` owns the turn population's
-  shape (`#3551`); `tools/purge_legacy_turns.py` (the delete), `tools/backfill_graph_turns.py`
-  and `tortoise/projection/__init__.py::_episodic_point_ids` carry the same predicate for
-  their own purposes. The census's statement is a mirror of the instrument's — the one
-  whose report sizes the licence — and
+  shape (`#3551`). The others are `tools/purge_legacy_turns.py` (the delete),
+  `tools/backfill_graph_turns.py`, `tools/backfill_copy_turns.py` and
+  `tortoise/projection/__init__.py::_episodic_point_ids`. ⚠️ **Only the instrument is
+  pinned, deliberately** — it is the one whose report sizes a licence; pinning the rest
+  would red this bound when a statement nothing licenses reflows. The census's statement
+  is a mirror of the instrument's, and
   `tests/test_cache_eviction_census.py::test_the_population_count_mirrors_the_instrument`
   compares the two EXECUTED constants (not source text), so a rename, a removal or a
   changed predicate reds.
 - **Mirror it exactly.** `is_episodic` is stamped on `:Source`/`:Object` nodes too
   (`graph-scripts/backfill_is_episodic.py`), so dropping the `:Point` half would *inflate*
   the ceiling and re-open this hole from the other side.
-- **The whole-graph check stays**, as the second, looser guard: a bad mirror can
-  over-count, so a claim above the graph's entire node count is still refused.
+- **The whole-graph check stays**, with its reach stated honestly: it compares the
+  REPORT's claim against every node the graph holds, so it fires only when a claim exceeds
+  the whole graph. A count statement whose predicate is too wide, or whose query shape
+  multiplies rows modestly, passes BOTH guards — no total-based comparison can tell that
+  apart from a population that grew since the report — so that class is covered **solely**
+  by the mirror pin above. The backstop catches the worst case: a claim above every node
+  the graph holds.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
 
 ## Tests

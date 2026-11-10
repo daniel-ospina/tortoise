@@ -2050,9 +2050,11 @@ def test_the_population_count_mirrors_the_instrument():
     mirror; this is the drift pin, and it compares the EXECUTED constant rather than the
     instrument's source text. A mirror that silently narrowed or widened the predicate
     would change the ceiling every licence is measured against, with no error anywhere.
-    ⚠️ `tools/purge_legacy_turns.py` and `tools/backfill_graph_turns.py` are further
-    textual carriers of this predicate; this pin binds the one whose report the licence
-    is actually sized from.
+    ⚠️ FOUR other textual carriers of this predicate exist — `tools/purge_legacy_turns.py`,
+    `tools/backfill_graph_turns.py`, `tools/backfill_copy_turns.py` and
+    `tortoise/projection/__init__.py::_episodic_point_ids`. ONLY the instrument is pinned,
+    deliberately: it is the one whose report sizes a licence, and pinning the others would
+    red this bound whenever one of them reflows a statement nothing licenses.
     """
     # ⛔ IDENTITY, not source-text containment. A containment check is satisfied by ANY
     # occurrence of the string — and the instrument carries `is_episodic = true` in a
@@ -2105,7 +2107,12 @@ def test_no_two_populations_share_a_resident_count_statement():
     one place this defect would be introduced, so pin it here rather than in a reviewer's
     head: each population must be counted by its OWN statement.
     """
-    statements = list(POPULATION_RESIDENT_COUNT.values())
+    # ⛔ SQUASHED, not verbatim. A Cypher statement's identity is semantic, and the
+    # realistic copy-paste failure is the same one-liner REFLOWED across source lines —
+    # byte comparison would call that unique while FalkorDB sees one statement, bounding
+    # the new population by `turn`'s count (fail-open, and invisible to the whole-graph
+    # backstop). The mirror pin above squashes for the same reason.
+    statements = [" ".join(value.split()) for value in POPULATION_RESIDENT_COUNT.values()]
     assert len(set(statements)) == len(statements), (
         f"two populations share one count statement: {POPULATION_RESIDENT_COUNT} — "
         f"each population must be counted by the statement for ITS OWN predicate"
