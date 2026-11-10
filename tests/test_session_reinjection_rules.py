@@ -1249,15 +1249,32 @@ def test_padded_session_id_is_not_charged_then_dropped_11382():
         # both turns spliced: charged AND delivered, whichever spelling
         assert [h["id"] for h in merged] == ["p1", "t1", "t2"], spell
 
-    # ⛔ NOT over-widened: a group whose session is NOT in the seed order is
-    # still not spliced into an unrelated block (the padded key must not
-    # start matching everything).
-    unrelated = reinjection_merge_order(
-        [{"id": "p1", "session_id": "  s1  ",
-          "point_kind": TURN_POINT_KIND}],
-        {"s2": [{"id": "x1", "session_id": "s2"}]},
+    # ⛔ NOT over-widened, and this arm DISCRIMINATES against the tempting
+    # "just normalise harder" (#11382 review): dropping EVERY space would fuse
+    # `'  s 1  '` (pool hit) with `'s1'` (group key), so the group would be
+    # ANCHORED after that base hit. Under `strip` they are two identities and
+    # the unanchored group falls to the defensive TAIL — which is the only
+    # place the difference is visible, hence TWO base hits (with one, an
+    # anchored splice and a tail append produce the same list).
+    spaced = {"id": "p1", "session_id": "  s 1  ",
+              "point_kind": TURN_POINT_KIND}
+    assert session_key_of(spaced) == "s 1"
+    tail = reinjection_merge_order(
+        [spaced, {"id": "p2", "session_id": "s2",
+                  "point_kind": TURN_POINT_KIND}],
+        {"s1": [{"id": "x1", "session_id": "s1"}]},
         seed_order=["s1"], max_chunks_per_session=10)
-    assert [h["id"] for h in unrelated] == ["p1"]
+    assert [h["id"] for h in tail] == ["p1", "p2", "x1"]
+    # ... and a group whose session is not in ``seed_order`` at all is not
+    # spliced into someone else's block (groups are built over ``order``, so
+    # an inconsistent caller/group pair contributes nothing — pre-existing
+    # behaviour, pinned so the normalisation cannot widen it)
+    other = reinjection_merge_order(
+        [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+         {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND}],
+        {"s2": [{"id": "x2", "session_id": "s2"}]},
+        seed_order=["s1"], max_chunks_per_session=10)
+    assert [h["id"] for h in other] == ["p1", "p2"]
 
 
 def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
@@ -1307,6 +1324,76 @@ def test_a_raw_custom_session_key_cannot_split_the_seed_from_the_merge_11382():
     # the tail shape the raw merge used to produce is NOT what happened: the
     # group starts at s1's own last base rank, not after every other session
     assert [h["id"] for h in merged] != ["p1", "p2", "p3", "t1", "t2"]
+
+
+def test_a_self_consistent_raw_caller_still_anchors_its_groups_11382():
+    """#11382, the RAW-CONSISTENT arm: a caller whose ``session_key``, its
+    ``seed_order`` AND its ``added_by_session`` keys are ALL raw and mutually
+    consistent keeps working.
+
+    Normalising only the POOL side of the merge is not a partial fix — it is a
+    REGRESSION for that caller, and nothing errors. MEASURED by reviewing the
+    one-sided version of this change:
+
+        pool ['p1'('  s1  '), 'p2'('s2'), 'p3'('s2')]
+        added {'  s1  ': ['t1'], 's2': ['t9']}   seed_order ['  s1  ', 's2']
+        one-sided -> ['p1','p2','p3','t1','t9']   (BOTH groups in the tail)
+        both-sided -> ['p1','t1','p2','p3','t9']  (each after its own session)
+
+    Reader-visible: the reader consumes a PREFIX of the pool, so a
+    tail-appended group is context it can lose.
+    """
+    def raw_key(hit: dict) -> str:
+        return hit.get("session_id") or ""
+
+    pool = [{"id": "p1", "session_id": "  s1  ", "point_kind": TURN_POINT_KIND},
+            {"id": "p2", "session_id": "s2", "point_kind": TURN_POINT_KIND},
+            {"id": "p3", "session_id": "s2", "point_kind": TURN_POINT_KIND}]
+    added = {"  s1  ": [{"id": "t1", "session_id": "  s1  "}],
+             "s2": [{"id": "t9", "session_id": "s2"}]}
+    merged = reinjection_merge_order(
+        pool, dict(added), seed_order=["  s1  ", "s2"], session_key=raw_key,
+        max_chunks_per_session=10)
+    assert [h["id"] for h in merged] == ["p1", "t1", "p2", "p3", "t9"]
+
+
+def test_the_merge_passes_phantom_keys_through_untouched_11382():
+    """#11382: the merge's normalisation must NOT reach the phantom ``idx:``
+    namespace — that payload is an IDENTITY, not a session id.
+
+    ``session_key_of`` interpolates the raw ``id`` into ``idx:point:{id}`` and
+    the raw index into ``idx:{index}``, deliberately: a Point id carrying
+    boundary whitespace is a DIFFERENT Point, so stripping it fuses two
+    distinct hits into one bucket and lets the C5 cap drop a base hit.
+    MEASURED with a blind strip applied to the produced key:
+
+        dedup_pool(max_chunks_per_session=1) via the authority -> ['p1','p1 ']
+        with the merge's key wrapped blindly                  -> ['p1']
+
+    So this pins that the merge's key IS the authority on the default path —
+    including the phantom legs — which is what ``_merge_key`` exists for.
+    """
+    # two DISTINCT points, no session identity — RAW CHUNKS, because the C5
+    # cap is the only thing that can DROP on a fused bucket (`is_raw_chunk`),
+    # and a non-chunk fixture would pass this arm for the wrong reason
+    # (measured: it did, before this line set the kind).
+    a, b = _chunk("p1", ""), _chunk("p1 ", "")
+    assert session_key_of(a) == "idx:point:p1"
+    assert session_key_of(b) == "idx:point:p1 "
+    assert dedup_pool([dict(a), dict(b)], max_chunks_per_session=1) == [a, b]
+    # the merge keyed by the authority keeps them apart too. The pool needs a
+    # REAL seeded session as well, otherwise the merge short-circuits before
+    # the C5 re-cap (`if not groups: return list(pool)`) and the key is never
+    # used at all.
+    pool = [dict(a), dict(b), {"id": "x1", "session_id": "s1",
+                               "point_kind": TURN_POINT_KIND}]
+    merged = reinjection_merge_order(
+        pool, {"s1": [{"id": "t1", "session_id": "s1"}]}, seed_order=["s1"],
+        max_chunks_per_session=1)
+    ids = [h["id"] for h in merged]
+    assert "p1" in ids and "p1 " in ids, ids   # nothing fused, nothing capped
+    # ... and a phantom bucket is not a REAL seed, so it never anchors a group
+    assert seeded_sessions([dict(a)], window=5, limit=5) == []
 
 
 def test_coverage_loop_session_of_delegates_to_the_authority(monkeypatch):

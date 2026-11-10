@@ -1062,9 +1062,12 @@ def _tr_complete_sessions(
     instead of silent (#11382): ``total`` is the fetch's own DISTINCT-item
     count, so ``total > injected`` names the case where the budget was spent
     and the group never reached the pool, and ``sessions`` is the number of
-    base sessions a group was actually spliced onto (``seeded > 0`` with
-    ``sessions == 0`` is the same failure seen from the seed side). The
-    padded-id mismatch that motivated them is fixed at the comparison seam
+    base sessions a group was actually spliced onto. ⚠️ Read ``sessions == 0``
+    ONLY together with ``total > 0``: a seed whose session is ALREADY complete
+    in the pool fetches nothing, which is the healthy ``seeded == 1,
+    total == 0, sessions == 0`` shape — the same numbers as a dropped group
+    except that nothing was charged. The padded-id mismatch that motivated
+    them is fixed at the comparison seam
     (:func:`retrieval.normalize_session_key`): this function makes no call of
     its own — it joins a group to its base hits through
     ``retrieval.session_key_of``, which inherits that normalisation, and the

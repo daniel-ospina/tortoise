@@ -393,6 +393,37 @@ def seeded_sessions(pool: list[dict], *,
     return out
 
 
+def _merge_key(value: object) -> str:
+    """The COMPARISON form of a key in :func:`reinjection_merge_order`'s
+    namespace (#11382), leaving the ``idx:`` PHANTOM namespace byte-identical.
+
+    Two different normalisations are wanted in one namespace, and conflating
+    them is a bug in either direction:
+
+    * a SESSION IDENTITY is compared after :func:`retrieval.normalize_session_key`
+      (``strip``) — the seed key, the graph group key and the splice anchor
+      must agree on ``"  s1  "`` vs ``"s1"``;
+    * a PHANTOM bucket (``idx:{index}``, ``idx:point:{id}``) is passed through
+      UNTOUCHED, because its payload is an identity, not a session id: a
+      Point id carrying boundary whitespace is a DIFFERENT Point, so
+      stripping it would fuse two distinct hits into one bucket and let the
+      C5 cap drop a base hit (measured: ``dedup_pool`` keeps ``['p1','p1 ']``
+      while a stripped key keeps ``['p1']``). It would also make this key
+      disagree with :func:`retrieval.session_key_of` — the pool authority
+      whose ``idx:`` legs interpolate the raw payload on purpose.
+
+    With that split, applying this to ``session_key_of``'s output is a true
+    no-op (its identity legs already return the normalised form), which is
+    what keeps the DEFAULT path of the merge byte-identical.
+    """
+    text = value if isinstance(value, str) else ""
+    if not text:
+        return ""
+    if text.startswith("idx:"):
+        return text
+    return normalize_session_key(text)
+
+
 def source_session_chunk_pass(
         proj: Any, seed_point_ids: list[str], *,
         pool_ids: Any,
@@ -611,24 +642,35 @@ def reinjection_merge_order(
     if not pool:
         return list(pool)
     # #11382: the merge is the SECOND half of the same comparison the seed
-    # makes, so it applies the same normalisation to whatever key produced it
-    # — including a caller-supplied one, and including the key handed on to
-    # ``guard_and_recap_pool``'s per-session re-cap. Without this a raw custom
-    # key would silently desynchronise the two halves: the SEED list is
-    # normalised by ``seeded_sessions``, so a raw ``last_rank`` never matches
-    # a seed and the group lands in the defensive TAIL instead of after its
-    # own session's base ranks (measured: pool ``['p1','p2','p3']`` with
-    # ``s1``/``s2`` seeded ⇒ ``['p1','p2','p3','t1','t2']`` rather than
-    # ``['p1','t1','t2','p2','p3']``), and the cap would then bucket a
-    # session's base chunks apart from its injected siblings. On the default
-    # key this is a no-op: ``session_key_of`` already returns the normalised
-    # form.
+    # makes, so BOTH SIDES of it run through :func:`_merge_key` — the pool
+    # key, the ``seed_order`` / ``added_by_session`` side, and the key handed
+    # on to ``guard_and_recap_pool``. Normalising only the pool side is a
+    # REGRESSION, not a partial fix: a caller passing a self-consistent RAW
+    # trio (raw ``session_key``, raw ``seed_order``, raw group keys) matched
+    # before and would stop matching, sending BOTH groups to the defensive
+    # TAIL (measured: ``['p1','p2','p3','t1','t9']`` instead of
+    # ``['p1','t1','p2','p3','t9']``) — reader-visible, because the reader
+    # consumes a PREFIX of the pool. See :func:`_merge_key` for why the
+    # phantom ``idx:`` namespace is passed through instead of stripped.
     raw_key = session_key if session_key is not None else session_key_of
 
     def key(hit: dict) -> str:
-        return normalize_session_key(raw_key(hit))
+        return _merge_key(raw_key(hit))
 
-    order = list(seed_order) if seed_order is not None else list(added_by_session)
+    raw_order = (list(seed_order) if seed_order is not None
+                 else list(added_by_session))
+    order: list[str] = []
+    for raw_sid in raw_order:
+        sid = _merge_key(raw_sid)
+        if sid and sid not in order:
+            order.append(sid)
+    # Every group arrives under its RAW key; index them by the merged form so
+    # a raw group key still meets its normalised seed.
+    groups_in: dict[str, list[dict]] = {}
+    for raw_sid, rows in added_by_session.items():
+        sid = _merge_key(raw_sid)
+        if sid:
+            groups_in.setdefault(sid, []).extend(rows or [])
     last_rank: dict[str, int] = {}
     for i, hit in enumerate(pool):
         last_rank[key(hit)] = i
@@ -636,7 +678,7 @@ def reinjection_merge_order(
     groups: dict[str, list[dict]] = {}
     for sid in order:
         keep: list[dict] = []
-        for hit in (added_by_session.get(sid) or []):
+        for hit in (groups_in.get(sid) or []):
             hid = hit.get("id")
             if not hid or hid in seen:
                 continue

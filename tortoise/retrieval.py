@@ -696,8 +696,12 @@ def normalize_session_key(value: object) -> str:
     Used by every equality the SOURCE-SESSION arm makes between two session
     identities: the pool hit's key (:func:`session_key_of`, both spellings),
     the seed key (:func:`tortoise.session_reinjection.seeded_sessions`, which
-    also covers a caller-supplied key function) and the graph's group key
-    (:func:`tortoise.session_reinjection.source_session_chunk_pass`). They
+    also covers a caller-supplied key function), the graph's group key
+    (:func:`tortoise.session_reinjection.source_session_chunk_pass`) and the
+    merge's two — the splice anchor and the key it hands to
+    ``guard_and_recap_pool`` (via ``session_reinjection._merge_key``, which
+    passes the phantom ``idx:`` namespace through untouched because that
+    payload is an identity, not a session id). They
     are SEPARATE reads of separately-produced values, so normalising at only
     one of them is not a fix: it MOVES the mismatch instead of removing it.
     #10540 measured exactly that — it stripped the camel leg alone and
@@ -2460,8 +2464,8 @@ def _session_admission_key(
     does): a TRUTHY non-``str`` snake id
     (``session_id: 5`` used to key the int ``5``, and THREE callers then
     raised ``AttributeError`` on ``.startswith``: ``seeded_sessions``,
-    ``coverage_loop.coverage_gap`` (``coverage_loop.py``:497) and
-    ``reader_window_displacement`` (``session_reinjection.py``:750-753); the
+    ``coverage_loop.coverage_gap`` (``coverage_loop.py``:488) and
+    ``reader_window_displacement`` (``session_reinjection.py``:843-845); the
     pool leg now returns ``""`` for a non-``str``, i.e. falls through to its
     index / wire / per-hit leg, so those three callers get a ``str`` — the
     untyped shape stops being an identity and is no longer a raising seam —
