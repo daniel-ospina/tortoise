@@ -7090,11 +7090,20 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
-    ),
+    # ⛔ DELETED `the exemption` (measured on PR #11719's head, 2026-11-10): the
+    # claim "absent from both documents until someone writes it" went STALE when
+    # `#11665` added a sentence to `EXTRACTOR-V4-ARCHITECTURE.md` §3 —
+    # *"**The exemption is about CONTENT, not the declaration site …**"* — which
+    # names no census row and is not a denial of one. `.lower()` makes the
+    # sentence-initial capital match the literal, so this leg red a REQUIRED
+    # check on `main` and on every merge of it (`test (i)`, run 42768411220).
+    # The marker is NOT weakened or exempted: it stays in `DENIAL_MARKERS`, where
+    # `_denies_the_class` still judges it per occurrence against a sentence that
+    # names a counted row — the direction the owner's decision governs. Only the
+    # false claim that the phrase is absent is removed. Re-declaring it here is
+    # only correct once BOTH documents stop writing the phrase, which is what
+    # `test_no_marker_is_written_in_a_spelling_the_flattener_cannot_produce`'s
+    # `unpinned` half will demand if that day comes.
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
