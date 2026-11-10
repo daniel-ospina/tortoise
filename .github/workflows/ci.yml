@@ -2468,9 +2468,11 @@ jobs:
             pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
             port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
             if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid was recorded at boot — it never started"
+              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is `stop`ped and `stop` deletes this file, so this does NOT mean it never started"
+            elif bash "$PREVIEW" ready --name "$name"; then
+              echo "${name}: pid ${pid} is ALIVE on :${port} and the port ANSWERS — this preview SURVIVED the run; the red is the specs' or the content's, not a dead server"
             elif kill -0 "$pid" 2>/dev/null; then
-              echo "${name}: pid ${pid} is ALIVE on :${port} — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server"
+              echo "::error::${name}: pid ${pid} is alive but the port does NOT answer — a preview that outlived its listener; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             else
               echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             fi
@@ -2710,9 +2712,11 @@ jobs:
             pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
             port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
             if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid was recorded at boot — it never started"
+              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is `stop`ped and `stop` deletes this file, so this does NOT mean it never started"
+            elif bash "$PREVIEW" ready --name "$name"; then
+              echo "${name}: pid ${pid} is ALIVE on :${port} and the port ANSWERS — this preview SURVIVED the run; the red is the specs' or the content's, not a dead server"
             elif kill -0 "$pid" 2>/dev/null; then
-              echo "${name}: pid ${pid} is ALIVE on :${port} — this preview SURVIVED the run, so the red is the specs' or the content's, not a dead server"
+              echo "::error::${name}: pid ${pid} is alive but the port does NOT answer — a preview that outlived its listener; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             else
               echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             fi

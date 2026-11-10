@@ -858,12 +858,18 @@ def test_the_dashboard_e2e_gate_names_the_shared_preflight_module() -> None:
 @pytest.mark.parametrize(
     "job_name,servers",
     [
-        # The two `ci.yml` jobs that boot `wrangler pages dev` previews and then
-        # run specs against them. They are pinned TOGETHER because the diagnostic
-        # step was written for one and not the other, and that asymmetry is
-        # exactly the defect this arm closed: #10305 added it to `dashboard-e2e`,
-        # and `legal-e2e` — same boot steps, same helper, same failure mode — kept
-        # red-ing undiagnosably until #11675.
+        # The `ci.yml` jobs that boot `wrangler pages dev` previews, run specs
+        # against them, AND carry the diagnostic step. They are pinned TOGETHER
+        # because the step was written for one and not the others, and that
+        # asymmetry is exactly the defect this arm closed: #10305 added it to
+        # `dashboard-e2e`, and `legal-e2e` — same boot steps, same helper, same
+        # failure mode — kept red-ing undiagnosably until #11675. `welcome-e2e`
+        # is the THIRD such job (`PREVIEW_JOBS`, above, and
+        # `preview-server.sh`'s own header) and it is NOT in this list because it
+        # still has no dump step — the same asymmetry, still open there and
+        # recorded on #10283. Registering it here without the step would red this
+        # pin, which is the correct outcome, not a reason to omit it from the
+        # comment.
         ("dashboard-e2e", ("auth", "app")),
         ("legal-e2e", ("marketing", "app")),
     ],
@@ -931,8 +937,40 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
         "the dump does not check whether the recorded pid is still ALIVE, so it "
         f"cannot say a preview DIED mid-run: {run}"
     )
+    # ⛔ A LIVE PID IS NOT A SURVIVING PREVIEW. `kill -0` proves the process
+    # exists and nothing else — `preview-server.sh`'s `ready` states the three
+    # facts separately (liveness, something ANSWERS on the port, that answer is
+    # HTTP) and names the shape that matters here: a wrangler whose listener is up
+    # while its bundle/workerd starts answers a connect and never a 200. So the
+    # SURVIVED verdict must be gated on the helper's own probe, and `kill -0` may
+    # only distinguish "alive but not answering" from "gone".
+    assert 'ready --name "$name"' in run, (
+        "the SURVIVED verdict is deduced from `kill -0` alone: a live pid whose "
+        f"port answers nothing would be reported as a surviving preview: {run}"
+    )
     for verdict in ("ALIVE", "DIED MID-RUN"):
         assert verdict in run, (
             f"the dump has no distinguishable {verdict!r} verdict, so a dead "
             f"preview and a failing spec read alike: {run}"
         )
+    # ⛔ THE ORDERING IS THE WHOLE VERDICT. `stop-all` deletes each `<name>.pid`
+    # (`preview-server.sh` `cmd_stop`), so a dump that runs AFTER the teardown
+    # finds no pid file at all and missays every preview as unstarted — while
+    # every assertion above still passes, because they only read the dump's own
+    # text. Pin the position instead of trusting it.
+    names = [str(s.get("name", "")) for s in job["steps"]]
+    dump_at = names.index(str(step.get("name", "")))
+    teardown_at = next(
+        (i for i, s in enumerate(job["steps"])
+         if "preview-server.sh" in str(s.get("run", ""))
+         and "stop-all" in str(s.get("run", ""))),
+        None,
+    )
+    assert teardown_at is not None, (
+        f"no `preview-server.sh stop-all` teardown in {job_name}: {names}"
+    )
+    assert dump_at < teardown_at, (
+        "the log dump runs AFTER the preview teardown, which deletes the pid "
+        "files the dump reads — every preview would then be reported as never "
+        f"having started: dump at {dump_at}, teardown at {teardown_at} in {names}"
+    )
