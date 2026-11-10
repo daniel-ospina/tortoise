@@ -152,22 +152,77 @@ def _derive_population(source: str) -> tuple[int, int]:
     """`(functions, collected)` for `source`, derived from the AST and **failing closed**.
 
     `collected` = functions + the extra cases of every `parametrize` arm. An earlier revision derived the
-    extras by `re.findall(...)[...].split(",")` on source TEXT, which counts commas INSIDE a tuple
-    (`[(1,2),(3,4)]` → 3 extras instead of 2) and misses every form its regex cannot spell — a tuple
-    `argnames`, a case list held in a module-level name, a parametrised class. An UNDERCOUNT that happens
-    to agree with a stale doc number is green; an OVERCOUNT reds against a TRUE number, and the tempting
-    "fix" is then to write the derived figure into the doc — so the pin would certify a false figure.
-    A form this function cannot read is therefore an ERROR, never a silent zero.
+    extras by `re.findall(...)[...].split(",")` on source TEXT, and it was wrong in BOTH directions: it
+    counts the commas INSIDE the cases (on a single-`argname` arm spelled
+    `parametrize("x", [(1, 2), (3, 4)])` it splits into 4 fields and reports **3** extras where there is
+    **1**), and it cannot see a single-quoted tuple `argnames` at all (**0** arms matched, so the arm
+    contributes nothing while pytest collects its 2 cases).
+
+    That second direction is the dangerous one: an UNDERCOUNT that happens to agree with a stale doc number
+    is green. The first is worse in a subtler way — an OVERCOUNT reds against a TRUE number, and the tempting
+    "fix" is then to write the derived figure into the document, so the pin would certify a false figure.
+    A form this function cannot model is therefore an ERROR, never a silent or approximate number:
+
+      * a `parametrize` **stacked** twice on one function (pytest collects the PRODUCT of the arms)
+      * a `parametrize` on the **class** (it applies to every method in it)
+      * an `argname` driven by a module-level `@pytest.fixture(params=...)` (the case count is the fixture's)
+      * an **empty** case list (pytest collects 0, so the function itself is not a collected case)
+      * a case list that is not an inline list/tuple literal
     """
+    tree = ast.parse(source)
     nodes = _collected_test_nodes(source)
+
+    # Names whose case count comes from a fixture, not from a `parametrize` arm we can read.
+    fixture_param_names: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            continue
+        for decorator in node.decorator_list:
+            if not isinstance(decorator, ast.Call) or not ast.unparse(decorator.func).endswith("fixture"):
+                continue
+            # The fixture's NAME is the decorated function's name; `params=` is a keyword, never positional.
+            if any(keyword.arg == "params" for keyword in decorator.keywords):
+                fixture_param_names.add(node.name)
+
+    # Classes whose OWN body carries a `parametrize` — it multiplies every method's cases.
+    parametrised_classes: set[str] = set()
+    for node in ast.walk(tree):
+        if not isinstance(node, ast.ClassDef):
+            continue
+        if any(
+            isinstance(decorator, ast.Call) and ast.unparse(decorator.func).endswith("parametrize")
+            for decorator in node.decorator_list
+        ):
+            parametrised_classes.add(node.name)
+
     extra = 0
     unreadable: list[str] = []
     for node in nodes:
-        for decorator in getattr(node, "decorator_list", []):
-            if not isinstance(decorator, ast.Call):
-                continue
-            if not ast.unparse(decorator.func).endswith("parametrize"):
-                continue
+        arms = [
+            decorator
+            for decorator in getattr(node, "decorator_list", [])
+            if isinstance(decorator, ast.Call) and ast.unparse(decorator.func).endswith("parametrize")
+        ]
+        if len(arms) > 1:
+            unreadable.append(
+                f"`{node.name}`: {len(arms)} stacked `parametrize` arms — pytest collects their PRODUCT, "
+                "which this derivation does not model"
+            )
+            continue
+        if not arms:
+            # A test can be case-driven with NO `parametrize` arm at all — a `@pytest.fixture(params=…)`
+            # parameter multiplies it. The first revision only inspected arm-bearing nodes, so this shape
+            # reported one case where pytest collects three.
+            arguments = [a.arg for a in getattr(node.args, "posonlyargs", []) + node.args.args]
+            arguments += [a.arg for a in node.args.kwonlyargs]
+            driven = sorted(set(arguments) & fixture_param_names)
+            if driven:
+                unreadable.append(
+                    f"`{node.name}`: parameter(s) {driven} are driven by a `@pytest.fixture(params=...)`, "
+                    "so the collected count is the fixture's"
+                )
+            continue
+        for decorator in arms:
             if len(decorator.args) < 2:
                 unreadable.append(f"`{node.name}`: `parametrize` with no case argument")
                 continue
@@ -177,9 +232,33 @@ def _derive_population(source: str) -> tuple[int, int]:
                     f"`{node.name}`: case list is `{ast.unparse(cases)[:48]}`, not an inline list/tuple"
                 )
                 continue
-            extra += max(len(cases.elts) - 1, 0)
+            if not cases.elts:
+                unreadable.append(
+                    f"`{node.name}`: empty case list — pytest collects 0 cases for it, so the function is "
+                    "not a collected case and this derivation would over-count it"
+                )
+                continue
+            argnames = decorator.args[0]
+            names: list[str] = []
+            if isinstance(argnames, ast.Constant) and isinstance(argnames.value, str):
+                names = [n.strip() for n in argnames.value.split(",")]
+            elif isinstance(argnames, (ast.List, ast.Tuple)):
+                names = [e.value for e in argnames.elts if isinstance(e, ast.Constant)]
+            driven = sorted(set(names) & fixture_param_names)
+            if driven:
+                unreadable.append(
+                    f"`{node.name}`: `argname(s) {driven}` are driven by a `@pytest.fixture(params=...)`, "
+                    "so the collected count is the fixture's"
+                )
+                continue
+            extra += len(cases.elts) - 1
+    for cls_name in sorted(parametrised_classes):
+        unreadable.append(
+            f"class `{cls_name}`: a class-level `parametrize` multiplies every method's cases, "
+            "which this derivation does not model"
+        )
     assert not unreadable, (
-        "this pin cannot derive the collected count from these `parametrize` arms, so it must not guess — "
+        "this pin cannot derive the collected count from these shapes, so it must not guess — "
         "the number it states is what a reader uses to judge coverage:\n  " + "\n  ".join(unreadable)
     )
     return len(nodes), len(nodes) + extra
@@ -1100,18 +1179,21 @@ class TestTheDocsAreDiscoverableAndResolve:
         )
 
     def test_these_DERIVATIONS_hold_on_a_synthetic_file(self, tmp_path):
-        """The two derivations this class rests on must be able to FAIL — on the shapes the repo does not hold.
+        """Both derivations must be able to FAIL — on the shapes the repo does not hold, and on the ones they cannot model.
 
-        Round-20 P3, measured: both derivations were only ever run against THIS file, where the shape they
-        get wrong does not exist — no module-level `test_`, and no `parametrize` whose case list the old regex
-        could not spell. So a revert to the broken form was GREEN twice over: the pin's own "every assertion
-        must be able to fail" rule, violated by the pin itself.
+        Round-20 P3, measured: both derivations were only ever run against THIS file, where the shapes they
+        get wrong do not exist (no module-level `test_`, no `parametrize` form the old regex could not spell).
+        So reverting either fix was GREEN twice over — the pin violated its own "every assertion must be able
+        to fail" rule. This arm builds those shapes in throwaway modules and holds both derivations to them.
 
-        This arm builds the shapes in a throwaway module and holds both derivations to them, so the fix is
-        exercised without needing a document to cite a `tests/` symbol or this file to grow a module-level test.
+        It also holds `_derive_population` to its FAIL-CLOSED promise. Round-21 measured four shapes pytest
+        collects that the first version of the helper silently counted as zero extras (stacked arms = the
+        product, a class-level arm = per-method, a fixture-`params` argname, an empty list = 0 collected).
+        A silent zero in that direction agrees with a stale doc number, which is green and wrong, so each of
+        those is now a `pytest.raises` case rather than an assumption.
         """
-        synthetic = tmp_path / "synthetic_mod.py"
-        synthetic.write_text(
+        module = tmp_path / "synthetic_mod.py"
+        module.write_text(
             "import pytest\n"
             "\n"
             "def test_module_level():\n"
@@ -1127,12 +1209,6 @@ class TestTheDocsAreDiscoverableAndResolve:
             "\n"
             "@pytest.mark.parametrize(('a', 'b'), [(1, 2), (3, 4)])\n"
             "def test_tuple_argnames_two_cases(a, b):\n"
-            "    pass\n"
-            "\n"
-            "CASES = [1, 2, 3]\n"
-            "\n"
-            "@pytest.mark.parametrize('x', CASES)\n"
-            "def test_module_level_case_list(x):\n"
             "    pass\n"
             "\n"
             "def helper_with_a_local():\n"
@@ -1140,73 +1216,84 @@ class TestTheDocsAreDiscoverableAndResolve:
             "    return local_name\n"
         )
 
-        # --- ISSUE 3: a module-level test IS collected; a nested-class method is NOT (outer only). ---
-        readable = tmp_path / "readable_mod.py"
-        readable.write_text(
-            "import pytest\n"
-            "\n"
-            "def test_module_level():\n"
-            "    pass\n"
-            "\n"
-            "class TestOuter:\n"
-            "    def test_a_method(self):\n"
-            "        pass\n"
-            "\n"
-            "    class TestInner:\n"
-            "        def test_nested_class_method(self):\n"
-            "            pass\n"
-            "\n"
-            "@pytest.mark.parametrize(('a', 'b'), [(1, 2), (3, 4)])\n"
-            "def test_tuple_argnames_two_cases(a, b):\n"
-            "    pass\n"
-        )
-        functions, collected = _derive_population(readable.read_text())
+        # --- ISSUE 3: a module-level test IS collected, and so is a nested-class method (both measured
+        # with `--collect-only`). A `^    def test_` regex reports 2 of these 4; a one-level class walk
+        # reports 3. Only the recursive walk gets 4. ---
+        functions, collected = _derive_population(module.read_text())
         assert functions == 4, (
             f"expected 4 collected test functions (2 module-level, 1 method, 1 nested-class method), got "
-            f"{functions} — a `^    def test_` regex reports 2 and misses BOTH module-level ones"
+            f"{functions} — `^    def test_` reports 2 and a one-level class walk reports 3"
         )
-        # `[(1, 2), (3, 4)]` is 2 cases on a function that would otherwise be 1, so the file collects 5.
         assert collected == 5, (
-            f"expected 5 collected cases, got {collected} — the old `split(\",\")` derivation counts the comma "
-            "INSIDE each tuple and would report 2 extras instead of 1"
+            f"expected 5 collected cases, got {collected} — `[(1, 2), (3, 4)]` is 2 cases on a function that "
+            "would otherwise be 1, and the old `split(\",\")` derivation counts the comma INSIDE each tuple"
         )
-
-        # A `parametrize` form the derivation cannot read must RAISE, never contribute a silent zero:
-        # an undercount that coincides with a stale doc number is green, and an overcount reds against a
-        # TRUE number — in which case the tempting fix is to falsify the document.
-        unreadable = tmp_path / "unreadable_mod.py"
-        unreadable.write_text(
-            "import pytest\n"
-            "CASES = [1, 2, 3]\n"
-            "@pytest.mark.parametrize('x', CASES)\n"
-            "def test_case_list_in_a_name(x):\n"
-            "    pass\n"
-        )
-        with pytest.raises(AssertionError, match="cannot derive the collected count"):
-            _derive_population(unreadable.read_text())
 
         # --- ISSUE 2: the AST symbol check keeps class qualification. ---
-        assert _ast_declares(synthetic, "TestOuter.test_a_method") is True
-        assert _ast_declares(synthetic, "TestOuter.TestInner.test_nested_class_method") is True
-        assert _ast_declares(synthetic, "test_module_level") is True
-        # wrong class, function-local name, and a name that is only a loop/assign target inside a function
-        assert _ast_declares(synthetic, "TestInner.test_a_method") is False, (
+        assert _ast_declares(module, "test_module_level") is True
+        assert _ast_declares(module, "TestOuter.test_a_method") is True
+        assert _ast_declares(module, "TestOuter.TestInner.test_nested_class_method") is True
+        assert _ast_declares(module, "TestInner.test_a_method") is False, (
             "`test_a_method` is declared on `TestOuter`, not `TestInner` — the flat-set form accepted this, "
             "which is the `_EdgeHandlers._upsert_point_edges` wrong-qualifier defect one level down"
         )
-        assert _ast_declares(synthetic, "helper_with_a_local.local_name") is False, (
+        assert _ast_declares(module, "helper_with_a_local.local_name") is False, (
             "a function-local name is not addressable as `module.function.name`"
         )
-        assert _ast_declares(synthetic, "no_such_name_at_all") is False
+        assert _ast_declares(module, "no_such_name_at_all") is False
+
+        # --- FAIL-CLOSED: every shape the derivation cannot model must raise, never contribute a number. ---
+        unmodellable = {
+            "case list held in a module-level name": (
+                "import pytest\nCASES = [1, 2, 3]\n"
+                "@pytest.mark.parametrize('x', CASES)\n"
+                "def test_case_list_in_a_name(x):\n    pass\n"
+            ),
+            "two stacked arms (pytest collects the product)": (
+                "import pytest\n"
+                "@pytest.mark.parametrize('x', [1, 2])\n"
+                "@pytest.mark.parametrize('y', [1, 2, 3])\n"
+                "def test_stacked(x, y):\n    pass\n"
+            ),
+            "class-level arm (multiplies every method)": (
+                "import pytest\n"
+                "@pytest.mark.parametrize('x', [1, 2])\n"
+                "class TestParametrised:\n"
+                "    def test_a(self, x):\n        pass\n"
+            ),
+            "argname driven by a fixture `params=`": (
+                "import pytest\n"
+                "@pytest.fixture(params=[1, 2, 3])\n"
+                "def three_cases(request):\n    return request.param\n"
+                "def test_fixture_driven(three_cases):\n    pass\n"
+            ),
+            "empty case list (pytest collects 0)": (
+                "import pytest\n"
+                "@pytest.mark.parametrize('x', [])\n"
+                "def test_empty(x):\n    pass\n"
+            ),
+        }
+        for label, source in unmodellable.items():
+            with pytest.raises(AssertionError, match="cannot derive the collected count"):
+                _derive_population(source)
+            del label  # the dict key documents the case; the assertion is what matters
 
     def test_the_inventory_in_the_LEDGER_matches_the_pinned_copies(self):
         """`docs/00_index.md` restates the headline inventory — so it is a copy that must be pinned too.
 
-        Round-20 P3: the index row carries 36 / 35 / 34 `IMPL` + 1 `NAND` / 33-of-35 verbatim, and no
-        assertion read it, so a pack edit would red `TestTheInventoryTheScopeCites` against the two documents
-        while the ledger — the file a lane actually uses to FIND the doc — stayed green on a stale number.
-        Same reasoning as the `config/ci-surfaces.yml` population registration: a stated figure is either
-        pinned or it is prose waiting to rot.
+        Round-20 P3: the index row carries 36 / 35 / 34 `IMPL` + 1 `NAND` / 33-of-35 / the axis split
+        verbatim, and no assertion read it, so a pack edit would red `TestTheInventoryTheScopeCites` against
+        the two documents while the ledger — the file a lane actually uses to FIND the doc — stayed green on
+        a stale figure. Same reasoning as the `config/ci-surfaces.yml` population registration: a stated
+        figure is either pinned or it is prose waiting to rot.
+
+        Scope, stated rather than implied (round-21 P3 caught the first version claiming more than it read):
+        the three figures DERIVED here are asserted as derived strings; the direct-shape figures are held to
+        the same integers the scope states, and those integers are pinned against the registry by
+        `test_the_direct_shape_partition_28_object_and_33_non_point` — so the chain is
+        registry -> scope -> ledger and no link can drift. ⛔ **The row's `19 CI pins` is NOT covered here**:
+        that is plan §6's row count, which this file does not derive, and saying otherwise would be the same
+        over-claim in a new place.
         """
         rows = _declared_relations()
         kinded = _kind_bearing(rows)
@@ -1218,8 +1305,37 @@ class TestTheDocsAreDiscoverableAndResolve:
         assert f"{len(kinded)} carrying `fromKind`/`toKind`" in index, (
             f"the index row no longer states {len(kinded)} carrying `fromKind`/`toKind`"
         )
+
+
         mechanisms = Counter(r.get("mechanism") for r in kinded)
         derived_split = f"{mechanisms['IMPL']} `IMPL` + {mechanisms['NAND']} `NAND`"
         assert derived_split in index, (
             f"the index row no longer states the mechanism split the packs drive (`{derived_split}`)"
+        )
+
+        # The copy chain registry -> scope -> ledger for the figures this file does NOT derive directly:
+        # each phrase must be in BOTH documents, and the scope's own copy is pinned against the registry by
+        # `test_the_direct_shape_partition_28_object_and_33_non_point`.
+        scope_text = SCOPE_DOC.read_text()
+        for phrase in (
+            "33 of the 35",
+            "28 Object↔Object",
+            "3 `Object→Subject`",
+            "1 `Object→Event`",
+            "1 `Event→Object`",
+        ):
+            assert phrase in scope_text, (
+                f"the scope no longer states `{phrase}` — this ledger check is stale, not the index"
+            )
+            assert phrase in index, (
+                f"the index row no longer states `{phrase}`, which the scope pins — the ledger and the "
+                "doc would publish different figures"
+            )
+        # `addresses` ×6 is spelled as a code-block row in the scope and as prose in the ledger, so each is
+        # held in its own form rather than through a shared substring that neither actually contains.
+        assert "addresses   declared 6×, 6 DISTINCT pairs" in scope_text, (
+            "the scope's §1.3 multiplicity row for `addresses` moved — update this ledger check with it"
+        )
+        assert "`addresses` is declared 6×" in index, (
+            "the index row no longer states the `addresses` ×6 multiplicity the scope's §1.3 table pins"
         )
