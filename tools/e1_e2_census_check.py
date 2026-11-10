@@ -993,6 +993,20 @@ def check(text: str) -> tuple[list[str], dict]:
             """Did the record DECLARE this floor, whatever its value?"""
             return binding_raw.get(field, "") not in ("", "n/a")
 
+        def _raw(field: str) -> float | int | None:
+            """The field as a comparable number, read from its RAW token.
+
+            ``Log.kv`` strips the surrounding quotes, so a declared-but-unreadable
+            floor that the probe printed as ``"0.2"`` reaches ``bind`` as the bare
+            ``0.2`` and reads as a MET floor — the exact permissive read ``_num``'s
+            own docstring promises to refuse, defeated at every call site that read
+            the stripped value (#11725 review P1). The raw token is the only place
+            the quoting survives, so every rule that treats a binding field as a
+            NUMBER — the owned-floor mirror, the floor arithmetic, the denominator
+            pair — reads through here.
+            """
+            return _num(binding_raw.get(field, ""))
+
         statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR",
                     "UNREADABLE")
         if bind.get("status") not in statuses:
@@ -1161,11 +1175,11 @@ def check(text: str) -> tuple[list[str], dict]:
                         f"[V15] the binding claims floors_owned={key} but this gate "
                         f"knows no declared/measured pair for it — an 'owned' floor "
                         f"nothing compares is a floor that was not checked")
-                elif not _is_number(bind.get(known[key], "")):
+                elif _raw(known[key]) is None:
                     findings.append(
                         f"[V15] the binding claims floors_owned={key} but prints "
-                        f"{known[key]}={bind.get(known[key])!r}, not a number — it "
-                        f"names a floor it never read")
+                        f"{known[key]}={binding_raw.get(known[key], '')!r}, not a "
+                        f"bare number — it names a floor it never read")
         if bind.get("status") == "MATCHED":
             # A MATCHED binding is the only shape a scored log may carry, so it
             # must carry NO refusal reason — otherwise a log could print a
@@ -1175,7 +1189,13 @@ def check(text: str) -> tuple[list[str], dict]:
                 findings.append(
                     f"[V15] the binding is MATCHED but states reason="
                     f"{bind.get('reason')!r} — a matched bar has nothing to refuse")
-            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            # Read from the RAW tokens (#11725 review): a quoted denominator or floor
+            # — what the probe prints for a value it could not read — reaches `bind`
+            # quote-stripped, so `isdigit()` on the stripped value accepted
+            # `declared_floor="20"` beside an unreadable floor and certified GREEN.
+            # `n/a` (no floor stated) stays legal; quoting is not.
+            nums = (binding_raw.get("objects", "").strip(),
+                    binding_raw.get("declared_floor", "").strip())
             # MATCHED means "a pin EXISTS, it agrees, and no floor is violated"
             # (the probe's own contract), so a MATCHED line that names no pin at
             # all is the UNPINNED case RELABELLED — a relabel, not an absent
@@ -1227,20 +1247,32 @@ def check(text: str) -> tuple[list[str], dict]:
             # The OTHER two owned floors, in the same both-directions shape: a
             # MATCHED bar cannot sit under a floor it declares, and it cannot claim
             # to have met a floor whose measured side it never printed (#11689).
-            for floor_field, measured_field, measured, floor_value in (
-                    ("declared_before_floor", "before_share",
-                     bind.get("before_share", ""), bind.get("declared_before_floor", "")),
-                    ("declared_surviving_floor", "surviving_units",
-                     bind.get("surviving_units", ""),
-                     bind.get("declared_surviving_floor", ""))):
-                if not _is_number(floor_value):
-                    continue
-                if not _is_number(measured):
+            # Both sides are read from their RAW tokens (#11725 review): `kv` strips
+            # quotes, so a forged or unreadable value — the probe prints a value it
+            # could not read QUOTED — would otherwise be fed to the arithmetic as a
+            # number, letting `declared_before_floor="0.2"` read as a met floor and
+            # skipping the below-floor check the pair exists to run.
+            for floor_field, measured_field in (
+                    ("declared_before_floor", "before_share"),
+                    ("declared_surviving_floor", "surviving_units")):
+                floor_value = _raw(floor_field)
+                measured = _raw(measured_field)
+                if floor_value is None:
+                    if not _declared(floor_field):
+                        continue          # no floor declared for this key
+                    findings.append(
+                        f"[V15] the binding is MATCHED but {floor_field}="
+                        f"{binding_raw.get(floor_field, '')!r} is not a bare "
+                        f"number — present but unreadable is not absent")
+                elif measured is None:
                     findings.append(
                         f"[V15] the binding is MATCHED and declares "
-                        f"{floor_field}={floor_value} but states no readable "
-                        f"{measured_field}={measured!r} — a floor met against a "
-                        f"quantity the log never printed is not reconciled")
+                        f"{floor_field}="
+                        f"{binding_raw.get(floor_field, '').strip()} but states "
+                        f"no readable {measured_field}="
+                        f"{binding_raw.get(measured_field, '')!r} — a floor met "
+                        f"against a quantity the log never printed is not "
+                        f"reconciled")
                 elif _below_floor_beyond_rounding(measured, floor_value):
                     # The band is one print half-width (`_SHARE_PRINT_BAND`), NOT the
                     # arm anchor's 5e-6: the declared side is exact and only the
@@ -1249,9 +1281,11 @@ def check(text: str) -> tuple[list[str], dict]:
                     # the printing resolution and swallowed real below-floor gaps).
                     findings.append(
                         f"[V15] the binding is MATCHED while "
-                        f"{measured_field}={measured} is under "
-                        f"{floor_field}={floor_value} — a below-floor run cannot "
-                        f"be bound-ready")
+                        f"{measured_field}="
+                        f"{binding_raw.get(measured_field, '').strip()} is under "
+                        f"{floor_field}="
+                        f"{binding_raw.get(floor_field, '').strip()} — a "
+                        f"below-floor run cannot be bound-ready")
         # The floors the binding REFUSED because it cannot evaluate them must
         # be named on the line and be the reason it refused: a refusal that
         # does not say which floor it dropped is not auditable, and a line that
