@@ -117,6 +117,13 @@ The enforcement map's `default: warn` was set for the **label-declaredness** que
 label is a vocabulary gap, so warn). A **declared** pair contradicted by the write is a different question
 with a different answer, so it gets its own default. Both are pinned (§6 pins 8, 9).
 
+> **OVERRIDES:** #1934's warn-not-block default, which is what `resolve_enforcement` falls back to — a
+> *declared* pair contradicted by the write blocks instead of warning, because #1934 answered the
+> **undeclared-label** question (a vocabulary gap, where warn is right) and this default answers the
+> declared-pair question; the later owner ruling D1 (`#11656`, 2026-11-09) rules refuse-where-declared.
+> Recorded here so the departure reads as intentional at the point a lane implements it, and so the
+> next reader holding #1934's closed ruling cannot mistake this default for an accident.
+
 ## 3. Alternatives considered and rejected
 
 | alternative | why rejected |
