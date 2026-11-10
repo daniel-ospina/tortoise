@@ -233,14 +233,16 @@ def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
     assert vec["count"] >= 1, vec
 
     # ⛔ The product's own declaration half of this pin used to be driven through
-    # `sdk.retrieval_legs`, which went WITH ITS DRIVER: `retrieval_legs` is one of
-    # the 26 methods #4282 retired (see `tortoise/sdk_retired.py`). The declaration
-    # is NOT unpinned — it moved onto the surface that survives:
-    # `tests/test_2952_degraded_read.py::declared_degraded_read` drives the unit,
-    # and `test_no_embedder_still_stores_the_turn_and_declares_the_leg_impaired`
-    # below drives the end-to-end `no_embedder` marker through
-    # `recall_state(leg_trace=)`. What this test is the only pin for is that the
-    # captured turn is REACHABLE through the dense leg at all.
+    # `sdk.retrieval_legs`, one of the 26 methods #4282 retired (see
+    # `tortoise/sdk_retired.py`). It is NOT unpinned, and the wrapper is NOT
+    # unreachable: `_retrieval_legs` in `tests/test_4199_dense_scope_coverage.py`
+    # rebuilds that probe on the surviving surface, and this pin's POSITIVE
+    # end-to-end declaration half lives there —
+    # `test_fully_embedded_turn_corpus_still_reports_hybrid` asserts
+    # `declared_degraded_read is None`, `hybrid is True` and a healthy vector arm
+    # over a fully-embedded turn scope. The NEGATIVE end-to-end half (`no_embedder`)
+    # is the test below. What THIS test is the only pin for is that the captured
+    # turn is REACHABLE through the dense leg at all.
 
 
 # ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──

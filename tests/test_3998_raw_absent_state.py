@@ -1378,8 +1378,10 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
 # `::TestUrlKeyedSourceIsWritable::test_a_rekeying_update_returns_the_node_at_its_new_address`
 # AND `::TestTheStateReadBackIsTheSameStatement::test_a_name_update_that_rekeys_a_url_source_still_journals`
 # (two classes, not one). Restoring the refusal fails exactly those 2 tests —
-# measured; that is 2 of the file's 23 collected tests (an earlier revision of this
-# note said "6", which is the union of the two named CLASSES, not the file). They are the pin; a second copy here could only
+# measured; that is 2 of the file's 30 collected tests at this head (an earlier
+# revision of this note said "6", which is the union of the two named CLASSES, not
+# the file; the count read 23 when this note was written and the file has grown
+# since, so it is stated as a count-at-a-head rather than a standing fact). They are the pin; a second copy here could only
 # disagree with them. An earlier revision of this file asserted the refusal, which
 # is why this PR was red for its whole life.
 #
@@ -1389,9 +1391,12 @@ def test_the_declaration_covers_an_id_less_source_stub(sdk):
 # measured live on the pre-#4282 head with a 1517-byte `url`. ⚠️ It cannot be
 # re-measured from THIS tree: the chain read that produced that number was
 # `get_provenance_chain`, one of the 26 public methods #4282 retired
-# (`tortoise/sdk_retired.py`). What survives is the projection query underneath it,
-# and the residual is still reachable through that — the number is retained as the
-# record of a measurement, not as a claim reproducible at this head. It is
+# (`tortoise/sdk_retired.py`), and its Cypher + row shaping were inline in that
+# method — no projection reader replaced it. What survives is the DATA, not a
+# query: the `:Source` / `extractedFrom` edges are still there, so the residual is
+# still reachable by writing that two-hop query yourself — not through a surviving
+# reader. The number is retained as the record of a measurement, not as a claim
+# reproducible at this head. It is
 # PRE-EXISTING to #3998 and it is #4649's structural issue (the outer label loop
 # takes the FIRST matching label), recorded on #4649 — which is CLOSED, so it is
 # neither open-tracked nor test-pinned. That is a real gap, stated rather than

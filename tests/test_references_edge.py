@@ -10,8 +10,14 @@ Covers:
 `test_provenance_chain_returns_data_for_ingested_document`,
 `test_provenance_chain_returns_document_without_source_url`): each drove
 `get_provenance_chain`, one of the 26 dead public methods #4282 deleted (see
-`tortoise/sdk_retired.py`), so no subject survives to re-point them at. The
-provenance-chain section headers below are kept as the ledger for them.
+`tortoise/sdk_retired.py`). ⚠️ Nothing was delegated: its two-hop Cypher
+(`(Point)-[:extractedFrom]->(Source)` + `OPTIONAL MATCH (Source)-[references]->`)
+and its row shaping were INLINE in that method, and no projection reader answers
+that question — the projection's own reader (`projection/edges.py`) is the
+CURRENCY reader over `extractedFrom` only, a different link set. So the READER
+went with the method; what survives is the DATA (the edges), not a query to
+re-point these tests at. The provenance-chain section headers below are kept as
+the ledger for them.
 
 All tests use TortoiseSDK (not direct FalkorProjection) because
 conftest.py sets TORTOISE_DB_URI for the Docker FalkorDB container;
@@ -272,9 +278,10 @@ def test_backfill_references_idempotent():
 # ── provenance chain via ingest path (#205) ────────────────────────────────
 #
 # EMPTY BY DESIGN (#4282): the three tests that lived under these two headers all
-# drove `get_provenance_chain`, which this PR deleted. See the module docstring
-# for the per-test ledger. The chain query itself survives in the projection; no
-# test in this file reaches it any more.
+# drove `get_provenance_chain`, which this PR deleted. The Cypher and the row
+# shaping were inline in that method, so the READER went with it — the graph
+# edges it read survive, a surviving query does not. See the module docstring for
+# the per-test ledger.
 
 
 def test_link_source_to_entity_source_kind_passthrough():
