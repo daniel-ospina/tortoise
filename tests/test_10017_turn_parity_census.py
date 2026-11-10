@@ -474,6 +474,55 @@ def test_the_cli_writes_the_measured_graph_into_the_json_artifact(
     assert "graph      : g" in capsys.readouterr().out
 
 
+def test_the_producers_stamp_is_taken_BEFORE_either_leg_is_read(
+        monkeypatch, tmp_path, capsys):
+    """The emitted `measured_at` is the READING's own instant, never the read's END.
+
+    Review P3 at `2c37345e`: `census()` defaulted the stamp to `_utc_now_iso()` at its
+    own entry, which runs AFTER both legs — so the artifact named an instant later than
+    the data it describes, and the consumer's age (`pass_started_at - measured_at`) came
+    out SMALLER by the read duration. The bound exists to refuse an AGED report, so a
+    stamp that understates the age is the one optimism a fail-closed direction cannot
+    afford: a census whose reads took an hour would claim to be an hour fresher than it
+    is, and a report just past the bound would pass it. Pre-fix the order recorded below
+    is `[graph, record, stamp]` and both ordering assertions red; at this head it is
+    `[stamp, graph, record]`.
+    """
+    order: list[str] = []
+    stamps: list[str] = []
+    real_now = tpc._utc_now_iso
+
+    def stamping_now() -> str:
+        value = real_now()
+        stamps.append(value)
+        order.append("stamp")
+        return value
+
+    def graph_read(*a, **k):
+        order.append("graph")
+        return {"nodes": {"s1_t0": _graph_node("s1_t0", "s1")}}
+
+    def record_read(*a, **k):
+        order.append("record")
+        return {"rows_by_key": {"s1_t0": _record_row("s1_t0")},
+                "non_turn_shaped": 0}
+
+    monkeypatch.setattr(tpc, "_utc_now_iso", stamping_now)
+    monkeypatch.setattr(tpc, "read_graph_turns", graph_read)
+    monkeypatch.setattr(tpc, "read_record_turns", record_read)
+
+    out = tmp_path / "r.json"
+    assert tpc.main(_argv("--json", str(out))) == 0
+    assert "stamp" in order, "no measurement stamp was taken at all"
+    assert order.index("stamp") < order.index("graph"), (
+        f"the stamp was taken AFTER the GRAPH leg was read ({order}) — the report would "
+        "claim to be fresher than the data it measured; take it before the reads")
+    assert order.index("stamp") < order.index("record"), (
+        f"the stamp was taken AFTER the RECORD leg was read ({order})")
+    assert json.loads(out.read_text())["measured_at"] == stamps[0], (
+        "the artifact must carry the instant the CLI took, not one minted by `census`")
+
+
 def test_resolve_graph_name_uses_the_canonical_uri_derivation():
     """Not a second URI parser: the URI arm is `resolve_db_endpoint`, the derivation
     `FalkorProjection.from_uri` itself calls — so the emitted name is the one the

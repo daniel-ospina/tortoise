@@ -7090,23 +7090,19 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
     ),
-    "the exemption": (
-        "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents at this head, and neither document carries a denial of it in "
-        "any other spelling — the `#10200`-era `both exemptions` / `merely "
-        "exempting` sentences are gone from `STORAGE-ARCHITECTURE.md` (removed by "
-        "`02beefe879`) and never existed in the EXTRACTOR document. ⚠️ A bare "
-        "noun is only the denial when it NAMES the row, which is why the "
-        "`#11665` sentence that used it for a different concept — the "
-        "source-type profile's rule, whose subject is prompt CONTENT and "
-        "not a census row — now says `This clause is about CONTENT` (NOT "
-        "`The carve-out …`: that noun belongs to `state_value_carve_out`, a "
-        "registry row, and borrowing it swaps one collision for another). "
-        "Rewording "
-        "the document (not this vocabulary) is what keeps the tripwire COARSE: "
-        "an occurrence anywhere is the signal, so a doc that wants a synonym for "
-        "an exemption must not borrow the denial's own noun"
-    ),
+    # ⛔ `"the exemption"` WAS a key here and is deleted — its declaration went
+    # stale on `main`, and this leg is the thing that caught it. `#11665` added
+    # *"⚠️ **The exemption is about CONTENT, not the declaration site**"* to
+    # `EXTRACTOR-V4-ARCHITECTURE.md` §3 — prose about prompt-pack hints, NOT a
+    # denial about a counted writer — so the definite-articled form is now PRESENT
+    # in the flattened document and *"absent from both documents"* became false.
+    # Deleting the key is what this leg asks for. The marker stays live in
+    # `DENIAL_MARKERS`: whether an OCCURRENCE is a denial is decided
+    # sentence-by-sentence by `DENIAL_PATTERNS` + `_class_marker_negated`, so the
+    # phrase showing up in unrelated prose cannot hide a real denial — this pin
+    # only asks that a marker is not DEAD, and it is not.
+    # Recorded on `#9066` as one more nodeid red on `main` because push-to-main
+    # legs never complete (that is why it reached a PR instead of `main`'s CI).
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"

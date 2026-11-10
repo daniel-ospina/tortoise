@@ -7837,6 +7837,7 @@ def test_two_surfaces_sharing_a_DIRECTORY_NAME_are_a_verdict(tmp_path) -> None:
     assert any("share the directory name" in e for e in membership_errors([row], surfaces))
 
 
+
 def test_a_surface_at_another_DEPTH_is_still_attributable(tmp_path) -> None:
     """The entry's root is DERIVED from the surface, never counted off it.
 
