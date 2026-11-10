@@ -2835,8 +2835,13 @@ def test_a_non_str_custom_key_is_dropped_not_stringified_11382():
     custom key that returns an ``int``, ``seeded_sessions`` drops every seed
     BEFORE any fetch (``[]`` — there is nothing to collapse into a bucket), and
     ``reinjection_merge_order`` drops the groups as well, returning the base
-    pool unchanged. Pre-#11382 those keys matched and spliced, so this is a
-    bespoke-path DROP, not a fusion.
+    pool unchanged. Pre-#11382 the two halves DIFFERED: ``seeded_sessions``
+    RAISED ``AttributeError`` (it reaches ``.startswith`` through
+    ``_is_real_session_id``) while ``reinjection_merge_order`` matched and
+    spliced such a key, so the pair never "worked" together — the direction of
+    this change is a DROP, not a fusion. ⚠️ ``session_reinjection._merge_key``'s
+    own docstring carries the same correction: keep the two copies in step, or
+    the PR ships a claim and the correction of it.
     """
     from tortoise.session_reinjection import _merge_key
 
