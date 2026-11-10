@@ -262,14 +262,14 @@ files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:956`, which is also one of the two that lifted the file
+(`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
-(`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
-mention at `4f68a2aa7`, which is the second file the count gained; its added mentions
-are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
-than an accident: this population grows for good reasons, so the figure tracks
-the tree and not a past commit.
+`REFUSED_NOT_FOUND` enum docstring), and #11729's prose lines in
+`tortoise/hosted_backup.py` — a file the population had not previously reached,
+carrying no `:Document` mention at `4f68a2aa7`, where the hosted backup/restore
+path now owns its label at the seam. All three are the point rather than an
+accident: this population grows for good reasons, so the figure tracks the tree
+and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
@@ -279,12 +279,12 @@ a docstring, a comment, a printed message, or an RST literal in
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
 lines — the RST literals in `migrate_kinds.py:63,170`, that same
-`cache_eviction.py:956` comment, and the ones in `hosted_backup.py`
-(`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
-literals. The exception is still an exception, so the exclusion argument stands;
-a guard carrying a hand-maintained allowlist of docstrings is a guard nobody can
-trust, so the label claim stays evidence recorded here rather than a check that
-would have to be argued with.
+`cache_eviction.py:956` comment, and the rest in `hosted_backup.py` (the
+served-label declaration, the validator's docstring and `restore_backup`'s),
+which arrived with #11729. The exception is still an exception, so the exclusion
+argument stands; a guard carrying a hand-maintained allowlist of docstrings is a
+guard nobody can trust, so the label claim stays evidence recorded here rather
+than a check that would have to be argued with.
 
 ---
 
