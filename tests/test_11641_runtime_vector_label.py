@@ -101,11 +101,17 @@ def test_the_declared_restore_labels_are_the_served_vocabulary() -> None:
     assert {label for label, _prop in _VECTOR_RESTORE_LABELS} == served
 
 
-def test_the_register_declares_what_both_seams_enforce() -> None:
-    """The register is a DECLARATION; these two tuples are what make it true.
+def test_the_register_declares_the_sets_the_two_seam_constants_name() -> None:
+    """The CONSTANTS and the DECLARATION name the same labels, and all of them are served.
 
-    Three things must agree or the declaration is the fabrication `LABELS_AT_RUNTIME` was invented
-    to refuse: the register's `stores`, the constant each writer enforces, and the served set.
+    ⚠️ This is a COUPLING pin, not an enforcement pin, and it is named for what it does (#11641
+    review): it compares `stores` ↔ `_VECTOR_RESTORE_LABELS`/`_RAW_WRITE_DOOR_LABELS` ↔
+    `served_store_labels()`, and it passes with both writers' guards deleted. It exists so the
+    declaration cannot drift from the constant a writer reads — that drift is how a declaration
+    becomes the fabrication `LABELS_AT_RUNTIME` was invented to refuse. The REFUSALS are pinned in
+    `test_the_door_refuses_*`, `test_restore_graph_refuses_an_unserved_label` and
+    `test_row_2_reads_met_with_no_runtime_label_left`'s source-reading assertions; do not read this
+    one as proof of enforcement.
     """
     assert EMBED_WRITER_CLASSES[RESTORE_WRITER].stores != LABELS_AT_RUNTIME, (
         "restore_graph is back to a runtime label — the restore must bound what it stores on, or "

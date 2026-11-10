@@ -111,12 +111,17 @@ _EMBED_BATCH = 400  # rows per UNWIND vecf32 re-encode query (falkordb inlines p
 #: whose labels include none of these is refused in the pre-mutation validation pass, so the vector
 #: restore can only ever run label-scoped against a label `run_vector_query` serves.
 #:
-#: ⛔ Refusing is the fail-closed direction, not a new restriction on legitimate dumps: a vector on
-#: a label no query path reaches is paid for and unreadable (`#5090` row 2's whole subject), so
-#: restoring one silently preserves a defect that a backup is the last chance to notice. The check
-#: runs in the SAME pre-mutation pass as `#3895`'s dangling-edge validation, so a refusal leaves the
-#: target graph untouched and the import endpoint maps it to a 422 + quarantine — never a partial
-#: restore.
+#: ⛔ Refusing is the fail-closed direction, and it IS a new restriction — saying otherwise would
+#: hide a DR-relevant behaviour change. An artifact written before D10 still holds
+#: ``(:Document {id, …})`` with an ``embedding``, so a dump that restored before `#11641` is now
+#: REFUSED unless the caller passes `allow_unserved_vectors=True` (the explicit, non-silent
+#: repair-on-read path — it keeps the node, drops the vector and reports it, so
+#: `migrate_kinds.relabel_legacy_documents(sdk)` can still run on the restored graph). The
+#: restriction exists because a vector on a label no query path reaches is paid for and unreadable
+#: (`#5090` row 2's whole subject), and restoring one silently preserves a defect that a backup is
+#: the last chance to notice. The check runs in the SAME pre-mutation pass as `#3895`'s
+#: dangling-edge validation, so a refusal leaves the target graph untouched and the import endpoint
+#: maps it to a 422 + quarantine — never a partial restore.
 #:
 #: ⛔ This tuple is a MIRROR of the query path's vocabulary, and it is pinned as one in BOTH
 #: directions (`tests/test_11641_runtime_vector_label.py`): a label added to
@@ -972,8 +977,13 @@ def _require_served_restore_labels(
             f"{list(labels)!r}, none of which `run_vector_query` serves "
             f"({sorted(_VECTOR_RESTORE_LABEL_SET)}). Restoring it would store a vector no "
             "read path can reach, so the artifact is refused before the target graph is "
-            "touched (#11641). Pass `allow_unserved_vectors=True` to restore it WITHOUT that "
-            "vector and repair the label afterwards — the path a pre-D10 `:Document` dump needs."
+            "touched (#11641). An OPERATOR can still recover the artifact: "
+            "`restore_backup(..., allow_unserved_vectors=True)` restores every other node and edge, "
+            "drops only this vector and reports it, so `relabel_legacy_documents()` can repair the "
+            "label afterwards — the path a pre-D10 `:Document` dump needs. That lever is deliberately "
+            "NOT exposed on the customer import route, for the same reason "
+            "`allow_dangling_edges` is not (#3895): it is a repair an operator runs after seeing the "
+            "drop, not a customer-side option that would hide it."
         )
     return strip, sorted(dropped)
 
@@ -1286,6 +1296,13 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         # Only reachable with allow_unserved_vectors=True — same rule: the strict
         # path raised before any node was created. Reported, never silent, and the
         # NODES are still restored so a relabel migration can repair them.
+        # ⚠️ Logged as well as returned, exactly as `dropped_edges` is: a caller that reads only
+        # `counts["nodes"]/["edges"]` would otherwise lose real vectors with nothing in the log.
+        logger.warning(
+            "restore_graph: dropped %d vector(s) on unserved label(s) %s — "
+            "allow_unserved_vectors=True (nodes kept so a relabel migration can repair them)",
+            dropped_vectors, dropped_vector_labels,
+        )
         result["dropped_vectors"] = dropped_vectors
         result["dropped_vector_labels"] = dropped_vector_labels
     return result

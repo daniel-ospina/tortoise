@@ -148,6 +148,7 @@ __all__ = [
     "statement_label_mutations",
     "statement_node_labels",
     "statement_pattern_labels",
+    "statement_unattributed_set_items",
     "statement_write_aliases",
     "statement_write_target_problem",
     "stored_embedding_vector_expr",
@@ -218,6 +219,51 @@ _INTERPOLATED_LABEL_RE = re.compile(
     rf"\(\s*(?:{_IDENT_FRAGMENT}\s*)?:\s*\{{")
 
 
+def _blank_string_literals(statement: str) -> str:
+    """``statement`` with every quoted STRING literal blanked to spaces — same length, same indices.
+
+    ⛔ The NAMING readers need this and the WRITE-TARGET readers get it from :func:`_depths`, which
+    marks a quoted span ``-1``. Without it the two halves of one module read the grammar differently:
+    measured at `1f82113dd`, ``MATCH (e:Event {eventId:$eid}) SET e.note = '(b:Batch)'`` made
+    :func:`statement_node_labels` return ``{'Batch', 'Event'}`` and ``SET e.note = '(n:{x})'`` made
+    :func:`statement_interpolates_label` return True — so the door REFUSED a legitimate statement
+    while naming a label the statement never binds. Fail-closed, but a false positive whose message
+    is not even true, which is the one error class this seam's own docstrings promise it does not
+    produce.
+
+    BACKTICKED spans are NOT blanked: a backtick is Cypher's spelling of an IDENTIFIER (the engine's
+    lexer returns ``Token::IdentifierOrKeyword`` for it), so `` (`b`:Batch) `` must keep reading as
+    the alias ``b``. A single or double quote opens a STRING, which can never be a node label.
+    """
+    out = list(statement)
+    index = 0
+    length = len(statement)
+    quote: str | None = None
+    escaped = False
+    while index < length:
+        char = statement[index]
+        if quote is not None:
+            out[index] = " "
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            index += 1
+            continue
+        if char in ("'", '"'):
+            quote = char
+            out[index] = " "
+        index += 1
+    return "".join(out)
+
+
+def _naming_text(statement: str) -> str:
+    """The text the NAMING readers read: comments AND string literals blanked, indices preserved."""
+    return _blank_string_literals(_blank_comments(statement))
+
+
 def statement_node_labels(statement: str) -> frozenset[str]:
     """Every node label a Cypher statement binds in a node PATTERN (``(x:Label``).
 
@@ -239,11 +285,12 @@ def statement_node_labels(statement: str) -> frozenset[str]:
 
     Labels are returned UNQUOTED, so `` (`b`:Batch) `` and `` (b:Batch) `` both read ``Batch`` —
     the engine strips the quotes too, and reporting them would make a served label look unserved.
-    Cypher comments are blanked first, so a label named inside a comment is not a label this
-    statement binds.
+    Cypher comments AND quoted string literals are blanked first (see :func:`_naming_text`), so a
+    label named inside a comment — or inside a string, as in ``SET e.note = '(b:Batch)'`` — is not a
+    label this statement binds. A BACKTICKED identifier is syntax, not a string, and is kept.
     """
     return frozenset(label.strip("`") for label in
-                     _STATEMENT_LABEL_RE.findall(_blank_comments(statement)))
+                     _STATEMENT_LABEL_RE.findall(_naming_text(statement)))
 
 
 def statement_interpolates_label(statement: str) -> bool:
@@ -259,7 +306,7 @@ def statement_interpolates_label(statement: str) -> bool:
     both: *which labels does the statement name* (:func:`statement_node_labels`) and *does it name
     one by interpolation* (this). Nothing here inspects a graph — it is a text-level bound.
     """
-    return bool(_INTERPOLATED_LABEL_RE.search(_blank_comments(statement)))
+    return bool(_INTERPOLATED_LABEL_RE.search(_naming_text(statement)))
 
 
 #: ── the WRITE TARGET: the node the statement writes TO (#11641) ──────────────────────────────
