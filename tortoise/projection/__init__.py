@@ -19447,9 +19447,10 @@ class FalkorProjection(
 
         So the fixup's real precondition is tested instead:
 
-            an array-valued ``search_keys`` anywhere, or — for the legacy
-            single-field index — a Point FULLTEXT index still missing
-            ``search_keys``.
+            an array-valued ``search_keys`` anywhere, or — for a legacy
+            Point FULLTEXT index — ANY field the declared set names that the
+            index does not hold (``_POINT_FTS_TARGET_FIELDS``; ``search_keys``
+            alone until #11682 added ``quote``).
 
         That check is CORRECT but NOT CHEAP. It is an unindexed label scan
         over ``:Point`` (``EXPLAIN`` → ``Node By Label Scan``; no RANGE index

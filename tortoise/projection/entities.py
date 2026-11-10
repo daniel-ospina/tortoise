@@ -1187,9 +1187,14 @@ def point_identifier_aliases(props: dict) -> list[str]:
     additive text in a channel that is already indexed.
 
     ⛔ ``quote`` is deliberately NOT an alias source (#11682). It is indexed
-    now, but it is the speaker's PROSE: deriving aliases from it would spend
-    index space on ``sprint2024`` from "sprint 2024" — exactly the noise the
-    ``space_separated=False`` rule below refuses on the write side.
+    now, but it is the speaker's PROSE, and the write-side extractor
+    (``space_separated=False``) still mints an alias from any EXPLICIT
+    ``-``/``_`` spelling — so prose would contribute ``costeffective`` from
+    "cost-effective", ``endtoend`` from "end-to-end", and similar composites
+    that belong to nobody's identifier vocabulary. The alias channel is the
+    extractor's own keys; the verbatim quote is the index's. (The exclusion is
+    not what refuses ``sprint2024`` — ``space_separated=False`` already does
+    that for any whitespace-separated pair.)
 
     Two properties this function deliberately has, both from the ruling:
 

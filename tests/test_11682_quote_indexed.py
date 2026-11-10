@@ -39,6 +39,12 @@ WHAT THIS PINS (each revert must red a named test):
   * drop ``"quote": r[7]`` from the snapshot's ROW MAPPING (or shift it)
         -> the ``row["quote"] == VERBATIM`` / ``row["has_answer"] is False``
            assertions in `test_the_bm25_mirror_finds_the_quote_too` red;
+  * revert the snapshot's JOIN (``texts = [point_index_text(p) …]``) or its
+    scorer join to ``index_text(content, search_keys)``
+        -> the masked-embedder arm in that test reds (the sparse vocabulary
+           loses ``quokka`` and ``search_snapshot`` misses the point), and
+           `test_the_bm25_corpus_select_and_join_carry_every_declared_field`
+           goes on red for the BM25 mirror's own select/join;
 
 BOTH DIRECTIONS are asserted, and the negative controls are explicit: the
 content-only word is still found (the leg was not narrowed), a word in NEITHER
@@ -59,7 +65,8 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import pytest  # noqa: I001
 
-from tests._live_utils import _skip_unless_live_uri
+from tests._live_utils import _skip_unless_live_uri, mask_embedder
+from tests._index_settle import index_rows_after_settle
 from tortoise.search_engine import (
     reset_circuit_breakers,
     run_bm25_query,
@@ -159,15 +166,16 @@ def _quoted_point(sdk) -> str:
     return pid
 
 
-def _point_fulltext_fields(graph) -> set[str] | None:
+def _point_fulltext_fields_from_rows(rows) -> set[str] | None:
     """The Point FULLTEXT field set, read from the row that carries FULLTEXT.
 
     Row-per-label is what this engine returns today, but taking the LAST Point
     row would read another index's fields if the engine ever split them; the
     FULLTEXT row is the same rule ``_schema_is_current`` and the migration
-    probe use.
+    probe use. Rows-based so a caller that WAITED for the catalogue can reuse
+    the read it settled on instead of sampling a second time.
     """
-    for row in graph.query("CALL db.indexes()").result_set:
+    for row in rows:
         if not row or row[0] != "Point":
             continue
         kinds = row[2] or {}
@@ -176,6 +184,11 @@ def _point_fulltext_fields(graph) -> set[str] | None:
         if fields:
             return fields
     return None
+
+
+def _point_fulltext_fields(graph) -> set[str] | None:
+    return _point_fulltext_fields_from_rows(
+        graph.query("CALL db.indexes()").result_set)
 
 
 def test_a_verbatim_quote_only_phrase_is_findable_by_the_fts_leg(sdk) -> None:
@@ -230,6 +243,7 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     # The degraded snapshot lane reads the SAME set: its query must select the
     # quote column, or the mirror silently falls back to content ∪ search_keys.
     from tortoise import fallback_snapshot as fs
+
     assert "quote" in fs._SNAPSHOT_QUERY, (
         "the snapshot mirror must carry the verbatim quote (#11682)")
 
@@ -237,8 +251,30 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     # index is silent: `quote` and `has_answer` would swap keys, the query-string
     # assertion above would still pass, and the mirror's corpus text would be
     # built from the wrong field (#11706 review round 1, F5).
-    snap = fs.build_snapshot(sdk._get_proj())
-    assert snap is not None, "the snapshot did not build on a two-point graph"
+    #
+    # The embedder is masked so `build_snapshot` takes its TF-IDF path: that is
+    # what makes the JOIN observable at all — the sparse vocabulary is built
+    # from the corpus text, so "quokka" can only be in it if the join read the
+    # quote. With a dense model the joined text would be hidden inside vectors
+    # and the assertions below could pass either way (#11706 round 2, F1).
+    with mask_embedder():
+        snap = fs.build_snapshot(sdk._get_proj())
+        assert snap is not None, "the snapshot did not build on a two-point graph"
+        assert snap["vectorizer"] is not None, (
+            "the snapshot took its DENSE path despite the mask — the join is "
+            "not observable here")
+        vocab = {str(t).casefold() for t in snap["vectorizer"].vocabulary_}
+        assert QUOTE_ONLY_TERM.casefold() in vocab, (
+            "the snapshot's CORPUS TEXT does not contain the quote's token — "
+            "the build join was reverted to content ∪ search_keys")
+        snap_hits = [r["id"] for r in fs.search_snapshot(
+            QUOTE_ONLY_TERM, snap, threshold=0.01)]
+        assert pid in snap_hits, (
+            "the degraded lane cannot answer a verbatim quote; "
+            f"hits={snap_hits}")
+        assert snap_hits.index(pid) == 0 or len(snap_hits) == 1, (
+            f"the quote-bearing point did not win its own query: {snap_hits}")
+
     row = next(p for p in snap["points"] if p["id"] == pid)
     assert row["quote"] == VERBATIM, (
         "the snapshot's row mapping did not carry the verbatim quote; "
@@ -246,6 +282,53 @@ def test_the_bm25_mirror_finds_the_quote_too(sdk) -> None:
     assert row["has_answer"] is False, (
         "the row mapping crossed its columns — `has_answer` reads the quote "
         f"column; row={row}")
+
+
+def test_the_bm25_corpus_select_and_join_carry_every_declared_field() -> None:
+    """Hermetic: the BM25 arm's COLUMN LIST and its join, both from the constant.
+
+    The declaration cannot widen a mirror's select (``_SNAPSHOT_QUERY`` had to
+    be edited by hand for ``quote``), so this walks the declared set against the
+    Cypher the arm actually emits, then proves the JOIN reads the quote: a
+    quote-only query must return the row whose only record of it is the quote.
+    ``bm25_scores`` OMITS documents that share no query token, so a reverted
+    join makes the hit ABSENT rather than zero-scored — the absence here is a
+    real signal, not an empty corpus (#11706 round 2, F1/F2).
+    """
+    from types import SimpleNamespace
+
+    from tortoise.sparse import POINT_INDEX_TEXT_FIELDS
+
+    class _FakeGraph:
+        def __init__(self, rows):
+            self.rows = rows
+            self.cypher = ""
+
+        def query(self, cypher, params=None, timeout=None):
+            self.cypher = cypher
+            return SimpleNamespace(result_set=self.rows)
+
+    reset_circuit_breakers()
+    graph = _FakeGraph([
+        ("p1", PARAPHRASE, None, VERBATIM, None),
+        ("decoy", DECOY, None, "", None),
+    ])
+    try:
+        hits = dict(run_bm25_query(
+            graph, QUOTE_ONLY_TERM, entity_type="point", limit=10,
+            excluded_statuses=()))
+    finally:
+        reset_circuit_breakers()
+
+    for field in POINT_INDEX_TEXT_FIELDS:
+        assert (f"n.{field}" in graph.cypher
+                or f"coalesce(n.{field}" in graph.cypher), (
+                    f"the BM25 corpus read does not select {field!r} — the "
+                    "declared Point lexical field set and this mirror drifted")
+    assert "p1" in hits, (
+        "the BM25 JOIN must read the quote: a quote-only query missed the row "
+        f"whose quote holds it; hits={hits}")
+    assert "decoy" not in hits
 
 
 def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None:
@@ -275,17 +358,29 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
             continue
     if not dropped:
         pytest.skip("engine has no Point fulltext drop procedure")
-    try:
-        proj._create_fulltext_index("Point", ["content", "search_keys"])
-    except Exception as e:
-        pytest.skip(f"engine cannot create a fulltext index: {e}")
+    # ⛔ NOT wrapped in a skip. This test IS the migration pin; if the engine
+    # cannot build the two-field legacy index, the pin never ran and a green
+    # lane would be a lie (#11706 round 2, F3 — the first version swallowed
+    # this, including the documented drop/create ordering hazard). The ONLY
+    # legitimate skip here is the missing drop procedure above, which is a
+    # property of the engine rather than of this change.
+    proj._create_fulltext_index("Point", ["content", "search_keys"])
+
+    # The create/drop are NOT synchronous with their return (tests/_index_settle.py
+    # documents the hazard: DROP INDEX returns before the indexer applies it),
+    # so the pre-state is WAITED FOR, not sampled — the same
+    # `index_rows_after_settle` the write-authority suite uses.
+    rows = index_rows_after_settle(
+        proj,
+        until=lambda r: _point_fulltext_fields_from_rows(r)
+        == {"content", "search_keys"})
 
     # The legacy state, pinned on the CATALOGUE (not only on a query that also
     # returns [] when no index exists at all): the point exists, the index is
     # EXACTLY the pre-#11682 shape, and its quote is not indexed.
-    assert _point_fulltext_fields(g) == {"content", "search_keys"}, (
+    assert _point_fulltext_fields_from_rows(rows) == {"content", "search_keys"}, (
         "fixture not reached: expected the pre-#11682 two-field index, got "
-        f"{_point_fulltext_fields(g)}")
+        f"{_point_fulltext_fields_from_rows(rows)}")
     assert [i for i, _ in run_fts_query(
         g, QUOTE_ONLY_TERM, entity_type="point")] == [], (
             "fixture not reached: the two-field index should NOT match a "
@@ -296,7 +391,10 @@ def test_a_pre_11682_two_field_index_is_upgraded_to_carry_the_quote(sdk) -> None
 
     proj._ensure_indexes()
 
-    fields = _point_fulltext_fields(g)
+    rows = index_rows_after_settle(
+        proj,
+        until=lambda r: "quote" in (_point_fulltext_fields_from_rows(r) or set()))
+    fields = _point_fulltext_fields_from_rows(rows)
     assert fields and "quote" in fields, (
         f"the sweep must widen the Point index to carry the quote, got {fields}")
     assert proj._schema_is_current() is True

@@ -39,11 +39,12 @@ index's fields nor its collection statistics.
 
 ⚠️ That is a statement about the advisory, NOT a promise that the index set is
 frozen. **#11682 later widened it deliberately** — the Point FULLTEXT index now
-carries the verbatim `quote`, which IS a ranking change (it moves collection
-statistics, so a point whose own text did not change can score differently
-once a peer gains a quote; measured by #11706's first review round). The
-owner's ordering on this issue is the one that governs it: fixes first, the
-#8486 batch measures afterwards. The widening is recorded in
+carries the verbatim `quote`, which IS a ranking change: it moves collection
+statistics (the field length and the corpus average), so a point whose own text
+did not change can score differently once a peer gains a quote. The ranking
+effect is NOT measured here; #8486 is where this family of changes is measured,
+and the owner's ordering on this issue is what governs it — fixes first, that
+batch afterwards. The widening is recorded in
 `docs/architecture/STORAGE-ARCHITECTURE.md §12.1b`. The helper does no graph
 read of its own — the one non-payload input is the
 stored text the `update_point` door reads and hands over.
@@ -362,7 +363,9 @@ def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
     update — while the sentence claimed something about the index it had not
     looked at (measured: stored content "the body mentions capstone heavily",
     `update_point(pid, name="capstone-9664")` warned, and the sentence was
-    false). The door now reads the stored content + search_keys.
+    false). The door now reads the stored content + search_keys (+ the
+    verbatim `quote`, an indexed field since #11682) — the text the index will
+    hold after the write.
 
     FAIL VALUE: drop `stored_text=` from the update door and this reds.
     """
