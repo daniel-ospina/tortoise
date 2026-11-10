@@ -613,13 +613,21 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "'docker://:falkordb@localhost:6379' \\",
         ),
         # #11744 follow-up: a MEASUREMENT transcript, not an instruction. The plan
-        # doc quotes the command that actually produced the recorded FAIL
-        # ("Measured, not argued — the re-take made the required check fail"), and
-        # the tool gained its guard afterwards, so rewriting the line to
-        # `uv run python` would falsify the record to clear a red — the failure
-        # mode this census's own doctrine forbids. Third instance of this class
-        # (#9118's comment, `tools/ci_check_repair.py`, this one), recorded on
-        # #9159.
+        # doc quotes the command that produced the recorded FAIL ("Measured, not
+        # argued — the re-take made the required check fail"), and that command DID
+        # resolve where it ran: the box's `python3` was >= 3.12. The census flags
+        # the FORM, because a reader on a pre-3.12 ambient gets the tool's refusal
+        # instead — so rewriting this line to `uv run python` would falsify the
+        # record in order to clear a red, which is the failure mode this census's
+        # own doctrine forbids.
+        # ⛔ NOT because the guard arrived later: the guard landed 2026-10-21
+        # (`a6085af8459`) and the doc-scan leg 2026-10-08 (`21617e6222`), both
+        # BEFORE this doc (2026-11-10). The line was a census red from the day it
+        # appeared; the exemption is what makes the record keepable.
+        # Third tracked instance of the class on #9159 — after
+        # `tools/ci_check_repair.py`'s #9118 comment and then
+        # `docs/plans/2026-10-18-7951-delete-point-outbox.md:210` — recorded there
+        # as a comment rather than filed as a peer.
         (
             "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
             "$ python3 tools/capstone_preregistration_check.py --dir "
