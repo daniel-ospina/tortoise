@@ -1078,18 +1078,39 @@ def test_wire_identity_never_moves_an_existing_key():
             assert session_key_of({"id": "e6", spell: junk}) == (
                 "idx:point:e6"), spell
 
-    # ... and with NO ``id`` at all the two spellings land on the same phantom
-    # bucket: a non-str identity is DISCARDED rather than keyed, so it shares
-    # the identity-less ``idx:-1`` bucket instead of becoming a bucket of its
-    # own. Pinned deliberately, because this is the one place the fail-closed
-    # leg FUSES two values (the int ``5`` and the int ``6`` are the same bucket
-    # here) and the fusion is invisible unless asserted. It is the same answer
-    # the camel leg has given since #10540, and it binds only the untyped seam
-    # ``retrieval.session_key_of`` documents — no in-repo pool carries a
-    # non-``str`` session id, and the alternative (keying the raw int) is the
-    # raising shape this arm replaces.
-    assert session_key_of({"session_id": 5}) == "idx:-1"
-    assert session_key_of({"sessionId": 5}) == "idx:-1"
+
+def test_a_non_str_session_identity_is_discarded_not_keyed_11382():
+    """#11382, the NO-`id` half of the non-str arm: a non-str identity is
+    DISCARDED, so the hit falls all the way to the identity-less bucket.
+
+    Its own test, not a tail of the arm above, so each guard has an
+    attributable mutation row: in one function the id-bearing loop fails
+    first and this assert could never be the row that goes red.
+
+    ⚠️ This is the one place the fail-closed leg FUSES two distinct values:
+    with no ``id`` and no ``lme_session_index``, ``{"session_id": 5}`` and
+    ``{"session_id": 6}`` are the SAME ``idx:-1`` bucket — and so is a hit
+    carrying no identity at all. Pinned deliberately rather than left silent,
+    because the alternative (keying the raw int) is the raising shape this arm
+    replaces: pre-#11382 the two were distinct dict keys AND every
+    key-reading caller crashed on them. It binds only the untyped seam
+    ``retrieval.session_key_of`` documents — no in-repo pool carries a
+    non-``str`` session id — and it is the same answer the camel leg has given
+    since #10540, now spelled by both.
+
+    An ``id`` changes the answer, which is why the arm above asserts
+    ``idx:point:e6``: the per-hit bucket is per-ID, and only a hit with no id
+    at all reaches the shared ``idx:-1``.
+    """
+    for spell in ("sessionId", "session_id"):
+        assert session_key_of({spell: 5}) == "idx:-1", spell
+        # ... a SECOND distinct value lands in the same bucket, which is the
+        # fusion this test exists to pin: 5 and 6 are one identity-less bucket.
+        assert session_key_of({spell: 6}) == "idx:-1", spell
+        # ... and an explicit index still outranks the phantom bucket, so the
+        # collapse above cannot swallow an eval hit's own ``idx:{n}``.
+        assert session_key_of({spell: 5, "lme_session_index": 3}) == (
+            "idx:3"), spell
 
 
 def test_wire_identity_is_stripped_like_the_reader_names_it():
