@@ -17445,11 +17445,10 @@ class TortoiseSDK:
         # `contentHash`, `ingestedAt` (`projection/edges.py::_mint_source_stub`
         # is the replay-shared twin of this shape) — and the SET clauses then
         # upgrade it. Running earlier must not change the node a capture lands —
-        # the claim `test_capture_path_source_shape_is_unchanged_by_the_early_materialization`
-        # used to pin against the pre-#8501 shape, until #4282 deleted
-        # `tests/test_8501_capture_path_anchor.py` whole with the SDK capture
-        # door. NOTHING in the tree pins that property set now; a caller reading
-        # this comment should treat the invariance as asserted, not verified.
+        # the invariance `test_capture_path_source_shape_is_unchanged_by_the_early_materialization`
+        # pins, in `tests/test_8501_capture_path_anchor.py` (re-pointed to this
+        # door by #4282, which retired the public `capture_session` wrapper; the
+        # test and its siblings still run against the door below).
         from .projection.edges import _mint_source_stub
         # `now` is the CAPTURE's instant, not a fresh clock read: for a capture
         # that mints no Point this is the only writer of `ingestedAt` on the arm
@@ -17634,14 +17633,13 @@ class TortoiseSDK:
         #     from the node the SET just wrote — not `now`. On the lane where this
         #     door's own mint CREATES the stub, the two are the same value (the
         #     mint is `_mint_source_stub(..., now=now)`, and the SET coalesces
-        #     into `$now`). (The two pins that said so —
+        #     into `$now`). (The two pins that say so —
         #     `test_a_keyless_capture_stamps_its_stub_with_the_capture_instant`
         #     and
         #     `test_the_extracting_lane_stamps_its_stub_with_the_capture_instant`
-        #     — lived in `tests/test_8501_capture_path_anchor.py`, deleted whole
-        #     by #4282 with the SDK capture door, so the mint-equals-`$now` arm
-        #     is now UNPINNED; one of the two must be restored or this comment
-        #     stays a claim.) On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
+        #     — live in `tests/test_8501_capture_path_anchor.py`, re-pointed to
+        #     this door by #4282 rather than deleted with the retired public
+        #     wrapper.) On a PRE-EXISTING stub they DIFFER: the live SET's `coalesce`
         #     keeps the earlier writer's instant (#398's never-overwrite contract
         #     — `ingestedAt` means when Tortoise FIRST saw this source), so a
         #     record stating `now` journals a value the write never wrote (#9451).
@@ -45599,51 +45597,6 @@ class TortoiseSDK:
         return result
 
     # ── T3 internal helpers ────────────────────────────────────────────
-
-    def _index_resolve_corpus_root(self, file_path: str, corpus_root: str | None,
-                                   corpus_name: str | None) -> tuple:
-        """§6.1 I6 pin: the corpus_root default resolution ``index_file`` used.
-
-        ⚠️ ``index_file``/``index_directory`` are among the 26 SDK methods #4282
-        deleted, and this helper lost its only caller with them. It is kept as the
-        readable record of the resolution contract (its error strings still name
-        ``index_file``), NOT as live surface: nothing calls it and no test pins it,
-        so treat it as documentation rather than a behaviour anyone exercises.
-
-        Explicit param → realpath-resolved. Else the nearest ancestor of the
-        file that equals TORTOISE_INGEST_BASE_DIR; else ValueError demanding
-        an explicit corpus_root (never an implicit walk-root guess). Guarantees
-        single-file + directory-sweep entry points derive the SAME corpus://
-        url for the same file (E2E-4 cross-entry-point variant).
-        """
-        import os as _os
-        from pathlib import Path
-        if corpus_root is not None:
-            root = Path(_os.path.realpath(str(corpus_root)))
-            # the file must resolve under the declared root (escape policy)
-            from .file_indexer import _resolve_rel_path
-            _resolve_rel_path(file_path, root)  # raises ValueError on escape
-            return root, (corpus_name or root.name)
-        base = _os.environ.get("TORTOISE_INGEST_BASE_DIR")
-        if base:
-            base_real = _os.path.realpath(_os.path.expanduser(base))
-            p = Path(_os.path.realpath(str(file_path)))
-            while True:
-                if str(p) == base_real:
-                    return p, (corpus_name or p.name)
-                parent = p.parent
-                if parent == p:
-                    break
-                p = parent
-            raise ValueError(
-                f"index_file: file {file_path!r} is not under "
-                f"TORTOISE_INGEST_BASE_DIR ({base_real}) and no corpus_root "
-                f"was given — pass corpus_root explicitly (§6.1 I6)."
-            )
-        raise ValueError(
-            f"index_file: corpus_root required — TORTOISE_INGEST_BASE_DIR is "  # noqa: F541
-            f"unset and no corpus_root was given (§6.1 I6)."  # noqa: F541
-        )
 
     def _index_max_bytes(self) -> int:
         """Two-layer size-guard threshold (§6.4): env TORTOISE_MAX_FILE_MB as

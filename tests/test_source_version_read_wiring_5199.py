@@ -8,12 +8,15 @@ comments only. `TortoiseSDK.get_provenance_chain` walked the very hop the note
 rides and returned the source's properties — which include the source's CURRENT
 version — but never the note, so even that reader could not compare the two.
 
-What this wiring ships: that reader reports the note, the source's current
-version, and a derived ``linkCurrency`` **per link** — one row per
-``(source, reference)`` hop, pinned so resolved links come before the
-self-terminal fallback and annotated links before unannotated ones. That is a
-**presentation** order, not a total one — the reader's docstring says so, and
-tests below pin the shapes that could otherwise tie.
+What this wiring shipped, while the reader existed: ``get_provenance_chain``
+reported the note, the source's current version, and a derived
+``linkCurrency`` **per link** — one row per ``(source, reference)`` hop, pinned
+so resolved links came before the self-terminal fallback and annotated links
+before unannotated ones. That was a **presentation** order, not a total one —
+the reader's docstring said so, and the tests below pinned the shapes that
+could otherwise tie. Both the reader and ``linkCurrency`` were retired by
+`#4282`; the per-link tests went with them, and the surviving reader is
+``provenance()`` (single-chain), whose own module pins it.
 
 What it deliberately does NOT ship is a currency on the SEARCH hit, and the
 reason is worth keeping: a hit is a **Point**, and a Point's currency is an
@@ -93,34 +96,6 @@ def test_currency_is_derived_not_stored():
         )
     finally:
         sdk.close()
-
-
-# ── the SDK reader ───────────────────────────────────────────────────────────
-
-def _point_and_source(sdk, *, current, source="c.txt", point="pt_1"):
-    proj = sdk._get_proj()
-    proj.g.query(
-        f"CREATE (p:Point {{id:'{point}', content:'a fact', pointKind:'fact', "
-        f"status:'live', createdAt:'2024-01-01'}})"
-    )
-    proj.g.query(
-        f"CREATE (s:Source {{url:'{source}', sourceKind:'corpus', "
-        f"title:'{source}', contentHash:'{current}', ingestedAt:'2024-01-01'}})"
-    )
-    proj.g.query(
-        f"MATCH (p:Point {{id:'{point}'}}), (s:Source {{url:'{source}'}}) "
-        f"CREATE (p)-[:extractedFrom]->(s)"
-    )
-    return proj
-
-
-def _annotate(proj, ref_url, version, source="c.txt"):
-    proj.g.query(
-        f"MERGE (d:Source {{url:'{ref_url}'}}) "
-        f"WITH d MATCH (s:Source {{url:'{source}'}}) "
-        f"CREATE (s)-[r:references]->(d) SET r.sourceVersion = $v",
-        params={"v": version},
-    )
 
 
 # ── the deliberate cut ───────────────────────────────────────────────────────

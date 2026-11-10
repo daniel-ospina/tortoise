@@ -191,9 +191,9 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
    produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
-   the capture path at `tortoise/sdk.py:17579`). (The probe's own docstring cites it too and was
+   the capture path at `tortoise/sdk.py:17578`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
-   insertion then moved both; both now read `17579` (#4282's -102-method deletion moved it again).) What is missing is the *declared part-whole* edge, not every structural
+   insertion then moved both; both now read `17578` (#4282's -102-method deletion moved it again).) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
 3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
@@ -759,7 +759,7 @@ uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
 sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
-sed -n '17579p' tortoise/sdk.py                             # the call (`references`'s writer)
+sed -n '17578p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
 # BUNDLE's OWN registration of the A1 row (#10982 landed it AFTER this record was written),

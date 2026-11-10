@@ -426,7 +426,7 @@ derivation target labels are `_DERIVATION_REFERENCES_LABELS` (`edges.py:747`: `E
 got one of them backwards: `extractedFrom` points FROM the derived node
 (`(Point)-[:extractedFrom]->(GraphEvent|Event)`), while `references` points AT it
 (`(Source)-[:references]->(Event|Document)` — `link_source_to_event`, `edges.py:2832-2857`,
-reached from the capture path at `sdk.py:17579` (`proj.link_source_to_event(source_key,
+reached from the capture path at `sdk.py:17578` (`proj.link_source_to_event(source_key,
 event_id)`)). So the rule now applied — printed in the log,
 applied by one Cypher query per label — is:
 
