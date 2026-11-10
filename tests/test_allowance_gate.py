@@ -878,6 +878,78 @@ def test_a_control_plane_bound_miss_on_the_carry_is_the_CONTROL_PLANE_503(
         exc.value.detail
 
 
+def test_the_capture_door_gets_a_capture_shaped_503_not_the_sign_in_copy(
+        monkeypatch):
+    """#10967: a control-plane stall on the CAPTURE door must say so.
+
+    ``capture_session`` writes a refused capture's ``detail`` into the
+    org-visible last-error slot (``_record_capture_last_error`` stringifies a
+    dict detail via its ``message``), and the dashboard renders that string
+    under ``Last attempt — …``. With no factory, ``_cp_offload`` raises
+    ``_control_plane_unavailable``, whose message is the SIGN-IN line — so a
+    tenant whose capture was refused by a QUOTA control-plane stall was told
+    that their sign-in failed, on the wire AND on the dashboard.
+
+    Both directions in one test, because the risk in a copy fix is
+    OVER-widening: the sign-in line is a contract with
+    ``website/apps/dashboard/public/signup.html`` and every other
+    control-plane door legitimately carries it.
+
+    * the capture door's factory → the capture body, ``error_code`` unchanged;
+    * a door that passes NO factory → the sign-in body, byte for byte (the
+      #3498 contract that makes the override opt-in at all).
+
+    Mutation this REDs: drop ``unavailable=unavailable`` from
+    ``_carry_allowances_off_loop``'s ``_cp_offload`` call — the first refusal
+    becomes the sign-in copy. Apply the factory unconditionally (ignore the
+    argument) and the second refusal reds instead.
+
+    The rendered line is ``Last attempt — <message>``, so the message carries NO
+    second em dash: this test pins a colon after its first clause for that
+    reason (a copy edit that reintroduces one renders two separators in one
+    sentence on the dashboard).
+    """
+    import asyncio
+    import time
+
+    from fastapi import HTTPException
+
+    import tortoise.hosted_api as ha
+    from tortoise import monitoring, quota, supabase_control
+
+    monkeypatch.setattr(monitoring, "CONTROL_PLANE_OFFLOAD_TIMEOUT_S", 0.05)
+    monkeypatch.setattr(supabase_control, "is_supabase_enabled", lambda: True)
+    monkeypatch.setattr(quota, "resolve_org_limits",
+                        lambda _oid: time.sleep(0.4))
+
+    def _refusal(unavailable):
+        async def _run():
+            await ha._check_org_limit_off_loop(
+                _rest_org(), "sessions", unavailable=unavailable)
+
+        with pytest.raises(HTTPException) as exc:
+            asyncio.run(_run())
+        assert exc.value.status_code == 503, exc.value
+        return exc.value.detail
+
+    capture = _refusal(ha._capture_control_plane_unavailable)
+    sign_in = _refusal(None)
+
+    # A copy fix must not mint a new client-visible CODE: the failing dependency
+    # really is the control plane in both cases.
+    assert capture["error_code"] == "control_plane_unavailable", capture
+    assert sign_in["error_code"] == "control_plane_unavailable", sign_in
+
+    assert capture["message"] != sign_in["message"], (capture, sign_in)
+    assert "Sign-in" not in capture["message"], capture
+    assert "not stored" in capture["message"], capture
+    # the dashboard prefix is `Last attempt — `, so the message must not carry a
+    # SECOND em dash (two separators in one rendered sentence)
+    assert "—" not in capture["message"], capture
+    assert sign_in["message"] == (
+        "Sign-in is temporarily unavailable — try again in a moment."), sign_in
+
+
 def test_a_no_record_org_is_resolved_ONCE_across_the_two_lanes(monkeypatch):
     """The marker: the graph-lane half must not re-read a LOOKUP MISS.
 

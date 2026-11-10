@@ -91,7 +91,81 @@ def test_live_skill_exists_at_the_defined_path():
         assert step in content, f"SKILL.md must reference the canonical step {step}"
     for fork in ("'self'", "'build'"):
         assert fork in content, f"SKILL.md must reference fork {fork}"
-    assert "tortoise_health" in content, "SKILL.md must verify via tortoise_health"
+    # #5439: the served document must not INSTRUCT a retired tool. The COUNT is the
+    # assertion, not a presence check — and that distinction is the whole point:
+    # the document legitimately keeps exactly ONE mention, the ChatGPT carve-out's
+    # retirement disclosure ("the legacy `tortoise_health` name is retired, so it is
+    # absent from `tools/list`"). A presence check for the advertised call is
+    # satisfied BY that disclosure, which says the opposite of what it appears to
+    # pin: measured on the pre-fix blob, `tortoise_graph_overview(section="health")`
+    # already occurs once, at the disclosure, so reverting all ten instruction sites
+    # left such an assertion GREEN (review finding F1 on PR #11719 — the same
+    # NAME-is-weaker-than-the-CALL class this file documents at #10914 below).
+    #
+    # ⛔ THE DISCLOSURE'S OWN SENTENCE IS THE PIN, not the word "retired" (#11719
+    # review, third head, finding 2 — measured there before this was written).
+    # `"retired" in line` is a spelling an INSTRUCTION can also carry: rewriting
+    # the disclosure to "`tortoise_health` is retired, but call it anyway —
+    # tools/list hides it and" left one mention, containing "retired", and this
+    # guard PASSED while the document instructed a name absent from `tools/list`.
+    # The count alone cannot tell the disclosure from an instruction either (that
+    # is finding 1, one head earlier). So the property is: the document names the
+    # retired tool EXACTLY ONCE, and that occurrence is the disclosure — the one
+    # that names the NAME as retired, says it is absent from `tools/list`, and
+    # says it will not appear in the connector's grant.
+    #
+    # ⛔ THE COUNT IS OVER OCCURRENCES OF THE NAME, NOT LINES (#11719 review,
+    # fourth head, finding 1 — measured there before this was written). A count of
+    # LINES says nothing about what else shares the line: appending an instruction
+    # ON THE LINE THAT CARRIES THE NAME — "`tortoise_health` name is retired, so it
+    # is absent from `tools/list` and — but call `tortoise_health` anyway if the
+    # container is missing." — leaves ONE line naming it, and the line-count form
+    # PASSED (measured: `pytest tests/test_onboarding_variants.py -q` → 42 passed)
+    # while the document instructed a
+    # name absent from `tools/list`. An append AFTER `(#3883)` lands on the NEXT
+    # line instead, which the line-count form DOES catch — so the line count is
+    # defeated by SHAPE (re-wrap the disclosure and the same instruction slips
+    # through), and only the occurrence count is not. Counting the NAME closes it:
+    # with `_flat.count(name) == 1` AND the disclosure present, the single
+    # occurrence
+    # of the name is necessarily INSIDE the disclosure sentence, so no second site
+    # can exist — on that line or any other. (Pre-fix blob: 11 occurrences. This
+    # head: 1, the disclosure alone.)
+    #
+    # Matched against the whitespace-normalised document so re-wrapping the
+    # paragraph cannot red a correct document the way a line-shaped pin would; a
+    # legitimate REWORD of the disclosure moves this pin with it, deliberately,
+    # because the sentence is what the served document promises the ChatGPT
+    # reader.
+    _flat = " ".join(content.split())
+    _disclosure = ("`tortoise_health` name is retired, so it is absent from "
+                   "`tools/list` and will not appear in this connector's tool "
+                   "grant (#3883)")
+    _retired_hits = [ln for ln in content.splitlines() if "tortoise_health" in ln]
+    _occurrences = _flat.count("tortoise_health")
+    assert _occurrences == 1 and _disclosure in _flat, (
+        "the served document must name the RETIRED `tortoise_health` ONLY inside "
+        f"its retirement disclosure; found {_occurrences} occurrence(s) of the "
+        f"name across {len(_retired_hits)} line(s): {_retired_hits[:3]}. The "
+        f"disclosure sentence is {_disclosure!r}. "
+        'The verify call is tortoise_graph_overview(section="health") (#5439)')
+    # ⛔ THE VERIFY PIN IS WRAP-INSENSITIVE TOO, for the same reason the two
+    # assertions above are (review finding on `f36e0a5abb`, P3 — measured there
+    # before this was written). It was `in content`, a raw-text, line-shaped pin
+    # sitting three lines under a comment stating that pins are matched against
+    # the whitespace-NORMALISED document "so re-wrapping the paragraph cannot red
+    # a correct document". Measured: re-wrapping §4's step the way it renders —
+    # "1. Call" / "   `tortoise_graph_overview(section=\"health\")` (MCP tool, …)"
+    # — leaves the document CORRECT and reds this pin. A false block on true prose
+    # trains the next author to delete the pin instead of keeping the order (the
+    # #3429 failure this file already records below). `_flat` is in scope from
+    # above, so the fix is the haystack: the rendered `1. Call …` prefix is kept,
+    # which is what makes it non-vacuous — the ChatGPT disclosure carries the bare
+    # call string, but it does not carry the imperative.
+    assert '1. Call `tortoise_graph_overview(section="health")`' in _flat, (
+        "the §4 verify step must name the ADVERTISED health section — a retired "
+        "name is absent from `tools/list`, so a client that honours its granted "
+        "tool list has no function to call (#5439)")
     assert "checkpoint" in content, "SKILL.md must write the harness-connected checkpoint"
 
 
@@ -1349,9 +1423,19 @@ def test_skill_decide_protocol_tools_are_registered_mcp_tools():
     # section="health" verification sentence, so nothing failed if the protocol stopped
     # performing the structure check at all. The SECTION is what performs it, so pin the
     # section: `section="structure_check"` is the call the protocol actually makes.
-    for required in ("tortoise_compute_confidence", "tortoise_create_operator",
-                     "tortoise_health"):
+    # The loop names only tokens whose presence can VARY. `tortoise_graph_overview`
+    # is deliberately NOT a member: the decide section already carries it via the
+    # `section="structure_check"` line below, so a membership assertion on the
+    # container name is a no-op that no revert can redden (PR #11719 review F1).
+    # The health verify is guarded by the explicit SECTION assertion below, which
+    # DOES redden — measured: the pre-fix decide section contains 0 occurrences of
+    # `tortoise_graph_overview(section="health")`.
+    for required in ("tortoise_compute_confidence", "tortoise_create_operator"):
         assert required in tokens, f"decide protocol must use {required}"
+    assert 'tortoise_graph_overview(section="health")' in decide_section, (
+        "the decide protocol must verify the live connection through the "
+        "container's health section — the retired `tortoise_health` name is not "
+        "in `tools/list`, so the verify could never succeed")
     assert 'tortoise_graph_overview(section="structure_check")' in decide_section, (
         "the decide protocol must run the structure check through the container's "
         "structure_check section — naming the container alone does not perform it")

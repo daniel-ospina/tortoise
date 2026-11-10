@@ -262,7 +262,7 @@ files under `tortoise/` (`git grep -n ':Document'` → 57 lines,
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 two independent lines have since been added, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:635`, which is also the one that lifted the file count,
+(`cache_eviction.py:894`, which is also the one that lifted the file count,
 being a new file), and #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring). Both are the point rather than an
 accident: this population grows for good reasons, so the figure tracks the tree
@@ -276,7 +276,7 @@ a docstring, a comment, a printed message, or an RST literal in
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **three**
 lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:635` comment. A guard carrying a hand-maintained allowlist of
+`cache_eviction.py:894` comment. A guard carrying a hand-maintained allowlist of
 docstrings is a guard nobody can trust, so the label claim stays evidence
 recorded here rather than a check that would have to be argued with.
 
