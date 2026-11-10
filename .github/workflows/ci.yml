@@ -2468,11 +2468,11 @@ jobs:
             pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
             port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
             if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is `stop`ped and `stop` deletes this file, so this does NOT mean it never started"
+              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is stopped by the retry loop, and stop deletes this file, so this does NOT mean it never started"
             elif bash "$PREVIEW" ready --name "$name"; then
               echo "${name}: pid ${pid} is ALIVE on :${port} and the port ANSWERS — this preview SURVIVED the run; the red is the specs' or the content's, not a dead server"
             elif kill -0 "$pid" 2>/dev/null; then
-              echo "::error::${name}: pid ${pid} is alive but the port does NOT answer — a preview that outlived its listener; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
+              echo "::error::${name}: pid ${pid} is alive but does NOT pass the HTTP probe — nothing may be listening on :${port}, or it answers a non-200 (or too slowly); preview-server.sh ready reports liveness, a bound port and an HTTP success as three separate facts, and only the third is known to have failed here; the log below is where the cause is"
             else
               echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             fi
@@ -2712,11 +2712,11 @@ jobs:
             pid="$(cat "${PREVIEW_STATE}/${name}.pid" 2>/dev/null || true)"
             port="$(cat "${PREVIEW_STATE}/${name}.port" 2>/dev/null || true)"
             if [ -z "$pid" ]; then
-              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is `stop`ped and `stop` deletes this file, so this does NOT mean it never started"
+              echo "::error::${name}: no pid file at teardown — read the boot step's own log; a boot that TIMED OUT is stopped by the retry loop, and stop deletes this file, so this does NOT mean it never started"
             elif bash "$PREVIEW" ready --name "$name"; then
               echo "${name}: pid ${pid} is ALIVE on :${port} and the port ANSWERS — this preview SURVIVED the run; the red is the specs' or the content's, not a dead server"
             elif kill -0 "$pid" 2>/dev/null; then
-              echo "::error::${name}: pid ${pid} is alive but the port does NOT answer — a preview that outlived its listener; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
+              echo "::error::${name}: pid ${pid} is alive but does NOT pass the HTTP probe — nothing may be listening on :${port}, or it answers a non-200 (or too slowly); preview-server.sh ready reports liveness, a bound port and an HTTP success as three separate facts, and only the third is known to have failed here; the log below is where the cause is"
             else
               echo "::error::${name}: pid ${pid} on :${port} is GONE — the preview DIED MID-RUN; its log below is the cause, and every ECONNREFUSED above is a SYMPTOM of it"
             fi

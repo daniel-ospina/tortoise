@@ -943,7 +943,11 @@ def test_a_preflight_red_dumps_the_preview_servers_own_logs(
     # HTTP) and names the shape that matters here: a wrangler whose listener is up
     # while its bundle/workerd starts answers a connect and never a 200. So the
     # SURVIVED verdict must be gated on the helper's own probe, and `kill -0` may
-    # only distinguish "alive but not answering" from "gone".
+    # only distinguish "alive but failing the HTTP probe" from "gone". That
+    # middle verdict must NOT say the port answers nothing: `ready` fails on
+    # liveness, on a free port AND on any non-200 (its last leg is `curl -f`, so
+    # a 500 — this step's own #10305 shape — lands here with the port very much
+    # bound), so the branch may only report that the probe failed.
     assert 'ready --name "$name"' in run, (
         "the SURVIVED verdict is deduced from `kill -0` alone: a live pid whose "
         f"port answers nothing would be reported as a surviving preview: {run}"
