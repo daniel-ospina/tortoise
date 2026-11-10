@@ -20339,14 +20339,17 @@ class FalkorProjection(
             return
         if getattr(self, '_is_embedded', False):
             return
-        # ⛔ The width constant (`embeddings.EMBEDDING_DIM`, #4194/#4280) is no
-        # longer read HERE, because this method no longer creates an index to
-        # single-source a width for. The width guarantee moved with the index:
-        # Postgres's `record_embedding_vector(jsonb) -> vector(384)` stores NULL
-        # for any other width, so a wrong-width vector is stored and not
-        # ann-indexed (see the block below).
-        # ⛔ #11642 / #4051 V1 — THIS STORE NO LONGER CREATES AN IN-GRAPH VECTOR
-        # INDEX, AND DROPS ONE IT FINDS.
+        # ⛔ The width constant (`embeddings.EMBEDDING_DIM`, #4194/#4280) is NOT
+        # read in THIS method, because the creation path is a separate method
+        # (`_create_vector_index_api`, which reads it) and the retirement path
+        # creates nothing. On an ARMED store the width guarantee the graph index
+        # used to carry lives in Postgres instead: `record_embedding_vector(
+        # jsonb) -> vector(384)` stores NULL for any other width, so a
+        # wrong-width vector is stored and not ann-indexed (see the block
+        # below); an UNARMED store is `main`'s posture and keeps the graph
+        # index, and with it the width blessing (#11660 review round 7, P2-2).
+        # ⛔ #11642 / #4051 V1 — ON A STORE WHOSE REPLACEMENT IS ARMED, this
+        # store CREATES NO IN-GRAPH VECTOR INDEX AND DROPS ONE IT FINDS.
         #
         # The owner's 2026-11-07 decision moved the vector index and its payload
         # to Postgres (`pgvector`; `docs/architecture/SEARCH-ARCHITECTURE.md`,
@@ -20374,16 +20377,18 @@ class FalkorProjection(
         # — that is the migration for every already-deployed graph, and it is
         # idempotent because the second run finds nothing to drop.
         #
-        # ⚠️ CONSEQUENCE, stated rather than discovered: `required_embedding_dim`
-        # is derived from `_vector_index_api`, so it now answers `None` on every
-        # lane. That is the DOCUMENTED no-index behaviour (the write path becomes
-        # width-agnostic and `run_vector_query`'s brute-force scan reads back
-        # whatever the encoder produced, #4280) — and it is now the correct
-        # answer, because a width-blessing graph index no longer exists. The
-        # dimension guarantee lives in Postgres instead:
+        # ⚠️ CONSEQUENCE, stated rather than discovered: on an ARMED store
+        # `required_embedding_dim` is derived from `_vector_index_api`, so it
+        # answers `None` there. That is the DOCUMENTED no-index behaviour (the
+        # write path becomes width-agnostic and `run_vector_query`'s brute-force
+        # scan reads back whatever the encoder produced, #4280) — and it is the
+        # correct answer, because a width-blessing graph index no longer exists
+        # on that store. The dimension guarantee lives in Postgres instead:
         # `record_embedding_vector(jsonb) -> vector(384)` stores NULL for any
         # width but 384, so a wrong-width vector is stored and not ann-indexed
-        # rather than rejected at the write.
+        # rather than rejected at the write. On an UNARMED store the graph index
+        # is still there (the gate below returns through the creation path), so
+        # `required_embedding_dim` keeps `main`'s answer.
         import logging
         _log = logging.getLogger(__name__)
         # ⛔ ONE PREDICATE DECIDES **BOTH** DIRECTIONS (#11660 review round 7,
@@ -20610,13 +20615,14 @@ class FalkorProjection(
         to Postgres's ``record_embedding_vector(jsonb) -> vector(384)`` — but
         that converter REJECTS nothing: it returns NULL for any other width, so
         the row is STORED and simply not ANN-indexed
-        (`20261109000001_record_embedding_vector.sql`). So after this change a
+        (`20261109000001_record_embedding_vector.sql`). So on an ARMED store a
         mismatched-width write is accepted on BOTH stores with no refusal
         anywhere, where `main` refused it on any store that had an index. That
         is a deliberate trade (the index, and with it the width constraint, left
-        the graph), and the observable consequence is: the row is visible to
-        every reader, the dense leg's ``WHERE embedding_vec IS NOT NULL``
-        excludes it, and
+        the graph THERE — on an unarmed store both are still in place, #11660
+        review round 7, P2-2), and the observable consequence is: the row is
+        visible to every reader, the dense leg's ``WHERE embedding_vec IS NOT
+        NULL`` excludes it, and
         :func:`tortoise.embedding_residual_scan` reports it as "held but NOT
         ANN-indexed" instead of leaving it invisible. The write path is
         width-agnostic and :func:`tortoise.search_engine.run_vector_query`'s
