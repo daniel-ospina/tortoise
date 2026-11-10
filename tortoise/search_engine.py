@@ -3661,15 +3661,18 @@ _DECORATION_TIMEOUT_MS = 200
 #:     TZ=Asia/Kolkata        k(…same…)                      -> (0, 1684529460.0)
 #:
 #: which makes consumers of this key answer DIFFERENTLY per host. The key
-#: itself is host-dependent for the value above, so a guard built on it returns
-#: a different VERDICT only for a mixed pair whose two bounds are closer
-#: together than the DIFFERENCE between the two hosts' UTC offsets (up to
-#: ~26h) — not only ``sdk.supersede_point``'s inversion guard (inverted on UTC
-#: and ``America/Los_Angeles``, not inverted on ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
+#: itself is host-dependent for the value above, and the guards order with it,
+#: so their verdict is the predicate ``reader_offset < (value - bound)``: two
+#: hosts disagree only when the pair's separation falls BETWEEN their two UTC
+#: offsets. That is not a bound on the pair's own distance — two hosts 1h apart
+#: disagree about a pair 13h30 apart, while a pair 20h apart is refused on every
+#: host — and it affects not only ``sdk.supersede_point``'s inversion guard
+#: (inverted on UTC and ``America/Los_Angeles``, not inverted on
+#: ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
 #: write door reached by ``create_point`` / ``update_point`` /
 #: ``invalidate_point`` / ``retract_point`` / ``mining._temporal_wire``) and
 #: audit check 8 (``inverted_validity_window``), which order with this same
-#: measure. On ``origin/main`` those values bucketed ``(1, text)``, so the guards
+#: measure. Before #11646 those values bucketed ``(1, text)``, so the guards
 #: were skipped — i.e. this exposure is NEW, and it is the #3982 divergence
 #: reaching WRITE and AUDIT paths.
 #: Reversing #3982 is a recorded decision and is NOT the fix; giving the

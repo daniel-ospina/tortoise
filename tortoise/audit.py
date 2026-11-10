@@ -919,14 +919,14 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     #
     # ⚠ #11646 made the ingest producer's shape (``2023/05/20 (Sat) 02:21``)
     # ORDERABLE, and a zone-less date-TIME is read in the READER's zone (#3982),
-    # so this check's VERDICT can differ across hosts for a MIXED PAIR whose two
-    # bounds are closer together than the DIFFERENCE between the two hosts' UTC
+    # so this check's VERDICT can differ across hosts for a MIXED PAIR: it
+    # refuses when ``reader_offset < (validFrom - validTo)``, so two hosts
+    # disagree only when the pair's separation falls BETWEEN their two UTC
     # offsets — not a new asymmetry, but a newly reachable one (the shape used
     # to bucket as unparseable, so the pair was skipped everywhere). It is
-    # RECORDED and
-    # PINNED rather than changed: flipping the reading is a reopen of #3982, and
-    # anchoring the producer's shape on its own is the SEPARATE decision recorded
-    # on #11646 — either way a decision, not a cleanup here. The pin is
+    # RECORDED and PINNED rather than changed: flipping the reading is a reopen
+    # of #3982, and anchoring the producer's shape on its own is the SEPARATE
+    # decision recorded on #11646 — either way a decision, not a cleanup here. The pin is
     # ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``,
     # which asserts ``validate_validity_window``'s verdict at three zones.
     #

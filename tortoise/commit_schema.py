@@ -512,13 +512,16 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
     read in the READER's zone. #11646 made that shape ORDERABLE here for the
     first time — before it, the value bucketed as unparseable and this guard
-    skipped the pair on every host — so a mixed pair whose two bounds are
-    closer together than the DIFFERENCE between the two hosts' UTC offsets CAN
-    now be refused on one host and accepted on another (measured: the pair
+    skipped the pair on every host — so for this shape the verdict is the
+    predicate ``reader_offset < (validFrom - validTo)``: two hosts disagree only
+    when the pair's separation falls BETWEEN their two UTC offsets, which is not
+    a bound on the pair's own distance (measured: the pair
     ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
     ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
-    ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three). That is the
-    recorded #3982 reading meeting a newly-orderable shape, not a new rule.
+    ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three; and two hosts
+    1h apart disagree about a pair 13h30 apart, while a pair 20h apart is refused
+    on every host). That is the recorded #3982 reading meeting a
+    newly-orderable shape, not a new rule.
     Changing that reading is a REOPEN of #3982; giving the producer's shape its
     own deterministic anchor instead is the SEPARATE decision recorded on
     #11646 (it would make this guard deterministic without touching #3982's
