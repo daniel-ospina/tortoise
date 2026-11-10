@@ -380,6 +380,31 @@ def test_a_name_only_update_silenced_by_stored_content(sdk, caplog):
         f"{[r.message for r in caplog.records]}")
 
 
+def test_a_name_only_update_silenced_by_the_stored_QUOTE(sdk, caplog):
+    """The update door must read the stored ``quote`` too — the #11682 arm.
+
+    ``quote`` joined the Point lexical field set in #11682, so the update door's
+    verdict reads it alongside content/search_keys (``stored={"quote":
+    _name_row[3]}``). Without that arm a name whose tokens live ONLY in the
+    point's verbatim quote is called unfindable — a false advisory on a record
+    the index can answer — and nothing reds, because the stored quote is not in
+    the payload and the content arm sees nothing (#11706 review, round 3).
+
+    FAIL VALUE: delete the ``"quote": _name_row[3]`` arm from the update door
+    and this reds while the content-only test above stays green.
+    """
+    created = sdk.create_point(
+        "statement", "an unrelated body about curtains",
+        quote="capstone-9664 shipped on Tuesday")
+    pid = created["id"]
+    with caplog.at_level(logging.WARNING):
+        sdk.update_point(pid, name="capstone-9664")
+    assert not _advisories(caplog), (
+        "the stored QUOTE carries the name's tokens and quote is indexed since "
+        "#11682, so the record IS reachable by its name — no advisory belongs "
+        f"here: {[r.message for r in caplog.records]}")
+
+
 def test_a_name_only_update_on_a_point_without_its_tokens_still_warns(sdk, caplog):
     """The other direction: stored text that does NOT carry the name still warns.
 
