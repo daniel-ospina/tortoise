@@ -612,6 +612,7 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
+        # PLACEHOLDER-EXEMPTION-REMOVED
     }
 )
 
@@ -1317,10 +1318,13 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
 
     ⚠️ `rc == 2` alone does not measure "a USAGE error" here: `2` is also this
     tool's documented NO-VERDICT (`tortoise/embedding_residual_scan.py:78`
-    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making
-    `--org` optional would leave the bare form parsing, refusing the graph half,
-    and still exiting 2 — green on the code while the property the message
-    states is false. The CAUSE is pinned too (`#11744` review, round 4).
+    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making all
+    three required arguments optional would leave the bare form parsing, refusing
+    the graph half, and still exiting 2 — green on the code while the property the
+    message states is false. (One of the three alone is not enough: the other two
+    still fail at parse time, which is why the assert looks redundant until you
+    read the tool's exit contract.) The CAUSE is pinned too (`#11744` review,
+    round 4).
     """
     path = (Path(__file__).resolve().parents[1]
             / "tools" / "embedding_residual_scan.py")
