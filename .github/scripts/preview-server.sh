@@ -78,7 +78,9 @@
 #   stopped · 6 never recorded · 10 record was ATTEMPTED and REFUSED (the process
 #   was already gone when the boot step tried to register it — `ci.yml`'s own
 #   "wrangler already died") · 1 gone (died mid-run, or it exited between the two
-#   probes) · 9 alive, but NO port was recorded, so SERVING was not checked. 0 is
+#   probes) · 9 alive, but NO port was recorded, so SERVING was not checked ·
+#   12 the pid FILE itself could not be read, so the dump took NO verdict at all
+#   (never reported as GONE — it measured nothing). 0 is
 #   therefore never returned on a leg that was not taken. The MESSAGE carries the
 #   same fact; the step only decides whether to prefix `::error::`, so the code is
 #   the contract and the prose is for the human reading the red.
@@ -438,11 +440,23 @@ cmd_alive() {
   # NAMES are for humans; the exit code is what the step branches on, and every
   # state below gets its own so a reader (and a test) can tell them apart.
   if [[ ! -f "$pfile" ]]; then
-    if [[ -f "$dir/${name}.booted" ]]; then
-      printf '%s\n' "${PROG}: ${name}: RECORDED, then STOPPED — this job DID start a preview and its pid file is gone, which is what stop does on every branch (the boot step's retry loop calls it between attempts, and so may a spec). This does NOT mean the preview never started: read the boot step's own log for why it was stopped."
-      return 5
-    fi
-    if [[ -f "$dir/${name}.refused" ]]; then
+    # ⛔ THE LAST ATTEMPT DECIDES, not the first artefact this loop happens to
+    # find. The boot step's retry loop can SUCCEED on attempt 1 (`record` writes
+    # `.booted`), be stopped by the timeout branch (`stop` deletes the pid file
+    # and keeps `.booted`), and then be REFUSED on attempt 2 (`.refused`). Both
+    # witnesses are on disk, and checking `.booted` first reported that state as
+    # "RECORDED, then STOPPED" — discarding the one datum that says the LAST
+    # spawn STARTED AND DIED (measured: `alive` returned 5 for that sequence).
+    # The later of the two witnesses wins; a tie goes to the refusal, because a
+    # refusal is the more specific statement about the attempt that explains the
+    # red.
+    local earlier_note=""
+    if [[ -f "$dir/${name}.refused" ]] && {
+      [[ ! -f "$dir/${name}.booted" ]] ||
+      [[ ! "$dir/${name}.refused" -ot "$dir/${name}.booted" ]]; }; then
+      if [[ -f "$dir/${name}.booted" ]]; then
+        earlier_note=" (an EARLIER attempt DID record and was then stopped, so this refusal describes the LAST attempt — the one whose failure explains the red)"
+      fi
       # The boot step DID call `record`, and `record` RAN — it just refused, which
       # means the process this job spawned was already gone (or `/proc` lost its
       # start time) at the moment it was registered. That is a preview that
@@ -450,14 +464,28 @@ cmd_alive() {
       # and conflating the two is the defect this branch removes.
       local why
       why="$(cat "$dir/${name}.refused" 2>/dev/null || true)"
-      printf '%s\n' "${PROG}: ${name}: RECORD REFUSED — the boot step DID reach record and record REFUSED (${why#refused }), because the process it had just spawned was already gone (or its start time could not be read) when it was registered. This is a preview that STARTED AND DIED, not one that never started: read the boot step's own log for why the process exited. A boot that never reached record reports itself as NEVER RECORDED, not as this."
+      printf '%s\n' "${PROG}: ${name}: RECORD REFUSED — the boot step DID reach record and record REFUSED (${why#refused }), because the process it had just spawned was already gone (or its start time could not be read) when it was registered. This is a preview that STARTED AND DIED, not one that never started: read the boot step's own log for why the process exited. A boot that never reached record reports itself as NEVER RECORDED, not as this.${earlier_note}"
       return 10
+    fi
+    if [[ -f "$dir/${name}.booted" ]]; then
+      printf '%s\n' "${PROG}: ${name}: RECORDED, then STOPPED — this job DID start a preview and its pid file is gone, which is what stop does on every branch (the boot step's retry loop calls it between attempts, and so may a spec). This does NOT mean the preview never started: read the boot step's own log for why it was stopped."
+      return 5
     fi
     printf '%s\n' "${PROG}: ${name}: NEVER RECORDED — no pid was ever recorded for this name in this job's state dir, so the boot step never reached record: read its log. A preview that started and was then stopped reports itself as RECORDED, then STOPPED, not as this."
     return 6
   fi
 
-  pid="$(cat "$pfile")"
+  # ⛔ Under `set -e` an unguarded read here exited 1 with EMPTY stdout — a blank
+  # `::error::` in the step, wearing the code the header reserves for GONE, from a
+  # dump that measured nothing (measured: `chmod 000` on the pid file). Every
+  # other read in this function already carries `|| true`; this one must not be
+  # the exception, and a state this probe could not read is neither a survived
+  # verdict nor a gone one.
+  pid="$(cat "$pfile" 2>/dev/null || true)"
+  if [[ ! "$pid" =~ ^[0-9]+$ ]]; then
+    printf '%s\n' "${PROG}: ${name}: PID FILE UNREADABLE — ${pfile} is present but no pid could be read from it (unreadable, empty, or not numeric), so this dump took NO verdict: the process may be alive or dead. Read the log and the boot step; do NOT read this as GONE."
+    return 12
+  fi
   recorded="$(cat "$dir/${name}.start" 2>/dev/null || true)"
 
   # Zombies answer kill(0) forever: liveness is `pid_running`, never bare kill -0.

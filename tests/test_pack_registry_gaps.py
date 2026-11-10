@@ -2556,7 +2556,17 @@ class TestCoreHierarchy:
             sdk._get_proj = lambda: types.SimpleNamespace(g=filter_graph)
             sdk.tortoise_fts_query(
                 "widget", kind="Object", entity_type="object")
-            expected = set(sdk._expand_kind("Object"))
+            # The set the CODE UNDER TEST must use is the READ FILTER's, not the
+            # membership set: #11679 split them, and deriving `expected` from
+            # `_expand_kind` stated a claim about the other accessor. Scope, said
+            # plainly: at THIS kind the two sets coincide (measured — 52 members
+            # either way, and `test_a_root_read_filter_is_unchanged` ASSERTS that
+            # coincidence for every CORE root), so this arm cannot by itself tell
+            # a read filter from a membership set. The split's own pins are the
+            # `#11679` arms in this file (`test_a_filter_is_transitive_down`,
+            # `test_the_membership_set_still_answers_up`); what THIS arm catches
+            # is a filter narrowed back to the bare kind.
+            expected = set(sdk._read_filter_kinds("Object"))
             # ONE call must carry the expansion. Asserting the union across every
             # recorded call would let an auxiliary call that happens to carry
             # `expand_kind(...)` MASK a filter narrowed back to the bare kind —
@@ -2582,7 +2592,7 @@ class TestCoreHierarchy:
         # the false diagnosis this pin was rewritten to avoid.)
         head_spellings = {"Object", "core:Object"}
         assert expected - head_spellings, (
-            "`expand_kind('Object')` collapsed to the head and its `core:` "
+            "`read_filter_kinds('Object')` collapsed to the head and its `core:` "
             "spelling, so this pin cannot distinguish an expansion from its "
             f"head: {sorted(expected)}")
         assert len(carriers) == 1, (
@@ -2591,7 +2601,7 @@ class TestCoreHierarchy:
         filter_cypher, observed_expansion = carriers[0]
         assert observed_expansion == expected, (
             "the post-retrieval kind filter was handed "
-            f"{sorted(observed_expansion)}, not the EXPANSION "
+            f"{sorted(observed_expansion)}, not the READ-FILTER set "
             f"{sorted(expected)} — the text-query read no longer widens, and "
             "the measurement DM4 records is false again")
         assert "n.objectKind IN" in filter_cypher, filter_cypher

@@ -924,8 +924,16 @@ def test_alive_does_not_claim_an_identity_it_could_not_READ(tmp_path: Path, stat
     """
     blind = tmp_path / "blind-bin"
     blind.mkdir()
-    (blind / "awk").write_text("#!/bin/sh\nexit 1\n")
-    (blind / "awk").chmod(0o755)
+    # BOTH read paths, because the gap must be simulated where the helper reads:
+    # Linux goes `/proc` + `awk`, a host without `/proc` (a developer's macOS — the
+    # branch `pid_state`/`pid_starttime` ship for) goes through `ps`. A blind `awk`
+    # alone is a NO-OP there, so this arm false-redded on macOS — "`alive` claims
+    # the start time matches" — for a capability the platform never uses. Blinding
+    # both keeps the arm about the STATE (a witness that cannot be re-read)
+    # instead of about one implementation.
+    for tool in ("awk", "ps"):
+        (blind / tool).write_text("#!/bin/sh\nexit 1\n")
+        (blind / tool).chmod(0o755)
 
     port = _script("alloc", "--name", "app", "--base", "18789", env=state)
     assert port.returncode == 0, port.stderr
@@ -1049,6 +1057,86 @@ def test_alive_refuses_to_call_an_unchecked_port_leg_a_serving_verdict(
         assert "SERVING was NOT checked" in result.stdout, result.stdout
         assert "SURVIVED the run" not in result.stdout, result.stdout
     finally:
+        _reap(victim.pid)
+
+
+def test_a_later_refusal_outranks_an_earlier_boot(tmp_path: Path, state) -> None:
+    """The retry loop can SUCCEED, be STOPPED, and then be REFUSED.
+
+    `record` writes `.booted` on success and `.refused` when the process it was
+    handed was already gone; `stop` deletes the pid file and keeps both. Checking
+    `.booted` first reported that state as "RECORDED, then STOPPED" and discarded
+    the one datum that says the LAST spawn STARTED AND DIED — the mechanism the
+    `.refused` witness was added to surface. The later witness wins, and a tie
+    goes to the refusal (it is the more specific statement about the attempt that
+    explains the red).
+
+    RED on the pre-fix code (**verified by running it**): rc 5 for this sequence.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        assert _script("stop", "--name", "app", env=state).returncode == 0
+        refused = _script("record", "--name", "app", "--pid", "999999", env=state)
+        assert refused.returncode == 4, refused.stderr
+        state_dir = Path(state["PREVIEW_STATE"])
+        both_witnesses = (
+            (state_dir / "app.booted").exists()
+            and (state_dir / "app.refused").exists()
+        )
+        assert both_witnesses, (
+            "the harness cannot measure: this state needs BOTH witnesses on disk")
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 10, (
+            "the LAST attempt was a refusal, but `alive` reported "
+            f"{result.returncode}: {result.stdout}{result.stderr}"
+        )
+        assert "RECORD REFUSED" in result.stdout, result.stdout
+        assert "EARLIER attempt DID record" in result.stdout, (
+            "the message must keep BOTH facts — a later refusal AND an earlier "
+            f"successful boot: {result.stdout}"
+        )
+    finally:
+        _reap(victim.pid)
+
+
+def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -> None:
+    """A pid file this probe cannot READ is not evidence that the preview DIED.
+
+    Under `set -euo pipefail` the unguarded `cat` exited 1 with EMPTY stdout, so
+    the step printed a blank `::error::` and the code said GONE. The dump took no
+    verdict at all, and the recorded process may well be alive — every sibling
+    read in `cmd_alive` already carried the `|| true` this one lacked.
+
+    RED on the pre-fix code (**verified by running it**): rc 1 and no output.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    pfile = Path(state["PREVIEW_STATE"]) / "app.pid"
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+        pfile.chmod(0o000)
+        result = _script("alive", "--name", "app", env=state)
+        assert result.returncode == 12, (
+            "the pid file could not be read, so no verdict was taken — `alive` "
+            f"must not answer with the GONE code: {result.returncode} "
+            f"{result.stdout}{result.stderr}"
+        )
+        assert "PID FILE UNREADABLE" in result.stdout, (
+            "a blank `::error::` is the failure this arm exists to catch: "
+            f"{result.stdout!r} / {result.stderr!r}"
+        )
+        assert " is GONE" not in result.stdout, (
+            "the unreadable state must not be REPORTED as the gone verdict: "
+            f"{result.stdout}")
+    finally:
+        with contextlib.suppress(OSError):
+            pfile.chmod(0o644)
         _reap(victim.pid)
 
 

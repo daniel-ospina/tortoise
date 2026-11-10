@@ -58,6 +58,30 @@ GATING_WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 RESOLVER_FLAG = "--non-gating-subtree-files"
 
 
+def _strip_shell_comment(line: str) -> str:
+    """Drop a shell comment, whole-line or trailing.
+
+    Quote-aware, and deliberately not a parser: `#` starts a comment only at the
+    start of a line or preceded by whitespace, and never inside `'…'` / `"…"`.
+    That is enough for workflow `run:` bodies, and it is what makes the arms below
+    about EXECUTION rather than text: a commented-out command, or a trailing
+    `# was: …` note quoting the argv, must not satisfy a pin (measured — a fully
+    commented-out line left two arms in this file green).
+    """
+    quote = ""
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    return line
+
+
 def _logical_commands(body: str) -> list[str]:
     """A step body's shell commands: comments dropped, `\\`-continuations joined.
 
@@ -71,8 +95,8 @@ def _logical_commands(body: str) -> list[str]:
     logical: list[str] = []
     buf = ""
     for raw in body.splitlines():
-        line = raw.strip()
-        if not line or line.startswith("#"):
+        line = _strip_shell_comment(raw.strip()).strip()
+        if not line:
             continue
         if line.endswith("\\"):
             buf += line[:-1] + " "
@@ -596,13 +620,17 @@ def test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file():
     # ... and the workflow's resolve step must invoke THAT verb, not merely
     # mention it. Parsed steps, keyed on the command — a step rename or a rewrap
     # must not red a workflow that is correct, and a comment quoting the argv
-    # must not satisfy the arm.
+    # must not satisfy the arm. `_logical_commands` is what makes the second half
+    # true: the step body CONTAINS its comments, so a body-level substring test
+    # stays green with the call commented out (measured, for both arms here).
     bodies = _workflow_run_bodies(EVAL_WORKFLOW)
-    resolve_bodies = [b for b in bodies if f"ci_selection.py {RESOLVER_FLAG}" in b]
-    assert resolve_bodies, (
+    resolve_cmds = [
+        cmd for b in bodies for cmd in _logical_commands(b)
+        if f"ci_selection.py {RESOLVER_FLAG}" in cmd]
+    assert resolve_cmds, (
         "the workflow must RUN `tools/ci_selection.py "
         f"{RESOLVER_FLAG}` — the argv verified above")
-    assert any("> /tmp/lane.txt" in b for b in resolve_bodies), (
+    assert any("> /tmp/lane.txt" in cmd for cmd in resolve_cmds), (
         "the resolve step must capture the resolver's stdout to the file the run "
         "step reads")
     # …and the RUN step must consume it: a resolve step whose output nobody reads
@@ -647,18 +675,18 @@ def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
         "landed and 27 when measured at #11675) and the drift is unobservable.")
     # And the workflow must READ that function, not re-inline the subtraction.
     # The bare NAME occurs in four comments in that file, so a name-substring is
-    # true with the call deleted — pin the CALL in a parsed step body, tolerating
-    # a hoisted manifest (the argument is a local, not a shape we care about).
+    # true with the call deleted — pin the CALL in a parsed step body, on its
+    # EXECUTABLE commands: the parsed body still carries its comments, so a
+    # body-level substring is satisfied by a commented-out call (measured).
+    # Tolerating a hoisted manifest (the argument is a local, not a shape we care
+    # about).
     bodies = _workflow_run_bodies(EMBEDDED_WORKFLOW)
-    calls = [
-        line for body in bodies for line in body.splitlines()
-        if "on_demand_literal_runner_files(" in line]
+    commands = [cmd for body in bodies for cmd in _logical_commands(body)]
+    calls = [cmd for cmd in commands if "on_demand_literal_runner_files(" in cmd]
     assert calls, (
         "evals-on-demand.yml must resolve its lane through the pinned selector "
         "function rather than re-deriving the subtraction in a heredoc")
-    reinline = [
-        line for body in bodies for line in body.splitlines()
-        if "on_demand_files(" in line]
+    reinline = [cmd for cmd in commands if "on_demand_files(" in cmd]
     assert not reinline, (
         f"the wholesale subtraction is the bug this test pins: {reinline[:3]}")
 
