@@ -841,6 +841,29 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         for surface in advisory_partial:
             lines.append(f"  [{_clean(surface.name)}] "
                          f"{_clean(surface.truncation_note or surface.note)}")
+    # ⛔ WHAT THE HOLDER READ RESTED ON, EVEN WHEN IT ATTRIBUTED NOBODY (#11678).
+    # The gate prints this inside its `issue assignee/holder` row's own note; this
+    # verb renders only surfaces that produced a HIT, so on a CLEAN the ONE arm
+    # whose answer is a PROXY on a cell (lane roster + board attribution + process
+    # table — never the holder-authored `refs/claims/…` registry) said "nobody"
+    # with no word about the store it rested on. That is #11202's property one verb
+    # over: the gate could say which store answered and which did not, and the
+    # sibling verb, which AGENTS.md points agents at for exactly this question,
+    # could not. The string is the GATE's own (`_holder_gate_note`, carried on the
+    # surface's `note` by `scan_issue_surface`) — never a second composition — so
+    # the two verbs cannot describe the same read differently.
+    # An INCOMPLETE holder read is NOT repeated here: it already prints, with this
+    # same note, under INCOMPLETE SURFACES above.
+    holder_surface = next((s for s in surfaces if s.name == cp.SURFACE_ISSUE), None)
+    if (holder_surface is not None
+            and holder_surface.status != cp.STATUS_INCOMPLETE
+            and (holder_surface.note or "").strip()):
+        lines.append("")
+        lines.append("CLAIM GATE — the gate's own note for the holder read behind "
+                     "this answer")
+        lines.append("             (a CLEAN that rested on ONE liveness store says "
+                     "so here):")
+        lines.append("  " + _clean(holder_surface.note.strip()))
     if unknown_detail:
         lines.append("")
         lines.append("UNREADABLE LOCAL STATE — could not check uncommitted work:")

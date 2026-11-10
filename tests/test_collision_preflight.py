@@ -12525,6 +12525,81 @@ class HolderGateTests(unittest.TestCase):
         self.assertEqual(old.liveness_unreadable, ())
         self.assertNotIn("liveness", self.cp._holder_gate_note(old))
 
+    def test_the_unreadable_cmux_store_never_makes_a_measured_board_unanswerable(
+            self):
+        """⛔ THE ARM-(c) DECISION, PINNED AS A TEST — because prose did not (#11678).
+
+        The #11669 review left ONE P0 open: `cmux-session-store` unreadable on a
+        cell still produced CLEAN / exit 0, and it offered three arms. The ruling
+        (on #11202, decision comment `6754475756`, recorded BEFORE the merge) took
+        arm (c): the process table is TOTAL coverage for the population this gate
+        protects (every lane on a cell runs as the one user it enumerates), the
+        cmux group is ABSENT on that CLI rather than failed, and a CLEAN resting on
+        it is a measurement, not an abstention.
+
+        OVERRIDES: the blanket "any store that did not answer must make the gate
+        non-clean" rule — refusing on the cmux group's absence would restore the
+        permanent INCOMPLETE (every dispatch blocked, forever, with no grammar to
+        add) that #11202 was filed to remove.
+
+        ⛔ WHY THIS TEST EXISTS AT ALL. The polarity was asserted only INCIDENTALLY
+        — `test_the_board_carries_the_liveness_stores_into_the_note` happens to
+        assert `read.measured` while its docstring is about NAMING, so a lane that
+        re-lands arm (a) sees a red under a name that never mentions the decision
+        and has every reason to call it a regression and update the assertion.
+        Here the decision is the assertion AND its name: this test fails the moment
+        `liveness_unreadable` becomes a refusal cause on an otherwise measured
+        board, and the failure explains why it may not be made one.
+        """
+        _write_board(self.board, _fleet_board_state(
+            liveness_source=self.cp.fleet_state.LIVE_STORE_PROCESS,
+            liveness_unreadable=[self.cp.fleet_state.LIVE_STORE_CMUX_GROUP],
+        ))
+        state = self.cp._read_board(SLUG, str(self.tmp))[0]
+        # ⛔ THIS ASSERTION FIRES FIRST UNDER ARM (a), so IT carries the decision:
+        # a reverter sees the ruling at the exact line that refused them, not four
+        # assertions later.
+        self.assertIsNotNone(state, (
+            "an unreadable cmux SESSION store must not make this board refused — "
+            "that is arm (a) of the #11669 review, and it was REFUSED by the "
+            "#11202 decision (comment 6754475756): the process table is total "
+            "coverage for the population this gate protects, and refusing here "
+            "restores the permanent every-dispatch INCOMPLETE that #11202 was "
+            "filed to remove. See OVERRIDES in this test's docstring."))
+        # 1. THE BOARD still answers. This is arm (a)'s exact interception point.
+        self.assertEqual(self.cp._board_can_answer(state), "", (
+            "an unreadable cmux SESSION store is not a coverage gap on a cell: the "
+            "process table is total coverage for the population this gate protects "
+            "(#11202 decision comment 6754475756). Making this refuse is arm (a), "
+            "which restores the permanent every-dispatch INCOMPLETE that #11202 "
+            "was filed to remove — see OVERRIDES in this docstring."))
+        # 2. …and the READ is measured, with the absent store still named beside the
+        #    one that answered (disclosure survives the decision).
+        read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))
+        self.assertTrue(read.measured, read.unanswerable)
+        self.assertEqual(read.liveness_unreadable,
+                         (self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,))
+        note = self.cp._holder_gate_note(read)
+        self.assertIn("liveness: process-table", note)
+        self.assertIn("unreadable store(s): cmux-session-store", note)
+        # 3. THE SURFACE the gate actually reports is CLEAN — not merely "not
+        #    refusing": the verdict a dispatch rail reads.
+        surface = self.cp.Surface(self.cp.SURFACE_ISSUE)
+        self.cp.scan_issue_surface(
+            surface, {"number": ISSUE, "state": "OPEN"}, self.cp.Identity(), read)
+        self.assertEqual(surface.status, self.cp.STATUS_CLEAN, surface.note)
+        self.assertEqual(surface.hits, [])
+        self.assertIn("unreadable store(s): cmux-session-store", surface.note)
+        # 4. THE CONTRAST THAT KEEPS THIS FROM BEING A LICENCE: a store whose
+        #    failure means the read is UNMEASURED still refuses. The decision is
+        #    about an ABSENT store, never about an unreadable board.
+        _write_board(self.board, _fleet_board_state(
+            liveness_unmeasured=True,
+            liveness_source=self.cp.fleet_state.LIVE_STORE_CMUX_GROUP,
+        ))
+        refused = self.cp._read_board(SLUG, str(self.tmp))[0]
+        self.assertIsNone(refused, "an unmeasured live read must still refuse")
+
     def test_an_unmeasured_workspace_read_never_prints_a_live_count(self):
         """⛔ EVERY failure path of `cmux_workspaces` returns an EMPTY map, so the
         count beside a FAILED read is `0` — an artefact, not a measurement.

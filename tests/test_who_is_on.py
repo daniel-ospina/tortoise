@@ -246,7 +246,8 @@ class WhoIsOnTest(unittest.TestCase):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG,
-                           registry_measured=True, registry_error="") -> Path:
+                           registry_measured=True, registry_error="",
+                           liveness_source=None, liveness_unreadable=None) -> Path:
         """Write the claim gate's board at `$HOME/.pi/agent/state`.
 
         Only the fields `collision_preflight._read_board` / `_holders_from_board`
@@ -255,9 +256,31 @@ class WhoIsOnTest(unittest.TestCase):
         measured), `index.issues` (attribution) and `lanes` (liveness).
         `generated_at` is NOW, so the board is fresh inside
         `fleet_state.STATE_FRESH_S` and no run pays a REBUILD.
+
+        `liveness_source` / `liveness_unreadable` are the LIVENESS provenance the
+        gate publishes in its own holder note (#11202, #11678): a cell answers from
+        `process-table` while both cmux grammars refuse, and the board must be able
+        to carry that shape here for the parity test to be non-vacuous.
         """
         path = self.tmp / ".pi" / "agent" / "state" / "fleet-state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
+        reconciliation: dict = {"registry_measured": bool(registry_measured),
+                                # The cause text `load_registry` records, so a
+                                # test can model an UNPROVISIONED roster (#9392).
+                                "registry_error": str(registry_error),
+                                "github_measured": True,
+                                # The board must also stamp its OPEN-ISSUE
+                                # coverage: `_board_can_answer` refuses an
+                                # unstamped board (a pre-#8175 cache cannot prove
+                                # it saw every open issue) and this fixture's
+                                # boards are meant to be SERVED, not rebuilt.
+                                "open_issues_truncated": False,
+                                "open_issues_read": 1,
+                                "open_issues_limit": 2000}
+        if liveness_source is not None:
+            reconciliation["liveness_source"] = str(liveness_source)
+        if liveness_unreadable is not None:
+            reconciliation["liveness_unreadable"] = list(liveness_unreadable)
         path.write_text(json.dumps({
             "generated_at": datetime.now(UTC).isoformat(),
             "repo": repo,
@@ -266,19 +289,7 @@ class WhoIsOnTest(unittest.TestCase):
             # always writes it, and an empty list is what a readable live-session
             # store produces.
             "orphans": [],
-            "reconciliation": {"registry_measured": bool(registry_measured),
-                               # The cause text `load_registry` records, so a
-                               # test can model an UNPROVISIONED roster (#9392).
-                               "registry_error": str(registry_error),
-                               "github_measured": True,
-                               # The board must also stamp its OPEN-ISSUE coverage:
-                               # `_board_can_answer` refuses an unstamped board
-                               # (a pre-#8175 cache cannot prove it saw every
-                               # open issue) and this fixture's boards are meant
-                               # to be SERVED, not rebuilt.
-                               "open_issues_truncated": False,
-                               "open_issues_read": 1,
-                               "open_issues_limit": 2000},
+            "reconciliation": reconciliation,
             "index": {"issues": {
                 str(number): {
                     "lanes": [label for label, _ in entries],
@@ -705,6 +716,45 @@ exec {real} "$@"
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: nobody", out)
         self.assertIn("Local-only branches and worktrees WERE enumerated", out)
+
+    def test_the_answer_says_which_store_the_holder_read_rested_on(self):
+        """⛔ PARITY ON THE DISCLOSURE, NOT ONLY ON THE COUNT (#11678).
+
+        Measured at `origin/main` `a7da06cc77` on a cell: the GATE's
+        `issue assignee/holder` row said
+        `liveness: process-table; unreadable store(s): cmux-session-store` inside a
+        CLEAN, and this verb — the same read, from the same `run_preflight` —
+        answered `ANSWER: nobody` with NEITHER clause, because it renders only
+        surfaces that produced a HIT. #11202's whole property is that a CLEAN
+        resting on one liveness store must not read as a CLEAN that read them all;
+        that property is about the reader, and this verb is the reader agents are
+        pointed at. The strings asserted here are the GATE's own note, so the two
+        verbs cannot drift into describing one read two ways.
+        """
+        self._write_fleet_board(
+            liveness_source="process-table",
+            liveness_unreadable=["cmux-session-store"],
+        )
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertIn("CLAIM GATE — the gate's own note", out)
+        self.assertIn("liveness: process-table", out)
+        self.assertIn("unreadable store(s): cmux-session-store", out)
+
+    def test_a_board_with_no_liveness_keys_prints_no_store_claim(self):
+        """ABSENT IS NOT EMPTY, on this verb too (#11678).
+
+        A pre-#11202 board carries neither key. Printing a store name — or an empty
+        "unreadable store(s): (none)" — would be a claim about a read that never
+        happened, so the clause is omitted entirely; the CLAIM GATE block still
+        prints, because the board source it DID record is a real datum.
+        """
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("board source:", out)
+        self.assertNotIn("liveness:", out)
+        self.assertNotIn("unreadable store(s)", out)
 
     # ── fail-closed: could-not-check is never "nobody" ───────────────────────
 
