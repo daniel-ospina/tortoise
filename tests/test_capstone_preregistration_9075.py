@@ -2107,6 +2107,33 @@ def test_the_real_machine_record_agrees_with_the_pins():
         "as a complete number")
     assert probe[527 - 1].strip() == '("TORTOISE_STATE_VALUE_VERBATIM", "1"))', (
         f"capstone_measure.py:527 reads {probe[527 - 1].strip()!r}, not the pinned entry")
+    # ⛔ SYMBOL-BOUND, because the field names TWO probe entries: a presence check for
+    # `:527` alone cannot tell WHICH clause holds it, so swapping the two cites — the
+    # VERBATIM sentence citing `:498` (the gap-fill entry) and the gap-fill paragraph
+    # citing `:527` — left this arm GREEN with both statements false (#11706 review,
+    # measured). ⛔ And EVERY binding is checked, not the first: `re.search` was measured
+    # GREEN on a field that carried a swapped (false) pair AND an appended correct pair,
+    # which is the same first-match hole this test's `extractor_v2` arm documents further
+    # down. Each symbol may be named more than once (a legitimate second citation), so the
+    # requirement is that no binding of it points anywhere but its own line.
+    for symbol, expected_line, entry in (
+        ("TORTOISE_STATE_VALUE_VERBATIM", 527, '("TORTOISE_STATE_VALUE_VERBATIM", "1"))'),
+        ("TORTOISE_PARTIAL_GAP_FILL", 498, '"TORTOISE_PARTIAL_GAP_FILL")'),
+    ):
+        bound = {
+            int(n) for n in re.findall(
+                rf"{symbol}` at `probes/capstone_measure\.py:(\d+)(?!\d)", read_back)
+        }
+        assert bound, (
+            f"the record must bind {symbol} to its own line — a bare number anywhere in "
+            "the field can be the OTHER probe cite's line")
+        assert bound == {expected_line}, (
+            f"the record binds {symbol} to {sorted(bound)}; its own line is "
+            f"{expected_line} — and every binding must say so, because one correct "
+            "mention does not excuse another that points at a different entry")
+        assert probe[expected_line - 1].strip() == entry, (
+            f"capstone_measure.py:{expected_line} reads "
+            f"{probe[expected_line - 1].strip()!r}, not the pinned entry")
 
     # ⛔ THE FIELD'S CITES TO FILES OTHER THAN THE PROBE ARE FOUR, AND THIS ARM PINS ONE OF
     # THEM. The arms above pin every `capstone_measure.py` cite in this field; the field also
@@ -2201,7 +2228,14 @@ def test_the_real_machine_record_agrees_with_the_pins():
     # `to` spelling each left the earlier cuts RED and this one GREEN, while a re-staled
     # copy still reds.
     cited_ranges = set(re.findall(r":(\d+-\d+)", read_back))
-    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2726-2728",
+    # ⛔ MEASURED ON `main`'s OWN HISTORY, not on the story the field used to tell: the
+    # window's four moves are a1dff7cec8 :2713-2715 -> :2724-2726 (+11), #11517
+    # (`7dabb59e0f45`) :2724-2726 -> :2736-2738 (+12), #11523's `DOOR_PINNED_ON` comment
+    # rewrap (`8212c41eff`) :2736-2738 -> :2738-2740 (+2), #11534 :2738-2740 ->
+    # :2747-2749 (+9). The field previously put the +2 BEFORE #11517 and reported
+    # `:2726-2728` — a position this window never occupied — so this set pins what the
+    # commits actually did (`git show <c>:probes/capstone_measure.py` at each, measured).
+    _expected_ranges = {"275-283", "2713-2715", "2724-2726", "2736-2738",
                         "2738-2740", "2747-2749"}
     assert cited_ranges == _expected_ranges, (
         "the record's cited ranges are "
@@ -2210,11 +2244,11 @@ def test_the_real_machine_record_agrees_with_the_pins():
         "fabricated or re-staled position, a missing one is a claim that left the record")
     # ⛔ EACH MOVE PINNED BY ADJACENCY, and the live slot by COUNT rather than by its verb.
     # A set alone cannot tell the two mentions of `:2724-2726` apart (it is `a1dff7cec8`'s
-    # move TARGET and this branch's move SOURCE), so `:2713-2715 -> :2724-2726` swapped to
-    # `-> :2726-2728` stayed GREEN inside the set while crediting that commit with the final
+    # move TARGET and #11517's move SOURCE), so `:2713-2715 -> :2724-2726` swapped to a
+    # later position stayed GREEN inside the set while crediting that commit with the final
     # position — the one thing the field's own last clause denies (measured). With ALL
-    # THREE moves adjacency-pinned the duplicate can no longer shield a swap. And `carries` was
-    # itself a prose pin (`cites` redded with every number intact), so the live slot is
+    # FOUR moves adjacency-pinned the duplicate can no longer shield a swap. And `carries`
+    # was itself a prose pin (`cites` redded with every number intact), so the live slot is
     # `count >= 2`: the move supplies one mention and the live cite must supply the other,
     # so deleting or re-staling the live one leaves 1 and reds.
     # ⛔ The SHA is BOUND, not merely mentioned: the previous pattern asserted only the numeric
@@ -2228,19 +2262,23 @@ def test_the_real_machine_record_agrees_with_the_pins():
     assert read_back.count(":2747-2749") >= 2, (
         f"the record states :2747-2749 {read_back.count(':2747-2749')} time(s): the last "
         "move (#11534's) supplies one mention and the LIVE cite must supply the other")
-    assert re.search(r":2724-2726\s*(?:->|→|to)\s*:2726-2728\b", read_back), (
-        "the record must place this branch's move of that window at its intermediate "
-        "position (:2724-2726 -> :2726-2728)")
-    # ⛔ The THIRD move, and it needs the same SHA binding as the first — not a count. When
-    # `main` merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
-    # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2726-2728 -> :2738-2740`
+    # ⛔ The SECOND move, with the same SHA binding as the first — not a count. When `main`
+    # merged in, `#11517` (`7dabb59e0f45`) put its `TORTOISE_RENARRATE_KEEP_RATE` arm
+    # inside `DOOR_PINNED_OFF`, above this window, and moved it `:2724-2726 -> :2736-2738`
     # (+12). Before this arm the sha was UNPINNED: the field could credit any other commit
     # with that +12 and every row here stayed green — the exact defect the first-move arm's
     # own comment records (`a1dff7cec8` swapped for `704fd60ee`, measured GREEN).
-    assert re.search(r"7dabb59e0f45[^:]{0,80}:2726-2728\s*(?:->|→|to)\s*:2738-2740\b", read_back), (
+    assert re.search(r"7dabb59e0f45[^:]{0,80}:2724-2726\s*(?:->|→|to)\s*:2736-2738\b", read_back), (
         "the record must attribute main's move to 7dabb59e0f45 — the SHA in the same clause "
-        "as the ranges — at the position main's merge actually reached (the live slot moved "
-        "once more after it, below)")
+        "as the ranges — at the position main's merge actually reached (:2724-2726 -> "
+        ":2736-2738, measured across that commit)")
+    # ⛔ The move AFTER it: #11523's rewrap of `DOOR_PINNED_ON`'s own comment (`8212c41eff`,
+    # +2), bound by SHA like its neighbours. The field used to credit "this branch's own +2"
+    # and place it BEFORE #11517, at `:2726-2728` — a window position the tree never had
+    # (measured: 2736 at `8212c41eff^`, 2738 at `8212c41eff`).
+    assert re.search(r"8212c41eff[^:]{0,120}:2736-2738\s*(?:->|→|to)\s*:2738-2740\b", read_back), (
+        "the record must attribute the +2 move to 8212c41eff — the SHA in the same clause "
+        "as the ranges — at the positions that commit actually moved the window between")
     # ⛔ The FOURTH move is this branch's OWN arm, so it is bound to the ISSUE rather than to a
     # SHA: `#11534`'s `TORTOISE_PARTIAL_GAP_FILL` pin sits inside `DOOR_PINNED_OFF`, above this
     # window, and moved it `:2738-2740 -> :2747-2749` (+9). Without this arm the field could
