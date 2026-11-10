@@ -2687,9 +2687,13 @@ _OMIT = _Omit()
 
 #: The Point properties the RECORD boundary flattens, mirroring
 #: ``projection.entities._POINT_FLATTEN_LIST_PROPS`` — the graph's ONE home of the
-#: rule. The two cannot be imported into each other (this module deliberately
-#: loads with no imports beyond the standard library, and
-#: ``projection/__init__.py`` imports THIS one), so the rule is restated here and
+#: rule. The two cannot be imported into each other: this module deliberately
+#: loads with NO imports beyond the standard library, because
+#: ``supabase/tests/pglite/validate.mjs`` execs it STANDALONE
+#: (``spec_from_file_location("record_projection", <path>)``) and it must be
+#: importable without the graph stack. The dependency runs the OTHER way —
+#: ``sdk``, ``record_writer``, ``hosted_api`` and ``cache_projection`` import THIS
+#: module, and ``projection/`` names it in prose only — so the rule is restated here and
 #: the pair is pinned by
 #: ``tests/test_record_searchkeys_10620.py::test_the_record_flattener_agrees_with_the_graph_flattener``,
 #: which now iterates the GRAPH declaration — so a key added there without being
@@ -2699,6 +2703,11 @@ _OMIT = _Omit()
 #: ONLY re-created the #10620 drift in the other direction (graph `a b c`, record
 #: `["a b", "c"]`, and a record-sourced rebuild re-materialised the array the
 #: index cannot match). `content` is NOT here (a string by contract).
+#: ⚠️ BOTH rules are WRITE-PATH: they govern a value written from now on. A row
+#: written before they landed can still hold a JSON-array TEXT in the (already
+#: `text`) column, which the column's owner reads straight back onto the node as
+#: a String — the graph-side repair is List-shaped (`typeof(...) = 'List'`) and
+#: cannot see it (#11784).
 _POINT_FLATTEN_COLUMNS: frozenset = frozenset({"search_keys", "quote"})
 
 
@@ -2719,9 +2728,22 @@ def _record_column_value(table: str, column: str, value: Any) -> Any:
         # — `_jsonb_or_scalar` would `json.dumps` the dict into the now-`text`
         # column, which is the SECOND representation #10620 exists to remove, and
         # this module's standing rule is that a disagreement stays visible rather
-        # than being coerced. A dict-valued `search_keys`/`quote` is unreachable
-        # from every producer today (the extractor emits a list, the fold a
-        # string); the refusal is the guard for the day that stops being true.
+        # than being coerced.
+        #
+        # ⚠️ The Mapping form IS REACHABLE, and this comment said otherwise until
+        # the #11706 re-record review measured it: `create_point`/`update_point`
+        # take an arbitrary props bag, and `flatten_search_keys_prop` flattens
+        # ``list``/``tuple`` only, so ``update_point(pid, quote={"a": 1})``
+        # arrives here. What the GRAPH does with that value is NOT "keep it" —
+        # the writers filter a value the engine cannot persist before dispatch
+        # (`_is_persistable_prop_value` refuses a Mapping, `_persist_extra_props`
+        # skips it, and the `#7369` "degraded … to null" warning fires on the live
+        # doors), so the node carries no value. This boundary refuses the WHOLE
+        # record write instead (`write_failed`, warned, journaled — and a replay
+        # of the same snapshot meets the same refusal, so it heals only once this
+        # arm changes). Whether that bigger divergence is worth it, or the arm
+        # should instead OMIT the column (exact parity with a write that stores
+        # nothing), is a design decision tracked in #11783 — not taken here.
         raise RecordProjectionError(
             f"point.{column} arrived as a MAPPING — the graph's form is the flat "
             "space-joined string (projection/entities.py::"

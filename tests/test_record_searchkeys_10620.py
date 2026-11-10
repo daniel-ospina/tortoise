@@ -882,14 +882,45 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
         flatten_search_keys_prop,
     )
 
+    # ⛔ A non-empty FLOOR first: emptying BOTH declarations satisfies the
+    # equality below AND empties the behavioural loop, which is the one polarity
+    # that silently stores `["a b", "c"]` again while every assertion passes
+    # (#11706 re-record review). A rule that names no key flattens nothing.
+    assert record_projection._POINT_FLATTEN_COLUMNS, (
+        "the record flatten declaration is EMPTY — the equality below cannot "
+        "see it, and neither can the loop below it"
+    )
+    assert _POINT_FLATTEN_LIST_PROPS, (
+        "the graph flatten declaration is EMPTY — same vacuity, graph side"
+    )
+
     # The two declarations must name the SAME set: a key flattened on one side
     # and not the other is the #10620 drift in whichever direction it points.
-    assert set(record_projection._POINT_FLATTEN_COLUMNS) == set(
-        _POINT_FLATTEN_LIST_PROPS), (
+    # Compared through the COLUMN spelling the code actually applies —
+    # `_split_properties` calls `snake()` BEFORE `_record_column_value` sees the
+    # property — never by raw string identity: a future key that is not
+    # snake-invariant would otherwise red this pin with "the declarations
+    # disagree" over an implementation that agrees, and then drive the loop
+    # below at a key the rule never receives (#11706 re-record review).
+    assert {record_projection.snake(key) for key in _POINT_FLATTEN_LIST_PROPS} == set(
+        record_projection._POINT_FLATTEN_COLUMNS), (
         "the record and graph flatten declarations disagree: record="
         f"{sorted(record_projection._POINT_FLATTEN_COLUMNS)} graph="
-        f"{sorted(_POINT_FLATTEN_LIST_PROPS)}"
+        f"{sorted(record_projection.snake(k) for k in _POINT_FLATTEN_LIST_PROPS)}"
     )
+
+    # ⛔ REACHABILITY — a key declared here but NOT a `point` COLUMN never reaches
+    # `_record_column_value` in production at all: `_split_properties` falls
+    # through to `tail[prop] = value`, so the record's `props` jsonb carries the
+    # RAW LIST while every assertion above stays green (#11706 re-record review).
+    point_columns = record_projection.table_columns()["point"]
+    for key in sorted(_POINT_FLATTEN_LIST_PROPS):
+        assert record_projection.snake(key) in point_columns, (
+            f"{key} is declared as a flattened list prop but "
+            f"{record_projection.snake(key)!r} is not a `point` record column — "
+            "the rule is unreachable there, so the props tail would store the "
+            "raw list the fulltext index cannot match"
+        )
 
     cases = [
         ["err4032", "release"],
@@ -903,7 +934,8 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
             props = {key: list(case)}
             flatten_search_keys_prop(props)
             graph_kept = key in props
-            actual = record_projection._record_column_value("point", key, case)
+            actual = record_projection._record_column_value(
+                "point", record_projection.snake(key), case)
             record_kept = actual is not record_projection._OMIT
             assert record_kept == graph_kept, (
                 f"{key} {case!r}: the graph "
