@@ -222,8 +222,10 @@ version: 1
 # the v4 design declares and classify each as built / unbuilt / descriptive —
 # this enumeration does not exist and is the first deliverable of Scope"*). The
 # eight came from the issue's O/I/T indicator (1) plus the carve-out; the five
-# added here were declared by a canonical ENUMERATION in
-# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row:
+# added then were declared by a canonical ENUMERATION in
+# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row. THE FOURTEENTH CAME FROM A
+# SURFACE NONE OF THEM WERE READ FROM (see below), so the current set is
+# fourteen — read the count off `mechanisms:`, never off this paragraph:
 #
 #   - §4.1's step list / §4.2's "resulting order" block declare `S2.2a-α EXACT
 #     DEDUP` and `S2.2a-β NEAR-DUP DETECT` as steps with a named rule; the
@@ -1550,12 +1552,14 @@ mechanisms:
       in `docs/architecture/` — one directory outside the surface this gate used
       to walk, which is how a declared-and-absent mechanism kept reading as
       shipped (#5064's root, with one directory of margin).
-      ⚠️ WHAT IS BUILT (the PAYLOAD half): `commit_schema.Mention` carriers
+      ⚠️ WHAT IS BUILT (the PAYLOAD half): `commit_schema.Mention` carries
       `surface`, `span_start`/`span_end` and `kind_guess` and BOUNDS EACH FIELD
       (it has no list-level validator, so it neither clamps nor dedupes the
       list); the clamp and the dedupe live in the PRODUCER —
       `extractor_v2._clamped_mention` and `extractor_v2._dedupe_mentions`, run
-      from `route_mentions` / `_mentions_for_claim` — and the producer channel
+      from `route_mentions` / `_mentions_for_claim`, and ALSO in `execute_embed`
+      (the `mentions_recorded` accounting the next paragraph is about) and
+      `extract_session_v2` (the evidence block) — and the producer channel
       publishes the result (`result["embed_list"]["mentions"]` /
       `result["s2_embed"]["mentions"]`). A future write door that persists the
       payload VERBATIM therefore stores what it was handed; it must not assume
