@@ -635,24 +635,30 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # `_DELIBERATE_BARE_FORM` rather than rewritten. Rewriting it would state a
         # command the machine never executed.") and names THIS set as its
         # mechanism, so the exemption is what the record's own decision requires —
-        # rewriting the doc line instead would reverse it.
+        # rewriting the doc line instead would reverse it. That sentence in the doc
+        # was FALSE on `main` until this key came back.
         #
-        # ⛔ This entry has been killed twice, so its history is the warning — and
-        # the ORDER below is measured, not remembered (`git merge-base
-        # --is-ancestor`): added with `#11755` (`217d46bac5`); deadened when
-        # `#11756` (`7c45d5af1f`) rewrote the doc line to `uv run python`; made
-        # live AGAIN when `#11759` (`6ba6fac984`) restored the record's original
-        # form and named this set as its mechanism in the DOC — that commit does
-        # not touch this file, so the key never left and simply began to match a
-        # live line again; then removed by `#11757` (`900d4aafc6`) on the stale
-        # premise that the doc still carried `uv run python`, which MOVED `main`'s
-        # red from the dead-key test to
+        # ⛔ REVIVED by `#11757`'s own rule. That PR removed this key and wrote down
+        # how it comes back: "an exemption can only be revived by restoring the line
+        # it names — never by re-declaring the key." The line IS back, so the key
+        # returns; nothing here re-declares an exemption for text that is gone.
+        #
+        # The ORDER is measured, not remembered (`git merge-base --is-ancestor`):
+        # added with `#11755` (`217d46bac5`); deadened when `#11756` (`7c45d5af1f`)
+        # rewrote the doc line to `uv run python`; made live AGAIN when `#11759`
+        # (`6ba6fac984`) restored the record's original form and named this set as
+        # its mechanism in the DOC — that commit does not touch this file, so the
+        # key never left and simply began to match a live line again; then removed
+        # by `#11757` (`900d4aafc6`), whose own tree already CONTAINED `#11759`, on
+        # the premise that the doc still carried `uv run python`. That removal MOVED
+        # `main`'s red from the dead-key test to
         # `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` instead of
         # clearing it — until the key came back here.
         #
         # ⛔ The lesson is the retirement step, not the restore: re-measure the doc
         # line before retiring this key, because a commit message saying the line
-        # was rewritten proves nothing about the line today. Membership is the
+        # was rewritten proves nothing about the line today — `#11757` merged three
+        # minutes AFTER the commit that made this line live again. Membership is the
         # exact STRIPPED line, so the key can only be revived by restoring the line
         # it names, never by re-declaring it, and it dies again the moment the doc
         # line is reworded.

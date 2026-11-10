@@ -256,17 +256,20 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **57** lines across **18**
-files under `tortoise/` (`git grep -n ':Document'` → 57 lines,
-`git grep -l ':Document'` → 18 files — the file count is not the line count).
+and the reason is measured: `:Document` occurs on **63** lines across **19**
+files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
+`git grep -l ':Document'` → 19 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-two independent lines have since been added, one per workstream: the #10976
+three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:894`, which is also the one that lifted the file count,
-being a new file), and #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring). Both are the point rather than an
-accident: this population grows for good reasons, so the figure tracks the tree
-and not a past commit.
+(`cache_eviction.py:956`, which is also one of the two that lifted the file
+count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
+`REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
+(`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
+mention at `4f68a2aa7`, which is the second file the count gained; its six added
+mentions are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
+than an accident: this population grows for good reasons, so the figure tracks
+the tree and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
@@ -274,9 +277,12 @@ of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
-and one narrow enough to skip them (`\(\w*:Document`) still matches **three**
+and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
 lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:894` comment. A guard carrying a hand-maintained allowlist of
+`cache_eviction.py:956` comment, plus three of `hosted_backup.py`'s
+(`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
+literals. Six of sixty-three is still the exception, so the exclusion argument
+stands; a guard carrying a hand-maintained allowlist of
 docstrings is a guard nobody can trust, so the label claim stays evidence
 recorded here rather than a check that would have to be argued with.
 
