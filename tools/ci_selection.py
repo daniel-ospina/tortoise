@@ -2578,6 +2578,35 @@ CORE_ALSO = ("tortoise/api.py", "tortoise/hosted_backup.py", "tools/skip-guard.p
              # reason to place them anywhere else. Pinned by
              # tests/test_ci_selection.py::test_the_census_tool_change_selects_core.
              "tools/hosted_api_cite_census.py",
+             # #11642 / #11086 — the SAME hole, owned by their own files. Both tools
+             # are `tools/**` entry points, so `tests/test_entry_point_python_guard.py`
+             # (`core`, the #5128 census) is the pin that holds them — and neither
+             # path matches a SOURCE_PATTERNS row while `tools/` is a flat
+             # NON_PYTHON_PREFIXES entry, so a tool-only diff returns `changed == []`,
+             # takes the docs-only early return and selects NO surface. Measured at
+             # PR #11733: `--changed-files tools/embedding_residual_scan.py` ->
+             # surfaces=[], guard file absent.
+             #
+             # ⛔ WHAT THIS IS NOT, because the first draft of this comment claimed it
+             # and the claim is FALSE: this gap is NOT why the two tools landed
+             # unguarded. Their PRs were not tool-only, and #11658's own CI RAN the
+             # guard: run 42714341603, job `test (d)` (129500375789) failed BOTH
+             # `test_entry_point_python_guard.py` cases naming
+             # `tools/measure_11086_gate_rate.py` at 23:46Z, while the PR merged at
+             # 23:02Z — a red merged over, not a pin that never ran (#11660's shard was
+             # watchdog-killed before it reached the file, while its shard `test (f)`
+             # (129600940876) had already failed on `test_bounded_raw_clients_3065`,
+             # which named that tool — before the merge). So the
+             # recurrence has TWO causes and this entry closes ONE: a tools-only change
+             # can still land with no surface selected, and a shard that has not
+             # reported yet can carry a red past the merge. The per-file remedy below is
+             # the census entry's — "the file that must carry it is now the file that
+             # selects its guard" — applied to both. ⚠️ Per-file, NOT the corpus-wide
+             # reach gap the guard's own docstring declares (still filed separately).
+             # Pinned by
+             # tests/test_ci_selection.py::test_the_11086_and_11642_tools_select_core.
+             "tools/embedding_residual_scan.py",
+             "tools/measure_11086_gate_rate.py",
              # #5612: the journal-growth measurement (`tools/journal_growth.py`)
              # and its probe
              # (`docs/evidence/5612-journal-growth/probes/corpus_growth_probe.py`)
