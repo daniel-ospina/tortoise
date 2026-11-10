@@ -383,6 +383,11 @@ def test_write_door_still_canonicalises_a_date_variant():
     assert read_caller_end("2024/03/01") == ("2024-03-01", None)
     assert read_caller_end("2024-3-1") == ("2024-03-01", None)
     assert read_caller_end("2024/3/1T12:00:00") == ("2024-03-01T12:00:00", None)
+    # MIXED separators are ordered by the widened read measure, so they reach
+    # this door too and must be re-spelled rather than stored un-canonicalised
+    # (cycle 4, finding 3 — on ``origin/main`` they were refused outright)
+    assert read_caller_end("2024/03-01") == ("2024-03-01", None)
+    assert read_caller_end("2024-03/01") == ("2024-03-01", None)
     # real instants: accepted, never re-spelled
     assert read_caller_end(PRODUCER_SESSION_DATE) == (PRODUCER_SESSION_DATE, None)
     assert read_caller_end("2024-06-01T12:00:00+02:00") == (
@@ -419,6 +424,11 @@ def test_write_door_still_canonicalises_a_date_variant():
     ("2026W243-05:00", "2026-06-10", "2026-06-10"),
     ("20230520-0500", "2023-05-20", "2023-05-20"),
     ("2023-W43-2+05:00", "2023-10-24", "2023-10-24"),
+    # BASIC-format (colon-less) time — `fromisoformat` reads the mixed form, so
+    # the assembly boundary must keep truncating it in UTC (cycle 4, finding 1)
+    ("2023-05-05T0221+05", "2023-05-05", "2023-05-04"),
+    ("2023-05-05T022100+05", "2023-05-05", "2023-05-04"),
+    ("2023-05-05 0221+05", "2023-05-05", "2023-05-04"),
 ])
 def test_a_value_that_parsed_before_still_names_its_day(value, written, utc_day):
     """Every one of these read a calendar-date PREFIX (or was as tolerant as
@@ -470,6 +480,12 @@ def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
     assert calendar_date("202001011") == date(1976, 5, 26)
     assert calendar_date("202305201112") is None
     assert calendar_date("1719792000000") is None
+    # the SIGN is symmetric (cycle 4, finding 2): ``_as_date`` read a signed
+    # epoch through ``float()``, so a leading ``+`` must not undate the value
+    # while ``-`` stays dated
+    assert calendar_date("+1684549260") == date(2023, 5, 20)
+    assert calendar_date("-1684549260") == date(1916, 8, 14)
+    assert time_aware._as_date("+1684549260") == "2023-05-20"
     # and no seam fabricates a day for them either
     assert time_aware._as_date("202305201112") is None
     assert _calendar_date("202305201112") is None

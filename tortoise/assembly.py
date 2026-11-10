@@ -2333,12 +2333,19 @@ def _window_bounds(lo: _date | None, hi: _date | None, *,
        this timestamp half cannot be removed by a string bound).
     3. FALSE NEGATIVE (pre-existing) — ``_norm_date``'s date-only branch also
        accepts the COMPACT (``20261020``) and ISO-WEEK (``2026-W43-2``)
-       spellings and LEADING-space values, none of which is lexicographically
-       inside a dashed range, so such a row is fetched by neither bound. (A
-       TRAILING-space value happens to sort INSIDE the range and is fetched —
-       the spelling class is not uniform.) No in-repo writer emits any of them
-       (the projection writes dashed ISO, the v2 lane writes ``YYYY-MM-DD``),
-       and the predicate cannot normalize a free-text value inside Cypher.
+       spellings, the SLASH spelling and LEADING-space values, none of which is
+       lexicographically inside a dashed range, so such a row is fetched by
+       neither bound. (A TRAILING-space value happens to sort INSIDE the range
+       and is fetched — the spelling class is not uniform.) Two of those classes
+       DO have in-repo writers: the ingest lane writes ``createdAt`` /
+       ``startedAt`` / ``endedAt`` / ``when`` / ``validFrom`` in the producer's
+       ``YYYY/MM/DD (Day) HH:MM`` shape (``tools/longmem_eval/ingest.py``,
+       ``ingest_v2.py``), and ``'2023/05/20 (Sat) 02:21' <= '2023-05-22'`` is
+       False (a slash sorts after a dash), so the window walk still fetches none
+       of those rows even though ``_norm_date`` now DATES them — the ladder
+       benefits, the fetch bound does not (#11646; residue, not a regression:
+       those rows were dropped before too). No version of this predicate can
+       normalize a free-text value inside Cypher.
     """
     lo_s = (lo - _timedelta(days=1)).isoformat() if lo else None
     if not hi:

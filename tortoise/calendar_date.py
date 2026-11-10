@@ -181,6 +181,24 @@ _INSTANT_RE = re.compile(
     r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?\s*\Z"
 )
 
+#: The same value with a BASIC-format (colon-less) time — ``2023-05-05T0221+05``,
+#: ``2023-05-05T022100+05``, ``2023-05-05 0221+05``. ``datetime.fromisoformat``
+#: reads the mixed extended-date/basic-time form (Python 3.11+), which is what
+#: the assembly ladder used, so it must reach the grammar: the prefix fallback
+#: would return the WRITTEN day where the old reader truncated in UTC, i.e. a
+#: silent DAY CHANGE on an aware instant (review cycle 4, finding 1).
+#: A separate arm, not looser separators on ``_INSTANT_RE``: optional colons
+#: there would also accept a MIXED spelling (``02:2100``) that
+#: ``fromisoformat`` REJECTS, and reading it as 02:21:00 + offset would move a
+#: day the old reader kept at the written value.
+_BASIC_TIME_INSTANT_RE = re.compile(
+    r"^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})(?!\d)"
+    r"(?:\s*\([A-Za-z]{2,9}\))?"
+    r"[T\s]+(?P<hour>\d{2})(?P<minute>\d{2})(?P<second>\d{2})?"
+    r"(?:[.,](?P<fraction>\d+))?"
+    r"\s*(?P<offset>[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?)?\s*\Z"
+)
+
 #: The date-only spellings ``date.fromisoformat`` accepts beyond the dashed
 #: calendar form: compact (``20261020``) and ISO week (``2026-W43-2``,
 #: ``2026W432``, week-only). Kept because the assembly ladder has always
@@ -221,8 +239,11 @@ _OFFSET_RE = re.compile(
     r"(?::?(?P<minutes>\d{2})(?::?(?P<seconds>\d{2}))?)?$")
 
 #: A pure-number string in the SECONDS-epoch range (9-10 digits, optional
-#: fraction). 8 digits is a compact date; 11+ is a millisecond epoch.
-_EPOCH_STRING_RE = re.compile(r"^-?\d{9,10}(?:\.\d+)?$")
+#: fraction). 8 digits is a compact date; 11+ is a millisecond epoch. The sign
+#: is SYMMETRIC on purpose: ``time_aware._as_date`` read a signed epoch through
+#: ``float()``, so ``+1684549260`` must not become undated while
+#: ``-1684549260`` stays dated (review cycle 4, finding 2).
+_EPOCH_STRING_RE = re.compile(r"^[+-]?\d{9,10}(?:\.\d+)?$")
 
 
 def calendar_date(value: object, *, utc_truncate: bool = False) -> date | None:
@@ -290,17 +311,18 @@ def _string_date(s: str, *, utc_truncate: bool) -> date | None:
     finally the TOLERANT prefix reading (see ``_CALENDAR_SHAPE_RE``)."""
     if not s:
         return None
-    match = _INSTANT_RE.match(s)
-    if match is not None:
-        d = _match_date(match)
-        if d is None:
-            return None
-        if utc_truncate and match.group("hour") is not None:
-            naive = _match_naive(match)
-            offset = _match_offset(match)
-            if naive is not None and offset is not None:
-                return _utc_day(naive.replace(tzinfo=offset), d)
-        return d
+    for instant_re in (_INSTANT_RE, _BASIC_TIME_INSTANT_RE):
+        match = instant_re.match(s)
+        if match is not None:
+            d = _match_date(match)
+            if d is None:
+                return None
+            if utc_truncate and match.group("hour") is not None:
+                naive = _match_naive(match)
+                offset = _match_offset(match)
+                if naive is not None and offset is not None:
+                    return _utc_day(naive.replace(tzinfo=offset), d)
+            return d
     d = _date_only_shape(s)
     if d is not None:
         return d
@@ -320,7 +342,7 @@ def _string_date(s: str, *, utc_truncate: bool) -> date | None:
 def _string_instant(s: str) -> datetime | None:
     if not s:
         return None
-    match = _INSTANT_RE.match(s)
+    match = _INSTANT_RE.match(s) or _BASIC_TIME_INSTANT_RE.match(s)
     if match is not None:
         naive = _match_naive(match)
         if naive is None:

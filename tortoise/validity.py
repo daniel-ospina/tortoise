@@ -120,7 +120,11 @@ END_WRITE_OUTCOMES: dict[str, int] = {"shaped": 0, "refused": 0}
 #: ``_names_an_instant``. (Review P3: a padded date normalised while the padded
 #: date-TIME beside it was refused — one sloppiness, two verdicts.)
 _DATE_VARIANT_RE = re.compile(
-    r"^(?P<year>\d{4})(?P<sep>[-/])(?P<month>\d{1,2})(?P=sep)(?P<day>\d{1,2})"
+    # the day separator is independent of the month's: ``2024/03-01`` and
+    # ``2024-03/01`` are variants ``_names_an_instant`` now ORDERS (the read
+    # measure widened for #11646), so this door must canonically re-spell them
+    # instead of storing a variant it used to refuse (review cycle 4, finding 3).
+    r"^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})"
     r"(?P<rest>[T ]\S*)?$"
 )
 
