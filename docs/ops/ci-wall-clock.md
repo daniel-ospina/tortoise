@@ -229,23 +229,33 @@ Every other row was checked against that rule. The discriminating fact is **not*
 remaining cold saves are small — most of these jobs install the same torch/embeddings wheels and
 write the same 3.6 GB archive on a cold key — it is whether the shipped cap already clears its own
 SUM. `test` cleared it with room to spare until the 2026-11-09 refresh — the refresh's
-map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10: 10 m
-last-failed pre-phase + the emitted **28 m** per-shard
+map took it over, and #11602 bought the room back by raising `fast_shards` 9 → 10; #11576 then
+raised it 10 → 11 for the same reason one merge later (the history is at the end of this
+parenthetical). At **`fast_shards: 11`** — the shipped shape — the row reads: 10 m
+last-failed pre-phase + the emitted **26 m** per-shard
 watchdog + 6 m embedder + **~7.3 m of MEASURED startup, not the ~1 m an earlier revision restated**
 (`Set up job` 182 s = 3 m 02 s, 10:21:30 → 10:24:32, plus 4 m 14 s of uncapped setup steps to the
 suite's first line — the 10:24:32 → 10:28:58 window of 266 s MINUS the embedder's own measured 12 s,
 whose 6 m cap is already a term above; run 42000057137, job `test (d)`, `actions/jobs/127165076497`)
-plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **59.6 m against
-90, x 1.5 = 89.5** — clearing it by 0.5 m, where the refreshed map at 9 shards stood at
+plus **an 8 m cache-write term (1 m prune + 7 m save)** and ~0.4 m last-failed save = **57.6 m against
+90, x 1.5 = 86.5** — 3.5 m of headroom, where the refreshed map at 9 shards stood at
 **63.6 m, x 1.5 = 95.5** and reded
 `test_the_test_job_carries_no_unbounded_cache_post_step`. The term that moved is
 the watchdog: it read **26 m** until #10999 registered its own fast suite
 (`tests/test_10999_batch_story_relations.py`), **27 m** until the 2026-11-09 sweep re-weighted the fast
-pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards takes it to
-**28 m**, because one more file in `fast_pool()` re-packs the worst
+pool, and **32 m** at 9 shards on that refreshed map — re-packing into 10 shards took it to
+**28 m** (59.6 m, x 1.5 = 89.5), because one more file in `fast_pool()` re-packs the worst
 shard across a whole minute, and this paragraph restates that emission rather than owning it:
 `tools/ci_selection.py --emit-push-matrix` is the authority, and `tests/test_ci_selection.py`
-reds the moment the two disagree again.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
+reds the moment the two disagree again. ⛔ **#11576 then re-broke it the same way, one merge
+later**: main's `test_embed_decision_step_11086.py` and that branch's
+`test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the union
+packs the worst shard at **840.2 s** (either parent alone packed 840.0 s), `ceil(840.2/60 x 2)`
+rounds up to **29 m**, and the arm-2 SUM became **60.64 m, x 1.5 = 90.96 m against the 90 m cap**
+— RED where both parents pass. `fast_shards: 11` packs the same map to 763.8 s → 26 m, i.e. the
+57.6 m above: 3.5 m of real headroom instead of the 0.5 m S=10 had been clearing by. The cap was
+NOT moved — `#3239`'s stale-head exposure is what raising it re-opens, and the SUM rose from the
+POOL, not from the pre-suite terms.) The write term fits because #11063 split this job's cache by payload: `~/.cache/pip`
 (3,616,385,308 B in a PR scope, the torch wheel set, 93% of the 3.88 GB payload the defect uploaded)
 is now read from the shared `pip-<os>-<hash uv.lock>` key that TWO other jobs write, while
 `~/.cache/uv` keeps exactly one writer here, bounded in ACCUMULATION (`uv cache prune` — it drops entries no environment reaches, not a single environment's set) and in time
@@ -431,7 +441,7 @@ same step with the same tail is the investigation.
   measured-normal population rather than on it. Where that wait cannot be MEASURED at all — the
   queued PR runs carry no readable `created_at` — the tool reports `PR-UNWITNESSED` rather than
   `OK`: an unmeasured wait is not a measured-healthy one.
-- **It does not reduce jobs per run.** A `python-ci` run is 21 jobs (max 29) by construction; with
+- **It does not reduce jobs per run.** A `python-ci` run is 22 jobs (max 30) by construction; with
   ~17 concurrent PR heads that is the arithmetic behind the p95 77-minute first-job wait, and it
   is a sharding/capacity question (#5215, #9539), not a timeout question. It does now bound how
   many of those jobs ONE run may hold at once — §7 — which moves the queue, not the work. It bounds
@@ -534,8 +544,8 @@ committed `durations` map — and
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m
 per-leg guideline: a guard that stopped at the per-leg share stayed GREEN while the job's wall was
 double it, which is the false PASS this pin exists to prevent. The fast
-matrix's band is pinned at `ceil(10/3)` = **4** waves after #11602 raised `fast_shards` to 10
-(it was `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
+matrix's band is pinned at `ceil(11/3)` = **4** waves after #11576 raised `fast_shards` to 11
+(it was `ceil(10/3)` = 4 at the 10-shard shape and `ceil(9/3)` = 3 at the 9-shard measurement) — exactly the 2–4 wave band invariant 1
 protects, so the pin stays GREEN while the accounted regression grows by a wave. That matters for
 the arithmetic below: the `+17.9 m p50 / +23.2 m max` band delta was simulated on the 3-wave shape,
 so it is a LOWER bound on the shipped 4-wave one, not a measurement of it — re-derive before
@@ -557,8 +567,8 @@ matrices**: `manifest-integrity`, `surface-guard` and `workflow-lint` carry no `
 and `test-concurrency-falkor`, `packs-compile`, `test-track-b`, `test-d14-hosted-api` and
 `test-record-postgres` need only `changes` — the same trigger the three matrices wait on.
 (`changes` is itself a fourth `needs:`-less job and is excluded from the 8 deliberately: the
-matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 29
-jobs** (18 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
+matrices wait on it, so it cannot overlap them.) On a full selection a PR therefore **requests 30
+jobs** (19 matrix legs + 11 non-matrix — the 12th, `canary-streak`, is `push`-gated), of which at
 most **17 can be in flight at once** (9 capped matrix slots + the 8 eligible non-matrix). **The
 pool does not bound that** — it bounds only the subset that lands on it. `test` and
 `test-carve-out` ask for `ubuntu-latest`, and `test-slow` pins `ubuntu-24.04` — but on this repo

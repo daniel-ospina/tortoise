@@ -19,8 +19,8 @@ version: 1
 # test (`test_real_workflow_halves_are_consistent`) and the lane-parity
 # superset test below, both of which recompute from the map.
 #
-# S=10 is also what the lane-parity contract permits: main publishes
-# `test (a)`…`test (i)` and a PR may only ADD to that set, never remove from it
+# S=11 is also what the lane-parity contract permits: main publishes
+# `test (a)`…`test (j)` and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
 # merge rail refuses a removal). #11602 raised S 9 -> 10 because the 2026-11-09
 # sweep took the worst committed shard to 32 m, which put the `test` job's SUM
@@ -30,18 +30,31 @@ version: 1
 # stale-head exposure is untouched, and `#6792`'s 10 m SLOW-leg ceiling is a
 # different number on a different lane and is not touched by this line.
 #
+# #11576 raised S 10 -> 11 for the SAME reason, one merge later: main's
+# `test_embed_decision_step_11086.py` and this branch's
+# `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the
+# union packs a worst shard at 840.2 s where either side alone packed 840.0 s,
+# and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 up to 29 m — 0.2 s of
+# packing crosses a whole watchdog minute. At 29 m the arm-2 SUM is 60.64 m,
+# x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
+# the same map packs to 763.8 s -> 26 m, i.e. 57.64 x 1.5 = 86.46 m: 3.54 m of
+# real headroom rather than the 0.54 m S=10 was clearing by. ⛔ The cap was NOT
+# moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
+# re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
+# from the pre-suite terms (those are measurements and file facts).
+#
 # The 1.25x balance band is enforced by `test_real_workflow_halves_are_
 # consistent`, which recomputes the ratio from the committed map. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
 # above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
-# labels, so it forbids a SHRINK and is what PERMITS 10, not what caps it at 9.
+# labels, so it forbids a SHRINK and is what PERMITS 11, not what caps it at 10.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
 # free win.
-fast_shards: 10
+fast_shards: 11
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
@@ -1267,6 +1280,24 @@ surfaces:
   # comment exists to prevent. DB-free: a fake control plane and a recording
   # fake SDK, no graph writes, no server.
   - test_10047_record_every_lane.py
+  # #8290: the demo/sample `:Session` is excluded from all three session read
+  # surfaces (list / detail / SDK). DUAL-REGISTERED (`api` + `core`) for the
+  # #2938/#3554 reason: `session_schema.py` matches no SOURCE_PATTERNS entry
+  # (so it falls to the `core` fallback), while two of the three surfaces this
+  # module pins by source (`list_sessions`, `get_session_detail`) live in
+  # `tortoise/hosted_api.py`, which SELECTS `api` — and a named-surface match
+  # REPLACES the fallback, so a core-only entry would never run this guard. No
+  # DOCKER graph lane here — but not a fake either: three of its tests build a
+  # throwaway EMBEDDED engine (`TortoiseSDK(<tmp_path>/tortoise.db)`: no docker,
+  # no server, no tenant graph) and run real Cypher against it — the SDK doors,
+  # the composed list WHERE, and `LIFETIME_MEMORY_QUERY`. That is why the fast
+  # surfaces can carry it; the tenancy-graph behavioural half is on
+  # `test_onboarding_seed_endpoint.py` (docker), which would not be selected by
+  # a `session_schema.py` diff. ⛔ Do not summarise this as "DB-free" in either
+  # direction: this map uses the phrase both ways (a "no graph writes" note
+  # elsewhere, and "throwaway embedded" on several rows), so state what the
+  # file does instead of which label it earns.
+  - test_demo_session_read_exclusion_8290.py
   # #3554: the `:Session` write-schema declaration (tortoise/session_schema.py)
   # and its writer inventory + D9 retrofit instrument
   # (tools/session_retrofit_audit.py). DUAL-REGISTERED (`api` + `core`), same
@@ -4157,11 +4188,19 @@ surfaces:
   - test_canonical.py
   - test_capture_loop_responsiveness.py  # #3365: capture ADMISSION key vs the graph the data path opens (dual: api)
   - test_capture_session.py
-  # #9599: a blank session id is refused at the CAPTURE DOORS (tortoise/ids.py
-  # + the two SDK doors + the hosted boundary) and at the two replay folds that
-  # merge the key. Registered beside its sibling capture suite; `core` owns
-  # `tortoise/ids.py`/`projection/`, and `sdk.py`/`hosted_api.py` are
-  # SHARED_MODULEs, so those diffs already run the full matrix.
+  # #9599: a blank session id is refused at the CAPTURE DOORS (`tortoise/ids.py`
+  # + the two SDK doors + the hosted boundary + `commit_schema.CommitPayload`)
+  # and at the two replay folds that merge the key. DUAL-REGISTERED with `sdk`
+  # (below): `core` owns `projection/`, but it does NOT own `tortoise/ids.py` —
+  # `SOURCE_PATTERNS` maps that file to the NAMED surface `sdk`, and a
+  # named-surface match REPLACES the `core` fallback, so an ids.py-only diff
+  # would silently skip this guard without the `sdk` arm (`#8290` review P3,
+  # measured: `--changed-files tortoise/ids.py` → `['sdk']`, and this file is
+  # absent from that run's `test_files`). `sdk.py` IS a SHARED_MODULE, so an
+  # sdk.py-only diff already runs the full matrix. `hosted_api.py` is NOT one:
+  # that diff selects `['api','onboarding']` with `full` false and this file is
+  # ABSENT from its `test_files`, so the suite is still asleep on the hosted
+  # boundary it pins — the `api` arm is the fix, and that gap is #11648.
   - test_9599_blank_session_id.py
   # #3945: the primary capture create site must map the extractor's validated
   # `when` onto `validFrom` (one slot, two spellings — docs/ONTOLOGY.md §4.7).
@@ -4214,6 +4253,9 @@ surfaces:
   - test_10046_two_tenants_never_share_a_credential_tenant.py  # #10046: two orgs live in one process — no credential resolves into the OTHER tenant (and the tenantless arm never names one); dual: api
   - test_10047_record_every_lane.py  # #10047: the seed runners + background index jobs install the DEFAULT-graph tenant; dual: api (core is load-bearing for record_writer.py, which matches no SOURCE_PATTERN)
   - test_10017_backfill_census.py  # #10017: the pre-delete turn census is per-session — core ONLY (the census drives a raw falkordb client, never the hosted API, so unlike the 3551/10000 rows above it has no api leg)
+  # #8290: the demo `:Session` read exclusion; dual: api (two of the three
+  # pinned surfaces live in hosted_api.py).
+  - test_demo_session_read_exclusion_8290.py
   # #3554: the `:Session` write-schema declaration + its writer inventory/D9
   # retrofit instrument; dual: api (the inventory predicate scans hosted_api.py).
   - test_session_schema_3554.py
@@ -7511,6 +7553,27 @@ surfaces:
   - test_csp_plan_doc_consistency.py
   sdk:
   - test_stdlib_shadow_guard.py  # #10060 N1: repo-wide guard — see the note on the `api` entry
+  # #8290: the RESERVED-namespace half lives in `tortoise/ids.py`, which
+  # `SOURCE_PATTERNS` maps to the NAMED surface `sdk` — and a named-surface match
+  # REPLACES the `core` fallback, so the `api`+`core` rows above do NOT run on an
+  # `ids.py` diff. Measured (#8290 review, P2): `--changed-files tortoise/ids.py`
+  # selects `['sdk']`, so with only the api+core rows NONE of the selected files
+  # could red if the reservation were deleted — the exclusion would silently
+  # become a filter over ids the write doors admit, the exact hole the P1 closed.
+  # ⚠️ #11620 P2: the "246" this note used to quote does not reproduce and was
+  # never a selection: the 60-file slow pool is EMITTED on every selection but
+  # RUNS only where `slow_run` says so (the whole pool on a full matrix, just
+  # `slow_selected` on tier-2, neither on a docs/website-only diff), and the
+  # fast count moves with the manifest — 189 at `db55b7b51f`. The pin is the
+  # SELECTION, which the sdk arm above makes: this suite is in it.
+  - test_demo_session_read_exclusion_8290.py
+  # #9599 (the `sdk` arm; the `core` row is in that block): same reason. The
+  # blank/reserved rule's DOOR half IS `tortoise/ids.py`, so an ids.py-only diff
+  # selects `sdk` and the `core`-only row would sleep through exactly the change
+  # it pins — including `_writable_container_id(reserved) is True`, the
+  # asymmetry this PR adds (dual `core` + `sdk`, the established pattern in this
+  # file — cf. `test_7936_stable_stub_ids.py` above).
+  - test_9599_blank_session_id.py
   # #5140 finding 12 (the `sdk` arm; the `core` row is in that block). NOT
   # because of `tortoise/sdk.py`: that module is a `SHARED_MODULES` entry, so a
   # `sdk.py`-only diff selects the FULL matrix anyway (the same NOTE sits above
@@ -10978,11 +11041,12 @@ durations:
   test_cursor_mcp_exit_evidence.py: 2.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_d3_session_identity.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_dashboard_unknown_address.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
+  test_demo_session_read_exclusion_8290.py: 14.0  # #11576 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured 2026-11-09, the WHOLE file as committed: 30 tests in 10.10s (`TORTOISE_TEST_CARVE_OUT=1`). Declared 14.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the 1.2 MB `config/ci-surfaces.yml` parse two of its census pins make. ⛔ Absent this row the file packs at the flat 2.0s `DEFAULT_FAST_WEIGHT`, understating it 5x. At S=11 this weight still packs the worst shard at 764.9s -> 26 m (arm-2 SUM 57.64 m x 1.5 = 86.46 m against the 90 m cap); at S=10 it would ADD to the 29 m shard and hold the SUM red. Refresh from the first post-merge junit artifact.
   test_dream_noop_3139.py: 4.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.3
   test_durability_posture.py: 9.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 8.2
   test_embed_metering.py: 2.4  # #4488: no source leg of the sweep collected it — refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.5
   test_embed_gate_5008.py: 6.0  # carried forward (not a full-file CI measurement) — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.8s) is a LOWER bound; kept 6.0
-  test_embed_decision_step_11086.py: 7.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured this turn, the WHOLE file as committed: 12 tests in 3.69s under `TORTOISE_TEST_CARVE_OUT=1` (5.08s wall). Declared 7.0s — ~1.9x the measured body, so a cold leg pays interpreter start and the one 1.2 MB `config/ci-surfaces.yml` YAML parse its selection pin makes without under-packing. ⛔ The ceiling is NOT free: 7.5s and above repacks a fast shard from 28 m to 29 m and breaches `test_ci_selection.py`'s arm-2 invariant (SUM x 1.5 <= the 90 m cap, 0.54 m of headroom left). If this file grows, shrink it or earn the shard back — do not simply raise this number.
+  test_embed_decision_step_11086.py: 7.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured (`TORTOISE_TEST_CARVE_OUT=1`): the WHOLE file as committed collects and runs **14** tests — `--collect-only -q` -> 14, `14 passed in 4.86s` (#11576 review P3: this note said "12 tests in 3.69s", a count and a body the file outgrew). Declared 7.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the one 1.2 MB `config/ci-surfaces.yml` YAML parse its selection pin makes without under-packing. ⛔ The ceiling is NOT free: 7.5s and above repacks a fast shard across a whole watchdog minute and breaches `test_ci_selection.py`'s arm-2 invariant. If this file grows, shrink it or earn the shard back — do not simply raise this number.
   test_embedder_provision.py: 8.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (7.8s) is a LOWER bound; kept 8.6
   test_entity_delete_rebuild.py: 2.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.7
   test_env_truthy.py: 22.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 18.8
