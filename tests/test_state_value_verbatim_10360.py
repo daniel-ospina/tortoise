@@ -6355,7 +6355,7 @@ def _same_magnitude_number(one: tuple, other: tuple) -> bool:
 
 
 def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool:
-    """Is one of the MISSING values a magnitude this projection cannot compare?
+    """Is EVERY missing value a magnitude this projection cannot compare?
 
     `missing` are the quote slots no content slot accounts for; `content_slots`
     are the slots LEFT OVER after each quote slot has consumed one match, so a
@@ -6364,22 +6364,38 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
 
     A magnitude is in play only where the missing slot has a COUNTERPART among
     the leftovers:
-      * both spellings carry a scale word over the same digits (`12 thousand`
-        against `12 million`) — two spellings, no way to say which is right;
+      * both spellings carry a DIFFERENT scale word over the same digits
+        (`12 thousand` against `12 million`) — two spellings, no way to say
+        which is right. The SAME scale word with a different mantissa is not
+        this case: the scale cancels, the mantissa is what differs, and the
+        shipped `_value_slot_divergence` JUDGES that pair — a classifier that
+        called it unjudged would refuse a judgement the rule makes;
       * the digits are zero-extended (`12000000` against `12 million`) — one
         value, a numeric form and a scaled one.
-    An unrelated slot's scale is NOT a counterpart, whatever its anchor, and an
-    unscaled quote value against a scaled content value is not a counterpart
-    either (`3 batches` against `3 million events` is a DROP, not a magnitude).
+
+    ⛔ EVERY missing slot must be explained, not just one (review cycle 10):
+    returning True on the first explained pair certified the whole row, so a
+    row whose OTHER missing value had no counterpart at all — `we shipped 3000
+    events` against `… 30 batches and 12 events` — was filed as a magnitude
+    question although `12 events` is simply dropped. An unrelated slot's scale
+    is not a counterpart whatever its anchor, and an unscaled quote value
+    against a scaled content value is not one either (`3 batches` against
+    `3 million events` is a DROP, not a magnitude).
     """
     for _anchor, quote_core, quote_scale in missing:
+        explained = False
         for _ca, content_core, content_scale in content_slots:
             if quote_scale and content_scale:
-                if _digits(quote_core) == _digits(content_core):
-                    return True
+                if (quote_scale != content_scale
+                        and _digits(quote_core) == _digits(content_core)):
+                    explained = True
+                    break
             elif _same_magnitude_number(content_core, quote_core):
-                return True
-    return False
+                explained = True
+                break
+        if not explained:
+            return False
+    return True
 
 
 def _retention_class(content: str, quote: str) -> str | None:
@@ -6765,6 +6781,16 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
         assert _stated_month_day(quote) is not None, quote[:80]
         assert _stated_month_day(content) == _stated_month_day(quote), (
             _stated_month_day(content), _stated_month_day(quote), content[:80])
+    # 3d. ⛔ AND THE HELPER ITSELF IS DISCRIMINATED, because both census rows
+    #     AGREE: an equality over two agreeing rows cannot tell "compares
+    #     month-and-day" from "compares presence", which is the cycle-9 P1 one
+    #     level down (a `_stated_month_day` reduced to `(0, 0)` when any date is
+    #     present left all three §24 tests green). One pair per direction.
+    assert _stated_month_day("due 2026-11-02") == _stated_month_day(
+        "land by November 2")
+    assert _stated_month_day("due 2026-12-25") != _stated_month_day(
+        "land by November 2"), "the checker must compare month-and-day, not presence"
+    assert _stated_month_day("nothing here") is None
     # 4. A value-free point is not a row at all.
     assert _retention_class("the team prefers intervals",
                             "the team prefers intervals") is None
