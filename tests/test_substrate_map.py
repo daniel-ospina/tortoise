@@ -58,15 +58,17 @@ _LABEL_CLAIM = re.compile(
 #: free to lie — and §5's own next sentence ("re-derives both numbers over the **same**
 #: population this sentence is stated in") asserts the very thing nothing read.
 #: ⛔ The lookahead requires the QUOTED-COMMAND clause ("… files under `tortoise/`
-#: (`git grep …") to follow the population IMMEDIATELY. An earlier version enumerated
-#: the separators a second population could be joined with (`,`, `and`, `or`, `plus`)
-#: — a closed list, measured GREEN on `files under `tortoise/` + `tests/``,
-#: `` `tortoise/` & `tests/` `` and `` `tortoise/` as well as `tests/` ``, i.e. green on
-#: exactly the drift it exists to stop. Binding what MUST follow instead of what must
-#: not is the shape that closes it: every added population breaks the lookahead.
+#: (`git grep …") to follow the population IMMEDIATELY — not merely *some*
+#: parenthesis. Two earlier versions were measured fail-open, one after the other:
+#: a negative lookahead enumerating the separators a second population could be
+#: joined with (`,`, `and`, `or`, `plus`) left `files under `tortoise/` + `tests/``
+#: green, and a bare `(?=\s*\()` left `files under `tortoise/` (and `tests/`)` green
+#: — a false sentence with every number green both times. Binding the clause that
+#: must follow, by name, is the shape that closes it: any second population, however
+#: it is punctuated, breaks the match.
 _POPULATION_CLAIM = re.compile(
     r"occurs on \*\*\d+\*\*\s+lines\s+across\s+\*\*\d+\*\*\s+files\s+under\s+"
-    r"`([^`]+)`(?=\s*\()"
+    r"`([^`]+)`(?=\s*\(`git grep)"
 )
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
