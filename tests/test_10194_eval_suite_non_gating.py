@@ -136,19 +136,46 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     return out
 
 
-EXPECTED_LEGS = {
+#: The leg FAMILIES this map enumerates. ⛔ The shard LETTERS are NOT typed here —
+#: they are derived from the selector's own counts (``fast_shard_count`` /
+#: ``slow_shard_count`` / ``carve_shard_count``, which read ``fast_shards`` and its
+#: siblings out of `config/ci-surfaces.yml`) by `_expected_legs` below. The typed
+#: form was a count that rotted silently in the wrong direction: `#11576` raised
+#: ``fast_shards`` 10 -> 11 to cut the critical leg's wall clock, and this leg then
+#: redded on `test (k)` — a COUNT change, not a coverage change, since the leak
+#: loop below walks every leg `cs.push_legs` actually produces. Deriving the
+#: letters keeps the tripwire that matters (a new FAMILY of gating set, which the
+#: map would not enumerate) while a re-shard is not a false block.
+_LEG_FAMILIES = {
     "fast_pool", "slow", "env_broken", "carve_out",
-    *(f"test ({c})" for c in "abcdefghij"),
-    *(f"test-slow ({c})" for c in "abcde"),
-    *(f"test-carve-out ({c})" for c in "abc"),
-    *(f"tier-2 test_files [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
-    *(f"tier-2 slow_selected [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
     "push slow_selected",
 }
+#: Surfaces the tier-2 legs are driven with, one changed file per subtree owner.
+_TIER2_CHANGES = (
+    "tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
+    "tools/longmem_eval/run.py", "tortoise/embeddings.py",
+)
+
+
+def _expected_legs(manifest: dict) -> set[str]:
+    """`_LEG_FAMILIES` + the shard legs, whose letters come from the MANIFEST.
+
+    ``string.ascii_lowercase[:n]`` is the same convention `cs.push_legs` names its
+    shards with — verified against the producer, never re-implemented: the
+    assertions below compare this set with the legs `_gating_sets` actually built.
+    """
+    import string
+
+    return {
+        *_LEG_FAMILIES,
+        *(f"test ({c})" for c in string.ascii_lowercase[:cs.fast_shard_count(manifest)]),
+        *(f"test-slow ({c})"
+          for c in string.ascii_lowercase[:cs.slow_shard_count(manifest)]),
+        *(f"test-carve-out ({c})"
+          for c in string.ascii_lowercase[:cs.carve_shard_count(manifest)]),
+        *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
+        *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
+    }
 
 
 def test_the_subtree_is_not_empty():
@@ -191,7 +218,7 @@ def test_no_subtree_file_is_in_any_gating_leg():
     """
     manifest = _manifest()
     legs = _gating_sets(manifest)
-    assert set(legs) == EXPECTED_LEGS, (
+    assert set(legs) == _expected_legs(manifest), (
         "the leg list this test walks changed — a new gating set was added to "
         "the selector (or one renamed) and is NOT covered here, which reads as "
         "a pass over a set nobody checked")
