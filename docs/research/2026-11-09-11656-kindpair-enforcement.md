@@ -14,7 +14,10 @@ stage: scoping-research
 
 # #11656 — a declared relation must only connect the kinds it declares
 
-**Status: research complete, blocked on two owner decisions (§5). No implementation proposed yet.**
+**Status: research complete. §5 lists four decisions, not two: the owner ruled D1, D2 and D3 on 2026-11-09,
+D4 needs no ruling (leave the existing edges; never retro-refuse — §5's own D4 recommendation), and D5 (the
+prevention half) is a scope addition carrying its own ruling — see
+`docs/plans/2026-11-09-11656-endpoint-kind-binding.md` §2. No implementation proposed yet.**
 
 The issue's O/I/T is sound as a *goal statement*. Its **prescribed location is wrong**, and two of its
 "open decisions" are not the only ones — the sharpest question is one the body does not ask. This brief

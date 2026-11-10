@@ -92,7 +92,7 @@ class TestTheInventoryTheScopeCites:
         assert mechanisms == {"IMPL": 34, "NAND": 1}, mechanisms
 
     def test_the_routing_the_gate_choice_rests_on(self):
-        """The number §1.2's table and §5.3a both rest on: which write paths each declaration binds.
+        """The number §1.1 and §3's alternatives table both rest on: which write paths each declaration binds.
 
         `relation_write_paths()` is the real routing predicate — the `mechanism` counts above are only a
         proxy for it. Measured at this head: 33 declarations bind the OPERATOR path alone, and exactly 2
