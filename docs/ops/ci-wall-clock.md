@@ -538,7 +538,7 @@ matrix gains its second wave (`ceil(5/3)` = 2): one wave of the measured slow-le
 (row above), so its band goes ~9 m → ~18 m (1 wave → 2), still narrower than
 the fast band under the same cap (~31.5 m), so it does not become the run's widest leg. **The wall
 guard measures that band, not the per-leg share**: `slow_wall_projection()` takes the job's
-`max-parallel` and reports `waves x (max leg + setup)` — `8.63 m` per leg → **`17.26 m`** from the
+`max-parallel` and reports `waves x (max leg + setup)` — `8.64 m` per leg → **`17.28 m`** from the
 committed `durations` map — and
 `test_slow_shards_are_duration_packed_and_meet_the_wall_target` holds it to
 `SLOW_LEG_CAPPED_WALL_TARGET_MIN` (20 m). That constant is a documented departure from the 10 m

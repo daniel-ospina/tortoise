@@ -1065,7 +1065,12 @@ def test_faq_internal_links_point_at_real_pages() -> None:
     html = _read(FAQ)
     missing: list[str] = []
     for href in sorted(set(re.findall(r'href="(/[^"]*)"', html))):
-        path = href.split("#", 1)[0]
+        # ⛔ THE QUERY IS STRIPPED, not just the fragment. The icon links carry a
+        # `?v=<sha256[:12]>` cache-buster (#11407) so a re-exported favicon cannot keep
+        # drawing the superseded artwork, and a resolver that keeps the query asks for a
+        # file literally named `favicon.ico?v=…`. Dropping it cannot hide a dangling link:
+        # the PATH is still resolved below, and a query never selects a different page.
+        path = href.split("#", 1)[0].split("?", 1)[0]
         if path in ("", "/"):
             continue
         candidate = WEBSITE / path.lstrip("/")
