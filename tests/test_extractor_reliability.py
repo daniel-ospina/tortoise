@@ -461,7 +461,18 @@ def test_census_equality_mixed_errors(monkeypatch):
     exactly one census class — ``len(errors) == sum(error_census.values())``
     holds even on a mixed-error session, and the four previously-uncensused
     deterministic classes (s1_chunk_summary / empty_embed_list /
-    entity_resolution_failed / s5_failed) are all present."""
+    entity_resolution_failed / s5_failed) are all present.
+
+    ⚠️ THE EQUALITY'S SCOPE, stated where it is asserted (#11693 review, P3): it
+    is a claim about the RAISE-PAIRED classes. `embedding_error`,
+    `unclassified_terminal` and `entity_identity_held` are ADDITIVE-ONLY by
+    declaration (`_bump_census_class`'s docstring), and `entity_identity_held`
+    is bumped ONCE PER RUN — so a session that both HELD an entity and raised any
+    other error reads `sum(census) == len(errors) + 1`. No arm below builds that
+    combination (these fixtures never reach entity resolution), so the equality
+    is bounded by this note rather than weakened by it; each additive class is
+    pinned by its own arm elsewhere.
+    """
     monkeypatch.setattr(v2.time, "sleep", lambda _: None)
     monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
     monkeypatch.delenv("TORTOISE_API_URL", raising=False)

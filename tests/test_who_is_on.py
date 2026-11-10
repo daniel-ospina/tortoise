@@ -246,7 +246,8 @@ class WhoIsOnTest(unittest.TestCase):
     # ── helpers ──────────────────────────────────────────────────────────────
 
     def _write_fleet_board(self, issues=None, lanes=None, repo=SLUG,
-                           registry_measured=True, registry_error="") -> Path:
+                           registry_measured=True, registry_error="",
+                           liveness_source=None, liveness_unreadable=None) -> Path:
         """Write the claim gate's board at `$HOME/.pi/agent/state`.
 
         Only the fields `collision_preflight._read_board` / `_holders_from_board`
@@ -255,9 +256,31 @@ class WhoIsOnTest(unittest.TestCase):
         measured), `index.issues` (attribution) and `lanes` (liveness).
         `generated_at` is NOW, so the board is fresh inside
         `fleet_state.STATE_FRESH_S` and no run pays a REBUILD.
+
+        `liveness_source` / `liveness_unreadable` are the LIVENESS provenance the
+        gate publishes in its own holder note (#11202, #11678): a cell answers from
+        `process-table` while both cmux grammars refuse, and the board must be able
+        to carry that shape here for the parity test to be non-vacuous.
         """
         path = self.tmp / ".pi" / "agent" / "state" / "fleet-state.json"
         path.parent.mkdir(parents=True, exist_ok=True)
+        reconciliation: dict = {"registry_measured": bool(registry_measured),
+                                # The cause text `load_registry` records, so a
+                                # test can model an UNPROVISIONED roster (#9392).
+                                "registry_error": str(registry_error),
+                                "github_measured": True,
+                                # The board must also stamp its OPEN-ISSUE
+                                # coverage: `_board_can_answer` refuses an
+                                # unstamped board (a pre-#8175 cache cannot prove
+                                # it saw every open issue) and this fixture's
+                                # boards are meant to be SERVED, not rebuilt.
+                                "open_issues_truncated": False,
+                                "open_issues_read": 1,
+                                "open_issues_limit": 2000}
+        if liveness_source is not None:
+            reconciliation["liveness_source"] = str(liveness_source)
+        if liveness_unreadable is not None:
+            reconciliation["liveness_unreadable"] = list(liveness_unreadable)
         path.write_text(json.dumps({
             "generated_at": datetime.now(UTC).isoformat(),
             "repo": repo,
@@ -266,19 +289,7 @@ class WhoIsOnTest(unittest.TestCase):
             # always writes it, and an empty list is what a readable live-session
             # store produces.
             "orphans": [],
-            "reconciliation": {"registry_measured": bool(registry_measured),
-                               # The cause text `load_registry` records, so a
-                               # test can model an UNPROVISIONED roster (#9392).
-                               "registry_error": str(registry_error),
-                               "github_measured": True,
-                               # The board must also stamp its OPEN-ISSUE coverage:
-                               # `_board_can_answer` refuses an unstamped board
-                               # (a pre-#8175 cache cannot prove it saw every
-                               # open issue) and this fixture's boards are meant
-                               # to be SERVED, not rebuilt.
-                               "open_issues_truncated": False,
-                               "open_issues_read": 1,
-                               "open_issues_limit": 2000},
+            "reconciliation": reconciliation,
             "index": {"issues": {
                 str(number): {
                     "lanes": [label for label, _ in entries],
@@ -705,6 +716,100 @@ exec {real} "$@"
         self.assertEqual(rc, 0, out)
         self.assertIn("ANSWER: nobody", out)
         self.assertIn("Local-only branches and worktrees WERE enumerated", out)
+
+    def test_the_answer_says_which_store_the_holder_read_rested_on(self):
+        """⛔ PARITY ON THE DISCLOSURE, NOT ONLY ON THE COUNT (#11678).
+
+        Measured at `origin/main` `a7da06cc77` on a cell: the GATE's
+        `issue assignee/holder` row said
+        `liveness: process-table; unreadable store(s): cmux-session-store` inside a
+        CLEAN, and this verb — the same read, from the same `run_preflight` —
+        answered `ANSWER: nobody` with NEITHER clause, because it renders only
+        surfaces that produced a HIT. #11202's whole property is that a CLEAN
+        resting on one liveness store must not read as a CLEAN that read them all;
+        that property is about the reader, and this verb is the reader agents are
+        pointed at. The strings asserted here are the GATE's own note, so the two
+        verbs cannot drift into describing one read two ways.
+        """
+        self._write_fleet_board(
+            liveness_source="process-table",
+            liveness_unreadable=["cmux-session-store"],
+        )
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: nobody", out)
+        self.assertIn("CLAIM GATE [issue assignee/holder]", out)
+        self.assertIn("liveness: process-table", out)
+        self.assertIn("unreadable store(s): cmux-session-store", out)
+
+    def test_the_holder_read_note_does_not_claim_the_whole_answer(self):
+        """⛔ THE HEADING NAMES THE ROW, NOT THE ANSWER AND NOT ITS OWN CONTENTS.
+
+        The heading over-claimed twice, and this test pins the SECOND, which the
+        first wording did not reach (#11681 review, P2 in two cycles):
+
+        • "the note for the holder read behind this answer" claimed holders THE
+          ANSWER has. Measured on #11678: a pushed branch made the answer
+          `1 holder(s) across 1 surface(s)` — the holder being a REMOTE BRANCH —
+          while the claim gate's own note read `NO lane is mechanically
+          attributed`. A reader taking the tail lines saw "nobody" three lines
+          under a holder count: the tail-line misread #11202 is about.
+        • "the gate's own note for the BOARD's holder read" claimed the note's
+          CONTENTS. `scan_issue_surface` appends an `issue state=…` sentence to
+          the same `surface.note`, so on a LANDED answer the heading sat over a
+          clause that is not part of that read and duplicated the LANDED block.
+
+        ⛔ `assertNotIn("behind this answer")` is NOT enough on its own and never
+        was: that wording was already gone before the heading was narrowed, so it
+        was true both before and after the fix — a vacuous pin. The `assertIn`
+        below is the discriminating half.
+        """
+        self._write_fleet_board(liveness_source="process-table",
+                                liveness_unreadable=["cmux-session-store"])
+        self.remote_branch(f"fix/{ISSUE}-pushed")
+        rc, out = self.run_tool(ISSUE)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("ANSWER: 2 holder(s)", out)
+        self.assertNotIn("ANSWER: nobody", out, (
+            "this fixture answers WITH holders, which is the case the heading "
+            "used to misdescribe"))
+        self.assertIn("CLAIM GATE [issue assignee/holder]", out)
+        self.assertIn("separate from any surface hit", out)
+        # ⛔ THE DISCRIMINATING ASSERTION (#11681 review, P2). Reverting the heading
+        # to "the BOARD's holder read" (or to "behind this answer") must red HERE.
+        # `assertNotIn` alone cannot do that: it is satisfied by BOTH the old and the
+        # new wording above, which is how the first pin was vacuous.
+        self.assertIn(
+            "the gate's own note for the `issue assignee/holder` row", out, (
+                "the heading must name the ROW it belongs to — see this test's "
+                "docstring: 'the BOARD's holder read' over-claims the note's "
+                "contents (it also carries an `issue state=…` sentence), and "
+                "'behind this answer' over-claims the ANSWER (its holders can "
+                "come from other surfaces)"))
+        self.assertNotIn("behind this answer", out)
+        self.assertNotIn("for the BOARD's holder read", out)
+
+    def test_a_board_with_no_liveness_keys_prints_no_store_claim(self):
+        """ABSENT IS NOT EMPTY, on this verb too (#11678).
+
+        A pre-#11202 board carries neither key. Printing a store name — or an empty
+        "unreadable store(s): (none)" — would be a claim about a read that never
+        happened, so the clause is omitted entirely; the CLAIM GATE block still
+        prints, because the board source it DID record is a real datum.
+        """
+        rc, out = self.run_tool(9999)
+        self.assertEqual(rc, 0, out)
+        self.assertIn("board source:", out)
+        self.assertNotIn("liveness:", out)
+        self.assertNotIn("unreadable store(s)", out)
+        # ⛔ THE HEADING'S PROMISE IS CONDITIONAL TOO (#11681 review, round 2): the
+        # block prints whenever the note is non-empty, and on THIS shape the note
+        # names no store — so a heading that promised the disclosure outright would
+        # sit over a note that made none, which is the same "a CLEAN that read them
+        # all" misread one level down. Both directions are pinned, so reverting the
+        # qualification reds.
+        self.assertIn("where the board recorded", out)
+        self.assertNotIn("liveness store says so here", out)
 
     # ── fail-closed: could-not-check is never "nobody" ───────────────────────
 
@@ -1283,6 +1388,17 @@ exit 0
         self.assertEqual(rc, 2, out)
         self.assertIn("ANSWER INCOMPLETE", out)
         self.assertNotIn("ANSWER: nobody", out)
+        # ⛔ AND THE CLAIM-GATE NOTE IS NOT PRINTED TWICE (#11681 review round 2,
+        # P2). `who_holds` skips its own CLAIM GATE block for an INCOMPLETE holder
+        # read because that read already prints — with the same note — under
+        # INCOMPLETE SURFACES. That skip was PROSE ONLY: delete the
+        # `status != STATUS_INCOMPLETE` guard and every suite stayed green while
+        # the note printed twice. In a PR whose whole thesis is "prose did not hold
+        # the polarity, so pin it as a test", the guard gets a pin.
+        self.assertEqual(out.count("claim gate:"), 1, (
+            "the holder note must appear exactly once — under INCOMPLETE "
+            "SURFACES, not again in a CLAIM GATE block:\n" + out))
+        self.assertNotIn("CLAIM GATE [issue assignee/holder]", out)
 
     def test_the_answer_does_not_claim_completeness_it_does_not_have(self):
         """The final ANSWER line must not assert completeness it does not have.

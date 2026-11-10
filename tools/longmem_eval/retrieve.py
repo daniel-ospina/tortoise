@@ -161,6 +161,7 @@ from tortoise.session_reinjection import (  # C4 (#2517): product rules
 )
 
 from . import encode_cache, evidence
+from .errors import fatal_census
 from .ingest import EXTRACTION_POINT_KIND, event_props_for_hits, point_props_for_hits
 
 # ── #1349 vector arm: exceptions, nDCG/P metrics, vector_search ────────────
@@ -4132,7 +4133,15 @@ def run_integrity_gate(
         return result
 
     # ── extraction-error fold (true cause first) ──
-    if stats.get("errors") or stats.get("error_census"):
+    # #11653: only the FATAL census classes fold. ``entity_identity_held`` is a
+    # healthy signature (S3 held an unresolved identity rather than minting it)
+    # and carries no ``errors`` entry; folding it returned ``reasons == []`` —
+    # this gate's GREEN — without running a single tier, for a question with no
+    # error at all. Report it, never fold on it.
+    fatal = fatal_census(stats.get("error_census"))
+    if stats.get("benign_census"):
+        result["census"]["benign_census"] = dict(stats["benign_census"])
+    if stats.get("errors") or fatal:
         result["census"]["error_fold"] = True
         return result
 

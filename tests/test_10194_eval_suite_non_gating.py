@@ -103,7 +103,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_leg_names()` below asserts this map's leg list, so a silent
+    which is why `_expected_legs()` below asserts this map's leg list, so a silent
     omission is impossible to mistake for a pass.
     """
     legs = cs.push_legs(manifest)
@@ -163,7 +163,36 @@ def _expected_legs(manifest: dict) -> set[str]:
     `cs.shard_labels` is the selector's own naming helper, so this map cannot
     drift from the legs it is compared against — the typed letters were exactly
     that drift (`test (k)`).
+
+    ⛔ BUT DERIVING FROM THE HELPER ALONE IS A TAUTOLOGY ON THE COUNT (#11681
+    review, P2). `push_legs` builds its bins from the SAME `fast_shard_count`, so
+    a code-side collapse — the helper falling back to a pool-size threshold and
+    ignoring `config/ci-surfaces.yml` — moves BOTH sides and the set comparison
+    stays green while the selector partitions CI into two shards (measured with
+    `cs.fast_shard_count` forced to return 2: set equality True, i.e. green).
+    So the counts are ALSO asserted against the manifest's RAW LITERAL, which
+    reds that collapse and still does not red a legitimate re-partition, because a
+    re-partition moves both sides together.
+
+    ⛔ The count is the manifest LITERAL (`fast_shard_count` — and
+    `split_fast_gate` says so: *"N comes from the manifest's `fast_shards` … NOT
+    capped by the file count"*), never a pool-size threshold. So a lane that
+    UNREGISTERS files must not drop a label: the two `core` rows #11642 added
+    move no shard count at all (measured over `push_legs`: strip both and the
+    names are still `a`..`k`; only the file count moves, and that number decays
+    with every unrelated registration). Deriving from `fast_shard_count` is what
+    keeps the claim the NAMES — which is the claim this pin makes.
     """
+    for key, got in (
+        ("fast_shards", cs.fast_shard_count(manifest)),
+        ("slow_shards", cs.slow_shard_count(manifest)),
+        ("carve_shards", cs.carve_shard_count(manifest)),
+    ):
+        assert got == manifest[key], (
+            f"`{key}` in config/ci-surfaces.yml is {manifest[key]!r} but the "
+            f"selector's helper reads {got!r} — the shard count must come from "
+            f"that manifest LITERAL and never from a pool-size threshold, or a "
+            f"lane that unregisters files silently re-partitions CI (#11642)")
     return {
         *_LEG_FAMILIES,
         *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),

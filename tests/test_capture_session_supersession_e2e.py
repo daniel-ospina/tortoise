@@ -170,7 +170,9 @@ def _mock_factory():
         the story off the transcript; the S2 (GRAPH MAPPER) embed list keys
         off the compiled story; S4 (GAP REVIEWER) reports no gaps so the S2
         output stands; the D3 ENTITY RESOLUTION pass never guesses aliases
-        (approach names are distinct entities)."""
+        (approach names are distinct entities) and says so under `new` — the
+        #11653 contract, where an OMITTED name is an undecided disambiguation
+        and is held rather than created."""
 
         def __init__(self) -> None:
             super().__init__()
@@ -184,8 +186,9 @@ def _mock_factory():
                 # no gaps — S2 output stands (kept by extract_session_v2)
                 return json.dumps({"entities": [], "events": [], "points": [], "operators": []})
             if "ENTITY RESOLUTION" in system:
-                # never guess an alias: approach-A/B/C are distinct entities
-                return json.dumps({"resolutions": []})
+                # never guess an alias: approach-A/B/C are distinct entities —
+                # which the answer must SAY (`new`), not merely omit.
+                return self._resolution_answer(user)
             if "GRAPH MAPPER" in system:
                 return json.dumps(_embed_for(self._story))
             return super().complete(system=system, user=user, max_tokens=max_tokens)

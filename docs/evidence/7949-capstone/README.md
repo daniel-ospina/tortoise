@@ -242,8 +242,8 @@ positions are the ones the step tables below print, and every one of those is re
 checked against the tree by the cite sweep.
 The `8278-8285` END was already one
 line long at that stamp (`8284` closes the block; `8285` opens the next one) and is corrected to
-the `result["classify_later"]` block at `:14217-14223` here, not in the log. The `8288-8292` cite is
-the `result["vet"]` block, and it is corrected to `:14227-14231` here — **not** to the `:8534-8538`
+the `result["classify_later"]` block at `:14569-14575` here, not in the log. The `8288-8292` cite is
+the `result["vet"]` block, and it is corrected to `:14579-14583` here — **not** to the `:8534-8538`
 this bundle's issue (#9919) predicted, because the tree moved again between that reading and this
 head; that is precisely the drift this paragraph exists to stop a reader from re-deriving by
 number. (The SYMBOL is what makes
@@ -329,8 +329,8 @@ though the receipt cannot witness them.
 | S0 READ | ✅ | `stats.edus=159`, `stats.chunks=7` across the seven sessions |
 | S1 NARRATE | ✅ | `stats.llm.by_stage.s1` calls = 7 |
 | S2.1 EXTRACT | ✅ | `stats.llm.by_stage.s2` calls = 7; `entities=77 events=38 points=141` |
-| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:14227-14231` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17345`), so this ❌ is the frozen run's answer, not the seam's reachability |
-| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:14217-14223` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17345`) |
+| S2.2 VET | ❌ **#9116** | measured at `e0fc940b5`, BEFORE the seam: the pass was ENABLED (`TORTOISE_VET=1`, forced in-process and read back), and its surface **exists** — `extract_session_v2` emits `result["vet"]` UNCONDITIONALLY at `tortoise/extractor_v2.py:14579-14583` — but the meta fold then forwarded `stats` alone, so whether it DID any work was not observable through the receipt (measured: 142 stats keys and 18 receipt keys inspected, `vet` in neither). The fold now COPIES the stage's own counts as `stats["step_witness"]["vet"]` (`tortoise/sdk.py:17345`), so this ❌ is the frozen run's answer, not the seam's reachability |
+| S2.3 CLASSIFY | ❌ **#9116** | same layer, same run: `result["classify_later"]` is built at `extractor_v2.py:14569-14575` and was dropped at the same fold, which now copies it as `stats["step_witness"]["classify_later"]` (`tortoise/sdk.py:17345`) |
 | S3 RESOLVE | ✅ | `stats.search_queries=105 > 0` and `stats.search_degraded=false` on every session (a degraded search is not S3) |
 | S5 CONNECT | ✅ | the graph write: 433 derived nodes (`Point` 338, `Object` 50, `Event` 45); `stats.operator_endpoints_minted=0`; operator-shaped relationships `IMPL=57 INPUT=58 NAND=10` |
 | S6 COMMIT | ✅ | 338 `:Point` nodes persisted, 170 carrying the commit's `eventId` stamp, 358 `:GraphEvent`s |
@@ -371,7 +371,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:13446-13450` — the classify block starts at `:13446`, the vet surface at `:13450` — and `:14217-14231`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:13780-13784` — the classify block starts at `:13780`, the vet surface at `:13784` — and `:14569-14583`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
@@ -382,13 +382,13 @@ non-empty S2 stats) fails CLOSED.
 ⛔ **And the FLAG is not ACTIVITY** — the sharper half, and the one this rule got wrong first. The
 first tightened rule accepted `enabled: true` on its own, reading it as "the extractor's OWN
 statement that the gate was open". It is not that: `enabled` is the FLAG, computed BEFORE the pass
-is reached. `vet_enabled` is computed at `extractor_v2.py:13415`, i.e. BEFORE the
-`if not edus:` early return (`:13419`), which emits literally
-`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:13450`), and
-each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:16397`), `if vet_enabled and
-complete_list:` (`:13999`). So a session with the flag ON and an empty list emits `enabled: True`
+is reached. `vet_enabled` is computed at `extractor_v2.py:13749`, i.e. BEFORE the
+`if not edus:` early return (`:13753`), which emits literally
+`"vet": {"enabled": vet_enabled, "s2": {}, "union": {}}` (`:13784`), and
+each VET pass is gated on the LIST — `if vet_enabled and embed_list:` (`:16762`), `if vet_enabled and
+complete_list:` (`:14333`). So a session with the flag ON and an empty list emits `enabled: True`
 with empty counters and no pass ran (a FAILED vet pass leaves the same shape: `_run_vet_pass` returns
-`{}` on its fail-open path, `:13144-13147`). Because `_witness_block` returns the first positive
+`{}` on its fail-open path, `:13478-13481`). Because `_witness_block` returns the first positive
 ANYWHERE on the run, ONE such session out of seven made S2.2/S2.3 WITNESSED (6/8 → 8/8) — and V5
 would then have passed on a step nobody observed. The rule now requires the flag AND positive
 activity, and a flag-on/zero-activity block gets its OWN cause ("flag on, no pass activity") that is
@@ -398,10 +398,10 @@ to look.
 ⛔ **And that cause cites each surface's OWN code — the CLASSIFY pass is not the VET pass.** It was
 first written once and templated for the surface NAME, so the S2.3 line argued from `vet_enabled`,
 the `if vet_enabled and …` gates and `_run_vet_pass` — code the classify pass never reaches. The
-classify pass has its own flag (`classify_later`, `:13384`), its own early-return block
-(`:13446-13449`), its own gates — `if classify_later and embed_list:` (`:13868`) around `if items:`
-(`:13871`), and `if classify_later and complete_list:` (`:14014`) around `if items:` (`:14024`) — and its
-own fail-open `except` (`:13884` / `:14035`), so an idle classify block comes from no embed list **or
+classify pass has its own flag (`classify_later`, `:13718`), its own early-return block
+(`:13780-13783`), its own gates — `if classify_later and embed_list:` (`:14202`) around `if items:`
+(`:14205`), and `if classify_later and complete_list:` (`:14348`) around `if items:` (`:14358`) — and its
+own fail-open `except` (`:14218` / `:14369`), so an idle classify block comes from no embed list **or
 no classify items**, not from a vet gate. The cites now live in ONE table keyed by the surface
 (`_IDLE_CITES`), and a surface added without its own entry fails loudly rather than borrowing
 another pass's code. Pinned by `test_the_flag_on_cause_is_per_surface_so_a_swap_cannot_pass` and by
@@ -415,7 +415,7 @@ proves the flag; a classify or vet block can legitimately carry `enabled: True, 
 list, no classify items, or a fail-open `except`) while doing nothing, and that shape is
 indistinguishable through a surface that is missing. The cause now says the pass was **ENABLED** and
 that whether it did work is not observable here; the `#9116` attribution — the surface is emitted
-unconditionally at `:14217`/`:14227` and now reaches the receipt through the seam at the meta fold
+unconditionally at `:14569`/`:14579` and now reaches the receipt through the seam at the meta fold
 `sdk.py:17345` (`"stats": _capture_stats_with_step_witness(out, len(extracted))`) — is updated
 accordingly, and the "where the fix must target" line with it.
 
@@ -1174,9 +1174,10 @@ way: a table whose rows carry the literal string `HEAD` is red by this repo's ow
 
 ## The entry point the run drives (and the receipt the #9116 seam opened)
 
-The pipeline's OWN path is `TortoiseSDK.capture_session` →
+The pipeline's OWN path WAS `TortoiseSDK.capture_session` (**DELETED by #4282**, 2026-10-27 —
+this bundle's probes now drive the private `sdk._capture_session`) →
 `sdk._extract_session_v2` (`sdk.py:16478`; called at `:15504`) →
-`extractor_v2.extract_session_v2` (`extractor_v2.py:13300`), which calls, in one pass.
+`extractor_v2.extract_session_v2` (`extractor_v2.py:13634`), which calls, in one pass.
 
 📌 **Cite convention for this bundle's own cites.** Every `file:line` THIS bundle adds is
 re-derived from the tree at the head it is stamped at and is paired with the symbol it names —
@@ -1201,13 +1202,13 @@ the same lesson (cite the symbol, not the line).
 
 | step | call site | witness the probe reads | on the receipt? |
 |---|---|---|---|
-| S0 READ | `_edus_from_conversation` `:13418` | `stats["edus"]`, `stats["chunks"]` | ✅ |
-| S1 NARRATE | `run_s1` `:16312` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
-| S2.1 EXTRACT | `run_s2` `:16344` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
-| S2.2 VET | `_run_vet_pass` `:16398` | `result["vet"]` — built at `extractor_v2.py:14227-14231`, copied onto the receipt at the meta fold `sdk.py:17345` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
-| S2.3 CLASSIFY | `_apply_classify_kinds` `:13873` | `result["classify_later"]` — built at `extractor_v2.py:14217-14223`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
-| S3 RESOLVE | `search_graph` `:13889` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
-| S5 CONNECT | `execute_embed` `:14134` (+ `run_s4` `:13910` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
+| S0 READ | `_edus_from_conversation` `:13752` | `stats["edus"]`, `stats["chunks"]` | ✅ |
+| S1 NARRATE | `run_s1` `:16677` | `stats["llm"]["by_stage"]["s1"]`, `story_arc` | ✅ (`story_arc` is off-receipt; `by_stage` carries it) |
+| S2.1 EXTRACT | `run_s2` `:16709` | `by_stage["s2"]`, item counts | ✅ (`embed_list` is off-receipt; `by_stage` carries it) |
+| S2.2 VET | `_run_vet_pass` `:16763` | `result["vet"]` — built at `extractor_v2.py:14579-14583`, copied onto the receipt at the meta fold `sdk.py:17345` as `stats["step_witness"]["vet"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `stats["step_witness"]["vet"]` `enabled=true`, `s2={"candidates": 40, "by_outcome": {"KEEP": 40}}` (the SUPERSEDED `e0fc940b5` log is the one that predates the seam) |
+| S2.3 CLASSIFY | `_apply_classify_kinds` `:14207` | `result["classify_later"]` — built at `extractor_v2.py:14569-14575`, copied at the same fold as `stats["step_witness"]["classify_later"]` | ✅ reachable (#9116 seam) — and WITNESSED by the shipped post-seam run: `enabled: true`, `s2 = {"adjudication_calls": 1, "assigned_llm": 7, …}` (`assigned_llm` is the evidence it did work, so this is not an idle pass) |
+| S3 RESOLVE | `search_graph` `:14223` | `result["search"]`, copied as `stats["step_witness"]["search"]` (mode/degraded/queries_run/hits); `stats["search_queries"]`/`stats["search_degraded"]` were already on the receipt | ✅ |
+| S5 CONNECT | `execute_embed` `:14483` (+ `run_s4` `:14244` gap filler) | `stats["s4_merge"]` | ✅ (gap-filler counters) — `capstone_measure.py` uses the graph write + `stats["operator_endpoints_minted"]` |
 | S6 COMMIT | `execute_embed` payload | `result["payload"]`, copied as `stats["step_witness"]["commit"]` (payload_produced + the count the write loop RESOLVED — created or folded onto an existing canonical, so a fully-folded capture reports the folded count, never 0) | ✅ — `capstone_measure.py` additionally reads the committed `:Point` nodes and their `eventId` stamps off the live graph |
 
 `capstone_run.py` binds `result = captured` and hands `observe_steps` the receipt itself — the

@@ -123,6 +123,7 @@ from .errors import (
     RESUME_ATTEMPTS_CAP,
     WriteStageRetriesExhausted,
     eval_failure_class,
+    fatal_census,
     retryable_transient,
 )
 from .ingest import DEFAULT_CHUNK_TURNS, ingest_haystack
@@ -5182,7 +5183,13 @@ def run_evaluation(
                         if (_cache_armed and not _cache_hit and _cache_wipe_ok
                                 and not gate_reasons
                                 and not ingest_stats.get("errors")
-                                and not ingest_stats.get("error_census")):
+                                # #11653: the healthy-signature classes
+                                # (``entity_identity_held``) carry no ``errors``
+                                # entry and are not extraction failures — folding
+                                # them here suppressed this marker on every run
+                                # whose S3 held a candidate.
+                                and not fatal_census(
+                                    ingest_stats.get("error_census"))):
                             with contextlib.suppress(Exception):
                                 _cache_marker_write(
                                     sdk._get_proj(), namespace=namespace,

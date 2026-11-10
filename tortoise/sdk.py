@@ -48595,13 +48595,35 @@ class TortoiseSDK:
 class _V2SessionMock:
     """Deterministic offline v2 extractor stand-in (TORTOISE_SESSION_LLM_MOCK=1,
     #1350). complete() adapts the v2 pipeline's prompts: S1 → narrative text,
-    S2/S4 → the embed-list JSON. Mirrors tests' V2MockModel. Accepts the
-    per-call ``max_tokens`` kwarg (M3 #1524 GATE-2 — ignored: deterministic)."""
+    S2/S4 → the embed-list JSON, the D3 ENTITY RESOLUTION pass → *"no aliases;
+    each name is a distinct entity"* (see `_resolution_answer`). Mirrors tests'
+    V2MockModel. Accepts the per-call ``max_tokens`` kwarg (M3 #1524 GATE-2 —
+    ignored: deterministic)."""
+
+    @staticmethod
+    def _resolution_answer(user: str) -> str:
+        """D3 phase 2, in the CONTRACT the extractor now asks for (#11653).
+
+        The stand-in resolves nothing (these are distinct names, not aliases)
+        AND says so: the answer names every asked candidate under ``new``. ⛔ An
+        empty ``resolutions`` list alone used to mean *"no aliases, so create
+        them"*; the contract now reads that omission as an UNDECIDED
+        disambiguation and HOLDS the candidate (§4.4 I1). A mock that stays
+        silent would therefore make every offline capture create no entities at
+        all — a fixture artefact, not a behaviour anyone wants.
+        """
+        tail = user.split("NEW ENTITY NAMES:", 1)[-1]
+        names = [ln.strip()[2:].strip() for ln in tail.splitlines()
+                 if ln.strip().startswith("- ")]
+        return _json.dumps({"resolutions": [],
+                            "new": [n for n in names if n and n != "(none)"]})
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
         if "STORY SUMMARIZER" in system:
             return "The session revealed a new strategy."
+        if "ENTITY RESOLUTION" in system:
+            return self._resolution_answer(user)
         return ("{\"entities\": [{\"name\": \"the strategy\", "
                 "\"kind\": \"core:strategy\", \"lifecycle\": \"created\", "
                 "\"supersedes\": null, \"note\": null}], "
