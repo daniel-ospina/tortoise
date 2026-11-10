@@ -715,13 +715,19 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
                                                           # sdk.create_operator) and 0 at this base — a
                                                           # count is only as good as the base it was taken at
 # ⛔ THREE hits in this record's merged tree since #11548 landed the consumer (#11237):
-# extractor_v2.py:11470 (the stale comment), relation_write.py:7, sdk.py:17403.
+# extractor_v2.py:11470 (the comment that WAS stale, corrected in place by #11001's lane),
+# relation_write.py:7, sdk.py:17403.
 # ⛔ AND THE CONCLUSION THIS ROW WAS WRITTEN WITH IS NOW FALSE — `relation_write.py` IS that
 # consumer. Its own docstring says so ("#10999 built the `relations` channel as transport only …
 # and nothing consumed it. … This module is that consumer"), and `_extract_session_v2` calls it at
-# `sdk.py:17416` (`capture_session` reaches it at `sdk.py:15619`). Of the three hits only ONE is still prose-about-absence (the stale comment at
+# `sdk.py:17416` (`capture_session` reaches it at `sdk.py:15619`). Of the three hits only ONE was still prose-about-absence (the stale comment at
 # `extractor_v2.py:11470`); the other two are the consumer announcing itself. Read §0's amendment
 # above, never "nothing consumes it".
+# ⛔ AND AS OF `#11001`'s LANE NONE OF THE THREE IS: the comment at `extractor_v2.py:11470` was
+# corrected IN PLACE — same line, and its block's line count was held at 13 so every cite in this
+# record keeps its number — to state the consumer (`apply_relation_edges`, called from
+# `_extract_session_v2`) and to leave only the EMISSION leg unmeasured. So the A1 paragraph's quote
+# is now history only, and the ONE prose-about-absence hit this row counted is gone.
 # ⛔ Both sides of the #11534 × #8290 forward-merge printed a different number, and neither matched
 # the other: the branch printed 10906 / :7 / 17181 at its own tip, main printed 11119 / :7 / 17188
 # at its own. The MERGED tree's three are exactly main's three — which is precisely why this was
@@ -730,7 +736,9 @@ git grep -nE '(^|[^[:alnum:]_])(create_edge|create_about_edge|create_operator)[[
 # this record's base: ONE hit" was itself stale — that base predates #11205, whose comment is the
 # hit.) Re-measured at the merge.
 git grep -n 'result\["relations"\]' -- tortoise/        # at this record's merged tree: THREE hits —
-                                                          # :11470 (the stale "nothing consumes it"
+                                                          # :11470 (was the stale "nothing
+                                                          # consumes it" comment; CORRECTED in
+                                                          # place — see the note above)
                                                           # comment), relation_write.py:7 (the
                                                           # CONSUMER's docstring) and sdk.py:17403 (the
                                                           # #10999 transport-only note). ⛔ NOT "no

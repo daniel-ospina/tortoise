@@ -78,10 +78,11 @@ the row's own write path invoked, the graph read back):
 direct Object→Object class is 9/45 and that 35 rows are operator bridges.**
 That is the whole argument for the three-way column.
 
-**Why `direct` is 9 and not 10.** A Layer-3 domain word can only be written
+**Why `direct` is 9 and not 11.** A Layer-3 domain word can only be written
 through the operator path: `create_edge` is STRICT and keyed on the edge's own
 predicate, so `blocks`/`partOfSprint` are not structural edge types (only
-`dependsOn`/`hasPart` are). Keeping the words — which the ruling requires —
+`dependsOn`/`hasPart`/`ownedBy` are — `ownedBy` is the direct row this pack
+declares). Keeping the words — which the ruling requires —
 therefore moves those two `pm` rows from `direct` to `mediated`. That is the
 measurement being honest, not a regression: the same two declarations, written
 through the writer their own vocabulary selects.
@@ -140,7 +141,7 @@ prints it. A marker without a reason is a silencer, not a disposition.
 
 | gap | status here | owner |
 |---|---|---|
-| the pipeline never emits declared relations (`result["relations"]` has no consumer) | `UNMEASURED` | **#11237** |
+| the pipeline's EMISSION of declared relations is unmeasured — the CONSUMER now exists (`apply_relation_edges`, called from `sdk.py` on `extract_session_v2`'s `relations`), so what is unmeasured is whether that channel emits | `UNMEASURED` | **#11237** |
 | `apply_hierarchy_edges` has **zero production callers** | the CAPABILITY is wired; the symbol is still test-only | **#11237 delivered the wiring, not this symbol** — `tortoise/relation_write.py:631` calls `pack_hierarchy.plan_hierarchy_edges`, and the production leg writes through the structural/operator writers itself. `apply_hierarchy_edges` remains called only by `tests/test_pack_hierarchy_11001.py` and named by the capstone pin. That is now a **shape** question (two seams for one job: a plan the pipeline consumes and an applier only tests use), not a `written` gap |
 | the commitment spine: `core:goal` (and `plan`, `strategy`, `target`) is named as an endpoint by **0 of 42** declared connections | ⛔ was `dangling`; `goal` and `dev:indicator` are **out of the list at this stamp** | **delivered by #11001** — KIN-2's three connections are declared in `packs/dev/manifest.yaml` and measured `written` above (`goal --ownedBy--> Subject` = `direct`, the two `addresses` rows = `mediated`). `plan`/`strategy`/`target` remain dangling and are NOT KIN-2's |
 | `dev:initiative` as a real kind | out of scope | **#11000** |

@@ -1650,10 +1650,14 @@ mechanisms:
       - plan_relation_edges
       - apply_relation_edges
     note: >-
-      The mechanism is the ORACLE, not a writer: a pack DECLARES which kind
-      pairs may be connected (`ontology.relations[]` and `ontology.hierarchies[]`)
-      and nothing may emit a pair the packs do not declare — so the graph can
-      tell an asserted structure from an invented one. `declared_hierarchy`
+      The mechanism is the ORACLE for the pairs a pack declares in
+      `ontology.hierarchies[]`: nothing may emit a HIERARCHY pair the packs do
+      not declare — so the graph can tell an asserted structure from an invented
+      one. `ontology.relations[]` rows are the other half of the declaration: they
+      contribute the declared `(from_kind, predicate, to_kind)` the census counts
+      and the mechanism/write path `relation_write_paths()` resolves, but their
+      pairs are NOT yet GATED at write time — that gate is `#11656`'s scope, not
+      this row's. `declared_hierarchy`
       resolves each declaration to a namespaced `(from_kind, predicate, to_kind)`
       and binds it to a write path from `relation_write_paths()` (consumed, never
       re-derived); `plan_hierarchy_edges`/`plan_relation_edges` render the plan

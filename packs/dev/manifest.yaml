@@ -205,9 +205,12 @@ ontology:
   # ⚠️ `goal --ownedBy--> Subject` carries `mechanism: IMPL` only because a
   # new-format relation must declare one (pack_registry._validate). ONTOLOGY §8
   # gives `ownedBy` NO mechanism (`—`: structural/neutral), so neither spelling
-  # contradicts it, and `relation_write_verdict` still resolves the row to the
-  # STRUCTURAL path (`structural` wins when both bind — the same recorded
-  # decision `pack_hierarchy` implements), where the writer stamps `:ownedBy`.
+  # contradicts it. `relation_write_verdict` answers the SET of bound paths —
+  # `("operator", "structural")` for this row, operator FIRST — not a choice:
+  # the PICK is `pack_hierarchy._binding`'s (`_VALID_EDGE_PREDICATES` ⇒ structural)
+  # and `tools/pack_relation_census.py::_relation_row`'s (`"structural" in paths`),
+  # and both resolve this row to the STRUCTURAL path, where the writer stamps
+  # `:ownedBy` as a bare `(:Object)-[:ownedBy]->(:Subject)` edge.
   # §3.6 makes the target an Entity (Subject | Object); this row names the
   # Subject half — the accountable owner — and its `->` reads "the subject owns
   # the goal", which is RACI Accountable, not a stake.

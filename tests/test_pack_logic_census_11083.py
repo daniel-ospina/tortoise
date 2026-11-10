@@ -863,12 +863,22 @@ def test_h14_the_pipeline_unmeasured_cell_cites_the_SENTENCE_not_a_line(artifact
     assert not _LINE_CITE.search(artifact["pipeline"]["relations_channel"]["why"]), (
         "the pipeline cell cites a LINE (`file.py:NNNN`), which re-stales on every "
         "edit above it and which `--write-probe` reproduces into the artifact")
+    # ⛔ DIRECTION FLIPPED: the sentence this cell used to cite ("nothing in this tree consumes
+    # `result[\"relations\"]`") was RETRACTED — `#11548` landed the consumer and `sdk.py`'s capture
+    # commit path calls `relation_write.apply_relation_edges` on exactly this dict, so the citation
+    # was supporting `UNMEASURED` with a falsehood. What is unmeasured is the EMISSION leg, not the
+    # consumer. Both halves are asserted in the corrected direction: the artifact must now cite the
+    # consumer, and must NOT carry the retracted sentence (which `--write-probe` would reproduce).
     why = artifact["pipeline"]["relations_channel"]["why"]
-    assert "nothing in this tree consumes" in why
+    assert "IS consumed" in why and "apply_relation_edges" in why, (
+        "the cell's only support must be the corrected reading — the channel HAS a consumer")
+    assert "nothing in this tree consumes" not in why, (
+        "the artifact still carries the retracted sentence; `--write-probe` reproduces whatever "
+        "the generator says, so a stale sentence in the artifact is a stale sentence forever")
     src = (REPO_ROOT / "tortoise" / "extractor_v2.py").read_text()
-    assert "nothing in this tree consumes `result[\"relations\"]`" in src, (
-        "the cited SENTENCE is not in the file it points at — an unfollowable "
-        "citation is the same defect as a stale line number")
+    assert "nothing in this tree consumes `result[\"relations\"]`" not in src, (
+        "the retracted sentence is back in the file this cell cites — the S5 Job 1 block must "
+        "state the consumer that exists")
 
 
 def test_h2c_the_dangling_kinds_are_spelled_as_the_packs_DECLARE_them(artifact):
