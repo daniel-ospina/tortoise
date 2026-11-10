@@ -1316,7 +1316,7 @@ def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
                 (state_dir / "app.port").chmod(0o644)
             (state_dir / "app.port").write_text("")
 
-        # …and a file that is NOT readable but yields no port must not be called
+        # …and a file that is NOT EMPTY but yields no port must not be called
         # unreadable when it was read fine (whitespace only): `-s` is true there.
         (state_dir / "app.port").write_text("\n\n")
         whitespace = _script("alive", "--name", "app", env=state)
