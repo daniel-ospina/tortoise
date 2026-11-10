@@ -20452,14 +20452,26 @@ class FalkorProjection(
         if catalogue_rows is None and not dropped:
             catalogue_rows = _rows
         if dropped:
+            # ⛔ SAY WHY THIS SWEEP WAS ALLOWED TO DROP IT (#11660 review round
+            # 4, P2). The gate above is `vector_index_retired()`, which asks BOTH
+            # arming conditions, so the unarmed case never reaches this line —
+            # but the line is emitted ONCE, on the sweep that destroys the only
+            # in-graph ANN index, and an operator reading it in an incident must
+            # not have to reconstruct a predicate to learn what replaced it. (The
+            # pre-gate wording said "the dense leg is served from the Postgres
+            # record" unconditionally, which was FALSE on the default posture:
+            # a DSN without `TORTOISE_RECORD_VECTOR_LEG` still full-scans, and
+            # that is the line the same sweep emitted next to the #4997 warning.)
             _log.info(
                 "#11642: dropped the in-graph Point.embedding vector index on %s "
-                "— the dense leg is served from the Postgres record (pgvector) "
-                "where a record tenant resolves, and a graph without the index "
-                "pays none of the index-bearing restore cost #7846 measured "
-                "(436.5 s at 20k nodes, 191.8 s tuned, instance blocked) — for "
-                "dumps taken AFTER this sweep; a dump taken before it still "
-                "carries the index", self._graph_name)
+                "— because the replacement is ARMED (TORTOISE_RECORD_VECTOR_LEG="
+                "1 and a record DSN), so the dense leg is served from the "
+                "Postgres record (pgvector) wherever a record tenant resolves; "
+                "an UNARMED store never reaches this line (it keeps the index). "
+                "A graph without the index pays none of the index-bearing "
+                "restore cost #7846 measured (436.5 s at 20k nodes, 191.8 s "
+                "tuned, instance blocked) — for dumps taken AFTER this sweep; a "
+                "dump taken before it still carries the index", self._graph_name)
         _wrote_index = dropped
 
         # #4997: measure what the catalog ACTUALLY has, AFTER the creation

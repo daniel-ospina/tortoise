@@ -3936,6 +3936,43 @@ def test_ci_arms_the_record_against_a_real_postgres():
         "second provision would overwrite the first and D8 would refuse its own "
         "target as `refuse_same_database` (#9567 D8)")
 
+    # ⛔ EVERY PROVISIONER THAT IS MIGRATED NEEDS AN IMAGE THAT CAN APPLY THE
+    # REGISTRY (#11660 review round 4, P1 — MEASURED). The first provisioner pins
+    # `pgvector/pgvector:pg16` and says why; the DRILL's second one passed no
+    # `image` and took the action's default, `postgres:16`. But BOTH containers
+    # are migrated by `tests/test_9567_record_capstone.py::drilled` →
+    # `_ensure_record_schema`, which applies the WHOLE
+    # `record_projection.RECORD_MIGRATIONS` registry (a fresh database is absent,
+    # so `public.journal_event` is not there and every file runs) — the vector
+    # migration included. Its first statement is
+    # `CREATE EXTENSION IF NOT EXISTS vector SCHEMA public`, and `IF NOT EXISTS`
+    # skips an INSTALLED extension; it cannot make an UNAVAILABLE one appear. On
+    # `postgres:16` that is `extension "vector" is not available`, the fixture
+    # errors before it seeds anything, `test_D8_…` fails, and the required
+    # `test-record-postgres` leg reds on a migration the PR cannot merge without.
+    #
+    # The rule is stated on the RESOLVED image so a dropped input reds here
+    # instead of on a CI leg: the action's own default is the failure mode, which
+    # is exactly why comparing explicit inputs only would stay green.
+    # Mutation: delete `image: pgvector/pgvector:pg16` from the drill's provision
+    # → it resolves to `postgres:16` → this test reds.
+    import yaml
+
+    provision_action = yaml.safe_load(
+        (POSTGRES_PROVISION.parent / "action.yml").read_text())
+    default_image = provision_action["inputs"]["image"]["default"]
+    provision_images = _resolved(provisions, "image", default_image)
+    for position, image in enumerate(provision_images, start=1):
+        assert "pgvector" in str(image), (
+            f"{name}'s Postgres instance #{position} resolves to image "
+            f"{image!r}, which does not carry the `vector` extension. Every "
+            "container in this job is migrated by `_ensure_record_schema` "
+            "against the full `RECORD_MIGRATIONS` registry, which now includes "
+            "`20261109000001_record_embedding_vector.sql` — on a plain "
+            "`postgres:16` that aborts with `extension \"vector\" is not "
+            "available` and the required `test-record-postgres` leg reds "
+            "(#11660 review round 4, P1)")
+
 
 def test_the_provision_action_refuses_a_name_bash_cannot_indirect(tmp_path):
     """A NAME input must be a SHELL variable name, not merely alphanumeric.
