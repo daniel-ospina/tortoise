@@ -905,8 +905,11 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
     # on DIFFERENT properties: with the graph declaring `searchKeys` and the
     # record column `search_keys`, a payload written under the snake spelling is
     # flattened by the record and stored as the array the fulltext index cannot
-    # match by the graph (#11706 re-record review, measured — before this arm,
-    # comparing through `snake()` made exactly that defect AGREE).
+    # match by the graph (#11706 review, measured). ⛔ The set equality below
+    # ALREADY reds on that shape — this arm is not the guard against it, it is the
+    # one that NAMES the reason: the equality's message says the declarations
+    # "disagree", which reads like a transcription slip, while the actual fault is
+    # that the graph can only ever flatten the spelling it declares.
     for key in sorted(_POINT_FLATTEN_LIST_PROPS):
         assert record_projection.snake(key) == key, (
             f"{key!r} is declared as a flattened list prop but is not "
