@@ -79,6 +79,23 @@ def _resolver_output() -> list[str]:
 
 
 
+#: The `push_legs()` keys `_gating_sets()` walks. Every OTHER key the producer
+#: returns must be named in `_NON_GATING_LEG_KEYS`, or the pin below is silent
+#: about a gating set nobody measured — a producer-side leg (say `"telemetry":
+#: []`) is invisible to a check that only compares the sets `_gating_sets()`
+#: itself built (measured: all 8 tests in this file stayed green when one was
+#: added). Two literals, because deriving either side from the other makes the
+#: check tautological.
+_WALKED_LEG_KEYS = frozenset({"shards", "slow_shards", "carve_shards",
+                             "slow", "env_broken", "carve_out"})
+
+#: Producer keys that are deliberately NOT walked, and why: `on_demand` is the
+#: manual `eval` lane's own selection — not a gating leg, so the set it produces
+#: is asserted elsewhere (reachability is pinned by
+#: `test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file`).
+_NON_GATING_LEG_KEYS = frozenset({"on_demand"})
+
+
 def _manifest() -> dict:
     return cs.load_manifest()
 
@@ -106,10 +123,13 @@ _TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
 
 #: The leg KINDS, which stay LITERAL — the DECLARED side of the equality, so a
 #: kind `_gating_sets()` starts producing without a matching entry here reds.
-#: ⚠️ The reverse case has no guard, and this comment used to claim the opposite:
-#: a producer the selector gains that `_gating_sets()` never reads produces no
-#: leg on EITHER side, so nothing here can see it. Editing that map's body is
-#: what a lane adding a producer has to remember.
+#: ⚠️ The reverse case is only PARTLY guarded: a producer KEY the selector gains
+#: is refused by the producer-key assertion in
+#: `test_no_subtree_file_is_in_any_gating_leg` (`_WALKED_LEG_KEYS` /
+#: `_NON_GATING_LEG_KEYS`), but a set omitted from `_gating_sets()`'s own BODY
+#: under an already-walked key produces no leg on EITHER side, so nothing here
+#: can see it. Editing that map's body is what a lane adding a producer has to
+#: remember.
 _LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
                         "push slow_selected"})
 
@@ -137,17 +157,25 @@ def _expected_legs(manifest: dict) -> set[str]:
     equality below still fails, and it now names the declared count rather than a
     stale one. Label SPELLING has its own pin
     (`tests/test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes`).
-    What this pin refuses is the DECLARED side, and only that: a leg
-    `_gating_sets()` produces that is not declared here (a gating set added or
-    moved below without `_LEG_KINDS`/this derivation following) reds, and the
-    message names both sides. ⚠️ It cannot refuse the other direction — a
-    producer the selector gains that `_gating_sets()` never reads appears on
-    neither side, so it still reads as a pass over a set nobody walked; an
-    earlier version of this docstring said this pin refused THAT. It does not,
-    and neither does `leg_coverage_issues()` (it checks overlap/cover over the
-    sets the producers DO emit): the guard is a lane editing `_gating_sets()`'s
-    body. The leg KINDS stay literal (`_LEG_KINDS`) so the declared side cannot
+    What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
+    that is not declared here (a gating set added or moved below without
+    `_LEG_KINDS`/this derivation following) reds, and the message names both
+    sides. The leg KINDS stay literal (`_LEG_KINDS`) so the declared side cannot
     drift along with the map.
+
+    ⚠️ It cannot, on its own, refuse the other direction — a producer the
+    selector gains that `_gating_sets()` never reads appears on neither side. An
+    earlier version of this docstring claimed it did; the measured counterexample
+    was a new `"telemetry": []` key on `push_legs()`' return, which left all 8
+    tests in this file green. That SPECIFIC half is now refused by the
+    producer-key assertion in `test_no_subtree_file_is_in_any_gating_leg`, which
+    diffs `set(push_legs(manifest))` against `_WALKED_LEG_KEYS |
+    _NON_GATING_LEG_KEYS` (the same mutant now reds, naming `telemetry`). What
+    remains unguarded is a set omitted from `_gating_sets()`'s own BODY under a
+    key that is already walked, or one the selectors gained outside
+    `push_legs()` — for those the guard is a lane editing that body, and
+    `leg_coverage_issues()` does not refuse them either (it checks overlap and
+    cover over the sets the producers DO emit).
 
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
@@ -250,6 +278,14 @@ def test_no_subtree_file_is_in_any_gating_leg():
     manifest = _manifest()
     legs = _gating_sets(manifest)
     expected = _expected_legs(manifest)
+    unaccounted = set(cs.push_legs(manifest)) - _WALKED_LEG_KEYS - _NON_GATING_LEG_KEYS
+    assert not unaccounted, (
+        "`push_legs()` produces leg key(s) that `_gating_sets()` does not walk "
+        f"and does not declare non-gating: {sorted(unaccounted)}. A gating set "
+        "added on the PRODUCER side is invisible to the equality below, which "
+        "compares only the sets `_gating_sets()` built itself — so it would "
+        "read as a pass over a set nobody walked (failure mode (a)). Walk it, "
+        "or add it to `_NON_GATING_LEG_KEYS` with the reason.")
     assert set(legs) == expected, (
         "the leg list this test walks changed — a new gating set was added to "
         "the selector (or one renamed) and is NOT covered here, which reads as "
