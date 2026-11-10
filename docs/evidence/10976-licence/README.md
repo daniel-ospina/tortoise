@@ -76,11 +76,11 @@ log (`population bound OFF (pre-fix arm)`) and into the artifact's `population_b
 
 **This is now also the cleanest evidence that the two staleness bounds are NOT redundant.**
 The report is stamped fresh, so `age_seconds` reads **0.12** — #11720's age bound does not
-fire, and cannot fire. Under the population bound alone the same fresh report still
-licenses **20,000** turns against a population of **500**: 40x. The sweep is what shrinks
-the population, and it runs inside the age bound's own window, so "fresh" and "oversized"
-are independent — which is why adopting this bound *in addition to* #11720's was argued on the
-issue rather than assumed.
+fire, and cannot fire. With that age bound as the **only** staleness guard (the `before`
+arm), the same fresh report still licenses **20,000** turns against a population of **500**:
+40x. The sweep is what shrinks the population, and it runs inside the age bound's own window,
+so "fresh" and "oversized" are independent — which is why adopting the population bound *in
+addition to* #11720's was argued on the issue rather than assumed.
 
 | | before (no population bound, #11720's age bound ACTIVE) | after |
 |---|---|---|
