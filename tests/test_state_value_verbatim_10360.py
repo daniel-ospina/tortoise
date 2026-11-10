@@ -6431,15 +6431,22 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
         explained = False
         for _ca, content_core, content_scale in content_slots:
             if quote_scale and content_scale:
-                # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION whatever
-                # the mantissas are (#11730 review, cycle 12): `2000 thousand`
-                # against `2 million` is the SAME value, and requiring equal
-                # digits filed it as a positive claim — a value ABSENT — which
-                # this projection cannot support. The SAME scale word is not a
-                # magnitude question: there the scale cancels, the mantissa is
-                # what differs, and the shipped rule JUDGES it
-                # (`1.2 million` against `12 million`).
-                if quote_scale != content_scale:
+                # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION — but only
+                # for the SAME value (#11730 review, cycles 12 and 14). `2000
+                # thousand` against `2 million` is one value, and requiring equal
+                # digits filed it as a positive claim (a value ABSENT) that this
+                # projection cannot support. ⛔ THE MANTISSAS MUST RELATE, though:
+                # accepting ANY differently-scaled leftover let an unrelated
+                # `7 billion` at another anchor explain a dropped `3 million`,
+                # which is the launder the docstring says is closed. Equal digits
+                # or a zero-extended form are the two relations that make the pair
+                # one value at two magnitudes. The SAME scale word is never a
+                # magnitude question: the scale cancels, the mantissa is what
+                # differs, and the shipped rule JUDGES it (`1.2 million` against
+                # `12 million`).
+                if (quote_scale != content_scale
+                        and (str(content_core[1]) == str(quote_core[1])
+                             or _same_magnitude_number(content_core, quote_core))):
                     explained = True
                     break
             elif ((quote_scale or content_scale)
@@ -6486,13 +6493,20 @@ def _retention_class(content: str, quote: str) -> str | None:
     quote_slots = v2._value_slots_scaled(quote)
     if not content_slots:
         # ⛔ THE EXEMPTION IS GATED ON `not content_slots`, so it covers a row whose
-        # ONLY value is written in an excluded form. A MULTI-value row that mixes
-        # one excluded form with a bound value (`we have 1,234 events and 5000
-        # nodes`) is still judged, and its excluded-form value is counted as a
-        # LOSS — the false-accusation direction, recorded rather than fixed
-        # because it is not reachable on this corpus (all 7 excluded rows bind
-        # no slot at all) and `len(dropped) == 1` would red if such a row were
-        # added (#11730 review, cycle 13).
+        # CONTENTS bind no slot and whose value is written in an excluded form.
+        # Two limits follow, both recorded rather than papered over (#11730
+        # review, cycles 13–14):
+        #   * a MULTI-value row that mixes one excluded form with a bound value
+        #     (`we have 1,234 events and 5000 nodes`) is still judged, and its
+        #     excluded-form value is counted as a LOSS;
+        #   * the MIRROR — a content that binds no slot and states its value in an
+        #     excluded form while the QUOTE carries a plain numeral the content
+        #     really does drop (`we cut over at 2am` against `we cut over at 2am
+        #     and dropped 300 nodes`) — is form-excluded, "not checkable", although
+        #     the `300` is not a form the content restates.
+        # Neither is reachable on this corpus (the 7 excluded rows' CONTENTS bind
+        # no slot; 5 of their quotes carry no value and the 2 that do are ISO dates
+        # the content restates), and `len(dropped) == 1` would red if one were added.
         if (_CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content)
                 or _SEPARATOR_FORM.search(content)):
             return "CONTENT_EXCLUDED_FORM"
@@ -6871,10 +6885,10 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #         `20%`, the same tolerance the file's battery at the top pins).
     assert _retention_class("we ordered 20 percent",
                             "we shipped 20%") == "LAYOUT_RETAINED"
-    #     (e) TWO DIFFERENT scale words are a magnitude question whatever the
-    #         mantissas are — `2000 thousand` and `2 million` are the SAME value,
-    #         so calling that pair LOST would be a positive claim the projection
-    #         cannot support (cycle 12, the false-accusation direction).
+    #     (e) TWO DIFFERENT scale words are a magnitude question — for the SAME
+    #         value: `2000 thousand` and `2 million` are one value, so calling that
+    #         pair LOST would be a positive claim the projection cannot support
+    #         (cycle 12, the false-accusation direction) …
     for content, quote in (("we shipped 2000 thousand units",
                             "we shipped 2 million units"),
                            ("we have 1200 thousand events",
@@ -6883,6 +6897,12 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "the fleet holds 2 thousand nodes")):
         assert _retention_class(content, quote) == "LAYOUT_UNJUDGED", (
             content, quote)
+    #         … AND the mantissas must RELATE (cycle 14): an unrelated
+    #         differently-scaled leftover does not explain a dropped value, or a
+    #         dropped `3 million` is rescued by any `7 billion` in the row.
+    assert _retention_class("the west shard holds 7 billion records",
+                            "we shipped 3 million events") == "LAYOUT_LOST", (
+        "an unrelated scale word must not explain a dropped scaled value")
     # 2f. ⛔ `_digits` CANNOT RETURN AN EMPTY STRING, which is what lets
     #     `_same_magnitude_number` decide on equality alone (#11730 review, cycle
     #     11). The census never reaches either shape — `_value_slots_scaled`
