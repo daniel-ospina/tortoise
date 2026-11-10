@@ -231,7 +231,7 @@ not closed by anything found here.** A4's target remains unset.
 > ⚠️ **SUPERSEDED ON THE LAST CLAUSE ONLY.** "A4's target remains unset" was true at the research stage and is
 > no longer: the owner ruling of 2026-11-09 set it — per-layer label coverage, bar = appears + labelled, the
 > percentage reported and not chased. **Everything else above stands**, including that this brief neither
-> confirmed nor refuted D3: the ruling moved A4 *off* D3 rather than settling D3. See `02-scope.md` §A4 (the ruling's effect, at `:76-82`) for the bar, and
+> confirmed nor refuted D3: the ruling moved A4 *off* D3 rather than settling D3. See `02-scope.md` *In Scope* item 5 for the bar, and
 > `04-plan.md` §4.1/§4.4 (`:446`) for its `#4432` locator.
 
 ---

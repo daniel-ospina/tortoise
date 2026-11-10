@@ -427,7 +427,7 @@ which the first version of this section omitted.
 they did.** That question was already decided and landed: `preregistration.json`'s `issue: 10982` amendment states
 *"required_criteria_rows stays `[E1..E5]`, so the new rows are registered and reported, never demanded by the gate (a
 required row would red every existing verdict table for rows nobody has run)"*, and `PRE-REGISTRATION.md` mirrors it.
-`:4123-4126` asserts `pins.required_criteria_rows == list(REQUIRED_CRITERIA)`, so moving one drags the other — into
+`capstone_preregistration_check.py:4123-4126` asserts `pins.required_criteria_rows == list(REQUIRED_CRITERIA)`, so moving one drags the other — into
 the outcome #10982 (CLOSED 2026-11-08) argued against. **The A-rows are verdict rows in the verdict TABLE without
 being REQUIRED rows in the prereg GATE**; the ten rows are a cardinality claim about the table, not about the gate.
 
@@ -443,7 +443,7 @@ load-bearing rather than decorative:
   that imports it — not reporting a finding.
 
 **A4's registration is therefore decided once, here, and it is (b): A4 stays a non-bar.** The owner ruling of
-2026-11-09 — relayed into `02-scope.md` §A4, and recorded on `#4432` comment `6751932659`, which is its home — sets A4's bar as
+2026-11-09 — relayed into `02-scope.md` *In Scope* item 5, and recorded on `#4432` comment `6751932659`, which is its home — sets A4's bar as
 *"appears + labelled, percentage reported not chased"*: a **rule**, not a threshold. Giving it a comparator would
 reverse that ruling, which is a reopen, not a plan edit.
 
@@ -471,7 +471,7 @@ already gives about retired keys.
 
 The rest of the instruction stands: keep `"A4"` in `REGISTERED_NON_BAR_ROWS`; keep the threshold cell
 `UNMEASURED(…)` with its `#NNNN`; spend the floor as the *non-vacuity* floor only, never re-scoped as a rate
-(`:3983-4008` refuses that); and leave A4 **out of `REQUIRED_CRITERIA`** (see §4.4's cardinality note below —
+(`capstone_preregistration_check.py:3983-4008` refuses that); and leave A4 **out of `REQUIRED_CRITERIA`** (see §4.4's cardinality note below —
 `required_criteria_rows` does **not** move). A4 is still a **verdict row** — it can fail (a declared kind absent; a
 thing or event left unlabelled) — but its verdict comes from the rule, not from a numeric bar. A lane that wants A4
 to carry a comparator must **reopen the owner ruling first**, and the same commit must then drop `"A4"` from the pin.
