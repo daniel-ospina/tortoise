@@ -66,12 +66,25 @@ follows).
 
 LANDING SIGNAL — stated precisely, because a half-fix must not pass it: I3 has
 landed when a failed run's journal delta is **EMPTY**, however the fix
-compensates (staging, buffering, or compensating writes). ⛔ Rolling back only
-the phases that PRECEDED the failure does NOT satisfy it: the events phase
-commits AFTER the point failure, so that fix leaves `EventRecorded` behind and
-this file stays green on the wrong behaviour. On a real I3 landing, arm 1's
-first assertion (`journal == []`) reds, which is the signal that the registry
-must be updated. That red is the deliverable, not a regression.
+compensates (staging, buffering, or compensating writes).
+
+⛔ Rolling back only the phases that PRECEDED the failure does NOT satisfy it —
+the events phase commits AFTER the point failure, so that fix leaves
+`EventRecorded` behind, and **this file REDS** at the `ObjectRegistered`
+assertion (measured: `got ['EventRecorded']`). Gating only the events phase reds
+the other way (`got ['ObjectRegistered']`). Both are PARTIAL fixes; neither is a
+landing — so a red here means *"read which record survived"*, not *"the entity
+write broke"*.
+
+⚠️ The one half-fix this file **cannot** see is a compensation that rolls the
+GRAPH back while leaving both journal records in place (unrecorded deletes — the
+`#4716` class). That is why the landing signal is the journal **delta** and not
+the graph, and why a graph-level compensation still owes its own record.
+
+On a real landing `assert failed["journal"]` reds (an empty delta is falsy),
+which is the signal that `config/v4-mechanisms.yml` (the `failure_policy` note's
+I3 clause, and the `commit_transaction` row `#10998`'s scoping plans) must be
+updated. That red is the deliverable, not a regression.
 """
 
 from __future__ import annotations
