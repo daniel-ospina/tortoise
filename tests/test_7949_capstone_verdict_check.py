@@ -642,6 +642,14 @@ def test_a_green_row_under_a_log_that_says_the_prereg_was_never_read_reds():
     """
     rec = _record()
     _green(rec)
+    # ⛔ THE SIXTH ROW (#11673). V9 is over `CLOSING_CRITERIA` = E1–E6, the epic's own
+    # close condition ("Close this epic only when E1–E6 all have evidence"), because a
+    # 5/5-green table with no `E6` row is exactly the "close 5-of-5" #7949 forbids. So
+    # this arm — whose claim is "the rows ARE green; the V5s are the defect" — has to
+    # stamp the sixth row or V9 fires for its ABSENCE and the `"V9" not in codes`
+    # assertion stops discriminating (measured: both #9089 regression arms redded here
+    # the moment V9 widened, with `['V5', 'V5', 'V5', 'V5', 'V5', 'V10', 'V9']`).
+    rec["rows"].append(dict(rec["rows"][0], criterion="E6"))
     for row in rec["rows"]:
         row.update(verdict="GREEN", evidence_kind="measurement",
                    evidence="docs/evidence/7949-capstone/capstone.log",
@@ -649,7 +657,9 @@ def test_a_green_row_under_a_log_that_says_the_prereg_was_never_read_reds():
                    corpus_sha256="a" * 64, sha=HEAD)
     rec["prereg"]["status"] = "ABSENT"
     codes = _codes(rec, require_green=True)
-    assert codes.count("V5") == 5, codes
+    # ONE V5 PER ROW, and the table now carries SIX (#11673's E6) — the count is the
+    # row count, not a constant; a 6-row table with the frozen prereg missing V5s 6x.
+    assert codes.count("V5") == 6, codes
     assert "V9" not in codes, codes
 
 
@@ -835,6 +845,9 @@ def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
     """
     rec = _record()
     _green(rec)
+    # the sixth row, for the same reason as the #9089 status arm above: V9 is over
+    # E1–E6 (#11673), so a five-row fixture can no longer prove "the rows ARE green".
+    rec["rows"].append(dict(rec["rows"][0], criterion="E6"))
     for row in rec["rows"]:
         row.update(verdict="GREEN", evidence_kind="measurement",
                    evidence="docs/evidence/7949-capstone/capstone.log",
@@ -846,7 +859,8 @@ def test_a_green_table_with_no_frozen_prereg_reds_even_when_the_sha_is_absent():
     for row in rec["rows"]:
         row["sha"] = "1234567890abcdef" + "0" * 24
     codes = _codes(rec, require_green=True)
-    assert codes.count("V5") == 5, codes
+    # one per row, six rows since #11673 registered E6 (see the status arm above)
+    assert codes.count("V5") == 6, codes
     assert "V9" not in codes, codes      # the rows ARE green; the V5s are the defect
 
 

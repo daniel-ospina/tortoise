@@ -6199,10 +6199,12 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
     `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
     the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:69` pointer now lands on a row that NAMES the re-run reading
+    `README.md:77` pointer now lands on a row that NAMES the re-run reading
     (`RED 8/14`) while its committed verdict cell still reads
     `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
     bundle's own entry point told a reader the opposite of the table beside it.
+    (The number moved 69 -> 77 when `#11673` grew the README's closing-rule paragraph
+    above the table; it is re-derived against the tree, never carried across a merge.)
     The cite is now held by `test_the_e2_routing_claim_cites_the_row_it_describes`
     below, which takes the LINE NUMBER from this docstring: review at `7c03efc1d`
     found the previous revision had re-pointed it at `README.md:65`, which is `>` — a
