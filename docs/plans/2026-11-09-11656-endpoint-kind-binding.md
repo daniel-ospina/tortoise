@@ -65,8 +65,8 @@ Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-s
 is `ingest`'s, not `create_direct_edge`'s: `_effective_route` is called only inside `ingest`/its helpers
 (`sdk.py:27455`, `:28378`, `:28445`), and `create_direct_edge`'s own docstring says so — *"`ingest()` adds the
 terminal-endpoint guard below PLUS the Point-mediated route gate (#8499)"* (`sdk.py:29066-29067`). So
-`link_entities` writes those 2 as Object→Point direct edges today, which is why pin 14's `link_entities` arm
-must cover a Point-bearing pair. ⚠️ The earlier "32 of 35" figure was the
+`link_entities` writes those 2 as direct edges today — one `Object→Point`, one `Point→Object` — which is why pin 14's
+`link_entities` arm must cover a Point-bearing pair in **both** directions. ⚠️ The earlier "32 of 35" figure was the
 **non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows.
 So a declared IMPL label over a mismatched **direct-shape** pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).

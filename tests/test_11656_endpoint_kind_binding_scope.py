@@ -92,7 +92,14 @@ class TestTheInventoryTheScopeCites:
         assert mechanisms == {"IMPL": 34, "NAND": 1}, mechanisms
 
     def test_the_routing_the_gate_choice_rests_on(self):
-        """The number §1.1 and §3's alternatives table both rest on: which write paths each declaration binds.
+        """The number the brief's §2.1 write-path table and the epic's `04-plan.md` §5.3a point 3 both state:
+        which write paths each declaration binds.
+
+        ⚠️ **Not the same 33 as §1.1's.** §1.1's 33 is the **direct-shape** population (complement: the 2
+        Point-involved rows); this pin's 33 is the **operator-path-only** population (complement:
+        `hasPart`/`dependsOn`, which ALSO bind the structural path). The two sets differ on four rows, so
+        citing §1.1 here would send a lane building pin 14's fixture to the wrong set — and omit exactly the
+        two Point-bearing rows §1.1's own paragraph requires that arm to cover.
 
         `relation_write_paths()` is the real routing predicate — the `mechanism` counts above are only a
         proxy for it. Measured at this head: 33 declarations bind the OPERATOR path alone, and exactly 2
