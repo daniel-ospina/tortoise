@@ -174,7 +174,7 @@ BEFORE_ARM = "before"
 #: must not both print `n/a` (#11689 review round 5: `{"e2b_surviving_units": null}`
 #: refused with `declared_surviving_floor=n/a` beside
 #: `floors_owned=…,e2b_surviving_units`).
-_ABSENT = object()
+_ABSENT = None
 
 #: The E1 numerator, restated from the architecture document (§1:85): a
 #: definite description is an Object whose name begins with `the `. The
