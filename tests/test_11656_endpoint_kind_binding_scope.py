@@ -125,6 +125,43 @@ def _kind_bearing(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r.get("fromKind") and r.get("toKind")]
 
 
+def _axis_partition() -> Counter:
+    """The declared relations bucketed by `(fromKind axis, toKind axis)`, derived from the packs + registry.
+
+    Extracted from `test_the_direct_shape_partition_…` so BOTH that row and the ledger row derive the same
+    numbers. Round-22 P2: the ledger row used to phrase-match `1 Object→Event` / `1 Event→Object` that nothing
+    asserted, so reversing `dev:deploysTo` left every row green while both documents still published 1/1.
+    """
+    registry = PackRegistry(PACKS_DIR)
+    registry.load_all()
+
+    axis: dict[str, str] = {}
+    for pack in registry.packs.values():
+        for attr, name in (("object_kinds", "object"), ("document_kinds", "object"),
+                           ("event_kinds", "event"), ("point_kinds", "point")):
+            for k in getattr(pack, attr, None) or []:
+                axis[f"{pack.namespace}:{k}"] = name
+    from tortoise import pack_registry as pr
+
+    for kind in pr.CORE_ENTITY_TYPES:
+        axis[kind] = "subject"
+    for const, name in ((pr.CANONICAL_OBJECT_KINDS, "object"),
+                        (pr.CANONICAL_EVENT_KINDS, "event"),
+                        (pr.CANONICAL_POINT_KINDS, "point")):
+        for k in const:
+            axis.setdefault(k if ":" in k else f"core:{k}", name)
+
+    partition: Counter = Counter()
+    for rel in _kind_bearing(_declared_relations()):
+        a, b = axis.get(rel["fromKind"]), axis.get(rel["toKind"])
+        assert a and b, (
+            f"{rel['_ns']}:{rel['predicate']} names a kind whose axis is unknown "
+            f"({rel['fromKind']} -> {rel['toKind']}) — the kind catalog moved; re-derive §1.1's partition"
+        )
+        partition[(a, b)] += 1
+    return partition
+
+
 def _collected_test_nodes(source: str) -> list[ast.AST]:
     """The test functions pytest would collect from `source`: module level + class methods.
 
@@ -138,10 +175,12 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
         for node in body:
             if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
                 nodes.append(node)
-            elif isinstance(node, ast.ClassDef):
-                # ⛔ RECURSE: pytest collects a nested-class method
-                # (`TestOuter::TestInner::test_...` — measured with `--collect-only`), so a one-level walk
-                # undercounts it. Every other class body is walked for the same reason.
+            elif isinstance(node, ast.ClassDef) and node.name.startswith("Test"):
+                # ⛔ Recurse, because pytest collects a nested-class method
+                # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
+                # ⛔ But ONLY into `Test*` classes: pytest's default `python_classes = Test`, so a
+                # `class Helpers:` holding a `test_` method is collected by NOBODY (measured) and counting
+                # it is the OVERCOUNT direction — the one whose tempting "fix" is to falsify the document.
                 _walk(node.body)
 
     _walk(ast.parse(source).body)
@@ -171,6 +210,29 @@ def _derive_population(source: str) -> tuple[int, int]:
     """
     tree = ast.parse(source)
     nodes = _collected_test_nodes(source)
+
+    # A module-level name bound to something `parametrize`-shaped (`pt = pytest.mark.parametrize`) then used
+    # as a decorator (`@pt(...)`) is an arm this derivation cannot see by name — measured: pytest collects
+    # its cases, the derivation reported (1, 1). Aliased arms are therefore an ERROR, not an absence.
+    parametrize_aliases: set[str] = set()
+    for node in ast.parse(source).body:
+        if isinstance(node, (ast.Assign, ast.AnnAssign)) and node.value is not None:
+            if "parametrize" not in ast.unparse(node.value):
+                continue
+            targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+            for target in targets:
+                if isinstance(target, ast.Name):
+                    parametrize_aliases.add(target.id)
+
+    # A `Test*` class inheriting another `Test*` class in this module re-collects the parent's methods, which
+    # are not in the subclass AST — measured: pytest collects both, the derivation saw only one.
+    module_classes = {n.name for n in ast.parse(source).body if isinstance(n, ast.ClassDef)}
+    inheriting = sorted(
+        node.name
+        for node in ast.parse(source).body
+        if isinstance(node, ast.ClassDef)
+        and any(isinstance(base, ast.Name) and base.id in module_classes for base in node.bases)
+    )
 
     # Names whose case count comes from a fixture, not from a `parametrize` arm we can read.
     fixture_param_names: set[str] = set()
@@ -209,18 +271,30 @@ def _derive_population(source: str) -> tuple[int, int]:
                 "which this derivation does not model"
             )
             continue
-        if not arms:
-            # A test can be case-driven with NO `parametrize` arm at all — a `@pytest.fixture(params=…)`
-            # parameter multiplies it. The first revision only inspected arm-bearing nodes, so this shape
-            # reported one case where pytest collects three.
-            arguments = [a.arg for a in getattr(node.args, "posonlyargs", []) + node.args.args]
-            arguments += [a.arg for a in node.args.kwonlyargs]
-            driven = sorted(set(arguments) & fixture_param_names)
-            if driven:
-                unreadable.append(
-                    f"`{node.name}`: parameter(s) {driven} are driven by a `@pytest.fixture(params=...)`, "
-                    "so the collected count is the fixture's"
-                )
+        # ⛔ UNCONDITIONAL: a fixture-driven parameter multiplies the cases whether or not the node also
+        # carries a `parametrize` arm. The first revision checked this only in the no-arms branch, so an
+        # arm + fixture combination reported (1, 2) where pytest collects 6.
+        arguments = [a.arg for a in getattr(node.args, "posonlyargs", []) + node.args.args]
+        arguments += [a.arg for a in node.args.kwonlyargs]
+        driven = sorted(set(arguments) & fixture_param_names)
+        if driven:
+            unreadable.append(
+                f"`{node.name}`: parameter(s) {driven} are driven by a `@pytest.fixture(params=...)`, "
+                "so the collected count is the fixture's"
+            )
+            continue
+        aliased = sorted(
+            target.id
+            for decorator in getattr(node, "decorator_list", [])
+            # `@pt(...)` is a Call whose `.func` is the alias; a bare `@pt` is the Name itself.
+            for target in ([decorator.func] if isinstance(decorator, ast.Call) else [decorator])
+            if isinstance(target, ast.Name) and target.id in parametrize_aliases
+        )
+        if aliased:
+            unreadable.append(
+                f"`{node.name}`: parametrised through the alias {aliased} — the arm is invisible to a "
+                "decorator-name match, so its cases cannot be counted here"
+            )
             continue
         for decorator in arms:
             if len(decorator.args) < 2:
@@ -252,6 +326,11 @@ def _derive_population(source: str) -> tuple[int, int]:
                 )
                 continue
             extra += len(cases.elts) - 1
+    for cls_name in inheriting:
+        unreadable.append(
+            f"class `{cls_name}`: it inherits another `Test*` class in this module, so pytest re-collects the "
+            "parent's methods and this derivation cannot see them"
+        )
     for cls_name in sorted(parametrised_classes):
         unreadable.append(
             f"class `{cls_name}`: a class-level `parametrize` multiplies every method's cases, "
@@ -386,39 +465,21 @@ class TestTheInventoryTheScopeCites:
         (`addresses`, 6 declarations) would pick the `useCase→feature` row, watch it reify, and conclude the
         direct door is not the dominant shape.
         """
-        registry = PackRegistry(PACKS_DIR)
-        registry.load_all()
+        partition = _axis_partition()
 
-        axis: dict[str, str] = {}
-        for pack in registry.packs.values():
-            for attr, name in (("object_kinds", "object"), ("document_kinds", "object"),
-                               ("event_kinds", "event"), ("point_kinds", "point")):
-                for k in getattr(pack, attr, None) or []:
-                    axis[f"{pack.namespace}:{k}"] = name
-        from tortoise import pack_registry as pr
-
-        for kind in pr.CORE_ENTITY_TYPES:
-            axis[kind] = "subject"
-        for const, name in ((pr.CANONICAL_OBJECT_KINDS, "object"),
-                            (pr.CANONICAL_EVENT_KINDS, "event"),
-                            (pr.CANONICAL_POINT_KINDS, "point")):
-            for k in const:
-                axis.setdefault(k if ":" in k else f"core:{k}", name)
-
-        partition: Counter = Counter()
-        for rel in _kind_bearing(_declared_relations()):
-            a, b = axis.get(rel["fromKind"]), axis.get(rel["toKind"])
-            assert a and b, (
-                f"{rel['_ns']}:{rel['predicate']} names a kind whose axis is unknown "
-                f"({rel['fromKind']} -> {rel['toKind']}) — the kind catalog moved; re-derive §1.1's partition"
-            )
-            partition[(a, b)] += 1
-
-        assert partition[("object", "object")] == 28, partition
-        assert partition[("object", "subject")] == 3, partition
-        point_involved = partition[("object", "point")] + partition[("point", "object")]
-        assert point_involved == 2, partition
-        direct_shape = sum(n for (_a, b), n in partition.items() if b != "point" and _a != "point")
+        # ⛔ Assert the WHOLE partition, not four cells. Round-22 P2: this row used to check only
+        # object/object, object/subject, the Point total and the direct-shape total, so reversing
+        # `dev:deploysTo` (Object→Event ⇒ Event→Object) left it GREEN while both documents and the ledger
+        # still published `1 Object→Event` / `1 Event→Object`. Deriving the Counter makes every cell a claim.
+        assert dict(partition) == {
+            ("object", "object"): 28,
+            ("object", "subject"): 3,
+            ("object", "event"): 1,
+            ("event", "object"): 1,
+            ("object", "point"): 1,
+            ("point", "object"): 1,
+        }, f"the direct-shape partition moved: {dict(partition)}"
+        direct_shape = sum(n for (a, b), n in partition.items() if "point" not in (a, b))
         assert direct_shape == 33, partition
 
     def test_the_repeated_predicates_are_addresses_contains_targets(self):
@@ -748,7 +809,7 @@ class TestThePairHasProductionReaders:
         )
 
         # ⛔ The symbol the docs must name. `sdk.apply_relation_edges` does not exist; this does.
-        assert callable(relation_write.apply_relation_edges), (
+        assert relation_write.apply_relation_edges, (
             "`tortoise.relation_write.apply_relation_edges` is gone — re-derive §5.5's live-path claim"
         )
         assert not hasattr(TortoiseSDK, "apply_relation_edges"), (
@@ -1272,11 +1333,39 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "@pytest.mark.parametrize('x', [])\n"
                 "def test_empty(x):\n    pass\n"
             ),
+            # Round-22 P3 — four more shapes measured as silently counted rather than rejected.
+            "arm bound to an ALIAS (`pt = pytest.mark.parametrize`)": (
+                "import pytest\n"
+                "pt = pytest.mark.parametrize\n"
+                "@pt('x', [1, 2, 3])\n"
+                "def test_aliased(x):\n    pass\n"
+            ),
+            "`Test*` class inheriting another `Test*` (parent methods re-collected)": (
+                "import pytest\n"
+                "class TestBase:\n"
+                "    @pytest.mark.parametrize('y', [1, 2, 3])\n"
+                "    def test_base(self, y):\n        pass\n"
+                "class TestChild(TestBase):\n    pass\n"
+            ),
+            "an arm PLUS a fixture-`params` parameter (the mixed node)": (
+                "import pytest\n"
+                "@pytest.fixture(params=[1, 2, 3])\n"
+                "def three(request):\n    return request.param\n"
+                "@pytest.mark.parametrize('z', [1, 2])\n"
+                "def test_mixed(z, three):\n    pass\n"
+            ),
         }
         for label, source in unmodellable.items():
             with pytest.raises(AssertionError, match="cannot derive the collected count"):
                 _derive_population(source)
             del label  # the dict key documents the case; the assertion is what matters
+
+        # --- The OVERCOUNT direction: pytest's default `python_classes = Test`, so a NON-`Test` class
+        # holding a `test_` method is collected by nobody. Counting it was the direction whose tempting
+        # "fix" is to write the derived figure into the document. ---
+        assert _derive_population(
+            "class Helpers:\n    def test_not_collected(self):\n        pass\n"
+        ) == (0, 0), "a non-`Test*` class's `test_` method is not collected by pytest"
 
     def test_the_inventory_in_the_LEDGER_matches_the_pinned_copies(self):
         """`docs/00_index.md` restates the headline inventory — so it is a copy that must be pinned too.
@@ -1313,24 +1402,61 @@ class TestTheDocsAreDiscoverableAndResolve:
             f"the index row no longer states the mechanism split the packs drive (`{derived_split}`)"
         )
 
-        # The copy chain registry -> scope -> ledger for the figures this file does NOT derive directly:
-        # each phrase must be in BOTH documents, and the scope's own copy is pinned against the registry by
-        # `test_the_direct_shape_partition_28_object_and_33_non_point`.
+        # The copy chain registry -> scope -> ledger for the direct-shape figures. ⛔ DERIVED, not
+        # phrase-matched: round-22 P2 measured that matching the phrases alone left `1 Object→Event` /
+        # `1 Event→Object` unasserted (reversing `dev:deploysTo` stayed green) and that the scope's own
+        # 36/35 copies were never read at all. Set-equality also catches a CONTRADICTORY duplicate — this
+        # document states the partition more than once, so a bare `in` test passed while one copy was wrong.
+        #
+        # The direct-shape sentence is found by QUALIFIER, not by the bare `N of the M` shape: the same
+        # document legitimately carries `32 of the 35` (the errata record of the earlier defect) and
+        # `8 of the 35` (the naive-D3 casualty count), and those are different figures, not drift.
+        def _direct_shape_claims(text: str) -> set[str]:
+            return {
+                match.group(1)
+                for match in re.finditer(r"(\d+) of the \d+", text)
+                if re.search(r"direct[- ]shape", text[match.end() : match.end() + 45])
+            }
+
+        partition = _axis_partition()
+        direct_shape = sum(n for (a, b), n in partition.items() if "point" not in (a, b))
         scope_text = SCOPE_DOC.read_text()
-        for phrase in (
-            "33 of the 35",
-            "28 Object↔Object",
-            "3 `Object→Subject`",
-            "1 `Object→Event`",
-            "1 `Event→Object`",
+
+        assert _direct_shape_claims(scope_text) == {str(direct_shape)}, (
+            f"the scope's direct-shape claims are {sorted(_direct_shape_claims(scope_text))}, the packs "
+            f"derive {direct_shape}"
+        )
+        assert _direct_shape_claims(index) == {str(direct_shape)}, (
+            f"the LEDGER row's direct-shape claim is {sorted(_direct_shape_claims(index))}, the packs derive "
+            f"{direct_shape} — the index is how a lane finds this doc, so its figure is pinned too"
+        )
+
+        for label, number, pattern in (
+            ("Object↔Object", partition[("object", "object")], r"(\d+) Object↔Object"),
+            ("`Object→Subject`", partition[("object", "subject")], r"(\d+) `Object→Subject`"),
+            ("`Object→Event`", partition[("object", "event")], r"(\d+) `Object→Event`"),
+            ("`Event→Object`", partition[("event", "object")], r"(\d+) `Event→Object`"),
         ):
-            assert phrase in scope_text, (
-                f"the scope no longer states `{phrase}` — this ledger check is stale, not the index"
-            )
-            assert phrase in index, (
-                f"the index row no longer states `{phrase}`, which the scope pins — the ledger and the "
-                "doc would publish different figures"
-            )
+            want = {str(number)}
+            for where, text in (("scope", scope_text), ("the LEDGER row", index)):
+                found = set(re.findall(pattern, text))
+                assert found == want, (
+                    f"{where}'s copies of the {label} figure are {sorted(found) or 'absent'}, the packs "
+                    f"derive {sorted(want)} — every copy must agree, or the doc publishes a figure it does not hold"
+                )
+
+        # The scope's own 36 / 35 copies — the two the round-22 review measured as read by NOTHING.
+        assert set(re.findall(r"(\d+) declared relations", scope_text)) == {str(len(rows))}, (
+            f"the scope states {sorted(set(re.findall(r'(\d+) declared relations', scope_text)))} declared "
+            f"relations; the packs hold {len(rows)}"
+        )
+        assert set(re.findall(r"(\d+) carry `fromKind`\+`toKind`", scope_text)) == {str(len(kinded))}, (
+            "the scope's `N carry fromKind+toKind` figure no longer matches the packs"
+        )
+        assert set(re.findall(r"\*\*(\d+) of them kind-bearing\*\*", scope_text)) == {str(len(kinded))}, (
+            "the scope's `**N of them kind-bearing**` figure no longer matches the packs"
+        )
+
         # `addresses` ×6 is spelled as a code-block row in the scope and as prose in the ledger, so each is
         # held in its own form rather than through a shared substring that neither actually contains.
         assert "addresses   declared 6×, 6 DISTINCT pairs" in scope_text, (
