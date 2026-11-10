@@ -119,7 +119,8 @@ def test_live_skill_exists_at_the_defined_path():
     # LINES says nothing about what else shares the line: appending an instruction
     # to the disclosure — "…tool grant (#3883) — but call `tortoise_health` anyway
     # if the container is missing." — leaves ONE line naming it, and the
-    # line-count form PASSED (measured: 20 passed) while the document instructed a
+    # line-count form PASSED (measured: `pytest tests/test_onboarding_variants.py
+    # -q` → 42 passed) while the document instructed a
     # name absent from `tools/list`. Counting the NAME closes it: with
     # `_flat.count(name) == 1` AND the disclosure present, the single occurrence
     # of the name is necessarily INSIDE the disclosure sentence, so no second site
