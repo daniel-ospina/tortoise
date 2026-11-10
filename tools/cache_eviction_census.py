@@ -3,9 +3,13 @@
 
 **Preview only. There is no `--execute`, and that is the deliverable, not an
 omission.** `#10976` gates eviction on the record being able to serve — *"gated on
-#10593 + #7879 … A pass that cannot answer that must refuse, never sweep"* — and
-both
-gates are OPEN, so a sweep today would delete nodes whose only copy is the graph.
+#10593 + #7879 … A pass that cannot answer that must refuse, never sweep"*. ⚠️ **The
+record CAN serve today, and this docstring said otherwise:** `#10593` (the record's
+write path) closed COMPLETED on 2026-11-06, so the `22P02` rejection cited here is
+gone; only `#7879` (the epic) is open, which is about the record as system of record,
+not its ability to serve a node. What withholds a licence is the absence of a CLEAN
+parity census for the graph being swept — and an `--execute` would delete nodes whose
+only copy is the graph.
 The `--execute` flag is therefore REFUSED BY NAME rather than absent, so a caller
 that tries it learns why instead of concluding the flag was misspelled.
 
@@ -266,11 +270,17 @@ def main(argv: list[str] | None = None) -> int:
     for flag in _REFUSED_FLAGS:
         if any(a == flag or a.startswith(f"{flag}=") for a in argv):
             print(
-                f"REFUSED {flag}: this census does not sweep, and cannot.\n"
-                f"  #10976 gates eviction on the record being able to serve "
-                f"(#10593 hosted record writes are rejected 22P02; #7879 the record "
-                f"epic) — both open. A pass that cannot prove the record serves a "
-                f"class must refuse rather than sweep.\n"
+                f"REFUSED {flag}: this census MEASURES; the pass that SPENDS a licence is "
+                f"`tortoise/cache_evictor.py` (gates 1-5, including the per-node record "
+                f"probe this tool never issues).\n"
+                f"  #10976 gates eviction on a census that proves the record serves a "
+                f"class — the report that proves the COUNT is the PARITY INSTRUMENT's "
+                f"(`--parity-report`, e.g. `tools/turn_parity_census.py --json`), which "
+                f"this tool CONSUMES; this tool's own verdict is its BYTE state, so a "
+                f"CLEAN verdict here never proves the record serves each node. #10593 "
+                f"(the record's write path) closed "
+                f"COMPLETED on 2026-11-06, so record readiness is not what stops a "
+                f"sweep.\n"
                 f"  Run without {flag} to get the plan and the refusal reasons.",
                 file=sys.stderr,
             )
@@ -295,9 +305,24 @@ def main(argv: list[str] | None = None) -> int:
                               "that name must match this one: a report naming no "
                               "graph is REFUSED, so a CLEAN census of another graph "
                               "cannot be re-badged by repeating --graph here. "
-                              "⚠️ The check is NAME-ONLY: a graph of the same name "
-                              "on a different INSTANCE, or measured EARLIER, is "
-                              "NOT detected here."))
+                              "⚠️ The NAME check is name-only: a graph of the same "
+                              "name on a different INSTANCE, or measured EARLIER, is "
+                              "NOT detected here. STALENESS is bounded downstream on "
+                              "two axes: the report's own `measured_at` (a report "
+                              "carrying no measurement time, or one measured EARLIER "
+                              "than this pass's bound — $TORTOISE_PARITY_REPORT_MAX_AGE_S, "
+                              "default 3600 s — is demoted to cannot-answer), and then "
+                              "the population's own resident count (a report claiming "
+                              "more nodes than its OWN population now holds is "
+                              "demoted to cannot-answer, so that population is "
+                              "absent from `plan['evictable']` (no licence), and "
+                              "a claim above the graph's whole node count is also "
+                              "refused. Note the VERDICT that demotion produces: "
+                              "`REFUSED` only when the cache is also over its "
+                              "byte ceiling — a byte-clean cache still answers "
+                              "`CLEAN`, carrying an empty licence. Read "
+                              "`plan['evictable']`, not the verdict, to learn "
+                              "what may be swept."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "
@@ -343,13 +368,27 @@ def main(argv: list[str] | None = None) -> int:
         # other — `load_parity_report` refuses a report that names no graph, so a
         # FOREIGN census cannot be re-badged by repeating `--graph` here
         # (review P1 on #11004; the `--parity-graph` help carries the same rule).
-        # ⚠️ What is NOT closed, here or anywhere on this path: a census of the SAME
-        # graph measured EARLIER. Its `graph` matches by construction, so the name
-        # comparison passes it, and the only staleness guard downstream is
-        # `assess()`'s over-count check (`entry.nodes > resident_total`), which fires
-        # only when the report's population EXCEEDS the resident node count
-        # (review P2 on #11097). Stated in `--parity-graph`'s help as well, where the
-        # operator reads it at the moment of choosing the flag.
+        # ⚠️ What is NOT closed HERE: a census of the SAME graph measured EARLIER. Its
+        # `graph` matches by construction, so the name comparison passes it — which is
+        # why STALENESS is bounded one layer down, on two independent axes. First the
+        # report's own `measured_at`: `assess()` demotes an undated report, and one older
+        # than the pass's bound (`TORTOISE_PARITY_REPORT_MAX_AGE_S`, default 3600 s), to
+        # `cannot-answer`. Second the POPULATION's own resident count: the report's count
+        # is compared against `POPULATION_RESIDENT_COUNT` for its population, so a stale
+        # report claiming more nodes than that population now holds is demoted even
+        # within the age bound (eviction shrinks a population between two fresh-looking
+        # reads). The whole-graph over-count check (`entry.nodes > resident_total`) remains
+        # as a one-integer backstop comparing the REPORT's claim against the graph total:
+        # its trigger is the CLAIM being above every node the graph holds, so it fires from
+        # removals between the two reads, or from an inflated count statement when the
+        # claim it licenses ALSO lands above the total. It is NOT a detector for a widened
+        # PREDICATE (a subgraph count cannot exceed the total), and it cannot reach a claim
+        # at or below the total, whatever the multiplier — that is the residual band the
+        # mirror pin alone covers, and the measured 20,000-against-500 shape on a
+        # 25,000-node graph sits inside it (review P2
+        # on #11097; #10976 residual comment 6689914601). Stated in
+        # `--parity-graph`'s help as well, where the operator reads it at the moment of
+        # choosing the flag.
         return _usage_error(
             parser,
             f"--parity-graph {args.parity_graph!r} must be the graph being measured "

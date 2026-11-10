@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import pytest
 
@@ -195,8 +196,8 @@ def _plan_assessment(client, graph, graph_name: str):
 
     The report claims the whole turn population was measured and CLEAN — that is what
     a closed record gate would produce, and it is the only thing that arms the
-    executor. When the record genuinely cannot serve (#10593/#7879 open), the same
-    call returns REFUSED and `evict` deletes nothing; that is asserted separately.
+    executor. When no CLEAN census report exists for the graph being swept (#10976), the
+    same call returns REFUSED and `evict` deletes nothing; that is asserted separately.
     """
     total = node_total(graph)
     report = ParityReport(
@@ -205,6 +206,11 @@ def _plan_assessment(client, graph, graph_name: str):
         measured_nodes=total,
         total_nodes=total,
         graph_name=graph_name,
+        # ⚠️ The report must be DATED. `assess` demotes an undated (or aged) report to
+        # `cannot-answer`, because the population count it carries is the executor's
+        # runaway cap — so this fixture stamps "measured now" rather than leaving the
+        # field out, which would silently turn this PLAN fixture into a REFUSAL.
+        measured_at=time.time(),
     )
     assessment = assess(
         client, graph, graph_name,
@@ -427,7 +433,8 @@ def test_a_refused_census_issues_no_mutating_statement(lane):
     seed_keys = _seed(graph, 10)
     before = _ids(graph)
     # No parity report ⇒ nothing is proven ⇒ REFUSED, which is production's real state
-    # while #10593 and #7879 are open.
+    # while no CLEAN parity census exists for the graph being swept (#10593 closed; #7879
+    # is about the record as system of record, not about its ability to serve a node).
     assessment = assess(client, graph, graph_name, ceiling_bytes=1)
     assert assessment.verdict == "REFUSED"
 

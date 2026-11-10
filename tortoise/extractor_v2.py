@@ -5494,7 +5494,7 @@ def _refuse_rewritten_value(content: object, quote: object, *,
     point's own quote holds a DIFFERENT value in the same slot, i.e. only on a
     value that is not the verbatim one. And it cannot RECOVER a value the model
     never emitted — that loss is upstream of every mechanical rule in this
-    module (the capstone E2a class, 1 of 14, is that class), which is why the
+    module (the capstone E2a class — 8 of 14, bar >= 13; `1 of 14` was the SUPERSEDED #9775 reading, #10610 — is that class), which is why the
     registry row keeps that residual named.
 
     The refusal is deliberate and REPORTED: the warning quotes both values and
@@ -5781,39 +5781,167 @@ def _find_existing_entity(entities: list[dict], name: str, kind: str) -> tuple[d
     return None, "none"
 
 
+#: Why a candidate's identity is UNRESOLVED — the reason a HOLD record carries
+#: (#11653). Every one of them is a state in which the run has NOT established
+#: that the entity does not exist, so §4.4's I1 forbids asserting `new`.
+HOLD_AMBIGUOUS = "ambiguous"
+HOLD_DISAMBIGUATION_FAILED = "disambiguation_failed"
+HOLD_DISAMBIGUATION_UNDECIDED = "disambiguation_undecided"
+HOLD_REASONS: tuple[str, ...] = (HOLD_AMBIGUOUS, HOLD_DISAMBIGUATION_FAILED,
+                                 HOLD_DISAMBIGUATION_UNDECIDED)
+#: …and the declared set is ENFORCED, not merely documented: `execute_embed`
+#: normalises an unknown reason arriving through its `held_entities` parameter to
+#: the undecided class with a warning, so the vocabulary cannot widen silently at
+#: a call site (see the comment at that seam).
+
+#: The ``held`` record kind of an ENTITY candidate S3 could not identify (#11653).
+#: A DISTINCT kind from `identity_hold.HOLD_ENDPOINT` on purpose: the hold store's
+#: drain mints POINTS from the records it reads, so an entity written there would
+#: be re-minted as a claim for a node. The two populations share one run-level
+#: list (I2: one place says what the run held) and nothing else.
+_HELD_ENTITY_KIND = "entity"
+
 _RESOLUTION_SYSTEM = (
     "You are the ENTITY RESOLUTION assistant for the Tortoise epistemic "
     "memory. You map NEW entity names from a conversation to EXISTING "
-    "entities already in the knowledge graph. Resolve ONLY confident "
+    "entities already in the knowledge graph, and you say which new names "
+    "denote an entity that is NOT in that table. Resolve ONLY confident "
     "aliases: same referent, case/variant/abbreviation forms (\"Joe\" → "
-    "\"Joseph\", \"NYC\" → \"New York City\"). NEVER guess: an ambiguous or "
-    "unclear name must be omitted. Never invent ids. "
+    "\"Joseph\", \"NYC\" → \"New York City\"). Never invent ids. "
+    "⛔ Decide EVERY name you are given: a name you can map goes in "
+    "`resolutions`; a name whose referent is NOT any existing entity goes in "
+    "`new`. A name in NEITHER list is reported as a FAILED disambiguation and "
+    "the candidate is held — so do not omit one because you are unsure: an "
+    "unsure name is ambiguous and belongs in neither list ON PURPOSE. "
     "Output ONE JSON object: {\"resolutions\": [{\"name\": str, "
-    "\"resolves_to\": str}]} where resolves_to is the existing entity's "
-    "id or exact name."
+    "\"resolves_to\": str}], \"new\": [str]} where resolves_to is the "
+    "existing entity's id or exact name."
 )
 
 
-def _resolution_prompt(existing: list[dict], new_names: list[str]) -> str:
+# #11654: how much of the run's narrative the resolution prompt carries.
+# The narrative is S3's DISAMBIGUATION INPUT (owner ruling 2026-09-23, §S3:
+# *"we can use the narrative to disambiguate when uncertain"*) — the one
+# artefact that answers "is this the same entity?".  Bounded by a constant,
+# not a config knob, and pinned to the same 4000 characters the payload
+# already carries ``story_arc`` at, so the prompt cost stays O(1) in the
+# narrative's length rather than growing with the session.
+_RESOLUTION_NARRATIVE_MAX_CHARS = 4000
+#: When the story is longer than the cap, HEAD **and** TAIL are kept and the
+#: middle is elided. A head-only window loses exactly the evidence this input
+#: exists to carry: a narrative introduces who someone is early and re-uses the
+#: short form later, so "Michael … our contact at Kaironis" (head) and "Mike
+#: said" (tail) can sit on opposite sides of a long session.
+#:
+#: The marker lives INSIDE the untrusted body, so a session's own text can carry
+#: it verbatim and appear to claim an elision that never happened. That claim is
+#: therefore made by the TRUSTED turn instead (`_resolution_prompt` says the
+#: middle was omitted only when ``_bounded_narrative`` reports it really was),
+#: and the marker is a separator, never the evidence that truncation occurred.
+_RESOLUTION_NARRATIVE_ELISION = "\n[… story truncated …]\n"
+
+
+def _bounded_narrative(story: str) -> tuple[str, bool]:
+    """``story`` trimmed to the constant, keeping both ends.
+
+    Returns ``(body, truncated)``. The body — elision marker included — is at
+    most ``_RESOLUTION_NARRATIVE_MAX_CHARS``: the marker is 23 characters of
+    the budget rather than 23 characters on top of it, so the constant states
+    what the prompt actually carries (a guard or budget computed from it must
+    not under-count the region).
+
+    ``truncated`` is returned rather than re-derived at the call site: two
+    places deciding *"was this elided?"* is how the prompt and its own
+    description drift apart, the same class of defect #11654's first cut had.
+    """
+    cap = _RESOLUTION_NARRATIVE_MAX_CHARS
+    if len(story) <= cap:
+        return story, False
+    half = (cap - len(_RESOLUTION_NARRATIVE_ELISION)) // 2
+    return f"{story[:half]}{_RESOLUTION_NARRATIVE_ELISION}{story[-half:]}", True
+
+
+def _resolution_prompt(existing: list[dict], new_names: list[str],
+                       narrative: str = "") -> str:
     """D3 phase-2 prompt: the existing-entity candidate table + the new
     names to resolve (the JSON contract pinned in the prompt so the model
-    output is parseable and validated against the table)."""
+    output is parseable and validated against the table) + (#11654) the
+    run's NARRATIVE, which §S3 makes a required input: identity is
+    referential, so a bare string cannot answer *"is this the same Object
+    A?"* and only the surrounding prose can.
+
+    ``narrative=""`` renders the pre-#11654 prompt byte-for-byte — a run
+    with no narrative (S1 degraded) has no context to pass, and inventing
+    one is worse than omitting it.
+
+    The narrative is verbatim session text, so it rides inside the untrusted
+    envelope (#10311) every other session-text region uses — phase 2's answer
+    rewrites entity names onto the payload, so a forged instruction in the
+    story must never arrive as a trusted turn.
+    """
     lines = [f"- {e.get('id', '')} | {e.get('name', '')} | {e.get('kind', '')}"
              for e in existing if e.get("name")]
     table = "\n".join(lines) if lines else "(none)"
     names = "\n".join(f"- {n}" for n in new_names) if new_names else "(none)"
+    story = str(narrative or "").strip()
+    # #10311: the narrative is verbatim session text, so it rides inside the
+    # UNTRUSTED envelope every other session-text region uses. S3 phase 2 is a
+    # WRITE-path prompt (its answer rewrites entity names onto the payload), so
+    # an instruction forged inside the story must not arrive as a trusted turn —
+    # the candidate-table validation bounds WHICH id a name binds to, never the
+    # identity judgment itself, so a mis-merge would be exactly the corruption
+    # this fix exists to prevent, delivered through its own evidence channel.
+    # The helper returns "" for an empty body, which is what keeps the
+    # narrative-absent render byte-identical to the pre-#11654 prompt.
+    body, elided = _bounded_narrative(story)
+    block = _render_untrusted_block("S1 STORY", body)
+    if block:
+        context = ("NARRATIVE (the S1 story of the conversation these names "
+                   "come from — the evidence that answers whether a new "
+                   "name and an existing entity are the SAME real "
+                   f"entity):\n{block}\n\n")
+        if elided:
+            # The elision marker sits INSIDE the untrusted body above, so the
+            # session could carry that text verbatim. The claim that evidence
+            # is missing is therefore made HERE, in the trusted turn, and only
+            # when the pipeline really dropped something — and it also warns
+            # against reading across the cut, since the head and the tail are
+            # not adjacent in the original.
+            context += ("The story was longer than the space allowed: its "
+                        "MIDDLE is omitted above, so the head and the tail "
+                        "are NOT adjacent in the original.\n\n")
+        rule = ("The NARRATIVE is ADDITIONAL evidence for identity: when it "
+                "establishes that a new name and an existing entity are the "
+                "same referent (an alias, a short form, a surname, a "
+                "company's short name), resolve to it. It supplements — it "
+                "never replaces — the spelling evidence named in your "
+                "system instructions (case, variant and abbreviation "
+                "forms): a name the narrative does not mention can still be "
+                "the same entity, so use the narrative to resolve what the "
+                "spellings alone leave uncertain. Where neither establishes "
+                "identity, the name is ambiguous → omit.")
+    else:
+        context = ""
+        rule = ""
     return (f"EXISTING ENTITIES (id | name | kind):\n{table}\n\n"
+            f"{context}"
             f"NEW ENTITY NAMES:\n{names}\n\n"
+            f"{rule + ' ' if rule else ''}"
             "Return {\"resolutions\":[{\"name\": ..., \"resolves_to\": "
-            "existing-id-or-name}]} — every resolution must match an id or "
-            "exact name in the EXISTING ENTITIES table; ambiguous → omit.")
+            "existing-id-or-name}], \"new\": [names that are NOT any "
+            "existing entity]} — every resolution must match an id or exact "
+            "name in the EXISTING ENTITIES table, and EVERY new name must "
+            "appear in exactly one of the two lists. An ambiguous name goes "
+            "in NEITHER list: it is held, never asserted new.")
 
 
 def resolve_entities(entity_refs: list[dict], search: dict,
-                     model=None, stats: dict | None = None) -> dict:
+                     model=None, stats: dict | None = None,
+                     narrative: str = "") -> dict:
     """D3: two-phase entity resolution — returns
     {"map": {name: {"id", "name"}}, "records": [{"name", "resolves_to",
-    "mode"}], "warnings": [...]}.
+    "mode"}], "new": [name], "held": [{"name", "kind", "reason"}],
+    "warnings": [...]}.
 
     Phase 1 (deterministic): the existing ``_find_existing_entity`` (exact
     → bare → ambiguous) for every ref — no model call.
@@ -5824,8 +5952,54 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     contract; every resolution validated against the candidate table (id
     or normalized-name match) — invalid/ambiguous dropped with a warning,
     never guessed.
-    Failure/timeout → warning + phase-1-only map (degrade to ADD semantics
-    at the caller — unresolved entities keep their names). NEVER raises.
+    NEVER raises.
+
+    ⛔ #11653 — WHAT HAPPENS TO THE REMAINDER (this is the whole point of the
+    return shape). `new` and `held` are DISJOINT populations, and only `new`
+    licenses the caller to create an entity:
+
+    * MEASURED ABSENCE (`new`) — the mechanical pass found no candidate of
+      that name (mode ``none``) and no resolver that answered said otherwise.
+      That is the one state that licenses an ADD.
+    * UNRESOLVED (`held`) — everything else, with the reason: ``ambiguous``
+      (phase 1 found >1 namespace-colliding matches and phase 2 did not pick
+      one), ``disambiguation_failed`` (the phase-2 call raised/timed out) or
+      ``disambiguation_undecided`` (the call answered and named neither a
+      resolution nor `new` for this name).
+
+    A name phase 2 RESOLVED is in NEITHER population (it is in `map`): the two
+    populations are the disposition of what is left UNRESOLVED, so a resolved
+    name can never be reported held.
+
+    ⛔ BOUNDARY, stated so this is not read as the blanket create gate. This
+    population is §4.4's **S3-disambiguation** row (FAIL-CLOSED on `new`) — the
+    candidates whose disambiguation DID NOT COMPLETE. A run whose LOOKUP did not
+    run at all (degraded, or a candidate whose own query was never issued) is
+    §4.4's SEPARATE **S3-lookup** row, whose recorded assignment is
+    ``#10998``'s blanket create gate (``failure_policy.created_record`` already
+    reports those candidates as ``found: None`` — the #5095 record half). Not
+    folded in here: doing so would move every capture run on a degraded lookup
+    from "creates entities" to "creates nothing" under an issue that owns the
+    disambiguation, and would make this function the second owner of a guarantee
+    §4.2 puts in exactly one place.
+
+    §4.4 I1: *an unresolved identity is NEVER asserted `new`* — and §4.4's S3
+    disambiguation row is *FAIL-CLOSED on `new`*, HOLD "unless the lookup
+    returned exactly ONE exact-key match, which attaches mechanically". The
+    pre-#11653 shape returned only `map`, so every name outside it was read by
+    the caller as *"create it"*: a failed or undecided disambiguation
+    MANUFACTURED THE DUPLICATE S3 exists to prevent, and no caller could tell
+    that from a genuine new entity. `held` is that distinction. The population
+    is reported on the run (``held``, a warning naming each reason, and the
+    ``entity_identity_held`` census class) — never dropped (I2).
+
+    ``narrative`` (#11654) is the run's S1 story — the disambiguation
+    context §S3 declares a required input (owner ruling 2026-09-23: *"we
+    can use the narrative to disambiguate when uncertain"*). It reaches
+    ONLY phase 2's prompt: phase 1 stays deterministic and
+    narrative-blind, and an empty narrative renders the pre-#11654 prompt
+    unchanged. It is evidence for the decision, never a source of ids —
+    the candidate-table validation below is untouched.
     """
     existing = [e for e in (search or {}).get("entities", []) or []
                 if isinstance(e, dict) and e.get("id")]
@@ -5847,15 +6021,44 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                             "mode": mode})
         else:
             unmatched.append({"name": name, "kind": kind, "mode": mode})
+    #: The names phase 2 positively declared ABSENT (distinct referents). Only
+    #: this verdict — never the absence of a verdict — licenses an ADD.
+    declared_new: set[str] = set()
+    disambiguation_ran = False
+    disambiguation_failed = False
     # Phase 2 — bounded LLM fallback for the unmatched/ambiguous remainder
     if model is not None and existing and unmatched:
+        disambiguation_ran = True
         try:
             prompt = _resolution_prompt(
-                existing, [u["name"] for u in unmatched])
+                existing, [u["name"] for u in unmatched],
+                narrative=narrative)
             resp = _complete(model, _RESOLUTION_SYSTEM, prompt,
                              max_tokens=500, stats=stats)
             parsed = _parse_json(resp)
             unmatched_names = {u["name"] for u in unmatched}
+            # ⛔ A `new` answer that is a STRING is iterable, so the old loop
+            # walked it CHARACTER BY CHARACTER: every character was dropped as
+            # "not among the unmatched names" and the candidate was held. That is
+            # the fail-closed direction (the candidate must not be created), but
+            # it emitted one bogus warning per character for a single malformed
+            # answer — say what arrived instead (#11693 review, P3).
+            _declared = parsed.get("new")
+            if _declared is not None and not isinstance(_declared, list):
+                warnings.append(
+                    f"'new' verdict is a {type(_declared).__name__}, not a list "
+                    "— ignored, so every candidate it did not name stays "
+                    "UNRESOLVED (held, never created)")
+                _declared = []
+            for item in (_declared or []):
+                cand = str(item or "").strip()
+                if not cand:
+                    continue
+                if cand in unmatched_names:
+                    declared_new.add(cand)
+                else:
+                    warnings.append(f"new-verdict {cand!r} is not among the "
+                                    "unmatched names — dropped")
             for item in (parsed.get("resolutions") or []):
                 if not isinstance(item, dict):
                     continue
@@ -5880,10 +6083,53 @@ def resolve_entities(entity_refs: list[dict], search: dict,
                                 "resolves_to": resolved[cand]["id"],
                                 "mode": "llm"})
         except Exception as e:  # noqa: BLE001, RUF100 — degrade, never block
-            warnings.append(f"entity-resolution LLM fallback failed "
-                            f"({type(e).__name__}: {e}) — phase-1 results "
-                            "only (degrade to ADD)")
-    return {"map": resolved, "records": records, "warnings": warnings}
+            disambiguation_failed = True
+            warnings.append(
+                f"entity-resolution LLM fallback failed "
+                f"({type(e).__name__}: {e}) — the candidates it was asked to "
+                "decide are HELD for a later run (§4.4 I1: held, not "
+                "asserted new)")
+    # ── the disposition of every UNMATCHED candidate (#11653) ─────────────
+    held: list[dict] = []
+    new: list[str] = []
+    for u in unmatched:
+        name = u["name"]
+        if name in resolved:
+            # ⛔ PHASE 2 MAY HAVE RESOLVED AN *UNMATCHED* NAME — that is its whole
+            # job. Such a name belongs to neither population; labelling it `held`
+            # would publish a hold that did not happen (measured: `Joe -> Joseph`
+            # reported "identity UNRESOLVED" while the run created Joseph).
+            continue
+        if u["mode"] == "ambiguous":
+            # A mechanical collision the resolver did not pick between: §4.4's S3
+            # row is FAIL-CLOSED on `new`, so nothing but a positive choice
+            # attaches a name matching SEVERAL existing entities.
+            reason = HOLD_AMBIGUOUS
+        elif disambiguation_failed:
+            reason = HOLD_DISAMBIGUATION_FAILED
+        elif disambiguation_ran and name not in declared_new:
+            # ⛔ The old contract made this state INVISIBLE: "ambiguous → omit" let
+            # an undecided name and a confidently-absent one both leave the answer
+            # empty and the caller created both. An omission is now the HOLD signal.
+            reason = HOLD_DISAMBIGUATION_UNDECIDED
+        else:
+            # Phase 1 found no candidate of this name and no resolver that
+            # answered said otherwise: the one measured absence.
+            new.append(name)
+            continue
+        held.append({"name": name, "kind": u["kind"], "reason": reason})
+        warnings.append(
+            f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
+            "created (§4.4 I1, #11653)")
+    # F4/F2: identity is `_norm` (F3). A raw-name subtraction licensed an alias of a
+    # held identity; dropped from `new` alone it is in neither population → HOLD.
+    _alias = {_norm(h["name"]): h["reason"] for h in held}
+    _kind_of = {u["name"]: u["kind"] for u in unmatched}
+    held += [{"name": n, "kind": _kind_of.get(n, ""), "reason": _alias[_norm(n)]}
+             for n in new if _norm(n) in _alias]
+    return {"map": resolved, "records": records, "held": held,
+            "new": [n for n in new if _norm(n) not in _alias],
+            "warnings": warnings}
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
@@ -9688,7 +9934,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
                   session_date: str | None = None,
                   edus: list[dict] | None = None,
                   merge_flagged: frozenset[str] | set[str] = frozenset(),
-                  hold_store: object | None = None) -> dict:
+                  hold_store: object | None = None,
+                  held_entities: Mapping[str, str] | object | None = None) -> dict:
     """S5: deterministic embed EXECUTION (not a flash prompt).
 
     Maps the complete embed list to the Layer-1 commit payload in dependency
@@ -9724,12 +9971,56 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     carries it to a later run against the same graph, where a resolved lookup
     commits it exactly once.
 
+    ⛔ #11653 (the ENTITY half of the same invariant): an ENTITY whose S3
+    identity is unresolved is not created either. ``held_entities`` is S3's own
+    verdict — ``resolve_entities``'s ``held`` population, as
+    ``{name: reason}`` or a bare iterable of names — and every named entity is
+    reported in ``held`` (kind ``entity``, with its reason) instead of being
+    appended to the payload. This is what makes a failed disambiguation
+    distinguishable from a measured absence: `#resolve_entities` returns BOTH,
+    and only its `new` list reaches the payload. An entity held here is NOT
+    persisted in the ``hold_store`` — that store's drain mints POINTS, so
+    persisting an entity into it would re-mint a claim instead of carrying a
+    node; the entity half's drainable home belongs with #10998's create gate.
+    The run reports the hold, its reason and the census class, which is I2's
+    *"records the loss"* arm.
+
     Returns {"payload", "chain_notes", "link_before_create", "warnings",
              "minted_kinds", "stats", "held", "held_drained", "hold"}.
     """
     master = master or build_master_list()
     idx = _index_search(search)
     warnings: list[str] = []
+    # #11653: the entity population S3 could not identify, normalised to
+    # `{name: reason}` so the hold record carries WHY it is unresolved.
+    if isinstance(held_entities, Mapping):  # keys NORMALISED (F3)
+        _entity_holds: dict[str, str] = {
+            _norm(_k): str(_v or HOLD_DISAMBIGUATION_UNDECIDED)
+            for _k, _v in held_entities.items() if _norm(_k)}
+    else:
+        _entity_holds = {_norm(_k): HOLD_DISAMBIGUATION_UNDECIDED
+                         for _k in (held_entities or ()) if _norm(_k)}
+    # ⛔ `HOLD_REASONS` IS THIS SEAM'S VOCABULARY, and this is the only place it
+    # can be enforced: `held_entities` is a PARAMETER, so a reason arrives from a
+    # CALLER (`extract_session_v2` forwards S3's own verdicts), not from this
+    # module's constants. An invented spelling would otherwise reach
+    # `stats["held_reasons"]` and `result["resolution_held"]` — the census an
+    # operator reads — while naming a state the design never decided. Fail CLOSED
+    # in both directions rather than silently widening the vocabulary: the item is
+    # still HELD, and its reason is the undecided class with a warning naming
+    # what arrived — and so is an EMPTY reason, never the run-level lookup (#11693 P3).
+    _unknown_reasons = sorted({r for r in _entity_holds.values()
+                               if r and r not in HOLD_REASONS})
+    if _unknown_reasons:
+        warnings.append(
+            "held_entities carried "
+            + ", ".join(repr(r) for r in _unknown_reasons)
+            + f" outside HOLD_REASONS {list(HOLD_REASONS)} — recorded as "
+            f"{HOLD_DISAMBIGUATION_UNDECIDED!r} (still HELD, never created)")
+        _entity_holds = {
+            n: (r if not r or r in HOLD_REASONS
+                else HOLD_DISAMBIGUATION_UNDECIDED)
+            for n, r in _entity_holds.items()}
     # #10997: the run-level identity state the mint gate reads, and the two
     # populations it reports. `held` is what this run did NOT mint and did NOT
     # drop (I2). `held_drained` is this run's DRAIN of what a previous run held —
@@ -9782,6 +10073,25 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         if key in seen_entities:
             continue
         seen_entities.add(key)
+        if _norm(name) in _entity_holds:  # F3: identity is `_norm`
+            # ⛔ #11653 — S3 could not identify this entity, so nothing here may
+            # assert it is `new` (§4.4 I1). It is held (reported, with the
+            # reason S3 gave) and NOT appended to the payload: `payload
+            # ["entities"]` is the commit's create list, one `create_entity` per
+            # entry, so the payload is where the node count is decided. No
+            # `link_before_create` record either — a create that did not happen
+            # must not publish a "searched for / found" entry (#5095's rule).
+            held.append({
+                "kind": _HELD_ENTITY_KIND,
+                "content": name,
+                "ref": name,
+                "where": f"entity '{name}'",
+                "session_ref": session_id,
+                "reason": _entity_holds[_norm(name)],
+                "persisted": False,
+                "key": f"{_HELD_ENTITY_KIND}\0{name}",
+            })
+            continue
         existing, match_mode = _find_existing_entity(
             idx["entities"], name, kind)
         if existing:
@@ -9881,6 +10191,47 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
     # scope (see the issue's "the candidate set cannot carry correctness").
     graph_entity_names = {k for e in idx["entities"] if e.get("name")
                           for k in _endpoint_keys(e.get("name"))}
+
+    # ── #11653 P1: a HELD entity is stripped from every reference set ────────
+    # ⛔ Withholding the entity from `payload["entities"]` while every claim that
+    # NAMES it keeps the name is not a hold — it is a Layer-1 rejection of the
+    # WHOLE session. `commit_schema` resolves `points[i].about_entities`,
+    # `events[i].about_entities` and the typed `subject`/`object` slots against
+    # the emitted entities; `sdk.commit_session` folds a `not l1.ok` into
+    # `errors` and returns `ok=False` WITHOUT POSTing, and the hosted door answers
+    # 422 before the first write. So the pre-fix trade — one duplicate node — would
+    # become "no memory at all", which is precisely the hazard `route_mentions`
+    # was built to avoid and the strip it implements is the recorded remedy:
+    # *"a hold that 422s the whole session … is worse than the phantom node it
+    # removed"*. An S3-held ENTITY is by definition a name the claims talk about,
+    # so this is the NORMAL case, not an edge.
+    #
+    # The operators half is the same hazard one step sideways: the
+    # mint-before-wire pass (#2552) materialises an unresolvable operator
+    # endpoint as a fabricated statement Point, so an operator naming the held
+    # entity must be DROPPED, not left to be minted.
+    #
+    # ⛔ Non-mutating: carriers this pass does not touch stay byte-identical and
+    # `embed_list` itself is never rewritten in place (the caller still owns it).
+    held_refs_stripped = 0
+    held_operators_dropped = 0
+    if _entity_holds:
+        _held_names: set[str] = set(_entity_holds)
+        _kept_events, _ev_stripped = _strip_carriers(
+            embed_list.get("events"), _held_names)
+        _kept_points, _pt_stripped = _strip_carriers(
+            embed_list.get("points"), _held_names)
+        _kept_operators, held_operators_dropped = _prune_held_operators(
+            embed_list.get("operators"), _held_names)
+        held_refs_stripped = _ev_stripped + _pt_stripped
+        embed_list = {**embed_list, "events": _kept_events,
+                      "points": _kept_points, "operators": _kept_operators}
+        if held_refs_stripped or held_operators_dropped:
+            warnings.append(
+                f"S3 HOLD (#11653): {held_refs_stripped} claim/event carrier(s) "
+                "had a held entity removed from about_entities/slots and "
+                f"{held_operators_dropped} operator(s) naming one were dropped "
+                "— the hold removes ONE node, never the session")
 
     # ── events (dependency order 2) ───────────────────────────────────────
     payload_events: list[dict] = []
@@ -11304,28 +11655,59 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
 
     if held:
         _held_ids = {r.get("key") or (r["content"], r["where"]) for r in held}
-        # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
-        # whether a store object was passed (#10997 review round 4, P3). With a
-        # store that raises on write (read-only volume, full disk, bad
-        # permissions) each per-occurrence warning already said "the hold store
-        # write FAILED … so it is NOT carried forward", and this aggregate line
-        # said the opposite — two contradicting warnings in one list, on the line
-        # an operator/census reads.
-        _persisted = sum(1 for r in held if r.get("persisted"))
+        # #11653: HOW MANY, AND WHY, per reason. `held` now carries two classes —
+        # the operator endpoints #10997 owns and the ENTITY candidates whose S3
+        # identity was unresolved — and they do not share a reason (an endpoint's
+        # is the run-level lookup state; an entity's is the candidate's own, from
+        # `resolve_entities`). One aggregate sentence for both would have said
+        # "their identity lookup was `resolved`" about an entity held because the
+        # disambiguation for it failed, which is exactly the kind of true-sounding
+        # false report this whole change removes.
+        _reasons: dict[str, int] = {}
+        for _r in held:
+            _why = str(_r.get("reason") or _lookup)
+            _reasons[_why] = _reasons.get(_why, 0) + 1
+        _why_text = ", ".join(f"{k}={v}" for k, v in sorted(_reasons.items()))
+        # ⛔ Describes what ACTUALLY persisted, not whether a store was passed
+        # (#10997 round 4 P3). The ENTITY-only case is the same defect from the
+        # other side — nothing was carried, so claiming it was is a false claim in
+        # the line a census reads, and the entity clause then says the opposite
+        # (measured, #11653 review F4).
+        # #11653: ENTITY holds are excluded from that arithmetic on purpose —
+        # they are never written to the store (its drain mints POINTS, so an
+        # entity record there would re-mint a claim for a node), so counting them
+        # as "persisted=False" compressions would report a store failure that
+        # never happened.
+        _endpoint_holds = [r for r in held
+                           if r.get("kind") != _HELD_ENTITY_KIND]
+        _entity_held = [r for r in held if r.get("kind") == _HELD_ENTITY_KIND]
+        _persisted = sum(1 for r in _endpoint_holds if r.get("persisted"))
         if hold_store is None:
             _carried = "; NOT carried forward — no hold store was supplied"
-        elif _persisted == len(held):
+        elif not _endpoint_holds:
+            _carried = ""  # only ENTITY holds: nothing endpoint-side was carried
+        elif _persisted == len(_endpoint_holds):
             _carried = ("; carried in the hold store for the next run against "
                         "this graph")
         else:
             _carried = (
-                f"; {_persisted} of {len(held)} occurrence(s) carried in the "
-                f"hold store, {len(held) - _persisted} NOT persisted (the store "
-                "write failed) and therefore NOT carried forward")
+                f"; {_persisted} of {len(_endpoint_holds)} occurrence(s) carried "
+                f"in the hold store, {len(_endpoint_holds) - _persisted} NOT "
+                "persisted (the store write failed) and therefore NOT carried "
+                "forward")
+        if _entity_held:
+            _carried += (
+                f"; {len(_entity_held)} ENTITY hold(s) are NOT carried forward "
+                "— an entity's drainable home belongs with #10998's create gate "
+                "(this store's drain mints points)")
         warnings.append(
-            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held because their "
-            f"identity lookup was {_lookup} — not minted (I1) and not dropped "
-            "(I2)" + _carried)
+            f"S3 HOLD (#10997): {len(_held_ids)} candidate(s) held — identity "
+            f"UNRESOLVED ({_why_text}); run lookup was {_lookup} — not minted "
+            "(I1) and not dropped (I2)" + _carried +
+            # #11653: the ENTITY half of the same invariant, named so a reader of
+            # this sentence knows which issue owns the create gate it describes.
+            (" [entity candidates: #11653 — held, never asserted new]"
+             if _entity_held else ""))
 
     return {
         "payload": payload,
@@ -11351,6 +11733,25 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             # ref named by two operators is ONE held item (one store key).
             "held": len({r.get("key") or (r["content"], r["where"])
                          for r in held}),
+            # #11653: the ENTITY half of the same population, and the reasons
+            # behind the whole set — the census the issue asks for, so "a run
+            # held N entities" is a number the run carries rather than a claim
+            # a reader has to infer from the absence of nodes.
+            "held_entities": sum(1 for r in held
+                                 if r.get("kind") == _HELD_ENTITY_KIND),
+            # #11653 review P1: what the hold had to REMOVE to stay a hold rather
+            # than a rejected session — the carriers whose reference sets named a
+            # held entity, and the operators dropped instead of being minted.
+            # Additive and always present: 0/0 means NO hold OR a hold with nothing
+            # to strip — the pair cannot tell those apart, so read `held_entities`
+            # for which run this was (a discrimination they cannot make).
+            "held_entity_refs_stripped": held_refs_stripped,
+            "held_entity_operators_dropped": held_operators_dropped,
+            "held_reasons": {
+                _why: sum(1 for r in held
+                          if str(r.get("reason") or _lookup) == _why)
+                for _why in sorted({str(r.get("reason") or _lookup)
+                                    for r in held})},
             # #10997 review round 3: the COMMITTED subset, not `len(held_drained)`.
             # A run that drains, mints and then PRUNES every endpoint reported
             # `held_drained=N` with `committed: False` on all N — a census that
@@ -11873,8 +12274,8 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
         for carrier in [*points, *events]:
             names = carrier.get("about_entities")
             if ((isinstance(names, list)
-                 and any(str(a).strip() == surface for a in names))
-                    or surface in _slot_ref_names(carrier)):
+                 and any(_norm(a) == _norm(surface) for a in names))
+                    or _norm(surface) in {_norm(x) for x in _slot_ref_names(carrier)}):
                 carriers.append(carrier)
         return carriers
 
@@ -11995,46 +12396,27 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
     # caller's fail-open guard then voided the ENTIRE selection — the hold, the
     # about_entities strip and the prune (review cycle 3, P1).
     for surface in _operator_endpoint_surfaces(embed_list.get("operators")):
-        if not surface or surface in held_surfaces or surface in abandoned_surfaces:
+        if not surface or _norm(surface) in {_norm(h) for h in held_surfaces} or _norm(surface) in {_norm(a) for a in abandoned_surfaces}:
             continue
         verdict = _referentiality.judge(surface)
         if verdict is not None:
             held_surfaces.add(surface)
             hold.setdefault(surface, verdict)
 
-    def _strip_reference_sets(carrier: dict) -> dict:
-        """Remove every held surface from BOTH reference sets Layer-1 resolves.
-
-        Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
-        stays byte-identical and the caller's dicts are never mutated), else a
-        NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
-        dangling slot is what Layer-1 reports as an extraction error.
-        """
-        out: dict = carrier
-        names = carrier.get("about_entities")
-        if isinstance(names, list):
-            pruned = [a for a in names
-                      if str(a).strip() not in held_surfaces]
-            if len(pruned) != len(names):
-                out = {**out, "about_entities": pruned}
-        slots = carrier.get("slots")
-        if isinstance(slots, dict):
-            stripped = _strip_held_slot_refs(slots, held_surfaces)
-            if stripped is not slots:
-                out = {k: v for k, v in out.items() if k != "slots"}
-                if stripped:
-                    out["slots"] = stripped
-        return out
-
+    # ⛔ ONE definition of the strip, shared with `execute_embed`'s #11653 hold:
+    # `_strip_reference_sets` is module-level precisely because a hold that lands
+    # AFTER this pass (S3's disambiguation, discovered inside `execute_embed`)
+    # owes the SAME two reference sets the SAME strip, and a second implementation
+    # is how the two would drift apart.
     for point in (embed_list.get("points") or []):
-        kept_points.append(_strip_reference_sets(point)
+        kept_points.append(_strip_reference_sets(point, held_surfaces)
                            if isinstance(point, dict) else point)
 
     for event in (embed_list.get("events") or []):
         if not isinstance(event, dict):
             kept_events.append(event)
             continue
-        stripped = _strip_reference_sets(event)
+        stripped = _strip_reference_sets(event, held_surfaces)
         if stripped is not event:
             stats["events_stripped"] += 1
         kept_events.append(stripped)
@@ -12164,7 +12546,7 @@ def route_mentions(embed_list: dict, narrative: str = "") -> dict:
             # `channel_refused_surfaces`. That is the run-disagrees-with-itself class
             # this PR closes, in the evidence a lane reads to decide whether mentions
             # are being lost (review at `ea790070d`, P3).
-            if surface in held_surfaces:
+            if _norm(surface) in {_norm(h) for h in held_surfaces}:
                 continue                   # a carrier already wrote its record
             # A mention with no resolvable claim AND no carrier is not a record.
             stats["channel_refused_no_claim"] += 1
@@ -12318,8 +12700,8 @@ def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
         if role in _SLOT_ENTITY_ROLES and isinstance(refs, list):
             kept = [ref for ref in refs
                     if not (isinstance(ref, dict)
-                            and str(ref.get("name") or "").strip()
-                            in held_surfaces)]
+                            and _norm(ref.get("name") or "")
+                            in {_norm(h) for h in held_surfaces})]
             if len(kept) != len(refs):
                 changed = True
             if kept:
@@ -12327,6 +12709,66 @@ def _strip_held_slot_refs(slots: dict, held_surfaces: set[str]) -> dict:
             continue
         out[role] = refs
     return out if changed else slots
+
+
+def _strip_reference_sets(carrier: dict, held_surfaces: set[str]) -> dict:
+    """Remove every held surface from BOTH reference sets Layer-1 resolves.
+
+    Returns ``carrier`` ITSELF when nothing changed (an untouched carrier
+    stays byte-identical and the caller's dicts are never mutated), else a
+    NEW dict. ⛔ `about_entities` alone leaves the slot dangling, and a
+    dangling slot is what Layer-1 reports as an extraction error.
+
+    ⛔ WHY THIS IS THE ONLY IMPLEMENTATION. Layer-1 resolves a point's and an
+    event's ``about_entities`` AND their typed ``subject``/``object`` slots
+    against the emitted ``entities[]`` (``commit_schema``), so ANY hold that
+    withholds an entity from the payload owes both halves — a hold that strips
+    neither does not remove one node, it removes the session: the SDK drops the
+    payload without POSTing it and the hosted door answers 422. Two callers need
+    exactly that shape, at two different stages: ``route_mentions`` (#11021,
+    the referentiality hold, which runs BEFORE S3) and ``execute_embed``
+    (#11653, S3's disambiguation hold, which is discovered DURING the entity
+    loop). The parameter is the held set, not a closure, so there is one rule.
+    """
+    out: dict = carrier
+    names = carrier.get("about_entities")
+    if isinstance(names, list):
+        pruned = [a for a in names
+                  if _norm(a) not in {_norm(h) for h in held_surfaces}]
+        if len(pruned) != len(names):
+            out = {**out, "about_entities": pruned}
+    slots = carrier.get("slots")
+    if isinstance(slots, dict):
+        stripped = _strip_held_slot_refs(slots, held_surfaces)
+        if stripped is not slots:
+            out = {k: v for k, v in out.items() if k != "slots"}
+            if stripped:
+                out["slots"] = stripped
+    return out
+
+
+def _strip_carriers(carriers: object,
+                    held_surfaces: set[str]) -> tuple[list, int]:
+    """Strip held surfaces from every point/event carrier, with a strip count.
+
+    The count is of CARRIERS CHANGED, not of references removed: it is the
+    number a warning reports so "the hold touched N claims" is a measurement
+    rather than an inference, and a carrier that named nothing held is not
+    counted (``_strip_reference_sets`` returns it unchanged).
+    """
+    if not isinstance(carriers, list):
+        return [], 0
+    kept: list = []
+    stripped = 0
+    for carrier in carriers:
+        if not isinstance(carrier, dict):
+            kept.append(carrier)
+            continue
+        out = _strip_reference_sets(carrier, held_surfaces)
+        if out is not carrier:
+            stripped += 1
+        kept.append(out)
+    return kept, stripped
 
 
 def _operator_endpoint_surfaces(operators: object) -> set[str]:
@@ -12387,7 +12829,7 @@ def _prune_held_operators(operators: object,
             if isinstance(target, dict):
                 endpoints += [str(target.get(k) or "").strip()
                               for k in ("src", "dst")]
-        if any(e in held_surfaces for e in endpoints if e):
+        if any(_norm(e) in {_norm(h) for h in held_surfaces} for e in endpoints if e):
             dropped += 1
             continue
         kept.append(op)
@@ -13936,6 +14378,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # (nothing to resolve against). Never blocks capture (P1).
     resolution_records: list[dict] = []
     resolution_warnings: list[str] = []
+    #: #11653: S3's HELD population — entities whose identity this run could not
+    #: establish. Carried into `execute_embed`, which refuses to create them.
+    resolution_held: list[dict] = []
     # #3359: the D3 entity-resolution LLM fallback makes a REAL provider
     # call. Without a stats dict it contributed nothing to the session cost
     # roll-up — silently understating spend for every session that hit it.
@@ -13943,6 +14388,10 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
     # after the try/except so a resolution failure still reports the spend
     # it already made.
     resolution_stats: dict = {}
+    # ⛔ #11653: the pass keeps its original trigger — a healthy lookup WITH
+    # candidates, the only state in which a DISAMBIGUATION can happen at all.
+    # A run whose lookup did not run has nothing to disambiguate, and its create
+    # gate is §4.4's separate S3-lookup row (#10998), not this one.
     if search and not search.get("degraded") and (search.get("entities") or []):
         ent_refs = [{"name": str(e.get("name", "")).strip(),
                      "kind": str(e.get("kind", "")).strip()}
@@ -13950,13 +14399,23 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     if isinstance(e, dict) and e.get("name")]
         if ent_refs:
             try:
+                # #11654: the run's narrative is S3's disambiguation
+                # context (§S3) — computed a stage earlier, and until now
+                # never handed to the resolver.
                 res = resolve_entities(ent_refs, search, model=model,
-                                       stats=resolution_stats)
+                                       stats=resolution_stats,
+                                       narrative=story_arc)
+                # ⛔ #11653: captured BEFORE the apply — a raise from it must not
+                # lose the hold (the entity it could not identify is then MINTED).
+                resolution_records = res.get("records") or []
+                resolution_warnings = res.get("warnings") or []
+                resolution_held = res.get("held") or []
+                if resolution_held:
+                    # §4.4's *"recorded loudly, never only in `warnings`"*: one deterministic census class per run, with the reasons and the candidates named on `result["resolution_held"]`.
+                    _bump_census_class(error_census, "entity_identity_held")
                 if res.get("map"):
                     complete_list = _apply_entity_resolution(
                         complete_list, res["map"])
-                resolution_records = res.get("records") or []
-                resolution_warnings = res.get("warnings") or []
                 # #1695 Task 5: post-resolution re-key — the resolution may
                 # rename entities; the participant-slot kinds are re-applied
                 # (idempotent — kinds don't change, names may) so the typed
@@ -13965,7 +14424,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                     slot_rekeys += _rekey_slots(complete_list)
             except Exception as e:  # noqa: BLE001, RUF100 — resolve_entities is
                 # guarded internally, but the orchestrator never dies on
-                # resolution (P1: degrade to phase-1/ADD semantics)
+                # resolution (P1: the run degrades to phase-1/mechanical
+                # semantics; a disambiguation that did not finish HELDs its
+                # candidates, it never asserts them new — #11653)
                 errors.append(f"entity resolution failed: {type(e).__name__}: {e}")
                 # D1 (#1746): deterministic class for the previously-
                 # uncensused resolution failure path.
@@ -14022,6 +14483,9 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
         result = execute_embed(complete_list, search, session_id=session_id,
                                story_arc=story_arc, master=master,
                                session_date=session_date, edus=edus,
+                               # #11653: S3's held verdict decides the create.
+                               held_entities={h["name"]: h.get("reason", "")
+                                              for h in resolution_held},
                                merge_flagged=_merge_flagged_contents(
                                    vet_s2_stats, vet_union_stats))
     except Exception as e:  # S5 must NEVER block the pipeline (design §7.4)
@@ -14273,6 +14737,13 @@ def extract_session_v2(model, conversation: list[dict], *, sdk=None,
                 for r in resolution_records])
     if resolution_warnings:
         result["warnings"] = resolution_warnings + (result.get("warnings") or [])
+    if resolution_held:
+        # #11653: the evidence surface for the held ENTITY candidates. S3's own
+        # verdict, beside the resolution records it also publishes — a reader can
+        # tell "resolved to X" from "held (reason)" from "measured absent"
+        # without re-deriving it from the absence of a node.
+        result["resolution_held"] = resolution_held
+        result.setdefault("stats", {})["resolution_held"] = len(resolution_held)
     if s4_warnings:
         result["warnings"] = s4_warnings + (result.get("warnings") or [])
     result["stats"]["elapsed_s"] = round(time.time() - t0, 1)
@@ -14676,7 +15147,13 @@ def _bump_census_class(error_census: dict[str, int], cls: str) -> None:
     classifier's fail-open per-item counters — rerank/adjudication/retrieval
     failures never raise, so no ``errors`` entry pairs THOSE bumps).
     ``embedding_error`` / ``unclassified_terminal`` are ADDITIVE ONLY (no
-    ``errors`` entry pairs them). The structural len-equality holds on the
+    ``errors`` entry pairs them). ``entity_identity_held`` (#11653) is
+    ADDITIVE ONLY on the same terms, and it is bumped ONCE PER RUN: the class
+    says *"this run held at least one entity for an unresolved identity"*, while
+    WHICH candidates (and why) is `result["resolution_held"]` and
+    `stats["held_reasons"]` — the raise-paired shape (one bump per item) would
+    make the class a count of occurrences that no `errors` entry can reconcile.
+    The structural len-equality holds on the
     raise-paired classes; the flag-only classes are governed by their own
     A/B thresholds (parse-census equality computes on the class
     INTERSECTION, per the plan)."""

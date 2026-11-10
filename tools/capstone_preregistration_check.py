@@ -10,10 +10,16 @@ It verifies six things, and it fails on each of them for a specific reason:
 
 1. **Every criteria row carries a metric, a denominator AND a numeric threshold.** A row with a
    placeholder (*"to be decided"*, *"TBD"*, an em dash) is a row that will be decided later — which is
-   the same failure as no registration at all. E1–E5 must each be present (E2 may be split into
-   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete). Only E2 takes
+   the same failure as no registration at all. The rows THIS bundle's pins require must each be
+   present — the core ``E1``–``E5`` set, plus ``E6`` for the capstone (see
+   ``required_criteria_for``; the set is per-bundle because the tool is shared) — and
+   ``E2`` may be split into
+   sub-rows, e.g. ``E2a``/``E2b``, and every sub-row must itself be complete. Only E2 takes
    sub-rows: ``E1b`` is E1's anti-gaming CONTROL, so a table carrying ``E1b`` without an ``E1`` row
-   is the epic's central criterion deleted behind its guard (#9075 review r3 P2).
+   is the epic's central criterion deleted behind its guard (#9075 review r3 P2). ``E6`` was added to
+   this set by ``#11673`` on the owner's 2026-11-05 ruling (``#7949`` comment ``6664402530``); it is
+   REQUIRED rather than registered-not-required because the ruling names it as the capstone's sixth
+   criterion, and it carries a countable bar, so it never joins ``REGISTERED_NON_BAR_ROWS``.
 2. **The registration was PUBLISHED on the base before every SCORED evidence log.** The
    pre-registration's earliest add-commit *reachable from the base ref* (`origin/main`) must be
    **older** than the evidence log's add-commit — where the log's add-commit is read on the base
@@ -363,11 +369,34 @@ CROSS_CHECKED_CORPUS_KEYS = (
     "hedge_scope_sentences_total",
 )
 
-#: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); the other four
-#: must be matched EXACTLY. A prefix match for every id let ``E1b`` (E1's anti-gaming control) stand
-#: in for a deleted ``E1`` — the epic's central criterion gone while its guard kept the check green
-#: (#9075 review r3 P2).
-REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The rows EVERY bundle's registration must carry: the five slots `#9075` closed on, and the
+#: vocabulary `docs/evidence/5087-hypothesis/PRE-REGISTRATION.md` shares with the capstone (*"the
+#: checker's slot vocabulary"* — the same ids name DIFFERENT measurements there). ``E2`` may be
+#: carried by sub-rows (``E2a``/``E2b``); the others must be matched EXACTLY. A prefix match for
+#: every id let ``E1b`` (E1's anti-gaming control) stand in for a deleted ``E1`` — the epic's
+#: central criterion gone while its guard kept the check green (#9075 review r3 P2).
+#:
+#: ⛔ TWO SETS, AND TWO DIFFERENT QUESTIONS — conflating them is what the `#11673` review cycle kept
+#: catching. THIS one is what a bundle's RECORD must carry (`required_criteria_for` decides which of
+#: the two a given bundle owes). The other is the epic's CLOSING set, `CRITERIA` in
+#: ``tools/capstone_verdict_check.py``, and it is the FIVE-row sentence `#7949` records. A row can be
+#: REQUIRED of the record and NOT closing, and `E6` is exactly that.
+CORE_REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The CAPSTONE's required set — the core slots plus ``E6``.
+#:
+#: ⛔ ``E6`` IS A REQUIRED ROW AND THIS IS THE TOOL CHANGE THAT MAKES IT ONE (#11673). The owner
+#: ruled on 2026-11-05 (``#7949`` comment ``6664402530``) that the capstone gains a sixth row —
+#: *per-pack declared → writable → written* — and ``#11083`` built the census for it without
+#: registering the row, so the epic's own acceptance criterion had no bar. A row that exists only in
+#: the record is refused here until its id is in this tuple, and that is deliberate: this is the
+#: gate that tells "the record describes a criterion" from "the record carries a bar for it".
+#: ⚠️ REQUIRED HERE IS NOT CLOSING THERE: `E6` is in this tuple and in the scorer's
+#: ``RECOGNISED_CRITERIA``, and deliberately NOT in the verdict tool's ``CRITERIA``, so the epic
+#: closes on five (see `CRITERIA`'s note in ``tools/capstone_verdict_check.py``).
+#: ``E6`` needs no exemption from the numeric arms — it has a countable bar (``= 0`` unbound and
+#: unexplained rows), so it is NOT a member of ``REGISTERED_NON_BAR_ROWS`` and the assertion below
+#: must stay satisfied.
+REQUIRED_CRITERIA = (*CORE_REQUIRED_CRITERIA, "E6")
 #: The ONLY rows the record registers as bar-less (`UNMEASURED(...)`, §3.1's A4). Pinned here so the
 #: completeness gate can tell a registered non-bar from a required row that declares itself one —
 #: the branch also skips both numeric arms, so an unscoped version was a false PASS (#10982).
@@ -592,6 +621,21 @@ def _plain(cell: str) -> str:
 
 def is_placeholder(cell: str) -> bool:
     return _plain(cell).casefold() in PLACEHOLDER_CELLS
+
+
+#: A criterion row's FAMILY — the SLOT it names, whatever the row calls itself. `E6`, `e6`, `E6a`
+#: and `E6 (declared)` all name slot `e6`; a sub-row suffix (`E1b`, `E2a`) collapses to its parent
+#: on purpose, because the refusal below is about the slot being DEFINED while the gate never
+#: demands it, not about the row's label. ⛔ #11688 review, issue 1: the exact-membership test this
+#: replaces was defeated by spelling the row `E6a` — one character, and the guard was inert.
+_CRITERION_FAMILY = re.compile(r"^([a-z]\d+)", re.IGNORECASE)
+
+
+def criterion_family(row_id: str) -> str:
+    """The slot a criterion row names: markdown-stripped, casefolded, sub-row suffix removed."""
+    plain = _plain(row_id).casefold()
+    match = _CRITERION_FAMILY.match(plain)
+    return match.group(1) if match else plain
 
 
 def parse_criteria_rows(text: str) -> list[dict[str, str]]:
@@ -3904,8 +3948,36 @@ def check_steps_block_is_pre_scored(directory: Path) -> list[str]:
     return failures
 
 
+def required_criteria_for(pins: dict) -> tuple[str, ...]:
+    """The rows THIS bundle must carry — the core slots, plus ``E6`` for the capstone.
+
+    ⛔ THE SET IS PER-BUNDLE BECAUSE THE TOOL IS SHARED. The gate's own CI step hands it TWO bundles
+    in one invocation (`.github/workflows/python-ci.yml`: `--dir docs/evidence/7949-capstone
+    --no-corpus --dir docs/evidence/5087-hypothesis`), and the two use the `E1`–`E5` slot names for
+    DIFFERENT measurements — `#5087`'s registration says exactly that (*"the checker's slot
+    vocabulary"*). One global required set therefore either demands the capstone's sixth row of an
+    epic that has no such criterion, or drops the sixth row from the epic that does.
+
+    The declaration is the pins' own ``required_criteria_rows``, and the reading is FAIL-CLOSED:
+    only the EXACT core set narrows the requirement, so a bundle cannot lose a requirement by
+    breaking its own declaration (absent, malformed, or any other combination is held to the full
+    set), and `check_pins` refuses a declaration that is neither of the two sanctioned sets.
+
+    ⚠️ The narrowing is gapless rather than airtight on its own: a bundle that defines a row beyond
+    the core set AND does not require it is refused by `check_pins` (the corpus half), because that
+    is the exact shape — a criterion the registration describes and the gate never demands — that
+    let the capstone's sixth row go unregistered (#11673).
+    """
+    declared = pins.get("required_criteria_rows")
+    if isinstance(declared, (list, tuple)) and list(declared) == list(CORE_REQUIRED_CRITERIA):
+        return CORE_REQUIRED_CRITERIA
+    return REQUIRED_CRITERIA
+
+
 def check_completeness(rows: list[dict[str, str]],
-                       row_floors: dict[str, float] | None = None) -> list[str]:
+                       row_floors: dict[str, float] | None = None,
+                       required: tuple[str, ...] | None = None) -> list[str]:
+    required_ids = REQUIRED_CRITERIA if required is None else tuple(required)
     failures: list[str] = []
     if not rows:
         return [
@@ -3923,16 +3995,16 @@ def check_completeness(rows: list[dict[str, str]],
                 f"row {row['id']!r} (line {row['line']}) is missing {', '.join(missing)} — "
                 "a criteria row must name all three before any run"
             )
-    for required in REQUIRED_CRITERIA:
-        if required in SUB_ROW_CRITERIA:
+    for required_id in required_ids:
+        if required_id in SUB_ROW_CRITERIA:
             present = any(
-                r["id"] == required or r["id"].startswith(required) for r in rows
+                r["id"] == required_id or r["id"].startswith(required_id) for r in rows
             )
         else:
             # EXACT: ``E1b`` is E1's control, not a stand-in for E1 (#9075 review r3 P2).
-            present = any(r["id"] == required for r in rows)
+            present = any(r["id"] == required_id for r in rows)
         if not present:
-            failures.append(f"criterion {required} has no row")
+            failures.append(f"criterion {required_id} has no row")
     for row in rows:
         if is_placeholder(row["threshold"]):
             continue  # already reported above
@@ -4060,7 +4132,8 @@ def check_e4_denominator(rows: list[dict[str, str]], text: str, pins: dict) -> l
     return failures
 
 
-def check_pins(pins: dict, derived: dict) -> list[str]:
+def check_pins(pins: dict, derived: dict,
+               rows: list[dict[str, str]] | None = None) -> list[str]:
     failures: list[str] = []
     corpus = pins.get("corpus") or {}
     salience_pins = _pins_mapping(pins, "salience_labels")
@@ -4120,11 +4193,41 @@ def check_pins(pins: dict, derived: dict) -> list[str]:
         cmp("split.tune_counts", split.get("tune_counts"), _half_counts(derived, tune))
         cmp("split.held_out_counts", split.get("held_out_counts"), _half_counts(derived, held))
 
-    rows = pins.get("required_criteria_rows")
-    if list(rows or []) != list(REQUIRED_CRITERIA):
+    # ⛔ TWO SANCTIONED SETS, AND A DECLARATION OUTSIDE THEM IS REFUSED (#11673). The core set is
+    # what every bundle shares; the full set adds the capstone's sixth row (§10.21). A third set —
+    # invented, or the core set with an `E`-row quietly dropped — is the shape that would let a
+    # required criterion disappear by editing the record alone, so it is refused here rather than
+    # read as "whatever this bundle says".
+    sanctioned = [list(CORE_REQUIRED_CRITERIA), list(REQUIRED_CRITERIA)]
+    declared = list(pins.get("required_criteria_rows") or [])
+    if declared not in sanctioned:
         failures.append(
-            f"pins.required_criteria_rows is {rows!r}, must be {list(REQUIRED_CRITERIA)}"
+            f"pins.required_criteria_rows is {declared!r}, must be one of {sanctioned} — the core "
+            "set every bundle shares, or that set plus `E6`"
         )
+    elif declared != list(REQUIRED_CRITERIA) and rows is not None:
+        # …and the reverse direction: a bundle that DEFINES a required id and does not require it.
+        # This is the capstone's own defect shape — `E6` described in §3.1 while the gate demanded
+        # only E1–E5 — so a table carrying `E6` under a core-only declaration is refused.
+        #
+        # ⛔ THE MATCH IS ON THE ROW'S SLOT, NOT ON ITS SPELLING (#11688 review, issue 1). An exact
+        # `r["id"] in {"E6"}` test was reachable around by writing the row `E6a`/`e6`/`E6 (declared)`
+        # — and `E6a` is this record's OWN sub-row convention, not a contrived spelling. Nothing
+        # upstream normalizes an id (`parse_criteria_rows` takes the cell verbatim), so the guard
+        # has to do it here.
+        beyond_core = {
+            criterion_family(c) for c in set(REQUIRED_CRITERIA) - set(CORE_REQUIRED_CRITERIA)
+        }
+        defined_beyond_core = sorted(
+            r["id"] for r in rows if criterion_family(r["id"]) in beyond_core
+        )
+        if defined_beyond_core:
+            failures.append(
+                f"the criteria table carries {defined_beyond_core} but pins.required_criteria_rows "
+                f"is {declared!r} — a row the registration defines and the gate never demands is "
+                "exactly the shape that let the capstone's sixth row go unregistered (#11673): "
+                "require it, or remove the row"
+            )
     return failures
 
 
@@ -4168,7 +4271,8 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
         "checks": {},
     }
     failures: list[str] = []
-    failures += check_completeness(rows, _registered_floor_values(directory))
+    failures += check_completeness(rows, _registered_floor_values(directory),
+                                   required=required_criteria_for(pins))
     failures += check_e4_denominator(rows, text, pins)
     registry_scopes: list[str] = []
     failures += check_registry_contradictions(directory, rows, pins, registry_scopes)
@@ -4362,7 +4466,7 @@ def run(directory: Path, use_git: bool = True, use_corpus: bool = True,
             "sentences_total": derived["sentences_total"],
             "salience": derived["salience"],
         }
-        failures += check_pins(pins, derived)
+        failures += check_pins(pins, derived, rows)
     else:
         # A skipped half must SAY it was skipped: `--no-corpus` is what the CI ordering step uses
         # (the corpus leg needs the package deps, and the test suite owns it), and a report that

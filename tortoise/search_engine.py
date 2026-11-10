@@ -3714,15 +3714,53 @@ _DECORATION_TIMEOUT_MS = 200
 #:     TZ=America/Los_Angeles k(…same…)                      -> (0, 1684574460.0)
 #:     TZ=Asia/Kolkata        k(…same…)                      -> (0, 1684529460.0)
 #:
-#: which makes ``sdk.supersede_point``'s inversion guard answer DIFFERENTLY per
-#: host for a mixed producer-shaped / dashed pair (inverted on UTC and
-#: ``America/Los_Angeles``, not inverted on ``Asia/Kolkata``). On ``origin/main``
-#: those values bucketed ``(1, text)``, so the guard was skipped — i.e. this
-#: exposure is NEW, and it is the #3982 divergence reaching a WRITE path.
-#: Reversing #3982 is a recorded decision and is NOT the fix; a deterministic
-#: anchor for the new shape is a separate decision to be argued on #11646. Until
-#: then the guard's host dependence is recorded here and on that issue rather
-#: than silently relied on.
+#: which makes consumers of this key answer DIFFERENTLY per host. The key
+#: itself is host-dependent for the value above, and the guards order with it,
+#: so which hosts disagree is decided by where the pair's separation falls
+#: against their two OFFSETS — for a MIXED pair (one bound zone-less, one
+#: stated) the end closed is the ACCEPTING host's offset (``O_low < S <= O_high``
+#: for a producer-as-START, ``O_low <= S < O_high`` for a producer-as-END; the
+#: full rule is ``commit_schema.validate_validity_window``'s). The distance alone
+#: decides nothing: refusal is ``reader_offset < (naive - other)`` when the naive
+#: value is the START (the sign INVERTS for an END). When BOTH bounds are naive
+#: ONE host reads both, so the reader's offset CANCELS and every host agrees —
+#: except where the pair straddles an OFFSET TRANSITION on that host (a DST
+#: change OR a permanent standard-offset change) that leaves ONE bound in a
+#: nonexistent hour AND reads the OTHER at the POST-transition offset (a
+#: WALL-INVERTED pair whose END is in the gap, or a non-inverted pair whose START
+#: is in it and whose END is after it). A gap bound is read at the PRE-transition
+#: offset, so a non-inverted END pair and a WALL-INVERTED START pair read BOTH at
+#: that same offset and cannot move. Given different offsets the verdict moves per
+#: ORIENTATION, because only the non-existent bound is shifted: as the END, a
+#: WALL-INVERTED pair flips at ``separation <= shift`` (the shift un-inverts it
+#: into a well-formed window of length ``shift - separation``, zero-length exactly
+#: at equality; at 60 min, 20/30/60 min flip, 61 does not), while a NON-inverted END
+#: pair never flips — BOTH bounds land on the SAME pre-transition offset, so the
+#: gap host reads the same separation-long window as any other host. As the START
+#: with the other bound AFTER the transition the flip needs ``separation <
+#: shift``, since at exactly the shift the GAP host reads a zero-length window
+#: while a transition-free host reads a shift-long one and both accept (measured:
+#: 20 and 59 min flip, 60 min agrees); a WALL-INVERTED START pair never flips,
+#: for the same offset reason.
+#: The US spring-forward pair is REFUSED at UTC and ACCEPTED at
+#: ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
+#: change does the same with no DST at all. Separately, two hosts 1h apart
+#: disagree about a pair 13h30 apart, while a pair 20h apart answers the same on
+#: every host. That affects not only ``sdk.supersede_point``'s inversion guard
+#: (inverted on UTC and ``America/Los_Angeles``, not inverted on
+#: ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
+#: write door reached by ``create_point`` / ``update_point`` /
+#: ``invalidate_point`` / ``retract_point`` / ``mining._temporal_wire``) and
+#: audit check 8 (``inverted_validity_window``), which order with this same
+#: measure. Before #11646 those values bucketed ``(1, text)``, so the guards were
+#: skipped — i.e. this exposure is NEW, and it is the #3982 divergence reaching
+#: WRITE and AUDIT paths.
+#: Reversing #3982 is a recorded decision and is NOT the fix; giving the
+#: producer's shape its own deterministic anchor instead is the SEPARATE
+#: decision recorded on #11646 (deterministic without touching #3982's dashed
+#: date-TIME reading, at the cost of a slash-vs-dashed asymmetry), and is not a
+#: reopen. Until either is decided the guards' host dependence is recorded here
+#: and on that issue rather than silently relied on.
 #:
 #: ``YYYY-DDD`` (ordinal) is absent deliberately: the stdlib cannot parse it
 #: (``date.fromisoformat("2026-161")`` raises), so such values are unparseable

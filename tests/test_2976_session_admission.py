@@ -478,6 +478,91 @@ def test_tr_complete_sessions_splices_adjacent_and_never_mutates_the_pool(monkey
     assert [h["content"] for h in out] == ["a0", "b0", "a1", "a2-injected"]
 
 
+def test_tr_complete_sessions_splices_a_padded_session_id_11382(monkeypatch):
+    """#11382, the third side of one comparison: the SPLICE lookup.
+
+    This function joins a fetched group back onto its base hits through
+    ``retrieval.session_key_of`` (the #10540 change), so it inherits the
+    normalisation — but only because the pool key is normalised. The fixture
+    below keeps the POOL side REAL (``_hit`` stamps a padded SNAKE
+    ``session_id``, ``"  sid-a  "``) and stubs the SEED and GROUP keys to the
+    NORMALISED value (``seeded_sessions`` returns ``"sid-a"``, and the
+    fetched ``by_session`` is keyed ``"sid-a"``), which is exactly the shape
+    the fix
+    exists for: before it the two sides were produced independently, so the
+    RAW pool key could never equal the normalised group key — one session,
+    two keys — and the group was fetched, charged against the total budget
+    (``total == 1``) and then never placed: ``seeded > 0`` with
+    ``sessions == 0``. That is why this test fails pre-fix.
+
+    ⚠️ The CAMEL half of the pre-fix defect is deliberately NOT in this
+    fixture — there is no ``sessionId`` here — so do not read the sentences
+    above backwards. The camel leg was the one already STRIPPED by #10540, so
+    on the pre-fix TREE it was the spelling that got dropped, while the raw
+    snake pool key MATCHED the raw graph group key and nothing was lost.
+    What this test pins is the SNAKE side under the fixed rule; the test that
+    carries BOTH spellings is
+    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``.
+
+    It also pins ``report["total"]`` — the fetch's DISTINCT-item count —
+    which this issue asks for so a "charged then dropped" fetch is visible as
+    ``total > injected`` instead of silent.
+    """
+    from tools.longmem_eval import retrieve as R
+    from tortoise import session_reinjection as SR
+
+    base = [_hit(0, "  sid-a  ", "a0", idx=0),
+            _hit(1, "sid-b", "b0", idx=0)]
+    injected = {"lme:q:s0:t9": {"content": "a2-injected", "session_id": "s1",
+                                "lme_session_index": 0}}
+
+    class _Seed:
+        session_id = "sid-a"        # the NORMALISED seed key
+        point_id = "lme:q:s0:t0"
+
+    monkeypatch.setattr(SR, "seeded_sessions", lambda *a, **k: [_Seed()])
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0,
+                         "total_cap_hit": False, "total": 1,
+                         "by_session": {"sid-a": [{"id": "lme:q:s0:t9"}]}})
+    monkeypatch.setattr(R, "point_props_for_hits",
+                        lambda proj, ids: {i: injected[i] for i in ids})
+    monkeypatch.setattr(R, "_speaker_for_turns", lambda proj, ids: {})
+
+    class _Sdk:
+        def _get_proj(self):
+            return object()
+
+    out, report = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=1, total_cap=5, per_session_cap=5)
+    assert report["ok"] is True and report["applied"] is True
+    assert report["sessions"] == 1, report
+    assert report["injected"] == 1
+    # the visibility key this issue asks for: what the fetch CHARGED
+    assert report["total"] == 1
+    assert [h["content"] for h in out] == ["a0", "a2-injected", "b0"]
+
+    # ⛔ NOT over-widened: with the group keyed on a DIFFERENT session, the
+    # padded pool hit must not adopt it — sessions stays 0 and nothing lands.
+    monkeypatch.setattr(
+        SR, "source_session_chunk_pass",
+        lambda *a, **k: {"ok": True, "dropped_by_cap": 0,
+                         "total_cap_hit": False, "total": 1,
+                         "by_session": {"sid-other": [
+                             {"id": "lme:q:s0:t9"}]}})
+    out2, report2 = R._tr_complete_sessions(
+        _Sdk(), list(base), ["2023-01-01", "2023-01-02"], seed_window=2,
+        seed_sessions=1, total_cap=5, per_session_cap=5)
+    assert report2["ok"] is True
+    assert report2["sessions"] == 0 and report2["injected"] == 0
+    assert [h["id"] for h in out2] == [h["id"] for h in base]
+    # ... and the charge is still visible, which is the whole point of the
+    # key: total=1 > injected=0 names the drop the report used to hide.
+    assert report2["total"] == 1
+
+
 def test_a_breadth_token_drop_is_reported_as_the_token_cap():
     """The breadth budget is a real drop counter: reporting `None` there said
     "no bound dropped anything" on a window the token budget had just narrowed,
@@ -748,10 +833,15 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
       the defect this file exists to prevent;
     * the same shape WITH the wire id now groups in admission (`sessA`) and
       still keys `idx:-1` in the pool — one block, but not the pool's key;
-    * a padded snake id is RAW in the pool authority (it strips nothing) and
-      STRIPPED in the admission grain.
+    * a BOOL `lme_session_index` (pinned below) — the pool's leg is
+      `is not None` so it outranks the wire id, while admission excludes
+      bool;
+    * a padded snake id USED to be the third, and it is NOT any more:
+      #11382 normalises BOTH pool legs through `retrieval.normalize_session_key`
+      (`strip`), so the pool authority and the admission grain now read a
+      padded id as the ONE identity it is, and #11382's own test pins it.
 
-    Neither divergence ships a wrong answer: no module under `tortoise/`
+    No remaining divergence ships a wrong answer: no module under `tortoise/`
     imports `session_reinjection`, so the `-1` shape arrives only through the
     eval annotator, and the identified shapes — the ones the camel leg is
     about — are asserted EQUAL at the end of this test.
@@ -776,8 +866,12 @@ def test_the_agreement_with_the_pool_authority_is_scoped_to_identified_hits():
     assert len(session_blocks(sentinel_wire)) == 1
 
     padded = {"id": "P_t0", "session_id": " sessA "}
-    assert session_key_of(padded) == " sessA "
+    # #11382: the pool leg now strips too, so this is the AGREEMENT case, not
+    # a divergence — same id, same key, whichever grain reads it.
+    assert session_key_of(padded) == "sessA"
     assert _session_admission_key(padded) == ("session", "sessA")
+    assert session_key_of({"id": "P_t1", "sessionId": " sessA "}) == (
+        "sessA")
 
     # a BOOL index is the other type seam, and it diverges too — but NOT the
     # way the sentinel does: the pool's leg is `is not None`, so `True` keys

@@ -7,6 +7,14 @@ the epic owns no implementation and its closing rule is an *execution*:
 not when the children close. A child closing is a claim; this epic is where the
 claim is checked against the pipeline running end to end."*
 
+⚠️ **This probe emits the five CLOSING rows, and that is now the whole rule.**
+`#11673` registered a sixth row (`E6`, per-pack *declared → writable → written*) and
+`#7949`'s corrected close condition keeps the epic closing on `E1`–`E5`: `E6` is
+RECOGNISED by the scorer and reported, never a closing row — the precedent §3.7
+records for the `A`-rows (*registered, measured, reported, **not closing***). The
+missing `E6` PRODUCER is `#11695`; until it lands, no run can populate that row, and
+that residual is named here rather than claimed away.
+
 ⚠️ **The issue BODY's claims were re-read at `717355e67` (its figures are pinned
 to `9037c7a7b`).** That sha is a MAIN commit — the base for the body re-read, NOT
 a stamp for any capstone log (the shipped log is stamped at `027c8c1ab`; see
@@ -16,16 +24,16 @@ the corrected reading:
 1. **A single entry point DOES exist.** The body says *"whether any single
    entry point … can drive all eight in one pass"* is an open question. It can:
    ``TortoiseSDK.capture_session`` → ``sdk._extract_session_v2``
-   (``sdk.py:16426``, called at ``:15454``) →
-   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13192``) calls
-   ``_edus_from_conversation`` (S0, ``:13310``) and then ``_arm_extract`` — the
+   (``sdk.py:16591``, called at ``:15619``) →
+   ``extractor_v2.extract_session_v2`` (``extractor_v2.py:13634``) calls
+   ``_edus_from_conversation`` (S0, ``:13752``) and then ``_arm_extract`` — the
    S1→S2→S2.2 prefix, which it calls twice since `#11002`: the first arm and the
-   retry — and that one function drives ``run_s1`` (S1, ``:16200``), ``run_s2``
-   (S2.1, ``:16232``) and ``_run_vet_pass`` (S2.2, ``:16286``).
+   retry — and that one function drives ``run_s1`` (S1, ``:16677``), ``run_s2``
+   (S2.1, ``:16709``) and ``_run_vet_pass`` (S2.2, ``:16763``).
    ``extract_session_v2`` itself calls ``kind_classifier.classify_items`` (S2.3,
-   ``:13764``), ``_apply_classify_kinds`` (S2.3, ``:13765``), ``search_graph``
-   (S3, ``:13781``), ``run_s4`` (the gap filler, ``:13802``), and
-   ``execute_embed`` (S5+S6, ``:14022``). ONE cite per symbol, on the line that symbol is on:
+   ``:14206``), ``_apply_classify_kinds`` (S2.3, ``:14207``), ``search_graph``
+   (S3, ``:14223``), ``run_s4`` (the gap filler, ``:14244``), and
+   ``execute_embed`` (S5+S6, ``:14483``). ONE cite per symbol, on the line that symbol is on:
    S2.3 makes TWO calls two lines apart, and the single ``:NNNN`` a
    ``a``/``b`` pair cite could carry is only ever checkable for one of them —
    that pair form is how ``_apply_classify_kinds`` sat on ``:9210`` (naming

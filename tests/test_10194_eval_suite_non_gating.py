@@ -103,7 +103,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_leg_names()` below asserts this map's leg list, so a silent
+    which is why `_expected_legs()` below asserts this map's leg list, so a silent
     omission is impossible to mistake for a pass.
     """
     legs = cs.push_legs(manifest)
@@ -136,32 +136,73 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     return out
 
 
-EXPECTED_LEGS = {
+#: The leg FAMILIES this map enumerates. ⛔ The shard LETTERS are NOT typed here —
+#: they are derived from the selector's own counts (``fast_shard_count`` /
+#: ``slow_shard_count`` / ``carve_shard_count``, which read ``fast_shards`` and its
+#: siblings out of `config/ci-surfaces.yml`) by `_expected_legs` below. The typed
+#: form was a count that rotted silently in the wrong direction: `#11576` raised
+#: ``fast_shards`` 10 -> 11 to cut the critical leg's wall clock, and this leg then
+#: redded on `test (k)` — a COUNT change, not a coverage change, since the leak
+#: loop below walks every leg `cs.push_legs` actually produces. Deriving the
+#: letters keeps the tripwire that matters (a new FAMILY of gating set, which the
+#: map would not enumerate) while a re-shard is not a false block.
+_LEG_FAMILIES = {
     "fast_pool", "slow", "env_broken", "carve_out",
-    # ⛔ `k` is `main`'s count, not this PR's (#11660). `config/ci-surfaces.yml`
-    # reads `fast_shards: 11` — bumped in `efc472108f`, an ancestor of `main`'s
-    # tip — while this pin still listed `a`..`j`, so the assertion below was RED
-    # on `main` independently of #11642. The count is that manifest LITERAL
-    # (`fast_shard_count`, and `split_fast_gate` says so: "N comes from the
-    # manifest's `fast_shards` … NOT capped by the file count"), never a
-    # pool-size threshold, so a lane that unregisters files must NOT drop `k` —
-    # the two `core` rows #11642 added move no shard count at all (measured over
-    # `push_legs`: strip both and the names are still `a`..`k`; only the file
-    # count moves, and that number decays with every unrelated registration, so
-    # the claim is the names, never the total).
-    # A leg added or renamed without landing here reads as a pass over a set
-    # nobody walked, which is what this pin refuses.
-    *(f"test ({c})" for c in "abcdefghijk"),
-    *(f"test-slow ({c})" for c in "abcde"),
-    *(f"test-carve-out ({c})" for c in "abc"),
-    *(f"tier-2 test_files [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
-    *(f"tier-2 slow_selected [{c}]" for c in
-      ("tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-       "tools/longmem_eval/run.py", "tortoise/embeddings.py")),
     "push slow_selected",
 }
+#: Surfaces the tier-2 legs are driven with, one changed file per subtree owner.
+_TIER2_CHANGES = (
+    "tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
+    "tools/longmem_eval/run.py", "tortoise/embeddings.py",
+)
+
+
+def _expected_legs(manifest: dict) -> set[str]:
+    """`_LEG_FAMILIES` + the shard legs, whose labels come from the PRODUCER.
+
+    `cs.shard_labels` is the selector's own naming helper, so this map cannot
+    drift from the legs it is compared against — the typed letters were exactly
+    that drift (`test (k)`).
+
+    ⛔ BUT DERIVING FROM THE HELPER ALONE IS A TAUTOLOGY ON THE COUNT (#11681
+    review, P2). `push_legs` builds its bins from the SAME `fast_shard_count`, so
+    a code-side collapse — the helper falling back to a pool-size threshold and
+    ignoring `config/ci-surfaces.yml` — moves BOTH sides and the set comparison
+    stays green while the selector partitions CI into two shards (measured with
+    `cs.fast_shard_count` forced to return 2: set equality True, i.e. green).
+    So the counts are ALSO asserted against the manifest's RAW LITERAL, which
+    reds that collapse and still does not red a legitimate re-partition, because a
+    re-partition moves both sides together.
+
+    ⛔ The count is the manifest LITERAL (`fast_shard_count` — and
+    `split_fast_gate` says so: *"N comes from the manifest's `fast_shards` … NOT
+    capped by the file count"*), never a pool-size threshold. So a lane that
+    UNREGISTERS files must not drop a label: the two `core` rows #11642 added
+    move no shard count at all (measured over `push_legs`: strip both and the
+    names are still `a`..`k`; only the file count moves, and that number decays
+    with every unrelated registration). Deriving from `fast_shard_count` is what
+    keeps the claim the NAMES — which is the claim this pin makes.
+    """
+    for key, got in (
+        ("fast_shards", cs.fast_shard_count(manifest)),
+        ("slow_shards", cs.slow_shard_count(manifest)),
+        ("carve_shards", cs.carve_shard_count(manifest)),
+    ):
+        assert got == manifest[key], (
+            f"`{key}` in config/ci-surfaces.yml is {manifest[key]!r} but the "
+            f"selector's helper reads {got!r} — the shard count must come from "
+            f"that manifest LITERAL and never from a pool-size threshold, or a "
+            f"lane that unregisters files silently re-partitions CI (#11642)")
+    return {
+        *_LEG_FAMILIES,
+        *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
+        *(f"test-slow ({c})"
+          for c in cs.shard_labels(cs.slow_shard_count(manifest))),
+        *(f"test-carve-out ({c})"
+          for c in cs.shard_labels(cs.carve_shard_count(manifest))),
+        *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
+        *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
+    }
 
 
 def test_the_subtree_is_not_empty():
@@ -204,7 +245,7 @@ def test_no_subtree_file_is_in_any_gating_leg():
     """
     manifest = _manifest()
     legs = _gating_sets(manifest)
-    assert set(legs) == EXPECTED_LEGS, (
+    assert set(legs) == _expected_legs(manifest), (
         "the leg list this test walks changed — a new gating set was added to "
         "the selector (or one renamed) and is NOT covered here, which reads as "
         "a pass over a set nobody checked")

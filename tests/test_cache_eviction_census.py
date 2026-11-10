@@ -15,8 +15,11 @@ DELETE`/`DROP` anywhere on the path fails the run rather than being argued about
 """
 from __future__ import annotations
 
+import ast
+import math
 import re
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -25,8 +28,11 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from tortoise.cache_eviction import (
     CACHE_CEILING_ENV,
+    DEFAULT_PARITY_REPORT_MAX_AGE_S,
     DERIVED_LABELS,
     PARITY_INSTRUMENTS,
+    PARITY_REPORT_MAX_AGE_ENV,
+    POPULATION_RESIDENT_COUNT,
     TRUTH_LABELS,
     Assessment,
     CacheReadError,
@@ -38,7 +44,10 @@ from tortoise.cache_eviction import (
     load_parity_report,
     measure_state,
     node_total,
+    parse_measured_at,
+    population_resident_count,
     resident_counts,
+    resolve_max_report_age,
 )
 
 #: Anything that would change the graph. The census is READ-ONLY by construction;
@@ -56,9 +65,18 @@ class _FakeGraph:
     name created it and it appeared in `GRAPH.LIST`, `tools/engine_probe.py`).
     """
 
-    def __init__(self, counts: dict[str, int], *, unlabelled: int = 0) -> None:
+    def __init__(self, counts: dict[str, int], *, unlabelled: int = 0,
+                 populations: dict[str, int] | None = None) -> None:
         self._counts = dict(counts)
         self._unlabelled = unlabelled
+        #: population -> how many nodes its OWN predicate answers for, in THIS graph.
+        #: ⛔ Explicit, never derived from the label counts: the turn population is a
+        #: SUBSET of `:Point` (`is_episodic = true`), which is the whole reason the
+        #: licence bound cannot use the label/whole-graph total. A population the fixture
+        #: does not name answers 0 — so a report for it is DEMOTED, and a test that
+        #: expected a licence has to state the population's real size rather than
+        #: inherit a number from a label that is not the population.
+        self._populations = dict(populations or {})
         #: (verb, statement) for EVERY statement, so a test can assert the VERB.
         self.queries: list[tuple[str, str]] = []
         # The TRUE node count. Defaults to the label sum so ordinary fixtures stay
@@ -85,14 +103,33 @@ class _FakeGraph:
         )
 
     def _answer(self, statement: str):
+        # ⛔ THE POPULATION READ IS RECOGNISED BY IDENTITY, not by a literal in the text
+        # (#11709 review, P3). The old form keyed on `"is_episodic = true" in
+        # statement`, so a SECOND population whose statement carries another predicate
+        # — anything starting `MATCH (n:` and containing `count(n)` — fell through to
+        # the LABEL branch below and answered that label's count (0 for a label the
+        # fixture does not declare) instead of raising `unexpected statement`. A future
+        # test could then assert a demotion production would never produce. Matching the
+        # registered statement exactly answers every registered population from its own
+        # declared size, and an UNREGISTERED one cannot reach this method at all
+        # (`population_resident_count` refuses before issuing any read).
+        squashed = " ".join(statement.split())
+        for name, registered in POPULATION_RESIDENT_COUNT.items():
+            if " ".join(registered.split()) == squashed:
+                return self._Result([[self._populations.get(name, 0)]])
         if "db.labels" in statement:
             return self._Result([[label] for label in self._counts])
         if "size(labels(n)) = 0" in statement:
             # Label-less nodes, MEASURED — never a residual (multi-label nodes make
             # `total - sum(counts)` go negative; see `resident_counts`).
             return self._Result([[self._unlabelled]])
-        if statement.startswith("MATCH (n:") and "count(n)" in statement:
-            label = statement[len("MATCH (n:"):].split(")")[0]
+        if re.fullmatch(r"MATCH \(n:(.+)\) RETURN count\(n\)", statement):
+            # ⛔ AN EXACT per-label count, the one form `resident_counts` issues. A
+            # statement that merely STARTS `MATCH (n:` and carries `count(n)` — a
+            # predicate-carrying count, i.e. a population read — must NOT be answered
+            # here: it would silently get a LABEL's count (0 for an undeclared label),
+            # and a future test could then assert a demotion production never produces.
+            label = statement[len("MATCH (n:"):-len(") RETURN count(n)")]
             return self._Result([[self._counts.get(label.strip("`"), 0)]])
         if statement.startswith("MATCH (n) RETURN count(n)"):
             if self.true_total is not None:
@@ -223,12 +260,13 @@ def test_the_truth_labels_are_never_silently_treated_as_evictable():
     # form of "a CLEAN turn census licenses evicting every `:Point`". Verified by
     # mutation: marking every derived-authority row eligible once ANY population is
     # proven survived the earlier, Point-less fixture green.
-    g = _FakeGraph({"Source": 50, "GraphEvent": 5_000, "Point": 10_000, "Object": 900})
+    g = _FakeGraph({"Source": 50, "GraphEvent": 5_000, "Point": 10_000, "Object": 900},
+                   populations={"turn": 2_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     # A CLEAN turn census — which must license the TURN population and NOTHING else.
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=2_000, total_nodes=2_000,
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -252,7 +290,8 @@ def test_a_clean_verdict_over_a_partial_population_does_not_prove_anything():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     partial = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                           measured_nodes=40, total_nodes=100, graph_name="tortoise")
+                           measured_nodes=40, total_nodes=100, graph_name="tortoise",
+                           measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": partial})
@@ -266,7 +305,7 @@ def test_a_verdict_with_no_population_is_not_evidence_about_a_population():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     no_population = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                                 graph_name="tortoise")
+                                 graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": no_population})
@@ -279,7 +318,8 @@ def test_a_non_clean_verdict_never_proves(verdict):
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict=verdict,
-                          measured_nodes=100, total_nodes=100, graph_name="tortoise")
+                          measured_nodes=100, total_nodes=100, graph_name="tortoise",
+                          measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -294,11 +334,12 @@ def test_a_clean_byte_verdict_still_publishes_the_licence():
     so `CLEAN`, but the entry budget a consumer enforces may be exceeded by orders of
     magnitude (many small turn nodes, the shape #10976 describes).
     """
-    g = _FakeGraph({"Point": 10})
+    g = _FakeGraph({"Point": 10}, populations={"turn": 10})
     c = _FakeClient(used=500, maxmemory=10_000)
     report = ParityReport(
         instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
         measured_nodes=10, total_nodes=10, graph_name="tortoise",
+        measured_at=time.time(),
     )
 
     result = assess(c, g, "tortoise", ceiling_bytes=1_000,
@@ -484,7 +525,17 @@ def _cli():
 
 @pytest.mark.parametrize("flag", ["--execute", "--sweep", "--purge", "--evict"])
 def test_the_cli_refuses_a_destructive_flag_by_name(capsys, flag):
-    """A missing flag reads as a typo; a REFUSED flag reads as the gate it is."""
+    """A missing flag reads as a typo; a REFUSED flag reads as the gate it is.
+
+    ⚠️ WHAT THIS PIN ASSERTS CHANGED with #11709's claim correction, and the change is the
+    point rather than a relaxation. It used to require `#10593` **and** `#7879` in the
+    message, because the message used to say eviction was gated on those two record gates
+    being open. `#10593` closed COMPLETED on 2026-11-06, so neither id names the reason any
+    more: the message now names the live tracker (`#10976`), the module that owns the
+    spending gates (`cache_evictor.py`), and the closed id only as the fact that record
+    readiness is NOT the trigger. Pinning the two old ids would have pinned the expired
+    cause — the failure this PR exists to remove — so the assertion follows the reason.
+    """
     cli = _cli()
 
     code = cli.main(["--graph-uri", "docker://h:1/g", "--graph", "g", flag])
@@ -492,7 +543,12 @@ def test_the_cli_refuses_a_destructive_flag_by_name(capsys, flag):
     assert code == 3
     err = capsys.readouterr().err
     assert "REFUSED" in err
-    assert "#10593" in err and "#7879" in err
+    # the live tracker, and the module that actually spends a licence
+    assert "#10976" in err
+    assert "cache_evictor.py" in err
+    # ⛔ and NOT a gate that has closed: the message may mention #10593 only as the
+    # readiness fact it is not gated on.
+    assert "#10593" in err and "closed" in err
 
 
 def test_the_cli_refuses_a_graph_that_disagrees_with_its_uri(capsys):
@@ -556,7 +612,7 @@ def test_a_benign_label_is_not_needlessly_quoted():
 def test_proves_requires_equality_over_a_non_empty_population(measured, total, expected):
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=measured, total_nodes=total,
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     assert report.proves() is expected
 
@@ -566,7 +622,8 @@ def test_a_zero_population_report_cannot_flip_the_gate_open():
     g = _FakeGraph({"Point": 100})
     c = _FakeClient(used=900, maxmemory=1_000)
     empty = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=0, total_nodes=0, graph_name="tortoise")
+                         measured_nodes=0, total_nodes=0, graph_name="tortoise",
+                         measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": empty})
@@ -806,7 +863,8 @@ def test_an_unbound_report_is_not_eligible_at_the_library_surface():
     g = _FakeGraph({"Point": 9_000, "GraphEvent": 1_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     unbound = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
-                           measured_nodes=1_000, total_nodes=1_000)
+                           measured_nodes=1_000, total_nodes=1_000,
+                           measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: unbound})
@@ -1086,10 +1144,23 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     nodes on a 120/120 report — a licence for 120 nodes in an empty graph, which is
     the number a sweeper would size itself from.
     """
-    g = _FakeGraph({"Point": 5})
+    # ⚠️ The fixture makes the POPULATION statement over-count past the whole graph
+    # (`turn`: 120 on a 5-node graph), because that is one of the two shapes this guard can
+    # reach: the trigger is `resident_population >= claim > node_total`, i.e. the CLAIM is
+    # above every node the graph holds. ⛔ A widened PREDICATE cannot produce it (a subgraph
+    # count never exceeds the total), and a multiplied count does not produce it on its own
+    # — a claim at or below the total passes BOTH guards whatever the multiplier
+    # (`test_a_row_multiplying_count_statement_is_a_documented_residual` pins that band, and
+    # `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total` pins its boundary).
+    # ⛔ Two causes reach `population > total` and then a claim above the total, and the
+    # fixture models the second: read skew (`assess()` reads each population's count and
+    # only THEN the graph total, so a loss between the two reads produces it), and an
+    # inflated count statement on a QUIESCENT graph. Neither is a widened predicate.
+    g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
-                         measured_nodes=120, total_nodes=120, graph_name="tortoise")
+                         measured_nodes=120, total_nodes=120, graph_name="tortoise",
+                         measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": stale})
@@ -1097,6 +1168,120 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     assert result.verdict == "REFUSED"
     assert result.eligible_classes == ()
     assert "only 5" in " ".join(result.problems)
+
+
+def test_the_demoted_row_still_names_its_population():
+    """⛔ A DEMOTION MUST NOT NULL THE NAME the row demonstrably has.
+
+    `assess()` carries `population_name` through the whole-graph demotion, and the comment
+    beside that carry records a MEASURED defect: dropping it made the exported artefact
+    report `population: null` beside a row whose label names a population.
+
+    ⛔ That comment carried no assertion — deleting the carry left the whole suite green —
+    so the regression it records could be re-introduced silently. That is the same
+    unpinned-claim class this PR has been closing elsewhere, so pin it here.
+
+    The row is `eligible=False` and never reaches the licence; what this protects is the
+    ARTEFACT's legibility, for an operator reading WHICH population was demoted.
+    """
+    g = _FakeGraph({"Point": 5}, populations={"turn": 120})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                         measured_nodes=120, total_nodes=120, graph_name="tortoise",
+                         measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": stale})
+
+    demoted = [r for r in result.classes if r.population_name and not r.eligible]
+    assert demoted, "the fixture must demote a POPULATION row, or this pins nothing"
+    row = demoted[0]
+    assert row.as_dict()["population"] == "turn", (
+        "dropping the `population_name` carry through the demotion makes the exported "
+        "artefact report `population: null` beside a label that names one"
+    )
+    assert row.label != row.as_dict()["population"], (
+        "the label is a DISPLAY string ('turn (population)'); a licence keyed on it does "
+        "not match the word the executor's population gate compares"
+    )
+
+
+def test_a_claim_above_the_graph_total_is_caught_from_an_inflated_count_statement():
+    """⛔ THE BACKSTOP IS REACHABLE ON A QUIESCENT GRAPH — pinned, because the comment
+    that claimed otherwise was wrong in the other direction.
+
+    A count statement whose query shape multiplies rows puts a population ABOVE the
+    whole-graph total with no read skew at all, so *"a population is a subgraph"*
+    (``resident_population <= node_total``) is a property of an HONEST statement, not of
+    the graph. In this arm the claim EQUALS the inflated ceiling, so the population bound
+    cannot fire (it is an upper bound) and the whole-graph backstop is the only guard
+    between the report and the licence.
+
+    Measured shape: `turn` answering 30,000 on a 25,000-node graph, CLEAN 30,000/30,000
+    report. Asserts the REASON as well as the verdict, because passing for the wrong guard
+    would hide exactly the claim this pins: the graph-total message must be what a reader
+    sees, and the population bound's message must be absent (it is silent here).
+
+    ⚠️ This arm does NOT say the backstop catches an inflated ceiling in general — it
+    catches the CLAIM when the claim is above the total. The complementary arm is
+    `test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`, and a comment here
+    that generalised from this fixture to "a LARGE multiplication is caught" was wrong
+    (measured: the same graph with a 25,000 claim still licenses 25,000).
+    """
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                            measured_nodes=30_000, total_nodes=30_000, graph_name="tortoise",
+                            measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": inflated})
+
+    assert result.verdict == "REFUSED"
+    assert result.plan["evictable"] == []
+    reasons = " ".join(result.problems)
+    assert "holds only 25000" in reasons, reasons
+    # ⛔ The population bound did NOT fire (30,000 > 30,000 is false): if its message
+    # appears, this test is passing for the other guard and pins nothing.
+    assert "holds only 30000" not in reasons, reasons
+    assert g.mutated == []
+
+
+def test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total():
+    """⛔ THE BOUNDARY OF THE RESIDUAL BAND IS THE CLAIM, NOT THE MULTIPLIER.
+
+    The guard is ``entry.nodes > resident_total``, and eligibility already capped the claim
+    at the population's count, so the trigger is ``resident_population >= claim >
+    node_total``. An inflated count statement therefore does NOT arm it by itself: with the
+    same 25,000-node graph and the same 30,000 `turn` ceiling (a 60x multiplication on 500
+    real turns), a CLEAN report licensing **25,000** nodes sits AT the total — the guard is a
+    strict ``>`` — so neither guard fires and the 25,000-node licence is ISSUED.
+
+    That is the residual band ``true_population < claim <= node_total`` — and it is why two
+    earlier comments on this file and on `cache_eviction.py` were wrong in opposite
+    directions: one said the backstop was unreachable on a quiescent graph (falsified by
+    the arm above), the next said "a LARGE multiplication is caught here" (falsified by this
+    one). The multiplier is irrelevant; only the CLAIM's position relative to the total is.
+
+    ⛔ Asserted so the correction cannot rot: the licence is issued, its size is the claim,
+    and NEITHER guard's message appears — a future change that starts refusing this shape
+    (a mirror-vs-total check, say) reds here and has to argue with the residual pin.
+    """
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                            measured_nodes=25_000, total_nodes=25_000, graph_name="tortoise",
+                            measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": inflated})
+
+    assert result.verdict == "PLAN"
+    assert [e["nodes"] for e in result.plan["evictable"]] == [25_000]
+    reasons = " ".join(result.problems)
+    assert "holds only 25000" not in reasons, reasons   # the whole-graph backstop
+    assert "holds only 30000" not in reasons, reasons   # the population bound
+    assert g.mutated == []
 
 
 def test_a_label_ending_in_a_newline_is_refused_rather_than_miscounted():
@@ -1133,11 +1318,11 @@ def test_an_unreachable_cache_refuses_rather_than_exiting_like_a_typo():
 
 def test_exit_two_licenses_only_the_listed_populations():
     """The plan must name what may NOT go, so exit 2 cannot read as a blanket licence."""
-    g = _FakeGraph({"Point": 10_000, "Object": 900})
+    g = _FakeGraph({"Point": 10_000, "Object": 900}, populations={"turn": 2_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=2_000, total_nodes=2_000,
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -1161,7 +1346,7 @@ def test_a_report_bound_to_another_graph_is_demoted_by_the_library_too():
     c = _FakeClient(used=900, maxmemory=1_000)
     elsewhere = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                              measured_nodes=2_000, total_nodes=2_000,
-                             graph_name="some_other_graph")
+                             graph_name="some_other_graph", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": elsewhere})
@@ -1223,18 +1408,410 @@ def test_the_size_cross_check_uses_the_true_total_not_the_label_sum():
     """
     # 10,000 real nodes: 8,000 `Point`-only + 2,000 `Point:Object` (so the label sum is
     # 12,000 while the graph holds 10,000).
-    g = _FakeGraph({"Point": 10_000, "Object": 2_000})
+    # ⚠️ Population statement over-counts as well (11,000), so the label-sum regression
+    # is measured HERE rather than caught by the population bound one gate earlier.
+    g = _FakeGraph({"Point": 10_000, "Object": 2_000}, populations={"turn": 11_000})
     g.true_total = 10_000
     c = _FakeClient(used=900, maxmemory=1_000)
     inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                             measured_nodes=11_000, total_nodes=11_000,
-                            graph_name="tortoise")
+                            graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={"tools/turn_parity_census.py": inflated})
 
     assert result.verdict == "REFUSED"
     assert "only 10000" in " ".join(result.problems)
+
+
+# --------------------------------------------------------------------------- #
+# STALENESS — the one hole the name binding and the size cross-check both leave open.
+# --------------------------------------------------------------------------- #
+#
+# The defect this closes, recorded on #10976 (review of the egress executor, #11167):
+# the ONLY staleness guard on the licence compared the report's population against the
+# WHOLE graph, so a stale `turn` report claiming 20,000 nodes passed on a graph holding
+# 25,000 nodes total but only 500 real turns -- and that claim IS the executor's runaway
+# cap (`cache_evictor` gate 2, `licence_remaining`), i.e. 40x the population the cap
+# exists to bound. Nothing unserved was deleted (gate 3 asks the record per node), so
+# this was not the data-loss class: it weakened exactly the property the cap exists for.
+# Each test below fails if the staleness demotion is removed, and each fails for its own
+# reason -- an undated report, an aged one, and a future-stamped one are three different
+# findings and must not collapse into one.
+
+
+def test_a_report_with_no_measurement_time_is_not_evidence():
+    """An artifact that cannot say WHEN it looked cannot be shown to describe this pass."""
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    undated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                           measured_nodes=500, total_nodes=500, graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": undated})
+
+    assert result.verdict == "REFUSED"
+    assert result.eligible_classes == ()
+    assert result.plan["evictable"] == []
+    assert "NO measurement time" in " ".join(result.problems), result.problems
+    assert g.mutated == []
+
+
+def test_a_stale_report_larger_than_the_population_but_smaller_than_the_graph_is_refused(
+    monkeypatch,
+):
+    """The measured 40x shape: 20,000 claimed, 25,000 resident, 500 real turns.
+
+    ⛔ THIS IS THE RESIDUAL ITSELF. The over-count cross-check passes it
+    (`500 < 20,000 < 25,000`), and before the age bound the plan offered 20,000 nodes
+    — the number the executor would have capped its sweep at.
+
+    `monkeypatch.delenv` makes the bound the DEFAULT: the fixture is aged 7200 s, so an
+    operator lever exported at, say, 7200 s would otherwise read this refusal as the
+    default's and the test would flip on an environment it never set.
+    """
+    monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    aged = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                        measured_nodes=20_000, total_nodes=20_000,
+                        graph_name="tortoise",
+                        measured_at=time.time() - 2 * 60 * 60)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": aged})
+
+    assert result.verdict == "REFUSED", result.verdict
+    assert result.plan["evictable"] == []
+    assert "older than this pass's" in " ".join(result.problems), result.problems
+
+
+def test_a_report_stamped_far_in_the_FUTURE_is_a_clock_disagreement_not_freshness():
+    """A stamp that predates nothing cannot place the reading in this pass.
+
+    Bounded, not absolute: two hosts may disagree by seconds (see
+    `PARITY_REPORT_FUTURE_SKEW_S`), so this asserts the TOLERANCE rather than "any
+    future stamp refuses" — the looser rule would false-block on NTP skew.
+    """
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    ahead = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                         measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                         measured_at=time.time() + 60 * 60)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": ahead})
+
+    assert result.verdict == "REFUSED", result.verdict
+    assert "clock disagreement" in " ".join(result.problems), result.problems
+
+
+def test_a_second_or_two_of_clock_skew_does_not_refuse_a_fresh_report():
+    """The other side of the tolerance: a small future stamp is SKEW, not a defect."""
+    # The `turn` population is declared HONEST here (500 claimed, 500 resident) so this arm
+    # decides on the AGE axis alone — the population bound is a second, independent demotion,
+    # and a fixture that omitted it would red for the wrong reason.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    skewed = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                          measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                          measured_at=time.time() + 2)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": skewed})
+
+    assert result.verdict == "PLAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+
+
+def test_the_age_bound_is_read_from_the_environment(monkeypatch):
+    """The operator's lever, and it is a BOUND: the aged fixture flips with it."""
+    # Honest population size (see the skew arm): the age bound is what flips here, and the
+    # population bound must not be what the `PLAN` half trips over.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    aged = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                        measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                        measured_at=time.time() - 120)
+
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "60")
+    refused = assess(c, g, "tortoise", ceiling_bytes=100,
+                     parity_reports={"tools/turn_parity_census.py": aged})
+    assert refused.verdict == "REFUSED", refused.problems
+    assert refused.plan["parity_evidence"]["bound_source"] == PARITY_REPORT_MAX_AGE_ENV
+
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "600")
+    accepted = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": aged})
+    assert accepted.verdict == "PLAN", accepted.problems
+
+
+def test_the_default_bound_is_applied_when_nothing_is_configured(monkeypatch):
+    monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
+    assert resolve_max_report_age() == DEFAULT_PARITY_REPORT_MAX_AGE_S
+    assert resolve_max_report_age(42) == 42
+    assert resolve_max_report_age(0.5) == 0.5
+
+
+def test_a_non_positive_or_malformed_bound_is_REFUSED_not_clamped(monkeypatch):
+    """A zero bound would refuse every report while LOOKING configured.
+
+    Same rule as `measure_state`'s non-positive ceiling: a bound must be greater than
+    zero. Reading 0 or -1 as "no bound" would be the fail-open form; reading them as a
+    live bound would be an inert enforcer. Both are refused instead.
+    """
+    for bad in (0, -1, -0.5):
+        with pytest.raises(CacheReadError):
+            resolve_max_report_age(bad)
+    for bad in ("nan", "inf", "-inf", "soon"):
+        monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, bad)
+        with pytest.raises(CacheReadError):
+            resolve_max_report_age()
+
+
+def test_the_bound_source_is_derived_from_the_bound_that_applied(monkeypatch):
+    """An artifact field a monitor keys on must name the bound that REALLY licensed.
+
+    Reachable — and it WAS the shipped state: `bound_source` was chosen by truthiness
+    of the raw variable while the resolution treats a whitespace-only value as unset,
+    so `TORTOISE_PARITY_REPORT_MAX_AGE_S='   '` applied the DEFAULT bound (3600 s) and
+    reported `bound_source: "TORTOISE_PARITY_REPORT_MAX_AGE_S"`. The field exists so a
+    monitor can tell which bound licensed a DESTRUCTIVE cap, so naming the wrong one is
+    the artifact lying about its own provenance.
+    """
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    fresh = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                         measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                         measured_at=time.time() - 30)
+
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "   ")
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh}
+                      ).plan["parity_evidence"]
+    assert evidence["bound_source"] == "default", evidence["bound_source"]
+    assert evidence["max_age_seconds"] == DEFAULT_PARITY_REPORT_MAX_AGE_S
+
+    # The environment, when it DOES bind, and the argument, which always wins.
+    monkeypatch.setenv(PARITY_REPORT_MAX_AGE_ENV, "600")
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh}
+                      ).plan["parity_evidence"]
+    assert evidence["bound_source"] == PARITY_REPORT_MAX_AGE_ENV
+    assert evidence["max_age_seconds"] == 600.0
+
+    evidence = assess(c, g, "tortoise", ceiling_bytes=100,
+                      parity_reports={"tools/turn_parity_census.py": fresh},
+                      max_report_age_seconds=120).plan["parity_evidence"]
+    assert evidence["bound_source"] == "argument"
+    assert evidence["max_age_seconds"] == 120.0
+
+
+def test_parse_measured_at_refuses_a_stamp_it_cannot_age():
+    """A stamp the bound cannot EVALUATE is a refusal, not a fresh reading.
+
+    Reachable — and it WAS the shipped state: the numeric arm returned `float(raw)`
+    unchecked, so `json.load`'s documented `NaN`/`Infinity` extension reached `assess`
+    as a stamp. `now - nan` is `nan`, every comparison in the staleness block is False
+    for it, and the report therefore stayed PROVEN — licensed — with only a render
+    helper raising two frames later. Same rule the bound already applied one function
+    up: a non-finite operand is REFUSED, never clamped.
+
+    The range arm is the same defect in its other shape: a millisecond epoch is 1000x
+    too large and must be refused AS A UNIT ERROR, not crash the artifact renderer.
+    """
+    for bad in (float("nan"), float("inf"), float("-inf")):
+        with pytest.raises(CacheReadError, match="not a finite instant"):
+            parse_measured_at(bad)
+    for bad in (1.75e12, 1e18):
+        # A unit error is named as one, so the operator fixes the producer's stamp
+        # rather than hunting a clock drift that does not exist.
+        with pytest.raises(CacheReadError, match="MILLISECOND"):
+            parse_measured_at(bad)
+    # ...and the two edges of the representable window are REFUSED / ACCEPTED exactly
+    # where `datetime`'s own year range puts them, so the bound is measured not guessed.
+    with pytest.raises(CacheReadError):
+        parse_measured_at(253_402_300_800.0)
+    assert parse_measured_at(-62_135_596_800.0) == -62_135_596_800.0
+    assert parse_measured_at(1_700_000_000.0) == 1_700_000_000.0
+
+    # ⛔ A JSON INTEGER TOO LARGE FOR `float` IS A REFUSAL, NOT AN `OverflowError`.
+    # `json.load` reads ANY digit string as a Python int, so this shape is reachable
+    # from an operator artifact. Measured pre-fix: `parse_measured_at(10**309)` raised
+    # `OverflowError: int too large to convert to float` — not this module's refusal
+    # type, so it escaped the loader's documented contract and would have reached
+    # `tools/cache_evict.py` as a traceback with exit 1 (its USAGE code, "retry your
+    # flags") instead of 3 (REFUSED). The int arm range-checks BEFORE converting.
+    for huge in (10**309, -(10**309)):
+        with pytest.raises(CacheReadError, match="MILLISECOND"):
+            parse_measured_at(huge)
+    # …and an IN-RANGE int is still accepted, converted exactly (no range check drift).
+    assert parse_measured_at(1_700_000_000) == 1_700_000_000.0
+    assert parse_measured_at(-62_135_596_800) == -62_135_596_800.0
+
+
+def test_a_nan_stamp_in_the_report_FILE_is_a_refusal_not_a_licence(tmp_path):
+    """The artifact seam: `json.load` accepts `NaN`, so the READER must not."""
+    path = tmp_path / "r.json"
+    path.write_text(
+        '{"instrument": "tools/turn_parity_census.py", "graph": "tortoise", '
+        '"verdict": "CLEAN", "measured_at": NaN, '
+        '"population": {"episodic_graph_nodes": 5}, '
+        '"dry_run": {"would_delete_turn_nodes": 5}}',
+        "utf-8",
+    )
+    with pytest.raises(CacheReadError):
+        load_parity_report(str(path), graph_name="tortoise")
+
+
+def test_an_int_stamp_too_large_for_the_clock_is_a_refusal_not_an_OverflowError(
+    tmp_path,
+):
+    """The artifact seam, for the one number shape `float()` cannot take.
+
+    Reachable and measured pre-fix: `json.load` reads a 309-digit literal as a Python
+    int, `float()` on it raises `OverflowError: int too large to convert to float`, and
+    that escaped `load_parity_report`'s documented `CacheReadError` contract. The
+    consequence is the one this loader exists to prevent: `tools/cache_evict.py`
+    classifies only `CacheReadError` as REFUSED, so this shape produced a traceback
+    with exit 1 — its USAGE code, which tells the operator to retry FLAGS against
+    evidence nobody could read.
+    """
+    path = tmp_path / "r.json"
+    path.write_text(
+        '{"instrument": "tools/turn_parity_census.py", "graph": "tortoise", '
+        '"verdict": "CLEAN", "measured_at": ' + "1" + "0" * 309 + ', '
+        '"population": {"episodic_graph_nodes": 5}, '
+        '"dry_run": {"would_delete_turn_nodes": 5}}',
+        "utf-8",
+    )
+    with pytest.raises(CacheReadError, match="MILLISECOND"):
+        load_parity_report(str(path), graph_name="tortoise")
+
+
+def test_an_un_ageable_stamp_is_REFUSED_by_assess_and_does_not_raise():
+    """The LIBRARY surface: `assess` returns a refusal, never a diagnostic-free crash.
+
+    Reachable — and it WAS the shipped state for a directly-constructed report: (1) a
+    NaN stamp stayed PROVEN (every age comparison is False for NaN), licensing the
+    sweep; (2) an out-of-range finite stamp was demoted correctly but then
+    `parity_evidence`'s `_epoch_to_iso` raised `ValueError`/`OverflowError`/`OSError`
+    out of `assess` — a non-`CacheReadError` escaping a function whose contract is
+    "an `Assessment` or a `CacheReadError`". Both must now be refusals an operator can
+    READ, with the artifact still emitted.
+    """
+    g = _FakeGraph({"Point": 25_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+
+    for stamp, expected in ((float("nan"), "not a finite instant"),
+                            (float("inf"), "not a finite instant"),
+                            (1.75e12, "clock disagreement")):
+        report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                              measured_nodes=20_000, total_nodes=20_000,
+                              graph_name="tortoise", measured_at=stamp)
+        result = assess(c, g, "tortoise", ceiling_bytes=100,
+                        parity_reports={"tools/turn_parity_census.py": report})
+        assert result.verdict == "REFUSED", (stamp, result.verdict)
+        assert result.plan["evictable"] == [], stamp
+        assert expected in " ".join(result.problems), (stamp, result.problems)
+        # The artifact is still emitted, and it says the stamp could not be rendered.
+        row = result.plan["parity_evidence"]["reports"][0]
+        assert row["measured_at"] is None, (stamp, row)
+        if math.isfinite(stamp):
+            # An out-of-range finite stamp still HAS an age, and it is the datum that
+            # names the defect (a huge negative: decades in the future).
+            assert row["age_seconds"] == pytest.approx(-(stamp - time.time()), rel=1e-6)
+            assert row["age_seconds"] < 0, row
+        else:
+            # `now - nan` is `nan`, and every comparison against it is False — so an
+            # un-ageable stamp must report NO age rather than a NaN that a JSON
+            # consumer would read as a number.
+            assert row["age_seconds"] is None, (stamp, row)
+    assert g.mutated == []
+
+
+def test_the_licence_carries_when_it_was_measured_and_against_which_bound(monkeypatch):
+    """`nodes` is a destructive cap: the operator must be able to audit its freshness."""
+    monkeypatch.delenv(PARITY_REPORT_MAX_AGE_ENV, raising=False)
+    # Honest population size: this arm is about the LICENCE's freshness evidence, so the
+    # population bound must be satisfied rather than be the demotion it reports.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 500})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    stamp = time.time() - 30
+    report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                          measured_nodes=500, total_nodes=500, graph_name="tortoise",
+                          measured_at=stamp)
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": report})
+
+    entry = result.plan["evictable"][0]
+    assert entry["nodes"] == 500
+    assert entry["max_age_seconds"] == DEFAULT_PARITY_REPORT_MAX_AGE_S
+    assert entry["age_seconds"] >= 30
+    assert entry["measured_at"].endswith("Z"), entry["measured_at"]
+    assert result.plan["parity_evidence"]["reports"][0]["instrument"] == (
+        "tools/turn_parity_census.py")
+
+
+def test_parse_measured_at_reads_the_wire_shapes_and_refuses_nonsense():
+    """Three accepted forms, one refusal — and `None` is NOT the refusal."""
+    assert parse_measured_at(None) is None
+    assert parse_measured_at("") is None
+    assert parse_measured_at(1_700_000_000) == 1_700_000_000.0
+    assert parse_measured_at("1970-01-01T00:00:01Z") == 1.0
+    assert parse_measured_at("1970-01-01T00:00:01") == 1.0
+    assert parse_measured_at("2026-11-10T05:03:00+00:00") == parse_measured_at(
+        "2026-11-10T05:03:00Z")
+    with pytest.raises(CacheReadError):
+        parse_measured_at("yesterday-ish")
+    with pytest.raises(CacheReadError):
+        parse_measured_at(True)
+
+
+def test_load_parity_report_reads_measured_at_and_refuses_an_unparseable_one(tmp_path):
+    """The loader carries the datum, and a broken stamp is a REFUSAL, not `None`."""
+    import json
+
+    def _write(payload):
+        path = tmp_path / "r.json"
+        path.write_text(json.dumps(payload), "utf-8")
+        return path
+
+    ok = load_parity_report(str(_write({
+        "instrument": "tools/turn_parity_census.py", "graph": "tortoise",
+        "verdict": "CLEAN", "measured_at": "2026-11-10T05:03:00Z",
+        "population": {"episodic_graph_nodes": 5},
+        "dry_run": {"would_delete_turn_nodes": 5},
+    })), graph_name="tortoise")
+    assert ok.measured_at == parse_measured_at("2026-11-10T05:03:00Z")
+    assert ok.proves() is True
+
+    with pytest.raises(CacheReadError):
+        load_parity_report(str(_write({
+            "instrument": "tools/turn_parity_census.py", "graph": "tortoise",
+            "verdict": "CLEAN", "measured_at": "last tuesday",
+            "population": {"episodic_graph_nodes": 5},
+            "dry_run": {"would_delete_turn_nodes": 5},
+        })), graph_name="tortoise")
+
+
+def test_the_real_instrument_emits_a_measured_at_the_loader_can_age():
+    """END TO END across the seam: the producer's stamp survives the loader.
+
+    The honest path is only open while these two agree, so it is pinned as one test
+    rather than trusting either side's own suite.
+    """
+    from tools import turn_parity_census
+
+    payload = turn_parity_census.census(
+        {"nodes": {}, "unidentifiable": []},
+        {"rows_by_key": {}, "declared_absent": [], "non_turn_shaped": 0},
+        sample=0, graph_name="tortoise",
+    )
+    assert payload["measured_at"].endswith("Z")
+    aged = parse_measured_at(payload["measured_at"])
+    assert aged is not None and abs(time.time() - aged) < 60
 
 
 def test_two_reports_for_one_instrument_are_a_usage_error_not_last_wins(tmp_path, capsys):
@@ -1290,7 +1867,7 @@ def test_refused_covers_unbounded_and_an_unbounded_plan_offers_nothing():
     c = _FakeClient(used=8_000_000, maxmemory=0)
     report = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
                           measured_nodes=20_000, total_nodes=20_000,
-                          graph_name="tortoise")
+                          graph_name="tortoise", measured_at=time.time())
 
     result = assess(c, g, "tortoise",
                     parity_reports={"tools/turn_parity_census.py": report})
@@ -1927,3 +2504,534 @@ def test_the_cli_PRINTS_the_licence_on_a_CLEAN_verdict(monkeypatch, capsys, tmp_
     assert "LICENSED (byte-clean)" in err, err
     assert "turn" in err and "7 nodes" in err, err
     assert "BYTE" in err, err
+
+
+# --------------------------------------------------------------------------- #
+# Round-5 findings (#10976 owner residual, comment 6689914601).
+# --------------------------------------------------------------------------- #
+
+#: The shape the defect was measured in: 25,000 nodes resident, only 500 of them in
+#: the `turn` population, and a stale report claiming 20,000 turns.
+_STALE_GRAPH = {"Point": 25_000}
+_STALE_POPULATION = {"turn": 500}
+_STALE_CLAIM = 20_000
+
+
+def test_a_stale_report_cannot_size_a_sweep_beyond_its_own_population():
+    """⛔ The licence's staleness guard was the WHOLE graph's node total.
+
+    Measured before the fix (lane container, `docs/evidence/10976-licence/`): a graph
+    holding 25,000 nodes with **500** `is_episodic = true` turns answered a 20,000/20,000
+    CLEAN report with `verdict: PLAN` and `plan["evictable"] = [{population: turn, nodes:
+    20000}]` — a cap **40x** the population it bounds, because 20,000 < 25,000. The
+    executor spends that cap directly (`licence_remaining`), so the runaway guard the
+    cap exists for was 40x too loose.
+
+    Nothing unserved could be deleted (gate 3 asks the record per node) — but "evicting
+    more nodes than the instrument measured is evicting nodes nothing proved" was false
+    as a property, which is what this pins.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    stale = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                         measured_nodes=_STALE_CLAIM, total_nodes=_STALE_CLAIM,
+                         graph_name="tortoise", measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: stale})
+
+    assert result.verdict == "REFUSED", result.plan
+    assert result.eligible_classes == ()
+    assert result.plan["evictable"] == []
+    reason = " ".join(result.problems)
+    # Both numbers must be in the refusal: an operator has to see WHICH population is
+    # short and by how much, or the next step is a re-investigation. ⛔ BIND THE PHRASE,
+    # not the bare number — `str(500)` is satisfied by the label row's `25000`, so a
+    # message reworded to drop the population size would keep a numeric assertion green.
+    assert str(_STALE_CLAIM) in reason, reason
+    assert f"holds only {_STALE_POPULATION['turn']}" in reason, reason
+    assert g.mutated == []
+
+
+def test_an_honest_report_of_the_same_population_still_licenses_it():
+    """The positive arm — the fix must not shut a gate that is legitimately open.
+
+    Without this, deleting the population bound entirely would keep the refusal test
+    green: a refusal-only suite cannot tell "the bound works" from "the bound is shut".
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=_STALE_POPULATION["turn"],
+                          total_nodes=_STALE_POPULATION["turn"],
+                          graph_name="tortoise", measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
+
+    assert result.verdict == "PLAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+    assert result.plan["evictable"][0]["nodes"] == _STALE_POPULATION["turn"]
+    assert g.mutated == []
+
+
+def test_a_report_claiming_fewer_nodes_than_the_population_still_licenses_that_smaller_cap():
+    """A SMALLER claim is the safe direction and must survive: it caps the sweep LOWER.
+
+    The bound is an upper bound (`>`), not equality. Requiring equality would refuse a
+    report measured while the population was smaller — over-tightening a gate that is
+    allowed to be conservative, and one a future "the numbers must match" simplification
+    would silently make permanent.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    smaller = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                           measured_nodes=400, total_nodes=400, graph_name="tortoise",
+                           measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: smaller})
+
+    assert result.verdict == "PLAN", result.problems
+    assert result.plan["evictable"][0]["nodes"] == 400
+
+
+def test_the_population_count_mirrors_the_instrument():
+    """The population predicate has ONE owner — and a test that reds when it drifts.
+
+    `tools/turn_parity_census.py` owns the turn population's shape (#3551). The census
+    may not import a script at RUNTIME, so `POPULATION_RESIDENT_COUNT["turn"]` is a
+    mirror; this is the drift pin, and it compares the EXECUTED constant rather than the
+    instrument's source text. A mirror that silently narrowed or widened the predicate
+    would change the ceiling every licence is measured against, with no error anywhere.
+    ⚠️ FOUR other textual carriers of this predicate exist — `tools/purge_legacy_turns.py`,
+    `tools/backfill_graph_turns.py`, `tools/backfill_copy_turns.py` and
+    `tortoise/projection/__init__.py::_episodic_point_ids`. ONLY the instrument is pinned,
+    deliberately: it is the one whose report sizes a licence, and pinning the others would
+    red this bound whenever one of them reflows a statement nothing licenses.
+    """
+    # ⛔ IDENTITY, not source-text containment. A containment check is satisfied by ANY
+    # occurrence of the string — and the instrument carries `is_episodic = true` in a
+    # dozen docstrings, so the accidental change this pin exists for (edit the executed
+    # constant, leave the old statement in prose) would keep it green. Bind the constant
+    # itself: a rename, a removal or a changed predicate all red.
+    from tools.turn_parity_census import _GRAPH_EPISODIC_COUNT_CYPHER
+
+    def squash(text: str) -> str:
+        # The instrument writes the statement as ADJACENT literals split across source
+        # lines (`"... true " "RETURN count(t)"`), so compare on collapsed whitespace.
+        return " ".join(text.split())
+
+    assert squash(POPULATION_RESIDENT_COUNT["turn"]) == squash(
+        _GRAPH_EPISODIC_COUNT_CYPHER
+    ), (
+        "POPULATION_RESIDENT_COUNT['turn'] and the instrument's own count statement "
+        "have drifted — the census and the instrument now measure different "
+        "populations (#3551 owns the predicate)"
+    )
+    # …and the predicate must keep the two halves that make it the POPULATION rather
+    # than the label: `:Point` (turns live there) and `is_episodic` (the recorded
+    # delete predicate, #10017). `is_episodic` rides non-`:Point` labels too —
+    # `:Session`/`:Event`/`:Source` (`graph-scripts/backfill_is_episodic.py`) and
+    # `:Object` (`TortoiseSDK.create_entity(is_episodic=…)`) — so dropping `:Point`
+    # would INFLATE the ceiling.
+    assert ":Point" in POPULATION_RESIDENT_COUNT["turn"]
+    assert "is_episodic" in POPULATION_RESIDENT_COUNT["turn"]
+
+
+def test_every_registered_population_has_a_resident_count_statement():
+    """A population licensed without a count statement could not be bounded at all.
+
+    `population_resident_count` refuses rather than defaulting — this pins that the
+    registry can never reach that refusal by construction, and that no count statement
+    outlives its population.
+    """
+    assert set(POPULATION_RESIDENT_COUNT) == set(PARITY_INSTRUMENTS), (
+        "every licensed population needs its OWN resident-count statement, and a "
+        "statement for a population nothing licenses is dead code that reads as a "
+        "bound"
+    )
+
+
+def _shared_count_statements(mapping: dict[str, str]) -> set[str]:
+    """The count statements that two or more populations of `mapping` would SHARE.
+
+    Squashed (`" ".join(value.split())`), because a Cypher statement's identity is
+    semantic and the realistic copy-paste failure is the same one-liner REFLOWED across
+    source lines — byte comparison would call that unique while FalkorDB sees one
+    statement, bounding the new population by `turn`'s count (fail-open).
+
+    A helper rather than an inline comprehension so the pin has DEMONSTRABLE
+    discriminating power: `test_the_shared_statement_check_can_actually_fire` feeds it a
+    duplicated mapping and asserts the collision is reported. An inline assertion over
+    the live registry alone cannot fail while the registry holds one population.
+    """
+    seen: set[str] = set()
+    shared: set[str] = set()
+    for value in mapping.values():
+        squashed = " ".join(value.split())
+        if squashed in seen:
+            shared.add(squashed)
+        seen.add(squashed)
+    return shared
+
+
+def test_no_two_populations_share_a_resident_count_statement():
+    """⛔ A COPY-PASTED STATEMENT IS A FAIL-OPEN BOUND, not a harmless duplicate.
+
+    Registering a second population and copying `turn`'s count into its slot would bound
+    that population by the TURN population's size — a stale report for it would then
+    license up to the turn count, and the whole-graph backstop cannot see it (a subgraph
+    count never exceeds the graph's total). The next population's registry entry is the
+    one place this defect would be introduced, so pin it here rather than in a reviewer's
+    head: each population must be counted by its OWN statement.
+
+    ⚠️ SCOPE — THIS PIN IS TEXTUAL. It catches an exact copy and a reflowed copy (the
+    realistic shapes); a SEMANTICALLY identical re-spelling (`WHERE true = t.is_episodic`,
+    or a superset carrying an extra filter) is NOT detected. Whoever ADDS a population
+    must therefore own that population's predicate and bound rather than inherit this
+    assertion — the semantic-duplicate gap is filed as #11726.
+    """
+    # ⛔ SQUASHED, not verbatim. A Cypher statement's identity is semantic, and the
+    # realistic copy-paste failure is the same one-liner REFLOWED across source lines —
+    # byte comparison would call that unique while FalkorDB sees one statement, bounding
+    # the new population by `turn`'s count (fail-open, and invisible to the whole-graph
+    # backstop). The mirror pin above squashes for the same reason.
+    shared = _shared_count_statements(POPULATION_RESIDENT_COUNT)
+    assert not shared, (
+        f"two populations share one count statement: {shared} of "
+        f"{POPULATION_RESIDENT_COUNT} — each population must be counted by the "
+        f"statement for ITS OWN predicate"
+    )
+
+
+def test_the_shared_statement_check_can_actually_fire():
+    """⛔ PROOF THE PIN ABOVE IS NOT VACUOUS.
+
+    `POPULATION_RESIDENT_COUNT` holds ONE population today, so the live assertion above
+    is "no shared statement" over a single element and CAN NEVER FAIL: it is a guard with
+    no demonstrated discriminating power. This test drives the SAME helper with the
+    defect that guard exists to catch and asserts it reports the collision — otherwise
+    nothing shows it would fire the day a second population is registered, which is the
+    only day it matters (#11726).
+
+    It also asserts the NEGATIVE direction: a genuinely distinct predicate must NOT be
+    reported, or the guard would block every new population and get deleted.
+    """
+    reflowed_copy = POPULATION_RESIDENT_COUNT["turn"].replace(
+        " RETURN count(t)", "\n    RETURN count(t)"
+    )
+    assert reflowed_copy != POPULATION_RESIDENT_COUNT["turn"], (
+        "the fixture must differ BYTEWISE, or this test proves nothing about the squash"
+    )
+    duplicated = {"turn": POPULATION_RESIDENT_COUNT["turn"], "turn_v2": reflowed_copy}
+    assert _shared_count_statements(duplicated) == {
+        " ".join(POPULATION_RESIDENT_COUNT["turn"].split())
+    }, (
+        "a REFLOWED copy of another population's statement must be reported as shared — "
+        "byte comparison would call it unique while FalkorDB sees one statement"
+    )
+    assert not _shared_count_statements(
+        {
+            "turn": POPULATION_RESIDENT_COUNT["turn"],
+            "other": "MATCH (o:Object) RETURN count(o)",
+        }
+    ), "a genuinely distinct predicate must NOT be reported, or the guard is a false block"
+
+
+def test_an_empty_population_count_read_is_a_refusal_not_zero():
+    """`0` and "could not read" are opposite findings, and only one is safe to threshold.
+
+    `RETURN count(...)` always yields one row, so an empty result means the reading did
+    not happen. Softening it to `0` would demote every report for the population with
+    the message "this graph holds only 0 …" — a fact about the graph nobody measured,
+    and a refusal indistinguishable from the record not being ready.
+    """
+
+    class _NoRows:
+        class _Result:
+            def __init__(self) -> None:
+                self.result_set: list = []
+
+        def ro_query(self, statement, params=None):
+            return _NoRows._Result()
+
+    with pytest.raises(CacheReadError):
+        population_resident_count(_NoRows(), "turn")
+
+
+def test_a_population_with_no_count_statement_is_a_refusal_not_a_guess():
+    """A population licensed without a bound must not be bounded by a default.
+
+    Defaulting to `0` would silently demote it forever; defaulting to the whole-graph
+    total would silently restore the defect this change closes. Both are guesses.
+    """
+
+    # ⛔ The stub must ANSWER a count, not raise (#11709 review, P1). `_read_statement`
+    # wraps ANY exception as `CacheReadError("… unreadable …")`, so a raising stub is
+    # converted into the very exception this test expects — from the WRONG branch — and
+    # the whole-graph default (`.get(population, "MATCH (n) RETURN count(n)")`) then
+    # reads a number successfully and the row stays GREEN. Measured at the reviewed
+    # head: `CacheReadError: … unreadable … (got 'MATCH (n) RETURN count(n)')` — the
+    # default WAS taken and the population WAS bounded by a guess. Answering a count
+    # makes any defaulted statement succeed (it would return 999 and this test would
+    # fail on the missing `pytest.raises`), and the `match` binds the refusal to the
+    # MISSING-STATEMENT branch rather than accepting any `CacheReadError` at all.
+    # The `0` half is covered by this same shape: a `0` default returns 0, and a
+    # whole-graph default returns 999.
+    class _Graph:
+        class _Result:
+            def __init__(self, rows):
+                #: ANY read SUCCEEDS — so a defaulted statement would be USED, never
+                #: refused, and this test would fail on its missing `pytest.raises`.
+                self.result_set = rows
+
+        def ro_query(self, statement, params=None):
+            return _Graph._Result([[999]])
+
+    with pytest.raises(CacheReadError, match="no resident-count statement"):
+        population_resident_count(_Graph(), "no-such-population")
+
+
+def test_the_graph_total_is_read_AFTER_every_population_count():
+    """⛔ Pin the READ ORDER, because reverting it left every suite green (#11709).
+
+    The total is read AFTER the per-population counts so that a graph which GAINS nodes
+    between the two reads satisfies `resident_population <= total` by construction: an
+    honest 500/500 report cannot be demoted by the whole-graph backstop. Read BEFORE the
+    counts it could be — a legitimate 500/500 report measured REFUSED when the total read
+    answered 5, the false block #11726 records.
+
+    The property is the ORDER, so that is what is asserted. A behavioural fixture cannot
+    see it: `node_total` is answered from graph metadata, and a fixture that answers
+    differently on the two reads models a graph that does not exist. Statement order is
+    the cheapest true statement of the invariant, and it reds on the pre-fix order.
+    """
+    g = _FakeGraph(_STALE_GRAPH, populations=_STALE_POPULATION)
+    c = _FakeClient(used=900, maxmemory=1_000)
+    honest = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=_STALE_POPULATION["turn"],
+                          total_nodes=_STALE_POPULATION["turn"],
+                          graph_name="tortoise", measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: honest})
+
+    # The honest arm still licenses (so this test cannot pass by refusing everything).
+    assert result.verdict == "PLAN", result.problems
+    assert [e["population"] for e in result.plan["evictable"]] == ["turn"]
+
+    total_at = g.statements.index("MATCH (n) RETURN count(n)")
+    population_at = [
+        i for i, s in enumerate(g.statements)
+        if s == POPULATION_RESIDENT_COUNT["turn"]
+    ]
+    assert population_at, (
+        "the population was never counted, so this test measured nothing — a report "
+        "that is not eligible never reaches the bound it is meant to exercise"
+    )
+    assert all(i < total_at for i in population_at), (
+        "the graph total is read BEFORE the population counts: a graph that GAINS "
+        "nodes between the two reads then demotes an honest report through the "
+        "whole-graph backstop (#11726) — read it after them"
+    )
+
+
+def test_a_row_multiplying_count_statement_is_a_documented_residual():
+    """⛔ WHAT THE WHOLE-GRAPH BACKSTOP DOES NOT CATCH — pinned so nobody believes it does.
+
+    A count statement whose query shape multiplies rows (a join, a second `MATCH`, an
+    `UNWIND`) inflates the population's ceiling. When the REPORT's claim then sits under
+    the graph's whole node count, BOTH guards pass: the per-population bound validates
+    the claim against the inflated ceiling, and the whole-graph check compares the CLAIM
+    (never the mirror's count) against the total.
+
+    ⛔ WHY THIS IS THE IRREDUCIBLE BAND, and not a checker someone forgot to write:
+    the band is bounded by the CLAIM, not by how badly a count statement multiplies. It is
+    ``true_population < claim <= node_total``: the population bound cannot fire above the
+    population, and the whole-graph backstop cannot fire at or below the total.
+
+    ⛔ Refusing on the MIRROR's count vs the total (``resident_population > node_total``)
+    WOULD close a sub-band of this residual, and an earlier revision of this docstring
+    claimed otherwise — wrongly. It would catch an inflated mirror that exceeds the total
+    while the claim stays under it: measured, a ``turn`` statement answering 30,000 on a
+    25,000-node graph licenses a 25,000 claim today, and such a guard would refuse it.
+    ``test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total`` asserts the CURRENT
+    behaviour (the licence IS issued), so it is the arm a mirror-vs-total change would red —
+    which is the opposite of "adds no detection".
+
+    It is not used because it is UNSOUND in the OTHER direction, which is the real reason
+    this band stays: for an HONEST mirror it fires on removal skew alone (a gain raises the
+    total with the population, now that the total is read AFTER every population count), so
+    it would false-block a legitimate report. The residual is irreducible GIVEN that a
+    mirror-vs-total check is unsound — not because no such check would detect anything.
+
+    Refusing on
+    `resident_population > report.total_nodes` is worse: the
+    report's total is frozen at measurement time, so it would refuse every legitimate
+    growth. That is why the residual rests on the identity pin
+    (`test_the_population_count_mirrors_the_instrument`), which binds the mirror to the
+    instrument's executed constant.
+
+    This test asserts the residual rather than the desired behaviour on purpose: the
+    alternative is a suite that reads as though the backstop covered the class, which is
+    how the mirror pin gets retired as "belt and braces".
+    """
+    # 25,000 nodes; the mirror answers 2,000 for a 500-node population (a row-multiplying
+    # statement); the report claims 1,500 — under the graph total, so the backstop is
+    # silent, and under the inflated ceiling, so the population bound is silent too.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 2_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    report = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=1_500, total_nodes=1_500,
+                          graph_name="tortoise", measured_at=time.time())
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+
+    assert result.verdict == "PLAN", result.problems
+    assert result.plan["evictable"][0]["nodes"] == 1_500, result.plan["evictable"]
+    assert not any("claims 1500" in problem for problem in result.problems), (
+        "the population bound must not be described as catching a claim that sits under "
+        "the inflated ceiling"
+    )
+    assert g.mutated == []
+
+
+# --------------------------------------------------------------------------- #
+# The evidence artifact — the two arms must come from ONE probe at ONE head.
+# --------------------------------------------------------------------------- #
+
+_EVIDENCE = ROOT / "docs" / "evidence" / "10976-licence"
+
+
+def _evidence_log(name: str) -> str:
+    path = _EVIDENCE / name
+    assert path.is_file(), f"{path} is missing — the licence bound's evidence is gone"
+    return path.read_text(encoding="utf-8")
+
+
+def _licence_keys_the_code_emits() -> set[str]:
+    """The key set of the entry `assess()` builds, read out of the SOURCE.
+
+    ⛔ Read from the AST, not hard-coded, because a hard-coded list is the weaker form of
+    exactly this pin: it stays green when the code grows a field the committed artifact
+    does not carry. The dict literal is the one passed to `licence.append(...)` **inside
+    `assess()`** — the receiver and the enclosing function are both checked, because
+    "any `X.append({...})` whose dict mentions `population`" also matches unrelated row
+    builders, and then this pin reds on a change that never touches the licence path.
+
+    ⛔ AND A PIN LIMITATION MUST NEVER READ AS ARTIFACT DRIFT. If the dict carries a key
+    that is not a string constant (`**spread`, a computed name), the emitted set cannot
+    be read from the AST. Dropping those entries silently would leave a PARTIAL set, and
+    the comparison downstream would then accuse `before.log` of having been produced by a
+    different tree — when the log is a faithful run and the parser is the thing that
+    fell short. That case raises its own, different error.
+    """
+    source = (ROOT / "tortoise" / "cache_eviction.py").read_text(encoding="utf-8")
+    assess = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef) and node.name == "assess"),
+        None,
+    )
+    assert assess is not None, (
+        "`assess()` is no longer a module-level function in tortoise/cache_eviction.py, so "
+        "this pin cannot locate the licence entry it compares against — re-derive the pin"
+    )
+    found: list[set[str]] = []
+    for node in ast.walk(assess):
+        if not (isinstance(node, ast.Call)
+                and isinstance(node.func, ast.Attribute)
+                and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "licence"
+                and node.args and isinstance(node.args[0], ast.Dict)):
+            continue
+        literal = node.args[0]
+        unreadable = [
+            key.dump() if key is not None else "**spread"
+            for key in literal.keys
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str))
+        ]
+        assert not unreadable, (
+            "the `licence.append({...})` dict in `assess()` carries key(s) this pin cannot "
+            f"read as string constants: {unreadable}. ⛔ THIS IS A PIN LIMITATION, NOT "
+            "EVIDENCE THAT THE ARTIFACT DRIFTED — `docs/evidence/10976-licence/*.log` may be "
+            "perfectly faithful and must NOT be re-captured on this message. Re-derive the "
+            "pin (compare against a runtime-constructed entry, which sees whatever the dict "
+            "actually emits) instead of widening or deleting this assertion.\n"
+            f"{ast.unparse(literal)}"
+        )
+        found.append({key.value for key in literal.keys})
+    assert len(found) == 1, (
+        "expected exactly one `licence.append({...})` call inside `assess()`, found "
+        f"{len(found)} — the pin cannot unambiguously locate the entry it compares against, "
+        "so re-derive it rather than widening this assertion"
+    )
+    return found[0]
+
+
+def test_the_two_evidence_arms_come_from_ONE_probe_and_differ_only_in_the_bound():
+    """Fails if `before.log` drifts back to being a run of DIFFERENT code.
+
+    Reachable, and it WAS the shipped state (PR #11709 review, P2): `before.log` was
+    captured from PRE-FIX code, which also predated #11720's `measured_at` /
+    `age_seconds` / `max_age_seconds` on the licence entry. So it printed a FOUR-key
+    licence that no run of the committed probe could produce at this head, at the merge
+    base, or on `main` — and the README's *"the two differ only in whether `assess()`
+    applies the population bound"* was false: they differed in two ways. A reader
+    checking the claim could not see that, which is why it is pinned rather than reworded.
+
+    Both arms are now captured by the committed probe at the same head via
+    `--without-population-bound`, so the pin asserts the three things that make the
+    claim checkable: each log DECLARES which arm it is, the arms differ in the VERDICT
+    and the licence, and the `before` licence still carries #11720's three freshness
+    keys — i.e. the age bound was ACTIVE and silent, so the difference really is the
+    population bound and not the age one.
+    """
+    before = _evidence_log("before.log")
+    after = _evidence_log("after.log")
+
+    assert "population bound               OFF (pre-fix arm)" in before, (
+        "before.log must declare the pre-fix arm; without that line a reader cannot tell "
+        f"which of the two bounds produced it:\n{before}"
+    )
+    assert "population bound               ON (this branch)" in after, (
+        f"after.log must declare the shipped arm:\n{after}"
+    )
+
+    # The arm difference is the VERDICT and the licence — nothing else.
+    assert "verdict                        PLAN" in before, before
+    assert "verdict                        REFUSED" in after, after
+    assert "licence                        none" in after, after
+    assert "'nodes': 20000" in before, (
+        f"the pre-fix arm must issue the 20,000-node licence:\n{before}"
+    )
+    assert "licence / population           40x" in before, before
+
+    # ⛔ THE DEFECT ITSELF: the `before` licence's key SET must equal the one `assess()`
+    # emits. A four-key licence here means the log was produced by a tree that predates
+    # the sibling bound's freshness fields, so the two logs are not a controlled comparison
+    # of ONE thing. Bound to the SOURCE's set rather than to three key names — the weaker
+    # form stays green when the code grows a field the artifact does not carry, which is
+    # the same drift one step later.
+    licence_line = re.search(r"^licence +(.+)$", before, re.MULTILINE)
+    assert licence_line, f"before.log carries no `licence` line:\n{before}"
+    entry = ast.literal_eval(licence_line.group(1).strip())
+    assert isinstance(entry, list) and entry and isinstance(entry[0], dict), (
+        f"before.log's licence is not a list with one entry dict: {entry!r}"
+    )
+    emitted = _licence_keys_the_code_emits()
+    assert set(entry[0]) == emitted, (
+        "before.log's licence entry does not carry the keys `assess()` emits — it was not "
+        "produced by the committed probe, so the two logs do not come from one head and "
+        "the README's 'differ only in the population bound' claim is false again. "
+        f"log={sorted(entry[0])} code={sorted(emitted)}"
+    )
+
+    # And the graph shape is identical on both sides, so neither arm measured a
+    # different population — the comparison isolates the BOUND.
+    for log in (before, after):
+        assert "MATCH (n) RETURN count(n)      25000" in log, log
+        assert "turn population (is_episodic)  500" in log, log
+        assert "stale report claims            20000 (CLEAN, proves=True)" in log, log

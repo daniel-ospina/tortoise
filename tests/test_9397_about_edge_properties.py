@@ -4250,14 +4250,16 @@ DENIAL_MARKERS: tuple[str, ...] = (
     # happened to use was caught (`#10200` review, measured).
     # ⛔ The NOUN is pinned as the DENIAL PHRASES — the predicate and articled
     # forms — NOT the bare stem `exempt`. The bare stem was measured "safe"
-    # (`#10200` review cycle 2, 0 red sentences in either document), but the reason
-    # it red nothing is that the only `exempt*` spellings the documents write are
-    # `exempts`, `exemptions` and `exempting` — the one spelling that is NOT a
-    # denial — so its liveness was an ARTIFACT and its only live effect was a FALSE
-    # RED: the documents' own §13 sentence *"the guard pins the shapes that make
-    # both exemptions true instead of merely exempting them"* reds as `'exempt'`
-    # the moment any census key is named in it (`#10200` review, cycle 5,
-    # executed). A denial the documents' plural noun can satisfy is not a denial.
+    # (`#10200` review cycle 2, 0 red sentences in either document), but that
+    # reading was an ARTIFACT of that head's corpus: a stem match cannot tell a
+    # denial from the non-denial `exempt*` prose either document writes, so its
+    # live effect is a FALSE RED. Executed at `#10200` review cycle 5 against §13's
+    # *"the guard pins the shapes that make both exemptions true instead of merely
+    # exempting them"* (`exemptions` / `exempting`, the non-denial spellings) the
+    # moment any census key was named in it; `#10303` has since reworded that
+    # sentence away, and `#11665` added §3's *"The exemption is about CONTENT"*,
+    # which the stem matches for the same non-denial reason. A denial the
+    # documents' non-denial prose can satisfy is not a denial.
     # ⚠️ `is exempted` is listed although `is exempt` is a substring of it: the
     # POST-positioned-negation read (`_MARKER_NEGATION_AFTER_RE`) anchors at the
     # match END, so *"is exempted from the census no longer"* is only seen when the
@@ -4265,17 +4267,21 @@ DENIAL_MARKERS: tuple[str, ...] = (
     "is exempt",
     "is exempted",
     "an exemption",
-    # ⚠️ `the exemption` is LIVE as of the `#11665` clause in the extractor's §3
-    # (*"The exemption is about CONTENT, not the declaration site"*), and it is
-    # deliberately NOT listed in `MARKERS_ABSENT_BY_DESIGN` any more: that
-    # declaration claimed the corpus would not write the spelling, and the corpus
-    # now does. It is a TOPIC use — the noun naming the exempt class, not a
-    # sentence calling a counted writer an exemption — and it cannot false-red,
-    # because this tuple is only consulted against a sentence that NAMES a census
-    # writer (`_denies_the_class`), and that sentence names none (`#11714`).
-    # Removing the declaration is the stale-declaration remedy leg 36 prescribes;
-    # rewording the document instead would be clearing a red by weakening TRUE
-    # prose, which is the failure mode these legs exist to prevent.
+    # ⚠️ `the exemption` — the DEFINITE-articled form of the owner's verbatim denial
+    # (*"a counted writer may not be called **an exemption**"*); an articled counted
+    # writer is the same claim as the indefinite one. It is NOT live in the corpus
+    # any more: `#11665` did add a §3 clause that used the phrase, and `#11688`
+    # (`24e53f2b`, this rebase's base) reworded that clause to *"The **carve-out**
+    # is about CONTENT, not the declaration site"*, so the phrase occurs ZERO times
+    # in either flattened document (measured, both files). ⛔ IN THE DENIAL LEG this
+    # tuple is consulted only for a sentence that leg has already keyed on a NAMED
+    # census writer, and each occurrence is then judged per-occurrence
+    # (`_denies_the_class`, `#11714`) — so THERE the failure direction is OVER-red,
+    # never a miss: a sentence naming a counted writer that carries the phrase
+    # affirmatively DOES red. ⛔ Leg 36 ALSO consults this tuple CORPUS-WIDE, with no
+    # writer key (`families`, `~:7224`) — that half is the LIVENESS read, so a marker
+    # that no longer appears anywhere reds there, which is why its absence is
+    # declared rather than left implicit (`MARKERS_ABSENT_BY_DESIGN` below).
     "the exemption",
     "carries nothing",
     "writes nothing",
@@ -4473,9 +4479,11 @@ DENIAL_PATTERNS: tuple[tuple[re.Pattern[str], tuple[str, ...], str], ...] = (
     ),
     (
         # ⛔ `exempts` — the third-person VERB only. The bare stem `exempt` is NOT
-        # a denial in this record: the documents write `exempts` / `exemptions` /
-        # `exempting`, and §13's *"make both exemptions true instead of merely
-        # exempting them"* is TRUE prose (`#10200` review, cycle 5).
+        # a denial in this record: it also matches `exemption` where the documents
+        # write it in the carve-out sense (§3: *"The exemption is about CONTENT,
+        # not the declaration site"*), and at `#10200` review cycle 5 it matched
+        # §13's *"make both exemptions true instead of merely exempting them"* —
+        # TRUE prose, since reworded away by `#10303`.
         re.compile(r"\bexempts\b[^;,]{0,80}?\b(?:census|counted)\b"),
         ("The guard exempts `sdk.supersede_point` from the census.",),
         "The guard makes both exemptions true instead of merely exempting them, "
@@ -5898,11 +5906,12 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # … and the NEGATION of that noun is TRUE prose about a counted writer, so
     # the marker must not fire on it. ⛔ This is why the trigger is the DEMONSTRATIVE
     # AND PREDICATE PHRASES (`an exemption`, `the exemption`, `is exempt`) rather
-    # than a bare `exempt` substring: the documents' own *"make both exemptions
-    # true instead of merely exempting them"* sentence sits in a run that names
-    # counted writers, and it contains `exemptions` / `exempting` — the non-denial
-    # spellings a stem match cannot tell from a denial (`#10200` review, cycle 5,
-    # executed: the bare stem red that very sentence).
+    # than a bare `exempt` substring: at `#10200` review cycle 5 the documents' own
+    # *"make both exemptions true instead of merely exempting them"* sat in a run
+    # naming counted writers and contained `exemptions` / `exempting` — non-denial
+    # spellings a stem match cannot tell from a denial (executed: the bare stem red
+    # that sentence). `#10303` has since reworded it away; §3's *"The exemption is
+    # about CONTENT"* keeps the same trap live for the singular.
     not_an_exemption = (
         (
             "probe",
@@ -5946,11 +5955,11 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
     # … and the inflected forms of the decision's noun, not just the articled one
     # (`is exempt`, `the exemption`). `#10200` review cycle 2 measured `an
     # exemption` alone leaving all three green; cycle 5 measured that the stem
-    # `exempt` which replaced it reds 0 sentences only because the documents'
-    # `exempt*` spellings are all NON-denial (`exemptions`, `exempting`) — i.e. it
-    # was an artifact, and it false-red the documents' own §13 sentence (the
-    # `not_only_affirms` and `documents_own_exemption_prose` probes below pin that
-    # direction). The three denials are pinned as PHRASES.
+    # `exempt` which replaced it reds 0 sentences only because a bare stem cannot
+    # tell a denial construction from the non-denial prose the documents also
+    # write — i.e. it was an artifact, and it false-red the documents' own §13
+    # sentence (the `not_only_affirms` and `documents_own_exemption_prose` probes
+    # below pin that direction). The three denials are pinned as PHRASES.
     inflected_exemption = (
         (
             "probe",
@@ -6079,9 +6088,13 @@ def test_no_corrected_passage_denies_a_verdict_the_census_counts():
         "weaken true prose"
     )
     # ⛔ Probe 16 (`#10200` review, cycle 5): the documents' OWN sentence about the
-    # exemptions is TRUE, and must stay green even when it names a counted writer.
-    # The bare stem `exempt` red it (it matches `exemptions` / `exempting`), which
-    # is why the denial vocabulary is the predicate and articled PHRASES.
+    # exemptions was TRUE and had to stay green even when it named a counted
+    # writer; the bare stem `exempt` red it (it matches `exemptions` /
+    # `exempting`), which is why the denial vocabulary is the predicate and
+    # articled PHRASES. The fixture keeps that sentence after `#10303` reworded it
+    # out of the corpus, because the trap is a property of the VOCABULARY rather
+    # than of one sentence — §3's *"The exemption is about CONTENT"* is the same
+    # trap in the singular.
     documents_own_exemption_prose = (
         (
             "probe",
@@ -7063,13 +7076,18 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "counted writer described this way"
     ),
     "carries nothing": (
-        "contradiction vocabulary — the verb form of `carries no property`, "
-        "which is the spelling the documents use today"
+        "contradiction vocabulary — the verb form of `carries no property`. Absent "
+        "from both documents today (measured: 0 occurrences of either), and kept "
+        "live in `DENIAL_MARKERS`/`CLASS_VERDICT_MARKERS` so the frame catches a "
+        "counted writer the moment one is described this way"
     ),
     "drops confidence": (
-        "contradiction vocabulary — the documents write the articled form "
-        "(`drops the binder's confidence`), so the non-articled verb is absent "
-        "by design until someone writes it"
+        "contradiction vocabulary — NO document writes this in either voice: the "
+        "`drops the …` hits in both documents are unrelated prose (`drops the "
+        "anchor`, `drops the arm`), and the transferred-`confidence` behaviour is "
+        "stated the other way round — an `about*` edge *keeps the binder's "
+        "`confidence` across a supersede (`live == rebuild`)*. The non-articled "
+        "verb is therefore absent by design until someone writes it"
     ),
     "false positive no longer": (
         "contradiction vocabulary — the post-negated form of 'called counted', "
@@ -7086,8 +7104,8 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     "is exempt": (
         "contradiction vocabulary — the predicate form of 'called an exemption'. "
         "Absent from both documents until someone writes it; it replaced the bare "
-        "stem `exempt`, whose only actual `exempt*` matches were the NON-denial "
-        "spellings `exempts` / `exemptions` / `exempting` (`#10200` review, "
+        "stem `exempt`, whose matches could not tell a denial construction from "
+        "the non-denial prose the documents also write (`#10200` review, "
         "cycle 5)"
     ),
     "is exempted": (
@@ -7100,6 +7118,59 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "contradiction vocabulary — the indefinite-articled form the owner's "
         "decision quotes verbatim ('called an exemption'). Absent from both "
         "documents until someone writes it"
+    ),
+    # ⛔ `the exemption` LEFT this table once, when `#11665` made the phrase live, and
+    # it is BACK because the live sentence was reworded away again: `#11688`
+    # (`24e53f2b`, this rebase's base) renamed that §3 clause to *"The **carve-out**
+    # is about CONTENT, not the declaration site"*. The marker never left
+    # `DENIAL_MARKERS` — it is a real denial phrase (the owner's decision: *"a
+    # counted writer may not be called **an exemption**"*, and a DEFINITE-articled
+    # counted writer is the same claim) — so only the DECLARATION moved, twice, and
+    # it moves with the CORPUS: absence declared over a live sentence reds `stale`,
+    # and a dead marker with no declaration reds `unpinned` (the red `main` carries
+    # between `24e53f2b` and this commit).
+    # ⚠️ While the phrase WAS live, its occurrence was the word in a DIFFERENT sense
+    # — a carve-out from the no-prompt-text rule, not a census row excused — which is
+    # why it also stayed out of the census: §3 is OUTSIDE `CORRECTED_SECTIONS`, so
+    # `test_no_corrected_passage_denies_a_verdict_the_census_counts` never read the
+    # sentence at all, and `_denied_verdicts` could not attribute it anyway (its
+    # stated limit 2: a denial that names no census writer is invisible). Green by
+    # EXCLUSION, not by being read and found true — the difference the `:4252` block
+    # exists to keep visible. This is the same doctrine that DELETED the bare `exempt`
+    # stem from the marker tuples: its live effect is a FALSE RED, because a stem
+    # match cannot tell a denial from the non-denial prose both documents DO write —
+    # `#11665`'s §3 clause (before `#11688` reworded it) and STORAGE's *"exempts that
+    # statement exactly"* — so it was removed rather than kept as coverage that fires
+    # on true prose (`#10200` review, cycle 5), and it is the doctrine that deleted
+    # the `#10200` cycle-9 orphans ("the entries were deleted rather than left as dead
+    # coverage").
+    # ⚠️ An occurrence cannot hide a real denial either way — whether a SENTENCE is a
+    # denial is decided per-occurrence by `DENIAL_PATTERNS` + `_class_marker_negated`
+    # — so this pin only asks that a marker is not DEAD, in whichever direction is
+    # true today. That is why the row carries the rename and not a re-wording of the
+    # document: rewriting §3 to restore the phrase would falsify a record to clear a
+    # red.
+    # ⚠️ Comment drift, named rather than silently folded in: three prose sites IN
+    # THIS FILE still quote the OLD §3 wording as the example of the stem-match trap
+    # — the `is exempt` row's comment in `DENIAL_MARKERS`, the `exempts`/`exempting`
+    # frame comment under `DENIAL_PATTERNS`, and the `documents_own_exemption_prose`
+    # fixture (Probe 16) that reuses the sentence. ⛔ NOT §3 itself: `#11688`
+    # (`24e53f2b`) renamed that clause to *"The carve-out is about CONTENT…"*, which
+    # is also what removed the `exempt*` substring from it — so those three examples
+    # are historical now. They red nothing, and rewriting main's prose about a
+    # measurement taken at an earlier head is a separate change, not this one. ⛔ And
+    # named by SYMBOL, not by `:LINE`: the bare-citation form this file's leg 40 bans
+    # is exactly what let the two numbers this comment used to carry drift by two.
+    "the exemption": (
+        "contradiction vocabulary — the DEFINITE-articled form of the owner's "
+        "verbatim denial (`a counted writer may not be called **an exemption**`), "
+        "absent from both documents today: `#11665` added a §3 clause that used it "
+        "and `#11688` (`24e53f2b`) reworded that clause to *\"The carve-out is "
+        "about CONTENT\"*, leaving 0 occurrences in either document (measured). "
+        "Kept in `DENIAL_MARKERS` so the frame still catches a counted writer "
+        "described this way; the row returns here rather than the marker leaving "
+        "the tuple, because the phrase's liveness was a wording choice and never a "
+        "claim that the denial cannot be made"
     ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "

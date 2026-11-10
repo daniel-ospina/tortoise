@@ -71,7 +71,12 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     EMBEDDING_PROPERTY,
     clear_embedding,
     clear_then_set_prefix,
+    require_served_store_labels,  # #11641: the ONE bound on WHERE a vector may be stored
     set_embedding_clause,
+    statement_interpolates_label,
+    statement_node_labels,
+    statement_uses_unmodelled_scope,  # #11641: the ACCEPTED GRAMMAR, refused outside it
+    statement_write_target_problem,  # #11641: WHERE it lands, not only what it NAMES
 )
 # #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
 from .sdk_retired import retirement_hint
@@ -438,6 +443,28 @@ BASELINE_SOURCE_DISPLAY: dict[str, str] = {
 # id-anchored and EP-predicated.
 _CALIBRATION_EVIDENCE_KINDS = ("statement", "observation", "hypothesis")
 _CALIBRATION_GATED_LABELS = ("Point",)
+
+#: The labels `TortoiseSDK._event_raw_write_door` may store a vector on (#11641).
+#:
+#: The door EXECUTES a caller-supplied Cypher statement, so its label was the one shape
+#: `tortoise.embed_writer_register` could not name: `LABELS_AT_RUNTIME` held `#5090` DoD row 2 at
+#: PARTIAL for it. The door now OWNS the label instead of inheriting it — every label its caller's
+#: statement names must be one of these, and the door refuses anything else BEFORE the write. That
+#: makes `stores=("Event",)` in the register a fact the code enforces rather than a claim about
+#: callers, so the row's served-set comparison applies to this writer like every other one.
+#:
+#: ⛔ ONE entry, and it is not a knob. The door is documented as "THE live-write door for an
+#: ``:Event``" and journals its record through `_journal_event_raw_write`, which REPLAYS through
+#: `_upsert_event` — a fold that MERGEs `:Event` and nothing else. A caller storing on any other
+#: label would make live and replay put the vector on two different labels, which is the hazard the
+#: door's own docstring names. Widening this tuple is a product decision, not a config change.
+#:
+#: `(label, id-prop)` shaped so the register's constant pin can read it in BOTH directions
+#: (`tests/test_embed_writer_register.py::test_every_declared_label_re_derives_at_this_head`) —
+#: ⚠️ only the LABEL element is re-derived there; `eventId` is the label's primary identity key
+#: (`projection._CANONICAL_ENTITY_ID_PROPS`) and is what this door's own statements match on, not a
+#: second fact the pin proves.
+_RAW_WRITE_DOOR_LABELS: tuple[tuple[str, str], ...] = (("Event", "eventId"),)
 
 #: The Cypher set of leading/trailing characters that make a string id
 #: UNCALIBRATABLE (#9063) — the MEASURED unresolvable class, not a guess.
@@ -12933,7 +12960,145 @@ class TortoiseSDK:
         whose ``:PackInstall`` set lacks it — where this writer previously wrote
         the node and widened the approval set (`#9068`, the P0 this shares a
         root with). ``_doc_write`` already gates its frontmatter the same way.
+
+        ⛔ THE DOOR OWNS ITS LABEL **AND ITS WRITE TARGET** (#11641). Every label this door's
+        statement NAMES must be one of :data:`_RAW_WRITE_DOOR_LABELS`; every label that statement
+        renders by INTERPOLATION is refused; and every alias it WRITES TO (`SET <a> …`,
+        `CREATE (<a> …`, `MERGE (<a> …`) must be bound in the SAME statement to one of those labels.
+        Anything else is refused HERE, before the journal append and before the write. That is what
+        makes ``stores=("Event",)`` in `tortoise.embed_writer_register` an enforced fact instead
+        of a claim about callers — **for the declared grammar this door accepts, stated below** — and
+        it closes a real divergence, not only a measurement: the
+        record this door appends replays through `_upsert_event`, which MERGEs `:Event` and nothing
+        else, so a caller writing a vector on any other label would get its vector back on a
+        DIFFERENT label after a rebuild, silently, with every existing test green.
+
+        ⚠️ WHY A GRAMMAR GUARD PLUS THREE LABEL CHECKS AND NOT ONE: the three label checks are about
+        what the statement MENTIONS, and mentioning is not storing — `MATCH (e:Event {…}) CREATE (p)
+        SET p += $props, …embedding` passes all of them while the vector lands on the label-less node
+        `[]`, which no `entity_type` reaches (`#5090` DoD row 2's own defect, measured). The third is
+        the one that makes the register's sentence true, and the two above are kept beside it because
+        a caller's error message is more useful the more specific it is. All three of them, though,
+        read an alias's labels BY NAME — so all three need the grammar guard that precedes them.
+
+        ⚠️ ACCEPTED RESIDUAL, named rather than implied: the write-target reader is a TEXT reader
+        (a Cypher label cannot be a bindable parameter — Neo4j's own Cypher Manual states it), so a
+        caller that never reaches this door writes outside every reader it has; that is the
+        chokepoint's question (`#9079`), not this bound's. Inside the grammar this bound fails
+        CLOSED in the only direction it can be tested (see below), and its residual is the declared
+        construct list itself rather than a shape it silently accepts.
+        INSIDE the grammar the reader is complete over what the engine accepts as an IDENTIFIER —
+        both spellings, bare (`e`) and backtick-quoted (`` `b` ``), which FalkorDB lexes as the same
+        token, not as a string — and it blanks Cypher comments before reading, so neither an
+        accepted spelling nor a `)` inside `/* … */` can hide a write target (#11641's fourth
+        review round found both live here). Its NAMING legs blank STRING literals as well (a label
+        spelled inside `SET e.note = '(b:Batch)'` is TEXT, not a pattern — `#11641`'s second round),
+        while a BACKTICK stays an identifier.
+
+        ⛔ THE GRAMMAR ITSELF IS DECLARED, AND ENFORCED FIRST (#11641's fifth round). Everything
+        above is keyed on the alias NAME, and Cypher's `WITH` ends what a name means: a variable the
+        clause does not carry "is dropped from the scope of the query and cannot be referenced by
+        subsequent clauses" (Neo4j Cypher Manual, `WITH` → *Control variables in scope*), so a later
+        `MATCH (p)` binds a NEW, UNLABELLED `p` while a name-keyed map still reports the served
+        label the FIRST pattern gave it. Measured on this door:
+
+            MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET p += $props, …embedding
+
+        was ACCEPTED and stored the `VectorF32` on `:Meta` — every node the second `MATCH` reached,
+        a label no `entity_type` reaches. Teaching the readers scope would be a Cypher parser, and an
+        under-modelled parser fails OPEN, so this door DEFINES ITS ACCEPTED GRAMMAR and refuses
+        every clause that moves or replaces the variable scope: `tortoise.vector_write::
+        statement_uses_unmodelled_scope` runs before
+        the journal append and before every other check, and refuses `WITH`, `UNION`, `CALL`
+        (including a `CALL { … }` subquery), `OPTIONAL MATCH`, `LOAD CSV` and `IN TRANSACTIONS`.
+        What it accepts — `MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` / `FOREACH` — is the
+        grammar all six of this product's own door statements are written in, and this door's
+        licence is that grammar: not `any Cypher the engine parses`.
+
+        ⛔ THE SCOPE GUARD IS WHAT MAKES THE PARAGRAPH ABOVE TRUE, so do not drop it as redundant.
+        Without it, `stores=("Event",)` is an enforced fact only about the labels a statement names
+        in the scope it STARTS in — and a `WITH` that drops an alias and re-binds the same name
+        defeats that with a false PASS: a `VectorF32` paid for and unreachable, with row 2 still
+        green. That is the defect `#11641` exists to close.
+
+        ⛔ THE RESIDUAL, VERBATIM, because an earlier revision of these paragraphs claimed totality
+        and was measured FALSE: the bound refuses the DECLARED construct list (`WITH`, `UNION`,
+        `CALL` including `CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS`) and a
+        `FOREACH` whose loop variable re-binds an alias a node pattern already binds; the list is a
+        DECLARATION, not a proof of exhaustiveness — a scope construct it does not name is not
+        refused. The `FOREACH` half is not in that list because `FOREACH` is INSIDE the accepted
+        grammar (the product's own clear guard is one) and the Manual says its variable context *"is
+        separate from the one outside it"* (`clauses/foreach/`) — so the COLLISION with a
+        pattern-bound alias is what
+        `tortoise.vector_write::statement_write_target_problem` refuses, not the clause. Both halves
+        are pinned in `tests/test_11641_runtime_vector_label.py` and neither is a claim about
+        statements other than the ones the tests execute. (`WITH` and the other six are refused only
+        in CLAUSE position — at the statement's own bracket level; an ALIAS or projection named
+        after one, `SET with += $props` / `RETURN x AS with`, is a statement the engine accepts and
+        this door accepts it too, which is a false-block fix from `#11641`'s sixth round and not a
+        widening of the grammar.)
         """
+        # ⛔ FIRST, the grammar (#11641's fifth review round). A statement that moves or replaces the
+        # variable scope has bindings this door's alias-keyed readers cannot prove, so it is refused
+        # BEFORE any label, interpolation or write target is read off it — and before the journal.
+        _scope_construct = statement_uses_unmodelled_scope(statement)
+        if _scope_construct is not None:
+            raise ValueError(
+                "_event_raw_write_door: the statement uses `"
+                f"{_scope_construct}`, and this door's bound is a TEXT reader with NO scope model, "
+                "so it cannot prove where the vector lands across a scope boundary. It matches an "
+                "alias to the labels the statement binds BY NAME, so an alias bound to a served "
+                "label BEFORE the boundary is still read as served AFTER it — while to the engine a "
+                "variable not carried through `WITH` is dropped from the scope and a later "
+                "`MATCH (p)` binds a NEW, unlabelled node, so the vector lands on a label no "
+                "`entity_type` reaches (measured: `MATCH (p:Event {eventId:'seed'}) WITH 1 AS x "
+                "MATCH (p) SET p += $props, …embedding` stored a `VectorF32` on `:Meta`). This "
+                "door accepts a DECLARED grammar — `MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` "
+                "/ `FOREACH` — and refuses every scope construct in that declared list rather "
+                "than guessing at one; re-spell the store without it (#11641)."
+            )
+        _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
+        _named_labels = statement_node_labels(statement)
+        if statement_interpolates_label(statement):
+            raise ValueError(
+                "_event_raw_write_door: the statement renders a node label by INTERPOLATION "
+                "(`(n:{…})`), so the label(s) it stores on cannot be read off the statement and "
+                "this door's bound cannot prove them — a literal `(e:Event …)` pattern beside it "
+                "would pass the bound while the vector landed wherever the interpolation points. "
+                "Name the label literally (`MATCH (e:Event {…})`) (#11641)."
+            )
+        if not _named_labels:
+            raise ValueError(
+                "_event_raw_write_door: the statement names NO node label, so the label this "
+                "write stores on cannot be proved — a label-free pattern stores wherever the node "
+                "happens to be. Name the label (`MATCH (e:Event {…})`), so this door's bound and "
+                "`tortoise.embed_writer_register`'s declaration stay facts (#11641)."
+            )
+        _stray_labels = sorted(_named_labels - _declared_labels)
+        if _stray_labels:
+            raise ValueError(
+                f"_event_raw_write_door: the statement names label(s) {_stray_labels}, but this "
+                f"door stores on {sorted(_declared_labels)} only — its journal record replays "
+                "through `_upsert_event`, which MERGEs `:Event`, so a store elsewhere would come "
+                "back on a different label after a rebuild (#11641)."
+            )
+        require_served_store_labels(
+            _declared_labels, writer="tortoise.sdk::_event_raw_write_door")
+        # ⛔ THE THIRD, NARROWER CHECK — WHERE the vector lands (#11641). The three label checks above
+        # are all about what the statement NAMES: a served label mentioned anywhere satisfies them
+        # while the vector lands on a DIFFERENT alias, which is a false PASS (`stores=("Event",)` and
+        # row 2 stay green over a `Vectorf32` on the label-less node `[]`). The register's
+        # declaration is about the node the statement WRITES TO, so the bound has to read the write
+        # target too (see :func:`tortoise.vector_write::statement_write_target_problem`).
+        _target_problem = statement_write_target_problem(statement, _declared_labels)
+        if _target_problem is not None:
+            raise ValueError(
+                "_event_raw_write_door: the statement's WRITE TARGET is not proved — "
+                f"{_target_problem}. This is a different question from the labels the statement "
+                "NAMES: naming a served label somewhere (a `MATCH (e:Event …)`) does not prove "
+                "where the vector lands, so the bound reads the aliases the statement WRITES TO, "
+                "not only the labels it mentions (#11641)."
+            )
         if self._journal_event_raw_write(
                 event_id, props, graph=getattr(proj, "g", None),
                 event_kind=event_kind, embedding=embedding) is False:
@@ -24184,7 +24349,7 @@ class TortoiseSDK:
             from .search_engine import _exclude_status_clause
             clauses.append(_exclude_status_clause("n"))
         if kind:
-            expanded = self._expand_kind(kind)
+            expanded = self._read_filter_kinds(kind)
             if len(expanded) == 1:
                 clauses.append("n.pointKind = $kind")
                 params["kind"] = expanded[0]
@@ -24255,7 +24420,7 @@ class TortoiseSDK:
             from .search_engine import _exclude_status_clause
             clauses.append(_exclude_status_clause("n"))
         if kind:
-            expanded = self._expand_kind(kind)
+            expanded = self._read_filter_kinds(kind)
             if len(expanded) == 1:
                 clauses.append("n.pointKind = $kind")
                 params["kind"] = expanded[0]
@@ -37890,8 +38055,10 @@ class TortoiseSDK:
         strategies = classify_query(query, kind)
         is_full_scan = (query is None and kind is not None)
 
-        # Expand kind early for pack-aware structural query + kind filter
-        expanded_kinds = self._expand_kind(kind) if kind else None
+        # Expand kind early for pack-aware structural query + kind filter.
+        # #11679: the KIND FILTER below feeds `n.{kind_field} IN [...]`, so it
+        # takes the read-filter set (descendants, never ancestors).
+        expanded_kinds = self._read_filter_kinds(kind) if kind else None
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
@@ -42846,12 +43013,34 @@ class TortoiseSDK:
     # ── Helpers ───────────────────────────────────────────────────
 
     def _expand_kind(self, kind: str) -> list[str]:
-        """Expand kind via subclassOf + equivalentTo for Cypher IN clause.
+        """Expand kind via subclassOf + equivalentTo for a MEMBERSHIP test.
 
         Uses PackRegistry.expand_kind(). Registry is loaded once and cached.
         Returns [kind] if no packs loaded or kind is unknown.
+
+        ⛔ The set carries a child's ANCESTORS — ``"operator" in
+        _expand_kind(kind)`` is the idiom this exists for. A read filter
+        (``n.pointKind IN [...]``) must use :meth:`_read_filter_kinds`
+        instead: the ancestor names there match rows BROADER than the kind
+        asked for (#11679).
         """
         return _get_kind_expander().expand_kind(kind)
+
+    def _read_filter_kinds(self, kind: str) -> list[str]:
+        """Expand kind to the values a READ FILTER may match — never an ancestor.
+
+        Uses PackRegistry.read_filter_kinds(): [kind] + descendants +
+        equivalents + stored spellings. Every read filter in this module that is
+        built from a kind EXPANSION uses this one, so a narrow-kind read cannot
+        return a broader-kinded row (#11679). Membership tests use
+        :meth:`_expand_kind`.
+
+        The quantifier is scoped on purpose: ``backfill_sources`` also runs an
+        ``e.eventKind IN $kinds`` filter, but its vocabulary is a CLOSED,
+        caller-supplied literal (``event_kinds``) that expands nothing, so it
+        cannot match a broader kind and needs no expansion either way.
+        """
+        return _get_kind_expander().read_filter_kinds(kind)
 
     def _resolve_traversal_path(self, path: str) -> dict | None:
         """Resolve 'Product→Feature' to {predicate, fromKind, toKind} from pack registry.
@@ -50091,13 +50280,35 @@ class TortoiseSDK:
 class _V2SessionMock:
     """Deterministic offline v2 extractor stand-in (TORTOISE_SESSION_LLM_MOCK=1,
     #1350). complete() adapts the v2 pipeline's prompts: S1 → narrative text,
-    S2/S4 → the embed-list JSON. Mirrors tests' V2MockModel. Accepts the
-    per-call ``max_tokens`` kwarg (M3 #1524 GATE-2 — ignored: deterministic)."""
+    S2/S4 → the embed-list JSON, the D3 ENTITY RESOLUTION pass → *"no aliases;
+    each name is a distinct entity"* (see `_resolution_answer`). Mirrors tests'
+    V2MockModel. Accepts the per-call ``max_tokens`` kwarg (M3 #1524 GATE-2 —
+    ignored: deterministic)."""
+
+    @staticmethod
+    def _resolution_answer(user: str) -> str:
+        """D3 phase 2, in the CONTRACT the extractor now asks for (#11653).
+
+        The stand-in resolves nothing (these are distinct names, not aliases)
+        AND says so: the answer names every asked candidate under ``new``. ⛔ An
+        empty ``resolutions`` list alone used to mean *"no aliases, so create
+        them"*; the contract now reads that omission as an UNDECIDED
+        disambiguation and HOLDS the candidate (§4.4 I1). A mock that stays
+        silent would therefore make every offline capture create no entities at
+        all — a fixture artefact, not a behaviour anyone wants.
+        """
+        tail = user.split("NEW ENTITY NAMES:", 1)[-1]
+        names = [ln.strip()[2:].strip() for ln in tail.splitlines()
+                 if ln.strip().startswith("- ")]
+        return _json.dumps({"resolutions": [],
+                            "new": [n for n in names if n and n != "(none)"]})
 
     def complete(self, *, system: str, user: str,
                  max_tokens: int | None = None) -> str:
         if "STORY SUMMARIZER" in system:
             return "The session revealed a new strategy."
+        if "ENTITY RESOLUTION" in system:
+            return self._resolution_answer(user)
         return ("{\"entities\": [{\"name\": \"the strategy\", "
                 "\"kind\": \"core:strategy\", \"lifecycle\": \"created\", "
                 "\"supersedes\": null, \"note\": null}], "

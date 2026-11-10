@@ -114,6 +114,15 @@ ROOT = Path(__file__).resolve().parents[1]
 #: The corpus the guards were applied to (see module docstring).
 CORPUS_DIRS = ("tools", "graph-scripts")
 
+#: Every root the doc/usage sweep walks — `CORPUS_DIRS` plus the docs tree. One
+#: definition, consumed by the sweep AND by the non-vacuity leg below, so the
+#: root LIST cannot drift between them (the leg asks the same containment
+#: question, below): a leg that restated this tuple would report a widened
+#: root's entries as "outside the swept roots" (false red) and would keep
+#: certifying entries a narrowed sweep no longer walks (false pass, in the leg
+#: whose whole purpose is catching entries that permit nothing).
+DOC_SWEPT_ROOTS = (*CORPUS_DIRS, "docs")
+
 #: Package markers, not entry points: never invoked as a script.
 EXCLUDED_NAMES = frozenset({"__init__.py"})
 
@@ -586,9 +595,16 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: RECORD and keeps the form that ran. A *reproduction instruction* with expected
 #: output — a docs command block, a plan doc's smoke step — is an INSTRUCTION and
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
-#: is why `docs/plans/2026-09-26-5042-…:208` and
+#: is why `docs/plans/2026-09-26-5042-…:209` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: three entries below do not.
+#: four entries below do not.
+#:
+#: #11744 (main red at `3173971283f9`): the `11689` plan doc's entry is the
+#: `$`-prompted transcript WITH its captured `FAIL — 1 problem(s): …` output, under
+#: "Measured, not argued — the re-take made the required check fail" — the second
+#: record bullet above, not a plan-doc smoke step. The paragraph beneath it reads as
+#: a receipt too (`main` passes the same command; only the re-take reds it), so the
+#: text records what a machine printed rather than asking a reader to reproduce it.
 #:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
@@ -612,6 +628,35 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
+        # ⛔ REVIVED, by #11757's own rule. That PR removed this key as dead and said
+        # how it comes back: "an exemption can only be revived by restoring the line
+        # it names — never by re-declaring the key." The line IS back: `#11759`
+        # (`6ba6fac9844a`) restored the record to the form that ran and stated, in the
+        # plan doc itself, that "the line is exempted in
+        # `tests/test_entry_point_python_guard.py`'s `_DELIBERATE_BARE_FORM`" — a
+        # sentence that was FALSE on `main` until this key returned.
+        #
+        # Both PRs were correct at their own head and red together, which is why the
+        # key is neither a mistake nor a re-declaration:
+        #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
+        #     this key matching no live line;
+        #   · `#11757` deleted the then-dead key — correctly, at a head that predated
+        #     `#11759` and merged ~3 min after it;
+        #   · `#11759` restored the `python3` record relying on a key `#11757` had
+        #     already removed.
+        # The merged tree therefore advertised the refused form with nothing exempting
+        # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
+        # `origin/main` at `900d4aafc61a`, with no branch content involved.
+        #
+        # Keeping the record verbatim is `#11759`'s recorded decision (THE BOUNDARY
+        # above: rewriting a RECORD falsifies evidence provenance), so the key returns
+        # rather than the line being rewritten — the resolution that satisfies both
+        # PRs' stated rules instead of reversing either.
+        (
+            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
+            "$ python3 tools/capstone_preregistration_check.py --dir "
+            "docs/evidence/7949-capstone \\",
+        ),
     }
 )
 
@@ -622,8 +667,25 @@ def test_the_record_exemptions_all_still_match_a_live_line():
     line is re-flagged, but worse, an entry can also linger for text that no
     longer exists while the occurrence it was written for is now uncovered.
     Assert every key still matches a line in its file, so the set cannot rot.
+
+    NON-VACUITY (#11744): matching a live line is not enough for an entry to do
+    any WORK. An entry is INERT — it exempts nothing and reads as though the
+    sweep permits something that it does not — when its file is outside the
+    swept roots (moved), when its suffix is one the walk skips, when the sweep's
+    `git ls-files` intersection does not carry it (untracked), when
+    `_BARE_INVOCATION` never matches the line (a stray key), or when EVERY
+    invocation on it is already a `RUNTIME_39`/`UNGUARDABLE` carve-out
+    (redundant). An inert entry is the same defect as a dead one, one level
+    quieter: the set reads as though it guards every record it lists while it
+    permits fewer, and nothing else in the file would notice.
+
+    The carve-out branch tests EVERY match, not the first: the sweep exempts the
+    whole LINE, so an entry that exempts a second, guarded invocation on the same
+    line is doing real work even when the first invocation is a carve-out (#11753
+    review). Reporting that entry inert would be a false red.
     """
     dead: list[str] = []
+    tracked = set(_git_lines("ls-files", "--", *DOC_SWEPT_ROOTS))
     for rel, line in _DELIBERATE_BARE_FORM:
         path = ROOT / rel
         if not path.is_file():
@@ -631,9 +693,148 @@ def test_the_record_exemptions_all_still_match_a_live_line():
             continue
         if line not in {ln.strip() for ln in path.read_text().splitlines()}:
             dead.append(f"{rel} :: {line[:70]}")
+            continue
+        #: Test containment the way the sweep WALKS it: `rglob` from each root
+        #: yields DESCENDANTS only — never the root itself — so "under root X"
+        #: means `rel` starts with `X/`, at any nesting depth, and NOT `rel == X`.
+        #: That exclusion is load-bearing: a root that is a FILE is walked by
+        #: nothing, so an entry keyed on it would exempt nothing while passing
+        #: every other branch here. A first-segment test
+        #: (`rel.split("/", 1)[0] == root`) agrees only while every root is a
+        #: single path segment, and silently false-reds a nested root's entries
+        #: (`#11753` review rounds 3-4).
+        if not any(
+            rel.startswith(root.rstrip("/") + "/") for root in DOC_SWEPT_ROOTS
+        ):
+            dead.append(f"{rel} (outside the swept roots {DOC_SWEPT_ROOTS})")
+        elif path.suffix not in _DOC_SUFFIXES:
+            dead.append(f"{rel} (suffix {path.suffix!r} is not walked)")
+        elif rel not in tracked:
+            dead.append(f"{rel} (untracked: the sweep skips it via `git ls-files`)")
+        else:
+            matches = list(_BARE_INVOCATION.finditer(line))
+            if not matches:
+                dead.append(f"{rel} :: {line[:70]} (not a bare invocation)")
+            elif all(
+                m.group(1) and f"{m.group(1)}/{m.group(2)}" in _CARVE_OUTS
+                for m in matches
+            ):
+                dead.append(f"{rel} :: {line[:70]} (already a carve-out)")
     assert not dead, (
-        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, so "
-        f"their exemption is dead and the occurrence may be uncovered: {dead}"
+        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, or "
+        f"match one that their exemption does nothing for: {dead}"
+    )
+
+
+_CARDINALITY_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+}
+
+
+def _comment_region_above(prefix: str) -> list[str]:
+    """The comment region immediately above the text `prefix` ends at.
+
+    Collected from the bottom up so the region is bounded by the first line that is
+    NOT part of a comment block: a non-blank line that does not start with `#`. That
+    bound is what keeps the "exactly one occurrence" assertion below meaningful — a
+    copy of the sentence higher in the file, past the code that ends the block, is
+    outside the region and cannot satisfy the pin.
+
+    Reading the REGION rather than the last contiguous run of `#:` lines is the
+    round-2 correction (#11754 review). A blank line, or a bare `#` separator,
+    anywhere in the block is a re-wrap of the paragraph — not a deletion of the
+    sentence — but scoping to a contiguous `#:` run made every break INSIDE the ~28
+    lines below the sentence read as *"the comment block no longer carries the
+    sentence"*, across a sentence that was present and correct. That message invites
+    the author to reword the pattern, i.e. to weaken the pin, so a false red here is
+    the failure mode this guard exists to avoid.
+    """
+    region: list[str] = []
+    for line in reversed(prefix.splitlines()):
+        if line.strip() and not line.lstrip().startswith("#"):
+            break
+        region.append(line)
+    return list(reversed(region))
+
+
+def _cardinality_of(token: str) -> int | None:
+    """A cardinality token as `int` — a word from `_CARDINALITY_WORDS`, or digits.
+
+    Digits are accepted so that a set which outgrows the word table is not reported
+    as *"the sentence is gone"* when the sentence is present and correct (#11754
+    review, finding 4: an 11-member set with prose `eleven` reddened with a message
+    telling the author to restore a sentence they had written).
+    """
+    return int(token) if token.isdigit() else _CARDINALITY_WORDS.get(token)
+
+
+def test_the_record_exemption_prose_counts_the_set_it_describes():
+    """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
+    in prose — *"…stay `uv run python` while the <N> entries below do not"*.
+    Nothing pinned that number, so it can drift silently: the set gains or loses an
+    entry while the prose goes on describing the set it used to be. That is not
+    hypothetical — it is what this test was written for, and it is also why the
+    prose said "four" over a set whose fourth member had gone dead (#11756 rewrote
+    the doc line at source rather than keep the exemption).
+
+    The set's own description is the only cardinality a reader has, so it must
+    describe THIS set — the same non-rot rule
+    `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
+    # The prose is the COMMENT REGION immediately above the definition, not every
+    # `#:` line in the file. The scoping is load-bearing: over the whole file head
+    # the search below takes the LEFTMOST match, so a stray earlier copy of the
+    # sentence satisfied this pin while the block that actually describes the set
+    # drifted (measured, #11754 review: decoy sentence above + prose `three` over a
+    # four-member set PASSED).
+    prose = " ".join(
+        re.sub(r"\s+", " ", line[2:]).strip()
+        for line in _comment_region_above(before)
+        if line.startswith("#:") and line[2:].strip()
+    )
+    matches = re.findall(r"while the ([a-z]+|\d+) entries below do not", prose)
+    assert matches, (
+        "the `_DELIBERATE_BARE_FORM` comment block no longer carries the sentence "
+        "'while the <N> entries below do not'. This pin must NOT rot into passing "
+        "on absence, because that sentence is what tells a reader how big the "
+        "exemption set is. If you REWORDED it, update the pattern in this test to "
+        "match the new wording — do not drop the sentence."
+    )
+    # EXACTLY one. Scoping to the block above is not enough on its own: a second
+    # copy of the sentence inside the SAME block satisfies a leftmost `re.search`
+    # while the real one drifts, which is a false PASS of the property this test
+    # exists for (measured, #11754 review finding 3). Two statements of a set's
+    # size is also just ambiguous prose, so requiring one is honest on its own.
+    assert len(matches) == 1, (
+        "the `_DELIBERATE_BARE_FORM` comment states its cardinality "
+        f"{len(matches)} times ({matches}) — the sentence must appear exactly "
+        "once, so that a stale copy cannot satisfy this pin while the sentence "
+        "describing the set says something else."
+    )
+    stated = _cardinality_of(matches[0])
+    assert stated is not None, (
+        f"the `_DELIBERATE_BARE_FORM` comment says 'while the {matches[0]} "
+        "entries below do not', which this test cannot read as a number. Write it "
+        "as a word from `_CARDINALITY_WORDS` or as digits."
+    )
+    assert stated == len(_DELIBERATE_BARE_FORM), (
+        f"the `_DELIBERATE_BARE_FORM` comment says '{matches[0]}' ({stated}) "
+        f"but the set holds {len(_DELIBERATE_BARE_FORM)} entries — the prose "
+        "describes a set that no longer exists. Update the word when you add or "
+        "remove an entry."
     )
 
 
@@ -669,8 +870,8 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     it).
     """
     offenders: list[str] = []
-    tracked = set(_git_lines("ls-files", "--", *CORPUS_DIRS, "docs"))
-    for base in (*CORPUS_DIRS, "docs"):
+    tracked = set(_git_lines("ls-files", "--", *DOC_SWEPT_ROOTS))
+    for base in DOC_SWEPT_ROOTS:
         for path in sorted((ROOT / base).rglob("*")):
             if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
                 continue
@@ -1295,3 +1496,70 @@ def test_the_site_icon_guard_names_an_invocation_that_actually_resolves(
         "the bare path must stay a USAGE error (argparse, `--source` is "
         f"required) — if it stops being one, this guard's advice is no longer the "
         f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+
+
+def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
+        monkeypatch, capsys):
+    """#11744 review (round 3) — the same unpinned-claim defect, one tool over.
+
+    `tools/embedding_residual_scan.py` gained the `#5128` guard with a refusal
+    naming the BARE path, which does not resolve: the tool takes `--org`,
+    `--graph-id` and `--graph-name` as `required=True`, so the bare form exits 2
+    on argparse's own usage error. The census pins only that an invocation is
+    named at all (`test_guard_refuses_an_old_interpreter_and_passes_the_floor`
+    asserts the `uv run python <path>` prefix), and that prefix is satisfied by
+    BOTH the bare path and the `--help` form — so reverting this message to the
+    bare path leaves the whole census green, which is exactly the shape
+    `test_the_site_icon_guard_names_an_invocation_that_actually_resolves`
+    (#11507 round 7) was written for.
+
+    Pinned by PROVING the claim rather than by reading the string alone: the form
+    the refusal names must resolve, and the bare path must NOT.
+
+    ⚠️ `rc == 2` alone does not measure "a USAGE error" here: `2` is also this
+    tool's documented NO-VERDICT (`tortoise/embedding_residual_scan.py:78`
+    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making all
+    three required arguments optional would leave the bare form parsing, refusing
+    the graph half, and still exiting 2 — green on the code while the property the
+    message states is false. (One of the three alone is not enough: the other two
+    still fail at parse time, which is why the assert looks redundant until you
+    read the tool's exit contract.) The CAUSE is pinned too (`#11744` review,
+    round 4).
+    """
+    path = (Path(__file__).resolve().parents[1]
+            / "tools" / "embedding_residual_scan.py")
+    guard = _guard_or_fail(path)
+    module = ast.Module(body=[guard], type_ignores=[])
+    ast.fix_missing_locations(module)
+    code = compile(module, _rel(path), "exec")
+
+    monkeypatch.setattr(sys, "version_info", (3, 11, 9))
+    with pytest.raises(SystemExit) as refusal:
+        exec(code, {"__name__": "__main__", "sys": sys})
+    # `raise SystemExit(<str>)` carries the message on the exception, not on
+    # stdout/stderr — the census reads it the same way (`str(refusal.value)`).
+    captured = capsys.readouterr()
+    message = str(refusal.value) + captured.out + captured.err
+
+    assert "tools/embedding_residual_scan.py --help" in message, (
+        "the refusal must name the `--help` form, which needs no `--org` / "
+        f"`--graph-id` / `--graph-name` token: {message!r}")
+
+    resolved = subprocess.run([sys.executable, str(path), "--help"],
+                              capture_output=True, text=True)
+    assert resolved.returncode == 0, (
+        "the invocation the refusal names must resolve; it exited "
+        f"{resolved.returncode}: {resolved.stderr[-400:]!r}")
+    bare = subprocess.run([sys.executable, str(path)],
+                          capture_output=True, text=True)
+    assert bare.returncode == 2, (
+        "the bare path must stay a USAGE error (argparse, `--org` is "
+        f"required) — if it stops being one, this guard's advice is no longer the "
+        f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+    # `2` is not unique to argparse on this tool (it is also `EXIT_UNAVAILABLE`),
+    # so the CODE above cannot distinguish "usage error" from "a store could not
+    # be read". Pin argparse's own text, which only the missing-token path emits.
+    assert "the following arguments are required" in bare.stderr, (
+        "the bare path exited 2, but not on argparse's missing-token error — `2` "
+        "is also this tool's NO-VERDICT exit, so the code alone does not prove "
+        f"the bare path is unusable: {bare.stderr[-300:]!r}")

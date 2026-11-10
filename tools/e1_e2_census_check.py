@@ -33,8 +33,28 @@ the measured bytes when one is given), and a denominator reconciled with the sco
 arm's own ``denominator=``. A SCORED log must carry a ``MATCHED`` binding, and a
 ``MATCHED`` binding must carry no refusal reason, so a refusal relabelled
 ``MATCHED`` is a finding rather than a verdict; a floor the binding could not
-evaluate is printed on ``floor_unconsumed=`` and must be the reason it refused,
+classify is printed on ``floor_unconsumed=`` and must be the reason it refused,
 because a silently dropped floor is a bar its author did not write.
+
+⚠️ A floor is only DROPPED if it is unaccounted for (#11689). V15 requires every
+declared floor to land in exactly one bucket — ``floors_owned=`` (a row this probe
+scores, so the floor is CHECKED, with its declared and measured sides both on the
+line), ``floor_skipped=`` (a row another instrument scores, printed as
+``key:CRITERION`` so the skip is declared instead of silent), or
+``floor_unconsumed=`` (unclassified, and then it is the refusal). The old shape had
+one bucket, so a floor on ANOTHER criterion's row voided the run — a probe that
+refuses everything enforces nothing.
+
+⚠️ What the LOG side cannot do, said plainly so the green is not read as more than
+it is: V15 requires all six floor sides on a scored binding line (two bucket names
+and the declared/measured pair for each owned floor), so the line must be complete
+and internally consistent — but `floors_owned=` is the probe's OWN statement. A log
+carries no copy of `denominator_floors`, so a hand-edited log that claims it owned
+fewer floors, blanks the two declared sides and keeps `objects=` yields NO V15
+finding. ⛔ Nothing in the tree closes that: `check_machine_record` (in
+``tools/capstone_preregistration_check.py``) compares the RECORD with its
+``pins.denominator_floors`` and never opens a log. It is an OPEN, stated residual —
+not one this module can delegate.
 
 Printing is not enough on its own: every finding below fails the run, because a
 log that omits its denominator is exactly the artifact this epic exists to refuse.
@@ -83,6 +103,10 @@ DROP_POINT_LINE = re.compile(
     r"^arm=(?P<arm>[a-z0-9-]+) dropped kind=point content=(?P<content>.*) "
     r"cause=(?P<cause>\S*)\s+values=(?P<values>\[.*\])$")
 FUSED_LINE = re.compile(r"^e2-atomic fused content=.* cause=(?P<cause>\S+)$")
+#: The floors THIS probe scores and therefore must COMPARE (#11689). Stated here
+#: independently of the probe's own `OWNED_FLOORS`: a gate that reads the list it
+#: is checking cannot refuse a log whose list was edited.
+OWNED_KEYS = ("e1_objects", "e1_min_before_share", "e2b_surviving_units")
 CRITERIA = ("e1", "e1-control", "e2-state", "e2-atomic before=")
 VERDICTS = {"PASS", "FAIL", "UNPREREGISTERED"}
 
@@ -107,6 +131,78 @@ REMOVED_NAMES_LINE = re.compile(r"removed_names=(?P<names>\[.*\])\s+note=")
 #: The marker ``apply_vet`` Rule 2 emits once per downgraded discard. It is the
 #: only place a downgrade is named, so it is what ``vet-downgrades count=`` counts.
 KEPT_MARKER = "kept (Layer-1 referential integrity)"
+
+
+def _num(value: object) -> float | int | None:
+    """The log field as a comparable number, or ``None`` when it is not one.
+
+    ``n/a`` (the probe's word for "no floor declared") and ``""`` (absent) are
+    NOT numbers, and neither is a JSON-quoted string: a helper that accepted them
+    would let an unreadable floor read as a met one, which is the permissive read
+    ``_declared_floor`` was fixed to refuse on the probe's side (#9513 review P2).
+
+    MAGNITUDE-SAFE (#11689 review round 7): a floor whose decimal text exceeds
+    float range — ``10 ** 400`` — is perfectly readable to the probe, which compares
+    ints, so routing it through ``float()`` made the GATE reject the probe's own
+    correct refusal as "no readable pair". Integral text outside float range is read
+    as an ``int``; only text that is neither finite nor integral is ``None``.
+    """
+    text = str(value).strip()
+    if not text or text == "n/a":
+        return None
+    try:
+        number = float(text)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if math.isfinite(number):
+        return number
+    try:
+        return int(text)
+    except (TypeError, ValueError):
+        return None
+
+
+def _is_number(value: object) -> bool:
+    """Is this log field a plain number this gate can compare?"""
+    return _num(value) is not None
+
+
+#: Half the resolution of ``before_share=``, which ``_fmt`` prints at 6 dp. A printed
+#: share is therefore uncertain by ±5e-7, and that — not a round 5e-6 — is the band
+#: every V15 share rule may use (#11689 review rounds 11 and 12). Two shapes:
+#: the floor rules compare ONE printed value against an EXACT declared floor, and the
+#: arm anchor compares two prints of the SAME census float (``_fmt(cen['share'])`` on
+#: the arm line, ``before_c["share"]`` on the binding), so a legitimate log's two sides
+#: are identical strings and the band is headroom for float parsing — not room for
+#: them to disagree. A 5e-6 tolerance there let a binding line drift four printed steps
+#: off the run's value while the gate still called it GREEN.
+_SHARE_PRINT_BAND = 5e-7
+
+
+def _below_floor_beyond_rounding(measured: object, floor: object) -> bool:
+    """Is ``measured`` under ``floor`` by MORE than one print-ulp?
+
+    ``before_share=`` prints via ``_fmt`` (6 dp) while the probe compares at full
+    precision, so a value that is genuinely below its floor can print equal to it, or
+    a full ulp above it. The band is one print half-width (``_SHARE_PRINT_BAND``) and
+    is used in BOTH rules so the two are polarity-consistent (#11689 review round 8,
+    corrected in round 11 — the first revision used 5e-6, ten times the printing
+    resolution, which swallowed real below-floor gaps and still red the ulp-above
+    case).
+
+    Subtracted rather than added to a tolerance because ``_num`` deliberately returns
+    an ``int`` for a magnitude outside float range — `10 ** 400` (round 7) — and
+    ``int + 5e-7`` raises ``OverflowError``. Every comparison here is exact.
+    """
+    m, f = _num(measured), _num(floor)
+    if m is None or f is None or not m < f:
+        return False
+    if isinstance(m, int) and isinstance(f, int):
+        return (f - m) > _SHARE_PRINT_BAND   # exact integer arithmetic
+    try:
+        return (f - m) > _SHARE_PRINT_BAND
+    except OverflowError:                    # one side is outside float range,
+        return True                          #  so the gap is far beyond any rounding
 
 
 class Log:
@@ -189,6 +285,10 @@ def check(text: str) -> tuple[list[str], dict]:
     # ── V3 + V4: numerators, denominators, and their equality ─────────────
     shares: dict[str, float] = {}
     totals: dict[str, int] = {}
+    #: E2b's population per arm — the ANCHOR for the binding's `surviving_units=`,
+    #: and the same quantity `capstone_measure`/`e1_e2_scores` compare that floor
+    #: against (one frozen key, one denominator — #11689 review).
+    atomic_pts: dict[str, int] = {}
     pre_shas: dict[str, str] = {}
     for arm in arms:
         line = next((ln for ln in log.find(f"arm={arm} metric=objects ")), None)
@@ -217,6 +317,24 @@ def check(text: str) -> tuple[list[str], dict]:
                            if "preg_embed_sha=" in ln), None))
         if pre.get("preg_embed_sha"):
             pre_shas[arm] = pre["preg_embed_sha"]
+        # E2b's denominator per arm — the ANCHOR for the binding's
+        # `surviving_units=`. Unparseable is a finding rather than a skip: an
+        # unreadable population is not an absent one (same rule as `objects`).
+        #: FIRST match, like every other reader of the arm data (`shares`/`totals`
+        #: at :294 and V7's `arm_metric` at :461) — `Log.one()` returns the LAST.
+        #: #11689 review round 9 (T4): an appended duplicate arm line re-anchored
+        #: the binding's `surviving_units=` to a population the run did not
+        #: produce, so a run the E2b row refuses certified GREEN.
+        ap_line = next((ln for ln in log.find(f"arm={arm} metric=atomic_points ")), None)
+        if ap_line is not None:
+            ap = log.kv(ap_line).get("atomic", "")
+            if ap.isdigit():
+                atomic_pts[arm] = int(ap)
+            else:
+                findings.append(
+                    f"[V3] arm {arm}: metric=atomic_points atomic={ap!r} is "
+                    f"not a count — E2b's denominator cannot be reconciled")
+    state["atomic_points"] = atomic_pts
     state["shares"] = shares
 
     # ── V3 (cont.): the `e1` line reconciles with the arm lines ───────────
@@ -861,6 +979,34 @@ def check(text: str) -> tuple[list[str], dict]:
     # (#9076 — the numerator/denominator mismatch the issue refuses one level up).
     bind = log.kv(log.one("prereg-binding "))
     if bind:
+        # The DECLARED side is read from the RAW token, never the quote-stripped
+        # value (#11689 review round 10). A record that declares the STRING `"n/a"`
+        # (or `""`) prints it QUOTED by `_floor_number`, and `kv` strips the quotes,
+        # so a stripped value cannot tell "declared something unreadable" from
+        # "declared nothing" — the same collapse rounds 4–6 fixed for a declared
+        # `null`, one token over. An honest `floor-unreadable` refusal is then red for
+        # a contradiction it does not contain.
+        binding_raw = {m.group("key"): m.group("val")
+                       for m in KV.finditer(log.one("prereg-binding ") or "")}
+
+        def _declared(field: str) -> bool:
+            """Did the record DECLARE this floor, whatever its value?"""
+            return binding_raw.get(field, "") not in ("", "n/a")
+
+        def _raw(field: str) -> float | int | None:
+            """The field as a comparable number, read from its RAW token.
+
+            ``Log.kv`` strips the surrounding quotes, so a declared-but-unreadable
+            floor that the probe printed as ``"0.2"`` reaches ``bind`` as the bare
+            ``0.2`` and reads as a MET floor — the exact permissive read ``_num``'s
+            own docstring promises to refuse, defeated at every call site that read
+            the stripped value (#11725 review P1). The raw token is the only place
+            the quoting survives, so every rule that treats a binding field as a
+            NUMBER — the owned-floor mirror, the floor arithmetic, the denominator
+            pair — reads through here.
+            """
+            return _num(binding_raw.get(field, ""))
+
         statuses = ("MATCHED", "MISMATCH", "UNPINNED", "BELOW_FLOOR",
                     "UNREADABLE")
         if bind.get("status") not in statuses:
@@ -888,6 +1034,152 @@ def check(text: str) -> tuple[list[str], dict]:
                 f"[V15] the binding checks objects={bind['objects']} but the "
                 f"scored arm {scored} measured {totals[scored]} — the floor was "
                 f"checked against a denominator this run did not produce")
+        # ── the FLOOR ACCOUNTING (#11689) ──────────────────────────────────
+        # Every declared `denominator_floors` key must land in exactly one bucket:
+        # OWNED (this probe scores the row, so it CHECKS the floor), SKIPPED with the
+        # criterion that owns it, or UNCONSUMED (and then it is the reason the
+        # binding refused). The buckets exist because the old shape had one bucket —
+        # "consumed" — so a floor on another row's criterion voided every run; a skip
+        # that is not declared and owned by somebody is the silent-drop #9513 review
+        # P2 closed, so the accounting is what makes the scoping auditable instead of
+        # silent.
+        owned_keys = [k for k in bind.get("floors_owned", "").split(",")
+                      if k not in ("", "n/a")]
+        skipped_entries = [k for k in bind.get("floor_skipped", "").split(",")
+                           if k not in ("", "n/a")]
+        unconsumed_keys = [k for k in bind.get("floor_unconsumed", "").split(",")
+                           if k not in ("", "n/a")]
+        for entry in skipped_entries:
+            key, _sep, owner = entry.partition(":")
+            if not key or not owner.strip():
+                findings.append(
+                    f"[V15] floor_skipped entry {entry!r} names no owning "
+                    f"criterion — a floor skipped without its row is a floor "
+                    f"dropped, and the reader cannot tell which instrument does "
+                    f"check it")
+            # …and a SKIP may not be used to shed a floor THIS probe owns. The
+            # bucket exists for rows another instrument scores; delegating an owned
+            # key to a made-up owner is how a scored log could certify a run whose
+            # owned floors were never compared — the same "compared it and denied
+            # owning it" class the MATCHED mirror closes for `floors_owned=`
+            # (#11689 review round 6).
+            if key in OWNED_KEYS:
+                findings.append(
+                    f"[V15] floor_skipped={entry} skips {key!r}, which is a floor "
+                    f"THIS probe owns and is expected to compare — an owned floor "
+                    f"may not be delegated to another row")
+        buckets: dict[str, list[str]] = {}
+        for label, keys in (("floors_owned", owned_keys),
+                            ("floor_skipped", [e.partition(":")[0]
+                                               for e in skipped_entries]),
+                            ("floor_unconsumed", unconsumed_keys)):
+            for key in keys:
+                buckets.setdefault(key, []).append(label)
+        for key, where in sorted(buckets.items()):
+            if len(where) > 1:
+                findings.append(
+                    f"[V15] the binding puts floor {key!r} in more than one "
+                    f"bucket ({', '.join(where)}) — a key that is owned and "
+                    f"skipped (or skipped and refused) is two claims about one "
+                    f"floor")
+        # The MEASURED side of the two newly owned floors must be anchored to the
+        # ARM lines, not to the binding line itself (#11689 review P1). Comparing
+        # `declared_before_floor` against a `before_share` printed on the SAME line
+        # is self-consistency: a hand-edited binding could relabel a genuinely
+        # below-floor run `MATCHED` while the arm lines still printed the real
+        # numbers. `objects` has had this anchor since V15 was written
+        # (`bind['objects']` vs the scored arm's denominator); the share and the
+        # surviving count get the same one. The share anchor's two sides are prints of
+        # the SAME census float, so they are identical in an honest log — the band is
+        # headroom for float parsing, NOT room to disagree (#11689 review round 12: at
+        # `abs_tol=5e-6` a binding line could drift four printed steps off the run's
+        # share and still be certified GREEN).
+        if _is_number(bind.get("before_share", "")) and before_arm in shares \
+                and not math.isclose(float(bind["before_share"]),
+                                     shares[before_arm], rel_tol=0,
+                                     abs_tol=_SHARE_PRINT_BAND):
+            findings.append(
+                f"[V15] the binding checks before_share="
+                f"{bind.get('before_share')} but the {before_arm} arm measured "
+                f"share={shares[before_arm]} — the floor was checked against a "
+                f"control-arm share this run did not produce")
+        if bind.get("surviving_units", "") not in ("", "n/a"):
+            if not bind.get("surviving_units", "").isdigit():
+                findings.append(
+                    f"[V15] the binding states surviving_units="
+                    f"{bind.get('surviving_units')!r}, not a count — a population "
+                    f"the gate cannot read is refused, not skipped")
+            elif scored not in atomic_pts:
+                findings.append(
+                    "[V15] the binding states surviving_units= but the scored arm "
+                    "prints no metric=atomic_points line — the measured side "
+                    "of E2b's floor is anchored to nothing, so a hand-edited "
+                    "binding could satisfy it on its own word")
+            elif int(bind["surviving_units"]) != atomic_pts[scored]:
+                findings.append(
+                    f"[V15] the binding checks surviving_units="
+                    f"{bind['surviving_units']} but the scored arm {scored} "
+                    f"measured {atomic_pts[scored]} atomic Points — the floor was "
+                    f"checked against a population this run did not produce")
+        # A floor that was COMPARED is an owned floor: `declared_*` carries a number
+        # only when the probe read that floor, so a binding that prints one without
+        # claiming the key is a comparison it then denies making.
+        for floor_key, declared_field in (
+                ("e1_objects", "declared_floor"),
+                ("e1_min_before_share", "declared_before_floor"),
+                ("e2b_surviving_units", "declared_surviving_floor")):
+            if _is_number(bind.get(declared_field, "")) and \
+                    floor_key not in owned_keys:
+                findings.append(
+                    f"[V15] the binding checked {floor_key} "
+                    f"({declared_field}={bind.get(declared_field)}) but does not "
+                    f"name it on floors_owned= — a floor it compared and then "
+                    f"denied owning is not auditable")
+        # Status-independent: an OWNED floor is a floor the record DECLARES — that
+        # is how `floors_owned=` is built — so its declared side can never print
+        # `n/a`. Owned + `n/a` is the log contradicting itself, and it is exactly
+        # how a declared JSON `null` floor used to hide (`n/a` covered both "none
+        # declared" and "declared but unreadable") — #11689 review round 5.
+        # (A refusal DOES legitimately print owned keys whose declared value was
+        # declared-but-unreadable: it prints the raw value it could not read. That
+        # value is QUOTED when it is a string, so a declared `"n/a"` or `""` reaches
+        # `kv` as the bare sentinel — which is why `_declared()` reads the RAW token
+        # above instead of the stripped value (#11689 review round 10). Round 4
+        # scoped this loop to MATCHED on the belief that a refusal prints `n/a`
+        # there; round 5 removed that scope and round 6 deleted the stale comment
+        # that still claimed it.)
+        for key in owned_keys:
+            field = {"e1_objects": "declared_floor",
+                     "e1_min_before_share": "declared_before_floor",
+                     "e2b_surviving_units": "declared_surviving_floor"}.get(key)
+            if field and not _declared(field):
+                findings.append(
+                    f"[V15] the binding claims floors_owned={key} but prints "
+                    f"{field}=n/a — an owned floor the record did not declare, so "
+                    f"nothing was compared against it")
+        if bind.get("status") == "MATCHED":
+            # …and the MIRROR of the rule above, ON A MATCHED BINDING: a key it
+            # CLAIMS to own must be a key this gate can locate a declared/measured
+            # pair for. `floors_owned=` was otherwise trusted word-for-word, so a
+            # log could claim ownership of a floor no code reads — the label coupled
+            # to the check by convention only, which is the same class of fail-open
+            # the anchors above close (#11689 review round 4). It is scoped to
+            # MATCHED because a REFUSAL has no measured side to reconcile with: the
+            # status-independent rule above already covers the `n/a` contradiction.
+            known = {"e1_objects": "declared_floor",
+                     "e1_min_before_share": "declared_before_floor",
+                     "e2b_surviving_units": "declared_surviving_floor"}
+            for key in owned_keys:
+                if key not in known:
+                    findings.append(
+                        f"[V15] the binding claims floors_owned={key} but this gate "
+                        f"knows no declared/measured pair for it — an 'owned' floor "
+                        f"nothing compares is a floor that was not checked")
+                elif _raw(known[key]) is None:
+                    findings.append(
+                        f"[V15] the binding claims floors_owned={key} but prints "
+                        f"{known[key]}={binding_raw.get(known[key], '')!r}, not a "
+                        f"bare number — it names a floor it never read")
         if bind.get("status") == "MATCHED":
             # A MATCHED binding is the only shape a scored log may carry, so it
             # must carry NO refusal reason — otherwise a log could print a
@@ -897,7 +1189,13 @@ def check(text: str) -> tuple[list[str], dict]:
                 findings.append(
                     f"[V15] the binding is MATCHED but states reason="
                     f"{bind.get('reason')!r} — a matched bar has nothing to refuse")
-            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
+            # Read from the RAW tokens (#11725 review): a quoted denominator or floor
+            # — what the probe prints for a value it could not read — reaches `bind`
+            # quote-stripped, so `isdigit()` on the stripped value accepted
+            # `declared_floor="20"` beside an unreadable floor and certified GREEN.
+            # `n/a` (no floor stated) stays legal; quoting is not.
+            nums = (binding_raw.get("objects", "").strip(),
+                    binding_raw.get("declared_floor", "").strip())
             # MATCHED means "a pin EXISTS, it agrees, and no floor is violated"
             # (the probe's own contract), so a MATCHED line that names no pin at
             # all is the UNPINNED case RELABELLED — a relabel, not an absent
@@ -923,25 +1221,6 @@ def check(text: str) -> tuple[list[str], dict]:
             # MATCHED means "the pin agrees", and the probe compares a declared
             # sha ALONE. The asymmetry is stated here so it is not read as an
             # omission (#9513 review P2).
-            # The floors the binding REFUSED because it cannot evaluate them must
-            # be named on the line and be the reason it refused: a refusal that
-            # does not say which floor it dropped is not auditable, and a line that
-            # names dropped floors while claiming a clean `reason=n/a` is the same
-            # silent-drop shape one field over (#9513 review P2).
-            dropped = bind.get("floor_unconsumed", "")
-            refused_for_dropped = "floor-unconsumed" in [
-                r for r in bind.get("reason", "").split(",")]
-            if refused_for_dropped and dropped in ("", "n/a"):
-                findings.append(
-                    f"[V15] the binding refuses for floor-unconsumed but names no "
-                    f"floor it dropped (floor_unconsumed={dropped!r}) — the "
-                    f"refusal is then unauditable")
-            elif dropped not in ("", "n/a") and not refused_for_dropped:
-                findings.append(
-                    f"[V15] the binding names floors it did not evaluate "
-                    f"(floor_unconsumed={dropped}) while stating "
-                    f"reason={bind.get('reason')!r} — a dropped floor is a bar "
-                    f"its author did not write")
             # The floor arithmetic is NOT gated on `isdigit()` (#9513 review P2):
             # skipping the comparison whenever a number cannot be read is the
             # permissive read `_declared_floor` was fixed to refuse in the probe,
@@ -965,19 +1244,149 @@ def check(text: str) -> tuple[list[str], dict]:
                     f"[V15] the binding is MATCHED but declares_floor={nums[1]!r} "
                     f"is neither a plain integer nor `n/a` — present but "
                     f"unreadable is not absent")
+            # The OTHER two owned floors, in the same both-directions shape: a
+            # MATCHED bar cannot sit under a floor it declares, and it cannot claim
+            # to have met a floor whose measured side it never printed (#11689).
+            # Both sides are read from their RAW tokens (#11725 review): `kv` strips
+            # quotes, so a forged or unreadable value — the probe prints a value it
+            # could not read QUOTED — would otherwise be fed to the arithmetic as a
+            # number, letting `declared_before_floor="0.2"` read as a met floor and
+            # skipping the below-floor check the pair exists to run.
+            for floor_field, measured_field in (
+                    ("declared_before_floor", "before_share"),
+                    ("declared_surviving_floor", "surviving_units")):
+                floor_value = _raw(floor_field)
+                measured = _raw(measured_field)
+                if floor_value is None:
+                    if not _declared(floor_field):
+                        continue          # no floor declared for this key
+                    findings.append(
+                        f"[V15] the binding is MATCHED but {floor_field}="
+                        f"{binding_raw.get(floor_field, '')!r} is not a bare "
+                        f"number — present but unreadable is not absent")
+                elif measured is None:
+                    findings.append(
+                        f"[V15] the binding is MATCHED and declares "
+                        f"{floor_field}="
+                        f"{binding_raw.get(floor_field, '').strip()} but states "
+                        f"no readable {measured_field}="
+                        f"{binding_raw.get(measured_field, '')!r} — a floor met "
+                        f"against a quantity the log never printed is not "
+                        f"reconciled")
+                elif _below_floor_beyond_rounding(measured, floor_value):
+                    # The band is one print half-width (`_SHARE_PRINT_BAND`), NOT the
+                    # arm anchor's 5e-6: the declared side is exact and only the
+                    # measured side is rounded by `_fmt` (#11689 review round 11 — the
+                    # first revision reused the anchor's tolerance, which is ten times
+                    # the printing resolution and swallowed real below-floor gaps).
+                    findings.append(
+                        f"[V15] the binding is MATCHED while "
+                        f"{measured_field}="
+                        f"{binding_raw.get(measured_field, '').strip()} is under "
+                        f"{floor_field}="
+                        f"{binding_raw.get(floor_field, '').strip()} — a "
+                        f"below-floor run cannot be bound-ready")
+        # The floors the binding REFUSED because it cannot evaluate them must
+        # be named on the line and be the reason it refused: a refusal that
+        # does not say which floor it dropped is not auditable, and a line that
+        # names dropped floors while claiming a clean `reason=n/a` is the same
+        # silent-drop shape one field over (#9513 review P2).
+        dropped = bind.get("floor_unconsumed", "")
+        refused_for_dropped = "floor-unconsumed" in [
+            r for r in bind.get("reason", "").split(",")]
+        if refused_for_dropped and dropped in ("", "n/a"):
+            findings.append(
+                f"[V15] the binding refuses for floor-unconsumed but names no "
+                f"floor it dropped (floor_unconsumed={dropped!r}) — the "
+                f"refusal is then unauditable")
+        elif dropped not in ("", "n/a") and not refused_for_dropped:
+            findings.append(
+                f"[V15] the binding names floors it did not evaluate "
+                f"(floor_unconsumed={dropped}) while stating "
+                f"reason={bind.get('reason')!r} — a dropped floor is a bar "
+                f"its author did not write")
         if bind.get("status") == "UNREADABLE" and \
                 "floor-unreadable" not in bind.get("reason", ""):
             findings.append("[V15] an UNREADABLE binding does not attribute it to "
                             "a floor that could not be read")
+        # The status word and the reason list must agree (#11689 review round 8, T3).
+        # `BELOW_FLOOR` is defined as "the corpus agreed and only a floor is under it",
+        # so any other stated cause contradicts the status the log claims — and a
+        # binding that refuses for the floor alone while claiming MISMATCH says the
+        # corpus did not agree when nothing else was wrong. Without these, a
+        # self-contradicting line certified sound.
+        reasons = {r for r in bind.get("reason", "").split(",") if r}
+        if bind.get("status") == "BELOW_FLOOR" and reasons != {"below-floor"}:
+            findings.append(
+                f"[V15] a BELOW_FLOOR binding states reason="
+                f"{bind.get('reason')!r} — BELOW_FLOOR means the corpus agreed and "
+                f"ONLY a floor is under the run, so it cannot carry another refusal "
+                f"cause (that is a MISMATCH)")
+        if bind.get("status") == "MISMATCH" and reasons == {"below-floor"}:
+            findings.append(
+                "[V15] a MISMATCH whose only stated cause is below-floor — a run "
+                "under its floor with an agreeing corpus is BELOW_FLOOR, and the "
+                "status is then the contradiction")
         if bind.get("status") == "BELOW_FLOOR":
-            nums = (bind.get("objects", ""), bind.get("declared_floor", ""))
-            if not all(n.isdigit() for n in nums):
-                findings.append(f"[V15] a below-floor binding states no readable "
-                                f"objects=/declared_floor= ({nums})")
-            elif int(nums[0]) >= int(nums[1]):
+            # Three owned floors can raise a below-floor refusal since #11689, so the
+            # readable pair is required on the floor that FIRED, not on `e1_objects`
+            # alone: a BELOW_FLOOR whose only numbers are readable-but-met (or absent)
+            # is unauditable, and a binding refused on its share floor with
+            # `declared_floor=n/a` is not a contradiction (it declares no Object
+            # floor). The original single-pair rule rejected exactly that legitimate
+            # shape, which is why it is generalised here rather than dropped.
+            pairs = ((bind.get("objects", ""), bind.get("declared_floor", "")),
+                     (bind.get("before_share", ""),
+                      bind.get("declared_before_floor", "")),
+                     (bind.get("surviving_units", ""),
+                      bind.get("declared_surviving_floor", "")))
+            # Magnitude-safe comparison (#11689 review round 7): `float()` turns a
+            # floor like `10 ** 400` into `inf`, which made this rule reject the
+            # probe's own correct refusal as "no readable pair".
+            #
+            # One band, BOTH polarities (#11689 review round 11). `before_share=` is
+            # printed at 6 dp, so a printed value is uncertain by one half-ulp:
+            #   * a MATCHED log whose printed share sits within one ulp BELOW its
+            #     floor may have met it (not red — `_below_floor_beyond_rounding`);
+            #   * a BELOW_FLOOR refusal whose printed share sits within one ulp ABOVE
+            #     its floor may be under it (not red — `m <= f + band` here).
+            # The two count pairs are integers: the probe compares them with a strict
+            # `<`, there is no printing loss, so equality there is provably met and no
+            # band applies.
+            def _under(measured: object, floor: object, *, rounding: bool) -> bool:
+                m, f = _num(measured), _num(floor)
+                if m is None or f is None:
+                    return False
+                if m < f:
+                    return True
+                if not rounding:
+                    return False
+                try:
+                    return m <= f + _SHARE_PRINT_BAND
+                except OverflowError:   # an integer floor outside float range
+                    return False        #  is far from any share ulp
+
+            under = [(measured, floor) for measured, floor, rounding in (
+                        (pairs[0][0], pairs[0][1], False),
+                        (pairs[1][0], pairs[1][1], True),
+                        (pairs[2][0], pairs[2][1], False))
+                     if _under(measured, floor, rounding=rounding)]
+            # ⛔ There is NO exception for an unmeasurable `before_share=` (#11689
+            # review round 9). An earlier revision accepted `before_share=n/a` beside a
+            # declared share floor on the theory that it is the probe's §3.2 output for
+            # a zero-Object control arm. It is not reachable for a log this gate could
+            # otherwise accept: a zero-Object arm prints `share=n/a` on the ARM line
+            # too, which V3 already refuses twice, and the exception had no anchor — so
+            # blanking `before_share=` converted ANY all-pairs-met refusal into an
+            # accepted one. The band above is the only relaxation.
+            if not under:
                 findings.append(
-                    f"[V15] the binding says BELOW_FLOOR but objects={nums[0]} "
-                    f"is not under declared_floor={nums[1]}")
+                    f"[V15] a below-floor binding states no readable "
+                    f"measured/declared floor pair that is actually under its "
+                    f"floor (objects/declared_floor={pairs[0]}, "
+                    f"before_share/declared_before_floor={pairs[1]}, "
+                    f"surviving_units/declared_surviving_floor={pairs[2]}) — the "
+                    f"refusal is then unauditable")
         if bind.get("status") == "MISMATCH" and not (
                 set(bind.get("reason", "").split(","))
                 & {"corpus-sha256", "corpus-path", "below-floor",
@@ -1001,6 +1410,42 @@ def check(text: str) -> tuple[list[str], dict]:
         if result in ("GREEN", "RED") and not bind.get("objects", "").isdigit():
             findings.append("[V15] the binding does not state the denominator "
                             "(objects=) the bar was checked against")
+        if result in ("GREEN", "RED"):
+            # A SCORED log is the one whose bar is load-bearing, so it must show the
+            # floor accounting: which floors it owned (and therefore checked) and
+            # which it deliberately skipped, with the row that owns each. Absent
+            # fields are the pre-#11689 shape, where the skip existed but was not
+            # declared — the exact silence this rule removes.
+            #
+            # The PAIRS are required too, not just the two bucket names, because
+            # `floors_owned=` is the probe's own statement: DELETING the pair fields
+            # is otherwise invisible here — the number->owned mirror cannot fire on
+            # an absent field, and the owned->number mirror cannot fire on a key the
+            # line no longer claims — so a scored log whose owned floors were never
+            # compared read GREEN. The probe's `binding_line` prints all six
+            # unconditionally, so no legitimate scored log is refused by requiring
+            # them (#11689 review round 7).
+            #
+            # ⛔ DELETION, not blanking: a field BLANKED to `n/a` keeps all six keys
+            # and is still accepted — that is the OPEN residual the module docstring
+            # states, pinned by `test_a_blanked_pair_is_the_stated_open_residual`
+            # (#11689 review round 9). This rule must not be read as closing it.
+            for field, why in (
+                    ("floors_owned", "the floors it checked are not declared"),
+                    ("floor_skipped", "the rows it skipped are not declared"),
+                    ("declared_before_floor",
+                     "the share floor's declared side is missing"),
+                    ("before_share",
+                     "the share floor's measured side is missing"),
+                    ("declared_surviving_floor",
+                     "the E2b floor's declared side is missing"),
+                    ("surviving_units",
+                     "the E2b floor's measured side is missing")):
+                if field not in bind:
+                    findings.append(
+                        f"[V15] the scored log's binding carries no {field}= — "
+                        f"{why}, so a floor this criterion owns would be "
+                        f"indistinguishable from one it never declared")
     else:
         declared = log.one("prereg_declared=")
         if result in ("GREEN", "RED"):

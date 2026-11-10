@@ -1810,8 +1810,27 @@ def score_rule_bullet() -> Row:
 #: `::test_a_no_live_vector_declaration_executes_no_store_clause` for every `NO_LIVE_VECTOR` entry.
 #: ⛔ State the residual at its true size (round-1 review): the `NO_LIVE_VECTOR` scan proves the
 #: writer's own body executes no store clause, which is NOT the same as proving it stores nothing —
-#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) carries no
-#: marker and is caught only by review. The pin narrows that half; it does not close it.
+#: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) cannot be pinned
+#: from its own body at all. `#11641` gave that door a BOUND instead of a body-shaped pin — it owns
+#: `sdk::_RAW_WRITE_DOOR_LABELS`, REFUSES a statement outside its DECLARED GRAMMAR (`MATCH` /
+#: `MERGE` / `CREATE` / `SET` / `REMOVE` / `FOREACH` — every construct on its refusal list, `WITH` /
+#: `UNION` / `CALL` / `CALL { … }` / `OPTIONAL MATCH` / `LOAD CSV` / `IN TRANSACTIONS`, is refused
+#: in CLAUSE position by `tortoise.vector_write::statement_uses_unmodelled_scope`), REFUSES a
+#: statement naming any label outside that set (or one it renders by INTERPOLATION, which no bound can
+#: read off the text), and — since the write-target reader landed — REFUSES a statement whose WRITE
+#: TARGET alias is unbound, unlabelled, outside the set, or whose labels it mutates. And
+#: `tests/test_embed_writer_register.py::LABEL_EVIDENCE` now carries a needle for it. ⚠️ The bound
+#: narrows that half; it does not close it: review still catches WHICH label the door's own
+#: declaration names, and the bound only catches what the writer's statement TEXT proves. ⛔ THE
+#: RESIDUAL, VERBATIM, because an earlier revision of this paragraph claimed totality and was
+#: measured FALSE: the bound refuses the DECLARED construct list (`WITH`, `UNION`, `CALL` including
+#: `CALL { … }`, `OPTIONAL MATCH`, `LOAD CSV`, `IN TRANSACTIONS`) and a `FOREACH` whose loop variable
+#: re-binds an alias a node pattern already binds; the list is a DECLARATION, not a proof of
+#: exhaustiveness — a scope construct it does not name is not refused. Clause text a helper builds is
+#: read as text like any other, so a construct inside it is refused too. Every half of this is named
+#: in the door's own docstring rather than left implied. (The mutating-procedure shape that earlier
+#: revisions named here is no longer outside the bound: a procedure is a `CALL`, and `CALL` is
+#: refused.)
 ROW2_REGISTER_MODULE = REGISTER_MODULE
 
 
