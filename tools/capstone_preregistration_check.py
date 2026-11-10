@@ -366,10 +366,20 @@ CROSS_CHECKED_CORPUS_KEYS = (
     "hedge_scope_sentences_total",
 )
 
-#: The rows the epic requires. ``E2`` may be carried by sub-rows (``E2a``/``E2b``); the others
-#: must be matched EXACTLY. A prefix match for every id let ``E1b`` (E1's anti-gaming control) stand
-#: in for a deleted ``E1`` — the epic's central criterion gone while its guard kept the check green
-#: (#9075 review r3 P2).
+#: The rows EVERY bundle's registration must carry: the five slots `#9075` closed on, and the
+#: vocabulary `docs/evidence/5087-hypothesis/PRE-REGISTRATION.md` shares with the capstone (*"the
+#: checker's slot vocabulary"* — the same ids name DIFFERENT measurements there). ``E2`` may be
+#: carried by sub-rows (``E2a``/``E2b``); the others must be matched EXACTLY. A prefix match for
+#: every id let ``E1b`` (E1's anti-gaming control) stand in for a deleted ``E1`` — the epic's
+#: central criterion gone while its guard kept the check green (#9075 review r3 P2).
+#:
+#: ⛔ TWO SETS, AND TWO DIFFERENT QUESTIONS — conflating them is what the `#11673` review cycle kept
+#: catching. THIS one is what a bundle's RECORD must carry (`required_criteria_for` decides which of
+#: the two a given bundle owes). The other is the epic's CLOSING set, `CRITERIA` in
+#: ``tools/capstone_verdict_check.py``, and it is the FIVE-row sentence `#7949` records. A row can be
+#: REQUIRED of the record and NOT closing, and `E6` is exactly that.
+CORE_REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The CAPSTONE's required set — the core slots plus ``E6``.
 #:
 #: ⛔ ``E6`` IS A REQUIRED ROW AND THIS IS THE TOOL CHANGE THAT MAKES IT ONE (#11673). The owner
 #: ruled on 2026-11-05 (``#7949`` comment ``6664402530``) that the capstone gains a sixth row —
@@ -377,10 +387,12 @@ CROSS_CHECKED_CORPUS_KEYS = (
 #: registering the row, so the epic's own acceptance criterion had no bar. A row that exists only in
 #: the record is refused here until its id is in this tuple, and that is deliberate: this is the
 #: gate that tells "the record describes a criterion" from "the record carries a bar for it".
+#: ⚠️ REQUIRED HERE IS NOT CLOSING THERE: `E6` is in this tuple and in the scorer's
+#: ``RECOGNISED_CRITERIA``, and deliberately NOT in the verdict tool's ``CRITERIA``, so the epic
+#: closes on five (see `CRITERIA`'s note in ``tools/capstone_verdict_check.py``).
 #: ``E6`` needs no exemption from the numeric arms — it has a countable bar (``= 0`` unbound and
 #: unexplained rows), so it is NOT a member of ``REGISTERED_NON_BAR_ROWS`` and the assertion below
 #: must stay satisfied.
-CORE_REQUIRED_CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 REQUIRED_CRITERIA = (*CORE_REQUIRED_CRITERIA, "E6")
 #: The ONLY rows the record registers as bar-less (`UNMEASURED(...)`, §3.1's A4). Pinned here so the
 #: completeness gate can tell a registered non-bar from a required row that declares itself one —

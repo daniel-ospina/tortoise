@@ -3,9 +3,17 @@
 
 This is the first half of the issue's own acceptance command. It exists because
 the epic owns no implementation and its closing rule is an *execution*:
-*"Close this epic only when E1–E6 all have evidence attached to this issue —
+*"Close this epic only when E1–E5 all have evidence attached to this issue —
 not when the children close. A child closing is a claim; this epic is where the
 claim is checked against the pipeline running end to end."*
+
+⚠️ **This probe emits the five CLOSING rows, and that is now the whole rule.**
+`#11673` registered a sixth row (`E6`, per-pack *declared → writable → written*) and
+`#7949`'s corrected close condition keeps the epic closing on `E1`–`E5`: `E6` is
+RECOGNISED by the scorer and reported, never a closing row — the precedent §3.7
+records for the `A`-rows (*registered, measured, reported, **not closing***). The
+missing `E6` PRODUCER is `#11695`; until it lands, no run can populate that row, and
+that residual is named here rather than claimed away.
 
 ⚠️ **The issue BODY's claims were re-read at `717355e67` (its figures are pinned
 to `9037c7a7b`).** That sha is a MAIN commit — the base for the body re-read, NOT

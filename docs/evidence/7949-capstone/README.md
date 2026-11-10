@@ -55,23 +55,25 @@ row's "no monkeypatch" clause holds on the fact that matters. The `sdk.py`/`extr
 lines this bundle cites are read, not changed.
 
 **Decision being proved:** the epic's own closing rule — *"Close this epic only when
-E1–E6 all have evidence attached to this issue — not when the children close. A child
+E1–E5 all have evidence attached to this issue — not when the children close. A child
 closing is a claim; this epic is where the claim is checked against the pipeline
 running end to end."*
 
-⛔ **The rule reads E1–E6, and `tools/capstone_verdict_check.py` now agrees with it.** The owner
-added the sixth row on 2026-11-05 (§3.8), so `V9` (`--require-green`) refuses the close while ANY of
-`E1`–`E6` is not green — including a table that is 5/5 green with **no `E6` row at all**, which is
-the "close 5-of-5" the issue forbids. `E6` is NOT demanded of every table (`V2`'s completeness arm
-stays over `E1`–`E5`): the two tables below are FROZEN evidence whose bytes §7 item 2 forbids
-revising in place, so requiring a sixth row of them would red this bundle on artifacts nobody may
-edit. The row is demanded at the CLOSE, which is the statement `#7949` makes (`#11673` review P1).
+⛔ **The rule reads E1–E5, and `tools/capstone_verdict_check.py` agrees with it.** `V9`
+(`--require-green`) refuses the close while ANY of `E1`–`E5` is not green. `E6` — the sixth row the
+owner ruled on 2026-11-05 (§3.8) — is **registered and reported, NOT closing**: it is accepted by
+the scorer (`RECOGNISED_CRITERIA`, so a table may carry it and the registration's §8 precondition is
+exercisable at all) and it is outside `CRITERIA`, which is both V2's completeness set and V9's
+closing set. That follows the precedent §3.7 records for the five `A`-rows — *"registered here,
+before any `A`-row run is scored … registered, measured, reported, **not closing**"*. **Consequence,
+stated rather than implied: this epic CAN close 5-of-5 with `E6` red.** Promoting a row into the
+closing set is a re-registration (`V2`'s row set, `V9`'s `5/5` and §3.1's table all change), so it
+is the owner's call and not a lane's (`#11673` review, relayed to `#7949`).
 
-⛔ **And the close cannot pass yet, on purpose:** the scored-log producer
-(`probes/capstone_measure.py`) still emits the five `E1`–`E5` rows, so a re-run's table has no
-`E6` row and `V9` refuses it. Growing the probe is tracked as `#11695` — registering the row
-ahead of its producer is deliberate, because the alternative leaves the epic's acceptance
-criterion with no bar at all.
+⛔ **`E6` cannot be SCORED yet, and that residual is named rather than claimed away:** the scored-log
+producer (`probes/capstone_measure.py`) still emits the five `E1`–`E5` rows, so no run can populate
+an `E6` row. Growing the probe is `#11695` — registering the row ahead of its producer is
+deliberate, because the alternative leaves the epic's acceptance criterion with no bar at all.
 
 > **Verdict: 0/5 rows green. THREE rows are RED with measured numbers, TWO are BLOCKED
 > because the frozen metric cannot be scored on the artifact that exists. The epic is NOT
@@ -649,8 +651,10 @@ uv run python tools/operator_receipt_check.py \
 
 # 3. the shipped verdict table gates it
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log
-#    GREEN=0, RED=3, BLOCKED=2 — 5/5 rows carry an evidence artifact + sha (exit 0)
-#    (the five rows V2 requires of every table; the epic's close is 6/6 — see V9 below)
+#    GREEN=0, RED=3, BLOCKED=2 — 5 row(s) carry an evidence artifact + sha, all 5 rows V2
+#    requires are present (exit 0)
+#    (the five rows V2 requires ARE the epic's close — #7949's close condition is the five-row
+#     sentence; `E6` is registered and reported, not closing — see V9 below)
 ```
 
 ⇒ **E4 = 5/15 = RED** against `= 15 of 15`. The leg is **unpatched in the sense that matters**: the
@@ -976,8 +980,9 @@ uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capsto
 #   verified 2026-11-02T14:22:24Z (11 on record)   (exit 0)
 
 uv run python tools/capstone_verdict_check.py docs/evidence/7949-capstone/capstone-measured-9152448d.log --require-green
-# → [V9] epic #7949: --require-green: 6/6 rows are not green  (exit 1)
-#   (E1–E6 close the epic, #7949; this table carries five rows, so the absent E6 is not green either)
+# → [V9] epic #7949: --require-green: 5/5 rows are not green  (exit 1)
+#   (E1–E5 close the epic, #7949's verbatim close condition; `E6` is recognised and reported but
+#    is NOT a closing row, so its absence here is not what refuses this close)
 ```
 
 *Is the table honest?* yes, 0 findings. *Can the epic close?* no, V9. A single exit code would

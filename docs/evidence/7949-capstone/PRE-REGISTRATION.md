@@ -2043,26 +2043,34 @@ the boundary is worth stating because the two neighbouring sets are deliberately
 - `REGISTERED_NON_BAR_ROWS` stays `frozenset({"A4"})`. `E6` is **not** bar-less — it carries
   `unbound_and_unexplained = 0` — so adding it there would have been a second deliberate tool change
   with its own disclosure argument, and it is not needed (§7 item 1).
-- `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` **and** to `CLOSING_CRITERIA`
-  — recognition is the first half; the second is that `V9`/`--require-green`, the arm that decides the
-  epic's close, now runs over the six-row set, so a five-row GREEN table cannot close it (see the
-  correction below, which replaced this bullet's original `**only**` claim). Before either, a
-  verdict table carrying an `E6` row was refused as *"not an E1–E5 or A1–A5 criterion"* — so this
-  row's own §8 precondition (its add-commit strictly earlier than any `E6` scored log) could never be
-exercised, because no `E6` log could exist.
+- `tools/capstone_verdict_check.py` gains `E6` to `RECOGNISED_CRITERIA` — a verdict table carrying
+  an `E6` row is no longer refused as *"not an E1–E5 or A1–A5 criterion"*, so this row's own §8
+  precondition (its add-commit strictly earlier than any `E6` scored log) can be exercised at all.
+  It enters NEITHER `CRITERIA` (the rows every TABLE must structurally carry, `V2`) NOR the epic's
+  closing set (`V9`/`--require-green`, which reads `CRITERIA`). Both absences are deliberate, and
+  the correction below says why.
 
-  ⛔ **CORRECTED ON THE `#11673` REVIEW (P1): the paragraph below it used to say `CRITERIA` is "the
-  epic's CLOSING rule" and that `E6` therefore stays out of it. That was WRONG, in the one way this
-  epic keeps producing — the issue said one thing and the tool said another.** `#7949`'s close
-  condition, verbatim: *"Close this epic only when **E1–E6** all have evidence attached to this
-  issue"*. So the closing rule gained `E6` (`CLOSING_CRITERIA` in `tools/capstone_verdict_check.py`,
-  which `V9`/`--require-green` now runs over) — a table that is 5/5 green with no `E6` row, or with
-  a RED one, can no longer be read as a closeable epic. What did NOT change is `CRITERIA`, and the
-  reason is the other half of the same fact: `CRITERIA` is the rows every TABLE must structurally
-  carry (`V2`), and the tables that predate the sixth row are FROZEN evidence whose bytes §7 item 2
-  forbids revising in place — so demanding `E6` of the shipped `capstone.log` and
+  ⛔ **CORRECTED — and the SECOND correction is the one that stands (`#11673` review r1 + r4).**
+  This bullet originally read *"gains `E6` to `RECOGNISED_CRITERIA` **only**"*, and the sentence
+  that followed it claimed `CRITERIA` is "the epic's CLOSING rule" with `E6` therefore kept out of
+  it. The first review called that false and this entry briefly grew a
+  `CLOSING_CRITERIA = (*CRITERIA, "E6")`, so `V9` closed the epic over six rows. **The second review
+  reverted its own edit to `#7949` and recorded why: the recorded close condition is the FIVE-row
+  sentence** — *"Close this epic only when **E1–E5** all have evidence attached to this issue — not
+  when the children close"* — and `E6` follows the precedent §3.7 records for the five `A`-rows
+  (*"registered here, before any `A`-row run is scored … registered, measured, reported, **not
+  closing**"*). So the tool is back to one closing set, `CRITERIA`, and the truthful reading of this
+  bullet is: the RECORD must carry `E6` (`REQUIRED_CRITERIA`, `tools/capstone_preregistration_check.py`),
+  the scorer accepts and checks it (`RECOGNISED_CRITERIA`), and the epic closes on `E1`–`E5`.
+
+  **Consequence, stated rather than implied: this epic CAN close 5-of-5 with `E6` red.** That is the
+  recorded rule, not an oversight. Promoting any row into the closing set — `E6` included — is a
+  RE-REGISTRATION: `V2`'s row set, `V9`'s `5/5` and §3.1's table all change, so it is the owner's
+  call and not a lane's. What `CRITERIA`'s five-row shape is NOT is a demand on every historical
+  table — `CRITERIA` is the rows every TABLE must structurally carry *because the epic closes on
+  them*, and the tables that predate the sixth row are FROZEN evidence whose bytes §7 item 2 forbids
+  revising in place, so demanding `E6` of the shipped `capstone.log` and
   `capstone-measured-9152448d.log` would red this bundle permanently on artifacts nobody may edit.
-  The row is demanded at the CLOSE, not in every historical table.
 
 **The bar, and the `A1` boundary in both directions.** `E6`'s bar is a COUNT of declared rows that are
 **unbound and unexplained**, and it is not the census's `written` column. `A1` (§3.7) already measures
@@ -2116,13 +2124,15 @@ the population rather than that aggregate.
 ⛔ **What is NOT yet wired, and is named rather than left to be discovered: the verdict ROW
 (`#11695`).** The census emits the metric's CELLS; the scored-log producer does not yet emit its ROW.
 `probes/capstone_measure.py` declares `CRITERIA = ("E1", …, "E5")` and its table builder writes five
-rows, so a full re-run produces a five-row table — and `V9` refuses it: *"6/6 rows are not green
-(E1, E2, E3, E4, E5, E6)"*. That is the gate behaving correctly (an epic must not close while `E6` is
-unscored), but it means **`#7949` cannot close until `#11695` teaches the probe to emit the `E6` row**
-from `pack-relation-census.json` — per-row cells of BOTH surfaces under the `e6_declared_rows` floor,
-with `written` reported beside and never as the bar. Registering the row AHEAD of its producer is
-deliberate: waiting for the producer would leave the epic's own acceptance criterion with no bar at
-all, which is the defect `#11673` exists to fix.
+rows, so a full re-run produces a five-row table — which is exactly the table `V9` closes the epic on,
+because the recorded close condition is the FIVE-row sentence. `E6` is therefore
+**registered and reported, not scored and not closing**: `V2` does not demand it of a frozen table,
+`V9` does not read it, and **`#7949` CAN close 5-of-5 with `E6` red — by rule, not by oversight**.
+`#11695` still owns teaching the probe to emit the row (per-row cells of BOTH surfaces under the
+`e6_declared_rows` floor, with `written` reported beside and never as the bar), because a registered
+row nobody can score is a bar nobody can check. Registering it AHEAD of its producer is deliberate:
+waiting for the producer would leave the epic's own acceptance criterion with no bar at all, which is
+the defect `#11673` exists to fix.
 
 **Why an amendment and not a second registration.** Same ground as §10.11: the record's corpus pin is a
 single `fixtures_hash`, its checker parses one criteria table and one machine record, and
