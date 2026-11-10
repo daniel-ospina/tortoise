@@ -917,6 +917,51 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # bound buckets as (1, <text>) and is a DIFFERENT concern (#5360) — not
     # reported here.
     #
+    # ⚠ #11646 made the ingest producer's shape (``2023/05/20 (Sat) 02:21``)
+    # ORDERABLE, and a zone-less date-TIME is read in the READER's zone (#3982),
+    # so this check's VERDICT can differ across hosts for a MIXED PAIR. What
+    # decides the disagreement is where the pair's separation falls against the
+    # two hosts' OFFSETS — the distance alone decides nothing: a naive bound's
+    # epoch is ``wall_clock - reader_offset``, so two hosts disagree only when
+    # the separation falls between their offsets, the closed end being the
+    # ACCEPTING host's offset (higher for a producer-as-START, lower for a
+    # producer-as-END — see ``commit_schema.validate_validity_window``). When
+    # BOTH bounds are naive ONE host reads both, so the reader's offset CANCELS
+    # — except where the pair straddles an OFFSET TRANSITION on that host (a DST
+    # change OR a permanent standard-offset change) that leaves ONE bound in a
+    # nonexistent hour AND reads the OTHER at the POST-transition offset — which
+    # is a WALL-INVERTED pair whose END is in the gap, or a non-inverted pair
+    # whose START is in it and whose END is after it. A gap bound is read at the
+    # PRE-transition offset, so a non-inverted END pair and a WALL-INVERTED START
+    # pair read BOTH bounds at that same offset and cannot move. Given different
+    # offsets the verdict moves per orientation, because only the NONEXISTENT
+    # bound is shifted — as the END, a WALL-INVERTED pair flips at
+    # ``separation <= shift`` (the shift un-inverts it into a well-formed window
+    # of length ``shift - separation``, zero-length exactly at equality; measured
+    # at a 60 min shift: 20/30/60 min flip, 61 does not), while a NON-inverted END
+    # pair never flips: BOTH bounds land on the SAME pre-transition offset, so
+    # the gap host reads the same separation-long window as any other host. As
+    # the START, with the other bound AFTER the transition, the flip needs
+    # ``separation < shift``, because at exactly the shift the GAP host reads a
+    # zero-length window while a transition-free host reads a shift-long one, and
+    # both accept (measured: 20 and 59 min flip, 60 min agrees); a WALL-INVERTED
+    # START pair never flips, for the same offset reason. Measured: the US
+    # spring-forward pair flips between UTC and America/Los_Angeles, and
+    # Asia/Pyongyang's PERMANENT +08:30 → +09:00 change in 2018 does the same with
+    # no DST at all. This check reports rather
+    # than refuses, but the verdict it reports is that measure under a
+    # host-dependent key: not a new asymmetry, but a newly reachable one (the
+    # shape used to bucket as unparseable, so the pair was skipped everywhere).
+    # It is RECORDED and PINNED rather than changed: flipping the reading is a
+    # reopen of #3982, and anchoring the producer's shape on its own is the
+    # SEPARATE decision recorded on #11646 — either way a decision, not a
+    # cleanup here. The pin is
+    # ``tests/test_11646_producer_date_shape.py``::
+    # test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded,
+    # which asserts ``validate_validity_window``'s verdict at FOUR zones (UTC,
+    # Asia/Kolkata, America/Los_Angeles, Africa/Johannesburg) plus a fifth child
+    # at Asia/Pyongyang for the permanent-shift case.
+    #
     # ⛔ The `fix` is LIFECYCLE-AWARE (#7819), and the scan deliberately keeps
     # terminal rows. It must not drop them: the population this check exists
     # for is the #4021 legacy supersession inversion, whose damaged row is the

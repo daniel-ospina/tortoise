@@ -50,13 +50,13 @@ can see.
 
 WHAT THIS GATE DELIBERATELY DOES NOT DO (#5064, bounded slice)
 -------------------------------------------------------------
-* It does not implement any mechanism. Four of the thirteen are genuinely
+* It does not implement any mechanism. Five of the fourteen are genuinely
   absent
   and are *meant* to be marked `not-implemented` — recording an absence is the
   output, not a failure.
 * It does not generate a design document from the registry (indicator (2) /
   #5064's open question (a): registry-as-source vs registry-as-check). The
-  registry is a CHECK over the two design documents here, not their source.
+  registry is a CHECK over the design documents that declare it, not their source.
 
 ⭐ THE DECLARATION SITE CARRIES THE STATE, and the gate fails closed when it
 cannot. This is the half `membership_errors` cannot reach: membership proves
@@ -82,12 +82,12 @@ state/operational-value carve-out, #2453) stayed unregistered while this gate
 stayed green: a hand-written list of seven cannot notice an eighth mechanism the
 design declares in prose. So every mechanism the registry knows about carries a
 `<!-- v4-mechanism: <id> state: <state> -->` marker in EACH
-`docs/architecture/**/*.md` document
+scanned document
 its row names — the convention is to place it at the declaration site, and that
 placement is a DISCIPLINE, not something this gate can read (see the stated
 limits) — and `membership_errors` fails closed on FOUR shapes:
 
-  * a marker in `docs/architecture/**/*.md` whose id has NO registry row — the
+  * a marker in a scanned document whose id has NO registry row — the
     declared-and-absent shape this whole issue exists to kill;
   * a registry row whose id NO design document marks — a row whose declaration
     cannot be found, i.e. an *unmarked* row (#5064 refactor direction 1: "there
@@ -102,6 +102,32 @@ limits) — and `membership_errors` fails closed on FOUR shapes:
     no document inside the scanned surface at all — the ATTRIBUTION and coverage
     half (#9778 review P2): the enumeration could otherwise shrink back to a
     single document, or read as marked while its declaration site is unreachable.
+
+⭐ THE SURFACE IS TWO DIRECTORIES, and the second one is here because the first
+was not enough (#11239 re-measured in this lane). Most of the v4 substrate's
+declarations live in `docs/architecture/**/*.md`; ONE mechanism the design
+declares does not. DM1 — *"a mention is **a property on the claim Point that
+carried it**"* — is declared in `docs/epics/2026-11-05-5087-extractor-v4/05-plan.md`
+§4. The payload half is built (`commit_schema.Mention` bounds the fields it
+declares a bound on — `surface`, `quote`, `kind_guess`, the span offsets;
+`claim_ref` and `rule_id` carry NO schema bound and are cut by the producer — and
+the clamp and the dedupe are the producer's — `extractor_v2._clamped_mention` and
+`extractor_v2._dedupe_mentions`) and
+NO write door persists it: `sdk._CAPTURE_PASSTHROUGH_ORDER`, `CreatePointRequest`,
+`hosted_api` and `selfhost_api` all omit `mentions`, so a capture counts mentions
+the write DISCARDS and a graph read holds the claim and no mention (`#11239`
+tracks persisting them). A design that declares a home the write path does not
+have, one directory outside a scan that only walked `docs/architecture/`, is
+#5064's root sentence with a margin: *a declared-and-absent mechanism read
+exactly like a shipped one*. So `docs/epics/**/*.md` is scanned too — every epic
+plan in the repo, not only the one that declares DM1: the bound is the
+DIRECTORY, because a plan that declares a mechanism is exactly the case this gate
+exists for and a per-epic allowlist would be the hand-pinned list #9778 removed —
+while `docs/**` stays out (that would let unrelated prose red or silently satisfy
+the gate). DM1 is a registry row with a `state: not-implemented` marker at its
+own declaration site. The replaced narrowing was never a rule of the design; it
+was an assumption about WHERE a design may declare a mechanism, and the limits
+below still state what a marker comparison cannot reach.
 
 ⚠️ ITS STATED LIMITS, because overclaiming here is the same defect:
 
@@ -134,17 +160,34 @@ limits) — and `membership_errors` fails closed on FOUR shapes:
   * a `declared_in:` entry the marker scan cannot read — `embed_gate`'s
     `packs/dev/manifest.yaml` is the live case — is NOT marker-checked: the
     convention is a markdown-comment convention, so the scan is `.md` files under
-    `docs/architecture/` and nothing else. Such a row still has to carry its
+    the two declaration surfaces (`docs/architecture/`, `docs/epics/`) and
+    nothing else. Such a row still has to carry its
     marker in one of its scanned documents, so the row is never unverifiable;
     what is uncovered is that extra source, and it is named in the registry
     header rather than silently assumed to be checked. The same holds for a
-    non-markdown file INSIDE the architecture dir: the surface is `**/*.md`, so a
+    non-markdown file INSIDE a surface: the surface is `**/*.md`, so a
     `.yaml` there is an uncovered source, not a document that owes a marker;
   * a SYMLINK to a document or to a directory in the surface is refused rather
     than followed — the walk and the attribution would disagree about its name (a
     linked directory is not descended, so a marker behind it would get no
     verdict), which is a verdict of its own and not a silent hole. No link exists
     there today; a NON-markdown link is an uncovered source, as above;
+  * a DIRECTORY in a surface that cannot be READ (one that exists but refuses
+    `scandir`, at the surface root or at any depth below it) is a verdict, not an
+    empty design: `is_dir()` answers about the inode, and `Path.rglob` — the
+    primitive this scan used to walk with — swallowed
+    the `PermissionError` and yields nothing, so without that probe an unreadable
+    directory was indistinguishable from a declaration-free one — the gate's
+    primary direction silently empty. Measured before the guard on a `0o000`
+    directory holding a marker with no row: `markers: {}`, `errors: []` (review
+    cycles 4 and 5, P2; probing only the ROOT left the nested case open, so the
+    walk collects its own errors). This is a verified read-at-the-directory
+    failure, unlike the permanent prose limit above it;
+  * two surfaces whose DIRECTORIES share a basename cannot qualify a document
+    identity, so that pair is a verdict rather than a silent alias:
+    `_document_name` prefixes with `surface.name`, which is what separates
+    `architecture/x.md` from `epics/x.md`, and two `plans/` surfaces would
+    collapse to one identity per document (review cycle 5, P2);
   * the sibling `*-CHANGELOG.md` is NOT scanned (`CHANGELOG_SUFFIX`): #8542 moved
     status and change narration into those files, so an entry recording a marker
     change may legitimately quote the convention, and scanning it would turn that
@@ -180,6 +223,7 @@ meets an ordering instead of a surprise.
 from __future__ import annotations
 
 import ast
+import os
 import re
 import sys
 import tokenize
@@ -202,6 +246,11 @@ REGISTRY = ROOT / "config" / "v4-mechanisms.yml"
 #: *"mark the omission explicit in the registry this issue builds"*). Pinning the
 #: tuple means a mechanism cannot be dropped from the registry without the gate
 #: going red, which is the whole point: the set is declared, not implied.
+#: `mention_record` is the fourteenth, and the first found OUTSIDE
+#: `docs/architecture/`: DM1 declares `Point.mentions` in the epic plan while no
+#: write door persists it (#11239) — a declared-and-absent mechanism the marker
+#: scan could not see until the plan surface was added (#5064's root, one
+#: directory out).
 DECLARED_IDS = (
     "vet",
     "source_dedup",
@@ -216,18 +265,22 @@ DECLARED_IDS = (
     "state_value_carve_out",
     "atomic_point_write",
     "failure_policy",
+    "mention_record",
 )
 
 #: WHERE the design's declarations live, and HOW one is marked. The marker is the
 #: only machine-readable surface a prose design has, so the marker convention is
 #: what turns "the design declares a set" into something one gate can compare
 #: against the registry — in BOTH directions (`membership_errors`) AND attributed
-#: to the document the row itself names (#9778 review P2). Bounded to
-#: `docs/architecture/**/*.md` (RECURSIVE — the scan and the attribution rule in
-#: :func:`_scanned_targets` are ONE definition, not two) on purpose: the two
-#: documents that declare the v4
-#: write path live there, and widening the scan to every `.md` would make an
-#: unrelated doc's prose able to red (or silently satisfy) the gate.
+#: to the document the row itself names (#9778 review P2). The surface is
+#: `DECLARATION_SURFACES` below — TWO bounded directories (RECURSIVE; the scan and
+#: the attribution rule in :func:`_scanned_targets` are ONE definition, not two),
+#: never `docs/**`: an unbounded scan would let an unrelated doc's prose red (or
+#: silently satisfy) the gate, which is the bound this note keeps. ⚠️ The bound
+#: was `docs/architecture/` alone until #11239/DM1 measured a real declaration
+#: living in a plan document, so the note states the FIRST surface here and the
+#: pair at the constant — a comment claiming one directory is how the widening
+#: would be read as drift.
 #:
 #: ⚠️ A marker must be a WHOLE HTML comment (`<!-- v4-mechanism: <id>
 #: state: <state> -->`, the id lowercase, digits and underscores). The token appearing in ordinary prose —
@@ -236,6 +289,17 @@ DECLARED_IDS = (
 #: marker for a sentence that mentioned one (review cycle 1, P2), which is a
 #: false verdict from a gate whose verdicts are meant to be actionable.
 ARCH_DOCS = ROOT / "docs" / "architecture"
+#: The SECOND declaration surface — the plan documents that declare this
+#: substrate (`#11239` / DM1). See the module docstring's surface note. The bound
+#: is the DIRECTORY (every epic plan), not one epic: a plan that declares a
+#: mechanism is the case this gate exists for, and an allowlist of epic names
+#: would be the hand-pinned list #9778 removed.
+EPIC_DOCS = ROOT / "docs" / "epics"
+#: ONE definition of the surface, consumed by every half (the marker walk, the
+#: attribution rule in :func:`_scanned_targets`, and the coverage rule). A caller
+#: may still pass ONE directory — the fixture-based unit tests do — and the
+#: default is the whole surface.
+DECLARATION_SURFACES = (ARCH_DOCS, EPIC_DOCS)
 MARKER_TOKEN = "v4-mechanism:"
 #: The token as it would be MIS-spelled. `MARKER_TOKEN` is an exact substring, so
 #: a comment writing `V4-MECHANISM:`, `v4-mechanism :`, `v4_mechanism:` or
@@ -307,8 +371,13 @@ MARKER_ID_STRICT = re.compile(r"[a-z][a-z0-9_]*")
 class Declaration:
     """ONE `<!-- v4-mechanism: <id> [state: <state>] -->` occurrence.
 
-    ``document`` is repo-relative to the docs dir (`sub/x.md`), because a basename
-    is not a document identity. ``state`` is the state the DECLARATION SITE
+    ``document`` is the document's identity: its path relative to its own
+    SURFACE (`sub/x.md`), prefixed with the surface's directory name when more
+    than one surface is in play (`architecture/x.md` vs `epics/x.md`, so the two
+    can never be mistaken for each other — see :func:`_document_name`). It is
+    related to the row's repo-relative `declared_in:` entry by RESOLUTION against
+    the surface root, never by string equality. A basename is not an identity.
+    ``state`` is the state the DECLARATION SITE
     asserts, or ``None`` when the marker states none — which
     :func:`declaration_state_errors` refuses and :func:`membership_errors` does
     not, so the two verdicts stay separable (a fixture exercising membership is
@@ -440,8 +509,75 @@ def _prose_only(text: str) -> str:
     return text
 
 
+def _surfaces(docs_dir) -> tuple[Path, ...]:
+    """The declaration surface as a tuple: ONE directory, or the default two.
+
+    The surface is one CONCEPT with two homes (:data:`DECLARATION_SURFACES`) and
+    every half of the gate consumes it through this function, so the marker walk,
+    the attribution rule and the coverage rule cannot disagree about what a
+    scanned document is (#9778 review P2 — that disagreement was a fail-OPEN).
+    A single-directory argument is accepted because the fixture-based unit tests
+    reason about one synthetic surface, and a caller testing the rule itself
+    should not have to fabricate a second tree.
+    """
+    if isinstance(docs_dir, (str, Path)):
+        return (Path(docs_dir),)
+    return tuple(Path(d) for d in docs_dir)
+
+
+def _document_name(surface: Path, path: Path, surfaces: tuple[Path, ...] = ()) -> str:
+    """The document's name, unambiguous ACROSS surfaces.
+
+    Root-relative to its own surface — the identity every fixture assertion
+    already uses (`a.md`, `sub/a.md`) — and PREFIXED with the surface's own
+    directory name whenever there is more than one surface in play. That prefix
+    is what stops `docs/architecture/x.md` and `docs/epics/x.md` from both
+    publishing `x.md`, which would let a marker in one surface satisfy a row
+    about the other (the basename collision #9778 review P2 closed one level
+    down). It is decided by the NUMBER of surfaces, not by where the path
+    happens to live, so a fixture tree and the real tree are named by ONE rule.
+
+    ⛔ BOTH SIDES ARE RESOLVED, and that is a correctness requirement rather than
+    tidiness (review cycle 1, P2): :func:`_scanned_targets` hands back RESOLVED
+    paths, so a surface that is a symlink (or named relatively) made
+    `path.relative_to(surface)` raise for every declared document — which
+    :func:`_document_for` swallowed, turning the per-document marker check into a
+    silent pass for a doc that carried no marker at all. Comparing resolved to
+    resolved is the only form in which the walk and the attribution agree.
+    """
+    rel = path.resolve().relative_to(surface.resolve()).as_posix()
+    if len(surfaces) <= 1:
+        return rel
+    return f"{surface.name}/{rel}"
+
+
+def _surface_label(docs_dir) -> str:
+    """The surface as a reader-facing label (`architecture/**/*.md + epics/…`)."""
+    labels: list[str] = []
+    for surface in _surfaces(docs_dir):
+        try:
+            labels.append(
+                surface.resolve().relative_to(ROOT).as_posix() + "/**/*.md"
+            )
+        except (OSError, RuntimeError, ValueError):
+            labels.append(surface.name + "/**/*.md")
+    return " + ".join(labels)
+
+
+def _document_for(path: Path, docs_dir) -> str | None:
+    """The display name of an ALREADY-RESOLVED path, or ``None`` if uncovered."""
+    surfaces = _surfaces(docs_dir)
+    for surface in surfaces:
+        try:
+            if path.is_relative_to(surface.resolve()):
+                return _document_name(surface, path, surfaces)
+        except (OSError, RuntimeError, ValueError):
+            continue
+    return None
+
+
 def declaration_markers(
-    docs_dir: Path = ARCH_DOCS,
+    docs_dir: Path | tuple[Path, ...] = DECLARATION_SURFACES,
 ) -> tuple[dict[str, list[Declaration]], list[str]]:
     """``{mechanism id: [Declaration, ...]}`` from the design docs' own markers.
 
@@ -492,15 +628,20 @@ def declaration_markers(
     declaration with NO verdict, silently: the fail-open shape this gate exists to
     refuse) while a row naming that same file was reported as an unmarked row even
     when it carried the marker (#9778 review P2). One surface, read the same way
-    by both halves; markers are keyed by their path relative to the docs dir
-    (`sub/x.md`), so a nested document is named exactly as the row names it — and
-    every verdict below names the document that way too, because a basename is
-    not a document identity (`a.md` can exist at two depths).
+    by both halves; markers are keyed by their path relative to their own surface
+    (`sub/x.md`) and PREFIXED with the surface directory's name when more than one
+    surface is scanned (`epics/2026-…/05-plan.md`), so two surfaces' same-named
+    documents stay distinct — see :func:`_document_name`, and note that
+    attribution relates that identity to a row's repo-relative `declared_in:` by
+    RESOLUTION, never by string equality. Every verdict below names the document
+    that way too, because a basename is not a document identity (`a.md` can exist
+    at two depths).
 
     ⛔ A SYMLINK to a DOCUMENT or to a DIRECTORY in the surface is a REFUSAL, not a
-    document. The surface is read two ways — this scan WALKS it (`rglob`) while
+    document. The surface is read two ways — this scan WALKS it (`os.walk` with
+    `followlinks=False`, so a refused read is reported rather than swallowed) while
     attribution RESOLVES each `declared_in:` entry — and those two readings cannot
-    be kept identical across a link: `rglob` does not descend a linked DIRECTORY (a
+    be kept identical across a link: `os.walk(followlinks=False)` does not descend a linked DIRECTORY (a
     `v4-mechanism:` marker inside one would get NO verdict at all, the fail-open
     direction), and a linked DOCUMENT whose target lies outside the surface is
     walked under its link name while resolving outside it, so a row naming the
@@ -515,14 +656,97 @@ def declaration_markers(
     """
     errors: list[str] = []
     markers: dict[str, list[Declaration]] = {}
-    if not docs_dir.is_dir():
+    surfaces = _surfaces(docs_dir)
+    if not surfaces:
+        # The ZERO-surface case is its own verdict: `missing` below cannot fire on
+        # an empty tuple, so a caller that filtered the surfaces away (or passed
+        # `()`) would get an empty marker set with NO error — the "no-op gate"
+        # shape this file refuses everywhere else (review cycle 1, P2).
         return markers, [
-            f"the declaration-marker surface is missing: {docs_dir} is not a "
-            f"directory — the gate cannot compare the declared set against "
-            f"anything (fail closed, never an empty pass)"
+            "the declaration surface is EMPTY — no directory was given, so the "
+            "gate cannot compare the declared set against anything (fail "
+            "closed, never an empty pass)"
         ]
-    for doc in sorted(docs_dir.rglob("*")):
-        rel = doc.relative_to(docs_dir).as_posix()
+    missing = [surface for surface in surfaces if not surface.is_dir()]
+    if missing:
+        return markers, [
+            f"the declaration-marker surface is missing: "
+            f"{', '.join(str(m) for m in missing)} is not a directory — the gate "
+            f"cannot compare the declared set against anything (fail closed, "
+            f"never an empty pass)"
+        ]
+    # ⛔ A SURFACE WHOSE DIRECTORY NAME IS NOT UNIQUE CANNOT QUALIFY A DOCUMENT
+    # IDENTITY (review cycle 5, P2). `_document_name` qualifies a document with
+    # its surface's BASENAME, which is what separates `architecture/x.md` from
+    # `epics/x.md` — but only because those two names differ, and nothing asserted
+    # it. Two surfaces sharing a basename published ONE identity per document, so
+    # a marker in the first satisfied a row about an unmarked document in the
+    # second: the cross-surface alias `_document_name` exists to prevent, re-opened
+    # by the name that was supposed to prevent it. Verdict rather than a silent
+    # coin-flip between the two surfaces.
+    shared_names = sorted(
+        name
+        for name in {surface.name for surface in surfaces}
+        if sum(1 for s in surfaces if s.name == name) > 1
+    )
+    if shared_names:
+        return markers, [
+            f"two declaration surfaces share the directory name "
+            f"{', '.join(shared_names)} — every document under them would "
+            f"publish the SAME identity, so a marker in one surface would "
+            f"satisfy a row about an unmarked document in the other (fail "
+            f"closed, never a cross-surface alias): the surface's own directory "
+            f"name is what qualifies a document identity"
+        ]
+    # ⛔ AN UNREADABLE DIRECTORY ANYWHERE IN A SURFACE IS ITS OWN VERDICT (review
+    # cycles 4 and 5, P2). `is_dir()` answers about the inode, not about
+    # permission to read it, and the `Path.rglob` this scan used to enumerate
+    # with SWALLOWED the `PermissionError` that `os.scandir` raises and yielded
+    # NOTHING — at the surface ROOT and at every
+    # depth below it — so an unreadable directory was indistinguishable from a
+    # declaration-free one, and the gate's PRIMARY direction (a marker with no
+    # registry row) went silently empty for every document behind it. Measured on
+    # a `0o000` directory holding a marker with no row: `markers: {} errors: []`
+    # before this guard. `missing` cannot catch it (`is_dir()` is True), the
+    # per-document `read_text` verdict cannot either (the walk never reaches the
+    # documents), and probing only the ROOT left the nested case open (measured:
+    # `docs/architecture/sub` at `0o000` holding a marker with no row still
+    # reported `markers: {}` with no verdict). So the walk collects its own errors
+    # (`os.walk(onerror=…)`), which is the one shape that reports a read it was
+    # refused, and the scan does not use `rglob` at all. This is the `#5064` shape
+    # at the directory rather than the file: a
+    # scan that could not look must never report "nothing declared".
+    walk_errors: list[str] = []
+    documents: list[tuple[Path, Path]] = []
+    for surface in surfaces:
+        entries: list[Path] = []
+        for dirpath, dirnames, filenames in os.walk(
+            surface,
+            onerror=lambda exc: walk_errors.append(
+                f"{getattr(exc, 'filename', '?')} ({type(exc).__name__})"
+            ),
+            followlinks=False,
+        ):
+            root = Path(dirpath)
+            entries.extend(root / name for name in dirnames)
+            entries.extend(root / name for name in filenames)
+        documents.extend((surface, entry) for entry in sorted(entries))
+    if walk_errors:
+        return markers, [
+            f"the declaration-marker surface cannot be READ: "
+            f"{', '.join(sorted(set(walk_errors)))} — the directory exists, so "
+            f"the walk that returns nothing is a refused read, not an empty "
+            f"design (fail closed, never an empty pass): a declaration behind it "
+            f"could not be compared against the registry at all"
+        ]
+    for surface, doc in documents:
+        try:
+            rel = _document_name(surface, doc, surfaces)
+        except (OSError, RuntimeError, ValueError):
+            # A path whose RESOLVED form leaves the surface (a symlink out of it) —
+            # the lexical name is the right identity for the refusal below, and
+            # the resolved form is the right one for every real document.
+            rel = doc.relative_to(surface).as_posix()
         if doc.is_symlink() and (doc.suffix == ".md" or doc.is_dir()):
             errors.append(
                 f"{rel}: a symlink inside the declaration surface — this scan "
@@ -530,7 +754,7 @@ def declaration_markers(
                 f"walked under one name while it resolves under another, so a "
                 f"marker behind it could be read here and attributed nowhere "
                 f"(fail closed): declare the mechanism in a real document under "
-                f"{docs_dir.name}/"
+                f"{_surface_label(surface)}"
             )
             continue
         if doc.name.endswith(CHANGELOG_SUFFIX):
@@ -643,11 +867,11 @@ def _declaring_paths(row: dict) -> list[str]:
     return [d for d in declared if isinstance(d, str) and d.strip()]
 
 
-def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
+def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
     """The declared documents that resolve INSIDE the gate's scanned surface.
 
     ONE definition of the surface, shared with :func:`declaration_markers`, which
-    walks it with `docs_dir.rglob("*")`: containment (recursive, so a
+    walks it with `os.walk(..., followlinks=False)`: containment (recursive, so a
     `docs/architecture/sub/x.md` IS inside) AND a `.md` suffix (so a non-markdown
     source is not) — the two halves cannot disagree about what a scanned document
     is, which is what made a nested document invisible to the scan while being
@@ -656,21 +880,23 @@ def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
     admitted here (`declaration_markers`: a linked directory is not descended and
     a linked file's target is outside the name it is walked under).
 
-    Resolved against the docs dir's own root (`<root>/docs/architecture` ->
+    Resolved against the surface's own root (`<root>/docs/architecture` ->
     `<root>`), not string-compared: a declaration written as
     `./docs/architecture/X.md` or with a doubled separator names the same
     document, and a string comparison would silently attribute it to nothing (a
     false red on a legitimate registry). Containment — not mere
     existence — is the test, so `packs/dev/manifest.yaml` is NOT a scanned
     declaring document: the markdown marker convention does not reach it. A
-    `.yaml`/`.yml` INSIDE the architecture dir is not one either, for the same
-    reason: `gate_errors` accepts such a source, it can carry no markdown
-    comment, and demanding a marker there emits a remedy no edit can satisfy.
+    `.yaml`/`.yml` INSIDE a surface is not one either, for the same reason:
+    `gate_errors` accepts such a source, it can carry no markdown comment, and
+    demanding a marker there emits a remedy no edit can satisfy.
     (A symlink is refused by the scan, never resolved here — see
     :func:`declaration_markers`.)
+
+    With more than one surface (:data:`DECLARATION_SURFACES`), an entry is
+    inside the surface when it resolves inside ANY of them — the two surfaces
+    are one surface for attribution, so a row may declare a document in either.
     """
-    scanned_dir = docs_dir.resolve()
-    root = docs_dir.parent.parent
     targets: set[Path] = set()
     for entry in entries:
         rel = Path(entry)
@@ -678,17 +904,33 @@ def _scanned_targets(entries: list[str], docs_dir: Path) -> set[Path]:
             continue
         if rel.name.endswith(CHANGELOG_SUFFIX):
             continue  # the same exclusion the marker scan makes
-        try:
-            resolved = (root / rel).resolve()
-        except (OSError, RuntimeError, ValueError):  # unresolvable: not attributable
-            continue
-        if resolved.is_relative_to(scanned_dir):
-            targets.add(resolved)
+        for surface in _surfaces(docs_dir):
+            # Resolved against the surface's OWN root (`<root>/docs/epics`
+            # -> `<root>`): an entry is repo-relative, so the root its surface
+            # belongs to is the base every `declared_in:` path is written from.
+            # ⚠️ STATED ASSUMPTION: every surface sits exactly TWO levels below
+            # the root, so `parent.parent` IS that root. True for both surfaces
+            # today (`docs/architecture`, `docs/epics`), and a third surface at
+            # a different depth would resolve entries against the wrong root and
+            # report the row's declaring document as UNNAMED — a FALSE RED, whose
+            # remedy names a document that is in fact on disk and marked, never a
+            # silent pass. So: add a surface here only at this depth, or derive
+            # the root from the surface instead of counting its parents.
+            surface_root = surface.parent.parent
+            try:
+                resolved = (surface_root / rel).resolve()
+            except (OSError, RuntimeError, ValueError):
+                continue  # unresolvable: not attributable
+            try:
+                if resolved.is_relative_to(surface.resolve()):
+                    targets.add(resolved)
+            except (OSError, RuntimeError, ValueError):
+                continue
     return targets
 
 
 def membership_errors(
-    mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
+    mechanisms: list[dict], docs_dir: Path | tuple[Path, ...] = DECLARATION_SURFACES
 ) -> list[str]:
     """The BIDIRECTIONAL membership rule: no unregistered declaration, no
     undeclared row — and every scanned document a row declares must mark it.
@@ -724,11 +966,12 @@ def membership_errors(
 
     ⚠️ STATED LIMIT: a `declared_in:` entry the scan cannot read (e.g.
     `packs/dev/manifest.yaml`, `embed_gate`'s policy source, or a non-`.md` file
-    inside the architecture dir) is not marker-checked — the convention is a
-    markdown-comment convention and this gate scans `docs/architecture/**/*.md`
-    only. Such a row must ALSO declare a scanned document carrying its marker, so
-    the row is never unverifiable; what is uncovered is that extra source, and it
-    is named in the registry header rather than silently assumed.
+    inside a surface) is not marker-checked — the convention is a
+    markdown-comment convention and this gate scans `.md` files under the two
+    declaration surfaces only (`docs/architecture/`, `docs/epics/`). Such a row
+    must ALSO declare a scanned document carrying its marker, so the row is never
+    unverifiable; what is uncovered is that extra source, and it is named in the
+    registry header rather than silently assumed.
 
     ``mechanisms`` is the parsed registry list (same shape `gate_errors` takes).
     """
@@ -757,7 +1000,7 @@ def membership_errors(
     for mid in sorted(ids - set(markers)):
         errors.append(
             f"{mid}: a registry row with NO `{MARKER_TOKEN} {mid}` marker in "
-            f"{docs_dir.name}/**/*.md — a row whose declaration cannot be found is "
+            f"{_surface_label(docs_dir)} — a row whose declaration cannot be found is "
             f"an UNMARKED row, and #5064's refactor direction allows none: put "
             f"the marker at the site that declares the mechanism, or drop the row"
         )
@@ -774,7 +1017,7 @@ def membership_errors(
         if not scanned_targets:
             errors.append(
                 f"{mid}: the row names NO declaring document inside the gate's "
-                f"scanned surface ({docs_dir.name}/**/*.md: "
+                f"scanned surface ({_surface_label(docs_dir)}: "
                 f"{', '.join(entries) or 'nothing'}) — its marker can never be "
                 f"found where the declaration is, so the row is UNVERIFIABLE and "
                 f"reads as an unmarked row (#9778 review P2): declare the "
@@ -786,10 +1029,24 @@ def membership_errors(
             continue  # already reported above as an UNMARKED row
         named = set()
         for resolved in sorted(scanned_targets):
-            # Compare the DOCUMENT, not its basename: two `a.md` in different
-            # directories are different documents, and a basename comparison let
-            # a marker in one satisfy the row for the other (review P2).
-            rel = resolved.relative_to(docs_dir.resolve()).as_posix()
+            # Compare the DOCUMENT, not its basename: two `x.md` in different
+            # directories — or in two different SURFACES — are different
+            # documents, and a basename comparison let a marker in one satisfy
+            # the row for the other (review P2).
+            rel = _document_for(resolved, docs_dir)
+            if rel is None:
+                # Fail CLOSED. `_scanned_targets` only admits contained paths, so
+                # this means the two readings disagree about the surface — and a
+                # check that silently skips a declared document is the fail-open
+                # this whole rule exists to refuse (review cycle 1, P2).
+                errors.append(
+                    f"{mid}: `declared_in:` names {resolved}, which resolves "
+                    f"inside the scanned surface but cannot be named relative "
+                    f"to it — the per-document marker check cannot run, and an "
+                    f"unverifiable declaration must not read as a marked one "
+                    f"(fail closed)"
+                )
+                continue
             named.add(rel)
             if any(d.document == rel for d in markers[mid]):
                 continue
@@ -818,7 +1075,7 @@ def membership_errors(
 
 
 def declaration_state_errors(
-    mechanisms: list[dict], docs_dir: Path = ARCH_DOCS
+    mechanisms: list[dict], docs_dir: Path | tuple[Path, ...] = DECLARATION_SURFACES
 ) -> list[str]:
     """The STATE half of a declaration: the site a reader meets says what the
     registry says, or the gate reds.
@@ -2427,8 +2684,8 @@ def test_every_render_path_carries_the_carve_out_the_guarantee_requires() -> Non
     compact render (`TORTOISE_EXTRACTOR_PROMPT=compact`) appended nothing — no
     `STATE_VALUE_CARVE_OUT` and no user-personal-state vocabulary — so a documented
     render toggle silently removed a declared guarantee on the S2/S4 write path.
-    (Measured on the capstone corpus: 1 of 14 value-bearing planted units survived,
-    against a bar of 13 — #9775's own comment.)
+    (Measured on the capstone corpus: 8 of 14 value-bearing planted units survived,
+    against a bar of 13 — `docs/evidence/9889/e2a-value-units.json`, #10610; the `1 of 14` that stood here is the SUPERSEDED `#9775` reading.)
 
     So the guarantee is pinned as a GUARANTEE, not as string presence on one path.
     Both halves are asserted where they are load-bearing:
@@ -5338,14 +5595,163 @@ def test_membership_requires_a_marker_in_every_declared_document(tmp_path) -> No
     assert any("b.md" in e and "rotted away" in e for e in errors), errors
 
 
-def test_membership_scans_only_the_architecture_docs(tmp_path) -> None:
-    """A marker elsewhere must not silently satisfy a row's declaration."""
+def test_membership_scans_the_declaration_surfaces_only(tmp_path) -> None:
+    """A marker in an UNSCANNED directory must not silently satisfy a row.
+
+    The surface is TWO directories (:data:`DECLARATION_SURFACES`), not every
+    `.md`: a third directory's prose stays out of the comparison in BOTH
+    directions — it can neither satisfy a row nor red one. That bound is the
+    reason the widening below is `docs/epics/` and not `docs/**`.
+    """
     docs = _docs(tmp_path, a__md="no declaration here\n")
     elsewhere = tmp_path / "docs" / "plans"
     elsewhere.mkdir(parents=True)
     (elsewhere / "p.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
-    errors = membership_errors([_row("x")], docs)
+    epics = tmp_path / "docs" / "epics"
+    epics.mkdir(parents=True)
+    errors = membership_errors([_row("x")], (docs, epics))
     assert any("UNMARKED row" in e for e in errors), errors
+
+
+def test_a_declaration_in_the_epic_plan_is_in_the_checked_set() -> None:
+    """The REAL surface includes `docs/epics`, and DM1 is the live instance.
+
+    Measured before this widening (#11239): `Point.mentions` is declared in the
+    epic plan (DM1 — *"a property on the claim Point that carried it"*), **no**
+    write door persists it, and the gate walked `docs/architecture/` alone — so
+    it reported NOTHING and a declared-and-absent mechanism read exactly like a
+    shipped one (#5064's root sentence, with one directory of margin).
+    """
+    markers, errors = declaration_markers()
+    assert errors == [], errors
+    assert "mention_record" in markers, sorted(markers)
+    assert {d.document for d in markers["mention_record"]} == {
+        "epics/2026-11-05-5087-extractor-v4/05-plan.md"
+    }, markers["mention_record"]
+    assert {d.state for d in markers["mention_record"]} == {NOT_IMPLEMENTED}
+
+
+def test_the_mention_record_row_records_the_persistence_half_as_unbuilt() -> None:
+    """The row's contract: an absence, its tracker, and the half that IS built."""
+    row = next(
+        r for r in load_registry()["mechanisms"] if r["id"] == "mention_record"
+    )
+    assert row["state"] == NOT_IMPLEMENTED
+    assert row["tracking_issue"] == 11239
+    # The payload half is BUILT — that is why this is not a "nothing exists" row.
+    assert row["code"] == ["tortoise/commit_schema.py"]
+    assert row["symbols"] == ["Mention"]
+    assert row["pins"] == [
+        "tests/test_referentiality_11021.py::"
+        "test_the_mention_record_is_payload_only_and_says_so"
+    ]
+
+
+def test_a_marker_in_the_epic_plan_with_no_row_is_refused(tmp_path) -> None:
+    """The widening's OWN direction — and its control is the old surface.
+
+    An epics declaration with no registry row produced an EMPTY error list on the
+    pre-widening surface (asserted here as the control), which is the
+    declared-and-absent shape being *invisible*. It now gets the same verdict an
+    architecture marker gets, and the message names the plan document.
+    """
+    docs = _docs(tmp_path, a__md="text <!-- v4-mechanism: x -->\n")
+    epics = tmp_path / "docs" / "epics"
+    epics.mkdir(parents=True)
+    (epics / "p.md").write_text("<!-- v4-mechanism: ghost -->\n", encoding="utf-8")
+    assert membership_errors([_row("x")], docs) == []  # the pre-widening surface
+    errors = membership_errors([_row("x")], (docs, epics))
+    assert any("ghost" in e and "NO row" in e for e in errors), errors
+    assert any("epics/p.md" in e for e in errors), errors
+
+
+def test_a_row_declared_in_the_epic_plan_is_attributed_there(tmp_path) -> None:
+    """Attribution crosses the surface: a row may declare a plan document.
+
+    All three directions: the plan's marker satisfies the row WHEN the row names
+    the plan; a plan marker the row omits is reported as an undeclared
+    declaration; and an unmarked plan is reported as a rotted half — so the plan
+    can be neither satisfied nor silently dropped.
+    """
+    docs = _docs(tmp_path, a__md="<!-- v4-mechanism: x -->\n")
+    epics = tmp_path / "docs" / "epics"
+    epics.mkdir(parents=True)
+    plan = epics / "p.md"
+    plan.write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    row = _row("x", declared_in=["docs/architecture/a.md", "docs/epics/p.md"])
+    assert membership_errors([row], (docs, epics)) == []
+    # The plan's marker is NOT satisfied by declaring only the architecture doc.
+    errors = membership_errors([_row("x")], (docs, epics))
+    assert any("epics/p.md" in e and "does not name it" in e for e in errors), errors
+    # ... and the row that names BOTH is told when the plan loses its marker.
+    plan.write_text("the declaration carries no marker\n", encoding="utf-8")
+    errors = membership_errors([row], (docs, epics))
+    assert any("epics/p.md" in e and "rotted away" in e for e in errors), errors
+
+
+def test_two_surfaces_cannot_share_a_document_identity(tmp_path) -> None:
+    """`architecture/a.md` and `epics/a.md` are DIFFERENT documents.
+
+    The identity is the surface-qualified name, so a marker in one surface cannot
+    satisfy a row that named the other — the basename collision #9778 review P2
+    closed at one depth, closed one surface out as well.
+    """
+    docs = _docs(tmp_path, a__md="no marker here\n")
+    epics = tmp_path / "docs" / "epics"
+    epics.mkdir(parents=True)
+    (epics / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    row = _row("x")  # declares docs/architecture/a.md
+    errors = membership_errors([row], (docs, epics))
+    assert any("architecture/a.md" in e and "rotted away" in e for e in errors), errors
+    # ... and the architecture document's OWN marker is what satisfies it.
+    (docs / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    errors = membership_errors([row], (docs, epics))
+    assert not any(
+        "architecture/a.md" in e and "rotted away" in e for e in errors
+    ), errors
+
+
+def test_an_empty_surface_is_a_verdict_not_an_empty_pass() -> None:
+    """Zero surfaces must not read as "nothing to check" (review cycle 1, P2).
+
+    Measured before the guard: `declaration_markers(())` returned `({}, [])`, so
+    the STATE half of the gate compared nothing and reported agreement — the
+    no-op-gate shape this file refuses everywhere else. `membership_errors`
+    happened to still red (every row is unmarked), which is exactly why the guard
+    has to live in the scanner rather than lean on that side effect.
+    """
+    markers, errors = declaration_markers(())
+    assert markers == {}
+    assert any("surface is EMPTY" in e for e in errors), errors
+    # ... and the composing verdict carries it rather than swallowing it.
+    state_errors = declaration_state_errors([], ())
+    assert any("surface is EMPTY" in e for e in state_errors), state_errors
+
+
+def test_a_symlinked_surface_still_names_its_documents(tmp_path) -> None:
+    """Resolved-vs-unresolved surface must not silently skip the per-doc check.
+
+    Measured before the fix (review cycle 1, P2): `_scanned_targets` returns
+    RESOLVED paths while `_document_name` did `path.relative_to(<unresolved
+    surface>)`, so for a symlinked surface that raised and `_document_for`
+    swallowed it — a declared document carrying NO marker reported CLEAN, the
+    declared-and-absent shape this gate exists to refuse.
+    """
+    real = tmp_path / "real-architecture"
+    real.mkdir()
+    (real / "a.md").write_text("no marker here\n", encoding="utf-8")
+    docs = tmp_path / "docs" / "architecture"
+    docs.parent.mkdir(parents=True)
+    docs.symlink_to(real, target_is_directory=True)
+    epics = tmp_path / "docs" / "epics"
+    epics.mkdir(parents=True)
+    (epics / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    row = _row("x", declared_in=["docs/architecture/a.md", "docs/epics/a.md"])
+    errors = membership_errors([row], (docs, epics))
+    assert any("architecture/a.md" in e and "rotted away" in e for e in errors), errors
+    # ... and the marker on the real document still satisfies it.
+    (real / "a.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    assert membership_errors([row], (docs, epics)) == []
 
 
 def test_membership_fails_closed_on_a_missing_documents_directory(tmp_path) -> None:
@@ -5511,7 +5917,7 @@ def test_membership_treats_a_non_markdown_source_inside_the_surface_as_unscanned
 def test_membership_refuses_a_linked_directory_in_the_surface(tmp_path) -> None:
     """A linked DIRECTORY is not descended, so its markers would get NO verdict.
 
-    `rglob` does not follow a directory symlink, while `_scanned_targets` resolves
+    `os.walk(followlinks=False)` does not follow a directory symlink, while `_scanned_targets` resolves
     a `declared_in:` entry — so a marker inside `docs/architecture/linked/` would
     be invisible to the scan, and a mechanism declared only there would read as
     nothing at all: the fail-open direction. A symlink in the surface is therefore
@@ -7304,6 +7710,121 @@ def test_an_unreadable_surface_is_not_a_vacuous_pass(tmp_path) -> None:
     """A missing docs dir must red THIS verdict too, not pass it empty."""
     errors = declaration_state_errors([_row("x")], tmp_path / "nope")
     assert any("is not a directory" in e for e in errors), errors
+
+
+def test_a_surface_that_cannot_be_read_is_a_verdict_not_an_empty_design(
+    tmp_path,
+) -> None:
+    """`is_dir()` is not permission to read, and `rglob` hides the difference.
+
+    Measured before the guard (review cycle 4, P2): a surface at mode `0o000`
+    holding a marker with NO registry row returned `markers: {}`, `errors: []` —
+    `Path.rglob` swallowed the `PermissionError` that `os.listdir` raises and
+    yields `[]`, so an unreadable surface read exactly like a declaration-free
+    one and the gate's PRIMARY direction (a marker with no row) went silently
+    empty for every document behind it. `missing` cannot catch it — `is_dir()`
+    is True — and the per-document `read_text` verdict cannot either, because the
+    walk never reaches a document.
+
+    This is #5064's root at the SURFACE instead of the file: a scan that could
+    not look must never report "nothing declared".
+    """
+    docs = tmp_path / "epics"
+    docs.mkdir()
+    (docs / "p.md").write_text(
+        "<!-- v4-mechanism: no_row_here state: built -->\n", encoding="utf-8"
+    )
+    docs.chmod(0o000)
+    try:
+        try:
+            os.listdir(docs)
+        except OSError:
+            pass
+        else:  # pragma: no cover — root (or CAP_DAC_READ_SEARCH) reads anything
+            pytest.skip("this box can read a 0o000 directory, so the shape cannot be built")
+        # the precondition the guard exists for: the walk says "nothing here"
+        assert list(docs.rglob("*.md")) == []
+        markers, errors = declaration_markers(docs)
+        # …and the composing verdict carries it rather than swallowing it, so the
+        # whole gate reds on an unreadable surface instead of reporting agreement.
+        # ⛔ Measured INSIDE the unreadable window: the mode must not be restored
+        # first, or the second call reads a readable directory and passes.
+        state_errors = declaration_state_errors([_row("x")], docs)
+    finally:
+        docs.chmod(0o755)
+    assert markers == {}
+    assert any("cannot be READ" in e for e in errors), errors
+    assert any("cannot be READ" in e for e in state_errors), state_errors
+
+
+def test_an_unreadable_SUBDIRECTORY_is_a_verdict_too(tmp_path) -> None:
+    """Probing only the surface ROOT left the fail-open open one level down.
+
+    Measured at the head that added the root probe (review cycle 5, P2):
+    `docs/architecture/sub` at `0o000` holding a marker with no registry row
+    reported `markers: {}`, `errors: []` and NO membership or state verdict —
+    because `os.listdir` only asks whether the SURFACE is listable while the
+    `rglob` the scan then walked with swallowed the `PermissionError` raised at
+    every depth. The gate's primary
+    direction was still silently empty, one directory down, under a comment
+    claiming the opposite. The walk now collects its own errors instead.
+    """
+    docs = tmp_path / "arch"
+    sub = docs / "sub"
+    sub.mkdir(parents=True)
+    (sub / "x.md").write_text(
+        "<!-- v4-mechanism: ghost state: implemented -->\n", encoding="utf-8"
+    )
+    sub.chmod(0o000)
+    try:
+        try:
+            os.listdir(sub)
+        except OSError:
+            pass
+        else:  # pragma: no cover — root (or CAP_DAC_READ_SEARCH) reads anything
+            pytest.skip("this box can read a 0o000 directory, so the shape cannot be built")
+        # the precondition: the surface ITSELF is listable, so the root probe
+        # would have said "fine", and `rglob` says "nothing here".
+        assert os.listdir(docs) == ["sub"]
+        assert list(docs.rglob("*.md")) == []
+        markers, errors = declaration_markers(docs)
+        state_errors = declaration_state_errors([], docs)
+    finally:
+        sub.chmod(0o755)
+    assert markers == {}
+    assert any("cannot be READ" in e for e in errors), errors
+    assert any("sub" in e for e in errors), errors
+    assert any("cannot be READ" in e for e in state_errors), state_errors
+
+
+def test_two_surfaces_sharing_a_DIRECTORY_NAME_are_a_verdict(tmp_path) -> None:
+    """The surface BASENAME is the only thing qualifying a document identity.
+
+    Measured (review cycle 5, P2): with two surfaces both named `plans`, a row
+    declaring `one/plans/x.md` (carrying NO marker) was satisfied by the marker in
+    `two/plans/x.md` — `membership_errors` returned `[]` where a rotted half is
+    owed. `_document_name` qualifies with `surface.name`, so the two surfaces
+    published ONE identity per document: the cross-surface alias the prefix exists
+    to prevent, re-opened by the prefix itself. Nothing asserted the basenames
+    differ, so the gate now refuses rather than silently aliasing.
+    """
+    one = tmp_path / "one" / "plans"
+    two = tmp_path / "two" / "plans"
+    one.mkdir(parents=True)
+    two.mkdir(parents=True)
+    # `one`'s document carries NO marker; `two`'s does — the alias is the whole bug.
+    (one / "x.md").write_text("no marker here\n", encoding="utf-8")
+    (two / "x.md").write_text("<!-- v4-mechanism: x -->\n", encoding="utf-8")
+    surfaces = (one, two)
+    assert [s.name for s in surfaces] == ["plans", "plans"]
+    markers, errors = declaration_markers(surfaces)
+    assert any("share the directory name" in e for e in errors), errors
+    assert markers == {}
+    # ... and every composing verdict carries it, so no caller can read the
+    # alias as agreement: membership must not answer "[]" here.
+    row = _row("x", declared_in=[str(one / "x.md")])
+    assert membership_errors([row], surfaces), "an aliased pair must not pass membership"
+    assert any("share the directory name" in e for e in membership_errors([row], surfaces))
 
 
 def test_a_malformed_marker_breaks_the_state_verdict_too(tmp_path) -> None:
