@@ -8420,7 +8420,7 @@ def test_every_matrix_bounds_its_fan_out_below_the_measured_pool():
     workflow's 12 non-matrix jobs include 8 that are eligible concurrently with
     the matrices (3 with no `needs:`; the fourth `needs:`-less job is `changes`,
     which the matrices wait on and so cannot overlap them; 5 need only
-    `changes`), so on a full selection a PR requests 29 jobs (18 matrix legs +
+    `changes`), so on a full selection a PR requests 30 jobs (19 matrix legs +
     11 non-matrix; `canary-streak` is push-gated), at most 17 of them in flight
     at once. The POOL does not bound that — it bounds only the subset that lands
     on it (`test`/`test-carve-out` ask for `ubuntu-latest` and `test-slow` pins
@@ -8547,7 +8547,7 @@ def _full_selection_claim_violations(
     `total` is the max a run can request (legs + non-matrix). `typical` is what a PR run actually
     requests, and it is NOT `total` minus the push-gated jobs: the `test-slow` and
     `test-carve-out` matrices are PATH-gated, so a typical PR run emits neither. It is the fast
-    shards plus the always-eligible non-matrix jobs (`21 = 10 + 11` at this head). Both are
+    shards plus the always-eligible non-matrix jobs (`22 = 11 + 11` at this head). Both are
     checked: a doc may state one half correctly and the other half wrongly, which is exactly how
     `20 jobs (max 29)` survived the 9 -> 10 raise.
 
@@ -8639,7 +8639,8 @@ def test_the_full_selection_job_and_leg_counts_match_the_shipped_shards():
     total = legs + non_matrix_pr
     # `typical` is NOT `total - push_gated`: the slow and carve matrices are path-GATED, so a
     # typical PR run emits neither. It is the fast shards plus the always-eligible non-matrix
-    # jobs (`20 = 9 + 11` on origin/main, `21 = 10 + 11` after the raise).
+    # jobs (`20 = 9 + 11` on origin/main, `21 = 10 + 11` after the raise, `22 = 11 + 11` after
+    # #11576's raise).
     typical = fast_shard_count(manifest) + non_matrix_pr
     assert legs >= 3 and non_matrix_pr >= 1 and 0 < typical < total, (
         legs, non_matrix_pr, typical, total)

@@ -795,7 +795,7 @@ jobs:
       # 8 of this workflow's 12 non-matrix jobs are eligible concurrently with
       # the matrices (3 carry no `needs:`; the fourth `needs:`-less job is
       # `changes`, which the matrices wait on and so cannot overlap them; 5 need
-      # only `changes`). On a full selection a PR REQUESTS 29 jobs (18 matrix
+      # only `changes`). On a full selection a PR REQUESTS 30 jobs (19 matrix
       # legs + 11 non-matrix; `canary-streak` is push-gated), at most 17 of them
       # in flight at once (9 capped matrix slots + the 8 eligible non-matrix).
       # The POOL does not bound that -- it bounds only the subset that lands on

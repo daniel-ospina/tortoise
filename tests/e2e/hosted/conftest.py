@@ -449,23 +449,42 @@ def bare_hosted_server(hosted_env):
         shutil.rmtree(d, ignore_errors=True)
 
 
-# ⛔ PER-REQUEST BUDGET, SIZED FROM A MEASUREMENT (#11576). The point of the
-# budget is to red a DEGRADED server without redding a SLOW RUNNER, so its floor
-# is the slowest measured healthy request, not a round number.
+# ⛔ THE `api` FIXTURE'S PER-REQUEST BUDGET, SIZED FROM A MEASUREMENT (#11576). The
+# point of the budget is to red a DEGRADED server without redding a SLOW RUNNER,
+# so its floor is the slowest measured healthy **chain**, not a round number.
+#
+# ⚠️ What was measured is a CHAIN total, not a per-request time: `--durations`
+# reports per-test CALL wall time, so every figure below is a whole test's
+# sequence of requests. Until #11576's review (P3) this comment described the
+# floor as the slowest healthy single request — naming a measurement nobody
+# took — and a future budget would have been re-derived from it.
 #
 # Measured on the SAME tree (only docs/tests differed between the two runs):
 #   green run 42704270992 @ 10638ca7 — `test_register_provisions_team_key_and_
 #     first_point`'s whole 4-request chain (register -> /v1/team -> POST
 #     /v1/points -> GET /v1/points) took 21.06s, and the suite 357.46s.
 #   red run 42711667194 @ 9c64675 — the same suite took 532.67s (1.49x), and
-#     POST /v1/points alone blew the old 30s budget: a 1.49x factor over 21.06s
+#     POST /v1/points alone blew the old 30s budget; a 1.49x factor over 21.06s
 #     is ~31.4s, i.e. the 30s budget sat INSIDE the observed variance band of a
 #     healthy run. That is a false red on a required-shaped check, not a
 #     degraded server.
+# Both figures come from the run's `--durations` table (`gh run view --log` on the
+# two run ids above, or the CI job's own summary): the slowest-durations block
+# names the test and its call time, and the suite total is the run's last line.
+# The red point is DERIVED (21.06 x 1.49), not measured per request — no artifact
+# records a single request's duration.
 # 60s is ~2x the observed red point. It is deliberately NOT unbounded: a real
 # hang must still FAIL the job before its 15-minute cap — a job killed by its own
 # timeout reports `cancelled`, which the merge rail treats as non-red, so an
 # over-generous budget would convert a hang into a silent pass.
+#
+# SCOPE: this is the ONE budget this change moves. Eight other request sites in
+# this suite keep their own hard-coded budgets and are untouched:
+# `test_03_billing_upgrade.py` (3 sites), `test_09_github_integration.py` (2) and
+# `test_13_claim.py` (2) at `timeout=10`, and `test_12_selfhost_migration.py` at
+# a 45s deadline. They are cheap requests, far below the top durations in both
+# runs, and are named here only so this comment is not read as "the whole suite
+# is now above the variance band".
 REQUEST_TIMEOUT_MS = 60_000
 
 

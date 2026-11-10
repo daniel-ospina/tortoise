@@ -19,8 +19,8 @@ version: 1
 # test (`test_real_workflow_halves_are_consistent`) and the lane-parity
 # superset test below, both of which recompute from the map.
 #
-# S=10 is also what the lane-parity contract permits: main publishes
-# `test (a)`…`test (i)` and a PR may only ADD to that set, never remove from it
+# S=11 is also what the lane-parity contract permits: main publishes
+# `test (a)`…`test (j)` and a PR may only ADD to that set, never remove from it
 # (`test_shard_labels_are_a_superset_when_s_changes` pins the polarity; the
 # merge rail refuses a removal). #11602 raised S 9 -> 10 because the 2026-11-09
 # sweep took the worst committed shard to 32 m, which put the `test` job's SUM
@@ -30,18 +30,31 @@ version: 1
 # stale-head exposure is untouched, and `#6792`'s 10 m SLOW-leg ceiling is a
 # different number on a different lane and is not touched by this line.
 #
+# #11576 raised S 10 -> 11 for the SAME reason, one merge later: main's
+# `test_embed_decision_step_11086.py` and this branch's
+# `test_demo_session_read_exclusion_8290.py` land in `fast_pool()` together, the
+# union packs a worst shard at 840.2 s where either side alone packed 840.0 s,
+# and `shard_watchdog_minutes()` rounds 840.2/60 x 2.0 up to 29 m — 0.2 s of
+# packing crosses a whole watchdog minute. At 29 m the arm-2 SUM is 60.64 m,
+# x 1.5 = 90.96 m against the 90 m cap (RED, where BOTH parents pass). At S=11
+# the same map packs to 763.8 s -> 26 m, i.e. 57.64 x 1.5 = 86.46 m: 3.54 m of
+# real headroom rather than the 0.54 m S=10 was clearing by. ⛔ The cap was NOT
+# moved: `test_the_test_job_carries_no_unbounded_cache_post_step` says raising it
+# re-opens `#3239`'s stale-head exposure, and the SUM grew from the POOL, not
+# from the pre-suite terms (those are measurements and file facts).
+#
 # The 1.25x balance band is enforced by `test_real_workflow_halves_are_
 # consistent`, which recomputes the ratio from the committed map. The old
 # "single-file floor" argument is RETIRED: it rested on
 # `test_onboarding_state_split.py` dominating max(shard), and #6133 split that
 # file — so extra shards do keep reducing max(shard). The lane-parity contract
 # above cannot hold a MINIMUM either way: it requires a SUPERSET of main's
-# labels, so it forbids a SHRINK and is what PERMITS 10, not what caps it at 9.
+# labels, so it forbids a SHRINK and is what PERMITS 11, not what caps it at 10.
 #
 # Raising this trades WALL CLOCK for AGGREGATE runner time (the same self-hosted
 # capacity the epic is trying to enlarge), so it is a wall-clock lever, not a
 # free win.
-fast_shards: 10
+fast_shards: 11
 
 # W37: the CARVE-OUT pool. `test-carve-out` was the CI critical path as ONE
 # unsharded job — measured 2026-09-30 over 23 PR runs and 3 successful main
@@ -11028,11 +11041,12 @@ durations:
   test_cursor_mcp_exit_evidence.py: 2.8  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_d3_session_identity.py: 2.5  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.9
   test_dashboard_unknown_address.py: 0.2  # ci-timing junit-census+top-15 2026-11-02 (run 41375596528); was 0.3
+  test_demo_session_read_exclusion_8290.py: 14.0  # #11576 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured 2026-11-09, the WHOLE file as committed: 30 tests in 10.10s (`TORTOISE_TEST_CARVE_OUT=1`). Declared 14.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the 1.2 MB `config/ci-surfaces.yml` parse two of its census pins make. ⛔ Absent this row the file packs at the flat 2.0s `DEFAULT_FAST_WEIGHT`, understating it 5x. At S=11 this weight still packs the worst shard at 764.9s -> 26 m (arm-2 SUM 57.64 m x 1.5 = 86.46 m against the 90 m cap); at S=10 it would ADD to the 29 m shard and hold the SUM red. Refresh from the first post-merge junit artifact.
   test_dream_noop_3139.py: 4.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 6.3
   test_durability_posture.py: 9.6  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 8.2
   test_embed_metering.py: 2.4  # #4488: no source leg of the sweep collected it — refresh from CI junit — ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 2.5
   test_embed_gate_5008.py: 6.0  # carried forward (not a full-file CI measurement) — #5008 (#3400 trap): a file ADDED BY A PR has no CI junit measurement (the refresher samples push-to-main runs only). Locally measured this turn on the embedded lane: 37 tests in 5.6s (`TORTOISE_TEST_CARVE_OUT=1`); declared at 6.0s so a cold leg cannot under-pack. Refresh from the first post-merge run. — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (0.8s) is a LOWER bound; kept 6.0
-  test_embed_decision_step_11086.py: 7.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured this turn, the WHOLE file as committed: 12 tests in 3.69s under `TORTOISE_TEST_CARVE_OUT=1` (5.08s wall). Declared 7.0s — ~1.9x the measured body, so a cold leg pays interpreter start and the one 1.2 MB `config/ci-surfaces.yml` YAML parse its selection pin makes without under-packing. ⛔ The ceiling is NOT free: 7.5s and above repacks a fast shard from 28 m to 29 m and breaches `test_ci_selection.py`'s arm-2 invariant (SUM x 1.5 <= the 90 m cap, 0.54 m of headroom left). If this file grows, shrink it or earn the shard back — do not simply raise this number.
+  test_embed_decision_step_11086.py: 7.0  # #11086 (#3400 trap: a file ADDED BY A PR has no CI junit measurement). Locally measured (`TORTOISE_TEST_CARVE_OUT=1`): the WHOLE file as committed collects and runs **14** tests — `--collect-only -q` -> 14, `14 passed in 4.86s` (#11576 review P3: this note said "12 tests in 3.69s", a count and a body the file outgrew). Declared 7.0s — ~1.4x the measured body, so a cold leg pays interpreter start and the one 1.2 MB `config/ci-surfaces.yml` YAML parse its selection pin makes without under-packing. ⛔ The ceiling is NOT free: 7.5s and above repacks a fast shard across a whole watchdog minute and breaches `test_ci_selection.py`'s arm-2 invariant. If this file grows, shrink it or earn the shard back — do not simply raise this number.
   test_embedder_provision.py: 8.6  # ci-timing junit-census+top-15 2026-10-26 (run 40259128208); was 6.1 — ci-timing junit-census+top-15 2026-11-09 (run 42546828652): no declared testcase count for this file (UNKNOWN), so the reading cannot prove it saw the whole file; the reading (7.8s) is a LOWER bound; kept 8.6
   test_entity_delete_rebuild.py: 2.2  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 1.7
   test_env_truthy.py: 22.1  # ci-timing junit-census+top-15 2026-11-09 (run 42546828652); was 18.8
