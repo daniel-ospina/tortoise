@@ -477,7 +477,8 @@ class TestEntityResolution:
              {"name": "Joe", "kind": "core:person"}],
             search, model=Boom())
         assert res["map"]["Joseph"]["id"] == "obj1"   # phase-1 survives
-        assert "Joe" not in res["map"]                 # unresolved → ADD
+        assert "Joe" not in res["map"]                 # unresolved → HELD
+        assert [h["name"] for h in res["held"]] == ["Joe"], res["held"]
         assert any("failed" in w for w in res["warnings"])
 
     def test_no_candidates_skips_phase2(self):
