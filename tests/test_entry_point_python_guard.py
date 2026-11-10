@@ -710,6 +710,55 @@ def test_the_record_exemptions_all_still_match_a_live_line():
     )
 
 
+_NUMBER_WORDS = {
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+}
+
+
+def test_the_record_exemption_prose_counts_the_set_it_describes():
+    """The `_DELIBERATE_BARE_FORM` comment states the exemption set's cardinality
+    in prose — *"…stay `uv run python` while the four entries below do not"*.
+    Nothing pinned that number, so it drifted silently: the `#11725` diff grew the
+    set to FOUR entries while the prose still said "three" (review finding 2,
+    PR #11754). The set's own description is the only cardinality a reader has, so
+    it must describe THIS set — the same non-rot rule
+    `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
+    """
+    source = Path(__file__).read_text(encoding="utf-8")
+    head = source.split("_DELIBERATE_BARE_FORM: frozenset", 1)[0]
+    # The prose is a `#:` comment block, so it may be re-wrapped at any column;
+    # join it to one line before matching rather than pinning a line break.
+    prose = " ".join(
+        re.sub(r"\s+", " ", block).strip()
+        for block in re.findall(r"^#:(.*)$", head, re.MULTILINE)
+    )
+    match = re.search(
+        r"while the (" + "|".join(_NUMBER_WORDS) + r") entries below do not", prose
+    )
+    assert match, (
+        "the `_DELIBERATE_BARE_FORM` comment no longer states its cardinality as "
+        "'while the <N> entries below do not' — this pin must NOT rot into passing "
+        "on absence, because that sentence is what tells a reader how big the "
+        "exemption set is; restore it"
+    )
+    stated_word = match.group(1)
+    assert _NUMBER_WORDS[stated_word] == len(_DELIBERATE_BARE_FORM), (
+        f"the `_DELIBERATE_BARE_FORM` comment says '{stated_word}' "
+        f"({_NUMBER_WORDS[stated_word]}) but the set holds "
+        f"{len(_DELIBERATE_BARE_FORM)} entries — the prose describes a set that no "
+        f"longer exists. Update the word when you add or remove an entry."
+    )
+
+
 def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     """#6937 P2-1 — the RECURRENCE seam, not a re-assertion of the sweep.
 
