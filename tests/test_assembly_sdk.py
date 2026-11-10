@@ -79,6 +79,23 @@ from the fused pool). No ``_FROZEN_CHUNKS`` / ``_A4_OFF_ROWS`` /
 ``_PRE_3804_CHUNKS`` edit accompanied this re-capture: those are the
 independent CONTENT record, and a re-capture must not touch them.
 
+#11682 RE-CAPTURE (R17, ORDER only — no content change). #11682 adds a Point's
+verbatim ``quote`` to the Point FULLTEXT index's declared field set
+(``sparse.POINT_INDEX_TEXT_FIELDS``), which is a RANKING change: the engine
+scores over the wider field set, so hits that already matched can re-order on a
+corpus whose text did not change. Measured here, not predicted — the affected
+goldens failed the ORDER layer while the two CONTENT layers passed, i.e. the
+row SET was intact and only the sequence moved. Re-captured from the docker
+lane on ``tests/_assembly_graph.build_base_graph`` /
+``build_out_of_subgraph_gold`` with ``question_date="2026-09-10"`` and a
+FakeReader, per the policy above: ``GOLD_LEGACY_CANARY`` and three
+``_A4_OFF_ORDERED`` entries (the canary, plus the two A4=0 orderings whose
+dated-spine position moved); ``GOLD_LEGACY_CURRENT`` / ``_MISFIRE`` / ``_AGO`` /
+``_COMPARE`` were byte-identical and are untouched, and the FIRED/HOSTED
+goldens are unaffected (their spine is rendered from dated events, not from the
+fused pool). NO ``_FROZEN_CHUNKS`` / ``_PRE_3804_CHUNKS`` / ``_A4_OFF_ROWS``
+edit accompanied this: those are the independent CONTENT record.
+
 Docker lane only (live FalkorDB — dedicated per-test graph with fulltext,
 deleted at teardown)."""
 import contextlib
@@ -268,13 +285,13 @@ GOLD_LEGACY_CANARY = """Current Date: 2026-09-10
 
 [session sess-2026-08-10] the dog chewed the corner of the dog bed cushion
 
-[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
-
 [session sess-2026-09-01] the new sofa was delivered on the first of september
 
-[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
+[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars
 
 [session sess-distract-8] talked about phone battery replacement shop with a friend
+
+[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead
 
 [session sess-2026-08-10] took the dog to the vet for the chewed cushion
 
@@ -435,17 +452,17 @@ _A4_OFF_ORDERED = {
     "which came first - the couch or the dog bed?": (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
     ),
     CANARY_QUESTION: (
         _HEADER_CHUNK,
         "[session sess-2026-08-10] the dog chewed the corner of the dog bed cushion",
-        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-09-01] [valid since 2026-09-01] sold the old couch and ordered a new sofa instead",
         "[session sess-2026-08-10] [valid since 2026-08-10] bought the grey couch from ikea for 800 dollars",
+        "[session sess-2026-09-01] the new sofa was delivered on the first of september",
         "[session sess-2026-08-10] took the dog to the vet for the chewed cushion",
         "[session sess-bookshelf] [valid since 2026-09-05] on the fifth of september we moved the bookshelf into the study and bought a reading lamp - the same week the old couch was discussed and the dog bed got chewed, but the bookshelf was the newest thing we bought that month",
     ),
