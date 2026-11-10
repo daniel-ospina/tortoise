@@ -6325,8 +6325,16 @@ def _digits(core: tuple) -> str:
 
     `1.2` and `1200000` are the same number written as a decimal scale and as
     digits; dropping the point makes them comparable by the padding relation
-    below without any magnitude arithmetic. Empty when the core carries no
-    digits at all (a clock binds `02`/`00`, which never reaches this path).
+    below without any magnitude arithmetic.
+
+    ⛔ THIS NEVER RETURNS AN EMPTY STRING. A core with no digits, and the literal
+    `0`, both collapse to `"0"` rather than to `""` — so `_same_magnitude_number`
+    tests `left == right` and NOT `not left or not right`: that guard was
+    unreachable, because `_value_slots_scaled` yields a slot only when it binds
+    digits, so every core that reaches here carries some. A guard no caller can
+    reach is surface no mutant can red, which is the class this PR removes
+    (review cycle 11, found while re-verifying cycles 8-10). The collapse is
+    pinned directly in §24 item 2f, because the census exercises neither shape.
     """
     return str(core[1]).replace(".", "").lstrip("0") or "0"
 
@@ -6347,7 +6355,7 @@ def _same_magnitude_number(one: tuple, other: tuple) -> bool:
     when BOTH spellings carry a scale word, which the caller tests.
     """
     left, right = _digits(one), _digits(other)
-    if not left or not right or left == right:
+    if left == right:
         return False
     longer, shorter = ((left, right) if len(left) > len(right) else (right, left))
     return longer.startswith(shorter) and set(longer[len(shorter):]) <= {"0"}
@@ -6805,6 +6813,18 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #         `20%`, the same tolerance the file's battery at the top pins).
     assert _retention_class("we ordered 20 percent",
                             "we shipped 20%") == "LAYOUT_RETAINED"
+    # 2f. ⛔ `_digits` CANNOT RETURN AN EMPTY STRING, which is what lets
+    #     `_same_magnitude_number` decide on equality alone (#11730 review, cycle
+    #     11). The census never reaches either shape — `_value_slots_scaled`
+    #     yields a slot only when it binds digits — so the CONTRACT is pinned
+    #     here rather than left as surface no input can reach: a digitless core
+    #     and the literal zero both collapse to `"0"`, and two of them are not a
+    #     magnitude pair.
+    assert _digits(("", "", None)) == "0", (
+        "a digitless core must collapse to the sentinel, never to ''")
+    assert _digits(("", "0", None)) == "0", "the literal zero is the sentinel"
+    assert _digits(("", "1.2", None)) == "12", _digits(("", "1.2", None))
+    assert _same_magnitude_number(("", "0", None), ("", "0", None)) is False
     # 3. An excluded FORM is its own class — residual (c) is not a loss.
     assert _retention_class("we cut over at 2am",
                             "we cut over at 2am") == "CONTENT_EXCLUDED_FORM"
