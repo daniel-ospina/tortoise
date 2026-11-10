@@ -402,13 +402,19 @@ def _eligible(block: dict, *, min_confidence: float,
     pure belief floor. Balanced-coinflip disputes (mean ≈ 0.5) never fire.
     """
     ep = (block or {}).get("ep") or {}
+    # #11702: an ABSENT belief has no mean. This used to substitute the neutral
+    # 0.5, which is indistinguishable from a measured coin flip at a floor — the
+    # shipped 0.7 default hid that (both were below it), but any floor at or
+    # under 0.5 admitted a never-measured claim as if it carried neutral
+    # evidence. No number, no clearance.
+    raw_mean = ep.get("confidence_mean")
     try:
-        mean = float(ep.get("confidence_mean", NEUTRAL_CONFIDENCE))
+        mean = float(raw_mean) if raw_mean is not None else None
     except (TypeError, ValueError):
-        mean = NEUTRAL_CONFIDENCE
-    if mean >= min_confidence:
+        mean = None
+    if mean is not None and mean >= min_confidence:
         return True
-    if conflict_relevant and ep.get("contested"):
+    if mean is not None and conflict_relevant and ep.get("contested"):
         boost_floor = max(NEUTRAL_CONFIDENCE, min_confidence - 0.1)
         return mean >= boost_floor
     return False
@@ -713,10 +719,13 @@ def run_volunteer_pipeline(
             if block is None:
                 continue
             ep = block.get("ep") or {}
+            # #11702: None is the ABSENT state — carried through, never coerced
+            # to the neutral 0.5 (see ``_eligible``).
+            raw_mean = ep.get("confidence_mean")
             try:
-                mean = float(ep.get("confidence_mean", NEUTRAL_CONFIDENCE))
+                mean = float(raw_mean) if raw_mean is not None else None
             except (TypeError, ValueError):
-                mean = NEUTRAL_CONFIDENCE
+                mean = None
             status = (block.get("supersession") or {}).get("status") \
                 or hit.get("status") or "live"
             cand = {
@@ -775,9 +784,16 @@ def run_volunteer_pipeline(
         #    (a live successor wins the slot when both match; a superseded
         #    point fills a remaining slot only flagged superseded — never as
         #    the current belief).
+        #    #11702: candidates with NO belief sort LAST within their
+        #    superseded/live tier (the tier above the score, exactly as
+        #    `recall_ranking` orders them) and fall through to the
+        #    deterministic tiebreaks. `-c["mean"]` on a `None` is a TypeError,
+        #    and the old code had no guard because the absent mean could not
+        #    reach here (`_assemble_ep_rows` fabricated 0.5 for it).
         kept.sort(key=lambda c: (
             c["superseded"],
-            -c["mean"],                          # trim lowest-confidence first
+            1 if c["mean"] is None else 0,     # absent never wins a slot first
+            -(c["mean"] or 0.0),               # trim lowest-confidence first
             c["rrank"],                           # relevance tiebreak
             c["id"],                              # deterministic final tiebreak
         ))

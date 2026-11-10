@@ -326,13 +326,18 @@ def test_event_signal_counts_about_objects(sdk):
     sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
     assert sig["about_objects"] == 3  # INSTANTIATES edge NOT counted (3, not 4)
     assert sig["is_event"] is True
-    assert sig["confidence"] == 0.5  # no PRODUCES Points → coalesce fallback
+    # #11702: no PRODUCES Points → NO belief (absent), never a 0.5 fallback.
+    assert sig["confidence"] is None and sig["ep_state"] == "absent"
     # Real-path chain: fetched sig → consumer. Guards producer key (sig key
     # rename → KeyError on the shape asserts above), consumer key (rename →
     # 0.6·0+0.2 = 0.2, value mismatch not exception), is_event routing, and
     # the producer→consumer handoff in one assertion — the plan's boost-level
     # silent-zero guard.
-    assert ranker.graph_boost({}, sig) == 0.65  # 0.6·(1-1/4) + 0.4·0.5
+    # #11702: absent belief drops the 0.4·confidence TERM and keeps the
+    # about-count term's own weight — 0.6·(1-1/4) = 0.45, not the unweighted
+    # 0.75 (which would score "nothing measured this" ABOVE a measured 0.5's
+    # 0.65) and not a fabricated 0.5 either.
+    assert ranker.graph_boost({}, sig) == 0.45
     # Saturation-shape pin: inst_norm = 1 - 1/(1+n) is nonlinear (0, 0.5, 0.75
     # for n=0,1,3); a linearized inst_norm (e.g. 0.25·n) would pass the 0 and
     # 3 anchors but diverge here at the midpoint (0.5, not 0.35).
@@ -346,13 +351,15 @@ def test_event_signal_degrades_without_about_objects(sdk):
     sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
     assert sig["about_objects"] == 0
     assert sig["is_event"] is True
-    assert sig["confidence"] == 0.5  # no PRODUCES Points → coalesce fallback
+    assert sig["confidence"] is None  # #11702: absent, not a 0.5 fallback
     # Real-path chain: if the producer dropped is_event this would route to the
     # point branch → 0.5·0.5 + 0 = 0.25, not 0.2. This 0.2 assert is
     # consumer-key-agnostic by construction (n=0 → inst_norm=0 under any key
     # name); the renamed-consumer-key guard lives in
-    # test_event_signal_counts_about_objects' 0.65 asserts.
-    assert ranker.graph_boost({}, sig) == 0.2
+    # test_event_signal_counts_about_objects' 0.45 asserts.
+    # #11702: zero about-objects AND no belief ⇒ 0.0 (this was 0.2 on the
+    # fabricated 0.5; there is no signal left to boost with).
+    assert ranker.graph_boost({}, sig) == 0.0
 
 
 def test_rerank_event_boost_from_about_objects(sdk):
@@ -376,12 +383,15 @@ def test_rerank_event_boost_from_about_objects(sdk):
         entity_type="event",
     )
     by_id = {r["id"]: r for r in out}
-    assert by_id[ev_a["eventId"]]["graph_ranking"]["graph_boost"] == 0.65
-    assert by_id[ev_b["eventId"]]["graph_ranking"]["graph_boost"] == 0.2
+    # #11702: ev_a has about-objects but NO produced belief → the belief term is
+    # dropped, so its boost is the about-count term alone (0.6·(1-1/4) = 0.45);
+    # ev_b has neither → 0.0. This used to be 0.65 / 0.2 off a fabricated 0.5.
+    assert by_id[ev_a["eventId"]]["graph_ranking"]["graph_boost"] == 0.45
+    assert by_id[ev_b["eventId"]]["graph_ranking"]["graph_boost"] == 0.0
     assert out[0]["id"] == ev_a["eventId"]  # boost decides the order
     # final_score uses unrounded inputs; approx mirrors test_rerank_annotates_and_sorts.
     assert by_id[ev_a["eventId"]]["graph_ranking"]["final_score"] == pytest.approx(
-        0.5 * 0.5 + 0.35 * 0.65 + 0.15 * 1.0, abs=5e-4)
+        0.5 * 0.5 + 0.35 * 0.45 + 0.15 * 1.0, abs=5e-4)
 
 
 def test_event_signal_includes_produces_confidence(sdk):
@@ -441,7 +451,9 @@ def test_event_signal_lowercase_produces_edge_not_matched(sdk):
     assert proj.create_edge(ev["eventId"], p["id"], "produces") is True
     ranker = GraphRanker(projection=proj)
     sig = ranker._fetch_event_signals([ev["eventId"]])[ev["eventId"]]
-    assert sig["confidence"] == 0.5  # lowercase edge NOT matched → coalesce
+    # #11702: absent (the lowercase edge is not matched, so nothing is
+    # produced) — a null, not the coalesced 0.5.
+    assert sig["confidence"] is None and sig["ep_state"] == "absent"
 
 
 def test_event_signal_confidence_only_degradation(sdk):
@@ -506,7 +518,9 @@ def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
     ranker = GraphRanker(projection=proj)
     sig = ranker._fetch_event_signals([ev_a["eventId"], ev_b["eventId"]])
     assert sig[ev_a["eventId"]]["about_objects"] == 3
-    assert sig[ev_a["eventId"]]["confidence"] == 0.5  # coalesce — no PRODUCES
+    # #11702: ev_a produces nothing → absent, not a coalesced 0.5.
+    assert sig[ev_a["eventId"]]["confidence"] is None
+    assert sig[ev_a["eventId"]]["ep_state"] == "absent"
     assert sig[ev_b["eventId"]]["about_objects"] == 0
     assert sig[ev_b["eventId"]]["confidence"] == 0.9  # avg scoped to ev_b
     out = ranker.rerank(
@@ -515,9 +529,10 @@ def test_event_signal_batch_fetch_preserves_per_event_grouping(sdk):
         entity_type="event",
     )
     by_id = {r["id"]: r for r in out}
-    assert by_id[ev_a["eventId"]]["graph_ranking"]["graph_boost"] == 0.65
+    # #11702: ev_a (3 about-objects, no produced belief) = the about term at
+    # its own weight (0.6·(1-1/4) = 0.45).
+    assert by_id[ev_a["eventId"]]["graph_ranking"]["graph_boost"] == 0.45
     assert by_id[ev_b["eventId"]]["graph_ranking"]["graph_boost"] == 0.36  # 0.6·0 + 0.4·0.9
-    # NB: flips when #25 lowercases the PRODUCES query — 0.36 → 0.2.
 
 
 def test_event_signal_keyed_by_eventId_not_id(sdk):
@@ -538,7 +553,10 @@ def test_event_signal_keyed_by_eventId_not_id(sdk):
     # for this id and the membership assert fails (AssertionError, not KeyError).
     # rerank with result id == eventId resolves to the signal row.
     out = ranker.rerank([{"id": "evt-7", "scores": {"rrf": 0.05}}], entity_type="event")
-    assert out[0]["graph_ranking"]["graph_boost"] == 0.2  # no aboutObject edges
+    # #11702: no about-objects and no produced belief ⇒ no signal at all (0.0);
+    # the row DID answer, which `ep_state: "absent"` records.
+    assert out[0]["graph_ranking"]["graph_boost"] == 0.0
+    assert out[0]["graph_ranking"]["ep_state"] == "absent"
 
 
 def test_rerank_event_unmatched_signals_are_neutral(sdk):
@@ -554,8 +572,14 @@ def test_rerank_event_unmatched_signals_are_neutral(sdk):
         entity_type="event",
     )
     by_id = {r["id"]: r for r in out}
-    assert by_id[ev["eventId"]]["graph_ranking"]["graph_boost"] == 0.2
+    # #11702: with the 0.5 belief default gone, a matched-but-signal-less event
+    # and an unmatched id BOTH land on boost 0.0 — so the divergence is now read
+    # from the state keys the ranker emits rather than from a fabricated 0.5:
+    # a matched row ANSWERS (``ep_state`` present), an unknown id does not.
+    assert by_id[ev["eventId"]]["graph_ranking"]["graph_boost"] == 0.0
+    assert by_id[ev["eventId"]]["graph_ranking"]["ep_state"] == "absent"
     assert by_id["no-such-event"]["graph_ranking"]["graph_boost"] == 0.0
+    assert "ep_state" not in by_id["no-such-event"]["graph_ranking"]
     # WHERE eventId IN $ids must scope to requested ids: fetching one event
     # never returns another event's row (would pass if the filter were removed).
     # Arrange: a second, unrequested event.

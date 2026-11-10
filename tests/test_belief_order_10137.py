@@ -444,10 +444,19 @@ def test_the_mirror_counts_only_where_the_read_consults_it(sdk):
     actually uses it.
 
     `GraphRanker` prefers the pre-#852 `n.confidence` mirror, so a mirror-only
-    node IS a measurement there. `StateRanker` reads α/β only, so the same node
-    is scored from the neutral default in `recall_state` and must NOT claim
-    `consulted`. One predicate for both would put "belief informed this order"
-    beside `confidence_source: "neutral"` on the same hit.
+    node IS a measurement there. `StateRanker` USED to read α/β only — so the
+    same node was scored from the neutral default in `recall_state` and must
+    not have claimed `consulted`.
+
+    #11702 SUPERSEDES that half deliberately: leaving the two rankers on
+    different presence predicates is the divergence the issue is about (a
+    mirror-only node — a pre-#852 legacy graph — must not be reported ABSENT
+    just because its α/β columns are missing). `StateRanker` now consults the
+    mirror for presence AND value, exactly as `GraphRanker` does, so BOTH
+    reads legitimately claim `consulted` and both report the same number. What
+    this test still guards is the ORIGINAL contract: a read that did NOT use
+    the belief must not claim it (see
+    `test_a_neutral_default_is_not_a_consulted_belief`).
     """
     only_mirror = sdk.create_point(
         "statement", "the deploy pipeline mirror only", status="live")["id"]
@@ -466,6 +475,10 @@ def test_the_mirror_counts_only_where_the_read_consults_it(sdk):
 
     state = {r["id"]: r for r in sdk.recall_state(query=_QUERY, limit=10)}
     assert state[ordinary]["ep"].get("informed_order") == "consulted"
-    assert state[only_mirror]["ep"].get("informed_order") != "consulted", (
-        "StateRanker does not read the mirror — the row was scored from the "
-        "neutral default and must not claim a consulted belief")
+    # #11702: StateRanker reads the mirror too, so this row IS scored from a
+    # persisted belief — and the value it is scored from is the mirror's 0.95,
+    # not the neutral default the old split fell back to.
+    assert state[only_mirror]["ep"].get("informed_order") == "consulted", (
+        "StateRanker consults the mirror (#11702 parity with GraphRanker)")
+    assert state[only_mirror]["ep"]["ep_state"] == "baseline"
+    assert graph[only_mirror]["ep"]["ep_state"] == state[only_mirror]["ep"]["ep_state"]

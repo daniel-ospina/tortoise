@@ -32,10 +32,15 @@ TEMPLATES: dict[str, dict] = {
             WHERE a.id <> b.id
               AND a.is_operator = false
               AND b.is_operator = false
-              AND coalesce(a.confidence, 0.5) > 0.45
-              AND coalesce(b.confidence, 0.5) > 0.45
-            RETURN a.id, a.content, coalesce(a.confidence,0.5) as a_conf,
-                   b.id, b.content, coalesce(b.confidence,0.5) as b_conf
+              // #11702: a claim with NO persisted belief is not a "high
+              // confidence claim". `coalesce(a.confidence, 0.5) > 0.45`
+              // ADMITTED it by fabricating the Beta(1,1) mean; a NULL
+              // comparison is NULL in Cypher, so the bare column refuses it
+              // while keeping the 0.45 bar for real beliefs.
+              AND a.confidence > 0.45
+              AND b.confidence > 0.45
+            RETURN a.id, a.content, a.confidence as a_conf,
+                   b.id, b.content, b.confidence as b_conf
             ORDER BY a_conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_pairs(rows, "conflict"),
@@ -58,8 +63,10 @@ TEMPLATES: dict[str, dict] = {
               AND coalesce(r_out.idx, 0) >= 1
               AND target.id <> supporter.id
               AND target.content CONTAINS $entity
-              AND coalesce(supporter.confidence, 0.5) > 0.0
-            RETURN supporter.id, supporter.content, coalesce(supporter.confidence,0.5) as conf
+              // #11702: no fabricated 0.5 as the admission ticket (see the
+              // conflict template above).
+              AND supporter.confidence > 0.0
+            RETURN supporter.id, supporter.content, supporter.confidence as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "supporting"),
@@ -73,7 +80,7 @@ TEMPLATES: dict[str, dict] = {
             WHERE target.id <> opponent.id
               AND target.content CONTAINS $entity
               AND opponent.is_operator = false
-            RETURN opponent.id, opponent.content, coalesce(opponent.confidence,0.5) as conf
+            RETURN opponent.id, opponent.content, opponent.confidence as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "counter"),
@@ -85,9 +92,12 @@ TEMPLATES: dict[str, dict] = {
         "cypher": """
             MATCH (c:Point)
             WHERE c.is_operator = false
-              AND coalesce(c.confidence, 0.5) > 0.6
+              // #11702: "consensus" is agreement among claims the graph has a
+              // BELIEF for; the coalesced 0.5 let a never-measured claim in at
+              // the 0.6 bar it was fabricating against.
+              AND c.confidence > 0.6
               AND NOT (c)<-[:NAND]-(:Point {op_type:\"NAND\"})
-            RETURN c.id, c.content, coalesce(c.confidence,0.5) as conf
+            RETURN c.id, c.content, c.confidence as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_ranked(rows, "consensus"),
@@ -145,7 +155,7 @@ TEMPLATES: dict[str, dict] = {
               AND target.id <> evidence.id
               AND target.content CONTAINS $entity
               AND evidence.is_operator = false
-            RETURN evidence.id, evidence.content, coalesce(evidence.confidence,0.5) as conf
+            RETURN evidence.id, evidence.content, evidence.confidence as conf
             ORDER BY conf DESC LIMIT $limit
         """,
         "format": lambda rows: _format_chain(rows),

@@ -253,8 +253,14 @@ class A4TortoiseArm:
                     continue
                 ep = row.get("ep") if isinstance(row.get("ep"), dict) else {}
                 mean = ep.get("confidence_mean")
-                confidence = (float(mean) if isinstance(mean, (int, float))
-                              else 0.5)
+                if not isinstance(mean, (int, float)):
+                    # #11702: `ep_state: "absent"` means there is no belief to
+                    # score. An A/B arm that invents 0.5 here cannot tell an
+                    # unmeasured claim from a measured coin flip, so any
+                    # measurement of the absence fix on this arm would be
+                    # contaminated by the very defect it removes.
+                    continue
+                confidence = float(mean)
                 confidence = max(0.0, min(1.0, confidence))
                 out.append(Memory(
                     id=rid, content=content, confidence=confidence,

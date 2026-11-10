@@ -278,7 +278,10 @@ class SearchScores:
 # ep_alpha that is NOT a #2199 baseline (legacy EP-prior back-compat).
 # PRIOR-ONLY (has_ep=False, baseline=True): a declared baseline prior — the
 # value is the prior mean, explicitly NOT a measured confidence. UNMEASURED
-# (has_ep=False, baseline=False): neutral Beta(1,1) mean 0.5.
+# (has_ep=False, baseline=False): NO persisted belief at all — `ep_state:
+# "absent"` and `confidence_mean: None`, never a number (#11702: the neutral
+# Beta(1,1) mean 0.5 this used to answer is indistinguishable from a measured
+# symmetric coin flip; see SEARCH-ARCHITECTURE.md §6.3).
 
 def ep_measured_cypher(alias: str) -> str:
     """Cypher boolean: EP has MEASURED the :Point bound to ``alias`` (#3276)."""
@@ -325,6 +328,104 @@ def ep_measurement_state(*, posterior_alpha, ep_alpha,
     return "baseline" if baseline_set else "unmeasured"
 
 
+# ── #11702: ABSENT belief state has a NAME, and NO value ────────────────────
+# `ep_measurement_state` answers the internal question (did EP measure this?).
+# A read/rank surface needs a different, blunter answer: *is there a persisted
+# belief here at all?* — because for a claim that has none there is no number
+# to report, and inventing one is the defect #11702 names. The recorded rule is
+# `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: **absent state is `null`
+# with `ep_state: "absent"`, never 0.5 — a value the ranker refuses to order
+# on.**
+#
+# ONE token differs from the internal vocabulary, deliberately and in exactly
+# one place: the decision names the state `absent` (the word the rule uses),
+# while the internal predicate calls it `unmeasured`. They are the same state;
+# this mapping is the only place the two spellings meet, so they cannot drift
+# into two vocabularies.
+EP_STATE_MEASURED = "measured"
+EP_STATE_BASELINE = "baseline"
+EP_STATE_ABSENT = "absent"
+
+
+def ep_has_belief_cypher(alias: str) -> str:
+    """Cypher boolean: a PERSISTED belief exists for ``alias`` (#11702).
+
+    The presence predicate, NOT the measurement predicate: it is true for an
+    EP-measured posterior, for a declared #2199 baseline prior, and for a
+    legacy EP-flush mirror (``n.confidence``) — every form in which a number
+    is genuinely stored. It is false only when there is nothing to report,
+    which is the one case where a read must return ``null`` rather than a
+    value. Textually in step with the Python twin :func:`ep_state`.
+    """
+    return (f"({alias}.posterior_alpha IS NOT NULL "
+            f"OR {alias}.ep_alpha IS NOT NULL "
+            f"OR {alias}.confidence IS NOT NULL)")
+
+
+def ep_state_cypher(alias: str) -> str:
+    """Cypher string: the #11702 state NAME — 'measured' | 'baseline' | 'absent'.
+
+    Read it beside the belief value so a consumer can tell the three apart:
+    a *measured* 0.5 (symmetric evidence, a real coin flip) and an *absent*
+    belief are both 0.5 on the old coalesce and must never be again.
+
+    ⚠️ ``measured`` here means ``ep_measured_cypher``, i.e. EP ran on this
+    claim — NOT the ``has_ep``/``measured`` fields, which #2490 additionally
+    gate on terminal-ness. A **terminal** claim (#2490) carries the decayed
+    ``0.5 / 1.0 / 1.0`` that ``live.VACUITY_BELIEF`` stamps on every
+    terminalising write: that is a persisted VALUE (so the state is never
+    ``absent``) but nothing measured it in that form, so a caller reporting
+    measurement must fold ``terminal`` in and land on ``baseline``. See
+    :func:`ep_state_resolve`, which is the ONE place that fold happens, and
+    the callers in :func:`annotate_ep_batch` / ``ranking.py`` that use it.
+    """
+    return (f"CASE WHEN NOT {ep_has_belief_cypher(alias)} "
+            f"THEN '{EP_STATE_ABSENT}' "
+            f"WHEN {ep_measured_cypher(alias)} THEN '{EP_STATE_MEASURED}' "
+            f"ELSE '{EP_STATE_BASELINE}' END")
+
+
+def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
+             baseline_set: bool = False) -> str:
+    """Python twin of :func:`ep_state_cypher` — 'measured' | 'baseline' | 'absent'.
+
+    ``absent`` means NO persisted belief in any form: the read must carry
+    ``None``, never a fabricated Beta(1,1) mean. ``baseline`` is a persisted
+    prior EP has not measured (a #2199 declared baseline, or a legacy
+    EP-flush mirror) — still a value, just not a measurement.
+    """
+    if posterior_alpha is None and ep_alpha is None and confidence is None:
+        return EP_STATE_ABSENT
+    return (EP_STATE_MEASURED
+            if ep_measurement_state(posterior_alpha=posterior_alpha,
+                                    ep_alpha=ep_alpha,
+                                    baseline_set=baseline_set) == "measured"
+            else EP_STATE_BASELINE)
+
+
+def ep_state_resolve(state: str, *, measured: bool) -> str:
+    """Fold the #2490 terminal gate into a presence-derived state name.
+
+    The ONE place this fold happens, so every surface that reports a state
+    reports the SAME one for the same claim. ``measured`` is the caller's
+    #2490-gated field (``has_ep`` after the terminal check), while ``state``
+    comes from the raw persisted columns.
+
+    * ``absent`` stays ``absent`` — there is no persisted belief either way.
+    * ``measured`` **downgrades to ``baseline``** when the claim is terminal or
+      otherwise not measured: a decayed posterior is a stored value, not a
+      measurement, and reporting it as ``measured`` tells a consumer EP ran
+      where only a terminalising write did.
+    * ``baseline`` stays ``baseline``.
+
+    Not folded: a live claim whose stored posterior *is* the measurement —
+    ``measured`` is then true and the state survives unchanged.
+    """
+    if state == EP_STATE_MEASURED and not measured:
+        return EP_STATE_BASELINE
+    return state
+
+
 @dataclass
 class EpEvidence:
     impl_count: int = 0
@@ -336,14 +437,33 @@ class EpEvidence:
 class EpBreakdown:
     # THE point confidence (issue #2206 contract): the belief mean α/(α+β)
     # of the PERSISTED posterior when EP has run on the claim
-    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta),
-    # else the neutral Beta(1,1) mean 0.5 — identical to the number
-    # TortoiseEP.compute_confidence / sdk.get_confidence return for the same
-    # point (coalesce(n.posterior_alpha, n.ep_alpha, 1.0)). Historically this
+    # (posterior_alpha/beta), else the persisted prior mean (ep_alpha/beta).
+    # It matches the number TortoiseEP.compute_confidence / sdk.get_confidence
+    # return for the same point WHENEVER one is persisted — with ONE stated
+    # exception, ``None`` here: those two still answer the Beta(1,1) prior mean
+    # (0.5) for a claim with no persisted belief at all, because they are the
+    # EP read under an explicit `require_calibration=False`, not a read/rank
+    # surface. That divergence is deliberate and recorded on #11702 (decision
+    # comment) — it is the one place "no belief" still answers 0.5, and it is
+    # outside this field's contract rather than a second vocabulary for it.
+    # Historically this
     # field was the structural edge-ratio impl/(impl+nand); it is NOT that
     # quantity anymore — a claim EP converged at 0.88 with no incoming IMPL
     # edges reads 0.88 here, and 0.0 only for a genuinely impossible store.
-    confidence_mean: float = 0.5
+    #
+    # #11702: ``None`` when there is NO persisted belief — the third state of
+    # the #2206 contract, which used to be reported as the neutral Beta(1,1)
+    # mean 0.5 and was therefore indistinguishable from a computed coin flip
+    # at every threshold and every order. Read :attr:`ep_state` beside it: a
+    # number here is a belief that exists, and ``None`` means none does.
+    confidence_mean: float | None = None
+    #: #11702 — the STATE NAME for :attr:`confidence_mean`, one of
+    #: ``measured`` (EP ran) / ``baseline`` (a persisted prior EP has not
+    #: measured) / ``absent`` (no persisted belief at all ⇒ the value is
+    #: ``None``). Derives from :func:`ep_state`, the single mapping of the
+    #: #11702 vocabulary; ``has_ep``/``measured`` keep their narrower #2490 /
+    #: #3276 meanings and are NOT this field's source.
+    ep_state: str = EP_STATE_ABSENT
     evidence: EpEvidence | None = None
     # Structural ratio nand/(impl+nand) — a DIFFERENT quantity from
     # confidence_mean (issue #2206): it answers "how much of the incoming
@@ -366,7 +486,8 @@ class EpBreakdown:
     # with the kind-derived system-default baseline reads has_ep=False here
     # (it used to read True at the 0.75 prior mean — the #3276 leak).
     # False = not measured; confidence_mean is then the declared prior mean
-    # when ``baseline`` is True, else the neutral Beta(1,1) mean 0.5. Neither
+    # when ``baseline`` is True, else ``None`` (no persisted belief at all —
+    # #11702; it used to be the neutral Beta(1,1) mean 0.5). Neither
     # is a signal of contestation.
     # #2490 has_ep overload: TERMINAL claims (terminal vocab status OR the
     # legacy outdated=true flag) are also gated to False — their posterior
@@ -3960,18 +4081,27 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
     confidence and agrees with ``get_confidence``/``recall`` for the same
     point: it is the belief mean α/(α+β) of the persisted posterior
     (posterior_alpha/beta) when EP has run on the claim, else the persisted
-    prior mean (ep_alpha/beta), else the neutral Beta(1,1) mean 0.5. It is
+    prior mean (ep_alpha/beta), else ``None`` (#11702 — the third state of
+    that contract, named by ``ep_state``; it used to be the neutral Beta(1,1)
+    mean 0.5). It is
     NOT the structural edge-ratio impl/(impl+nand) that this field used to
     carry — that quantity lives on in ``evidence`` (impl_count/nand_count/
     total) and ``contention`` (the NAND fraction), which are legitimately
     different from a belief.
 
-    Points with no EP data (no posterior_alpha AND no ep_alpha) get
-    has_ep=False + confidence_mean=0.5 (neutral — absence of measurement is
-    NOT low support, matching the recall/why-layer convention);
-    contention=0.0. variance/contested are computed from the PERSISTED
-    posterior (posterior_alpha/beta, falling back to ep_alpha/beta priors)
-    (posterior stability), not from edge ratios.
+    Points with no EP data (no posterior_alpha AND no ep_alpha AND no
+    ``n.confidence`` mirror) get has_ep=False + **confidence_mean=None** +
+    ``ep_state='absent'`` (#11702). This read used to answer the neutral
+    Beta(1,1) mean 0.5 there, which made "we have not computed this" and "a
+    measured symmetric coin flip (α=β)" the same number — indistinguishable
+    at every threshold and every ordering. The rule that replaced it is
+    `docs/architecture/SEARCH-ARCHITECTURE.md` §6.3: absent state is ``null``
+    with ``ep_state: "absent"``, never 0.5. A claim that DOES carry a
+    persisted belief keeps its number: a computed posterior of 0.5 still
+    reads 0.5 — the distinction is presence, not value. contention=0.0.
+    variance/contested are computed from the PERSISTED posterior
+    (posterior_alpha/beta, falling back to ep_alpha/beta priors) (posterior
+    stability), not from edge ratios.
 
     #2490 has_ep overload: TERMINAL claims (status in the terminal vocab or
     the legacy outdated=true flag) are gated to has_ep=False + contested=False
@@ -4029,7 +4159,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # baseline_set plumbs the prior-only distinction to Python.
             f"  {ep_measured_cypher('n')} AS has_ep, "
             "  n.status, coalesce(n.outdated, false), "
-            f"  {ep_baseline_cypher('n')} AS baseline_set "
+            f"  {ep_baseline_cypher('n')} AS baseline_set, "
+            # #11702: the RAW presence columns ride the tail (10/11/12) so the
+            # state is derived from what is PERSISTED, not from the coalesced
+            # 1.0 defaults above — `coalesce(n.posterior_alpha, …, 1.0)`
+            # answers 0.5 for a claim that has no belief at all, which is
+            # precisely the number this issue removes.
+            "  n.posterior_alpha, n.ep_alpha, n.confidence "
         )
         rows = graph.query(cypher, params={"ids": point_ids}).result_set
 
@@ -4047,10 +4183,47 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             # 7/9-col row shapes keep their index mapping under the len guard.
             baseline_set = bool(row[9]) if len(row) > 9 else False
             measured = bool(has_ep)
+            # #11702: PRESENCE, derived from the RAW columns (10/11/12). A
+            # test double that predates them asserts the numeric contract, so
+            # its row carries a belief by construction — that fallback keeps
+            # the doubles honest instead of silently marking them absent.
+            if len(row) > 12:
+                state = ep_state(posterior_alpha=row[10], ep_alpha=row[11],
+                                 confidence=row[12], baseline_set=baseline_set)
+            else:
+                state = (EP_STATE_MEASURED if measured
+                         else EP_STATE_BASELINE)
+            # #11702: the #2490 terminal gate applies to the STATE too, not
+            # only to `measured` — a terminal claim's decayed posterior is a
+            # persisted value that EP never measured in that form, so a
+            # surface saying `measured` there tells a consumer an EP run
+            # happened. Resolved through the shared fold so the rankers (which
+            # read the same claim through a different query) cannot disagree.
+            state = ep_state_resolve(state, measured=measured)
+            # #11702: the VALUE follows the same precedence the rankers use
+            # (`ranking._fetch_point_signals`): the `n.confidence` mirror
+            # first (#2206's served belief), the α/β mean as the fallback for a
+            # node the flush never reached. Keeping the two surfaces on one
+            # precedence is the whole point — the same claim reporting 0.5 in
+            # the `ep` block and 0.95 in the ranking was the mirror/αβ split
+            # one level down. A row shape that predates the raw columns cannot
+            # be absent (the state above already answered), so the α/β mean is
+            # the honest answer there.
+            mirror = row[12] if len(row) > 12 else None
+            if state == EP_STATE_ABSENT:
+                value = None
+            elif mirror is not None:
+                value = round(float(mirror), 4)
+            else:
+                value = round(_beta_mean(alpha, beta), 4)
             total = impl + nand
             variance = _beta_variance(alpha, beta)
             breakdowns[pid] = EpBreakdown(
-                confidence_mean=round(_beta_mean(alpha, beta), 4),
+                # #11702: `None` when nothing is persisted — never the neutral
+                # 0.5, which is what made "no evidence" and "a measured coin
+                # flip" the same number here.
+                confidence_mean=value,
+                ep_state=state,
                 evidence=EpEvidence(impl_count=impl, nand_count=nand, total=total),
                 contention=contention,
                 variance=round(variance, 6),
@@ -4072,11 +4245,13 @@ def annotate_ep_batch(graph, point_ids: list[str]) -> dict[str, EpBreakdown]:
             )
 
         # Fill in defaults for IDs that are not Point nodes (defaults match
-        # the neutral contract: confidence_mean 0.5, has_ep False).
+        # the ABSENT contract: no belief ⇒ confidence_mean None, ep_state
+        # 'absent', has_ep False — #11702; this used to report 0.5).
         for pid in point_ids:
             if pid not in breakdowns:
                 breakdowns[pid] = EpBreakdown(
-                    confidence_mean=0.5,
+                    confidence_mean=None,
+                    ep_state=EP_STATE_ABSENT,
                     evidence=EpEvidence(impl_count=0, nand_count=0, total=0),
                     contention=0.0,
                 )
@@ -4703,10 +4878,15 @@ def get_relationships_bounded(
                             # fallback (0.5) is the SAME value the sibling
                             # signal surface reports for the pair
                             # (StateRanker._fetch_point_signals,
-                            # ranking.py:1046 → NEUTRAL_CONFIDENCE: measured
-                            # on the write-path shape, which mirrors
+                            # ranking.py's degenerate-pair 0.5: measured on
+                            # the write-path shape, which mirrors
                             # `confidence`; the GraphRanker sibling has no
-                            # guard and is untouched by this read).
+                            # guard and is untouched by this read. #11702: this
+                            # is NOT the neutral-absence constant (that one is
+                            # deleted) — it is the exact mean of a pair whose
+                            # α+β is non-positive, a genuinely degenerate pair,
+                            # and `variance` is 0.0 beside it so it never reads
+                            # as a fabricated Beta(1,1) posterior).
                             # It is not the fabricated posterior above: for this
                             # pair `_beta_variance`'s own s <= 0 guard yields
                             # variance 0.0, so contested stays False and nothing

@@ -39,6 +39,16 @@ logger = logging.getLogger(__name__)
 
 # ── Classification constants (documented, kept inline for testability) ───────
 
+def _round_optional(value: float | None, ndigits: int = 4) -> float | None:
+    """Round a belief value that may be ABSENT (#11702).
+
+    ``None`` is a real answer here — "no persisted belief" — and it must
+    survive to the wire as ``null`` rather than raising inside ``round`` or
+    being coerced to 0.5 on the way out.
+    """
+    return None if value is None else round(value, ndigits)
+
+
 # Settled zone: confidence_mean must be at or above this.
 SETTLED_CONFIDENCE_THRESHOLD = 0.7
 # Settled zone: EP posterior variance must be strictly below this.
@@ -58,7 +68,9 @@ class SettledPoint:
     id: str
     content: str
     point_kind: str
-    confidence_mean: float
+    # #11702: None when the claim has NO persisted belief (``ep_state:
+    # "absent"``) — never a fabricated 0.5.
+    confidence_mean: float | None
     variance: float
     impl_count: int
     nand_count: int
@@ -71,7 +83,8 @@ class ContestedPoint:
     id: str
     content: str
     point_kind: str
-    confidence_mean: float
+    # #11702: None when the claim has no persisted belief (see SettledPoint).
+    confidence_mean: float | None
     variance: float
     impl_count: int
     nand_count: int
@@ -324,14 +337,18 @@ def _classify_points(
         impl_count = evidence.impl_count if evidence else 0
         nand_count = evidence.nand_count if evidence else 0
 
-        # Settled: high confidence + tight posterior variance
-        if (ep.confidence_mean >= SETTLED_CONFIDENCE_THRESHOLD
+        # Settled: high confidence + tight posterior variance.
+        # #11702: an ABSENT belief (confidence_mean None) can never be settled —
+        # there is no reading to call settled, and the old 0.5 default made the
+        # comparison answer for a claim nothing had been measured on.
+        if (ep.confidence_mean is not None
+                and ep.confidence_mean >= SETTLED_CONFIDENCE_THRESHOLD
                 and ep.variance < SETTLED_VARIANCE_THRESHOLD):
             significant.append(SettledPoint(
                 id=pid,
                 content=content,
                 point_kind=point_kind,
-                confidence_mean=round(ep.confidence_mean, 4),
+                confidence_mean=_round_optional(ep.confidence_mean),
                 variance=round(ep.variance, 6),
                 impl_count=impl_count,
                 nand_count=nand_count,
@@ -344,7 +361,7 @@ def _classify_points(
                 id=pid,
                 content=content,
                 point_kind=point_kind,
-                confidence_mean=round(ep.confidence_mean, 4),
+                confidence_mean=_round_optional(ep.confidence_mean),
                 variance=round(ep.variance, 6),
                 impl_count=impl_count,
                 nand_count=nand_count,
@@ -411,7 +428,7 @@ def _classify_points(
                                 id=side_pid,
                                 content=side_info.get("content", ""),
                                 point_kind=side_info.get("point_kind", ""),
-                                confidence_mean=round(side_ep.confidence_mean, 4),
+                                confidence_mean=_round_optional(side_ep.confidence_mean),
                                 variance=round(side_ep.variance, 6),
                                 impl_count=side_ev.impl_count if side_ev else 0,
                                 nand_count=side_ev.nand_count if side_ev else 0,
@@ -448,8 +465,10 @@ def _build_argument_structure(
                 "mechanism": mechanism,
                 "predicate": rel.get("predicate", ""),
                 "operator_id": rel.get("operator_id", ""),
-                "source_confidence": round(ep_self.confidence_mean, 4) if ep_self else None,
-                "target_confidence": round(ep_other.confidence_mean, 4) if ep_other else None,
+                "source_confidence": (_round_optional(ep_self.confidence_mean)
+                                     if ep_self else None),
+                "target_confidence": (_round_optional(ep_other.confidence_mean)
+                                     if ep_other else None),
                 "source_variance": round(ep_self.variance, 6) if ep_self else None,
                 "target_variance": round(ep_other.variance, 6) if ep_other else None,
             }

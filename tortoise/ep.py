@@ -2792,7 +2792,15 @@ class TortoiseEP:
                 "    n.posterior_alpha = CASE WHEN coalesce(n.baseline_set,false) "
                 "                           THEN n.posterior_alpha ELSE null END, "
                 "    n.posterior_beta  = CASE WHEN coalesce(n.baseline_set,false) "
-                "                           THEN n.posterior_beta  ELSE null END"
+                "                           THEN n.posterior_beta  ELSE null END, "
+                # #11702: clear the `n.confidence` flush-mirror with the
+                # posterior it summarises. It is the SERVED belief mean (#2206)
+                # and every read/rank surface prefers it, so leaving it behind
+                # made a claim report its OLD posterior mean beside its NEW
+                # prior — two numbers for one belief on one response. A later
+                # flush writes the real value; a baseline'd claim keeps both.
+                "    n.confidence = CASE WHEN coalesce(n.baseline_set,false) "
+                "                       THEN n.confidence ELSE null END"
             ):
                 self._hop_query(
                     _q, {"params": params_list}, hop=None,

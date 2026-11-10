@@ -60,8 +60,19 @@ from .live import (
 )
 from .search_engine import (  # type: ignore[import-not-found]
     CONTESTED_VARIANCE_THRESHOLD,
+    # #11702: the ONE presence vocabulary. The canonical ``ep`` block is the
+    # block `/v1/context`, the volunteer reflex and the pushed webhook all
+    # serve, so it must report the same state as `annotate_ep_batch` and the
+    # rankers — otherwise the fabricated 0.5 survives on the largest
+    # agent-facing read surface while search reports null for the same claim.
+    EP_STATE_ABSENT,
+    EP_STATE_BASELINE,
+    EP_STATE_MEASURED,
     _exclude_status_clause,
+    ep_has_belief_cypher,
     ep_measured_cypher,  # #3276: has_ep == EP measured (baseline prior != measured)
+    ep_state,
+    ep_state_resolve,
     fetch_point_epistemic_state,
 )
 
@@ -396,8 +407,29 @@ def _assemble_ep_rows(rows: list, by_id: dict[str, dict]) -> None:
         baseline_set = bool(row[6]) if len(row) > 6 else False
         measured = bool(has_ep)
         variance = _beta_variance(a, b)
+        # #11702: the state, resolved through the SAME vocabulary every other
+        # surface uses (presence from the raw columns, then the #2490 fold).
+        # Index map for `_EP_CYPHER`: 0 id, 1 alpha, 2 beta, 3 measured,
+        # 4 status, 5 outdated, 6 baseline_set, 7 has_belief, 8 posterior_alpha,
+        # 9 ep_alpha, 10 confidence. The len guard covers the pre-#11702
+        # 7-col contract doubles, which carry a belief by construction.
+        if len(row) > 10:
+            state = ep_state(posterior_alpha=row[8], ep_alpha=row[9],
+                             confidence=row[10], baseline_set=baseline_set)
+        else:
+            state = (EP_STATE_MEASURED if measured
+                     else EP_STATE_BASELINE)
+        state = ep_state_resolve(state, measured=measured)
         by_id[pid]["ep"] = {
-            "confidence_mean": round(_mean(a, b), 4),
+            # #11702: `None` when nothing is persisted — never the Beta(1,1)
+            # mean. This is the block a caller reads to decide whether to
+            # surface/notify, so a fabricated 0.5 here admitted a
+            # never-measured claim through every `min_confidence <= 0.5`
+            # floor (volunteer.py, why_snapshot.py) as if it carried neutral
+            # evidence.
+            "confidence_mean": (None if state == EP_STATE_ABSENT
+                                else round(_mean(a, b), 4)),
+            "ep_state": state,
             "variance": round(variance, 6),
             "contested": measured and variance > CONTESTED_VARIANCE_THRESHOLD,
             "has_ep": measured,
@@ -578,9 +610,15 @@ _EP_CYPHER = (
     # terminal ids in the supersession block — the exclusion is NOT a WHERE
     # insertion here).
     "  n.status, coalesce(n.outdated, false), "
-    # #3276: baseline_set rides LAST (index 6) so the pre-#3276 6-col row
+    # #3276: baseline_set rides LAST-3 (index 6) so the pre-#3276 6-col row
     # shape keeps its index mapping under the len guard.
-    "  coalesce(n.baseline_set, false)"
+    "  coalesce(n.baseline_set, false), "
+    # #11702: PRESENCE + the RAW presence columns (7/8/9). Without these the
+    # block answers `_mean(coalesce(…, 1.0), …)` = 0.5 for a claim with no
+    # belief at all — the defect this issue removes, one level above the
+    # coalesce that was fixed in `annotate_ep_batch`.
+    f"  {ep_has_belief_cypher('n')}, "
+    "  n.posterior_alpha, n.ep_alpha, n.confidence"
 )
 # Tradeoffs (decision points): the point is the operator SOURCE (INPUT idx 0)
 # and the alternatives are the operator's IMPL TARGETS at idx > 0 (the

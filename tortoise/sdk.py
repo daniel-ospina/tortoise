@@ -33520,13 +33520,22 @@ class TortoiseSDK:
         _set_clause = (
             "n.ep_alpha = $a, n.ep_beta = $b, n.baseline_set = true, "
             "n.baseline_source = $src, "
+            # #11702: the `n.confidence` flush-mirror is the SERVED belief mean
+            # (#2206) and every read/rank surface prefers it, so nulling the
+            # posterior without touching it left the node reporting its OLD
+            # posterior mean (0.9) beside a new prior mean (0.75) — the two
+            # halves of one claim disagreeing on one response. The mirror is
+            # refreshed to THIS prior's mean in the same write, so it can never
+            # outlive the belief it summarises.
+            "n.confidence = $c, "
             "n.posterior_alpha = null, n.posterior_beta = null"
         )
         if source != BASELINE_SOURCE_INHERITED:
             _set_clause += ", n.credibility = null, n.baseline_system_default = null"
         written = proj.g.query(
             f"MATCH (n:Point {{id: $id}}) SET {_set_clause} RETURN n.id",
-            params={"id": claim_id, "a": alpha, "b": beta, "src": source},
+            params={"id": claim_id, "a": alpha, "b": beta, "src": source,
+                    "c": alpha / (alpha + beta)},
         ).result_set
         # #9063: a baseline the statement did NOT write must never be reported
         # as written when the caller's node EXISTS. ``set_point_baseline`` used
@@ -37213,8 +37222,12 @@ class TortoiseSDK:
         Point results annotated with EP breakdown. confidence_mean is THE
         point's confidence (issue #2206 contract): the belief mean α/(α+β) of
         the persisted posterior when EP has run, else the persisted prior
-        mean, else the neutral Beta(1,1) mean 0.5 — identical to
-        get_confidence/recall for the same point. contention/evidence stay
+        mean, else the persisted prior mean — and ``null`` + ``ep_state:
+        "absent"`` when NOTHING is persisted (#11702: there is then no belief
+        to report; the neutral Beta(1,1) 0.5 was indistinguishable from a
+        measured symmetric coin flip, so it is no longer substituted anywhere
+        on a read/rank surface — ``get_confidence`` remains the EP prior read
+        and still answers 0.5 there). contention/evidence stay
         the structural edge-ratio family (a different quantity). Non-Point
         entities skip EP annotation. min_confidence filters on
         confidence_mean (belief); defaults to 0.0 (no filter).
@@ -39237,7 +39250,15 @@ class TortoiseSDK:
             cap_source_path = pt.get("sourcePath", "")  # #167
 
             # Apply min_confidence filter (Point only; non-Point always pass)
-            if entity_type == "point" and ep and ep.confidence_mean < min_confidence:
+            # #11702: an ABSENT belief has no number to clear a numeric floor,
+            # so it cannot satisfy one — but a floor of 0.0 is the shipped
+            # "filter off" default and must keep admitting it. This used to
+            # compare the fabricated neutral 0.5 against the floor, so an
+            # unmeasured claim silently passed every cut-off below 0.5 as if it
+            # had neutral evidence.
+            if (entity_type == "point" and ep and min_confidence > 0.0
+                    and (ep.confidence_mean is None
+                         or ep.confidence_mean < min_confidence)):
                 continue
 
             # Build scores
@@ -39430,10 +39451,23 @@ class TortoiseSDK:
             ranker = graph_ranker or GraphRanker(proj)
             read = ranker._fetch_signals([r.id for r in results], entity_type)
             signals = read or {}
-            results.sort(
-                key=lambda r: signals.get(r.id, {}).get("confidence", 0.5),
-                reverse=True,
-            )
+
+            def _confidence_key(r):
+                """#11702: a row with NO belief has no position on this axis.
+
+                `order_by="confidence"` sorts on a number; an absent claim has
+                none, so ordering it at the old 0.5 default put it in the
+                middle of a belief ranking it was never measured for. It is
+                placed AFTER every row that carries a number (tier 1), keeping
+                its RRF position among the other unmeasured rows — the sort
+                stays total and deterministic, and no fabricated key is used.
+                """
+                conf = (signals.get(r.id) or {}).get("confidence")
+                if conf is None:
+                    return (1, 0.0)
+                return (0, -float(conf))
+
+            results.sort(key=_confidence_key)
             # #10137 review P1 / round 7 P1: the label describes the READ and
             # the read must have supplied a MEASUREMENT — a failed fetch answers
             # None (every key stays at the neutral 0.5, leaving the list in RRF
@@ -40406,13 +40440,18 @@ class TortoiseSDK:
           (retracted stays excluded — #689 leak guard).
         - Object-centric: Objects and the Points about them are ranked
           together; an Object's confidence is the mean EP posterior of the
-          Points about it (neutral 0.5 when none).
+          Points about it (``null`` when none of them has a belief — #11702).
         - Contested claims are SURFACED, never buried: ``contested:true`` +
           ``counter_evidence`` (NANDing point id/content) attached.
         - Most important arguments (operators, by annotator_precision) and
           high-contention NANDs / mitigations attached to top results.
-        - Uncalibrated points fall back to documented neutral confidence 0.5
-          (absence of measurement is NOT low support).
+        - Uncalibrated points (no persisted belief at all) carry
+          ``confidence: null`` + ``ep_state: "absent"`` and are ordered AFTER
+          every row that has a belief (#11702). This replaces the documented
+          neutral-0.5 fallback: absence is still not scored as LOW support —
+          the belief term does not participate in the order at all, and the
+          row says so — but it is no longer ordered AS a measured coin flip
+          either. `SEARCH-ARCHITECTURE.md` §6.3 is the decision.
 
         #2598 — drafts render honestly. A DRAFT is EP-inert (``live._live_only``
         excludes it at every factor-extraction call site), so when EP has not
@@ -48293,7 +48332,12 @@ class TortoiseSDK:
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
-            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            # #11702: NO `coalesce(p.confidence, 0.5)` — an evidence point with
+            # no persisted belief has no confidence to report, and the report is
+            # the whole use of this column here (the Beta below counts IMPL vs
+            # NAND, it does not weight by confidence). The fabricated 0.5 made
+            # "no evidence recorded" read as "symmetric evidence".
+            "RETURN p.id, p.content, p.confidence AS conf",
             params={"sid": resolved_sid},
         ).result_set
         nand_rows = proj.g.query(
@@ -48303,16 +48347,25 @@ class TortoiseSDK:
             "AND (p.outdated IS NULL OR p.outdated = false) "
             "AND e.eventKind <> 'humanApproval' "  # #531: no reputation from own approvals
             f"AND {match_clause} "
-            "RETURN p.id, p.content, coalesce(p.confidence, 0.5) AS conf",
+            # #11702: NO `coalesce(p.confidence, 0.5)` — an evidence point with
+            # no persisted belief has no confidence to report, and the report is
+            # the whole use of this column here (the Beta below counts IMPL vs
+            # NAND, it does not weight by confidence). The fabricated 0.5 made
+            # "no evidence recorded" read as "symmetric evidence".
+            "RETURN p.id, p.content, p.confidence AS conf",
             params={"sid": resolved_sid},
         ).result_set
 
         # Collect outcomes
         outcomes: list[dict] = []
         for row in impl_rows:
-            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "IMPL"})
+            outcomes.append({"point_id": row[0], "content": row[1],
+                             "confidence": (float(row[2]) if row[2] is not None
+                                            else None), "outcome": "IMPL"})
         for row in nand_rows:
-            outcomes.append({"point_id": row[0], "content": row[1], "confidence": float(row[2]), "outcome": "NAND"})
+            outcomes.append({"point_id": row[0], "content": row[1],
+                             "confidence": (float(row[2]) if row[2] is not None
+                                            else None), "outcome": "NAND"})
 
         total = len(outcomes)
         impl_count = sum(1 for o in outcomes if o["outcome"] == "IMPL")

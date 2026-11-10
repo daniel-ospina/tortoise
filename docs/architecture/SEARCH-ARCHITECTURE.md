@@ -97,7 +97,8 @@ quality change. **Live before private-beta:**
 3. the **rebuild headroom** measured and reserved (§7) — the #1 production risk;
 4. the **shortfall assertion** on the vector leg (§6.1), without which a beta customer can silently receive
    fewer results than exist;
-5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — a live defect today, independent of windows;
+5. the **`null`-not-0.5 rule** for absent belief state (§6.3) — **landed** (#11702, implementing the §6.3
+   decision of PR #11481); what remains of it is the per-surface sweep named in §6.3, not the rule itself;
 6. the **two truncation reason strings** (§7) — `degraded: "insufficient_graph"` / `degraded:
    "truncated_boundary"` — because item 1 only makes an incomplete answer *labelled*, not *labelled with a
    reason a caller can branch on*.
@@ -279,14 +280,32 @@ That ruling stands and nothing here reverses it.
 boundary, so recomputing EP for it is **exact**, not approximate. Residency and the EP carve-out
 therefore point the same way — and no schema change is needed.
 
-**One live defect must be fixed independently of all of this, and it is already in the code.** A claim
-with **no persisted α/β answers the neutral Beta(1,1) mean 0.5** (`search_engine.py:280` and `:339` state
-the rule; `sdk.py:37208` repeats it) **and the ranker coalesces the value** — `coalesce(n.confidence, …)`
-at `ranking.py:795` and `coalesce(n.confidence, 0.5)` at `ranking.py:1873`. `ingest.py:206` names the
-same construct as *"the silent `coalesce(n.confidence, 0.5)` default"*. So **missing belief state returns
-a plausible number instead of an error**, and it is indistinguishable from a computed one at the point
-where ordering happens. **Rule: absent state is `null` with `ep_state: "absent"`, never 0.5** — a value
-the ranker refuses to order on.
+**✅ FIXED (#11702) — kept here as the reason the rule exists, with the citations re-pointed.** A claim
+with **no persisted belief** used to answer the neutral Beta(1,1) mean 0.5, and the ranker coalesced the
+value to it. It was indistinguishable from a computed one at the point where ordering happens. The rule
+that replaced it — **absent state is `null` with `ep_state: "absent"`, never 0.5** — is now implemented
+on every read/rank surface: `annotate_ep_batch`, the canonical `why` `ep` block (`tortoise/why.py`),
+`GraphRanker`, `StateRanker`/`recall_ranking`, `GapsRanker`/`gaps_ranking`, `SubgraphExpander`, and the
+event/object aggregate reads; the `analyze` templates refuse an absent claim rather than admitting it at a
+coalesced 0.5. The vocabulary is declared ONCE (`search_engine.EP_STATE_*` +
+`ep_has_belief_cypher`/`ep_state_cypher`/`ep_state`/`ep_state_resolve`), and
+`tests/test_11702_absent_belief_state.py` pins the property across every one of those surfaces, in both
+directions (a *measured* 0.5 keeps its 0.5).
+
+**How the rankers honour it, stated exactly** — because "null" alone under-specifies an ORDER:
+
+* **absent rows sort AFTER every row that has a belief** (`recall_ranking.belief_informed_order` is
+  `false` on them). A multiplicative gate cannot express "absent" as a factor — `conf**exp` ranges over
+  `(0, 1]`, so the multiplicative identity a missing factor would use is that axis's **maximum**, which
+  would rank "nothing measured this" above a claim measured at 0.9. The refusal is therefore a sort
+  TIER, not a fabricated factor.
+* **`GraphRanker`'s absent row drops the belief TERM and keeps the remaining term's WEIGHT**
+  (`0.6·inst_norm` / `0.5·connectivity`), never the unweighted term — which would let absence (0.75)
+  outscore a measured 0.5 (0.65), the same defect pointed the other way.
+* **`min_confidence`**: an absent claim fails any floor above `0.0` and is kept by the `0.0` default.
+* **The one stated exception**, recorded on #11702: `sdk.get_confidence` /
+  `TortoiseEP.compute_confidence` still answer the Beta(1,1) prior mean under an explicit
+  `require_calibration=False` — that is the EP read, not a read/rank surface.
 
 ---
 

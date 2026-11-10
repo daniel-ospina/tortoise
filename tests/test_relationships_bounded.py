@@ -1480,9 +1480,11 @@ def test_degenerate_measured_peer_decorates_with_the_uniform_fallback():
     assert peers["A"]["confidence"] == 0.75, peers["A"]  # 3/(3+1)
     assert peers["B"]["confidence"] == 0.5, (
         "#330's uniform fallback is the house value for a degenerate pair — "
-        "the same 0.5 StateRanker._fetch_point_signals reports for it "
-        "(ranking.py:1046 → NEUTRAL_CONFIDENCE); NOT the GraphRanker sibling, "
-        "which reads the mirrored column and has no such guard. got "
+        "the same 0.5 StateRanker._fetch_point_signals reports for it; NOT the "
+        "GraphRanker sibling, which reads the mirrored column and has no such "
+        "guard. #11702: this is the degenerate-pair mean (α+β <= 0), NOT the "
+        "neutral-absence constant — that one is gone, and absence is None + "
+        "ep_state 'absent' now. got "
         f"{peers['B']['confidence']!r}")
     assert peers["B"]["variance"] == 0.0, (
         "_beta_variance's s <= 0 guard — which is why the 0.5 mean does not "

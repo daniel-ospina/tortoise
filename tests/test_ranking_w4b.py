@@ -623,7 +623,17 @@ def _seed_twin_conflict(sdk, counter_content: str) -> tuple[str, str, str]:
     cc_parity = sdk.create_point(
         "statement", "regional weather fronts shift whole bird populations")
     proj = sdk._get_proj()
-    for pid, a, b in [(calm["id"], 10.0, 10.0), (hot["id"], 2.0, 2.0)]:
+    for pid, a, b in [(calm["id"], 9.0, 1.0), (hot["id"], 0.9, 0.1)]:
+        # #11702: the twins must be SELF-CONSISTENT — the same belief mean on
+        # every surface — because the rankers now read the persisted α/β as the
+        # belief and treat `n.confidence` as their cache. This fixture used to
+        # write α/β = (10,10) / (2,2) (mean 0.5) beside `confidence = 0.9`, i.e.
+        # a node whose mirror contradicted its own posterior; that is not a
+        # state any write path produces, and once the read stopped preferring
+        # the stale mirror the boost dropped to 0.5 and the span premise below
+        # collapsed. Both twins keep mean 0.9 — so the twin pair still differs
+        # ONLY in variance (0.0082 calm vs 0.045 hot, bracketing the 0.04
+        # contested threshold) — while the mirror agrees with them.
         proj.g.query(
             "MATCH (n:Point {id:$id}) SET n.confidence = 0.9, "
             "n.posterior_alpha = $a, n.posterior_beta = $b, "

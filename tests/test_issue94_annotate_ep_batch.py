@@ -3,11 +3,17 @@
 
 Post-#2206 contract: EpBreakdown.confidence_mean is the belief mean α/(α+β)
 of the PERSISTED posterior when EP has run (posterior_alpha/beta), else the
-persisted prior mean (ep_alpha/beta, e.g. a baseline), else the neutral
-Beta(1,1) mean 0.5 — identical to sdk.get_confidence for the same point.
-Unmeasured points (no persisted α/β) get has_ep=False + confidence_mean=0.5
-(absence of measurement is NOT low support), while points with NAND edges
-get has_ep=True + confidence_mean < 0.5 only once EP/evidence persisted.
+persisted prior mean (ep_alpha/beta, e.g. a baseline) — identical to
+sdk.get_confidence for the same point.
+#11702 SUPERSEDES the third arm: unmeasured points (no persisted α/β and no
+`n.confidence` mirror) now read has_ep=False + **confidence_mean=None** +
+`ep_state="absent"` — the neutral Beta(1,1) mean 0.5 this file used to pin
+was indistinguishable from a measured symmetric coin flip (α=β), so an
+absent claim silently passed every 0.5 threshold and ordered as mid-strength
+(docs/architecture/SEARCH-ARCHITECTURE.md §6.3). "Absence is not low
+support" still holds — it is simply not a NUMBER any more. Points with NAND
+edges get has_ep=True + confidence_mean < 0.5 only once EP/evidence
+persisted.
 contention/evidence remain the structural edge-ratio family — a DIFFERENT
 quantity from confidence_mean (#2206 — no conflation).
 """
@@ -58,10 +64,11 @@ class TestAnnotateEpBatchIssue94:
     """EP batch annotation: no-evidence vs all-NAND distinction (#94) +
     belief-mean semantics (#2206)."""
 
-    def test_isolated_point_is_neutral_not_zero(self, sdk):
-        """Point with zero edges and no persisted EP → has_ep=False,
-        confidence_mean=0.5 (neutral Beta(1,1) — #2206: absence of
-        measurement is NOT low support, so never the old 0.0)."""
+    def test_isolated_point_is_absent_not_zero(self, sdk):
+        """#11702 (flips this test's pre-#11702 pin): a Point with zero edges
+        and no persisted EP carries NO belief — confidence_mean is None and
+        ep_state is "absent", never the neutral 0.5 (which the old #2206 note
+        used to justify) and never the pre-#2206 edge-ratio 0.0."""
         # Create an isolated point (no operators)
         point = sdk.create_point("statement", "Isolated claim with no evidence")
         pid = point["id"]
@@ -75,8 +82,9 @@ class TestAnnotateEpBatchIssue94:
         ep = result[pid]
         assert ep.has_ep is False, \
             f"Isolated point should have has_ep=False, got {ep.has_ep}"
-        assert ep.confidence_mean == 0.5, \
-            f"Isolated point should read the neutral mean 0.5, got {ep.confidence_mean}"
+        assert ep.confidence_mean is None, \
+            f"An isolated point has no belief to report, got {ep.confidence_mean}"
+        assert ep.ep_state == "absent"
         assert ep.evidence.impl_count == 0
         assert ep.evidence.nand_count == 0
         assert ep.evidence.total == 0
@@ -84,7 +92,8 @@ class TestAnnotateEpBatchIssue94:
 
     def test_nanded_point_edges_do_not_measure(self, sdk):
         """Point with NAND edges but NO persisted EP data → has_ep=False and
-        the neutral 0.5 (edges alone never set a belief — #753, #2206)."""
+        NO belief (edges alone never set one — #753, #2206; #11702 makes the
+        absence a null rather than a 0.5)."""
         # Create a claim and two contradictory NAND sources
         claim = sdk.create_point("statement", "A claim that gets contradicted")
         claim_id = claim["id"]
@@ -105,10 +114,12 @@ class TestAnnotateEpBatchIssue94:
         # has_ep = persisted EP data (post-#753); edges alone don't set it.
         assert ep.has_ep is False, \
             f"NANDed point should have has_ep=False without persisted EP, got {ep.has_ep}"
-        # 0 IMPL, 2 NAND, no persisted α/β → neutral 0.5 (#2206: unmeasured
-        # is NOT low support — the old edge-ratio 0.0 conflated the two).
-        assert ep.confidence_mean == 0.5, \
-            f"Unmeasured NANDed point should read neutral 0.5, got {ep.confidence_mean}"
+        # 0 IMPL, 2 NAND, no persisted α/β → absent (#11702: unmeasured is
+        # NOT low support — the old edge-ratio 0.0 conflated the two — but it
+        # is not a 0.5 either).
+        assert ep.confidence_mean is None, \
+            f"Unmeasured NANDed point should have no belief, got {ep.confidence_mean}"
+        assert ep.ep_state == "absent"
         assert ep.evidence.impl_count == 0
         assert ep.evidence.nand_count == 2
         assert ep.evidence.total == 2
@@ -117,8 +128,8 @@ class TestAnnotateEpBatchIssue94:
             f"All-NAND point should have contention=1.0, got {ep.contention}"
 
     def test_mixed_edges_measured_only_after_ep(self, sdk):
-        """Point with both IMPL and NAND edges but no persisted EP → neutral
-        0.5; contention keeps the 0.5 edge ratio (distinct quantity)."""
+        """Point with both IMPL and NAND edges but no persisted EP → absent
+        (#11702); contention keeps the 0.5 edge ratio (distinct quantity)."""
         claim = sdk.create_point("statement", "A disputed claim")
         claim_id = claim["id"]
 
@@ -137,10 +148,12 @@ class TestAnnotateEpBatchIssue94:
         ep = result[claim_id]
         assert ep.has_ep is False, \
             f"Point with edges should have has_ep=False without persisted EP, got {ep.has_ep}"
-        # No persisted α/β → neutral 0.5 (the edge ratio was also 0.5 here —
-        # coincidence; the two quantities are NOT the same).
-        assert ep.confidence_mean == 0.5, \
-            f"Unmeasured mixed point should read neutral 0.5, got {ep.confidence_mean}"
+        # No persisted α/β → absent (#11702). The edge ratio is also 0.5
+        # here — coincidence; the two quantities are NOT the same, and the
+        # belief is now null while the contention stays 0.5.
+        assert ep.confidence_mean is None, \
+            f"Unmeasured mixed point should have no belief, got {ep.confidence_mean}"
+        assert ep.ep_state == "absent"
         assert ep.evidence.impl_count == 1
         assert ep.evidence.nand_count == 1
         assert ep.evidence.total == 2
@@ -161,15 +174,17 @@ class TestAnnotateEpBatchIssue94:
 
         result = annotate_ep_batch(graph, [isolated_id, claim_id])
 
-        # Isolated — neutral 0.5, not the old edge-ratio 0.0 (#2206).
+        # Isolated — absent (#11702), not the old edge-ratio 0.0 and not 0.5.
         iso_ep = result[isolated_id]
         assert iso_ep.has_ep is False
-        assert iso_ep.confidence_mean == 0.5
+        assert iso_ep.confidence_mean is None
+        assert iso_ep.ep_state == "absent"
 
-        # NANDed — edges alone don't measure; neutral 0.5, contention 1.0.
+        # NANDed — edges alone don't measure; absent, contention 1.0.
         claim_ep = result[claim_id]
         assert claim_ep.has_ep is False
-        assert claim_ep.confidence_mean == 0.5
+        assert claim_ep.confidence_mean is None
+        assert claim_ep.ep_state == "absent"
         assert claim_ep.contention == 1.0
 
     def test_prior_baseline_is_prior_only_not_measured(self, sdk):
