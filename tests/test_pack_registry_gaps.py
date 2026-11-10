@@ -2350,10 +2350,56 @@ class TestReadFilterKinds:
         `equivalentTo` peer) and `query(kind="dev:issue")` returned only those
         rows. The UP walk added `WorkItem`/`Object` to the shared list; the
         filter set must be the pre-#11667 set again.
+
+        The exact-list form below is a snapshot, NOT an order contract: it
+        passes because the builder appends `sorted(gained.difference(bucket))`
+        and `"pm:issue"` happens to sort after `"dev:issue"`. The method's real
+        contract is over SET membership (see its docstring); use `set(...)`
+        when adding an assertion that should not depend on that accident.
         """
         assert shipped.read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]
         assert shipped.expand_kind("dev:issue") != shipped.read_filter_kinds("dev:issue")
         assert "WorkItem" in shipped.expand_kind("dev:issue")
+
+    def test_the_api_doc_states_the_derivation_the_builder_forbids(self, shipped):
+        """The public docstring may not describe the table as SUBTRACTION.
+
+        #11679 grows the read-filter table POSITIVELY, from the pre-closure
+        `down_base` snapshot, because subtraction couples it to the closure's
+        `sources` expression: a third inheritance relation would put an ancestor
+        in a bucket this table never walks up to notice, and `filter ⊆
+        membership` plus `kind ∈ filter` both stay true while it happens — so
+        **no behavioural assertion can catch it**. That makes the API docstring
+        (the first thing a maintainer reads before editing this method) the one
+        place the wrong derivation can survive, and it did: pre-fix it read "the
+        membership bucket MINUS the ancestors", contradicting the ⛔ comment in
+        `_build_kind_expansions` and the DM4 decision record.
+
+        This is a PHRASE guard, not a semantic proof — a future rewrite could
+        restate subtraction in other words, and no synthetic-relation test is
+        available because the two derivations are set-identical under today's
+        relations. It reds on the wording that actually shipped, and it asserts
+        the doc and the builder agree on the POSITIVE source (`down_base`).
+        """
+        import inspect
+
+        doc = shipped.read_filter_kinds.__doc__ or ""
+        builder = inspect.getsource(shipped._build_kind_expansions)
+
+        # The builder's own ⛔ — the ground truth this test holds the doc to.
+        assert "down_base" in builder
+        assert "never by" in builder and "subtracting" in builder, (
+            "the builder's forbidden-derivation comment moved or vanished; "
+            "re-anchor this guard rather than deleting it")
+
+        # …and the public doc must state the same mechanism.
+        assert "down_base" in doc, (
+            "`read_filter_kinds` does not name its actual derivation source "
+            "(`down_base`, the pre-closure snapshot); the doc is describing a "
+            "mechanism the builder does not implement (#11684 review)")
+        assert "never" in doc and "subtract" in doc.lower(), (
+            "`read_filter_kinds` does not forbid the subtraction derivation "
+            "in its own docstring — the #11684 finding verbatim")
 
     def test_a_bare_kind_filter_keeps_its_namespaced_rows(self, shipped):
         """#6146 spelling rescue survives the split, one-directionally.

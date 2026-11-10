@@ -3405,6 +3405,11 @@ class PackRegistry:
         (``read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]``) while
         a root with no ancestors (``Object``, ``Subject``, ``Point``, ``Event``,
         ``Document``) is unchanged.
+
+        The contract is over SET membership, not list order: the bucket is a
+        list, but its ordering is an artefact of the builder's
+        ``sorted(gained.difference(bucket))`` append, not a guarantee. Compare
+        with ``set(...)``.
         """
         if not hasattr(self, '_kind_read_filters'):
             self._build_kind_expansions()
