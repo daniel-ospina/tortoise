@@ -26,6 +26,7 @@ instead of silently dropping it (see
 Harness conventions (§7): fresh embedded DB per test; graph assertions via
 raw Cypher; extract_metadata=False (no network).
 """
+# #4282: `test_t12_backfill_rebuild_wipe_semantics` was removed WITH `backfill_sources`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations  # noqa: I001
 
 import json

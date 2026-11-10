@@ -5,6 +5,7 @@ creation is idempotent, labeled lookups plan as Node By Index Scan (unlabeled
 as All Node Scan — the P0 this issue fixes), and the _resolve_entity /
 entity-CRUD / edge / navigation / org-query rewrites preserve behavior.
 """
+# #4282: `test_org_queries_parity` was removed WITH `get_org_structure`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations
 
 import contextlib

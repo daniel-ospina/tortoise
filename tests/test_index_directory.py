@@ -15,6 +15,7 @@ Harness conventions (§7): fresh embedded DB per test via
 TortoiseSDK(tempdir/t.db, namespace="e2e-900"); no network; graph assertions
 via raw Cypher on sdk._get_proj().g.
 """
+# #4282: `test_cross_entry_point_convergence`, `test_e2e14_first_writer_variant`, `test_e2e14_stem_collision_leg`, `test_index_file_duplicate_session_id`, `test_index_file_requires_corpus_root`, `test_unknown_file_type_raises` were removed WITH `index_file`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations  # noqa: I001
 
 import errno

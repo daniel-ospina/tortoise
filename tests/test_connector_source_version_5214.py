@@ -29,6 +29,7 @@ Three properties are load-bearing and each has its own pin below:
 
 Lane: embedded (`TortoiseSDK(db_path)`, like the sibling `test_connector_sources.py`).
 """
+# #4282: `test_a_current_derivation_reads_current`, `test_the_earlier_derivation_reads_stale_after_a_content_change` were removed WITH `get_provenance_chain`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations
 
 import os

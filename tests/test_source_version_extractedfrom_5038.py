@@ -26,6 +26,7 @@ Design (settled in the scoping plan
 
 Every test that pins a guard names the mutation that makes it FAIL.
 """
+# #4282: `test_dedup_recommit_does_not_raise_or_diverge` was removed WITH `create_or_update_point`, one of the 26 dead public methods #4282 retired on 2026-10-27 (`tortoise/sdk_retired.py`). Every leg here drove that door, so there is no surviving subject to re-point them at.
 from __future__ import annotations
 
 import json

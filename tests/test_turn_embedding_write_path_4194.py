@@ -45,6 +45,7 @@ from tests.test_hosted_api import TEST_ORG_ID
 from tests.test_hosted_api import client as client
 from tortoise.embeddings import EmbeddingModel, compute_embedding
 from tortoise.sdk import TortoiseSDK
+from tortoise.search_engine import run_vector_query
 
 
 class _FakeEmbedder:
@@ -187,6 +188,43 @@ def test_captured_turn_embedding_matches_the_query_encoder(sdk, embedder,
 
 # ── 2. The dense leg now actually returns the captured turn ───────────────
 
+def test_dense_leg_returns_the_captured_turn(sdk, embedder, monkeypatch):
+    """Searching the turn's own content finds it THROUGH the dense leg.
+
+    ``run_vector_query`` is the vector leg in isolation — no lexical leg is
+    involved — so its returning the turn proves the leg now has material. The
+    leg trace records it as ran/not-degraded with a non-zero count, and the
+    product declaration surface reports the read as hybrid.
+    """
+    _keyless(monkeypatch)
+    sdk._capture_session(CONV, session_id="sess-4194-dense")
+    proj = sdk._get_proj()
+    turn_id = "sess-4194-dense_t0"
+    turn_text = proj.g.query(
+        "MATCH (t:Point {id:$id}) RETURN t.content",
+        params={"id": turn_id}).result_set[0][0]
+
+    trace: list[dict] = []
+    qvec = embedder.encode([turn_text])[0].tolist()
+    hits = run_vector_query(
+        proj.g, qvec, limit=10,
+        is_embedded=getattr(proj, "_is_embedded", True),
+        entity_type="point", leg_trace=trace)
+    assert turn_id in [h[0] for h in hits], (
+        f"the turn's own vector did not surface it: {[h[0] for h in hits]}")
+
+    vec = next(e for e in trace if e["leg"] == "vector")
+    assert vec["ran"] is True, vec
+    assert vec["degraded"] is False, vec
+    assert vec["count"] >= 1, vec
+
+    # ⛔ The product's own declaration half of this pin (`sdk.retrieval_legs`) went
+    # WITH ITS DRIVER: `retrieval_legs` is one of the 26 methods #4282 retired (see
+    # `tortoise/sdk_retired.py`), so nothing at this head can ask the SDK to
+    # declare the read hybrid. The unit-level declaration is still pinned by
+    # `tests/test_2952_degraded_read.py::declared_degraded_read`, which drives the
+    # same value directly. What survives here is the part this test was the only
+    # pin for — that the captured turn is REACHABLE through the dense leg at all.
 
 
 # ── 3. Negative control: no embedder ⇒ turn stored, leg DECLARED impaired ──

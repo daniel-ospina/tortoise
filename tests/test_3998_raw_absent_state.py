@@ -1534,3 +1534,45 @@ def test_a_url_only_stub_that_collides_with_a_point_id_still_guards_the_write(sd
     # `:Source` above — ruling B applies to every `:Source` the write reaches.
     with pytest.raises(ValueError, match="retired field"):
         s.update_entity(pid, content="edited point A content")
+
+def test_provenance_reads_do_not_raise_and_invent_no_raw_for_a_sourceless_point(sdk):
+    """Criterion (2), on the SURVIVING read door: `provenance()` returns a VALUE.
+
+    ⛔ This is the surviving half of `test_reads_do_not_raise_when_the_raw_is_
+    unreachable`, which #4282 deleted with `get_provenance_chain` — that method is
+    one of the 26 retired doors (`tortoise/sdk_retired.py`), so the two assertions
+    that read through it are gone WITH their driver and are not restored here.
+    What IS restored is the half that reads through a method that SURVIVES, and it
+    is restored because nothing else at this head covers it: no test asserted that
+    a point with NO source at all gets no `raw` block invented for it, and an
+    invented block would fabricate a raw-availability state out of nothing.
+
+    (1) FAILS if `provenance()` raises for an absent raw, returns an `error`
+        payload instead of the state, or hands a sourceless point a `raw` key.
+    (2) REACHABLE: the deletion is recorded and read below; the three observed
+        conditions are read over the real source row; the sourceless point is
+        created by `create_point` with no `extractedFrom` and no session context.
+    """
+    s, _events = sdk
+    s.create_source(RAW_URL, "conversation", contentHash="h1")
+    pid = _memory(s)
+    # Taken over a record with no marker (a recorded act wins), so the live reads
+    # below observe the plain row rather than the deletion just written.
+    plain = _source_props(s)
+
+    s.create_source(RAW_URL, "conversation", raw_state=RAW_DELETED)
+    prov = s.provenance(pid)                     # must not raise
+    assert prov["raw"]["raw_state"] == RAW_DELETED
+    assert "error" not in prov
+
+    for cause in RAW_OBSERVED_STATES:
+        entry = raw_entry(plain, observed=cause)
+        assert isinstance(entry, dict) and entry, "the live read went silent"
+        assert entry["raw_state"] == cause
+        assert entry["available"] is False and entry["label"] and entry["message"]
+    # A hostile observation is a value too, not an exception.
+    assert raw_entry(plain, observed=object())["raw_state"] == RAW_UNRECOGNISED
+
+    # A point with NO source at all: still no raise, and NO raw key invented.
+    orphan = s.create_point("statement", "orphan claim")["id"]
+    assert "raw" not in s.provenance(orphan)
