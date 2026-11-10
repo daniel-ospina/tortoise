@@ -74,11 +74,23 @@ _POPULATION_CLAIM = re.compile(
     r"`([^`]+)`(?=\s*\(`git grep)"
 )
 
-#: A backticked PATH inside the quoted measurement's parenthetical, other than the two
-#: `git grep` commands themselves. A second population named AFTER the quote lives
-#: there: measured GREEN on "… the file count is not the line count, and `tests/` is
-#: counted in both figures)" while `tests/` alone holds several times the claimed lines.
-_NO_SECOND_POPULATION = re.compile(r"`((?!git grep)[^`]*/[^`]*)`")
+#: Any backticked span in the measurement sentence other than the two `git grep`
+#: commands and the pinned population itself. A second population named AFTER the quote
+#: lives there, and it is measured GREEN without this: "… the file count is not the line
+#: count, and `tests/` is counted in both figures)" — and `tests` / `graph-scripts` without
+#: a trailing slash were GREEN too, so this rule allowlists by VALUE (the one population
+#: this pin measures) instead of requiring a `/`, which a population name need not carry.
+#: ⛔ No lookahead inside the pattern: a `(?!git grep)` there shifts the scan by one
+#: backtick when it rejects the first command, and the span pairing then swallows the
+#: NEXT population instead of reading it ("`tests/`" came back as part of a longer
+#: non-population span, measured GREEN). Extract every span positionally, then filter.
+_NO_SECOND_POPULATION = re.compile(r"`([^`]+)`")
+
+#: What a population can be spelled as: one path segment (letters, digits, `.`, `-`, `_`)
+#: with an optional trailing slash. Without this shape test the backtick scan above also
+#: pairs the CLOSING backtick of one command with the OPENING backtick of the next and
+#: reads " → 63 lines," as a population.
+_POPULATION_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+/?")
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
@@ -1743,11 +1755,22 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
             "§5's measurement parenthetical is never closed — the tail of that clause "
             "is where a second population would be stated, so this pin cannot read it"
         )
-    tail = section[open_at + 1 : close_at]
+    # Not to the parenthetical's close: a second population can sit AFTER it and still
+    # be the same sentence (measured GREEN: "… count)" and `tests/` is counted in both
+    # figures."), so the slice runs to the sentence's own end — the nearer of the next
+    # period and the next newline — and the parenthetical's close is just where the
+    # quote's own text provably stops.
+    sentence_end = len(section)
+    for stop in (section.find(".", close_at + 1), section.find("\n", close_at + 1)):
+        if stop != -1:
+            sentence_end = min(sentence_end, stop)
+    tail = section[open_at + 1 : sentence_end]
     extra = [
         token
         for token in _NO_SECOND_POPULATION.findall(tail)
-        if token != _TRACKED_DIR + "/"
+        if not token.startswith("git grep")
+        and _POPULATION_TOKEN.fullmatch(token)
+        and token != _TRACKED_DIR + "/"
     ]
     assert not extra, (
         f"§5's measurement parenthetical names another path after the quote — "
