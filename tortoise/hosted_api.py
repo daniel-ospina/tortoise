@@ -21290,6 +21290,16 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: DM1's mention record rides the write ONLY when it carries
+            # one. ⛔ NOT `mentions=<recs> or None` on the call: a re-commit of a
+            # claim with no mentions would then fold `mentions=None` onto the
+            # dedup target, and a `None` in a generic prop REMOVES the property
+            # (`SET n += $props`, measured) — deleting a stored record on the
+            # ordinary re-commit path, in the direction that loses memory.
+            # Absent means "this payload did not speak about mentions", which
+            # is first-writer, the same rule every other prop here follows.
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             # #5363 (B) / #7000 review P2: validate THIS window here — after
             # every EARLIER point of this commit has been written, so the
             # successor this write will actually dedup onto is already visible
@@ -21307,8 +21317,6 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # E4 (#5007): the verbatim span pointer rides to the node
                 span_start=pr.point.span_start,
                 span_end=pr.point.span_end,
-                # #11239: DM1's mention record (see `_mention_props` above).
-                mentions=_mention_props or None,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),
@@ -21446,6 +21454,10 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
             if pr.point.when:
                 point_props["when"] = pr.point.when
                 point_props["validFrom"] = pr.point.when
+            # #11239: only when the payload carries a record — see the
+            # supersede leg's note above (an explicit None would CLEAR it).
+            if _mention_props:
+                point_props["mentions"] = _mention_props
             _written = sdk.create_point(
                 pr.point.pointKind, pr.point.content, dedup=True, id=pid,
                 status=pr.point.status, confidence=pr.point.confidence,
@@ -21456,8 +21468,6 @@ def _execute_commit_writes(sdk: TortoiseSDK, payload: CommitPayload, plan):  # n
                 # E4 (#5007): the verbatim span pointer rides to the node
                 span_start=pr.point.span_start,
                 span_end=pr.point.span_end,
-                # #11239: DM1's mention record (see `_mention_props` above).
-                mentions=_mention_props or None,
                 source_ref=pr.point.source_ref,
                 extractedFrom=session_ref_urls.get(
                     pr.point.source_ref, pr.point.source_ref),

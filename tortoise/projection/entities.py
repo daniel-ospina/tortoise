@@ -1189,11 +1189,25 @@ def encode_json_record_props(props: dict) -> None:
     the same ``or None`` convention `flatten_search_keys_prop` uses, so a blank
     list never clears an existing value with an empty JSON array.
 
-    This is deliberately NOT a policy that DROPS a record: every field the
-    producer put on a mention survives the encode, and a record the producer
-    could not shape is kept by taking its ``str()`` for the surface rather
-    than dropped (a lost mention is the memory loss the channel exists to
+    This is deliberately NOT a policy that DROPS a RECORD — a record the
+    producer could not shape is kept by taking its ``str()`` for the surface
+    rather than dropped (a lost mention is the memory loss the channel exists to
     prevent — ``value_gate``'s asymmetry, cited at `extractor_v2`).
+
+    ⛔ **It is NOT field-preserving, and the narrowing is DM1's, not this
+    helper's.** The encode writes exactly FOUR keys — ``surface``,
+    ``span_start``, ``span_end``, ``kind_guess`` — because that is DM1's declared
+    shape (`05-plan.md` §4: *"a property on the claim Point that carried it"*,
+    with no ``claim_id`` because the owning point IS the claim). The payload's
+    `Mention` model carries four MORE that this encode deliberately does not
+    write to the node: ``claim_ref`` (the claim's own content — the node's
+    identity already is that claim), ``quote`` and ``span_source`` (the address
+    and the name of the haystack it indexes into; the POINT's own span fields
+    carry the same pair) and ``rule_id`` (which rule held it — that is S2.1's
+    audit channel on the PAYLOAD/evidence block, `result["mentions"]`).
+    A reader must not conclude those four reached the node: **promoting any of
+    them onto the Point is a reopen of DM1 in DM1's own home, not an edit
+    here.**
     """
     import json
 
@@ -1215,11 +1229,11 @@ def encode_json_record_props(props: dict) -> None:
                 rec = item.model_dump()
             else:
                 rec = {"surface": str(item)}
-            # Fixed field set, no None members and a string surface: the shape
-            # `Mention` declares, so a reader parses one schema rather than a
-            # per-call variant. `kind_guess` is kept only when it carries a
-            # value (DM1 makes it optional, and there is no producer that must
-            # invent one).
+            # Fixed field set, no None members and a string surface: DM1's
+            # FOUR-field row (not the model's eight — see the docstring), so a
+            # reader parses one schema rather than a per-call variant.
+            # `kind_guess` is kept only when it carries a value (DM1 makes it
+            # optional, and there is no producer that must invent one).
             surface = rec.get("surface")
             out = {"surface": "" if surface is None else str(surface)}
             for offset in ("span_start", "span_end"):

@@ -1265,18 +1265,29 @@ def test_the_mention_record_reaches_the_claim_point_and_says_so():
         _EntityHandlers,
         encode_json_record_props,
     )
-    from tortoise.sdk import TortoiseSDK, _CAPTURE_PASSTHROUGH_PROPS
+    from tortoise.sdk import _CAPTURE_PASSTHROUGH_PROPS, TortoiseSDK
 
     # the record EXISTS at the payload — "payload-only" was never "nothing"
     payload, _ = _mint(_embed_list("it"))
     assert [m["surface"] for m in _mentions_of(payload)] == ["it"]
 
     # ── the PERSISTENCE half, door by door ────────────────────────────────
-    # 1. the hosted commit door — the one the v2 payload actually rides.
+    # 1. the hosted commit door — the one the v2 payload actually rides. It adds
+    #    the key ONLY when the payload carries a record: `mentions=_mention_props
+    #    or None` on a dedup hit would REMOVE a stored record (a `None` in a
+    #    generic prop clears the property), so the empty case must not speak.
     _commit_src = inspect.getsource(hosted_api._execute_commit_writes)
-    assert "mentions=_mention_props or None" in _commit_src, (
-        "the commit route no longer writes `mentions`: DM1's home is empty "
-        "again — see #11239 and `Mention`'s docstring")
+    assert '_mention_props = [' in _commit_src, (
+        "the commit route no longer reads the payload point's `mentions`: "
+        "DM1's home is empty again — see #11239")
+    assert _commit_src.count('point_props["mentions"] = _mention_props') == 2, (
+        "both create legs (supersede and new) must carry `mentions`, and ONLY "
+        "when the payload has one — a leg that passes None clears a stored "
+        "record on the ordinary re-commit path")
+    assert "mentions=_mention_props" not in _commit_src, (
+        "a `mentions=` kwarg on the dedup write reintroduces the clearing bug: "
+        "`create_point(dedup=True, mentions=None)` folds `mentions=None` onto "
+        "the existing point, and `SET n += $props` carrying a None REMOVES it")
     # 2. the SDK capture seam: a create-only carrier, read off the payload point
     #    beside the other passthrough read (the `validFrom` shape — stored,
     #    never advertised).
