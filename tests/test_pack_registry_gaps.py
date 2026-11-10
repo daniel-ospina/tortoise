@@ -26,6 +26,37 @@ REPO = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO / "packs"
 
 
+@pytest.fixture(autouse=True)
+def _isolate_search_engine_state():
+    """Isolate every test here from `search_engine`'s MODULE-LEVEL state.
+
+    Both halves are module-global, so a test that drives a leg leaks into the
+    next one in the same process:
+
+    * the per-strategy **circuit breaker** (`_BREAKERS`) — a leg that records a
+      failure counts toward tripping it, and an OPEN breaker does not raise, it
+      short-circuits the leg to an empty result. The form-scope pin below drives
+      `run_structural_query` and the real `tortoise_fts_query`, and its failure
+      message would then name the widening when the actual cause was breaker
+      state — the false-diagnosis class this pin was rewritten to remove. The
+      sibling suites (`test_search_engine_gaps.py`) install this same autouse
+      reset for the same reason.
+    * the **retrieval tally** (`retrieval_metering._ACTIVE`, a ContextVar) —
+      `run_structural_query` notes its leg unconditionally, so a tally armed by
+      an outer fixture would be incremented by a test that never asked for it.
+      `take_and_reset()` is the public claim-and-clear: it detaches the tally
+      WITHOUT writing a ledger row, so nothing this file runs can reach the
+      ledger.
+    """
+    from tortoise import retrieval_metering, search_engine
+
+    search_engine.reset_circuit_breakers()
+    retrieval_metering.take_and_reset()
+    yield
+    search_engine.reset_circuit_breakers()
+    retrieval_metering.take_and_reset()
+
+
 # ── Validation edge cases ──────────────────────────────────────────────────
 
 class TestValidationEdgeCases:
@@ -2404,10 +2435,16 @@ class TestCoreHierarchy:
         assert run_structural_query(
             graph, "Object", entity_type="object", limit=5) == []
         (cypher, params), = graph.calls
-        assert "n.objectKind = $kind" in cypher, cypher
-        assert " IN [" not in cypher, (
+        # Scoped to the KIND clause, not to `" IN ["` anywhere in the Cypher: an
+        # unrelated set predicate (`_exclude_status_clause` growing an `IN [...]`
+        # form) would otherwise red HERE with a message accusing the kind leg.
+        # Ordered BEFORE the exact-match assertion so that the edit this guards —
+        # the leg carrying the EXPANSION — reds with the message that names the
+        # widening rather than with a bare mismatch the leg could also produce.
+        assert "n.objectKind IN" not in cypher, (
             "the structural leg now carries a kind SET — that is the widening "
             f"this docstring says does not happen on the kind-only read: {cypher}")
+        assert "n.objectKind = $kind" in cypher, cypher
         assert params["kind"] == "Object", (
             "the structural leg must be handed the UNEXPANDED kind, never "
             f"expand_kind(...): {params['kind']!r}")
