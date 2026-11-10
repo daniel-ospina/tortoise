@@ -7091,35 +7091,9 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
         "documents until someone writes it"
     ),
     "the exemption": (
-        # ⛔ This entry's ORIGINAL reason — *"absent from both documents until
-        # someone writes it; the documents write `both exemptions` and `merely
-        # exempting` instead"* — went stale twice over and the `stale` half above
-        # is what caught it (`#11714`, inherited by every PR from `main`). Both
-        # halves, because they need different repairs:
-        #   1. THE CITED SENTENCES ARE GONE. `both exemptions` / `merely
-        #      exempting` are 0 occurrences in BOTH documents (removed from
-        #      `STORAGE-ARCHITECTURE.md` by `02beefe879`) and never existed in
-        #      the EXTRACTOR document, so "the documents write … instead" had
-        #      become a claim about text nobody can find.
-        #   2. SOMEONE WROTE IT — and the DOCUMENT was the wrong half. `#11665`
-        #      opened `EXTRACTOR-V4-ARCHITECTURE.md` §3 with *"⚠️ **The exemption
-        #      is about CONTENT, not the declaration site**"*, borrowing this
-        #      noun for a DIFFERENT concept: the source-type profile's rule, whose
-        #      subject is prompt CONTENT, not a census row. That sentence is now
-        #      `This clause is about CONTENT` — rewording the DOCUMENT, not
-        #      widening this vocabulary, is what keeps the tripwire COARSE: an
-        #      occurrence ANYWHERE is the signal, so prose that wants a synonym
-        #      for an exemption must not borrow the denial's own noun. Deleting
-        #      the entry instead would say "this spelling is allowed now", which
-        #      is the exemption the `stale` half exists to refuse.
-        # ⚠️ NOT `The carve-out …` either: that noun belongs to
-        # `state_value_carve_out`, a `v4-mechanisms.yml` registry row, so
-        # borrowing it swaps one collision for another.
         "contradiction vocabulary — the definite-articled form. Absent from both "
-        "documents at this head, and neither carries a denial of it in any other "
-        "spelling. The `#11665` sentence that used the bare noun for a different "
-        "concept now says `This clause is about CONTENT`, so an occurrence of "
-        "THIS spelling remains the signal it was written to be"
+        "documents until someone writes it; the documents write `both exemptions` "
+        "and `merely exempting` instead, neither of which is a denial"
     ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
