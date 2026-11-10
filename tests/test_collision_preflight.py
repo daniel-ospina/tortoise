@@ -12551,10 +12551,6 @@ class HolderGateTests(unittest.TestCase):
         `liveness_unreadable` becomes a refusal cause on an otherwise measured
         board, and the failure explains why it may not be made one.
         """
-        _write_board(self.board, _fleet_board_state(
-            liveness_source=self.cp.fleet_state.LIVE_STORE_PROCESS,
-            liveness_unreadable=[self.cp.fleet_state.LIVE_STORE_CMUX_GROUP],
-        ))
         # ⛔ NO LIVE REBUILD IN THIS TEST (#11681 review, P1). `_read_board` does
         # not merely return a refused board — it REBUILDS, and the contrast arm
         # below used to fall through to a real `fleet_state.build_state`: a live
@@ -12569,25 +12565,33 @@ class HolderGateTests(unittest.TestCase):
                 "this test must never rebuild the board — a rebuild is a live "
                 "gh/cmux/ps read (see the review P1 in the docstring)")
 
-        with mock.patch.object(self.cp.fleet_state, "build_state", _no_rebuild):
-            state = self.cp._read_board(SLUG, str(self.tmp))[0]
-        # ⛔ THIS ASSERTION FIRES FIRST UNDER ARM (a), so IT carries the decision:
-        # a reverter sees the ruling at the exact line that refused them, not four
-        # assertions later.
-        self.assertIsNotNone(state, (
-            "an unreadable cmux SESSION store must not make this board refused — "
-            "that is arm (a) of the #11669 review, and it was REFUSED by the "
-            "#11202 decision (comment 6754475756): the process table is total "
-            "coverage for the population this gate protects, and refusing here "
-            "restores the permanent every-dispatch INCOMPLETE that #11202 was "
-            "filed to remove. See OVERRIDES in this test's docstring."))
-        # 1. THE BOARD still answers. This is arm (a)'s exact interception point.
-        self.assertEqual(self.cp._board_can_answer(state), "", (
+        # ⛔ 0. THE DECISION, ON THE BOARD ITSELF, BEFORE ANY READ (#11681 review
+        # round 2, P2). This is arm (a)'s exact interception point, and it is
+        # asserted HERE — deterministically, no I/O — because `_read_board` REBUILDS
+        # a board it cannot answer: under an arm-(a) revert the read below reaches
+        # the raiser and reports the REBUILD's failure, which would mask the
+        # decision behind an unrelated cause. A reverter now sees the ruling at the
+        # first line that refuses them.
+        board = _fleet_board_state(
+            liveness_source=self.cp.fleet_state.LIVE_STORE_PROCESS,
+            liveness_unreadable=[self.cp.fleet_state.LIVE_STORE_CMUX_GROUP],
+        )
+        _write_board(self.board, board)
+        self.assertEqual(self.cp._board_can_answer(board), "", (
             "an unreadable cmux SESSION store is not a coverage gap on a cell: the "
             "process table is total coverage for the population this gate protects "
             "(#11202 decision comment 6754475756). Making this refuse is arm (a), "
             "which restores the permanent every-dispatch INCOMPLETE that #11202 "
             "was filed to remove — see OVERRIDES in this docstring."))
+        # 1. …and the gate SERVES it rather than rebuilding. `source`/`why` ride the
+        #    message so a merely STALE fixture (or a `_board_is_for_repo` mismatch)
+        #    names its own cause instead of accusing the reader of arm (a).
+        with mock.patch.object(self.cp.fleet_state, "build_state", _no_rebuild):
+            state, source, why = self.cp._read_board(SLUG, str(self.tmp))
+        self.assertIsNotNone(state, (
+            "the board must be SERVED, not rebuilt or refused — an unreadable cmux "
+            "session store does not make a measured board unanswerable"
+            f" [source={source}; why={why}]"))
         # 2. …and the READ is measured, with the absent store still named beside the
         #    one that answered (disclosure survives the decision).
         read = self.cp.read_holders(ISSUE, slug=SLUG, repo_root=str(self.tmp))

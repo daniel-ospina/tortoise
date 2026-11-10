@@ -1357,6 +1357,17 @@ exit 0
         self.assertEqual(rc, 2, out)
         self.assertIn("ANSWER INCOMPLETE", out)
         self.assertNotIn("ANSWER: nobody", out)
+        # ⛔ AND THE CLAIM-GATE NOTE IS NOT PRINTED TWICE (#11681 review round 2,
+        # P2). `who_holds` skips its own CLAIM GATE block for an INCOMPLETE holder
+        # read because that read already prints — with the same note — under
+        # INCOMPLETE SURFACES. That skip was PROSE ONLY: delete the
+        # `status != STATUS_INCOMPLETE` guard and every suite stayed green while
+        # the note printed twice. In a PR whose whole thesis is "prose did not hold
+        # the polarity, so pin it as a test", the guard gets a pin.
+        self.assertEqual(out.count("claim gate:"), 1, (
+            "the holder note must appear exactly once — under INCOMPLETE "
+            "SURFACES, not again in a CLAIM GATE block:\n" + out))
+        self.assertNotIn("CLAIM GATE [issue assignee/holder]", out)
 
     def test_the_answer_does_not_claim_completeness_it_does_not_have(self):
         """The final ANSWER line must not assert completeness it does not have.
