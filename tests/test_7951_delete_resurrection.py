@@ -184,7 +184,7 @@ def _reset_replay_anchors():
 #: `--timeout=300` is not a safe per-item budget here — the same reason
 #: `test_embedder_probe.py` and friends carry this marker (#1349). It ALSO keeps
 #: `_SUITE_WAIT_BOUND_S` unambiguously below the item budget it must beat, which
-#: half 3 of `TestAWaiterRefusalCannotPoisonTheNextCapture` asserts.
+#: the `BOUNDS` block of `TestAWaiterRefusalCannotPoisonTheNextCapture` asserts.
 _ITEM_BUDGET_S = 600
 pytestmark = pytest.mark.timeout(_ITEM_BUDGET_S)
 
@@ -210,7 +210,7 @@ pytestmark = pytest.mark.timeout(_ITEM_BUDGET_S)
 #: 280 s is sized off that 124.53 s measurement AND off the two clocks around it.
 #: There are three budgets in play, and the correct value sits BETWEEN the other
 #: two — each read from its owner, never re-typed (see the pin in
-#: `TestAWaiterRefusalCannotPoisonTheNextCapture`, half 3):
+#: `TestAWaiterRefusalCannotPoisonTheNextCapture`, its `BOUNDS` block):
 #:
 #:   `conftest.py` embedder load budget   270 s  (`EmbeddingModel._LOAD_TIMEOUT_S`)
 #:   this file's transport bound          280 s  <- must sit in here
@@ -241,7 +241,7 @@ pytestmark = pytest.mark.timeout(_ITEM_BUDGET_S)
 #: graded at — with the marker, and with the marker dropped back to the shard
 #: default (at which rung a 300 s bound would tie the item clock exactly, and the
 #: item clock wins ties). The marker's job is headroom for the rest of the item
-#: (see the coverage assert in half 3), not this ordering.
+#: (see the coverage assert in the `BOUNDS` block), not this ordering.
 _SUITE_WAIT_BOUND_S = 280.0
 
 #: How long `_drain_in_flight_captures` waits for an abandoned capture's worker
@@ -256,9 +256,12 @@ def _item_budget_s(item) -> float:
 
     Read from the plugin's own resolver (`_get_item_settings`) rather than
     re-implemented, so the marker -> `--timeout` -> `PYTEST_TIMEOUT` -> ini
-    precedence cannot drift from pytest-timeout's. `None` (no budget) is `inf`:
-    with no item alarm, the transport bound is not competing with anything and
-    the ordering this file pins is trivially satisfied.
+    precedence cannot drift from pytest-timeout's. A non-positive or absent
+    budget is `inf`, because pytest-timeout arms NOTHING there (`timeout <= 0`
+    never starts the alarm), so "no bound" is the true reading — the same
+    polarity `tests/test_migrate_db.py::_positive_or_unbounded` uses for the
+    global case. That arm is not reachable while this module's marker is in
+    place: dropping `pytestmark` reds the marker assertion beside this call.
 
     A hand-rolled CLI-then-ini resolver is NOT good enough and was caught in
     review: for an item with no marker, `PYTEST_TIMEOUT=120` under an ini of 300
@@ -270,7 +273,8 @@ def _item_budget_s(item) -> float:
     import pytest_timeout
 
     timeout = pytest_timeout._get_item_settings(item).timeout
-    return float(timeout) if timeout else float("inf")
+    value = float(timeout) if timeout is not None else 0.0
+    return value if value > 0 else float("inf")
 
 
 def _drain_in_flight_captures(timeout_s: float = _DRAIN_TIMEOUT_S) -> None:
@@ -1158,9 +1162,10 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
         drain still holding this session's key, one assertion before the
         retry that CI answered 409.
 
-        HALF 3 — the raised bound must be the FIRST clock that can fail, and it
-        must not pre-empt the one that is supposed to report a cold load. Three
-        budgets are in play and the bound has to sit strictly between the outer
+        BOUNDS (checked FIRST, before any stateful capture — the order in this
+        body is 1, BOUNDS, 2) — the raised bound must be the FIRST clock that
+        can fail, and it must not pre-empt the one that is supposed to report a
+        cold load. Three budgets are in play and the bound has to sit strictly between the outer
         two, each READ from its owner rather than re-typed:
 
           conftest.py embedder load budget  270 s  `EmbeddingModel._LOAD_TIMEOUT_S`
@@ -1180,7 +1185,7 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
         The marker is asserted, not assumed: dropping `pytestmark` leaves the
         ORDERING arm green (300 still exceeds 280) while silently handing this
         file back to the shard's 300 s default, which is the flake this commit
-        removes — so half 3 pins the declared value and the resolved one.
+        removes — so this block pins the declared value and the resolved one.
         """
         tc, _ = hosted
 
@@ -1194,7 +1199,7 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
             "the suite bound must be strictly above the shipped 10.0 s value, "
             "or it reproduces the race instead of removing it")
 
-        # ── HALF 3: … and it must still be the clock that fires first ──
+        # ── BOUNDS: … and it must still be the clock that fires first ─────
         from tortoise.embeddings import EmbeddingModel
 
         load_budget = float(EmbeddingModel._LOAD_TIMEOUT_S)
@@ -1220,19 +1225,23 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
             f"{_ITEM_BUDGET_S} s: a marker override, `PYTEST_TIMEOUT`, "
             f"`--timeout` or the ini is grading this file with a budget the "
             f"transport bound was not reasoned against")
-        # …and the declared value must cover the worst case this file can spend
-        # WITHOUT being the shard's default under another name. Both terms are
-        # read from their owners, so lowering `_ITEM_BUDGET_S` cannot move both
-        # sides together: at 300 s (the shard's `--timeout=300`) a bound-hitting
-        # capture leaves 20 s — a sixth of the fixture's 120 s drain — where the
-        # worst case needs 400 s, so it is 100 s short.
+        # …and the declared value must clear the MINIMUM a real budget has to
+        # afford — one bound-hitting capture PLUS the fixture's drain — without
+        # being the shard's default under another name. It is a LOWER BOUND, not
+        # this item's total cost (the cold load and the retry capture are paid on
+        # top of it); it is the term that kills the decorative-300 case. Both
+        # terms are read from their owners, so lowering `_ITEM_BUDGET_S` cannot
+        # move both sides together: at 300 s (the shard's `--timeout=300`) a
+        # bound-hitting capture leaves 20 s — a sixth of the fixture's 120 s
+        # drain — where that minimum needs 400 s, so it is 100 s short.
         assert _ITEM_BUDGET_S > _SUITE_WAIT_BOUND_S + _DRAIN_TIMEOUT_S, (
-            f"the declared per-item budget ({_ITEM_BUDGET_S} s) does not cover "
-            f"the worst case this file can legitimately spend: a capture that "
-            f"runs to the transport bound ({_SUITE_WAIT_BOUND_S} s) PLUS the "
-            f"fixture's drain of an abandoned worker ({_DRAIN_TIMEOUT_S} s). A "
-            f"budget that small is the shard's 300 s default under another "
-            f"name, and the marker beside it is decorative")
+            f"the declared per-item budget ({_ITEM_BUDGET_S} s) does not clear "
+            f"the minimum a real budget must afford: a capture that runs to the "
+            f"transport bound ({_SUITE_WAIT_BOUND_S} s) PLUS the fixture's drain "
+            f"of an abandoned worker ({_DRAIN_TIMEOUT_S} s). This is a LOWER "
+            f"bound, not the item's total cost — the cold load and the retry "
+            f"capture are paid on top. A budget below it is the shard's 300 s "
+            f"default under another name, and the marker beside it is decorative")
         assert item_budget > _SUITE_WAIT_BOUND_S, (
             f"the suite bound ({_SUITE_WAIT_BOUND_S} s) is not strictly below "
             f"the per-item budget in force ({item_budget:g} s), so pytest kills "
