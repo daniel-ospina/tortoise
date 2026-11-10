@@ -139,7 +139,7 @@ the owner already ruled on (#10194).
 
 | flag | where | required verification |
 |---|---|---|
-| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:4598`, consumed `sdk.py:9244`/`:9297` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
+| **Silent function skips** | `subject_binding_available` is a **fail-OPEN** probe (`search_engine.py:4782`, consumed `sdk.py:9288`/`:9341` — a symbol-keyed pair, so a later insertion above either one moves the helper, not the claim); a fail-open probe makes "no subjects" indistinguishable from "never ran" | A5's case must report *which* state occurred — **Tier E**, asserted on the run record, not on a mock |
 | **Conditional guards** | `_capture_lane()` returns `"v2"` unless `TORTOISE_SESSION_EXTRACTOR=m2`; the whole door claim hangs on a conditional | a CI-level pin on the selector itself (cheap, file-level) + Tier E evidence that the named lane ran |
 | **Stale measurement artifact** | the shipped verdict table carries `E4 2/15` while `E1-E5-PROOFS.md` corrects to `5/15` | CI pin that **both** figures are named and the stale one is not used as a bar |
 | **N+1 / cost blowup** | `capstone_measure.py` re-derives over 397 nodes; the E4 leg pays 7-session LLM cost | Tier E only; a CI pin on the *declared* point budget would be theatre |
@@ -201,7 +201,7 @@ Otherwise it is a Tier E test, and it must **name the tier in its docstring** so
 | item | applies? | how it is covered |
 |---|---|---|
 | Contract defined? | ✅ | the registration schema + the verdict enum are the contracts; §2 rows 1–3 |
-| Boundary values | ✅ | floor/REFUSED arms: `≥30` labelled pairs, **`≥1` labelled node for A4** (the registered floor `a4_labelled_nodes`; *the population being non-empty* is a second, separate arm — `n > 0` over things and events passes on a graph where every one of them is unlabelled, which is the below-floor run A4 exists to red),  **`≥30` named actors for A5** (the registered floor `a5_actors`; *bindable subject slots* is A5's **metric**) — each with the below-floor arm as a **test**, not narration |
+| Boundary values | ✅ | floor/REFUSED arms: `≥30` labelled pairs, **`≥1` labelled node for A4** (the floor **this amendment** registers — `a4_labelled_nodes: 1`, `04-plan.md` §4.1 / AM7 at `:989`; ⚠️ the RECORD does not carry it yet: `preregistration.json`'s A4 row still reads `floor: a4_typed_statements` with `blocked_by: #10988`, retired by §4.2's table and rewritten by C1 — do not grep the record and take the old floor as registered; *the population being non-empty* is a second, separate arm — `n > 0` over things and events passes on a graph where every one of them is unlabelled, which is the below-floor run A4 exists to red),  **`≥30` named actors for A5** (the registered floor `a5_actors`; *bindable subject slots* is A5's **metric**) — each with the below-floor arm as a **test**, not narration |
 | Empty vs null | ✅ | `REFUSED` ≠ `RED` ≠ `GREEN`; the record's own three-state vocabulary, pinned in CI |
 | Timeout / 429 / 503 / 400 / malformed response | ✅ for the capture door | the 402 quota arm is the one that actually fires; timeout/5xx are the eval lane's to report (Tier E) |
 | Atomic writes | ⚠️ N/A | the epic writes no multi-row transaction of its own (S6's atomicity is `#5087`'s) |
