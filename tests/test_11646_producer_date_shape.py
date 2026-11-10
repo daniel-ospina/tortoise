@@ -265,11 +265,23 @@ def test_the_epoch_spelled_as_a_string_still_names_no_instant():
 
 
 def test_coverage_loop_calendar_date_is_routed_through_the_shared_resolver():
-    """The already-working seam keeps working, now from ONE grammar."""
+    """The already-working seam keeps working, now from ONE grammar.
+
+    ⛔ The first four assertions are NOT the falsifier of the routing, and a
+    review measured that: ``origin/main``'s local ``_CALENDAR_DATE_RE``
+    (``^\\d{4}[-/]\\d{1,2}[-/]\\d{1,2}(?!\\d)``) plus its sentinel strip return
+    the SAME four answers, so reverting ``coverage_loop._calendar_date`` to its
+    own copy left this test green while the seam it names was un-routed. The
+    last two assertions are the falsifier: a compact date and a numeric epoch
+    are shapes ONLY the shared resolver dates, so they red on that revert.
+    """
     assert _calendar_date(PRODUCER_SESSION_DATE) == ISO_SESSION_DATE
     assert _calendar_date(ISO_SESSION_DATE) == ISO_SESSION_DATE
     assert _calendar_date("2023/4/9") == "2023-04-09"
     assert _calendar_date("1970-01-01T00:00:00Z") is None
+    # ⛔ the routing falsifier — unparseable by the pre-#11646 local copy
+    assert _calendar_date("2026-W43-2") == "2026-10-20"   # ISO week
+    assert _calendar_date(1684549260) == "2023-05-20"     # numeric epoch
 
 
 # ── the shared resolver itself: the union, and the no-coercion decision ────
@@ -327,6 +339,37 @@ def test_calendar_datetime_anchoring_matches_the_ordered_measure():
     # an epoch STRING names no instant (#9202); the NUMBER does
     assert calendar_datetime("1900000000") is None
     assert calendar_datetime(1900000000).date() == date(2030, 3, 17)
+
+
+@pytest.mark.parametrize("value,written", [
+    ("0001-01-01T00:00:00+23:59", date(1, 1, 1)),     # UTC day is year 0
+    ("9999-12-31T23:59:59-23:59", date(9999, 12, 31)),  # UTC day is year 10000
+])
+def test_an_unconvertible_edge_answers_with_the_stated_day_never_an_exception(
+        value, written):
+    """``calendar_date`` promises "never an exception", and the two
+    ``utc_truncate=True`` consumer chains it feeds (``assembly._norm_date``,
+    ``assembly.collect_slices``) each promise never to raise on a malformed
+    stored date. A legal instant at the ``datetime`` range boundary carrying a
+    real offset converts to a day OUTSIDE ``date``'s range, where ``astimezone``
+    raises ``OverflowError`` (measured — review findings, two cycles).
+
+    ``extractor_v2._valid_iso_date`` accepts both spellings
+    (``^\\d{4}-\\d{2}-\\d{2}([Tt ].*)?$``, <= 40 chars), so a stored ``when``
+    really can be one, and assembly calls ``_norm_date`` UNGUARDED per row.
+
+    The answer is the day the value STATES (:func:`_utc_day`'s ``fallback``),
+    not ``None``: a year-1/9999 instant is a value whose day is knowable, and
+    undating it would drop a row ``origin/main`` kept. The point of the test is
+    that it is an ANSWER, never a raised exception out of an assembly read —
+    the pre-fix code raised here on both spellings.
+    """
+    assert calendar_date(value, utc_truncate=True) == written
+    # every consumer inherits the answer instead of the raise; the assembly
+    # ladder then applies its own pre-1970 floor / keeps the day
+    assert _norm_date(value) == (None if written <= date(1970, 1, 1) else written)
+    assert time_aware._as_date(value) is not None
+    assert _calendar_date(value) is not None
 
 
 def test_write_door_still_canonicalises_a_date_variant():
@@ -404,13 +447,23 @@ def test_a_value_that_parsed_before_still_names_its_day(value, written, utc_day)
 def test_a_pure_number_is_never_truncated_into_a_fabricated_day():
     """Review cycle 1, finding 2: an unanchored ``\\d{8}`` alternative read the
     first eight digits of a 9/10-digit EPOCH spelling and invented a day
-    (``2020010112`` → 2020-01-01, fourteen years early as a window bound).
-    The digit count decides, deterministically:
+    (``2020010112`` → 2020-01-01). The digit count decides, deterministically:
 
     * exactly 8 → a compact DATE (``20230520``);
     * 9-10 → a SECONDS epoch;
     * 11+ → undated (the millisecond shape ``validity`` refuses at the write
       door, #10079 — never a year-8380 date).
+
+    ⛔ THIS IS THE UNION'S ONE STATED EXCEPTION, and the direction it cuts is
+    not stated by "fourteen years early" alone. ``origin/main``'s
+    ``assembly._norm_date`` DATES ``2020010112`` at 2020-01-01 (it takes the
+    leading eight digits), so this reading replaces a dated row with a
+    future-dated one — and ``assembly.collect_slices`` EXCLUDES a dated row after
+    the question while RETAINING an undated one. Measured against
+    ``origin/main``'s own body: ``2023052011`` main 2023-05-20 / here 2034-02-08
+    (excluded), ``202305201122`` main 2023-05-20 / here ``None`` (retained, sorts
+    last). The rule below is DELIBERATE and recorded in the module docstring;
+    reversing it is a reopen, not a fix.
     """
     assert calendar_date("20230520") == date(2023, 5, 20)
     assert calendar_date("2020010112") == date(2034, 1, 4)

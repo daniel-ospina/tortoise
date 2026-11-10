@@ -85,6 +85,37 @@ not a year-shaped date; the NUMBER ``2023`` is still the epoch it always was, as
 ``_norm_date`` read it as 2023-05-20 while ``_as_date`` read it as the epoch, so
 the two disagreed; one documented rule (digits, not ambiguity) settles it.
 
+⛔ SO THE UNION HAS ONE MORE STATED EXCEPTION — the "leading calendar date is
+UNAMBIGUOUS" qualifier above is where a reader is otherwise misled into
+thinking that no value the replaced parsers read may stop parsing at all. The
+exception is a pure-digit COMPACT TIMESTAMP, ``YYYYMMDDHH`` / ``YYYYMMDDHHMM`` /
+``YYYYMMDDHHMMSS``:
+``date.fromisoformat`` reads the LEADING EIGHT digits of such a string as a
+day (it ignores the unreadable tail), so ``origin/main``'s ``assembly._norm_date``
+dated them, and this module does not. Measured at the value level, against
+``origin/main``'s own body:
+
+    ``2023052011``      main ``_norm_date`` 2023-05-20 · here 2034-02-08 (a 10-digit epoch)
+    ``202305201122``    main ``_norm_date`` 2023-05-20 · here ``None`` (11+ digits)
+    ``20230520112233``  main ``_norm_date`` 2023-05-20 · here ``None``
+
+**The two readings cut the as-of window in OPPOSITE directions, which is why
+this is named rather than left as a footnote.** In ``assembly.collect_slices``
+a *dated* row after the question is EXCLUDED from the as-of slice, while an
+*undated* row is RETAINED and sorted last. So the 10-digit reading above drops
+a row ``main`` displayed, and the 11+ reading moves a row that was dated to the
+end of the spine while letting it escape the as-of cut. Neither direction is
+silently safe. No in-repo producer writes any of these shapes (the ingest lane
+writes ``2023/05/20 (Sat) 02:21``; ``validity.read_caller_end`` refuses a 9+
+digit numeric string at the write door), so reachability is a directly written
+graph property or a legacy row — the legacy class this module still serves. Nor
+is this the compact-with-OFFSET family (``20230520-0500``, ``2026W243-05:00``):
+that reads through :func:`_compact_date_offset` on the offset as its gate, never
+on trailing digits, so it stays dated. The digit-count rule is deliberate and
+pinned
+(``tests/test_11646_producer_date_shape.py::test_a_pure_number_is_never_truncated_into_a_fabricated_day``);
+reversing it is a REOPEN of that rule, not a bug fix.
+
 The undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``) is a
 POSITIVE date that means "no date". It is EXPORTED, never applied: callers
 differ deliberately — the assembly ladder floors ``<= 1970-01-01`` (any
