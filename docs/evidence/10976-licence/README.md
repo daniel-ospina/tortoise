@@ -97,10 +97,13 @@ gated individually by the executor's per-node record probe.
   multiplies rows modestly, passes BOTH guards — no total-based comparison can tell that
   apart from a population that grew since the report — so that class is covered **solely**
   by the mirror pin above. The backstop's reach is stated narrowly, as
-  `cache_eviction.py`'s own comment does: it fires on a claim above every node the graph
-  holds, and on a quiescent graph the population bound already excludes that — so its
-  only reachable trigger is REMOVAL skew between the population read and the total read.
-  It is a one-integer backstop, **not** a second detector for a misplaced predicate.
+  `cache_eviction.py`'s own comment does: it compares the REPORT's claim against every
+  node the graph holds, so it fires when a claim exceeds the whole graph — reachable via a
+  count statement that multiplies rows far enough to push the population (and a claim
+  capped by it) past the total, or via nodes REMOVED between the population read and the
+  total read. It is **not** a detector for a widened predicate (a subgraph count cannot
+  exceed the total), and a MODEST row-multiplication still passes both guards — which is
+  the residual band the characterisation test pins.
 - **A population with no count statement is a REFUSAL**, never a defaulted bound.
 
 ## Tests
@@ -122,7 +125,8 @@ tests/test_cache_eviction_evictor_pins.py tests/test_cache_evict_cli.py -q` →
 | `test_the_shared_statement_check_can_actually_fire` | **proves the pin above is not vacuous** — the live assertion runs over ONE population and can never fail, so this drives the same helper with a REFLOWED copy (must report the collision) and a genuinely distinct predicate (must not), which is the only demonstration the guard would fire the day a second population is registered |
 | `test_an_empty_population_count_read_is_a_refusal_not_zero` | an empty count read is a refusal, never `0`: "this graph holds only 0" would be a fact nobody measured |
 | `test_a_population_with_no_count_statement_is_a_refusal_not_a_guess` | an unbounded population is refused, never bounded by a default (`0` demotes it forever; the whole-graph total restores the defect) |
-| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible (a mirror-vs-total check cannot tell inflation from a cache that LOST nodes between the two reads, and a report-total check would refuse legitimate growth), so that class rests on the mirror pin alone |
+| `test_a_row_multiplying_count_statement_is_a_documented_residual` | **asserts what the whole-graph backstop does NOT catch** — a 500-node population counted as 2,000 with a 1,500 claim passes both guards; the band is irreducible because a mirror-vs-total check adds no detection the backstop lacks (for an honest mirror it fires only under removal skew; for an inflated one, exactly when the multiplication pushes the population past the total), and a report-total check would refuse legitimate growth. So that MODEST-multiplication class rests on the mirror pin alone |
+| `test_a_LARGE_row_multiplication_is_caught_by_the_whole_graph_backstop` | the **other side of the same claim, pinned**: a `turn` statement answering 30,000 on a 25,000-node graph is refused by the **graph-total** check, with the population bound silent (`30000 > 30000` is false). ⛔ Proves the backstop is reachable on a QUIESCENT graph — a comment that said it was unreachable there was wrong — and that the refusal comes from the right guard (the population bound's message must be absent, or the arm passes for the wrong one) |
 
 Measured red-first: with the population bound removed, the stale-report arm fails
 `assert 'PLAN' == 'REFUSED'` while the two positive arms stay green.

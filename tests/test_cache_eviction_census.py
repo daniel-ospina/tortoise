@@ -1121,17 +1121,17 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     # (`turn`: 120 on a 5-node graph), because that is the only shape this guard can
     # reach: the trigger is `resident_population >= claim > node_total`, i.e. the CLAIM is
     # above every node the graph holds. ⛔ A widened PREDICATE cannot produce it (a
-    # subgraph count never exceeds the total) and a modest row-multiplication does not
+    # subgraph count never exceeds the total) and a MODEST row-multiplication does not
     # either (the claim stays under the total) — that class is covered solely by
     # `test_the_population_count_mirrors_the_instrument`, and
     # `test_a_row_multiplying_count_statement_is_a_documented_residual` pins what this
-    # guard does NOT catch.
-    # ⛔ The fixture MODELS READ SKEW, not a graph shape. `assess()` reads each
-    # population's count and only THEN the graph total (that order is what keeps
-    # additions between the two reads from demoting an honest report — #11726), so
-    # `population > total` is a state the two reads can DISAGREE about, never one a
-    # quiescent graph produces. That is exactly the failure this guard exists for: an
-    # operator's record describing a graph that no longer exists.
+    # guard does NOT catch. A LARGE row-multiplication (one that pushes the population past
+    # the total) DOES land here, and is not read skew.
+    # ⛔ Two causes reach `population > total`, and the fixture models the second: read
+    # skew (the operator's record describing a graph that no longer exists — `assess()`
+    # reads each population's count and only THEN the graph total, so a loss between the
+    # two reads produces it), and an inflated count statement whose multiplication exceeds
+    # the graph total on a QUIESCENT graph. Both are real; neither is a widened predicate.
     g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -1143,6 +1143,40 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     assert result.verdict == "REFUSED"
     assert result.eligible_classes == ()
     assert "only 5" in " ".join(result.problems)
+
+
+def test_a_LARGE_row_multiplication_is_caught_by_the_whole_graph_backstop():
+    """⛔ THE BACKSTOP IS REACHABLE ON A QUIESCENT GRAPH — pinned, because the comment
+    that claimed otherwise was wrong in the other direction.
+
+    A count statement whose query shape multiplies rows puts a population ABOVE the
+    whole-graph total with no read skew at all, so *"a population is a subgraph"*
+    (``resident_population <= node_total``) is a property of an HONEST statement, not of
+    the graph. There the population bound cannot fire — the claim is EQUAL to the inflated
+    ceiling and the bound is an upper bound — so the whole-graph backstop is the only
+    guard standing between the report and the licence.
+
+    Measured shape: `turn` answering 30,000 on a 25,000-node graph, CLEAN 30,000/30,000
+    report. Asserts the REASON as well as the verdict, because passing for the wrong guard
+    would hide exactly the claim this pins: the graph-total message must be what a reader
+    sees, and the population bound's message must be absent (it is silent here).
+    """
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    inflated = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
+                            measured_nodes=30_000, total_nodes=30_000, graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={"tools/turn_parity_census.py": inflated})
+
+    assert result.verdict == "REFUSED"
+    assert result.plan["evictable"] == []
+    reasons = " ".join(result.problems)
+    assert "holds only 25000" in reasons, reasons
+    # ⛔ The population bound did NOT fire (30,000 > 30,000 is false): if its message
+    # appears, this test is passing for the other guard and pins nothing.
+    assert "holds only 30000" not in reasons, reasons
+    assert g.mutated == []
 
 
 def test_a_label_ending_in_a_newline_is_refused_rather_than_miscounted():
@@ -2316,13 +2350,13 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
 
     ⛔ WHY THIS IS THE IRREDUCIBLE BAND, and not a checker someone forgot to write:
     refusing on the MIRROR's count vs the graph total (`resident_population >
-    node_total`) is not sound — it cannot tell an inflated statement from a graph that
-    LOST nodes between the population read and the total read (the total is read AFTER
-    every population count, `cache_eviction.py`'s `resident_total = node_total(graph)`),
-    so it would false-block. Only removals can make `resident_population > node_total`
-    in that order; a cache that GAINED nodes raises the total with the population, so
-    gains cannot produce the false block this docstring used to name — the direction is
-    stated once, correctly, in `cache_eviction.py`'s backstop comment. Refusing on
+    node_total`) adds no detection this backstop lacks. For an HONEST mirror it can only
+    fire under removal skew (a gain raises the total with the population, now that the
+    total is read AFTER every population count), and for an INFLATED one it fires exactly
+    when the multiplication pushes the population past the total — the same case where the
+    backstop already refuses the claim (measured: a `turn` statement answering 30,000 on a
+    25,000-node graph refuses the 30,000 claim). What it cannot reach is the MODEST
+    multiplication, which is the band this test pins. Refusing on
     `resident_population > report.total_nodes` is worse: the
     report's total is frozen at measurement time, so it would refuse every legitimate
     growth. That is why the residual rests on the identity pin

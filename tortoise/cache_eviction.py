@@ -952,22 +952,30 @@ def assess(
     #   test that pins this residual. Keep the pin; this check does not replace it.
     #
     # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
-    # NARROWLY, because "whatever produced it" would be FALSE: the population bound
-    # above already required ``claim <= resident_population``, and a population is a
-    # subgraph of the graph (``resident_population <= node_total``), so on a QUIESCENT
-    # graph the two conditions cannot both hold — this check is UNREACHABLE there, and
-    # it is NOT a second detector for a misplaced predicate. It stays as a one-integer
-    # backstop whose only reachable trigger is the read skew named below (#11726 item 3
-    # asked for exactly this honesty after the reorder removed the addition-skew half).
+    # NARROWLY in BOTH directions, because each of the two sentences that have sat here
+    # was wrong in one of them:
     #
-    # ⚠️ ITS REACH IS READ SKEW, and the read order below is what keeps that honest. The
-    # total is read HERE — AFTER every per-population count — rather than beside them:
-    # a graph that GAINS nodes between the two reads then satisfies
-    # ``resident_population <= total`` by construction, so an honest report cannot be
-    # demoted by this check. (Read before the counts, it could: a legitimate 500/500
-    # report measured REFUSED when the total read answered 5, which is the false block
-    # #11726 records.) What remains reachable is the opposite skew — nodes REMOVED
-    # between a population count and this read.
+    # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
+    #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`.
+    # - It IS reachable on a QUIESCENT graph, via a count statement that multiplies rows
+    #   by ENOUGH. "A population is a subgraph" (``resident_population <= node_total``)
+    #   holds for an HONEST statement, not for an inflated one, so the population bound's
+    #   premise does not carry here. Measured in this worktree: with the `turn` statement
+    #   answering 30,000 on a 25,000-node graph and a CLEAN 30,000/30,000 report, the
+    #   population bound stays SILENT (30,000 > 30,000 is false) and THIS check refuses
+    #   (``claims 30000 node(s) but the graph holds only 25000``). So a LARGE
+    #   row-multiplication is caught here; the residual band
+    #   `test_a_row_multiplying_count_statement_is_a_documented_residual` pins is the
+    #   MODEST one, whose inflated ceiling still sits under the total.
+    #
+    # ⚠️ ITS OTHER REACHABLE TRIGGER IS READ SKEW, and the read order below is what keeps
+    # that honest. The total is read HERE — AFTER every per-population count — rather than
+    # beside them: a graph that GAINS nodes between the two reads then satisfies
+    # ``resident_population <= total`` by construction for an honest mirror, so an honest
+    # report cannot be demoted by this check. (Read before the counts, it could: a
+    # legitimate 500/500 report measured REFUSED when the total read answered 5, which is
+    # the false block #11726 records.) What remains reachable on the honest path is the
+    # opposite skew — nodes REMOVED between a population count and this read.
     resident_total = node_total(graph)
     checked: list[ClassReading] = []
     for entry in classes:
