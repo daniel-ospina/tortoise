@@ -233,6 +233,45 @@ def _close_keepalive_anchors(ha_mod) -> None:
                 pass
 
 
+def _pin_db_path(db_path: str) -> str | None:
+    """Pin ``TORTOISE_DB_PATH`` to the DB the patched ``__init__`` forces.
+
+    #1950's fix, extracted so the three fixtures cannot drift (#2273). Every
+    fixture here patches ``TortoiseSDK.__init__`` onto its own temp DB, but
+    ``_make_sdk``/``_registry_anchor`` resolve their ``db_path`` from
+    ``TORTOISE_DB_PATH`` via ``_resolve_embedded_db_path()``. Unpinned, those
+    two DIVERGE — measured 2026-11-10 in the embedded lane with the
+    ``internal_client`` fixture:
+
+        pin (ambient conftest guard)  /tmp/…/tortoise-embedded-lane-…/tortoise.db
+        anchor._proj._path            /tmp/…/tmpfc2pqjn6/test.db
+        _anchor_usable(anchor, pin)   False
+
+    ``_anchor_usable()`` False is the #1607/#1950 failure exactly: the
+    process-lifetime anchor is evicted, closed and recreated on every registry
+    access, so the guarantee it exists for ("writes through it are visible to
+    later calls") is void — and the seed the fixture wrote is not the DB the
+    anchor serves.
+
+    Returns the PREVIOUS value so the caller can restore it. A bare ``pop``
+    (what the #1950 precedent did) destroys a dev shell's export, and in the
+    embedded lane it destroys the conftest guard (``tests/conftest.py:511``)
+    for the rest of the session; snapshot-restore is the shape
+    ``tests/_http_fixtures.py`` documents as the P3-correct one.
+    """
+    prev = os.environ.get("TORTOISE_DB_PATH")
+    os.environ["TORTOISE_DB_PATH"] = db_path
+    return prev
+
+
+def _restore_db_path(prev: str | None) -> None:
+    """Undo :func:`_pin_db_path` — restore the previous pin, or clear it."""
+    if prev is None:
+        os.environ.pop("TORTOISE_DB_PATH", None)
+    else:
+        os.environ["TORTOISE_DB_PATH"] = prev
+
+
 @pytest.fixture
 def client():
     """TestClient with auth override and temp FalkorDBLite DB.
@@ -256,7 +295,7 @@ def client():
         # is REUSED instead of evicted + closed on every registry access (each
         # eviction shut the redislite daemon down mid-test, losing the consent
         # seed between this fixture's write and the gate read → 403).
-        os.environ["TORTOISE_DB_PATH"] = db_path
+        _prev_db_path = _pin_db_path(db_path)
         import tortoise.hosted_api as ha_mod
         # #1927: provision the Team node first (the state writer is
         # MATCH...SET — a silent no-op without it), then seed the flag so the
@@ -279,7 +318,7 @@ def client():
             with _verdict_client(app) as tc:
                 yield tc
         finally:
-            os.environ.pop("TORTOISE_DB_PATH", None)
+            _restore_db_path(_prev_db_path)
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
 
@@ -295,11 +334,19 @@ def unauth_client():
         db_path = os.path.join(tmpdir, "test.db")
 
         _orig_init = _patch_tortoise_sdk_init(db_path)
+        # #2273/#1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched
+        # init forces. Without it the auth layer's registry lookups resolve
+        # `_make_sdk`/`_registry_anchor` onto the AMBIENT DB while every
+        # patched SDK opens the temp one — the divergence `_pin_db_path`
+        # documents, i.e. the docstring's promise that "the auth layer can
+        # attempt registry lookups" on this DB is false without it.
+        _prev_db_path = _pin_db_path(db_path)
 
         try:
             with _verdict_client(app) as tc:
                 yield tc
         finally:
+            _restore_db_path(_prev_db_path)
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
 
@@ -5198,24 +5245,96 @@ def internal_client():
 
         app.dependency_overrides[get_current_org] = lambda: dict(TEST_TEAM)
         _orig_init = _patch_tortoise_sdk_init(db_path)
-        # C3 (#2112): seed the Team node the auth override bypasses — the
-        # registry mint path (sdk.apikey_create) validates the team exists
-        # (mirror of the client fixture's seed; production teams always
-        # exist — the override skips the resolution that would have found
-        # them).
-        import tortoise.hosted_api as ha_mod2
-        ha_mod2._make_sdk(namespace="registry")._get_registry().query(
-            "CREATE (t:Team {id:$id})",
-            params={"id": TEST_ORG_ID},
-        )
+        # #2273/#1950: pin TORTOISE_DB_PATH to the SAME temp DB the patched
+        # init forces. The C3 seed below and the mint's team lookup must be
+        # ONE database: the seed writes through `_make_sdk` (patched onto
+        # `db_path`), the lookup reads through `_registry_anchor` (which
+        # resolves `_resolve_embedded_db_path()` — i.e. `TORTOISE_DB_PATH`).
+        # Unpinned, they diverge: `_anchor_usable()` is False on every access,
+        # so the anchor is evicted + closed + recreated per call and the seed
+        # is only visible because the redislite close happens to SAVE. That is
+        # the "explicit and self-contained seed" #2273's acceptance asked for
+        # — self-contained needs the pin, not just the CREATE.
+        _prev_db_path = _pin_db_path(db_path)
 
         try:
+            # C3 (#2112): seed the Team node the auth override bypasses — the
+            # registry mint path (sdk.apikey_create) validates the team exists
+            # (mirror of the client fixture's seed; production teams always
+            # exist — the override skips the resolution that would have found
+            # them). Inside the `try` so a seed failure still restores the env.
+            import tortoise.hosted_api as ha_mod2
+            ha_mod2._make_sdk(namespace="registry")._get_registry().query(
+                "CREATE (t:Team {id:$id})",
+                params={"id": TEST_ORG_ID},
+            )
             with _verdict_client(app) as tc:
                 yield tc
         finally:
+            _restore_db_path(_prev_db_path)
             _restore_tortoise_sdk_init(_orig_init)
             app.dependency_overrides.clear()
             os.environ["FASTAPI_INTERNAL_KEY"] = old_key
+
+
+def _assert_fixture_pins_anchor_db_path(fixture_name: str) -> None:
+    """#2273/#1950: the fixture's seed and the anchor's read share ONE DB.
+
+    The patch forces every SDK the fixture's app builds onto its temp DB;
+    `_resolve_embedded_db_path()` — the single policy `_make_sdk` /
+    `_registry_anchor` read — resolves from `TORTOISE_DB_PATH` instead. If the
+    fixture does not pin them to the same value the registry anchor is bound
+    to a DIFFERENT database than the fixture seeded, so `_anchor_usable()` is
+    False on every access: the anchor is evicted, closed and recreated per
+    call, and the process-lifetime guarantee it exists for (#1607) is void.
+
+    Measured pre-fix (2026-11-10, embedded lane, this file)
+    — ``tests/test_hosted_api.py::TestBodySweepCaps`` depends on this:
+
+        inside_internal_client  .pin=<guard>/tortoise.db
+                                .anchor_path=<fixture tmp>/test.db  .usable=False
+    """
+    import tortoise.hosted_api as ha
+
+    pin = os.environ.get("TORTOISE_DB_PATH") or ""
+    assert pin, (
+        f"{fixture_name} must pin TORTOISE_DB_PATH (#2273/#1950): the patch "
+        "forces the fixture's SDKs onto its temp DB while the anchor policy "
+        "resolves the ambient (here: unset) env, so the two databases "
+        "diverge and the seed is not the DB the anchor serves")
+    assert pin == ha._resolve_embedded_db_path(), (
+        f"{fixture_name}'s TORTOISE_DB_PATH pin ({pin!r}) must be the path "
+        "_resolve_embedded_db_path() returns "
+        f"({ha._resolve_embedded_db_path()!r}) — otherwise _anchor_usable() "
+        "can never match the anchor the fixture seeded")
+
+    if os.environ.get("TORTOISE_DB_URI"):
+        # URI mode: `_registry_anchor()` is the #4661 probe cache, not a
+        # `_FALLBACK_KEEPALIVE` anchor, so there is no embedded DB for the
+        # anchor to hold. The pin assertion above IS this lane's whole
+        # contract — and it is the leg that reds here without the fix (the
+        # ambient pin is unset on every CI shard, which all export a URI).
+        return
+
+    anchor = ha._registry_anchor()
+    anchor_path = getattr(getattr(anchor, "_proj", None), "_path", None)
+    assert ha._anchor_usable(anchor, pin), (
+        f"{fixture_name}'s registry anchor is bound to a different DB than "
+        f"its TORTOISE_DB_PATH pin ({anchor_path!r} != {pin!r}) — so it is "
+        "evicted + closed on every registry access (#2273/#1950)")
+    assert ha._registry_anchor() is anchor, (
+        "the registry anchor must survive across accesses (#1607): a "
+        "rebuilt anchor means the previous one was evicted and closed")
+
+
+def test_internal_client_pins_the_db_path_its_anchor_reads(internal_client):
+    """#2273: `internal_client` must not seed one DB and read another."""
+    _assert_fixture_pins_anchor_db_path("internal_client")
+
+
+def test_unauth_client_pins_the_db_path_its_anchor_reads(unauth_client):
+    """#2273: same omission, same failure — pinned for `unauth_client`."""
+    _assert_fixture_pins_anchor_db_path("unauth_client")
 
 
 def test_register_journals_minted_team_graph(tmp_path, monkeypatch):
