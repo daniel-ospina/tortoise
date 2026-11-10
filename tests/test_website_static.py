@@ -5888,6 +5888,19 @@ class TestSiteIconAndSocialPreviewContract:
     # `mask-icon` and could not tell `rel="icon"` from `rel="apple-touch-icon"`.
     ICON_RELS = ("icon", "apple-touch-icon")
 
+    # The APPLE-TOUCH relations, for the CROSS-RELATION rule in
+    # `_surface_icon_violations` only — NOT a superset of `ICON_RELS`, because `icon` must
+    # not be in it: this tuple answers "is this link claiming the iOS home-screen slot?",
+    # and a `rel="icon"` link is claiming the TAB, a different asset.
+    # `apple-touch-icon-precomposed` is a DISTINCT token (WebKit's parser separates it,
+    # hence it is absent from `ICON_RELS`, where it must stay OPTIONAL and must never become
+    # a fourth required link) — but iOS still HONOURS it, which is why the pre-existing
+    # wordmark guard deliberately matches `"icon" in token` to cover it. A rule gating on
+    # the exact `apple-touch-icon` token alone leaves the hazard it was written for wide
+    # open through this spelling: measured, `<link rel="apple-touch-icon-precomposed"
+    # href="/favicon.png?v=…">` PASSED.
+    TOUCH_RELS = ("apple-touch-icon", "apple-touch-icon-precomposed")
+
     # The app SURFACE is its own Pages deployment on its own origin, so its pages may
     # name `https://app.premiselabs.co/…` absolutely. `SITE_ORIGINS` stays the marketing
     # pair on purpose: it is what the `og:image` guard holds a card to, and widening THAT
@@ -6179,23 +6192,35 @@ class TestSiteIconAndSocialPreviewContract:
         # exists to prevent. `rel="icon"` naming `apple-touch-icon.png` is the same hole
         # and is refused for the same reason: a relation names an ASSET here, not a size
         # preference, so a cross-relation extra silently swaps a mark instead of adding
-        # one. Non-trio extras (an SVG variant, a 192 px slot, a repeat of the same file
-        # under the same rel) are untouched, so round 4's false red does not come back.
+        # one.
+        #
+        # ⚠️ THE RULE IS SCOPED TO TRIO FILES, AND TO EVERY TOUCH SPELLING. Its first cut
+        # both over- and under-reached, measured:
+        #   * gating on "the path is not /apple-touch-icon.png" refused Apple's DOCUMENTED
+        #     multi-size pattern — <link rel="apple-touch-icon" sizes="152x152"
+        #     href="/apple-touch-152.png?v=…"> — an honest, opaque, correctly-versioned
+        #     extra. The rule exists to stop a TRIO file being re-declared under the other
+        #     relation, so it now requires `resolved in expected`; any non-trio extra is
+        #     held only to existing and carrying its own `?v=`, by the loop above.
+        #   * gating on the exact two `ICON_RELS` tokens let
+        #     `apple-touch-icon-precomposed` — which iOS still honours — carry
+        #     `/favicon.png` straight through. Hence `TOUCH_RELS`.
         # Residual, stated rather than implied: a `sizes=` declared on a non-trio PNG/ICO
         # extra is not compared with that file's real pixels — closing that needs a byte
         # probe per extra, and no extra exists today.
         apple_asset = f"/{self.ICON_APPLE}"
         for link in self._links(self._head(head)):
             tokens = link.get("rel", "").lower().split()
-            if not any(token in self.ICON_RELS for token in tokens):
+            touch = [token for token in tokens if token in self.TOUCH_RELS]
+            if not touch and "icon" not in tokens:
                 continue
             href = link.get("href", "")
             resolved = self._icon_ref(href, origins=origins)
             if not resolved:
                 continue  # data:/foreign/not-a-URL is already reported above
-            if "apple-touch-icon" in tokens and resolved != apple_asset:
+            if touch and resolved in expected and resolved != apple_asset:
                 violations.append(
-                    f"{page_name} declares {href!r} under rel=\"apple-touch-icon\", but "
+                    f"{page_name} declares {href!r} under rel=\"{touch[0]}\", but "
                     f"that relation names {apple_asset} — iOS keys the saved home-screen "
                     "mark off this relation and resolves competing links to one, so a "
                     "cross-relation extra can replace the opaque 180 px tile with a "
