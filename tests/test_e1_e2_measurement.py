@@ -75,6 +75,7 @@ _LOG = _REPO_ROOT / "docs" / "evidence" / "7949-capstone" / "e1-e2.log"
 
 sys.path.insert(0, str(_REPO_ROOT))
 from tools import e1_e2_census_check as check  # noqa: E402
+from tools import capstone_preregistration_check as prereg_check  # noqa: E402
 
 
 def _load(path: Path, name: str):
@@ -88,6 +89,10 @@ def _load(path: Path, name: str):
 
 probe = _load(_PROBE_PATH, "e1_e2_probe")
 builder = _load(_CORPUS_DIR / "build_e1e2_corpus.py", "build_e1e2_corpus")
+#: The ONE owner of "is this sha a commit in THIS checkout" — a shallow clone cannot
+#: answer, so it answers `unprovable` instead of mutating a legitimate log into a red
+#: required check (#11689 review round 8). Reused rather than re-derived.
+_LEDGER = _load(_REPO_ROOT / "tools" / "capstone_ledger.py", "capstone_ledger")
 
 
 # ── 1. the corpus ─────────────────────────────────────────────────────────
@@ -391,33 +396,117 @@ def test_the_produced_log_passes_the_structural_check(log_text):
     assert state["result"] == "UNPREREGISTERED"
 
 
+def test_the_committed_log_names_a_real_commit_and_the_doc_agrees():
+    """`sha=` must name a commit, and `Measured at:` must be that same commit.
+
+    #11689 review: re-taking the log with `| tee <tracked log>` truncates the tracked
+    file BEFORE the probe asks `measurement_sha()`, so the artifact came out naming
+    `<sha>+dirty` — a tree that is not any commit — while E1-E2.md still asserted the
+    two agree "by construction". Nothing could red on it, because the reproduction pin
+    masks the whole `sha=` line. This is that pin: an evidence log that names no
+    commit is not evidence.
+    """
+    import re
+
+    log_sha = next(ln for ln in _LOG.read_text(encoding="utf-8").splitlines()
+                   if ln.startswith("sha=")).split("=", 1)[1]
+    assert not log_sha.endswith("+dirty"), (
+        f"e1-e2.log names {log_sha!r}, which is not a commit — re-take it on a CLEAN "
+        f"tree into a temp file and `mv` it into place: "
+        f"`uv run python docs/evidence/7949-capstone/probes/e1_e2_probe.py \\ "
+        f"> /tmp/e1e2.log; mv /tmp/e1e2.log docs/evidence/7949-capstone/e1-e2.log` "
+        f"(a SEMICOLON: this run exits 3 by design, so `&&` would leave the log stale)")
+    assert re.fullmatch(r"[0-9a-f]{40}", log_sha), log_sha
+    # ⛔ The GIT-FREE half runs FIRST (#11689 review round 9). The `test` job checks
+    # out at depth-1, so the sha below is `unprovable` there and skips — if the
+    # doc/log agreement were asserted after that skip, the half of this pin that
+    # needs no object database would never run in the required check, while
+    # `E1-E2.md` says this test "checks exactly that" the two agree.
+    doc = (_LOG.parent / "E1-E2.md").read_text(encoding="utf-8")
+    measured = re.search(r"\*\*Measured at:\*\* `([0-9a-f]{7,40})`", doc)
+    assert measured, "E1-E2.md states no `Measured at:` commit"
+    assert log_sha.startswith(measured.group(1)), (
+        f"E1-E2.md's `Measured at:` ({measured.group(1)}) is not the commit the log "
+        f"names ({log_sha}) — the two are supposed to agree by construction")
+    # #11689 review round 7: the docstring above says "an evidence log that names no
+    # commit is not evidence", and this pin only matched 40 hex characters — so
+    # `sha=0000…0`, or the sha of a commit a force-push removed, satisfied every
+    # assertion while the doc claimed a provenance the gate never checked.
+    #
+    # ⛔ It cannot be a `git cat-file -e` exit test, and the reason is MEASURED in
+    # this repo: the `test` job's only checkout is `actions/checkout@v4` with no
+    # `fetch-depth`, so every shard is depth-1, and this log names an ANCESTOR
+    # (`b165cb386b…`) that such a clone does not carry — `cat-file -e` exits 128 and
+    # a correct tree would red a REQUIRED check. That is the doctrine in
+    # `tools/capstone_ledger.py::_commit_state` ("a shallow checkout CANNOT answer",
+    # pinned by `test_a_shallow_checkout_is_unprovable_never_absent`), so this uses
+    # that one predicate rather than a second owner of it: `unprovable` is a
+    # MEASURED answer about a shallow checkout and is skipped; `absent` (the object
+    # is not here and the clone is complete) and `unmeasurable` (git could not be
+    # asked at all) are both red.
+    state = _LEDGER._commit_state(log_sha, _REPO_ROOT)
+    if state == "unprovable":
+        pytest.skip(f"a shallow checkout cannot resolve {log_sha} — unprovable is "
+                    f"not absent (tools/capstone_ledger.py::_commit_state)")
+    assert state == "exists", (
+        f"e1-e2.log names sha={log_sha}, which is {state!r} in this checkout — a "
+        f"40-hex string is not provenance")
+
+
 def test_the_committed_log_passes_the_structural_check():
     findings, _state = check.check(_LOG.read_text(encoding="utf-8"))
     assert findings == [], findings
 
 
-def test_the_committed_log_is_what_the_probe_prints(run):
-    """The log the bundle is ABOUT is the one file in it with no reproduction pin.
+def test_the_committed_log_is_frozen_and_stays_unscored():
+    """This log is GRANDFATHERED — and that is why no reproduction pin applies to it.
 
-    The corpus is pinned (`test_committed_corpus_matches_a_fresh_build`), and the
-    structural checker reconciles the committed log WITH ITSELF — so a hand-edited
-    log, or a probe improved without re-taking the log, would keep both green. The
-    documented re-take command claims the log reproduces; this is what verifies it.
+    This test used to be `test_the_committed_log_is_what_the_probe_prints`: it
+    byte-compared the committed log to the CURRENT probe's output, and its failure
+    message told the reader to re-take the log. **That remedy is forbidden**, and the
+    pin was therefore unsatisfiable in principle:
 
-    ``sha=`` is the only genuinely non-reproducible line: ``measurement_sha()``
-    reads ``HEAD``, and the log necessarily names the PARENT commit (the one the run
-    was taken at) because it cannot name the commit that adds it.
+    `e1-e2.log` predates the pre-registration (`#9507`), which grandfathers it on five
+    bounds (`PRE-REGISTRATION.md` §0/§7 item 2) — one of which is that its content must
+    not have been modified at or after the registration's add-commit, because an
+    in-place edit can put a measurement number into a grandfathered log after the
+    thresholds were written. `tools/capstone_preregistration_check.py` enforces that in
+    the `changes` job. So when `#11689` reworded the E2b floor note, the old pin
+    demanded an in-place edit of a frozen evidence artefact and the ordering gate
+    refused the PR — a pin whose only remedy is forbidden is not a pin.
+
+    What is asserted instead is what actually holds and is load-bearing:
+
+    * this log IS in the pins' `pre_existing_unscored_logs` exemption. That is the
+      *reason* no reproduction pin applies, so if the exemption is ever withdrawn (the
+      log would then have to be ordered normally, which no re-take can achieve) this
+      reds instead of leaving a stale "does not apply" claim behind;
+    * it is still the `UNPREREGISTERED`, exit-3 artefact the exemption is granted to,
+      so it can never be read as a scored run.
+
+    The current probe's printed text is verified against its OWN output by the note-
+    state pins below, never against this historical artefact.
+
+    ⛔ "Was the log edited after the registration?" has exactly ONE owner — the
+    ordering gate in the `changes` job. This file deliberately keeps no second copy of
+    that predicate.
     """
-    def strip(text: str) -> str:
-        return "\n".join("sha=<masked>" if ln.startswith("sha=") else ln
-                         for ln in text.splitlines())
+    pins = prereg_check.parse_pins(
+        (_LOG.parent / "PRE-REGISTRATION.md").read_text(encoding="utf-8"))
+    exempt = prereg_check._pins_mapping(pins, "pre_existing_unscored_logs")
+    assert _LOG.name in exempt, (
+        f"{_LOG.name} is no longer in the pins' pre_existing_unscored_logs "
+        f"({sorted(exempt)}) — the reason this log is exempt from the probe-output "
+        f"pin is gone, so either restore the exemption (PRE-REGISTRATION.md §0) or "
+        f"order the log normally; a re-take cannot do the latter")
 
     committed = _LOG.read_text(encoding="utf-8")
-    assert strip(run["text"]) == strip(committed), (
-        "e1-e2.log is not what the probe prints — re-take it "
-        "(`.venv/bin/python docs/evidence/7949-capstone/probes/e1_e2_probe.py \\ "
-        "| tee docs/evidence/7949-capstone/e1-e2.log`) and update `Measured at:`"
-    )
+    assert "prereg=UNPREREGISTERED" in committed, (
+        "e1-e2.log no longer declares itself UNPREREGISTERED — the exemption is "
+        "granted only to a log that says so on its own line")
+    findings, state = check.check(committed)
+    assert findings == [], findings
+    assert state["result"] == "UNPREREGISTERED", state["result"]
 
 
 def test_checker_fails_when_a_denominator_is_missing(log_text):
@@ -526,7 +615,18 @@ def _scored(text: str) -> str:
         f"prereg-binding status=MATCHED corpus=e1e2_corpus.json "
         f"corpus_sha256={sha} declared_path=docs/evidence/7949-capstone/corpus/"
         f"e1e2_corpus.json declared_sha256=n/a declared_floor=20 objects=25 "
-        f"reason=n/a",
+        # The floor accounting a SCORED log must carry since #11689: which floors
+        # this probe owns (and therefore checks) and which rows it skipped, each
+        # with its owning criterion. A fixture that omitted them would be the
+        # pre-fix shape the gate now refuses, so every fail-open pin built on this
+        # scored log would be testing a log the checker rejects.
+        f"floor_unconsumed=n/a "
+        f"floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units "
+        # A MATCHED binding owns all three floors, so all three DECLARED values are
+        # numbers — `n/a` here is the unreadable shape, which V15 now refuses when
+        # the same key is claimed as owned (#11689 review round 4).
+        f"floor_skipped=n/a declared_before_floor=0.2 before_share=0.600000 "
+        f"declared_surviving_floor=30 surviving_units=114 reason=n/a",
     ]
     return "\n".join(lines) + "\n"
 
@@ -1311,8 +1411,8 @@ def test_checker_refuses_a_matched_binding_carrying_a_reason(monkeypatch):
     code, text = _run_with_prereg(monkeypatch, _bound_artifact(0.0))
     assert code == 0, text
     tampered = text.replace(
-        "objects=25 floor_unconsumed=n/a reason=n/a",
-        "objects=25 floor_unconsumed=n/a reason=floor-unreadable", 1)
+        "reason=n/a",
+        "reason=floor-unreadable", 1)
     assert "reason=floor-unreadable" in tampered, tampered
     findings, _ = check.check(tampered)
     assert any("[V15]" in f and "nothing to refuse" in f for f in findings), findings
@@ -1423,6 +1523,96 @@ def test_checker_refuses_a_binding_denominator_the_run_did_not_produce(monkeypat
     assert any("[V15]" in f and "did not produce" in f for f in findings), findings
 
 
+def test_checker_refuses_a_scored_log_whose_binding_is_not_matched(log_text):
+    """The T2 boundary: a SCORED log may only carry a MATCHED binding.
+
+    #11689 review round 7: this rule was UNPINNED — deleting it left 157 tests green
+    while a log with `result=GREEN` and `status=BELOW_FLOOR reason=below-floor`
+    certified with zero findings, i.e. a run under its own floor scoring. The four
+    refusal-metadata rules beside it were unpinned too, so each gets its pin here.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    # (a) scored against a below-floor bar
+    unbind = scored.replace("status=MATCHED", "status=BELOW_FLOOR", 1)
+    unbind = unbind.replace("reason=n/a", "reason=below-floor", 1)
+    findings, _ = check.check(unbind)
+    assert any("[V15]" in f and "SCORED against a bar whose binding is" in f
+               for f in findings), findings
+    # (b) a population that is not a count
+    frac = scored.replace("surviving_units=114", "surviving_units=114.0", 1)
+    findings, _ = check.check(frac)
+    assert any("[V15]" in f and "not a count" in f for f in findings), findings
+    # (c) a MISMATCH with no recognised reason
+    noname = scored.replace("status=MATCHED", "status=MISMATCH", 1)
+    findings, _ = check.check(noname)
+    assert any("[V15]" in f and "no recognised reason" in f
+               for f in findings), findings
+    # (d) a scored log whose binding states no denominator
+    noden = scored.replace("declared_floor=20 objects=25", "declared_floor=20", 1)
+    bind_line = next(ln for ln in noden.splitlines()
+                     if ln.startswith("prereg-binding "))
+    assert "objects=" not in bind_line, bind_line
+    findings, _ = check.check(noden)
+    assert any("[V15]" in f and "does not state the denominator" in f
+               for f in findings), findings
+    # (e) a MATCHED binding inside an UNPREREGISTERED log, with nothing else to say
+    stuck = scored.replace("result=GREEN", "result=UNPREREGISTERED", 1)
+    stuck = stuck.replace("prereg=deadbeef", "prereg=UNPREREGISTERED", 1)
+    findings, _ = check.check(stuck)
+    assert any("[V15]" in f and "no reason is stated for refusing to score" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_skip_that_sheds_an_owned_floor(log_text):
+    """`floor_skipped=` may not be used to delegate a floor THIS probe owns.
+
+    #11689 review round 6 P1: the bucket exists for rows another instrument scores,
+    and nothing stopped a log from moving an owned key there with a made-up owner —
+    so a SCORED log could certify a run whose owned floors were never compared
+    (measured: `floors_owned=n/a` + all three floors skipped → GREEN, zero findings).
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    shed = scored.replace(
+        "floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units",
+        "floors_owned=n/a", 1)
+    shed = shed.replace(
+        "floor_skipped=n/a",
+        "floor_skipped=e1_objects:A1,e1_min_before_share:E1,"
+        "e2b_surviving_units:E2b", 1)
+    assert "floors_owned=n/a" in shed, shed
+    findings, _ = check.check(shed)
+    assert any("[V15]" in f and "may not be delegated" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_binding_that_owns_a_floor_it_never_read(log_text):
+    """`floors_owned=` is a CLAIM, and V15 now checks the mirror of it.
+
+    #11689 review round 4: the gate verified "a numeric `declared_*` must be named
+    on `floors_owned=`" but not the converse, so a log could claim ownership of a
+    floor nothing compared — including a key this gate knows no pair for at all —
+    and pass with zero findings. Both shapes below scored GREEN before the mirror.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    # (a) an owned key the gate knows no declared/measured pair for
+    invented = scored.replace(
+        "floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units",
+        "floors_owned=a1_objects,e1_min_before_share,e1_objects,"
+        "e2b_surviving_units", 1)
+    findings, _ = check.check(invented)
+    assert any("[V15]" in f and "knows no declared/measured pair" in f
+               for f in findings), findings
+    # (b) a known owned key whose declared side is `n/a` — "owned and never read"
+    unread = scored.replace("declared_surviving_floor=30",
+                            "declared_surviving_floor=n/a", 1)
+    findings, _ = check.check(unread)
+    assert any("[V15]" in f and "names a floor it never read" in f
+               for f in findings), findings
+
+
 def test_checker_refuses_a_matched_binding_that_names_no_pin(log_text):
     """A MATCHED bar that names NO pin is the UNPINNED case relabelled (P2).
 
@@ -1465,8 +1655,9 @@ def test_checker_refuses_a_matched_binding_with_an_unreadable_denominator(
         log_text):
     """`objects=25.0` is a denominator the gate cannot read — refused (P2)."""
     scored = _scored(log_text)
-    tampered = scored.replace("objects=25 reason=n/a", "objects=25.0 reason=n/a", 1)
-    assert "objects=25.0 reason=n/a" in tampered, tampered
+    tampered = scored.replace("declared_floor=20 objects=25 ",
+                              "declared_floor=20 objects=25.0 ", 1)
+    assert "declared_floor=20 objects=25.0 " in tampered, tampered
     findings, _ = check.check(tampered)
     assert any("[V15]" in f and "not a plain integer" in f
                for f in findings), findings
@@ -1551,15 +1742,41 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
     assert "declared_path=tests/eval/write_path" in text, text
     assert "declared_floor=30 objects=25" in text, text
     assert "corpus-path" in text and "below-floor" in text, text
-    # DERIVED from the record, not hand-listed: the invariant this leg holds is that
-    # the probe names EVERY floor it cannot evaluate — the four `e*` keys beside
-    # `e1_objects` AND, since `#10982`, the nine `a*` ones. A hard-coded list would
-    # have to be edited beside the record (and would silently stop noticing a floor
-    # the probe dropped); deriving it means a key the record adds appears in the
-    # expectation and in the probe's own line together, or this assert reds.
-    unconsumed = ",".join(sorted(k for k in artifact["denominator_floors"]
-                                 if k != "e1_objects"))
-    assert f"floor_unconsumed={unconsumed}" in text, text
+    # ⛔ BELOW_FLOOR means "the corpus agreed and only a floor is under it" — the
+    # precedence rule `len(reasons) == 1` (#11689 review round 8). This record
+    # refuses for TWO causes, so its status is MISMATCH; asserting the status here is
+    # what reds if the precedence guard is deleted (deleting it left 162 green, and
+    # the resulting `BELOW_FLOOR` + `reason=corpus-path,below-floor` line — a status
+    # asserting the corpus agreed on a run whose corpus did not — still certified).
+    assert "prereg-binding status=MISMATCH" in text, text
+    # ⛔ #11689: the REFUSAL must be about this run and nothing else. Before the fix
+    # every `denominator_floors` key the binding could not evaluate was refused, so
+    # the record's floors for OTHER instruments (A1–A5, E3, E5) voided every run,
+    # and `prereg_binding` could never return MATCHED on the record this probe
+    # exists to score. The floors are now ACCOUNTED FOR: the three this probe owns
+    # are checked (`floors_owned=`), the rest are declared skips carrying the row
+    # that owns each (`floor_skipped=`), and NOTHING is left unconsumed.
+    assert "floor_unconsumed=n/a" in text, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "reason=floor-unconsumed" not in binding, binding
+    skipped = re.search(r"floor_skipped=(\S+)", binding).group(1)
+    skipped_keys = {e.partition(":")[0] for e in skipped.split(",")}
+    owned = set(re.search(r"floors_owned=(\S+)", binding).group(1).split(","))
+    # DERIVED from the record, not hand-listed: every declared key is owned or
+    # skipped, so a floor the record adds appears here — and a key nobody classified
+    # would show up as `floor_unconsumed=` and refuse the run, which is the
+    # fail-closed half #9513 review P2 closed.
+    assert skipped_keys | owned == set(artifact["denominator_floors"]), (
+        binding, sorted(set(artifact["denominator_floors"]) -
+                        (skipped_keys | owned)))
+    assert owned == {"e1_min_before_share", "e1_objects", "e2b_surviving_units"}
+    # every skip names a criterion, so the skip is auditable rather than silent
+    for entry in skipped.split(","):
+        assert re.fullmatch(r"[a-z0-9_]+:[A-Z][A-Z0-9]*", entry), entry
+    # …and the two owned floors this record declares are COMPARED, not only printed
+    assert "declared_before_floor=0.2 before_share=0.600000" in binding, binding
+    assert "declared_surviving_floor=30 surviving_units=" in binding, binding
     assert "prereg-error=" in text, text    # the prose bar is not consumable
     assert "result=UNPREREGISTERED" in text, text
     findings, _ = check.check(text)
@@ -1567,34 +1784,490 @@ def test_the_real_pre_registration_schema_names_why_it_cannot_score_this_run(
 
 
 @pytest.mark.parametrize("floors", [
-    {"e1_objects": 20, "e1_min_before_share": 0.2},   # 1 of 5 floors consumed
-    {"e1_min_before_share": 0.2},                      # `e1_objects` absent
+    {"e1_objects": 20, "e7_unclassified": 30},   # a key nobody owns or declares
+    {"e9_mystery": 1},                             # `e1_objects` absent, key unknown
 ])
-def test_a_floor_the_probe_cannot_evaluate_is_refused_not_dropped(
-        monkeypatch, floors):
-    """A floor on a key the binding cannot check must REFUSE (#9513 review P2).
+def test_a_floor_no_row_owns_is_refused_not_dropped(monkeypatch, floors):
+    """A floor on a key neither owned nor declared-skipped must REFUSE (#9513).
 
-    `_declared_floor` consumed only `denominator_floors.e1_objects`, so the real
-    `capstone-preregistration/v1` record — five floors, including
-    `e1_min_before_share: 0.2`, an ANTI-GAMING floor on a number this probe
-    measures and prints (`e1 before_share=0.600000`) — bound as `MATCHED` with four
-    floors silently dropped: a run whose before-share reduction was 0.06 met
-    `e1_objects` and scored with the registration's own floor violated. The second
-    shape is the same drop from the key side: "no `e1_objects` in a NON-EMPTY
-    mapping" used to read as "this artifact states no floor", which is the silent
-    drop the integer check closed one field over. Both shapes used to score; both
-    now exit 3 naming the floors they refused.
+    This is the half of #9513 review P2 that #11689 must NOT undo. Scoping the
+    refusal to this probe's own rows is only safe while an UNCLASSIFIED key still
+    fails closed: a record that adds a floor for a row nobody has classified would
+    otherwise be dropped silently, which is exactly the silent-green shape the
+    original finding closed. So the two keys below are owned by nobody and
+    skipped by nobody, and both void the run.
     """
     code, text = _run_with_prereg(
         monkeypatch, {**_bound_artifact(0.05), "denominator_floors": floors})
     assert code == 3, text
     assert "prereg-binding status=MISMATCH" in text, text
     assert "reason=floor-unconsumed" in text, text
-    assert "floor_unconsumed=e1_min_before_share" in text, text
+    assert "floor_unconsumed=" + ",".join(sorted(set(floors) - {"e1_objects"})) \
+        in text, text
     assert "prereg=UNPREREGISTERED" in text, text
     assert "result=RED" not in text and "result=GREEN" not in text, text
     findings, _ = check.check(text)
     assert findings == [], findings
+
+
+def test_the_owned_floors_are_checked_and_a_run_that_meets_them_binds(
+        monkeypatch):
+    """#11689, the direction that was impossible: owning all three floors BINDS.
+
+    Every floor this probe scores is compared against the run it is about —
+    `e1_objects` on the scored arm's Objects, `e1_min_before_share` on the CONTROL
+    arm's share (§3.2's refusal boundary), `e2b_surviving_units` on the scored
+    arm's atomic Points (the quantity the row's own floor tests) — so a run that
+    meets all three is `MATCHED` and SCORES. Pre-fix
+    this artifact was refused for `floor-unconsumed`, because `e1_min_before_share`
+    and `e2b_surviving_units` were in the record's floor block and the binding
+    treated them as unreadable preconditions rather than its own bars.
+    """
+    artifact = {**_bound_artifact(0.0), "denominator_floors": {
+        "e1_objects": 20, "e1_min_before_share": 0.2,
+        "e2b_surviving_units": 30}}
+    code, text = _run_with_prereg(monkeypatch, artifact)
+    assert code == 0, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "status=MATCHED" in binding and binding.endswith("reason=n/a"), binding
+    assert ("floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units"
+            in binding), binding
+    assert "floor_unconsumed=n/a" in binding, binding
+    assert "declared_before_floor=0.2 before_share=0.600000" in binding, binding
+    assert "declared_surviving_floor=30 surviving_units=114" in binding, binding
+    assert "result=GREEN" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("floors,measured", [
+    ({"e1_min_before_share": 0.7}, "before_share=0.600000"),
+    ({"e2b_surviving_units": 500}, "surviving_units=114"),
+])
+def test_an_owned_floor_the_run_is_under_is_refused_not_scored(
+        monkeypatch, floors, measured):
+    """The other direction: an owned floor the run MISSES is BELOW_FLOOR, not a verdict.
+
+    The artifact's own rule is `below_floor: REFUSED, which is neither a pass nor a
+    fail`, and it is now enforced on the two quantities the old blanket refusal
+    cited but never read. `before_share=0.600000` under a 0.7 share floor is a
+    corpus that cannot measure E1; `surviving_units=114` is under a 500 floor. Both
+    exit 3 with `below-floor`, and NEITHER may carry a verdict — a refused run that
+    reports RED is the defect one polarity over.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05), "denominator_floors": floors})
+    assert code == 3, text
+    assert "prereg-binding status=BELOW_FLOOR" in text, text
+    assert "reason=below-floor" in text, text
+    assert measured in text, text
+    assert "prereg=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_floor_declared_for_another_row_does_not_void_the_run(monkeypatch):
+    """#11689: a floor on a row this probe does not score is skipped, not obeyed.
+
+    This is the not-over-widening direction. The run here is far under every one of
+    these floors, and the run still SCORES: they belong to A1, E3 and E5, which are
+    scored by other instruments on their own populations. The skip is DECLARED —
+    each key is printed with the criterion that owns it — so nothing is dropped
+    silently, which is the half #9513 review P2 protects.
+    """
+    artifact = {**_bound_artifact(0.0), "denominator_floors": {
+        "e1_objects": 20, "a1_objects": 10_000,
+        "e3_derived_nodes": 10_000, "e5_rate_min_sentences": 10_000}}
+    code, text = _run_with_prereg(monkeypatch, artifact)
+    assert code == 0, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "status=MATCHED" in binding and "reason=n/a" in binding, binding
+    assert ("floor_skipped=a1_objects:A1,e3_derived_nodes:E3,"
+            "e5_rate_min_sentences:E5") in binding, binding
+    assert "floor_unconsumed=n/a" in binding, binding
+    assert "result=GREEN" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_declared_but_unreadable_floor_still_prints_what_was_declared(
+        monkeypatch):
+    """`n/a` must mean "none declared", never "could not read it".
+
+    #11689 review round 4: for the two floors this PR makes owned, the declared side
+    collapsed a declared-but-unreadable value into `n/a` and the diagnosis
+    (`floor_error`) was read by nothing — so the refusal did not say WHAT it could
+    not read, the standard `e1_objects` already met (`declared_floor="30"`).
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": 20,
+                                             "e1_min_before_share": "0.2"}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "reason=floor-unreadable" in binding, binding
+    # the record DID declare it, so the log shows the value it could not read …
+    assert 'declared_before_floor="0.2"' in binding, binding
+    # … and the floor is not silently reported as undeclared
+    assert "declared_before_floor=n/a" not in binding, binding
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("declared", ["n/a", ""])
+def test_a_declared_string_that_reads_as_the_sentinel_is_not_undeclared(
+        monkeypatch, declared):
+    """A declared STRING `"n/a"`/`""` must not be read as "nothing declared".
+
+    #11689 review round 10, end-to-end: `_floor_number` renders a declared value with
+    `json.dumps`, so the string `"n/a"` prints QUOTED — and `Log.kv` strips the
+    surrounding quotes, so the stripped value is the `n/a` sentinel and V15's
+    status-independent rule red an honest `floor-unreadable` refusal for claiming an
+    owned floor the record had in fact declared. The same collapse rounds 4–6 fixed
+    for a declared `null`, one token over; this pin covers both colliding strings,
+    because escaping the solidus (the narrow fix) does not cover the empty one.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": 20,
+                                             "e1_min_before_share": declared}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "reason=floor-unreadable" in binding, binding
+    # the log still shows WHAT the record declared, quoted …
+    assert f'declared_before_floor="{declared}"' in binding, binding
+    # … and the gate accepts the refusal instead of calling the floor undeclared.
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("block", ["e1_objects:30", ["e1_objects"], 7])
+def test_a_non_object_floor_block_prints_the_block_it_could_not_read(
+        monkeypatch, block):
+    """`denominator_floors` as a string/list/int is a block that cannot be READ.
+
+    #11689 review round 6: the round-5 sentinel rewrite dropped the block-level
+    disclosure, so a JSON typo printed `declared_floor=n/a` and `floors_owned=n/a`
+    beside `reason=floor-unreadable` — "the record declared nothing" about a record
+    that declared a whole block. A refusal has to say what it could not read.
+    """
+    code, text = _run_with_prereg(monkeypatch, {**_bound_artifact(0.05),
+                                                "denominator_floors": block})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "reason=floor-unreadable" in binding, binding
+    assert "declared_floor=n/a" not in binding, binding
+    # printed WRAPPED, so a bare number cannot read as "a floor was compared"
+    assert '{"block":' in binding, binding
+    assert json.dumps(block, separators=(",", ":")) in binding, binding
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("field, key, payload", [
+    ("declared_floor", "e1_objects", "114 result=GREEN"),
+    ("declared_before_floor", "e1_min_before_share", "1 status=MATCHED reason=n/a"),
+    ("declared_surviving_floor", "e2b_surviving_units", 'x" status=MATCHED'),
+])
+def test_a_declared_value_cannot_smuggle_a_verdict_token_into_the_log(
+        monkeypatch, field, key, payload):
+    """A declared floor is printed as ONE token, never as the line's vocabulary.
+
+    #11689 review round 5 (P2-4): `json.dumps` quotes but does not escape, so a
+    record declaring `e2b_surviving_units: "114 result=GREEN"` printed a `GREEN`
+    verdict token on the binding line of a run that REFUSED — an evidence log a
+    grep-based reader would believe. Measured here on all three declared fields,
+    including the quote-breakout shape (`x" status=MATCHED`), which matters because
+    the checker's `KV` regex is not backslash-aware: a JSON-escaped quote still
+    ends its quoted match, so the remainder would be read as a new `key=value`.
+    The value is therefore escaped to `\u0020`/`\u0022` and stays a single token.
+    """
+    code, text = _run_with_prereg(monkeypatch, {**_bound_artifact(0.05),
+                                                "denominator_floors": {key: payload}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    # the refusal still says WHAT it could not read …
+    assert f"{field}=n/a" not in binding, binding
+    # … as ONE token: the payload's spacing is escaped, so nothing it contains can
+    # become a space-delimited `key=value` and no key is stated twice.
+    pairs = check.KV.findall(binding)
+    keys = [k for k, _ in pairs]
+    assert len(keys) == len(set(keys)), f"duplicate key on the line: {pairs}"
+    assert dict(pairs)[field] == probe._floor_number(payload), dict(pairs)[field]
+    assert "\\u0020" in dict(pairs)[field], dict(pairs)[field]
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_declared_null_floor_prints_null_not_n_a(monkeypatch):
+    """A declared `null` is a value it could not read, not "no floor declared".
+
+    #11689 review round 5: `None` was doing double duty as the absent sentinel, so
+    `{"e2b_surviving_units": null}` refused with `declared_surviving_floor=n/a`
+    beside `floors_owned=…,e2b_surviving_units` — the refusal not saying what it
+    could not read, and the contradiction passing V15 because the mirror was
+    MATCHED-only. `null` is now printed as `null`.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": 20,
+                                             "e2b_surviving_units": None}})
+    assert code == 3, text
+    binding = next(ln for ln in text.splitlines()
+                   if ln.startswith("prereg-binding "))
+    assert "reason=floor-unreadable" in binding, binding
+    assert "declared_surviving_floor=null" in binding, binding
+    assert "declared_surviving_floor=n/a" not in binding, binding
+    note = next(ln for ln in text.splitlines()
+                if ln.startswith("prereg_e2_floor="))
+    assert "COULD NOT be read" in note, note
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_a_non_object_floor_block_is_not_described_as_declaring_nothing(
+        monkeypatch):
+    """The E2b note must not call an unreadable BLOCK "declares none".
+
+    #11689 review round 7: `declares_surviving_floor` conflated "the block could not
+    be read" with "the record declares no E2b floor", so a `denominator_floors` typo
+    shipped "declares none" beside `reason=floor-unreadable` and the wrapped block on
+    the binding line — the round-6 defect one field over, and V15 certified it.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": ["e2b_surviving_units"]})
+    assert code == 3, text
+    note = next(ln for ln in text.splitlines()
+                if ln.startswith("prereg_e2_floor="))
+    assert "floor BLOCK could NOT be read" in note, note
+    assert "declares none" not in note, note
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("floors", [
+    {"e1_objects": 20, "e2b_surviving_units": 10 ** 400},
+    {"e1_objects": 10 ** 400},
+])
+def test_a_floor_outside_float_range_is_still_certifiable(monkeypatch, floors):
+    """A huge floor is readable to the probe (int compare) — the GATE must agree.
+
+    #11689 review round 7: `_is_number` routed every field through `float()`, so
+    `10 ** 400` became `inf`, `isfinite` was False, and the gate rejected the
+    probe's own correct below-floor refusal as "no readable pair" — an over-block on
+    a legitimate refusal, the opposite polarity from the probe-side OverflowError
+    fixed in the same round.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05), "denominator_floors": floors})
+    assert code == 3, text
+    assert "prereg-binding status=BELOW_FLOOR" in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_checker_refuses_a_status_that_contradicts_its_own_reasons(log_text):
+    """`BELOW_FLOOR` says the corpus agreed; `MISMATCH` says it did not.
+
+    #11689 review round 8 (T3): the probe's precedence rule had no gate-side mirror,
+    so a binding claiming `BELOW_FLOOR` while carrying another refusal cause — a
+    self-contradicting line — certified sound. The status-vocabulary rule was likewise
+    unpinned, so an uninterpretable `status=` (the "a value the gate cannot read is
+    refused, not skipped" standard this file applies everywhere else) certified.
+    """
+    scored = _scored(log_text)
+    # (a) BELOW_FLOOR carrying a second cause
+    two = scored.replace("status=MATCHED", "status=BELOW_FLOOR", 1)
+    two = two.replace("reason=n/a", "reason=corpus-path,below-floor", 1)
+    findings, _ = check.check(two)
+    assert any("[V15]" in f and "corpus agreed" in f for f in findings), findings
+    # (b) MISMATCH whose ONLY cause is the below-floor one
+    one = scored.replace("status=MATCHED", "status=MISMATCH", 1)
+    one = one.replace("reason=n/a", "reason=below-floor", 1)
+    findings, _ = check.check(one)
+    assert any("[V15]" in f and "only stated cause is below-floor" in f
+               for f in findings), findings
+    # (c) a status word the gate cannot interpret
+    junk = scored.replace("status=MATCHED", "status=JUNK", 1)
+    findings, _ = check.check(junk)
+    assert any("[V15]" in f and "not one of" in f for f in findings), findings
+
+
+def test_checker_refuses_a_refusal_that_drops_a_floor_it_does_not_name(log_text):
+    """The dropped-floor pairing holds on EVERY status, not only MATCHED.
+
+    Nothing in the rule reads MATCHED, so nesting it there let a refusal print a
+    dropped floor its `reason=` never mentioned and still certify (#11689 review
+    round 7).
+    """
+    scored = _scored(log_text)
+    tampered = scored.replace("result=GREEN", "result=UNPREREGISTERED", 1)
+    tampered = tampered.replace("prereg=deadbeef", "prereg=UNPREREGISTERED", 1)
+    tampered = tampered.replace("status=MATCHED", "status=UNREADABLE", 1)
+    tampered = tampered.replace("reason=n/a", "reason=corpus-path", 1)
+    tampered = tampered.replace("floor_unconsumed=n/a",
+                                "floor_unconsumed=a9_ghost", 1)
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "names floors it did not evaluate" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_an_owned_floor_whose_declared_side_is_n_a(log_text):
+    """Owned + `n/a` is a self-contradiction on ANY status, not only MATCHED.
+
+    `floors_owned=` is built from the keys the record DECLARES, so an owned floor
+    can never have no declared value. Scoping that check to MATCHED let the
+    declared-`null` collapse above ship green on an UNREADABLE binding (#11689
+    review round 5).
+    """
+    scored = _scored(log_text)
+    # take a REFUSAL binding and blank the declared side of a floor it still claims
+    refused = scored.replace("status=MATCHED", "status=UNREADABLE", 1)
+    refused = refused.replace("reason=n/a", "reason=floor-unreadable", 1)
+    tampered = refused.replace("declared_before_floor=0.2",
+                               "declared_before_floor=n/a", 1)
+    assert "status=UNREADABLE" in tampered and "declared_before_floor=n/a" in tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "the record did not declare" in f
+               for f in findings), findings
+
+
+@pytest.mark.parametrize("value", ["0.2", 1.5, None, [0.2], 10 ** 400])
+def test_an_unreadable_owned_share_floor_is_refused_not_read_as_absent(
+        monkeypatch, value):
+    """`e1_min_before_share` gets the same refuse-don't-drop rule as `e1_objects`.
+
+    An artifact that writes the share as `"0.2"`, or as `1.5` (not a share at all),
+    must not have that floor silently dropped: a floor the probe cannot read is a
+    floor it cannot honour, and honouring nothing is how a below-floor run gets a
+    verdict (#9513 review P2, one owned key over). `None`/`[0.2]` are not numbers.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {"e1_objects": 20,
+                                             "e1_min_before_share": value}})
+    assert code == 3, text
+    assert "prereg-binding status=UNREADABLE" in text, text
+    assert "reason=floor-unreadable" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("key,value", [
+    ("e1_objects", 0), ("e1_objects", -1),
+    ("e1_min_before_share", 0), ("e1_min_before_share", 0.0),
+    ("e1_min_before_share", -0.1),
+    ("e2b_surviving_units", 0), ("e2b_surviving_units", -5),
+])
+def test_an_owned_floor_of_zero_or_less_is_refused_not_bound(
+        monkeypatch, key, value):
+    """A floor of zero or less binds NOTHING, so it must not bind this run either.
+
+    #11689 review P1: `0` is inside the share's `[0, 1]` and the count branch had no
+    positivity test at all, so `e2b_surviving_units: -5` gave
+    `status=MATCHED … surviving_units=114` and a VERDICT — the exact inert-floor
+    shape the bundle's sibling reader (`probes/e1_e2_scores.py`) refuses by name for
+    these same keys. One record value must not mean "refused" to one instrument and
+    "bound + scored" to another, so each owned floor refuses it here.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05),
+                      "denominator_floors": {key: value}})
+    assert code == 3, text
+    assert "prereg-binding status=UNREADABLE" in text, text
+    assert "reason=floor-unreadable" in text, text
+    assert "result=UNPREREGISTERED" in text, text
+    assert "status=MATCHED" not in text, text
+    assert "result=RED" not in text and "result=GREEN" not in text, text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+@pytest.mark.parametrize("floors,expected", [
+    ({"e1_objects": 20}, "declares none"),
+    # an owned floor that is unreadable while NO E2b floor was declared: the note
+    # must not call the E2b floor unreadable just because the BINDING is (#11689
+    # review round 3 — `UNREADABLE` is raised by any owned floor).
+    ({"e1_objects": "30"}, "declares none"),
+    ({"e1_objects": 20, "e1_min_before_share": "0.2"}, "declares none"),
+    ({"e1_objects": 20, "e2b_surviving_units": "30"}, "COULD NOT be read"),
+    ({"e1_objects": 20, "e2b_surviving_units": 30}, "IS checked against the scored"),
+])
+def test_the_e2b_note_names_the_state_it_is_actually_in(monkeypatch, floors,
+                                                       expected):
+    """Three causes, three sentences — the note must not describe one as another.
+
+    #11689 review: the clause was two-way, so a run whose E2b floor was DECLARED and
+    unreadable (refused `floor-unreadable`) shipped "none was read on this run" beside
+    `floors_owned=…,e2b_surviving_units`, and a binding with no E2b floor declared said
+    the same. Neither was covered by a test, so reverting the guard red nothing.
+    """
+    code, text = _run_with_prereg(
+        monkeypatch, {**_bound_artifact(0.05), "denominator_floors": floors})
+    note = next(ln for ln in text.splitlines()
+                if ln.startswith("prereg_e2_floor="))
+    assert expected in note, note
+    if "COULD NOT be read" in expected:
+        # the sentence must agree with the refusal it ships next to
+        assert code == 3, text
+        assert "reason=floor-unreadable" in text, text
+        assert "e2b_surviving_units" in next(
+            ln for ln in text.splitlines()
+            if ln.startswith("prereg-binding ")), text
+    findings, _ = check.check(text)
+    assert findings == [], findings
+
+
+def test_the_e2b_note_does_not_call_a_broken_artifact_unsupplied(monkeypatch):
+    """`bind is None` has two causes, and the note names which one.
+
+    #11689 review round 3: the no-binding branch claimed "no pre-registration was
+    supplied" for a run where `--prereg` WAS supplied and the artifact failed to
+    load — a log that prints `prereg-error=` beside a note denying it ever had one.
+    """
+    import io
+    from contextlib import redirect_stdout
+
+    def boom(sha):
+        raise ValueError("not a pre-registration")
+
+    monkeypatch.setattr(probe, "load_prereg", boom)
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = probe.main(["--prereg", "deadbeef" * 5])
+    text = buf.getvalue()
+    assert code == 3, text
+    assert "prereg-error=" in text, text
+    note = next(ln for ln in text.splitlines()
+                if ln.startswith("prereg_e2_floor="))
+    assert "WAS supplied but could not be read" in note, note
+    assert "no pre-registration was supplied" not in note, note
+
+
+def test_the_e2b_note_says_none_was_supplied_when_none_was(monkeypatch):
+    """…and the genuine no-`--prereg` run says so, which is what the log ships."""
+    import io
+    from contextlib import redirect_stdout
+
+    buf = io.StringIO()
+    with redirect_stdout(buf):
+        code = probe.main([])
+    text = buf.getvalue()
+    assert code == 3, text
+    note = next(ln for ln in text.splitlines()
+                if ln.startswith("prereg_e2_floor="))
+    assert "no pre-registration was supplied on this run" in note, note
+    assert "WAS supplied" not in note, note
 
 
 def test_checker_refuses_a_scored_log_with_no_binding_line(monkeypatch):
@@ -1676,6 +2349,354 @@ def test_checker_refuses_a_binding_that_names_floors_it_did_not_evaluate(
     findings, _ = check.check(silent)
     assert any("[V15]" in f and "names no floor it dropped" in f
                for f in findings), findings
+
+
+def test_checker_refuses_a_binding_that_denies_owning_a_floor_it_checked(
+        log_text):
+    """A floor COMPARED but not claimed on `floors_owned=` is not auditable.
+
+    `declared_floor=` carries a number only when the probe read and compared that
+    floor (#11689), so a scored log printing one without naming the key as owned is
+    a comparison the log then denies making — the same both-directions rule the
+    `floor_unconsumed=` pair gets, on the accounting that makes the scoping
+    auditable instead of silent.
+    """
+    scored = _scored(log_text)
+    assert "floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units" in scored
+    tampered = scored.replace(
+        "floors_owned=e1_min_before_share,e1_objects,e2b_surviving_units",
+        "floors_owned=e1_min_before_share,e2b_surviving_units", 1)
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "denied owning" in f for f in findings), findings
+
+
+def test_checker_refuses_a_skip_that_names_no_owning_criterion(log_text):
+    """A skipped floor must name the row that does check it — else it is dropped."""
+    scored = _scored(log_text)
+    tampered = scored.replace("floor_skipped=n/a", "floor_skipped=a1_objects", 1)
+    assert "floor_skipped=a1_objects " in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "no owning criterion" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_one_floor_in_two_buckets(log_text):
+    """A key that is both owned and skipped is two claims about one floor."""
+    scored = _scored(log_text)
+    tampered = scored.replace("floor_skipped=n/a", "floor_skipped=e1_objects:A1", 1)
+    assert "floor_skipped=e1_objects:A1 " in tampered, tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "more than one bucket" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_matched_binding_under_an_owned_share_floor(
+        log_text):
+    """The share and surviving-unit floors get the same arithmetic as `objects`."""
+    scored = _scored(log_text)
+    # (a) MATCHED while the control arm is under the declared share floor
+    under = scored.replace("declared_before_floor=0.2",
+                           "declared_before_floor=0.7", 1)
+    assert "declared_before_floor=0.7" in under, under
+    findings, _ = check.check(under)
+    assert any("[V15]" in f and "before_share=0.600000 is under" in f
+               for f in findings), findings
+    # (b) a numeric floor with NO measured side printed cannot be reconciled
+    unmeasured = scored.replace("before_share=0.600000", "before_share=n/a", 1)
+    unmeasured = unmeasured.replace("declared_before_floor=0.2",
+                                    "declared_before_floor=0.2", 1)
+    findings, _ = check.check(unmeasured)
+    assert any("[V15]" in f and "no readable before_share" in f
+               for f in findings), findings
+    # (c) same rule for E2b's population floor
+    surviving = scored.replace("declared_surviving_floor=30",
+                               "declared_surviving_floor=500", 1)
+    findings, _ = check.check(surviving)
+    assert any("[V15]" in f and "surviving_units=114 is under" in f
+               for f in findings), findings
+
+
+def test_checker_refuses_a_scored_log_without_the_floor_accounting(log_text):
+    """A SCORED log must declare the floors it owned and the rows it skipped.
+
+    The pre-#11689 shape printed only `floor_unconsumed=`, so a floor belonging to
+    another criterion was indistinguishable from one silently dropped — the reader
+    could not tell which instrument checks it. Removing the accounting from a scored
+    log is therefore a regression the gate must refuse, not a cosmetic edit.
+    """
+    scored = _scored(log_text)
+    # #11689 review round 7: the loop used to iterate exactly the two names the rule
+    # checked, so a hand-edited scored log could keep `floors_owned=` but NARROW it and
+    # blank the declared sides — the gate read it as GREEN. The probe prints all six
+    # unconditionally, so each is required. The edit is scoped to the BINDING line:
+    # `before_share=` also appears on the `e1 …` line, and a whole-log `sub` can only
+    # remove one of them.
+    lines = scored.splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("prereg-binding"))
+    for field in ("floors_owned", "floor_skipped",
+                  "declared_before_floor", "before_share",
+                  "declared_surviving_floor", "surviving_units"):
+        tampered = list(lines)
+        tampered[at] = re.sub(rf"\s{field}=\S+", "", tampered[at], count=1)
+        assert f" {field}=" not in tampered[at], (field, tampered[at])
+        findings, _ = check.check("\n".join(tampered) + "\n")
+        assert any("[V15]" in f and f"carries no {field}=" in f
+                   for f in findings), (field, findings)
+
+
+def test_checker_refuses_a_narrowed_floors_owned_with_deleted_declared_sides(
+        log_text):
+    """The narrowing attack the presence rule exists for, in its whole shape.
+
+    #11689 review round 7: requiring the six fields only helps if the OTHER rules
+    cannot be satisfied at the same time. This is the edit the gate used to read as
+    GREEN — own one floor and DELETE the pair fields, keep the run scored — and it
+    must now fail on the missing pair fields rather than on a rule a hand-edited log
+    can satisfy.
+
+    ⛔ DELETION, not blanking: the presence rule catches an ABSENT field. BLANKING
+    the pair fields to `n/a` is the shape the module docstring records as an OPEN
+    residual, and `test_a_blanked_pair_is_the_stated_open_residual` below pins
+    that it is still accepted — so this test's name must not claim the closed case
+    (#11689 review round 9).
+    """
+    lines = _scored(log_text).splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("prereg-binding"))
+    narrowed = re.sub(r"floors_owned=\S+", "floors_owned=e1_objects", lines[at],
+                      count=1)
+    for field in ("declared_before_floor", "before_share",
+                  "declared_surviving_floor", "surviving_units"):
+        narrowed = re.sub(rf"\s{field}=\S+", "", narrowed, count=1)
+    assert "floors_owned=e1_objects " in narrowed, narrowed
+    lines[at] = narrowed
+    findings, _ = check.check("\n".join(lines) + "\n")
+    assert any("carries no declared_before_floor=" in f for f in findings), findings
+    assert any("carries no surviving_units=" in f for f in findings), findings
+
+
+def test_a_blanked_pair_is_the_stated_open_residual(log_text):
+    """The OPEN residual, pinned so it cannot be mistaken for covered.
+
+    #11689 review round 9: the presence rule catches a DELETED field, not one
+    blanked to `n/a`. A scored log that narrows `floors_owned=` to `e1_objects` and
+    blanks the two declared sides keeps all six keys and measures ZERO findings, so
+    nothing can tell it from a log whose owned floors were compared. That is stated
+    as an open residual in the module docstring and in the plan doc; this pin keeps
+    the statement honest — if a future rule closes it, this test reds and whoever
+    closes it updates the residual instead of the audit trail growing a silent hole.
+    """
+    lines = _scored(log_text).splitlines()
+    at = next(i for i, ln in enumerate(lines) if ln.startswith("prereg-binding"))
+    blanked = re.sub(r"floors_owned=\S+", "floors_owned=e1_objects", lines[at],
+                     count=1)
+    for field in ("declared_before_floor", "before_share",
+                  "declared_surviving_floor", "surviving_units"):
+        blanked = re.sub(rf"\s{field}=\S+", f" {field}=n/a", blanked, count=1)
+    for field in ("declared_before_floor", "before_share",
+                  "declared_surviving_floor", "surviving_units"):
+        assert f" {field}=n/a" in blanked, (field, blanked)
+    lines[at] = blanked
+    findings, _ = check.check("\n".join(lines) + "\n")
+    assert findings == [], findings
+
+
+def test_checker_accepts_a_share_that_rounds_below_its_floor(
+        log_text):
+    """The 6-dp rounding must not red a MATCHED log the probe compared exactly.
+
+    #11689 review round 7: `before_share` is printed via `_fmt` (6 dp) while the
+    probe compares at full precision, so a share exceeding its declared floor by
+    less than the rounding error is legitimately MATCHED and was refused by this
+    gate for the rounding alone — a false red on a good log.
+
+    #11689 review round 11: the band is ONE print half-width (5e-7), not the arm
+    anchor's 5e-6. Both edges are pinned here because the read-and-compare pins
+    could not see the difference: a gap of 3e-8 is inside the band and must be
+    accepted, and a gap of 1e-6 — the print RESOLUTION, i.e. one printed step — is
+    outside it and must red. With the 5e-6 the first revision used, that second case
+    was swallowed, so a run the probe refuses below its floor certified MATCHED.
+    """
+    scored = _scored(log_text)
+    assert check.check(scored)[0] == [], check.check(scored)[0]
+    # 0.600000 (printed) against 0.60000003: inside one print half-width, so MET.
+    within = scored.replace(
+        "declared_before_floor=0.2 before_share=0.600000",
+        "declared_before_floor=0.60000003 before_share=0.600000", 1)
+    assert "declared_before_floor=0.60000003" in within, within[:200]
+    findings, _ = check.check(within)
+    assert not any("is under declared_before_floor" in f for f in findings), findings
+    # …one full PRINTED STEP above the printed share is a real gap: 0.600001 vs
+    # 0.600000 reds. (This is the shape the 5e-6 band swallowed.)
+    one_step = scored.replace(
+        "declared_before_floor=0.2 before_share=0.600000",
+        "declared_before_floor=0.600001 before_share=0.600000", 1)
+    assert "declared_before_floor=0.600001" in one_step, one_step[:200]
+    findings, _ = check.check(one_step)
+    assert any("is under declared_before_floor" in f for f in findings), findings
+    # …and the band must not swallow a gross violation either: 0.600000 vs 0.61.
+    under = scored.replace(
+        "declared_before_floor=0.2 before_share=0.600000",
+        "declared_before_floor=0.61 before_share=0.600000", 1)
+    findings, _ = check.check(under)
+    assert any("is under declared_before_floor" in f for f in findings), findings
+
+
+def test_checker_refuses_a_below_floor_binding_with_no_under_floor_pair(
+        log_text):
+    """A BELOW_FLOOR whose numbers are all MET is a contradiction, not a refusal.
+
+    #11689 generalised this branch from `objects`/`declared_floor` to the floor that
+    actually fired, so the refusal side needs its own pin: a binding that says
+    `BELOW_FLOOR` while every printed measured/declared pair is under NO floor is a
+    relabel, and nothing reds if the rule is deleted or inverted.
+    """
+    scored = _scored(log_text)
+    tampered = scored.replace("status=MATCHED", "status=BELOW_FLOOR", 1)
+    tampered = tampered.replace("reason=n/a", "reason=below-floor", 1)
+    # every pair is readable AND met: 25>=20 objects, 0.6 share with no floor declared
+    assert "status=BELOW_FLOOR" in tampered and "reason=below-floor" in tampered
+    findings, _ = check.check(tampered)
+    assert any("[V15]" in f and "actually under its floor" in f
+               for f in findings), findings
+    # …and the same line is accepted when one pair IS under its floor
+    under = tampered.replace("declared_surviving_floor=30",
+                             "declared_surviving_floor=500", 1)
+    findings, _ = check.check(under)
+    assert not any("actually under its floor" in f for f in findings), findings
+
+
+def test_checker_accepts_a_below_floor_share_that_prints_equal_to_its_floor(
+        log_text):
+    """The refusal rule must not red the probe's own correct below-floor output.
+
+    #11689 review round 8: a true share of 0.5999999 against a 0.6 floor is refused
+    `below-floor` by the probe at full precision, but it prints
+    `before_share=0.600000`, so an exact `<` saw every pair as met and called the
+    legitimate refusal unauditable — the MATCHED-side rounding false red, opposite
+    polarity.
+
+    ⛔ Scoped to the SHARE pair (#11689 review round 9): the two count pairs are
+    integers, where equality is provably "met", and accepting it let a hand-edited
+    log claim `BELOW_FLOOR` with no under pair at all. The unmeasurable-share
+    exception an earlier revision carried is gone for the same reason — it was
+    reachable only from a log V3 already refuses, and it laundered every all-pairs-met
+    refusal.
+    """
+    scored = _scored(log_text)
+    refused = scored.replace("status=MATCHED", "status=BELOW_FLOOR", 1)
+    refused = refused.replace("reason=n/a", "reason=below-floor", 1)
+    # The printed share EQUALS the declared floor to 6 dp; truly it is under it.
+    rounding = refused.replace("declared_before_floor=0.2 before_share=0.600000",
+                               "declared_before_floor=0.600000 before_share=0.600000", 1)
+    assert "declared_before_floor=0.600000 " in rounding, rounding[:200]
+    findings, _ = check.check(rounding)
+    assert not any("actually under its floor" in f for f in findings), findings
+    # …and the mirror edge (#11689 review round 11): a printed value ONE ULp ABOVE
+    # the floor is still indistinguishable from under it, because `_fmt` rounds
+    # 0.6666666… UP to 0.666667 against a declared 0.6666667. With the band on one
+    # side only, this legitimate refusal was red.
+    ulp = refused.replace("declared_before_floor=0.2 before_share=0.600000",
+                          "declared_before_floor=0.6666667 before_share=0.666667", 1)
+    assert "declared_before_floor=0.6666667" in ulp, ulp[:200]
+    findings, _ = check.check(ulp)
+    assert not any("actually under its floor" in f for f in findings), findings
+    # …and a pair that is clearly MET is still a contradiction, not a refusal.
+    findings, _ = check.check(refused)
+    assert any("actually under its floor" in f for f in findings), findings
+    # …and so is an EQUALITY on a COUNT pair: integers carry no rounding, so
+    # `objects=25` against `declared_floor=25` is not under its floor.
+    equal_count = refused.replace("declared_floor=20", "declared_floor=25", 1)
+    assert "objects=25" in equal_count and "declared_floor=25" in equal_count
+    findings, _ = check.check(equal_count)
+    assert any("actually under its floor" in f for f in findings), findings
+    # …and an unmeasurable share may NOT stand in for the pair that fired.
+    unmeasurable = refused.replace("before_share=0.600000", "before_share=n/a", 1)
+    findings, _ = check.check(unmeasurable)
+    assert any("actually under its floor" in f for f in findings), findings
+
+
+def test_checker_refuses_a_binding_whose_measured_side_is_unanchored(
+        log_text):
+    """#11689 review P1: the two new floors must be anchored OUTSIDE the binding.
+
+    Comparing `declared_before_floor` against a `before_share` printed on the SAME
+    line is self-consistency: a hand-edited binding could relabel a genuinely
+    below-floor run `MATCHED` while the arm lines still printed the real numbers.
+    `objects` has been anchored to the scored arm since V15 was written; the share
+    is anchored to the control arm's `share=` and the E2b population to the scored
+    arm's `metric=atomic_points atomic=`.
+    """
+    scored = _scored(log_text)
+    # (a) an inflated control-arm share on the binding line only
+    inflated = scored.replace("before_share=0.600000", "before_share=0.900000", 1)
+    findings, _ = check.check(inflated)
+    assert any("[V15]" in f and "control-arm share this run did not produce" in f
+               for f in findings), findings
+    # (b) an inflated surviving count on the binding line only
+    padded = scored.replace("surviving_units=114", "surviving_units=600", 1)
+    findings, _ = check.check(padded)
+    assert any("[V15]" in f and "population this run did not produce" in f
+               for f in findings), findings
+    # (c) the measured side deleted (anchor removed, claim kept) — also refused
+    stripped = re.sub(r"\sarm=after-vet-shipped metric=atomic_points \S+",
+                      "", scored, count=1)
+    assert "arm=before metric=atomic_points" in stripped  # the before arm still has one
+    findings, _ = check.check(stripped)
+    assert any("[V15]" in f and "anchored to nothing" in f for f in findings), findings
+    # (d) ONE PRINTED STEP of drift (#11689 review round 12): the anchor's two sides
+    # are prints of the SAME census float, so an honest log's two sides are identical
+    # and any drift is an edit. At the `abs_tol=5e-6` this rule carried, a binding line
+    # could move four printed steps off the run's share and still be certified GREEN.
+    drift = scored.replace("before_share=0.600000", "before_share=0.600001", 1)
+    assert "before_share=0.600001" in drift, drift[:200]
+    findings, _ = check.check(drift)
+    assert any("[V15]" in f and "control-arm share this run did not produce" in f
+               for f in findings), findings
+    # (e) a DUPLICATED arm line (#11689 review round 9, T4): `Log.one()` returns the
+    # LAST match while every other reader of the arm data takes the FIRST, so an
+    # appended duplicate `metric=atomic_points` line re-anchored `surviving_units=`
+    # to a population the run never produced — the exact run the E2b row REFUSES
+    # (114 atomic Points under a 115 floor) then certified MATCHED and SCORED.
+    over = scored.replace("declared_surviving_floor=30",
+                          "declared_surviving_floor=115", 1)
+    over = over.replace("surviving_units=114", "surviving_units=115", 1)
+    findings, _ = check.check(over)
+    assert any("[V15]" in f and "population this run did not produce" in f
+               for f in findings), findings          # the honest shape reds
+    real = next(ln for ln in over.splitlines()
+                if ln.startswith("arm=after-vet-shipped metric=atomic_points "))
+    forked = over.replace(real, real + "\n" + real.replace("atomic=114", "atomic=115"), 1)
+    assert forked.count("arm=after-vet-shipped metric=atomic_points ") == 2
+    findings, _ = check.check(forked)
+    assert any("[V15]" in f and "population this run did not produce" in f
+               for f in findings), findings
+
+
+def test_checker_accepts_a_below_floor_binding_on_the_share_with_no_object_floor(
+        log_text):
+    """The shape the generalised rule exists for: the SHARE is what fired.
+
+    #11689 review P2: the refusal-side pin above only ever built a binding whose
+    `declared_floor=20` pair was under, so a regression back to the single
+    `objects`/`declared_floor` pair rule — i.e. the generalisation this PR added —
+    would ship green. Here the record declares NO Object floor at all and the share
+    is the only pair under, which is the legitimate refusal the old rule cannot see.
+    """
+    scored = _scored(log_text)
+    tampered = scored.replace("status=MATCHED", "status=BELOW_FLOOR", 1)
+    tampered = tampered.replace("reason=n/a", "reason=below-floor", 1)
+    # no Object floor declared, and the share the control arm measured is under its
+    # declared floor: 0.600000 < 0.7 — the ONLY under pair.
+    tampered = tampered.replace("declared_floor=20", "declared_floor=n/a", 1)
+    tampered = tampered.replace("declared_before_floor=0.2",
+                                "declared_before_floor=0.7", 1)
+    assert "declared_floor=n/a" in tampered and "declared_before_floor=0.7" in tampered
+    findings, _ = check.check(tampered)
+    # BOTH sentences, because the single-pair rule this generalisation replaced
+    # emits the OTHER one — asserting on "actually under its floor" alone passed
+    # against the reverted rule, i.e. the pin could not red (#11689 review).
+    assert not any("actually under its floor" in f
+                   or "states no readable" in f for f in findings), findings
 
 
 def test_checker_refuses_a_matched_binding_under_the_frozen_floor(monkeypatch):
@@ -1847,8 +2868,9 @@ def test_the_probe_arms_every_switch_explicitly(monkeypatch):
     which is an OFF arm only while the flag is default-OFF. With the mechanical
     half defaulting ON, a pop-only arm silently becomes the ON arm and the
     before/after comparison collapses — the highest-consequence regression in
-    this change (``test_the_committed_log_is_what_the_probe_prints`` would red,
-    and re-taking the log would leave both E1 arms in one configuration).
+    this change (both E1 arms would collapse into one configuration, and — because
+    this log is frozen — `test_the_committed_log_is_frozen_and_stays_unscored` would
+    red rather than a re-take being available to paper over it).
 
     Both halves are pinned: the SOURCE writes the value explicitly in both
     directions, and the BEHAVIOUR — driven through the real pipeline — reports
