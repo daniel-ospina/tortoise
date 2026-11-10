@@ -3591,9 +3591,14 @@ class PackRegistry:
         # that canonical set), so every declared pair is the chain
         # `pack kind ⊑ core child ⊑ Object`
         # (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
-        # 17 declared pairs have a parent that is itself an `Object` child, and
-        # `expand_kind("Object")` carried NONE of them — so `query(kind="Object")`
-        # still returned no pack Objects, half-fixing the very defect #11000 is.
+        # 17 declared pairs had a parent that is an `Object` child, and
+        # `expand_kind("Object")` carried NONE of them — half-fixing the very
+        # defect #11000 is. ⚠️ The instrument that reads `kind=` for OBJECTS is the
+        # object entity read path (`tortoise_fts_query(..., entity_type="object")`
+        # / `search` with `kind_field='objectKind'`), **NOT `sdk.query()`**:
+        # `query` is `MATCH (n:Point)` (`sdk.py`), so it can never return an
+        # Object and its answer is `[]` before AND after this fix. Naming `query`
+        # here would be a claim no measurement can distinguish.
         #
         # ⛔ The closure must be DIRECTIONAL. A plain "add the members of every
         # member's bucket" fixpoint is WRONG: `WorkItem`'s bucket contains all
@@ -3638,6 +3643,22 @@ class PackRegistry:
         # `core:`-alias copy loop that also used to do so was measured inert and
         # deleted (see the `_equivalent` seed above), so nothing runs after the
         # snapshot any more.
+        # ⛔ The COST, measured rather than assumed — a first version of this note
+        # claimed "no writer stores `subjectKind='Subject'`", which is FALSE:
+        # `create_subject(subjectKind="Subject")` and
+        # `create_subject(subjectKind="core:Subject")` are both accepted and STORED
+        # as written, so `subjectKind IN expand_kind("team")` now also returns a
+        # root-kinded Subject row — the read genuinely widens by a join on the
+        # layer root.
+        #
+        # …and that is CORRECT, because the `Object` row has had exactly this
+        # property since the §6 table was first read: `create_object(objectKind=
+        # "Object")` is likewise accepted and STORED, so `objectKind IN
+        # expand_kind("dev:issue")` returns it. The Subject row was the anomaly,
+        # not the Object row. Declining the seed would leave the stated contract
+        # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
+        # the four §6 rows while the other three already behave this way. Applied
+        # for UNIFORMITY, with the widening named rather than denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])

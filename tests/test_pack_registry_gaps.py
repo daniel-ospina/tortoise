@@ -2286,3 +2286,36 @@ class TestCoreHierarchy:
         # child (this was already true before the fix — asserted so the two
         # directions cannot be confused).
         assert "portfolio:allocationTarget" in shipped.expand_kind("target")
+
+    def test_the_object_and_point_rows_overlap_exactly(self, shipped):
+        """The FOUR core kinds that are children of BOTH `Object` and `Point`.
+
+        The failure this prevents: the §6 Object↔Point overlap is a CROSS-LAYER
+        read change — `expand_kind("Object")` now carries point kinds, so an
+        object read for `kind="Object"` also returns `:Point` rows stored with
+        `pointKind='goal'`/`'target'`. Measured as `[]` before this PR
+        (`expand_kind("Object") == ["Object"]`).
+
+        ⚠ It is a consequence of the mandated contract, not an implementation
+        error — #7813's ruling is that confidence propagates across
+        `:Point`/`:Object`/`:Event`, so the duplication IS the model (the same
+        reasoning `test_a_cross_axis_parent_is_a_recorded_decision` records for
+        the far milder `portfolio:allocationTarget`). But the milder case was
+        pinned as a decision while this one was unnamed, which is backwards. The
+        set is asserted EXACTLY so a fifth shared kind has to be acknowledged
+        here instead of sliding in.
+        """
+        from tortoise.pack_registry import CANONICAL_POINT_KINDS
+
+        shared = set(CORE_SUBCLASSES["Object"]) & set(CORE_SUBCLASSES["Point"])
+        assert shared == {"goal", "plan", "strategy", "target"}, (
+            "the set of core kinds that are children of BOTH Object and Point "
+            f"changed — an object read widens by this much: {sorted(shared)}")
+
+        # …and the consequence, measured on the table rather than implied: every
+        # shared kind is reachable from `Object` and is a live point kind.
+        for kind in sorted(shared):
+            assert kind in CANONICAL_POINT_KINDS, kind
+            assert kind in shipped.expand_kind("Object"), (
+                f"expand_kind('Object') does not carry {kind!r} — the overlap "
+                "stopped widening, so this pin's premise is stale")
