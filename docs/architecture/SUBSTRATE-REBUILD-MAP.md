@@ -252,39 +252,58 @@ none.
 `aboutDocument` **edge** is retargeted at `:Source` — that asymmetry is the
 whole fold, and it is why L1 and L2 could close. The retirement mechanism is a
 symbol pair this guard does check: the writers' retired-key allowlist
-`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`) and the graph migration
-`relabel_legacy_documents` (`migrate_kinds.py:167`).
+`_DOC_RETIRED_KEYS` (`projection/entities.py:1974`, at this head — `1584` at
+`4f68a2aa7`) and the graph migration `relabel_legacy_documents`
+(`migrate_kinds.py:167`).
+
+**How to read a line pointer in this section:** the LINE NUMBERS from §5's
+heading down to `### The one interface that must not be broken` — the
+interface-map table AND the prose under it — are as-of the frontmatter's
+`measured_at_commit`, so they drift at head by design. That is a statement about
+the NUMBERS only: the table's `*leaf*` cells and its interface symbols are still
+re-measured at HEAD by `tools/substrate_map_check.py --check`, so a maintainer
+must not read "as-of" as "leave this alone". The prose BELOW that heading (this
+subsection) is maintained at HEAD, and two pins hold it there:
+`test_every_symbol_citation_in_section5_lands_on_the_symbol_it_names` for
+`` `SYMBOL` (`file:line`) `` pointers, and
+`test_every_cited_line_in_this_section_still_carries_the_prose_it_describes` for
+`cache_eviction.py:<n>` pointers. Any OTHER bare `file.py:<n>` pointer in this
+subsection is a re-derivation duty, not a measured fact — stating it as held would
+claim coverage no test has. A pointer that legitimately names a past commit marks
+it ("at `4f68a2aa7`"). Without that sentence the conventions look like one, and a
+reader who re-derives the stale half concludes the live half is stale too.
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
 and the reason is measured: `:Document` occurs on **63** lines across **19**
-files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
-`git grep -l ':Document'` → 19 files — the file count is not the line count).
+files under `tortoise/` (`git grep -n ':Document' -- tortoise/` → 63 lines,
+`git grep -l ':Document' -- tortoise/` → 19 files — the file count is not the line count).
 It was **55** across **17** when this was first measured at `4f68a2aa7`, and
 three moves have since been made, one per workstream: the #10976
 census's own note on why node labels do not partition the node set
-(`cache_eviction.py:956`, which is also one of the two that lifted the file
+(`cache_eviction.py:956`, which is also one of those that lifted the file
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
-(`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
-mention at `4f68a2aa7`, which is the second file the count gained; its six added
-mentions are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
-than an accident: this population grows for good reasons, so the figure tracks
-the tree and not a past commit.
+`REFUSED_NOT_FOUND` enum docstring), and #11729's prose lines in
+`tortoise/hosted_backup.py` — a file the population had not previously reached,
+carrying no `:Document` mention at `4f68a2aa7`, whose served-label bound added
+the pre-D10 dump/restore refusal and repair prose. All three are the point rather than an
+accident: this population grows for good reasons, so the figure tracks the tree
+and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
 of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
-`migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
+`migrate_kinds.py` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
-lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:956` comment, plus three of `hosted_backup.py`'s
-(`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
-literals. Six of sixty-three is still the exception, so the exclusion argument
-stands; a guard carrying a hand-maintained allowlist of
-docstrings is a guard nobody can trust, so the label claim stays evidence
-recorded here rather than a check that would have to be argued with.
+lines — the RST literals in `migrate_kinds.py` (the pre-D10 shape comment and
+`relabel_legacy_documents`'s docstring), that same
+`cache_eviction.py:956` comment, and the `hosted_backup.py` ones (the
+served-label declaration, the validator's docstring and `restore_backup`'s),
+which arrived with #11729. The exception is still an exception, so the exclusion
+argument stands; a guard carrying a hand-maintained allowlist of docstrings is a
+guard nobody can trust, so the label claim stays evidence recorded here rather
+than a check that would have to be argued with.
 
 ---
 
