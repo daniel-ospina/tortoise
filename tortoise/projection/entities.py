@@ -1307,55 +1307,57 @@ def encode_json_record_props(props: dict) -> None:
             ensure_ascii=False)
 
 
-def stated_json_record_prop(payload, key: str) -> tuple[bool, object]:
-    """``(writes_property, value)`` for one `_POINT_JSON_RECORD_PROPS` key.
+def stated_json_record_prop(payload, key: str) -> tuple[str, object]:
+    """``(disposition, value)`` for one `_POINT_JSON_RECORD_PROPS` key.
 
-    The ONE rule for *"does this payload state a record this writer must apply,
-    and as what bytes"* — the pass-1a/1b create writer (`_upsert_point_props`,
-    which encodes before `_persist_extra_props` can consult the list policy) and
-    the pure replay fold (`_apply_one`'s creation arm, whose carry-forward must
-    mirror the writer's OUTCOME on a MERGE'd node) — never re-spelled at either
-    site (#5048).
+    The ONE rule for *"what does this writer dispatch for this key"* — the
+    create/upsert writer (`_upsert_point_props`, which encodes before
+    `_persist_extra_props` can consult the list policy) and the pure replay fold
+    (`_apply_one`) — never re-spelled at either site (#5048).
 
-    The answer IS the writer's outcome, spelled against every gate that sits
-    between the payload and the property:
+    The disposition IS the writer's outcome, spelled against every gate that
+    sits between the payload and the property. ``value`` carries the bytes to
+    store when the disposition is ``"set"`` (the encoder's output, not the
+    payload's raw spelling), and ``None`` otherwise:
 
-      * absent / ``None`` — `_persist_extra_props` skips a ``None`` value, so a
-        MERGE keeps whatever the node already holds: NO property written;
-      * a value ``_is_persistable_prop_value`` refuses (a map, bytes, a set, a
-        nested array of maps) — filtered before the SET, same outcome;
-      * a ``str`` — already canonical, passed through untouched, so only the
-        store-EXACTNESS gate is left (#7369 nulls a value `_value_ok` refuses,
-        e.g. a NUL/lone-surrogate string);
-      * a non-empty ``list``/``tuple`` — normalised through
-        `encode_json_record_props` (THE encoder), which POPS an empty list, so
-        an empty record list writes no property either — and the encoded
-        scalar is re-tested against the store gate for the same #7369 reason;
-      * any other shape — the encoder pops it, so nothing is written.
+      * ``"set"`` — the payload states a value the writer stores: a ``str``
+        already in canonical form, or a non-empty ``list``/``tuple`` normalised
+        through `encode_json_record_props` (THE encoder);
+      * ``"skip"`` — the payload states nothing the writer puts in its SET: an
+        absent key, an explicit ``None`` (`_persist_extra_props` drops those),
+        a value `_is_persistable_prop_value` refuses (a map, bytes, a set, a
+        nested array of maps), an empty list (the encoder POPS it), or any other
+        shape (the encoder pops it). On a MERGE'd node the stored value then
+        SURVIVES, untouched;
+      * ``"null"`` — the payload states a value the filter ACCEPTS but the
+        store cannot hold EXACTLY (#7369 nulls it before dispatch — a NUL /
+        lone-surrogate string), so the writer dispatches a null and the property
+        is REMOVED. Distinct from ``"skip"`` on purpose: the provenance fold
+        spells the same split, and conflating them is a live/replay divergence
+        in the direction that resurrects state.
 
-    Written for `_apply_one`'s omitted-key carry-forward (`#11239`), which needs
-    exactly this: the graph MERGE keeps the stored record whenever the payload
-    states none the writer can persist, and a fold that replaced the entry
-    outright would disagree with the graph on the same journal — a divergence
-    `check_consistency` then reports with the advice ("replay the journal") that
-    reproduces the graph.
+    Written for `_apply_one`'s two arms (`#11239`): the creation arm carries a
+    ``"skip"`` value forward (the graph MERGE keeps it) and drops a ``"null"``
+    one, while the revision arm folds ``"set"`` and treats ``"skip"``/``"null"``
+    as the absence the graph fold's ``n.<key> = NULL`` produces.
     """
     if not isinstance(payload, dict) or key not in payload:
-        return False, None
+        return "skip", None
     value = payload.get(key)
     if value is None or not _is_persistable_prop_value(value):
-        return False, None
+        return "skip", None
     if isinstance(value, str):
-        holds = _store_holds_prop_value(value)
-        return (True, value) if holds else (False, None)
+        return ("set", value) if _store_holds_prop_value(value) else ("null", None)
     if not isinstance(value, (list, tuple)):
-        return False, None
+        return "skip", None
     view = {key: value}
     encode_json_record_props(view)
     encoded = view.get(key)
-    if encoded is None or not _store_holds_prop_value(encoded):
-        return False, None
-    return True, encoded
+    if encoded is None:
+        return "skip", None
+    if not _store_holds_prop_value(encoded):
+        return "null", None
+    return "set", encoded
 
 
 def flatten_search_keys_prop(props: dict) -> None:
