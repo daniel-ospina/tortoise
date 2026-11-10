@@ -297,7 +297,7 @@ checker fails closed on any record `denominator_floors` key with **no** counterp
 `PRE-REGISTRATION.md`'s fenced `preregistration-pins` block — *"the record may not invent a REFUSED boundary the
 document does not state"*. **That fence does not hold five keys; it holds fifteen** — **six** E-keys at §3.6
 (`e6_declared_rows: 30` arrived with `#11673`) plus **nine** A-row floors at §3.7. ⚠️
-`PRE-REGISTRATION.md:679` still says *fourteen*, and *five* E-keys: that was true when the document
+`PRE-REGISTRATION.md:682` (it read `:679` before `#11688`'s base shift — the number rots, the quoted words do not) still says *fourteen*, and *five* E-keys: that was true when the document
 was frozen, and it stays that way because `preregistration.json` pins its `document_sha256` — a
 correction here would re-cut the digest of the registration this bundle reports against. So the
 count is re-derived from the record, not copied from the frozen prose. — an earlier revision of this paragraph said "exactly the five
@@ -309,7 +309,7 @@ pass on three objects"* returns.
 ⚠️ **Two of the five proposed keys are NEW, two already exist and one is the registered A5 floor — the amendment
 edits the set, it does not append five.** At
 this head the record holds `a1_objects`, `a2_candidates`, `a3_statements`, `a4_typed_statements`, `a5_points`,
-`a5_actors`, plus the **five** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (5 + 9 = 14). So:
+`a5_actors`, plus the **six** E-keys and `a1_rollup_queries` / `a2_decided_candidates` / `a3_event_root_coverage` (6 + 9 = 15). So:
 `a2_candidates` and `a3_statements` are **already there** (reuse, do not duplicate); `a1_labelled_pairs` and
 `a4_labelled_nodes` are the **two** genuinely new keys; **A5's floor is the already-registered `a5_actors: 30`** (the
 collision above — `a5_slots` is dropped, not registered); and `a4_typed_statements` must be **removed**, not left
@@ -926,7 +926,7 @@ the strongest evidence either is right.
 | §4.4 ↔ §6 I1 | the enum is derived, but I1 freezes the row shape | both: derive from `criteria[].id`, freeze the field set |
 | §3 ↔ #11454 | the prototype draws three tiers; the map lists 18 surfaces | the diagram is the *tier* view; the map is the *surface* view — one cross-reference, no second list |
 | §7 ↔ 02-scope | ⛔ **the claim "1:1, no new case invented" is FALSE** — §7 has **ten** cases, the scope **eight**; §7 added **E2E-9** (F3's retry/replay contract, a money-spending one) and **E2E-10** (the 402 state) with **no scope parent** | **02-scope gains E2E-9/E2E-10**, or §7 marks them derived additions that **C2's child must carry** — either way they get an owner, or decomposition drops them |
-| **§6 I1 ↔ the seven E-rows** | I1 freezes `floor_kind`, `max_realizations`, `corpus_id`; the seven E-rows carry **none of the three** today | state that `floor_kind`/`max_realizations` are **A-row-only** (or add them to all twelve) — §4.1 resolves only `corpus_id` |
+| **§6 I1 ↔ the seven E-rows** | I1 freezes `floor_kind`, `max_realizations`, `corpus_id`; the seven E-rows carry **none of the three** today | state that `floor_kind`/`max_realizations` are **A-row-only** (or add them to all thirteen) — §4.1 resolves only `corpus_id` |
 | **§6 I9 ↔ §5.3 / J2** | I9 names "J2's reader" and "the census/verdict tooling" as consumers, while §5.3 says C3's rollup is **EVIDENCE-ONLY** and J2 says **no new service is built** | narrow I9's consumers to **C3 + the scorer** (the reader is the existing graph path, not a new one) |
 | **§4.1 floors ↔ the checker's pin↔record contract** | the A-floors in the record alone are a **hard red** (no doc counterpart) | both homes + `document_sha256`, same commit (§4.1) |
 | §2 W4 ↔ 02-scope D3 | W4 is a workflow, not a decision | W4 routes; it does not adopt |
