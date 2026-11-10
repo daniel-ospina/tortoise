@@ -777,7 +777,10 @@ class TestTheInventoryTheScopeCites:
 
         # 4. The guard is REACHABLE end-to-end: a declaration naming one of the absent layers fails closed
         #    with the message that sends the reader to §1.1. Before the fix this input bucketed cleanly as
-        #    `("subject", "object")` — a silent wrong answer, which is the defect.
+        #    `("subject", "subject")` — a silent wrong answer, which is the defect. ⛔ Both endpoints: the
+        #    pre-fix loop mapped ALL SEVEN `CORE_ENTITY_TYPES` to `subject`, and the canonical legs below it
+        #    only ever write the `core:`-PREFIXED spelling, so bare `Object` was never re-keyed to `object`.
+        #    Re-derive it, do not read it back — an earlier revision of this comment said `object` here.
         with pytest.raises(AssertionError, match="axis is unknown"):
             _partition(
                 [{"fromKind": "Action", "toKind": "Object", "predicate": "probe", "_ns": "probe"}],
