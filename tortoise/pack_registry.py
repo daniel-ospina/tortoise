@@ -3657,7 +3657,9 @@ class PackRegistry:
         # expand_kind("dev:issue")` returns it. The Subject row was the anomaly,
         # not the Object row. Declining the seed would leave the stated contract
         # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
-        # the four §6 rows while the other three already behave this way. Applied
+        # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
+        # declares only `Object`/`Document`/`Subject`, so `Point` is this module's
+        # extension) while the other three already behave this way. Applied
         # for UNIFORMITY, with the widening named rather than denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):

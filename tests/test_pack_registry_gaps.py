@@ -2290,13 +2290,20 @@ class TestCoreHierarchy:
     def test_the_object_and_point_rows_overlap_exactly(self, shipped):
         """The FOUR core kinds that are children of BOTH `Object` and `Point`.
 
-        The failure this prevents: the §6 Object↔Point overlap is a CROSS-LAYER
-        read change — `expand_kind("Object")` now carries point kinds, so an
-        object read for `kind="Object"` also returns `:Point` rows stored with
-        `pointKind='goal'`/`'target'`. Measured as `[]` before **#11667**
-        (`expand_kind("Object") == ["Object"]`); the widening cited here is
-        already in `main` via #11667, so this PR's own before-state is the
-        closure, not `[]` — the `[]` is #11667's measurement.
+        The failure this prevents: `expand_kind("Object")` carrying point-kind
+        NAMES changes what a `kind="Object"` read matches, and nothing named it.
+        ⚠️ But the consequence is LABEL-SCOPED, not cross-layer — every read is
+        `MATCH (n:<label>)` for its own `entity_type`
+        (`read_ledger.label_for_entity_type`), so a read for
+        `entity_type="object"`, `kind="Object"` now also matches **`:Object` rows**
+        whose `objectKind` is `goal`/`plan`/`strategy`/`target`; it does NOT return
+        `:Point` rows. A `sdk.query(kind="Object")` (a `MATCH (n:Point)` read)
+        matches **`:Point` rows** whose `pointKind` is one of those four. The two
+        read paths widen inside their own label space.
+        ⚠️ And the cause is LEG B, not the closure: `CORE_SUBCLASSES["Object"]` IS
+        `CANONICAL_OBJECT_KINDS`, so registering the §6 rows already put these four
+        in `expand_kind("Object")` at ONE hop; the closure only adds the pack kinds
+        beneath them.
 
         ⚠ It is a consequence of the mandated contract, not an implementation
         error — #7813's ruling is that confidence propagates across
