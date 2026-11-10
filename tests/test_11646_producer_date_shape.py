@@ -719,9 +719,9 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     #11646: ``_created_sort_key`` bucketed the shape as unparseable, so
     ``validate_validity_window`` (which orders with the SAME measure) skipped
     the pair on every host. Now the bound IS orderable, so a MIXED PAIR whose
-    two bounds fall within the reader's zone offset of each other can be
-    refused on one host and accepted on another — only a pair that close
-    diverges, which the scoping note on the assertions below states.
+    two bounds are closer together than the DIFFERENCE between two hosts' UTC
+    offsets can be refused on one host and accepted on another — only a pair
+    that close diverges; bounds further apart than that agree everywhere.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
     ruling or giving the producer's shape its own deterministic anchor — the
@@ -761,9 +761,10 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     assert all("(0," in k for k, _ in observed.values()), observed
     # the epoch — and therefore the window verdict — is decided by the HOST
     assert len({k for k, _ in observed.values()}) == 3, observed
-    # ⚠ scoped: only a pair this CLOSE diverges. Bounds further apart than the
-    # reader's zone offset agree everywhere, so this is not "a mixed window is
-    # host-dependent" in general (review of PR 11705, finding 4).
+    # ⚠ scoped: only a pair this CLOSE diverges — the criterion is the
+    # DIFFERENCE between two hosts' UTC offsets (up to ~26h), not one reader's
+    # own offset. Bounds further apart than that agree everywhere, so this is not
+    # "a mixed window is host-dependent" in general (review of PR 11705).
     assert observed["UTC"][1] == "refused"
     assert observed["Asia/Kolkata"][1] == "accepted"
     assert observed["America/Los_Angeles"][1] == "refused"

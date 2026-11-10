@@ -512,9 +512,9 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     date-TIME, and #3982 recorded that such a value stays NAIVE, so its epoch is
     read in the READER's zone. #11646 made that shape ORDERABLE here for the
     first time — before it, the value bucketed as unparseable and this guard
-    skipped the pair on every host — so a mixed pair whose two bounds fall
-    within the reader's zone offset of each other CAN now be refused on one
-    host and accepted on another (measured: the pair
+    skipped the pair on every host — so a mixed pair whose two bounds are
+    closer together than the DIFFERENCE between the two hosts' UTC offsets CAN
+    now be refused on one host and accepted on another (measured: the pair
     ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
     ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
     ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three). That is the

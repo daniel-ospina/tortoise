@@ -3662,10 +3662,10 @@ _DECORATION_TIMEOUT_MS = 200
 #:
 #: which makes consumers of this key answer DIFFERENTLY per host. The key
 #: itself is host-dependent for the value above, so a guard built on it returns
-#: a different VERDICT only for a mixed pair whose two bounds fall within the
-#: reader's zone offset of each other — not only ``sdk.supersede_point``'s
-#: inversion guard (inverted on UTC and ``America/Los_Angeles``, not inverted on
-#: ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
+#: a different VERDICT only for a mixed pair whose two bounds are closer
+#: together than the DIFFERENCE between the two hosts' UTC offsets (up to
+#: ~26h) — not only ``sdk.supersede_point``'s inversion guard (inverted on UTC
+#: and ``America/Los_Angeles``, not inverted on ``Asia/Kolkata``), but also ``commit_schema.validate_validity_window`` (the
 #: write door reached by ``create_point`` / ``update_point`` /
 #: ``invalidate_point`` / ``retract_point`` / ``mining._temporal_wire``) and
 #: audit check 8 (``inverted_validity_window``), which order with this same

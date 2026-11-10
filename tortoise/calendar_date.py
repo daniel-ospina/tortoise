@@ -454,10 +454,15 @@ def _string_instant(s: str) -> datetime | None:
     #
     # ⚠ The claim is scoped to THIS arm, not universal: the compact /
     # ISO-week date with an OFFSET and no time is whole-value and day-dated
-    # (:func:`_compact_date_offset`) yet still NOT orderable —
-    # ``_created_sort_key``'s length-and-separator gate needs a ``-``, ``T`` or
-    # ``/``, which ``20230520+05:00`` does not have. That gap predates #11646,
-    # is untouched here, and is named rather than left to be rediscovered as a
+    # (:func:`_compact_date_offset`) yet NOT always orderable, and WHICH
+    # spellings are is decided by ``_created_sort_key``'s length-and-separator
+    # gate (it needs a ``-``, ``T`` or ``/``). A ``+``-spelled COMPACT form has
+    # none — ``20230520+05:00`` and ``2026W243+05:00`` never reach the gate and
+    # bucket as ``(1, text)`` — while ``20230520-05:00`` arrives because the
+    # NEGATIVE offset supplies the ``-``, and the DASHED ISO-week
+    # ``2023-W43-2+05:00`` arrives by its own dashes. So the gap is
+    # sign-and-spelling dependent, not a uniform class. It predates #11646, is
+    # untouched here, and is named rather than left to be rediscovered as a
     # violation of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:
         try:
