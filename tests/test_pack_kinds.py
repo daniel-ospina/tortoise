@@ -1195,9 +1195,31 @@ class TestWorkedExampleV3Fixture:
         # fixture's cross-pack `equivalentTo` bridge is gone. The legacy
         # `dev:requirement` spelling still rides the expansion as a READ alias
         # for stored data (LEGACY_KIND_ALIASES); it is not a declared kind.
-        assert registry.expand_kind("product-strategy:requirement") == [
-            "product-strategy:requirement", "dev:requirement"
-        ]
+        #
+        # #11000: the bucket is now ALSO widened by the kind's declared
+        # `subclassOf: WorkItem` — both spellings of the parent — so this is an
+        # additive-content pin, not an exact list (an exact list here re-encodes
+        # "the parent is missing" and would have to be re-broken by hand to
+        # widen the expansion again).
+        #
+        # The closure (#11000 R6) adds the parent's ANCESTORS too (`Object`,
+        # because `WorkItem ⊑ Object` per ONTOLOGY §6) and the bare spelling,
+        # so the required set is asserted by containment and the bucket is
+        # checked for the one thing it must never contain: a SIBLING of the
+        # parent (`dev:issue`, `dev:epic`, … are WorkItems, not requirements).
+        _req = registry.expand_kind("product-strategy:requirement")
+        assert set(_req) >= {
+            "product-strategy:requirement", "dev:requirement", "requirement",
+            "WorkItem", "core:WorkItem",
+        }, _req
+        _siblings = {f"{p.namespace}:{c}"
+                     for p in registry.packs.values()
+                     for c, parent in p.kind_subclasses.items()
+                     if parent == "WorkItem"} - {"product-strategy:requirement"}
+        assert _siblings, "no sibling WorkItem kind exists — the guard is vacuous"
+        assert not (_siblings & set(_req)), (
+            "the expansion copied the parent's bucket instead of appending the "
+            f"parent's name: {sorted(_siblings & set(_req))}")
         assert "dev:requirement" not in registry._all_known_kinds()
 
 
