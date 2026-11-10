@@ -588,7 +588,7 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: takes the guarded form, because its purpose is that a reader re-runs it. That
 #: is why `docs/plans/2026-09-26-5042-…:208` and
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
-#: four entries below do not.
+#: three entries below do not.
 #:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
@@ -612,27 +612,19 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
-        # #11744 follow-up: a MEASUREMENT transcript, not an instruction. The plan
-        # doc quotes the command that produced the recorded FAIL ("Measured, not
-        # argued — the re-take made the required check fail"), and that command DID
-        # resolve where it ran: the box's `python3` was >= 3.12. The census flags
-        # the FORM, because a reader on a pre-3.12 ambient gets the tool's refusal
-        # instead — so rewriting this line to `uv run python` would falsify the
-        # record in order to clear a red, which is the failure mode this census's
-        # own doctrine forbids.
-        # ⛔ NOT because the guard arrived later: the guard landed 2026-10-21
-        # (`a6085af8459`) and the doc-scan leg 2026-10-08 (`21617e6222`), both
-        # BEFORE this doc (2026-11-10). The line was a census red from the day it
-        # appeared; the exemption is what makes the record keepable.
-        # Third tracked instance of the class on #9159 — after
-        # `tools/ci_check_repair.py`'s #9118 comment and then
-        # `docs/plans/2026-10-18-7951-delete-point-outbox.md:210` — recorded there
-        # as a comment rather than filed as a peer.
-        (
-            "docs/plans/2026-11-10-issue-11689-e1e2-owned-floors.md",
-            "$ python3 tools/capstone_preregistration_check.py --dir "
-            "docs/evidence/7949-capstone \\",
-        ),
+        # RETIRED — do NOT re-add this key (#11757). It exempted the plan doc's
+        # `$ python3 tools/capstone_preregistration_check.py …` transcript. #11756
+        # then rewrote that line to `uv run python` (measured: the new form
+        # reproduces the block's recorded FAIL output verbatim, so the record still
+        # describes a command that runs), which left this key matching NO live line —
+        # `test_the_record_exemptions_all_still_match_a_live_line` reddened main.
+        # The exemption is dead weight now, not protection: the doc no longer
+        # carries the bare form, so the doc-scan test does not need it either.
+        # ⛔ Re-adding THIS key reddens the dead-key test again, because its text
+        # (`$ python3 …`) no longer appears in the doc. Membership is the exact
+        # stripped line, so an exemption can only be revived by restoring the line
+        # it names — never by re-declaring the key. If that record is ever put back
+        # in the bare form, re-derive the key from the live line and say why there.
     }
 )
 
