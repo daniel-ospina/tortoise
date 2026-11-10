@@ -2094,11 +2094,14 @@ class TestCoreHierarchy:
         test is the correction: `_validate` does restrict a `subclassOf` parent
         to core kinds (true — pinned below), but ALL 16 of the
         `CANONICAL_OBJECT_KINDS` are THEMSELVES children of `Object` (the row is
-        that canonical set), so every declared pair is the chain
+        that canonical set), so a declared pair is the chain
         `pack kind ⊑ core child ⊑ Object`
-        (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
-        17 declared pairs had a parent that is an Object child, and
-        `expand_kind("Object")` carried none of them.
+        (`dev:bug ⊑ Problem ⊑ Object`) — but not EVERY pair:
+        `product-strategy:architecture ⊑ Document` has no `Object` in its chain
+        (`Document` is a `CORE_ENTITY_TYPES` member with no `CORE_SUBCLASSES`
+        row at all, by design — a document is a `:Source`). Measured at the
+        one-hop head: 16 of the 17 declared pairs had a parent that is an Object
+        child, and `expand_kind("Object")` carried none of them.
 
         Both directions are asserted, because they are different relations:
         DOWN (a root gathers its whole subtree) and UP (a child inherits its
