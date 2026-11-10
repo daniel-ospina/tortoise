@@ -44,9 +44,9 @@ jobs:
 
   census-drift:
     # #8290 / #11576 review (P2): two prose notes in `tortoise/activation_scorecard.py`
-    # and `tortoise/hosted_api.py` state a MEASUREMENT of the tracked tree (449
-    # distinct `hosted_api.py:<N>` cite targets, 434 below the pivot, 14 above, from
-    # 179 citing files), and `tools/hosted_api_cite_census.py --check` is the command
+    # and `tortoise/hosted_api.py` state a MEASUREMENT of the tracked tree (456
+    # distinct `hosted_api.py:<N>` cite targets, 441 below the pivot, 14 above, from
+    # 185 citing files), and `tools/hosted_api_cite_census.py --check` is the command
     # that answers whether they are still true. It is wired HERE — nightly, on main,
     # REPORT-ONLY — and deliberately NOT as a per-PR check: the population belongs to
     # EVERY tracked file, so a per-PR assertion reds PRs that touch neither note and

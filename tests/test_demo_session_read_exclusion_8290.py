@@ -798,23 +798,53 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     at all. Mutating ``if stated == want:`` to ``if True:`` left ``--check``
     reporting "every stated figure is the measured one" with RC 0 and the whole
     fast suite green. The two arms below are the discriminating pair.
+
+    ⛔ THE SHIPPED FIGURES ARE DELIBERATELY NOT ASSERTED HERE. They describe a
+    population that belongs to EVERY tracked file — any file adding a
+    ``hosted_api.py:<N>`` cite moves it (measured: ~1 commit in 30) — so comparing
+    the shipped notes to the tree in the fast suite reds a PR whose only remedy is
+    prose in a module it never opened. That is the FALSE BLOCK #11576 removed: see
+    `tools/hosted_api_cite_census.py`'s docstring, the note in
+    `tortoise/activation_scorecard.py`, and `.github/workflows/main-health-nightly.yml`
+    (`census-drift` — nightly, report-only, "deliberately NOT as a per-PR check").
+    The arm below was added back in that same commit and re-created the block: it
+    redded #11685, a docs PR whose eight markdown artifacts legitimately cite seven
+    more `hosted_api.py` lines (population 449 → 456). Arm 1 therefore proves the
+    ROUND TRIP on the throwaway copies — restate to the measured census, then
+    `--check` is green — which is all this test can own.
     """
     from tools import hosted_api_cite_census as census_mod
 
     repo = _census_tmp_repo(tmp_path, monkeypatch)
     measured = census_mod.census(_PIVOT)
 
-    # arm 1: the notes as written agree with the tree — green.
+    # arm 1: notes that AGREE with the census are green. The copies are brought
+    # into agreement first, so the arm holds whether or not the shipped notes
+    # happen to be current at this head.
+    rc = census_mod._sweep(measured, refresh=True)
+    assert rc in (0, 1), (
+        f"a restatement pass returned {rc}: it must be 0 (nothing stale) or 1 "
+        "(rewrote), never a refusal over measurable figures")
     assert census_mod._sweep(measured, refresh=False) == 0, (
-        "the shipped notes must be in agreement with the measured census")
+        "the notes agree with the measured census and `--check` still called them "
+        "stale — the verb is not reading the sentence it just wrote")
 
     # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
     scorecard = repo / census_mod._SCORECARD
     text = scorecard.read_text(encoding="utf-8")
-    assert "**434**" in text, (
-        "the BELOW count this arm degrades must still be the figure the note "
-        "states; re-point the degradation at the new one")
-    scorecard.write_text(text.replace("**434**", "**999**", 1), encoding="utf-8")
+    # DERIVED, never a literal: the degradation must track the figure the note
+    # actually states, so a `--refresh` anywhere in the tree cannot silently turn
+    # this arm into a no-op (the previous `**434**` literal had to be re-pointed by
+    # hand on every restatement).
+    below = measured["below_pivot"]
+    assert _stated(r"\*\*(\d+)\*\* have a number smaller", text) == below, (
+        f"arm 1's restatement left the BELOW count stating something other than "
+        f"the measured {below} — it cannot be degraded")
+    degraded = text.replace(f"**{below}**", "**999**", 1)
+    assert degraded != text, (
+        f"the BELOW count sentence does not spell its figure as `**{below}**` — "
+        "the degradation would be a no-op")
+    scorecard.write_text(degraded, encoding="utf-8")
     assert census_mod._sweep(measured, refresh=False) == 1, (
         "`--check` green-lit a note whose stated figure is not the measured one — "
         "that is the false green the nightly census-drift job exists to prevent")
