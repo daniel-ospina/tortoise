@@ -2916,27 +2916,57 @@ def _licence_keys_the_code_emits() -> set[str]:
 
     ⛔ Read from the AST, not hard-coded, because a hard-coded list is the weaker form of
     exactly this pin: it stays green when the code grows a field the committed artifact
-    does not carry. The dict literal is the one passed to `licence.append(...)` in
-    `assess()`; every key is a string constant, so a rename, an addition or a removal
-    moves this set and reds the artifact comparison below.
+    does not carry. The dict literal is the one passed to `licence.append(...)` **inside
+    `assess()`** — the receiver and the enclosing function are both checked, because
+    "any `X.append({...})` whose dict mentions `population`" also matches unrelated row
+    builders, and then this pin reds on a change that never touches the licence path.
+
+    ⛔ AND A PIN LIMITATION MUST NEVER READ AS ARTIFACT DRIFT. If the dict carries a key
+    that is not a string constant (`**spread`, a computed name), the emitted set cannot
+    be read from the AST. Dropping those entries silently would leave a PARTIAL set, and
+    the comparison downstream would then accuse `before.log` of having been produced by a
+    different tree — when the log is a faithful run and the parser is the thing that
+    fell short. That case raises its own, different error.
     """
     source = (ROOT / "tortoise" / "cache_eviction.py").read_text(encoding="utf-8")
+    assess = next(
+        (node for node in ast.parse(source).body
+         if isinstance(node, ast.FunctionDef) and node.name == "assess"),
+        None,
+    )
+    assert assess is not None, (
+        "`assess()` is no longer a module-level function in tortoise/cache_eviction.py, so "
+        "this pin cannot locate the licence entry it compares against — re-derive the pin"
+    )
     found: list[set[str]] = []
-    for node in ast.walk(ast.parse(source)):
+    for node in ast.walk(assess):
         if not (isinstance(node, ast.Call)
                 and isinstance(node.func, ast.Attribute)
                 and node.func.attr == "append"
+                and isinstance(node.func.value, ast.Name)
+                and node.func.value.id == "licence"
                 and node.args and isinstance(node.args[0], ast.Dict)):
             continue
-        keys = {k.value for k in node.args[0].keys
-                if isinstance(k, ast.Constant) and isinstance(k.value, str)}
-        # The licence entry is the only `append({...})` whose dict carries `population`.
-        if "population" in keys:
-            found.append(keys)
+        literal = node.args[0]
+        unreadable = [
+            key.dump() if key is not None else "**spread"
+            for key in literal.keys
+            if not (isinstance(key, ast.Constant) and isinstance(key.value, str))
+        ]
+        assert not unreadable, (
+            "the `licence.append({...})` dict in `assess()` carries key(s) this pin cannot "
+            f"read as string constants: {unreadable}. ⛔ THIS IS A PIN LIMITATION, NOT "
+            "EVIDENCE THAT THE ARTIFACT DRIFTED — `docs/evidence/10976-licence/*.log` may be "
+            "perfectly faithful and must NOT be re-captured on this message. Re-derive the "
+            "pin (compare against a runtime-constructed entry, which sees whatever the dict "
+            "actually emits) instead of widening or deleting this assertion.\n"
+            f"{ast.unparse(literal)}"
+        )
+        found.append({key.value for key in literal.keys})
     assert len(found) == 1, (
-        "expected exactly one `licence.append({...})` carrying a 'population' key in "
-        f"`assess()`; found {len(found)} — the pin cannot locate the entry it compares "
-        "against, so re-derive it rather than widening this assertion"
+        "expected exactly one `licence.append({...})` call inside `assess()`, found "
+        f"{len(found)} — the pin cannot unambiguously locate the entry it compares against, "
+        "so re-derive it rather than widening this assertion"
     )
     return found[0]
 
