@@ -5858,6 +5858,15 @@ class HolderRead:
     # in provenance; both take that arm), exactly like `budget_exhausted` /
     # `truncation_widenable` on `Surface`, which exist for this same reason.
     registry_error: str | None = None
+    # WHICH STORE ANSWERED THE LIVENESS READ, and which store GROUP could not be
+    # read (#11202). `source` above is the BOARD read's provenance (rebuild vs
+    # cache), which says nothing about the liveness underneath it — on a cell the
+    # board answers from the PROCESS TABLE alone while both cmux grammars refuse,
+    # and a note that printed only `board source: rebuilt` let that CLEAN read as
+    # if every store had been read. `None` / `()` mean the board did not publish
+    # them (an older writer): no claim is printed, never "no stores unreadable".
+    liveness_source: str | None = None
+    liveness_unreadable: tuple[str, ...] = ()
 
 
 def _board_can_answer(state: dict) -> str:
@@ -6573,7 +6582,43 @@ def read_holders(issue: int, *, slug: str | None, repo_root: str,
         workspaces_measured=(
             (state.get("reconciliation") or {}).get("workspaces_measured")
             is True),
+        # #11202: the LIVENESS read's own provenance, read with the same strict
+        # polarity — a non-blank STRING only, so a board that recorded nothing
+        # prints nothing and a malformed one cannot become a store name.
+        liveness_source=_board_text(
+            state.get("reconciliation") or {}, "liveness_source"),
+        liveness_unreadable=_board_names(
+            state.get("reconciliation") or {}, "liveness_unreadable"),
     )
+
+
+def _board_text(rec: dict, key: str) -> str | None:
+    """One of the board's published PROVENANCE strings, or ``None`` (#11202).
+
+    ⛔ ABSENT IS NOT EMPTY AND IS NEVER A CLAIM. A board from an older writer
+    carries no key, and a malformed one may carry a non-string; both take the
+    `None` arm so the note prints nothing rather than inventing a store name. A
+    blank string is collapsed to `None` for the same reason `_board_registry_error`
+    does it: `build_state` writes `""` when nothing answered, and `""` is not a
+    fact about a store.
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if not isinstance(value, str) or not value.strip():
+        return None
+    return value
+
+
+def _board_names(rec: dict, key: str) -> tuple[str, ...]:
+    """A board-published LIST of NAMES (store groups), or ``()`` (#11202).
+
+    Strict, for the same reason: only a list/tuple of non-blank strings is a
+    measurement. Anything else is `()` — which prints no claim.
+    """
+    value = rec.get(key) if isinstance(rec, dict) else None
+    if not isinstance(value, (list, tuple)):
+        return ()
+    names = tuple(v for v in value if isinstance(v, str) and v.strip())
+    return names if len(names) == len(value) else ()
 
 
 def _holder_gate_note(read: HolderRead) -> str:
@@ -6589,6 +6634,14 @@ def _holder_gate_note(read: HolderRead) -> str:
     makes a roster of one VISIBLY a roster of one. It changes no verdict — the
     gate still keys on `registry_measured` — so it is disclosure, not a
     dismissal switch.
+
+    ⛔ AND THE LIVENESS READ'S STORE, BESIDE THAT (#11202). `board source` is the
+    BOARD read; the liveness underneath it may have come from a single store while
+    another refused — measured on a cell, where the board answers from
+    `process-table` and both cmux grammars refuse, leaving a durable store that a
+    lane not run by this user would appear in unreadable. A CLEAN that rests on one
+    store must say so, or it reads as a CLEAN that read them all and an INCOMPLETE
+    is mistaken for "no lanes". Still disclosure: the verdict keys on `measured`.
     """
     counts = ""
     if read.roster_rows is not None:
@@ -6605,6 +6658,19 @@ def _holder_gate_note(read: HolderRead) -> str:
             # workspace has no roster row at all, so `N vs M` printed a
             # discrepancy in the HEALTHY case — the opposite of the intent.
             counts += f"; live cmux workspaces: {read.workspaces_count}"
+    # ⛔ AND WHICH STORE THE LIVENESS CAME FROM, BESIDE WHICH DID NOT ANSWER
+    # (#11202). `board source` is the BOARD read; a CLEAN that rests on ONE store
+    # (a cell: `process-table`, both cmux grammars refusing) looked identical to a
+    # CLEAN that read every store, so an INCOMPLETE could be mistaken for "no
+    # lanes" — and, worse, a CLEAN could be read as complete. Disclosure only: the
+    # gate still keys on `measured`, which the board's own rule decides.
+    # Kept SHORT on purpose: this clause rides a note that is already near the
+    # harness's first-cause window, and every character here is spent before the
+    # per-lane reason that decided a refusal (see `scan_issue_surface`).
+    if read.liveness_source:
+        counts += f"; liveness: {read.liveness_source}"
+    if read.liveness_unreadable:
+        counts += "; unreadable store(s): " + ", ".join(read.liveness_unreadable)
     if not read.measured:
         return (
             "claim gate: the FLEET BOARD could not answer — "
@@ -6740,7 +6806,14 @@ def scan_issue_surface(
         detail = "; ".join(
             f"lane {holder.lane!r}: {holder.reason}" for holder in unanswered
         )
-        problem = f"{holder_note}; {detail}"
+        # ⛔ THE DECIDING ARM LEADS (#11202 review). `holder_note` carries the
+        # liveness stores' provenance now, so composing it FIRST pushed the
+        # per-lane reason past the harness's 320-char first-cause window —
+        # measured at cell values: the reason began at char 335 of a roughly
+        # 390-char note, so a bounded reader saw provenance and NO cause at all.
+        # The reason is what decided this refusal, so it comes first; the same
+        # ordering rule `fleet_state.live_sessions` applies to a poisoned store.
+        problem = f"{detail}; {holder_note}"
     if problem:
         # ⛔ NEVER CLOBBER AN EXISTING REASON. `incomplete()` OVERWRITES `note`,
         # so if a caller passes a surface that is ALREADY INCOMPLETE (today's

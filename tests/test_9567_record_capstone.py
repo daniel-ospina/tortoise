@@ -59,12 +59,30 @@ from typing import Any
 import pytest
 
 from tortoise import cache_projection as cp
+from tortoise import log as tlog
 from tortoise import monitoring, record_writer
 from tortoise import record_projection as rp
+from tortoise.projection import FalkorProjection, _GuardedGraph
 from tortoise.record_writer import use_record_tenant
 from tortoise.sdk import TortoiseSDK
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+
+#: The four write doors `_instrument` patches, snapshotted as they are at IMPORT
+#: time — i.e. before any fixture in this module can install an instrument.
+#: `test_D3_the_capture_instrument_is_not_left_installed` compares the live
+#: attributes against these to prove the module-scoped capture does not leave its
+#: wrappers behind for D4–D12. Identity, not name: the wrappers are closures, so
+#: only the original object can tell "patched" from "restored".
+_UNPATCHED_AT_IMPORT = tuple(
+    (door, owner, attr, getattr(owner, attr))
+    for door, owner, attr in (
+        ("journal", tlog.EventLog, "append"),
+        ("record", record_writer, "write_live_record"),
+        ("fold", FalkorProjection, "apply"),
+        ("cache", _GuardedGraph, "query"),
+    )
+)
 
 #: The record's database — the arming surface `test_9078` and the CI job use.
 RECORD_DB_ENV = "TEST_RECORD_DB_URI"
@@ -340,11 +358,16 @@ def test_D2_one_capture_writes_the_record_with_zero_write_failures(armed):
 
 
 def test_D3_no_write_path_bypasses_the_record():
-    """D3: every capture door writes the record (the wiring gate, executed).
+    """D3's STATIC half: every capture door writes the record (the gate, run).
 
     The gate is the production tool; running it is the measurement.
     Falsifier: a live door that drops the journal ordinal (`seq=None`) → the
     gate exits 1 naming the call site.
+
+    ⛔ This is a WIRING check, not the ordering the criterion also names
+    ("… in that order"). It cannot observe an order, which is why the four
+    `test_D3_order_*` legs below measure the same write path at runtime with
+    every door instrumented (#9567 D3, #11477).
     """
     proc = subprocess.run(
         [sys.executable, str(REPO_ROOT / "tools" / "record_wiring_check.py")],
@@ -358,8 +381,716 @@ def test_D3_no_write_path_bypasses_the_record():
     assert "WIRED" in proc.stdout, proc.stdout
 
 
-# ── D4/D5/D6 — the rebuild from the record only ────────────────────────────
+# ── D3's ORDERING half — the three doors, observed at RUNTIME ──────────────
+#
+# The gate above answers "does a production caller reach the record". It cannot
+# answer the other half of the criterion — *"the capture writes journal →
+# record → cache in that order, with no cache-only path"* — because a static
+# scan has no order to see (#9567 comment 6713293528 §2.1 grades D3 NOT
+# MEASURED for exactly this reason; #11477 carries the item). So these legs
+# instrument the three real doors on one real capture and assert the order that
+# was OBSERVED, not the order the source claims.
+#
+# What the run measured on this tree, and what is therefore NOT claimed:
+#
+# * `journal → record` holds for every record the capture appends (leg 1).
+# * A journal-first door writes the cache after its record (leg 2).
+# * Some folds DO run ahead of their own append (`_create_entity`'s Object and
+#   Event registration blocks — the KNOWN DEVIATIONS block at the top of
+#   `tortoise/sdk.py`), so the criterion's letter is NOT satisfied on this path.
+#   What leg 3 asserts is the property the contract can actually hold those
+#   arms to: **a fold that runs ahead of its append must DECLARE that it is
+#   doing so** (a lane is open), and the set of such folds that declare a
+#   JOURNAL-FIRST lane is the recorded deviation population — PINNED, so the
+#   leg reds when it grows (a fresh contradiction) or shrinks (a deviation
+#   closed, and D3 must be re-graded). A silent cache-ahead write is the §17.1
+#   failure; a declared journal-first one is a recorded deviation with a
+#   carrier. The census of lanes lives in the run's artifact, never as a
+#   constant here (DoD rule 4); the *set* is a pin, not a count.
+# * The criterion's `with no cache-only path` half is measured by the fourth
+#   leg at the FLOOR the trace can support: **no mutating cache statement
+#   precedes** the capture's first journal append and first APPLIED record
+#   write. It is NOT a per-write attribution, and this comment used to claim
+#   one — every other statement of this leg's scope (its docstring, its name,
+#   the artifact's §2 table, §4, §6.2 F6) already said FLOOR. A cache write
+#   injected MID-capture, after some append and its record have landed, leaves
+#   the leg green: call order carries no descriptor tying a raw-handle statement
+#   to the append it skipped. The residue is measured and carried by #11477.
 
+
+#: The `(event_type, lane)` pairs that fold AHEAD of their own append while
+#: declaring a JOURNAL-FIRST lane — the direction D3 forbids. This is NOT a
+#: licence and not a green: it is the tree's RECORDED deviation set
+#: (`tortoise/sdk.py`, module-top "KNOWN DEVIATIONS" block — `_create_entity`'s
+#: Object/Event registration blocks fold first and are left as-is because
+#: reordering them rides the #2194/#2295/#2309 first-registration hardening).
+#: Pinned as a `(event_type, lane)` SET, never a count, so the leg reds in every
+#: direction: a pair that is new (a fresh contradiction — e.g. a CAPTURE door
+#: re-declaring its `_live_write_scope` reason while it still folds first; NOT
+#: an `_apply_and_journal` reorder, which is not on the capture path and whose
+#: leg-2 probe is trimmed out of this trace), or a pair that has GONE (a
+#: deviation closed or re-declared apply-first — then D3 must be re-graded,
+#: #9567/#11477).
+_KNOWN_AHEAD_DEVIATIONS = frozenset({
+    ("EventRecorded", "create_entity"),
+    ("ObjectRegistered", "create_entity"),
+})
+
+#: The steps `tortoise/sdk.py`'s KNOWN DEVIATIONS block actually NAMES as apply-first
+#: (`:4836`: *"`TortoiseSDK._create_entity`'s Object/**Subject**/Event registration
+#: blocks are apply-first"*), all under the `create_entity` lane (`sdk.py:43309`).
+#: Kept SEPARATE from the pin above on purpose: the pin is the population THIS
+#: capture exercises, and a capture that creates a Subject legitimately yields
+#: `("SubjectAdded", "create_entity")` without that being a fresh violation. The
+#: failure message consults this set so an observed-but-not-pinned pair is
+#: reported as *a recorded deviation this capture newly exercises* (extend the
+#: pin after review) and only an UNRECORDED pair is called a violation.
+_RECORDED_DEVIATION_EVENT_TYPES = frozenset(
+    {"ObjectRegistered", "SubjectAdded", "EventRecorded"}
+)
+
+
+def _ahead_population_advice(gained: set, lost: set) -> str:
+    """The remediation text for a moved journal-first-ahead population.
+
+    The tree ALREADY records these arms as apply-first (`sdk.py:4836`: the
+    Object/**Subject**/Event registration blocks, all under `create_entity` at
+    `sdk.py:43309`). Three shapes need three different remedies, and conflating
+    them printed contradictory advice for one change (review cycle 3):
+
+    * the pin carried this pair and still does, but the capture now drives it →
+      RECORDED, newly exercised (extend the pin);
+    * the pin carried the event type under a DIFFERENT lane → LANE MOVED (a
+      rename, or an arm newly claiming journal-first) — never reported as both
+      "a fresh violation" and "the deviation was closed";
+    * nothing records it → a fresh violation.
+    """
+    recorded = sorted(
+        p for p in gained if p[1] == "create_entity" and p[0] in _RECORDED_DEVIATION_EVENT_TYPES
+    )
+    # Event types the PIN carried under the recorded lane and no longer does.
+    pin_recorded_types = {
+        p[0] for p in lost if p[1] == "create_entity" and p[0] in _RECORDED_DEVIATION_EVENT_TYPES
+    }
+    moved = sorted(p for p in gained if p[0] in pin_recorded_types)
+    unrecorded = sorted(p for p in gained if p not in recorded and p not in moved)
+    # Subtract only the types that actually MOVED. Subtracting `pin_recorded_types`
+    # unconditionally emptied `lost` for this pin, making the GONE branch dead code
+    # and leaving a genuinely-closed deviation with no advice at all (review cycle 4).
+    moved_types = {p[0] for p in moved}
+    lost = {p for p in lost if p[0] not in moved_types}
+    lines = []
+    if moved:
+        lines.append(
+            f"  \u2022 LANE MOVED on a recorded event type: {moved}. The "
+            "KNOWN DEVIATIONS block at `tortoise/sdk.py:4835` records this arm as "
+            "apply-first under `create_entity`, and the pin no longer carries that "
+            "lane. The deviation's lane was RENAMED: update the KNOWN DEVIATIONS "
+            "block at `sdk.py:4835` and extend the pin."
+        )
+    if recorded:
+        lines.append(
+            f"  \u2022 RECORDED, newly exercised by this capture: {recorded}. The "
+            "KNOWN DEVIATIONS block at the top of `tortoise/sdk.py` names these "
+            "arms, so this is a deviation being OBSERVED, not a fresh violation. "
+            "Extend `_KNOWN_AHEAD_DEVIATIONS` so the pin covers the population "
+            "the capture actually drives."
+        )
+    if unrecorded:
+        lines.append(
+            f"  \u2022 NOT RECORDED anywhere: {unrecorded}. This is a fresh "
+            "violation of D3's order \u2014 a door claiming journal-first while "
+            "folding first. Fix the door; do not widen the pin."
+        )
+    if lost:
+        lines.append(
+            f"  \u2022 Pinned pair(s) GONE: {sorted(lost)}. That deviation was "
+            "closed or re-declared apply-first (`_apply_first_write_scope`). "
+            "Re-grade D3 (#9567 / #11477) and shrink the pin \u2014 an assertion "
+            "whose population moved must not stay green."
+        )
+    return "\n".join(lines) + ("\n" if lines else "")
+
+
+@dataclass
+class Door:
+    """One observed call at one of the capture's three write doors."""
+
+    door: str  # "journal" | "record" | "fold" | "cache"
+    event_type: str | None = None
+    event_id: str | None = None
+    lane: str | None = None  # the declared cache lane ("cache" only)
+    in_fold: str | None = None  # the fold a cache statement belongs to
+    statement: str | None = None
+    #: The record door's own verdict ("record" only): `RecordWriteOutcome.APPLIED`
+    #: when a row was materialized, `None` when the seam was UNARMED, `REFUSED`
+    #: otherwise. A CALL is not a WRITE, and only this field can tell them apart
+    #: (`write_live_record` returns `None` when unarmed, `record_writer.py:2340`).
+    outcome: Any = None
+
+
+@dataclass
+class Traced:
+    """One capture with every write door instrumented, plus its receipt."""
+
+    entries: list[Door]
+    receipt: dict
+    session_id: str
+    tenant: tuple[str, str]
+    sdk: Any
+
+
+def _instrument(mp, entries: list[Door]) -> dict:
+    """Wrap the three write doors so each call is RECORDED, then forwarded.
+
+    The doors are the ones the criterion names, not a new abstraction:
+
+    * **journal** — `tortoise.log.EventLog.append`, the truth store's append;
+    * **record** — `record_writer.write_live_record`, THE production call site
+      (`tools/record_wiring_check.py` pins that it is the only one);
+    * **cache** — `FalkorProjection.apply` (the sanctioned fold) plus every
+      MUTATING statement that reaches the projection's write handle
+      (`_GuardedGraph.query`), classified by the SAME shared classifier the
+      §17.1 guard uses (`_statement_writes`) so this instrument and the guard
+      cannot disagree about what a write is.
+
+    A cache statement's declared lane is read from the ContextVar the guard
+    itself reads (`_CACHE_WRITE_AUTHORIZED`), so "declared" here means exactly
+    what it means to the door: a scope was open, and its reason is the lane.
+
+    Returns a mutable holder carrying the fold currently in progress, so a
+    statement can be attributed to the fold that issued it.
+    """
+    from tortoise import log as tlog
+    from tortoise.projection import (
+        _CACHE_WRITE_AUTHORIZED,
+        FalkorProjection,
+        _GuardedGraph,
+        _statement_writes,
+    )
+
+    open_fold = {"type": None}
+
+    orig_append = tlog.EventLog.append
+
+    def append(self, event):
+        seq = orig_append(self, event)
+        entries.append(
+            Door("journal", event_type=event.get("type"), event_id=event.get("event_id"))
+        )
+        return seq
+
+    orig_write = record_writer.write_live_record
+
+    def write_live_record(record, **kwargs):
+        out = orig_write(record, **kwargs)
+        entries.append(
+            Door(
+                "record",
+                event_type=record.get("type"),
+                event_id=record.get("event_id"),
+                # `getattr` because the unarmed door returns `None` — and the whole
+                # point of carrying the outcome is that "called" ≠ "wrote".
+                outcome=getattr(out, "outcome", None),
+            )
+        )
+        return out
+
+    orig_apply = FalkorProjection.apply
+
+    def apply(self, event, **kwargs):
+        prev, open_fold["type"] = open_fold["type"], event.get("type")
+        entries.append(
+            Door("fold", event_type=event.get("type"), event_id=event.get("event_id"))
+        )
+        try:
+            return orig_apply(self, event, **kwargs)
+        finally:
+            open_fold["type"] = prev
+
+    orig_query = _GuardedGraph.query
+
+    def query(self, cypher, params=None, timeout=None):
+        mutating = False
+        try:
+            mutating = bool(_statement_writes(cypher))
+        except Exception:
+            # An unparseable statement is not a write claim: the shared
+            # classifier's own contract, and this instrument must never invent
+            # a write the guard would not see.
+            mutating = False
+        if mutating:
+            entries.append(
+                Door(
+                    "cache",
+                    lane=_CACHE_WRITE_AUTHORIZED.get(),
+                    in_fold=open_fold["type"],
+                    statement=" ".join(str(cypher).split())[:80],
+                )
+            )
+        return orig_query(self, cypher, params=params, timeout=timeout)
+
+    mp.setattr(tlog.EventLog, "append", append)
+    mp.setattr(record_writer, "write_live_record", write_live_record)
+    mp.setattr(FalkorProjection, "apply", apply)
+    mp.setattr(_GuardedGraph, "query", query)
+    return open_fold
+
+
+@pytest.fixture(scope="module")
+def traced(armed, tmp_path_factory):
+    """One MORE capture — the same doors, instrumented, on its own tenant.
+
+    A separate capture rather than a replay of `armed`'s: the instrumentation
+    has to be installed BEFORE the writes it observes, and `armed` (the D2
+    baseline) is shared by several legs. The record is the same armed one, so
+    the record leg is a real write and not a decline.
+    """
+    from tests.test_9078_record_written_by_production_path import _seed_tenant
+
+    tmp = tmp_path_factory.mktemp("capstone-9567-order")
+    tag = uuid.uuid4().hex[:8]
+    tenant = (f"org-9567-order-{tag}", f"graph-9567-order-{tag}")
+    _seed_tenant(armed.conn, tenant)
+
+    sdk = TortoiseSDK(str(tmp / "graph.db"), event_log_path=str(tmp / "journal.jsonl"))
+    entries: list[Door] = []
+    mp = pytest.MonkeyPatch()
+    try:
+        # A WARM-UP write before the instrument is installed: the graph's schema
+        # DDL and its `ep-epoch` mirror are issued on FIRST use, so without this
+        # they land inside the measured region and read as cache writes ahead of
+        # a journal they have nothing to do with (measured: 24 schema statements
+        # + `MERGE (m:EpMeta)` before the capture's first append).
+        with use_record_tenant(*tenant):
+            sdk.create_point("observation", "warm-up: schema + ep-epoch, not observed")
+        _instrument(mp, entries)
+        session_id = f"capstone-order-{tag}"
+        with use_record_tenant(*tenant):
+            receipt = sdk.capture_session(list(_TURNS), session_id=session_id)
+        # The measured census, for the run's artifact. A COUNT of what this run
+        # observed is the evidence (DoD rule 1); it is printed, never asserted
+        # against a constant (DoD rule 4 — a number in a test rots).
+        counts = Counter(e.door for e in entries)
+        undeclared = sum(1 for e in entries if e.door == "cache" and e.lane is None)
+        print(
+            "\n#9567 D3 write-order census: "
+            f"journal={counts['journal']} record={counts['record']} "
+            f"fold={counts['fold']} cache={counts['cache']} "
+            f"cache-with-no-declared-lane={undeclared}"
+        )
+        # ⛔ THE DOOR WRAPPERS COME OFF HERE, BEFORE THE TESTS RUN. They are only
+        # needed for the CAPTURE; leaving them installed (the previous shape put
+        # `mp.undo()` in the `finally` below, i.e. at MODULE teardown) meant D4–D12
+        # executed with `EventLog.append` / `write_live_record` /
+        # `FalkorProjection.apply` / `_GuardedGraph.query` all wrapped. Harmless
+        # today only by accident. A leg that needs a door instrumented installs its
+        # own — leg 2 does, through this same `_instrument` helper.
+        mp.undo()
+        yield Traced(entries=entries, receipt=receipt, session_id=session_id,
+                     tenant=tenant, sdk=sdk)
+    finally:
+        # `undo()` is idempotent, so this second call costs nothing and covers the
+        # FAILURE path: if `capture_session` (or the census print) raises, the call
+        # before the `yield` never ran and the wrappers would otherwise stay
+        # installed for the rest of the session.
+        mp.undo()
+        sdk.close()
+
+
+def test_D3_order_the_record_write_follows_the_journal_append(traced):
+    """D3 (journal → record): every appended record is **written** to the record.
+
+    The assertion is pairwise on the OBSERVED call order — identity (`event_id`)
+    AND position — so it fails on the two directions the criterion forbids: a
+    record write with no journal append behind it (an invented write, including
+    a per-event inversion that pre-writes one kind's record ahead of its own
+    append) and a journal append that never reaches the record ("a write path
+    bypasses the record").
+
+    ⛔ A CALL IS NOT A WRITE (`record_writer.write_live_record` returns `None`
+    when unarmed and a `RecordWrite` whose `outcome` may be `REFUSED` otherwise),
+    so the count comparison alone cannot see a seam that declined every call.
+    The `APPLIED` count is asserted beside it for exactly that reason: that is
+    the `derived = replay(journal)` gap D3 exists to close.
+
+    Falsifier: make `_write_record_projection` decline every call (the record
+    then has the journal and not the row) → the counts diverge and this reds.
+    Falsifier 2: make the seam decline instead of write (force the unarmed
+    branch, or `durable=False`) → the counts still match and the `APPLIED`
+    assertion is what reds.
+    Falsifier 3: move ONE event kind's record write ahead of its own append
+    (`_emit_event`, `seq=None`, skip the post-append write) → identity still
+    aligns and the global floor still holds, so the POSITION assertion is what
+    reds.
+    """
+    journal = [e for e in traced.entries if e.door == "journal"]
+    records = [e for e in traced.entries if e.door == "record"]
+    assert traced.receipt.get("ok") is True, traced.receipt
+    assert journal, "the capture appended nothing — the trace observed no journal door"
+    assert len(records) == len(journal), (
+        f"the capture appended {len(journal)} journal record(s) and made {len(records)} "
+        "record write(s): a write path bypassed the record (or invented one)"
+    )
+    applied = [
+        e for e in records
+        if e.outcome is record_writer.RecordWriteOutcome.APPLIED
+    ]
+    assert len(applied) == len(journal), (
+        f"the capture appended {len(journal)} journal record(s) and only "
+        f"{len(applied)} reached the record as APPLIED (outcomes: "
+        f"{dict(Counter(str(e.outcome) for e in records))}) — the door was "
+        "CALLED and did not WRITE, which is the `derived = replay(journal)` "
+        "gap D3 measures (an unarmed/refused call is not a record write)"
+    )
+    for appended, written in zip(journal, applied, strict=True):
+        assert written.event_id == appended.event_id, (
+            f"record write for {written.event_id!r} does not answer journal append "
+            f"{appended.event_id!r} ({appended.event_type}) — the record is not the "
+            "journal's own position"
+        )
+    # ⛔ IDENTITY IS NOT ORDER. The `zip` above proves the k-th record write
+    # ANSWERS the k-th append; it does not prove it FOLLOWS it, and the floor
+    # below is satisfied by pair #1 alone. A door that pre-writes ONE event
+    # kind's record before appending it keeps identity alignment, keeps the
+    # counts equal, and keeps `first_journal < first_record` — so identity plus
+    # a global floor leaves a per-event inversion green, which is exactly the
+    # direction D3 forbids. Measured (review round 9): writing
+    # `TurnsRecorded`'s record ahead of its own append (`seq=None`) left all
+    # four D3_order legs passing. Compare POSITIONS, pairwise.
+    # Positions come from the SAME objects the `zip` above paired, via one index
+    # map — not from a re-filtered copy. A second copy of the predicate would
+    # silently decouple identity pairing from position pairing the day someone
+    # edits one filter and not the other.
+    index_of = {id(e): i for i, e in enumerate(traced.entries)}
+    journal_pos = [index_of[id(e)] for e in journal]
+    applied_pos = [index_of[id(e)] for e in applied]
+    assert all(j < r for j, r in zip(journal_pos, applied_pos, strict=True)), (
+        "a record write preceded its own journal append — the record was written "
+        "from something other than the journal's append (D3's cache-only shape, "
+        f"per event): journal positions {journal_pos}, record positions "
+        f"{applied_pos}"
+    )
+    first_journal = next(i for i, e in enumerate(traced.entries) if e.door == "journal")
+    first_record = next(i for i, e in enumerate(traced.entries) if e.door == "record")
+    assert first_journal < first_record, (
+        "a record write ran before the first journal append — the record was written "
+        "from something other than the journal (D3's cache-only shape)"
+    )
+
+
+def test_D3_order_a_journal_first_door_writes_journal_record_then_cache(
+    armed, traced, monkeypatch
+):
+    """D3 (record → cache): on the sanctioned door, the fold comes LAST.
+
+    `_apply_and_journal` is THE live-write door for a pre-built record (the
+    chokepoint #7951 landed; `tools/record_wiring_check.py` names it the
+    production call site). Its contract is the criterion's own sentence, so the
+    measurement drives it once and reads the door order back: **journal append,
+    then record write, then the fold and every cache statement the fold
+    issues.**
+
+    ⛔ THE RECORD IS RE-ARMED HERE, and that is load-bearing, not setup. The
+    suite's autouse `_no_ambient_record_arming` clears the arming keys for the
+    BODY of every test (hermetic by design — `tests/conftest.py`), and this leg
+    drives the door INSIDE the body. Without the re-arm the record seam is
+    unarmed for this probe: `write_live_record` returns `None`, writes nothing,
+    and the `"record"` door below would be a CALL that landed no row — the
+    `derived = replay(journal)` gap wearing a green. `test_D1` re-arms the same
+    way and for the same reason.
+
+    Falsifier: swap the door's order (fold before the append) → the fold's own
+    statements precede its record write and this reds, naming both positions.
+    """
+    from tests.test_9078_record_written_by_production_path import _app_role_dsn
+    from tortoise.record_writer import RECORD_DSN_ENV
+
+    monkeypatch.setenv(RECORD_DSN_ENV, _app_role_dsn(armed.dsn))
+
+    object_id = f"order-probe-{uuid.uuid4().hex[:10]}"
+    mark = len(traced.entries)
+    observed: list[Door] = []
+    probe_mp = pytest.MonkeyPatch()
+    try:
+        # The module fixture UNDOES its door wrappers before yielding (they must not
+        # stay installed while D4–D12 run), so this probe installs its own for its
+        # own window. Same helper, so the doors are byte-identical to the capture's.
+        _instrument(probe_mp, traced.entries)
+        with use_record_tenant(*traced.tenant):
+            traced.sdk._apply_and_journal(
+                traced.sdk._get_proj(),
+                {
+                    "type": "ObjectRegistered",
+                    "id": object_id,
+                    "name": f"ordering probe {object_id}",
+                    "objectKind": "concept",
+                },
+            )
+        observed = list(traced.entries[mark:])
+    finally:
+        # ⛔ The trace is MODULE-scoped and shared by every leg in this file. This
+        # probe used to leak its doors into it, so leg 3's "ahead" population
+        # silently depended on leg 2 having run: run alone with
+        # `-k "D3 and SILENTLY"`, leg 3's declared falsifier did NOT red. Trim the
+        # probe back out so each leg reads the capture and nothing else.
+        del traced.entries[mark:]
+        probe_mp.undo()
+    doors = [e.door for e in observed]
+    assert "journal" in doors and "record" in doors and "fold" in doors, (
+        "`_apply_and_journal` did not reach all three doors: observed "
+        f"{doors} — the trace cannot order doors it never saw"
+    )
+    record_doors = [e for e in observed if e.door == "record"]
+    assert record_doors and all(
+        e.outcome is record_writer.RecordWriteOutcome.APPLIED for e in record_doors
+    ), (
+        "`_apply_and_journal` reached the record door but the seam did not APPLY "
+        f"it (outcomes: {[str(e.outcome) for e in record_doors]}) — an unarmed or "
+        "refused call is not a record write, so this probe cannot order a write "
+        "it never made"
+    )
+    first_j = doors.index("journal")
+    first_r = doors.index("record")
+    first_f = doors.index("fold")
+    assert first_j < first_r < first_f, (
+        "`_apply_and_journal` did not write journal → record → cache: observed "
+        f"{doors} (journal at {first_j}, record at {first_r}, fold at {first_f})"
+    )
+    folded = [(i, e) for i, e in enumerate(observed) if e.door == "cache"]
+    assert folded, (
+        "the fold issued no cache statement — the door folded an event and wrote "
+        f"nothing, which is not the write the criterion describes: {doors}"
+    )
+    # ⛔ EVERY cache statement in this probe's window, not only the ones carrying
+    # `in_fold`. A raw-handle write (`in_fold is None`) issued on this door before
+    # its append is exactly the shape a cache-only path takes, and filtering to
+    # `e.in_fold is not None` left it unexamined. `enumerate`, never
+    # `observed.index(e)`: `Door` is a dataclass, so `.index` resolves by VALUE
+    # and would return an earlier equal instance.
+    for i, stmt in folded:
+        assert i > first_r, (
+            f"a cache statement ran before the door's record write ({i} <= "
+            f"{first_r}: {stmt.statement!r}, in_fold={stmt.in_fold!r}) — the cache "
+            "is ahead of the record on a door that claims journal-first"
+        )
+
+
+def test_D3_the_capture_instrument_is_not_left_installed(traced):
+    """The capture's four monkeypatches are UNDONE before its fixture yields.
+
+    A module-scoped fixture's patches normally live until the module's last test
+    tears down, so every leg after the capture (D4–D12) would run against
+    instrumented doors: each statement re-classified by `_statement_writes` and
+    appended to this capture's trace, and every leg's write attributed to a
+    capture that had already finished. That is a leg-ORDER dependency in a file
+    whose round-2 fix existed to remove exactly that shape.
+
+    The fixture does undo before the `yield` — but nothing else in the file
+    reds if that call drifts back into the `finally`, so this leg is the PIN.
+    The property is asserted by IDENTITY against the doors as they were at import
+    time: a closure cannot be compared to itself by name, so an assertion that
+    "the doors look right" would be inert.
+
+    Falsifier: move `mp.undo()` back after the `yield` → every door below is this
+    module's wrapper and this reds naming it. Leg 2 installs its own instrument
+    on a private `probe_mp` for its probe and undoes it in its own `finally`, so
+    it does not trip this.
+    """
+    leaked = [
+        f"{door} ({getattr(owner, '__name__', type(owner).__name__)}.{attr})"
+        for door, owner, attr, original in _UNPATCHED_AT_IMPORT
+        if getattr(owner, attr) is not original
+    ]
+    assert not leaked, (
+        "the capture's instrumentation is still installed after the fixture "
+        f"yielded: {', '.join(leaked)} — every leg after this one would be "
+        "measuring an instrumented tree and appending to another leg's trace"
+    )
+
+
+def test_D3_order_no_cache_write_runs_ahead_of_its_append_SILENTLY(traced):
+    """D3 (no cache-only path): cache-ahead writes must DECLARE that order.
+
+    The tree carries recorded apply-first deviations (`_create_entity`'s Object
+    and Event registration blocks — the KNOWN DEVIATIONS block at the top of
+    `tortoise/sdk.py`), and this run observes them: those folds reach the cache
+    before their own journal append. What is not tolerable is the SILENT form —
+    a cache write ahead of the journal with no scope open at the write handle —
+    which is the §17.1 failure the guard measures and does not yet refuse.
+    So: a fold that runs ahead of its append must be inside a DECLARED lane, and
+    the set of such folds that declare a JOURNAL-FIRST lane is the tree's
+    recorded deviation population — pinned as a measurement, so the leg reds when
+    a pair appears (a fresh contradiction) or when a pinned pair is gone (a
+    deviation closed, and D3 must be re-graded).
+
+    ⛔ THE PREVIOUS FORM OF THIS LEG WAS INERT. It compared `stmt.lane` against
+    the literal `"live-door"`, which is only `_live_write_scope`'s DEFAULT
+    argument (`tortoise/projection/__init__.py:4063`) — every production caller
+    passes an explicit reason, so the assertion could never fail on production
+    code, and it passed on the very contradiction it documents: the ahead folds
+    run under `_live_write_scope("create_entity")`, a journal-first lane. The
+    tree already exports the mechanical discriminator (`_APPLY_FIRST_LANE`,
+    `projection/__init__.py:4969`) and that is what classifies a lane here.
+
+    Falsifier: change the lane a CAPTURE door declares while it still folds first —
+    e.g. `_create_entity`'s `_live_write_scope("create_entity")` to any other
+    non-apply-first reason → a `(event_type, lane)` pair that is not pinned
+    appears and this reds naming it. (It used to name "reorder
+    `_apply_and_journal`", which stopped being true once leg 2's probe is trimmed
+    back out of this module-scoped trace: `_apply_and_journal` is not on the
+    capture path, so a reorder there is leg 2's falsifier, not this one's.)
+    """
+    from tortoise.projection import _APPLY_FIRST_LANE
+
+    folds = [(i, e) for i, e in enumerate(traced.entries) if e.door == "fold"]
+    appends_by_type: dict[str | None, list[int]] = {}
+    for i, e in enumerate(traced.entries):
+        if e.door == "journal":
+            appends_by_type.setdefault(e.event_type, []).append(i)
+
+    # Pair the i-th fold of a type with the i-th append of that type: a fold
+    # whose paired append lands AFTER it ran ahead of its own record.
+    seen: dict[str | None, int] = {}
+    ahead: list[tuple[int, Door]] = []
+    for i, fold in folds:
+        n = seen.get(fold.event_type, 0)
+        seen[fold.event_type] = n + 1
+        appends = appends_by_type.get(fold.event_type) or []
+        if n < len(appends) and i < appends[n]:
+            ahead.append((i, fold))
+
+    assert ahead, (
+        "no fold ran ahead of its append — this leg measured nothing. If the "
+        "apply-first deviations were closed, delete the leg and re-grade D3 "
+        "(#9567 D3 / #11477): an assertion whose population is empty is not a "
+        "green measurement (DoD rule 1)"
+    )
+
+    journal_first_ahead: set[tuple[str, str]] = set()
+    for i, fold in ahead:
+        # The statements of this fold, up to the fold's own append.
+        stop = next(
+            (
+                j
+                for j, e in enumerate(traced.entries)
+                if j > i and e.door == "journal" and e.event_type == fold.event_type
+            ),
+            len(traced.entries),
+        )
+        # ⛔ THE WINDOW IS EVERY STATEMENT THAT IS STILL AHEAD OF ITS OWN APPEND.
+        # Taking every cache entry in `[i, stop)` was too wide (review cycle 3): a
+        # statement preceded by a NESTED door's append is not ahead of its journal
+        # — only ahead of the OUTER fold's — and a journal-first lane there is
+        # correct code. Accusing it would send a fixer to reorder a conforming
+        # door. So: fold-attached statements always qualify; a raw-handle one
+        # qualifies only while nothing has journalled between the fold and it.
+        stmts: list[Door] = []
+        for j, e in enumerate(traced.entries[i:stop], start=i):
+            if e.door != "cache":
+                continue
+            if e.in_fold == fold.event_type or (
+                e.in_fold is None
+                and not any(
+                    traced.entries[k].door == "journal" for k in range(i + 1, j)
+                )
+            ):
+                stmts.append(e)
+        assert stmts, (
+            f"the {fold.event_type} fold ran ahead of its append and issued no cache "
+            "statement — the instrument observed a fold, not a write"
+        )
+        for stmt in stmts:
+            assert stmt.lane is not None, (
+                f"a cache write ahead of its journal append ran with NO declared lane "
+                f"({stmt.statement!r}, fold {fold.event_type}, in_fold={stmt.in_fold!r}) "
+                "— that is the §17.1 silent cache-ahead write D3 forbids"
+            )
+            # Classified by the tree's OWN discriminator, never a literal: a lane
+            # without the `_APPLY_FIRST_LANE` prefix claims the journal-first order.
+            if not str(stmt.lane).startswith(_APPLY_FIRST_LANE):
+                journal_first_ahead.add((str(fold.event_type), str(stmt.lane)))
+
+    assert journal_first_ahead == set(_KNOWN_AHEAD_DEVIATIONS), (
+        "the journal-first-ahead fold population changed: observed "
+        f"{sorted(journal_first_ahead)}, pinned "
+        f"{sorted(_KNOWN_AHEAD_DEVIATIONS)}.\n"
+        + _ahead_population_advice(
+            journal_first_ahead - set(_KNOWN_AHEAD_DEVIATIONS),
+            set(_KNOWN_AHEAD_DEVIATIONS) - journal_first_ahead,
+        )
+    )
+
+
+def test_D3_order_no_cache_write_precedes_the_captures_first_journal_append_and_record(
+    traced,
+):
+    """D3 (no cache-only path): no cache write precedes the capture's first record.
+
+    D3's row states BOTH halves — *"journal → record → cache in that order, **with
+    no cache-only path**"* — and pins the falsifier *"inject a cache write that
+    skips the record → D3 must red"*. Neither leg above could red for it:
+
+    * leg 1 looks only at the journal/record pair, never at a cache statement;
+    * the `…_SILENTLY` leg bounds itself to the window between ONE ahead fold and
+      its own append, so a cache-only write anywhere else in the capture is
+      outside its population.
+
+    ⛔ WHAT THIS LEG MEASURES, stated as narrowly as it actually is. It asserts the
+    FLOOR: no mutating cache statement precedes the capture's first journal append
+    and first APPLIED record write. It is NOT a per-write attribution, and a
+    reviewer measured what that costs: a cache write injected MID-capture — after
+    some append and its record have already landed — leaves this leg (and all
+    three others) green, because the trace carries no descriptor tying a raw-handle
+    statement to the append it skipped. Attribution of an arbitrary raw write is
+    not recoverable from call order alone; see §4 of the artifact for the residue
+    and why it stays on #11477.
+
+    The population is also exactly `_GuardedGraph.query` — the handle's other
+    mutating-capable verbs (`ro_query` and `execute_command`, which the module's
+    own comments call out as write-capable) are NOT wrapped, so a write through
+    them is invisible to every leg here.
+
+    Falsifier: add
+    `sdk._get_proj().g.query("CREATE (:X {id:'cache-only'})")` at the TOP of the
+    measured region (before the capture) → the statement has no journal append and
+    no APPLIED record write behind it, and this reds naming it. The mid-capture
+    placement is NOT this leg's falsifier: it does not red, and that is the
+    measured residue, not an oversight.
+    """
+    cache = [(i, e) for i, e in enumerate(traced.entries) if e.door == "cache"]
+    assert cache, (
+        "the capture issued no mutating cache statement — this leg measured nothing "
+        "(DoD rule 1: an empty population is not a green measurement)"
+    )
+    journal = [i for i, e in enumerate(traced.entries) if e.door == "journal"]
+    applied = [
+        i
+        for i, e in enumerate(traced.entries)
+        if e.door == "record" and e.outcome is record_writer.RecordWriteOutcome.APPLIED
+    ]
+    assert journal and applied, (
+        "this trace cannot distinguish a cache-only write: "
+        f"journal={len(journal)} append(s), APPLIED record write(s)={len(applied)}. "
+        "With no APPLIED record there is nothing for a cache write to be 'behind', "
+        "and a leg asserting it would be vacuous"
+    )
+    first_journal = min(journal)
+    first_applied = min(applied)
+    orphans = [
+        (i, e) for i, e in cache if i < first_journal or i < first_applied
+    ]
+    assert not orphans, (
+        f"{len(orphans)} mutating cache statement(s) ran with no journal append and "
+        "no APPLIED record write behind them — the cache-only path D3 forbids: "
+        + "; ".join(
+            f"[{i}] {e.statement!r} (lane={e.lane!r}, in_fold={e.in_fold!r})"
+            for i, e in orphans
+        )
+    )
+
+
+# ── D4/D5/D6 — the rebuild from the record only ────────────────────────────
 
 @dataclass
 class Restored:
