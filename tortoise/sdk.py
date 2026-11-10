@@ -75,6 +75,7 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     set_embedding_clause,
     statement_interpolates_label,
     statement_node_labels,
+    statement_uses_unmodelled_scope,  # #11641: the ACCEPTED GRAMMAR, refused outside it
     statement_write_target_problem,  # #11641: WHERE it lands, not only what it NAMES
 )
 # #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
@@ -12960,31 +12961,76 @@ class TortoiseSDK:
         `CREATE (<a> …`, `MERGE (<a> …`) must be bound in the SAME statement to one of those labels.
         Anything else is refused HERE, before the journal append and before the write. That is what
         makes ``stores=("Event",)`` in `tortoise.embed_writer_register` an enforced fact instead
-        of a claim about callers — and it closes a real divergence, not only a measurement: the
+        of a claim about callers — **for the declared grammar this door accepts, stated below** — and
+        it closes a real divergence, not only a measurement: the
         record this door appends replays through `_upsert_event`, which MERGEs `:Event` and nothing
         else, so a caller writing a vector on any other label would get its vector back on a
         DIFFERENT label after a rebuild, silently, with every existing test green.
 
-        ⚠️ WHY THREE CHECKS AND NOT ONE: the first two are about what the statement MENTIONS, and
-        mentioning is not storing — `MATCH (e:Event {…}) CREATE (p) SET p += $props, …embedding`
-        passes both while the vector lands on the label-less node `[]`, which no `entity_type`
-        reaches (`#5090` DoD row 2's own defect, measured). The third check is the one that makes
-        the register's sentence true, and the two above are kept beside it because a caller's
-        error message is more useful the more specific it is.
+        ⚠️ WHY A GRAMMAR GUARD PLUS THREE LABEL CHECKS AND NOT ONE: the three label checks are about
+        what the statement MENTIONS, and mentioning is not storing — `MATCH (e:Event {…}) CREATE (p)
+        SET p += $props, …embedding` passes all of them while the vector lands on the label-less node
+        `[]`, which no `entity_type` reaches (`#5090` DoD row 2's own defect, measured). The third is
+        the one that makes the register's sentence true, and the two above are kept beside it because
+        a caller's error message is more useful the more specific it is. All three of them, though,
+        read an alias's labels BY NAME — so all three need the grammar guard that precedes them.
 
         ⚠️ ACCEPTED RESIDUAL, named rather than implied: the write-target reader is a TEXT reader
         (a Cypher label cannot be a bindable parameter — Neo4j's own Cypher Manual states it), so a
-        store rendered by a shape it cannot phrase as `SET`/`REMOVE`/`CREATE`/`MERGE` — a mutating
-        procedure (`CALL apoc.*`), or clause text built by a helper — is outside it. A caller that
-        renders its store through a procedure therefore defeats this bound, which is why the door
-        is a bound on the statement TEXT and not a claim of totality. Where the reader cannot prove
-        a target it REFUSES (see :func:`tortoise.vector_write::statement_write_target_problem`).
+        caller that never reaches this door writes outside every reader it has; that is the
+        chokepoint's question (`#9079`), not this bound's. Inside the grammar this bound fails
+        CLOSED in the only direction it can be tested (see below), and its residual is the declared
+        construct list itself rather than a shape it silently accepts.
         INSIDE the grammar the reader is complete over what the engine accepts as an IDENTIFIER —
         both spellings, bare (`e`) and backtick-quoted (`` `b` ``), which FalkorDB lexes as the same
         token, not as a string — and it blanks Cypher comments before reading, so neither an
         accepted spelling nor a `)` inside `/* … */` can hide a write target (#11641's fourth
         review round found both live here).
+
+        ⛔ THE GRAMMAR ITSELF IS DECLARED, AND ENFORCED FIRST (#11641's fifth round). Everything
+        above is keyed on the alias NAME, and Cypher's `WITH` ends what a name means: a variable the
+        clause does not carry "is dropped from the scope of the query and cannot be referenced by
+        subsequent clauses" (Neo4j Cypher Manual, `WITH` → *Control variables in scope*), so a later
+        `MATCH (p)` binds a NEW, UNLABELLED `p` while a name-keyed map still reports the served
+        label the FIRST pattern gave it. Measured on this door:
+
+            MATCH (p:Event {eventId:'seed'}) WITH 1 AS x MATCH (p) SET p += $props, …embedding
+
+        was ACCEPTED and stored the `VectorF32` on `:Meta` — every node the second `MATCH` reached,
+        a label no `entity_type` reaches. Teaching the readers scope would be a Cypher parser, and an
+        under-modelled parser fails OPEN, so this door DEFINES ITS ACCEPTED GRAMMAR and refuses
+        everything outside it: `tortoise.vector_write::statement_uses_unmodelled_scope` runs before
+        the journal append and before every other check, and refuses `WITH`, `UNION`, `CALL`
+        (including a `CALL { … }` subquery), `OPTIONAL MATCH`, `LOAD CSV` and `IN TRANSACTIONS`.
+        What it accepts — `MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` / `FOREACH` — is the
+        grammar all six of this product's own door statements are written in, and this door's
+        licence is that grammar: not `any Cypher the engine parses`.
+
+        ⛔ THE SCOPE GUARD IS WHAT MAKES THE PARAGRAPH ABOVE TRUE, so do not drop it as redundant.
+        Without it, `stores=("Event",)` is an enforced fact only about the labels a statement names
+        in the scope it STARTS in — and a `WITH` that drops an alias and re-binds the same name
+        defeats that with a false PASS: a `VectorF32` paid for and unreachable, with row 2 still
+        green. That is the defect `#11641` exists to close.
         """
+        # ⛔ FIRST, the grammar (#11641's fifth review round). A statement that moves or replaces the
+        # variable scope has bindings this door's alias-keyed readers cannot prove, so it is refused
+        # BEFORE any label, interpolation or write target is read off it — and before the journal.
+        _scope_construct = statement_uses_unmodelled_scope(statement)
+        if _scope_construct is not None:
+            raise ValueError(
+                "_event_raw_write_door: the statement uses `"
+                f"{_scope_construct}`, and this door's bound is a TEXT reader with NO scope model, "
+                "so it cannot prove where the vector lands across a scope boundary. It matches an "
+                "alias to the labels the statement binds BY NAME, so an alias bound to a served "
+                "label BEFORE the boundary is still read as served AFTER it — while to the engine a "
+                "variable not carried through `WITH` is dropped from the scope and a later "
+                "`MATCH (p)` binds a NEW, unlabelled node, so the vector lands on a label no "
+                "`entity_type` reaches (measured: `MATCH (p:Event {eventId:'seed'}) WITH 1 AS x "
+                "MATCH (p) SET p += $props, …embedding` stored a `VectorF32` on `:Meta`). This "
+                "door accepts a DECLARED grammar — `MATCH` / `MERGE` / `CREATE` / `SET` / `REMOVE` "
+                "/ `FOREACH` — and refuses every scope construct rather than guessing at one; "
+                "re-spell the store without it (#11641)."
+            )
         _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
         _named_labels = statement_node_labels(statement)
         if statement_interpolates_label(statement):
@@ -13012,11 +13058,12 @@ class TortoiseSDK:
             )
         require_served_store_labels(
             _declared_labels, writer="tortoise.sdk::_event_raw_write_door")
-        # ⛔ THE THIRD, NARROWER CHECK — WHERE the vector lands (#11641). The three checks above are
-        # all about what the statement NAMES: a served label mentioned anywhere satisfies them while
-        # the vector lands on a DIFFERENT alias, which is a false PASS (`stores=("Event",)` and row 2
-        # stay green over a `Vectorf32` on the label-less node `[]`). The register's declaration is
-        # about the node the statement WRITES TO, so the bound has to read the write target too.
+        # ⛔ THE THIRD, NARROWER CHECK — WHERE the vector lands (#11641). The three label checks above
+        # are all about what the statement NAMES: a served label mentioned anywhere satisfies them
+        # while the vector lands on a DIFFERENT alias, which is a false PASS (`stores=("Event",)` and
+        # row 2 stay green over a `Vectorf32` on the label-less node `[]`). The register's
+        # declaration is about the node the statement WRITES TO, so the bound has to read the write
+        # target too (see :func:`tortoise.vector_write::statement_write_target_problem`).
         _target_problem = statement_write_target_problem(statement, _declared_labels)
         if _target_problem is not None:
             raise ValueError(

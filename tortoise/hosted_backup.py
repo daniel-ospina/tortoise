@@ -946,6 +946,14 @@ def _require_served_restore_labels(
     DROPS the unserved vector, KEEPS the node (so the relabel can still run) and REPORTS every label
     it dropped — never silently, and never as the default.
 
+    ⛔ WHO CAN REACH IT, stated at its true size: **a Python caller can pass
+    ``allow_unserved_vectors=True``** — no product entry point does. `hosted_api`'s restore and drill
+    omit it and there is no CLI flag, so through the HTTP surface a pre-D10 dump carrying an unserved
+    vector is still refused WHOLE, and the DR claim above holds for a caller that opts in from
+    Python, not for the API. Widening it to the API is a separate decision (a repair switch on an
+    HTTP surface needs its own review), so this docstring is narrowed rather than the product routed
+    around it.
+
     Returns ``(dump ids to strip, sorted labels whose vectors were dropped)`` — empty unless
     ``allow_unserved_vectors``. The ids are returned rather than the props being mutated here,
     because a validator that edits the artifact it validated is how a refusal and a repair start
@@ -972,8 +980,10 @@ def _require_served_restore_labels(
             f"{list(labels)!r}, none of which `run_vector_query` serves "
             f"({sorted(_VECTOR_RESTORE_LABEL_SET)}). Restoring it would store a vector no "
             "read path can reach, so the artifact is refused before the target graph is "
-            "touched (#11641). Pass `allow_unserved_vectors=True` to restore it WITHOUT that "
-            "vector and repair the label afterwards — the path a pre-D10 `:Document` dump needs."
+            "touched (#11641). A Python caller can pass `allow_unserved_vectors=True` to restore "
+            "it WITHOUT that vector and repair the label afterwards — the path a pre-D10 "
+            "`:Document` dump needs (no product entry point passes it today, so through the API "
+            "this artifact stays refused whole)."
         )
     return strip, sorted(dropped)
 
@@ -984,8 +994,11 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
 
     Returns ``{"nodes": N, "edges": M}``; with ``allow_dangling_edges=True``
     the returned dict additionally carries ``dropped_edges`` and
-    ``dropped_edge_endpoints``, and with ``allow_unserved_vectors=True`` it
-    carries ``dropped_vectors`` and ``dropped_vector_labels``.
+    ``dropped_edge_endpoints``. With ``allow_unserved_vectors=True`` it carries
+    ``dropped_vectors`` and ``dropped_vector_labels`` **only when something was
+    actually dropped** — a flagged restore of an all-served dump returns
+    ``{"nodes": 1, "edges": 0}`` and nothing else, so a caller must not read
+    their absence as "nothing was flagged".
 
     Raises ValueError on unsafe labels/types, unsupported dump format, or an
     edge whose endpoint is not in the dump's node list. The last one is the
@@ -1017,8 +1030,12 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     that cannot be lifted would make that artifact — and the relabel migration
     that repairs it — unreachable at DR time. It restores every other node and
     edge, DROPS the unserved vectors, KEEPS the nodes so the migration can still
-    run, and reports the count + the dropped labels. Never the default, and not
-    revision-gated (see the note at the check itself).
+    run, and reports the count + the dropped labels (only when it dropped some —
+    see the return value above). Never the default, and not revision-gated (see
+    the note at the check itself). ⛔ A PYTHON CALLER can pass it; no product
+    entry point does (`hosted_api`'s restore and drill omit it and there is no
+    CLI), so the recoverability it buys is a Python caller's, not an API
+    caller's — see ``_require_served_restore_labels``.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
