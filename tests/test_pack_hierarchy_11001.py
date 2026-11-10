@@ -386,11 +386,11 @@ class TestTheShippedPacks:
         `live == rebuild` for this predicate's structural lane is
         `tests/test_9553_class4_structural_edge_records.py`.
         """
+        from tortoise.pack_registry import relation_write_verdict
         from tortoise.projection.edges import (
             RECORD_ADDRESSABLE_EDGE_LABELS,
             RECORD_CARRIED_STRUCTURAL_RELS,
         )
-        from tortoise.pack_registry import relation_write_verdict
 
         reg = PackRegistry(PACKS_DIR)
         reg.load_all()
