@@ -379,7 +379,7 @@ One mark, on every origin, at a URL that moves when the bytes do (#11407).
 - **No page may blank its icon** (`<link rel="icon" href="data:,">`, the old dashboard SPA trick) **or use the wordmark** (`/logo.png` is 400×244 and renders as a squashed bar).
 - **Every href carries `?v=<sha256[:12]>`** of the file's own bytes. Cloudflare serves these with `max-age=14400` and browsers keep a favicon far longer than any header, so without a version the *old* artwork keeps drawing after a re-export — measured on this repo, a deleted `/blog/og-image.png` still answered 200 from the edge four hours later. Re-exporting an icon without bumping the version fails the guard above.
 - The blog's head is a STRING in `website/functions/blog/_lib.ts` (no page on disk for a glob to reach), so it is asserted separately, in both `tests/test_website_static.py` and `tests/test_blog_seo_meta.mjs`.
-- Regenerate the raster with `tools/build_site_icons.py --source <owner artwork>`; the source PNG is owner-side and deliberately NOT committed.
+- Regenerate the raster with `tools/build_site_icons.py --source <owner artwork>`; the source PNG is owner-side and deliberately NOT committed. ⛔ That script writes **one tree** (its `--out`, default `website/`): a re-export is not done until the three files are also copied to `website/apps/dashboard/public/` (the byte-identity assertion reds otherwise) and every `?v=<sha256[:12]>` is re-cut — 14 marketing pages, the five dashboard entry points and `website/functions/blog/_lib.ts`. The guard names whichever step was missed.
 
 ## 7. Key paths
 
