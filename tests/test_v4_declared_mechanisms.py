@@ -108,8 +108,10 @@ was not enough (#11239 re-measured in this lane). Most of the v4 substrate's
 declarations live in `docs/architecture/**/*.md`; ONE mechanism the design
 declares does not. DM1 — *"a mention is **a property on the claim Point that
 carried it**"* — is declared in `docs/epics/2026-11-05-5087-extractor-v4/05-plan.md`
-§4. The payload half is built (`commit_schema.Mention` bounds each field; the
-clamp and the dedupe are the producer's — `extractor_v2._clamped_mention` and
+§4. The payload half is built (`commit_schema.Mention` bounds the fields it
+declares a bound on — `surface`, `quote`, `kind_guess`, the span offsets;
+`claim_ref` and `rule_id` carry NO schema bound and are cut by the producer — and
+the clamp and the dedupe are the producer's — `extractor_v2._clamped_mention` and
 `extractor_v2._dedupe_mentions`) and
 NO write door persists it: `sdk._CAPTURE_PASSTHROUGH_ORDER`, `CreatePointRequest`,
 `hosted_api` and `selfhost_api` all omit `mentions`, so a capture counts mentions
@@ -829,6 +831,14 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
             # Resolved against the surface's OWN root (`<root>/docs/epics`
             # -> `<root>`): an entry is repo-relative, so the root its surface
             # belongs to is the base every `declared_in:` path is written from.
+            # ⚠️ STATED ASSUMPTION: every surface sits exactly TWO levels below
+            # the root, so `parent.parent` IS that root. True for both surfaces
+            # today (`docs/architecture`, `docs/epics`), and a third surface at
+            # a different depth would resolve entries against the wrong root and
+            # report the row's declaring document as UNNAMED — a FALSE RED, whose
+            # remedy names a document that is in fact on disk and marked, never a
+            # silent pass. So: add a surface here only at this depth, or derive
+            # the root from the surface instead of counting its parents.
             surface_root = surface.parent.parent
             try:
                 resolved = (surface_root / rel).resolve()

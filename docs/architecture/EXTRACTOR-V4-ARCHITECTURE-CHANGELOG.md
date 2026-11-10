@@ -1854,6 +1854,7 @@ created) by the count check, and left open because the text mutations all the gu
 are string edits. (5) The retirement scan is a bounded word list, and it now READS each row's
 continuation lines, so a claim wrapped onto a second line is caught; a synonym outside the list
 (`DELETED`, `SUPERSEDED`, `DEPRECATED`) is not.
+
 ## 2026-11-10 — the declared set gained a SECOND SURFACE: 13 rows → 14 (`#5064` / `#11239`)
 
 `config/v4-mechanisms.yml` compared its rows against `docs/architecture/**/*.md` markers and nothing else, so a
@@ -1876,7 +1877,10 @@ declared instead of inferring presence from an adopted shape.
 
 **Disposition taken, and it is the one #5064 reserved.** The issue recorded three options and left the choice to
 whoever owned closure: (a) a row + a marker in a `docs/architecture/` doc, (b) widen the scan to the plan that
-declares it, (c) record DM1 as an explicit exclusion. This is **(a) + (b)**: the row exists AND the scanned surface
+declares it, (c) record DM1 as an explicit exclusion. This is **(b) plus the registry row, with the marker at the
+DECLARATION SITE** — not (a) as the issue worded it: the marker sits in the plan that declares DM1, not in a
+`docs/architecture/` doc, which would have been a marker with no declaration behind it (the detached-marker limit
+this gate already states). So the row exists AND the scanned surface
 includes the plan, so the same class of declaration cannot hide in `docs/epics/` again — rather than (c), which
 would have documented the blindness instead of closing it. The alternatives were not "adopt with a caveat": (c)
 leaves the mechanism invisible, and an architecture-doc marker with no declaration behind it is the detached-marker
@@ -1890,7 +1894,9 @@ return `({}, [])`, i.e. the state half of the gate compared nothing and reported
 `surface is EMPTY` verdict. Both are pinned by tests that fail without the guard.
 
 **Two documentation-truth defects found in review cycle 2, and two factual defects in cycle 3.** Cycle 2: the
-registry header said *"these thirteen are every mechanism either document names"* (there are fourteen, and
+registry header said *"these thirteen are every mechanism either document names"* — inside a sentence whose *"it is
+**not** a claim that …"* negation is the point, so what was stale was the NUMERAL, not a completeness claim (there
+are fourteen, and
 `mechanisms:` starts below it) and `test_ci_selection.py`'s tier-1 failure message still asserted the pre-change
 surface — both corrected. Cycle 3 found
 one **inherited** claim in the text this change adds: the row said `commit_schema` *"clamps and dedupes the list"*,
@@ -1904,11 +1910,12 @@ diff, 155 → **165** for a STORAGE-only diff; an epic-plan-only diff takes the 
 drift inside the comment block this change edits, kept correct rather than carried. Cycle 4 (over the head cycle 3
 produced) found four more: the registry's headline still said *"eight to thirteen"* while the block below it
 narrates the fourteenth; this entry QUOTED text the base blob does not contain (*"the thirteen rows above"* — the
-blob says *"these thirteen are every mechanism either document names"*), which is the unverifiable-citation class;
+blob says *"it is **not** a claim that these thirteen are every mechanism either document names"*), which is the unverifiable-citation class;
 the row named 2 of the 4 call sites that run the clamp/dedupe (missing `execute_embed` — the `mentions_recorded`
 accounting this row is about — and `extract_session_v2`); and a typo (`carriers`). All corrected, and the
 relay this entry claims is now a fact rather than a plan — **the disposition is recorded on `#5064` as comment
-`6759903508`**, not only here.
+`6759903508`, corrected by `6762271557`** (that first comment said `(a) + (b)`, and (a) as the issue words it is a
+marker in a `docs/architecture/` doc — no such marker exists; the marker is at the declaration site), not only here.
 
 **Provenance.** Review cycle 1 (reviewer B: the two fail-opens above, both measured; reviewer A: the disposition had
 to be relayed onto `#5064` rather than stated only in this narrative, and five records still described a
@@ -1916,6 +1923,52 @@ one-directory surface — the records are corrected here and the relay is the co
 reviewer over the corrected artifact: the two documentation-truth defects above). Cycle 3 (a fresh reviewer over the
 final head: the clamp/dedupe attribution and the stale selection counts — both measured against `extractor_v2` and
 `tools/ci_selection.py`). Cycle 4 (a fresh reviewer over cycle 3's head: a stale headline count, a quote the base
-blob does not carry, two unlisted call sites and a typo). The mechanism's absence is unchanged and still tracked by
+blob does not carry, two unlisted call sites and a typo). Cycle 5 (over the head that produced, after the branch was
+merged with `main` and the inherited red fixed: a stated cause of that red which blamed SELECTION when the shards
+were cancelled, and a replacement noun colliding with this document's own `state_value_carve_out` row). Cycle 6
+(five more: a docstring still saying `Mention` bounds every field, a count quoted a head late, a `§7.3` that does not
+exist, `(filed separately)` with no issue number, and the `(a) + (b)` disposition wording). Cycle 7 (a `carve-out`
+location claim that §3 itself falsifies, the relay cited to the comment its own text disavows, an inverted phrase
+attribution, a `cycle-5 note` cited to the wrong file, and this Provenance list ending three cycles early). The mechanism's absence is unchanged and still tracked by
 `#11239`; `#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism
 that is built.
+
+**One INHERITED red blocked this PR's CI (`test (c)`), and `main` had already repaired it.** `#11665` added a
+sentence to this document's §3 opening *"⚠️ **The exemption is about CONTENT, not the declaration site …**"*. That
+suite's `MARKERS_ABSENT_BY_DESIGN["the exemption"]` declared the phrase absent-by-design (it is a `DENIAL_MARKERS`
+member — the owner's decision forbids calling a counted WRITER *"an exemption"*), so the first selection that ran
+the file reddened on a raw substring: *"these markers are declared absent-by-design but DO appear in the documents:
+['the exemption']"*. The sentence's subject is **not** a census row — it is the source-type profile's rule, whose
+point is that prompt CONTENT is what the rule reaches — so the phrase was never live: the denial rule only reads a
+sentence that names a census symbol, and that one names `memory_granularity`, `sourceTypes` and a pack manifest.
+⚠️ **Do not blame the SELECTION for this, which an earlier draft of this entry did.** The file IS selected on a
+docs-only diff — measured here, `select(['docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md'], "pull_request", …)`
+returns 84 files and `test_9397_about_edge_properties.py` is in them (it is `core` AND `tier1`, and a docs-only diff
+is the empty-surface / `tier1` arm). It did not run at `#11665`'s head because that run's fast shards `test (d)`–
+`(j)` were **cancelled** (`test (a)`/`(b)`/`(c)` succeeded) and the file is assigned to shard **d** — cancellation,
+not selection. Stating the cause correctly matters beyond this entry: the wrong version teaches the next lane that
+a docs-only diff skips doc-subject guards, which is the opposite of what the surface table says.
+
+**This branch first carried a COMPETING repair — rewording §3's noun so the declaration stayed true — and that
+repair is DROPPED on rebase.** `#11704` (`397a2d34b46`) repaired the same red first, by deleting the stale key and
+keeping `#11665`'s reviewed prose, explicitly naming and rejecting the reword (*"would edit freshly-reviewed prose to
+appease a pin"*); that repair is what `#9066` records, and reversing a recorded repair is a reopen on that issue,
+never a side effect of a rebase. The two are mutually exclusive — a reworded document makes the key TRUE and a kept
+document makes the key STALE — so the base's decision wins and this change takes it, leaving
+`tests/test_9397_about_edge_properties.py` byte-identical to `origin/main`'s copy. Two by-products of that abandoned
+route are kept because they are findings about the DOCUMENT rather than about the repair. **`carve-out` is not a
+free synonym**: `state_value_carve_out` (E2, `#1534`) is a registry row this same gate scans, and its marker sits on
+§7's subsection *"State values and numeric facts — the carve-out is NARROWER than it looks"* — not in §4.3, which
+carries no carve-out text at all. Every `carve-out` in the document — §3's own included, at
+`EXTRACTOR-V4-ARCHITECTURE.md:504` — names that mechanism, so a sentence about prompt content must not borrow the
+noun; do not re-derive an occurrence count here, it is a moving figure and this entry is not the place to hold it.
+A reword to *"The carve-out …"* would have swapped one collision for another. **And the marker's liveness
+now rests on prose that is NOT a denial** — `MARKERS_ABSENT_BY_DESIGN` no longer declares it, so the next document
+that borrows the denial's own noun reddens one PR at a time. That one-at-a-time visibility is the defect `#9066`
+exists to close, and it is why this branch's route was to reword rather than to leave the marker resting on this
+accident — a route the base had already foreclosed (above), so the residual is recorded here instead.
+
+**⚠️ A false PASS this lane measured and did NOT fix here (filed as `#11737`):** `#11665`'s head merged with Python CI
+showing seven of ten fast shards `cancelled` and only `test (a)`/`(b)`/`(c)` executed. A merge rail that reads a
+cancelled shard as "nothing to see" is a false PASS on the merge path, and it is how a red `main` is created — the
+red this PR inherits is that mechanism's product.
