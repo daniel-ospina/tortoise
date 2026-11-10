@@ -1506,7 +1506,11 @@ SOURCE_PATTERNS = {
 # carries `20261012000001`–`…05`, i.e. 12 entries for 16 members — and
 # nothing pinned the completeness of that list — so a member nobody registered
 # selected NO surface at all (measured on #11703's head: 1 of the 16
-# `supabase/migrations/*_record_*.sql` files). The rule keyed on
+# `supabase/migrations/*_record_*.sql` files). ⚠️ Those three counts are a DATED
+# ANCHOR (`2026-11-10`), not live counts: the next `*_record_*.sql` moves all
+# three, and nothing reds on the sentence — what stays true is the derived
+# completeness pin in `tests/test_ci_selection.py`, which is why it, not this
+# paragraph, is what the fix rests on. The rule keyed on
 # `is_record_migration_path()` closes the whole family at once, including the
 # member nobody has written yet, and it is what makes the completeness pin in
 # `tests/test_ci_selection.py` RUN on a migration-only diff: `core` is a surface,

@@ -4803,10 +4803,11 @@ def test_the_semantic_id_key_migration_selects_every_reader_of_the_contract():
 def test_every_record_migration_selects_core_and_both_readers():
     # #10080 (category A — a no-op gate): the forward record migrations were
     # claimed by HAND-WRITTEN `CORE_ALSO` coverage (11 per-file entries plus the
-    # shared `2026101200000` prefix = 12 entries for 16 members), and nothing
-    # pinned the COMPLETENESS of that enumeration — the tuple arm above pins only
-    # the paths someone remembered to add. Measured on #11703's head: of the 16
-    # `supabase/migrations/*_record_*.sql` files,
+    # shared `2026101200000` prefix = 12 entries for 16 members — a DATED ANCHOR,
+    # `2026-11-10`: the next `*_record_*.sql` moves those counts, and the pin below
+    # covers it), and nothing pinned the COMPLETENESS of that enumeration — the
+    # tuple arm above pins only the paths someone remembered to add. Measured on
+    # #11703's head: of the 16 `supabase/migrations/*_record_*.sql` files,
     # `20261109000001_record_embedding_vector.sql` (the #11642 vector move) was
     # the ONE that selected no surface at all, so a migration-only edit to it
     # ran neither the width pin (`test_11642_vector_move.py`, which parses its
