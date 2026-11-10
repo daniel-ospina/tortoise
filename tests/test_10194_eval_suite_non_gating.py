@@ -129,10 +129,9 @@ _TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
 #: another while its name survives is refused there too — every leg family (all
 #: FIVE declared flat legs, all three shard families, both tier-2 families) is
 #: read back against the producer's own set, per family, so any map-side mutation
-#: of a leg's membership reds. Two residuals are NOT covered, both measured: a
-#: filter applied to the PRODUCER itself (in `tools/ci_selection.py`) moves both
-#: sides together, and a new key `select()` RETURNS is enumerated by nothing. Both
-#: are stated in `_expected_legs()`.
+#: of a leg's membership reds. Two classes this file does NOT enforce (and does
+#: not claim anyone else does): a filter applied to the PRODUCER itself moves both
+#: sides together, and a new key `select()` RETURNS is enumerated by nothing.
 _LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
                         "push slow_selected"})
 
@@ -164,10 +163,10 @@ def _expected_legs(manifest: dict) -> set[str]:
     that is not declared here (a gating set added or moved below without
     `_LEG_KINDS`/this derivation following) reds, and the message names both
     sides. The leg KINDS stay literal (`_LEG_KINDS`) so the declared side cannot
-    drift along with the map — which also means a set DELETED from the map's body
-    reds here as `declared-but-missing` (measured: dropping the `shards`,
-    `slow_shards` or `carve_shards` loop each reds), so the map cannot quietly
-    stop walking a leg it used to.
+    drift along with the map — which is also why DELETING a leg from the map's
+    body reds (as a `KeyError` from the per-family read-back, or in that
+    read-back's own comparison; the per-family arms run first, so the
+    `declared-but-missing` message is not always the one you see).
 
     ⚠️ Two gaps, named precisely, because this docstring has now been wrong twice
     in the same direction (each version claiming a guard for a class the guard
@@ -182,8 +181,9 @@ def _expected_legs(manifest: dict) -> set[str]:
        _NON_GATING_LEG_KEYS` (the same mutant now reds, naming `telemetry`), and
        both constants are pinned so neither can grow as a quiet one-liner.
     2. A leg that keeps its NAME but loses its CONTENT — `_gating_sets()` emptying
-       a shard, or dropping a file from any leg — reds neither this equality nor
-       `leg_coverage_issues()` (measured at #11675: 8 passed for every family).
+       a shard, or dropping a file from any leg — red an equality whose two sides
+       are BOTH built from that map, i.e. nothing in this file (measured at
+       #11675: 8 passed for every family, before the arms below existed).
        That one is now refused by TWO arms in the same test: every gating leg
        must be non-empty (only `tier-2 slow_selected [...]` is exempt, and for a
        stated reason), and every leg family is read back against the producer's
@@ -197,30 +197,19 @@ def _expected_legs(manifest: dict) -> set[str]:
        version of this test compared two PRODUCER calls, which no map edit can
        reach, and its reviewer measured that.
 
-       ⛔ Two residuals, both measured GREEN here, both stated so nobody infers a
-       guard:
+       ⛔ What this file does NOT enforce, stated without naming anyone else as
+       the owner — the earlier versions of this paragraph did, and every review of
+       it found one of those attributions false (a function that is informational,
+       a pin that reds only on synthetic fixtures, a universal that held for one
+       dropped file and not the next). Who else guards a class is a separate
+       question, answered by measuring, not by this docstring:
 
        (a) a filter applied to the PRODUCER itself (in `tools/ci_selection.py`)
-           moves both sides together. What actually FAILS CLOSED for a dropped
-           fast file is `tests/test_ci_selection.py::test_push_legs_partitions_
-           every_classified_file` (plus its siblings
-           `test_coverage_hole_report_is_always_a_fast_pool_file`,
-           `test_a_shard_that_cannot_fit_its_budget_is_named_not_silently_killed`,
-           `test_full_matrix_split_is_duration_balanced` — measured red on a
-           `fast_pool()` drop). `fast_files_absent_from_halves()` is NOT one of
-           them: its own docstring says "#1266 (informational) … Kept as a
-           warning (not fail-closed)", and `--integrity` prints its warning and
-           still exits 0. For a PRODUCER-side `slow_gating_files()` filter
-           nothing reds at all: measured, the target file and
-           `tests/test_ci_selection.py` both pass and `--integrity` is clean. (A
-           CONFIG `slow_files` drop does red
-           `test_the_documented_slow_wall_restates_the_committed_maps_own_projection`
-           — but collaterally, because that pin restates the durations
-           projection, not because it guards coverage.)
-       (b) nothing enumerates the keys `select()` RETURNS, so a new gating key
-           there is unguarded — including by the leak check below, which iterates
-           only the keys this map built. "Today" in the next sentence means "no
-           such key exists", not "the leak guard would catch it".
+           moves both sides together, so the read-backs above cannot see it;
+       (b) nothing here enumerates the keys `select()` RETURNS, so a new gating
+           key there is unguarded — including by the leak check below, which
+           iterates only the keys this map built. "Today" in the next sentence
+           means "no such key exists", not "the leak guard would catch it".
 
     The count is the manifest's, never a second copy in this file: the two
     `core` rows #11642 added move no shard count at all (measured over
@@ -256,8 +245,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     emptied, filtered or swapped reds in the per-family read-backs — but a key
     `select()` newly RETURNS is enumerated by nothing (the leak check below walks
     only the keys THIS map built), and a filter applied to the PRODUCER moves both
-    sides together (the `tests/test_ci_selection.py` partition pins own that one,
-    not this file). See `_expected_legs()`.
+    sides together. Neither is this file's to enforce. See `_expected_legs()`.
     """
     legs = cs.push_legs(manifest)
     out: dict[str, set[str]] = {
