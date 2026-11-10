@@ -3514,6 +3514,26 @@ _DECORATION_TIMEOUT_MS = 200
 #: why ``validity._names_an_instant`` read the producer's dates as naming no
 #: instant).
 #:
+#: ⛔ THE PRODUCER'S SHAPE NAMES A ZONE-LESS INSTANT, SO ITS KEY IS
+#: HOST-DEPENDENT — and that is a recorded residual, not a bug to paper over
+#: here. #3982 deliberately leaves a zone-less date-TIME NAIVE (it defers to
+#: ``datetime.timestamp()``), so the float this arm returns resolves in the
+#: reader's zone. Measured on one stored pair:
+#:
+#:     TZ=UTC                 k('2023/05/20 (Sat) 02:21') -> (0, 1684549260.0)
+#:     TZ=America/Los_Angeles k(…same…)                      -> (0, 1684574460.0)
+#:     TZ=Asia/Kolkata        k(…same…)                      -> (0, 1684529460.0)
+#:
+#: which makes ``sdk.supersede_point``'s inversion guard answer DIFFERENTLY per
+#: host for a mixed producer-shaped / dashed pair (inverted on UTC and
+#: ``America/Los_Angeles``, not inverted on ``Asia/Kolkata``). On ``origin/main``
+#: those values bucketed ``(1, text)``, so the guard was skipped — i.e. this
+#: exposure is NEW, and it is the #3982 divergence reaching a WRITE path.
+#: Reversing #3982 is a recorded decision and is NOT the fix; a deterministic
+#: anchor for the new shape is a separate decision to be argued on #11646. Until
+#: then the guard's host dependence is recorded here and on that issue rather
+#: than silently relied on.
+#:
 #: ``YYYY-DDD`` (ordinal) is absent deliberately: the stdlib cannot parse it
 #: (``date.fromisoformat("2026-161")`` raises), so such values are unparseable
 #: either way and an alternative for them would be dead.

@@ -398,6 +398,14 @@ def test_write_door_still_canonicalises_a_date_variant():
     assert read_caller_end("2024/3/1+05:00") == ("2024-03-01+05:00", None)
     assert read_caller_end("2024/03/01+05:00") == ("2024-03-01+05:00", None)
     assert read_caller_end("2024/3/1-05:00") == ("2024-03-01-05:00", None)
+    # ⛔ the offset arm must be as WIDE as ``_INSTANT_RE``'s, or ONE defect class
+    # gets THREE outcomes at the door: a bare ``±HH`` and ``Z`` tail used to fall
+    # past this helper and be stored verbatim (or, for ``2024/3/1Z``, refused) —
+    # measured `('2024/3/1+05', None)`, `('2023/05/20Z', None)`, ValueError.
+    assert read_caller_end("2024/3/1+05") == ("2024-03-01+05", None)
+    assert read_caller_end("2023/05/20Z") == ("2023-05-20Z", None)
+    assert read_caller_end("2023/05/20+05") == ("2023-05-20+05", None)
+    assert read_caller_end("2024/3/1Z") == ("2024-03-01Z", None)
     # …and an offset that is not a real one is REFUSED, not re-spelled
     with pytest.raises(ValueError):
         read_caller_end("2024/3/1+25:00")
@@ -434,6 +442,36 @@ def test_a_stated_offset_that_is_not_real_names_no_instant():
     assert calendar_datetime("2023/05/20T02:00:00Z").utcoffset() == timedelta(0)
     assert calendar_datetime("2023/05/20").utcoffset() == timedelta(0)
     assert _names_an_instant("2023/05/20T02:00:00+05:00") is True
+
+
+def test_the_dashed_offset_arm_is_delegated_and_that_divergence_is_recorded():
+    """The guard above lives in THIS module's offset parser, which
+    ``_created_sort_key`` reaches only for a SLASH spelling (its ``"/" in s``
+    arm). A DASHED value goes straight to ``datetime.fromisoformat``, whose
+    offset parser NORMALISES an impossible one rather than refusing it:
+
+        datetime.fromisoformat("2023-05-20T02:00:00+00:99")
+            -> 2023-05-20 02:00:00+01:39
+
+    so ``calendar_datetime`` answers ``None`` while ``_created_sort_key``
+    happily orders it and ``_names_an_instant`` reads ``END_KNOWN`` — two
+    notions of "names an instant" for one string.
+
+    ⛔ This is PRE-EXISTING dashed behaviour (`origin/main` did the same via
+    ``datetime.fromisoformat``) and it is deliberately NOT fixed here: routing
+    the dashed arm through this resolver would change what the recorded #9202
+    ruling reads for a shape that ruling already covers. It is PINNED so the
+    divergence is visible and a later lane inherits it as a decision rather
+    than rediscovering it as a bug — see the residual recorded on #11646.
+    """
+    # the slash spelling is refused by this module's own parser
+    assert calendar_datetime("2023/05/20T02:00:00+00:99") is None
+    assert _names_an_instant("2023/05/20T02:00:00+00:99") is False
+    # the dashed spelling is normalised by the stdlib, so it still names an
+    # instant — the pre-existing divergence, pinned rather than papered over
+    assert calendar_datetime("2023-05-20T02:00:00+00:99") is None
+    assert _names_an_instant("2023-05-20T02:00:00+00:99") is True
+    assert _created_sort_key("2023-05-20T02:00:00+00:99")[0] == 0
 
 
 # ── UNION parity: no value that parsed before may stop parsing ─────────────

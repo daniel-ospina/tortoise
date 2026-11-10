@@ -131,15 +131,18 @@ _DATE_VARIANT_RE = re.compile(
     # measure widened for #11646), so this door must canonically re-spell them
     # instead of storing a variant it used to refuse (review cycle 4, finding 3).
     r"^(?P<year>\d{4})[-/](?P<month>\d{1,2})[-/](?P<day>\d{1,2})"
-    # ``rest`` covers a TIME part AND an OFFSET-ONLY tail. `[T ]\S*` alone could
-    # not express ``2024/3/1+05:00``, so a date variant carrying only an offset
-    # returned ``None`` here, took the "already an instant" path at
-    # ``_names_an_instant`` (widened by #11646), and was stored VERBATIM —
-    # unpadded and slash-spelled, the exact spelling #9202-review-P3 settled
-    # against. Measured before the widening:
-    # ``read_caller_end("2024/3/1+05:00") -> ("2024/3/1+05:00", None)``
-    # while ``read_caller_end("2024/3/1") -> ("2024-03-01", None)``.
-    r"(?P<rest>(?:[T ]\S*|[+-]\d{2}:?\d{2}(?::?\d{2})?))?$"
+    # ``rest`` covers a TIME part AND an OFFSET-ONLY tail, and the offset arm
+    # must be as WIDE as ``_INSTANT_RE``'s — ``[Zz]`` and a bare ``±HH`` included.
+    # A narrower arm (``±HH:MM`` at minimum) left the rest of the family falling
+    # past this helper into the "already an instant" short-circuit, so ONE
+    # defect class had THREE outcomes at the door (measured):
+    #   read_caller_end("2024/3/1+05:00") -> ("2024-03-01+05:00", None)  # re-spelled
+    #   read_caller_end("2024/3/1+05")    -> ("2024/3/1+05", None)       # ⛔ verbatim
+    #   read_caller_end("2023/05/20Z")    -> ("2023/05/20Z", None)       # ⛔ verbatim
+    #   read_caller_end("2024/3/1Z")      -> ValueError                  # refused
+    # Storing a slash-spelled bound is not cosmetic: it is invisible to the
+    # lexicographic ``STARTS WITH`` window pre-filters (#9406).
+    r"(?P<rest>(?:[T ]\S*|[Zz]|[+-]\d{2}(?::?\d{2}(?::?\d{2})?)?))?$"
 )
 
 #: An epoch supplied as a STRING. ``_created_sort_key`` reads an epoch from a

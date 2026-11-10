@@ -35,8 +35,10 @@ union" by re-adding them:
   ``fromisoformat`` path truncated it to a real date; that is a day nobody
   wrote;
 * a pure 9+-digit number read as a date (``20230520.3``, ``202305201112``) —
-  the same truncation artifact seen from the other side; see the epoch rule
-  below for what those ARE read as;
+  the same truncation artifact seen from the other side. Both are now UNDATED,
+  by the same digit-count rule that refuses a 9+-digit epoch STRING (see the
+  epoch rule below); neither is read as an epoch — the pointer this line used
+  to carry was false for both of its own examples;
 * a compact / ISO-week date with a MALFORMED offset tail (``20230520+5:00``,
   ``20230520+050``, ``2023W206+5:00``) — ``origin/main`` dated these by
   truncating at ten characters, and the offset gate below deliberately accepts
@@ -124,6 +126,26 @@ deliberate and pinned
 (``tests/test_11646_producer_date_shape.py::test_a_pure_number_is_never_truncated_into_a_fabricated_day``);
 reversing it is a REOPEN of that rule, not a bug fix.
 
+⛔ THIS ENUMERATION IS NOT EXHAUSTIVE, and it is stated that way rather than as a
+closed list because measurement found three more classes in the same DIRECTION
+(value was dated on ``origin/main``, undated here) that no cycle had named:
+
+    ``_norm_date("2023-W43-2x")``            main 2023-10-24 · here ``None``
+    ``_norm_date("2023-W43-2(Sat)02:21")``   main 2023-10-24 · here ``None``
+    ``time_aware._as_date("1e9")``           main '2001-09-09' · here ``None``
+    ``time_aware._as_date("1.9e9")``         main '2030-03-17' · here ``None``
+
+The first two are the ISO-WEEK analogue of the compact-timestamp exception (the
+old ``s[:10]`` truncated to a complete week date); the last two are ``float()``
+epoch SPELLINGS, which ``_as_date`` used to accept and the digit rule now refuses
+(a pure number still names an epoch; an exponential spelling of one does not).
+Every class found so far moves in the SAFE direction — a value is undated rather
+than future-dated — which is why none is repaired here: repairing any of them
+would widen the parse union past what the recorded digit rule allows. What this
+paragraph exists to prevent is the opposite: a reader who takes the three named
+exclusions as the WHOLE of the exception surface, and therefore trusts the union
+claim absolutely.
+
 The undated sentinel (``tools/longmem_eval/ingest.UNDATED_SENTINEL``) is a
 POSITIVE date that means "no date". It is EXPORTED, never applied: callers
 differ deliberately — the assembly ladder floors ``<= 1970-01-01`` (any
@@ -174,9 +196,12 @@ UNDATED_SENTINEL_DATE = "1970-01-01"
 #: exists to fix (a real date silently becoming undated) — an unreadable TAIL
 #: means the exact INSTANT is unknown, not that the stated DAY is.
 #:
-#: ⛔ The duplication is the ONLY copy that is not independently re-spelled:
-#: ``tests/test_11646_producer_date_shape.py`` pins both against the same
-#: table, so a change to one that the other does not follow reds a test.
+#: ⛔ The duplication is DELIBERATE and it is NOT test-enforced: no test
+#: references either pattern, so a narrowing of this tolerant prefix that
+#: ``_INSTANT_RE`` does not follow would leave the suite green. Keep them
+#: agreeing by hand (this prefix is the LAST-RESORT arm, so it must stay at
+#: least as wide as the whole-value grammar's — narrowing it silently undates
+#: a value whose only defect is an unreadable tail).
 _CALENDAR_SHAPE_RE = re.compile(r"^(\d{4})[-/](\d{1,2})[-/](\d{1,2})(?!\d)")
 
 #: A WHOLE-value instant: the calendar prefix, an optional producer weekday
