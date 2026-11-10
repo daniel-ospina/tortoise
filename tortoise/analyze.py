@@ -30,18 +30,23 @@ from .search_engine import (  # #11702: the ONE presence predicate
 # ⛔ The fallback is **null**, never 0.5 (#11702, §6.3). A `CASE ... ELSE 0.5`
 # arm cannot tell a stored (α, β) = (0, 0) from "no columns at all" — both sum
 # to 0.0 — so it handed a never-measured claim a neutral coin flip and
-# `ORDER BY conf DESC` then ranked it ABOVE a measured 0.10 claim. A template
-# that must exclude an absent belief gates on `ep_has_belief_cypher` (see
-# `disagreement`/`consensus`); one that deliberately admits it reports `null`
-# and orders it LAST (`_order_by_belief`), which is the same refusal the
-# rankers make.
+# `ORDER BY conf DESC` then ranked it ABOVE a measured 0.10 claim.
+#
+# The presence gate is `ep_has_belief_cypher`, the SHARED predicate — never a
+# private sum written here. A local sum is how this file leaked a second
+# presence rule: it called a HALF pair (`posterior_beta` alone) a belief, and
+# the `coalesce(…, 1.0)` default answered `1/4` for it while the other six
+# surfaces said `absent`. Gating on the shared predicate makes that drift
+# impossible. A template that must EXCLUDE an absent belief instead gates its
+# WHERE on the same predicate (`disagreement`/`consensus`); one that
+# deliberately admits it reports `null` and orders it LAST
+# (`_order_by_belief`), which is the same refusal the rankers make.
 _BELIEF = (
-    "CASE WHEN {a}.confidence IS NOT NULL THEN {a}.confidence "
-    "  WHEN (coalesce({a}.posterior_alpha, {a}.ep_alpha, 0.0) "
-    "        + coalesce({a}.posterior_beta, {a}.ep_beta, 0.0)) > 0 "
-    "       THEN coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
-    "            / (coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
-    "               + coalesce({a}.posterior_beta, {a}.ep_beta, 1.0)) "
+    "CASE WHEN " + ep_has_belief_cypher("{a}") + " "
+    "  THEN coalesce({a}.confidence, "
+    "    coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
+    "    / (coalesce({a}.posterior_alpha, {a}.ep_alpha, 1.0) "
+    "       + coalesce({a}.posterior_beta, {a}.ep_beta, 1.0))) "
     "  ELSE null END"
 )
 
@@ -180,17 +185,15 @@ TEMPLATES: dict[str, dict] = {
             MATCH (c:Point)
             WHERE c.is_operator = false
               AND {_terminal_excluded('c.status')}
-              AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
+              // #11702: the population gate is the SHARED presence predicate,
+              // so a stored (0, 0) or HALF pair is not a candidate at all — it
+              // has no variance to rank and no belief to report.
+              AND {ep_has_belief_cypher('c')}
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
             WITH c, a, b, (a * b) / 
                ((a + b)^2 * (a + b + 1)) as variance
-            RETURN c.id, c.content,
-                   coalesce(c.confidence,
-                            CASE WHEN a + b > 0
-                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
-                     as conf,
-                   variance
+            RETURN c.id, c.content, {_belief('c')} as conf, variance
             ORDER BY variance DESC LIMIT $limit
         """,
         "format": lambda rows: _format_uncertain(rows),
@@ -235,11 +238,7 @@ TEMPLATES: dict[str, dict] = {
               AND (c.posterior_alpha IS NOT NULL OR c.ep_alpha IS NOT NULL)
             WITH c, coalesce(c.posterior_alpha, c.ep_alpha, 1.0) AS a,
                  coalesce(c.posterior_beta, c.ep_beta, 1.0) AS b
-            RETURN c.id, c.content,
-                   coalesce(c.confidence,
-                            CASE WHEN a + b > 0
-                                 THEN toFloat(a) / (a + b) ELSE 0.5 END)
-                     as conf,
+            RETURN c.id, c.content, {_belief('c')} as conf,
                    a, b, c.createdAt
             ORDER BY c.createdAt DESC LIMIT $limit
         """,
@@ -295,7 +294,12 @@ def _format_uncertain(rows: list) -> str:
         return "No uncertain claims found."
     lines = ["Most uncertain claims (highest variance):"]
     for i, r in enumerate(rows[:10], 1):
-        lines.append(f"  {i}. \"{r[1][:80]}\" (conf: {r[2]:.2f}, var: {r[3]:.4f})")
+        # #11702: an absent belief renders as "no belief" instead of raising on
+        # `f"{None:.2f}"` (the blanket `except` in `analyze()` would turn that
+        # into an empty answer, which reads as "found nothing").
+        conf_txt = (f"conf: {float(r[2]):.2f}"
+                    if r[2] is not None else "no belief")
+        lines.append(f"  {i}. \"{r[1][:80]}\" ({conf_txt}, var: {r[3]:.4f})")
     return "\n".join(lines)
 
 
@@ -321,7 +325,12 @@ def _format_timeline(rows: list) -> str:
     lines = ["Confidence timeline:"]
     for r in rows[:10]:
         ts = r[5][:10] if len(r) > 5 and r[5] else "?"
-        lines.append(f"  [{ts}] \"{r[1][:80]}\" (α={r[3]:.1f}, β={r[4]:.1f}, conf={r[2]:.2f})")
+        # #11702: an absent belief is `null` — render it as "no belief" rather
+        # than raising TypeError on `f"{None:.2f}"` (which the blanket
+        # exception in `analyze()` would turn into a silently empty answer).
+        conf_txt = (f"conf={float(r[2]):.2f}"
+                    if len(r) > 2 and r[2] is not None else "no belief")
+        lines.append(f"  [{ts}] \"{r[1][:80]}\" (α={r[3]:.1f}, β={r[4]:.1f}, {conf_txt})")
     return "\n".join(lines)
 
 

@@ -8,7 +8,10 @@ from __future__ import annotations  # noqa: I001
 import re
 from typing import Any
 
-from .search_engine import EP_STATE_ABSENT, ep_state
+# #11702: the ONE Python belief reader — `belief_value`, which applies the
+# shared presence predicate AND the #2206 precedence — so this surface cannot
+# re-decide either for itself.
+from .search_engine import belief_value
 
 
 #: Root-lookup branches for _resolve_root (issue #327). Every branch is a
@@ -229,21 +232,22 @@ def entityProfile(
             # #11702: `node.get("confidence", 0.5)` fabricated the neutral
             # Beta(1,1) mean for a claim with NO persisted belief, so a floor at
             # or below 0.5 admitted it as if it carried neutral evidence — the
-            # same defect `min_confidence` on search/recall had. An absent
-            # belief has no number to clear a floor with: it is kept only by the
-            # no-op default (0.0 / None) and excluded by any real floor.
+            # same defect `min_confidence` on search/recall had.
             #
             # ⚠️ But the mirror is not the only place a belief is PERSISTED: a
             # claim written by any path other than the EP flush carries
-            # posterior/prior α/β and NO `n.confidence` mirror (that is the
-            # population `_fetch_point_signals`' "a node the flush never
-            # reached" fallback exists for). Reading the mirror alone made a
-            # claim MEASURED at 0.9 read `conf is None` and drop out of every
-            # floor — a recall regression that contradicts the §6.3 rule that a
-            # new read surface uses the shared presence predicate instead of
-            # re-deriving absence. `_persisted_belief` applies the repo-wide
-            # precedence: mirror first, then the stored α/β mean, with
-            # `ep_state` deciding absence.
+            # posterior/prior α/β and NO `n.confidence` mirror (the population
+            # `_fetch_point_signals`' "a node the flush never reached" fallback
+            # exists for). Reading the mirror alone made a claim MEASURED at 0.9
+            # read `conf is None` and drop out of every floor — a recall
+            # regression, and a second presence rule on a read surface.
+            #
+            # `_persisted_belief` delegates to `search_engine.belief_value`, the
+            # ONE Python reader, so this surface cannot re-decide precedence or
+            # presence for itself (which is how `analyze` came to answer 1/4 for
+            # a half pair). An absent belief still has no number to clear a
+            # floor with: it is kept only by the no-op default (0.0 / None) and
+            # excluded by any real floor.
             conf = _persisted_belief(node)
             if conf is None:
                 if confidenceMin > 0.0:
@@ -358,24 +362,19 @@ def _persisted_belief(node: dict) -> float | None:
     A pair that is complete but sums to zero is ``absent`` — Beta(0, 0) is not a
     distribution — so it answers ``None`` too, which is the same rule
     ``ep_has_belief_cypher`` spells in Cypher.
+
+    ⛔ This function DELEGATES to :func:`search_engine.belief_value` rather than
+    implementing the rule: two implementations of "what is a belief" is the
+    defect class #11702 removes, and the next reader would have to keep them in
+    step by hand.
     """
-    mirror = node.get("confidence")
-    if ep_state(posterior_alpha=node.get("posterior_alpha"),
-                ep_alpha=node.get("ep_alpha"),
-                confidence=mirror,
-                posterior_beta=node.get("posterior_beta"),
-                ep_beta=node.get("ep_beta")) == EP_STATE_ABSENT:
-        return None
-    if isinstance(mirror, (int, float)):
-        return float(mirror)
-    alpha, beta = node.get("posterior_alpha"), node.get("posterior_beta")
-    if alpha is None:
-        alpha, beta = node.get("ep_alpha"), node.get("ep_beta")
-    if alpha is not None and beta is not None:
-        total = float(alpha) + float(beta)
-        if total > 0:
-            return float(alpha) / total
-    return None
+    return belief_value(
+        confidence=node.get("confidence"),
+        posterior_alpha=node.get("posterior_alpha"),
+        posterior_beta=node.get("posterior_beta"),
+        ep_alpha=node.get("ep_alpha"),
+        ep_beta=node.get("ep_beta"),
+    )
 
 
 def _parse_node_with_identity(node: Any) -> tuple[dict, Any, str]:

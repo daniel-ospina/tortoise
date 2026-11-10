@@ -23,16 +23,22 @@ belief that does not exist) rather than against a call site, so a new ranker or
 a re-introduced `coalesce(…, 0.5)` is caught by the same assertions.
 
 **Coverage, stated exactly** (so a later lane does not read this file as
-covering more than it does): the surfaces pinned here are
+covering more than it does). PINNED here: the vocabulary (`ep_state`,
+`ep_has_belief_cypher` via the surfaces below, `belief_value`),
 `annotate_ep_batch`, the canonical `why` `ep` block, `GraphRanker`,
-`StateRanker`/`recall_ranking`, `GapsRanker`, `SubgraphExpander` and the
-`n.confidence`-mirror `ep_state`. Deliberately OUT of this file's scope:
-`analyze.py`'s template returns (pinned by their own template tests),
-`battery/arms/a4_tortoise.py` (an eval arm, not a product surface), and
-`sdk.get_confidence`/`TortoiseEP.compute_confidence`, which remain the EP
-prior read under `require_calibration=False` and still answer 0.5 for an
-absent claim — the one stated exception, recorded in the #11702 decision
-comment (issuecomment-6781252637).
+`StateRanker`/`recall_ranking`, `GapsRanker`, `SubgraphExpander`, the
+`analyze` templates (`evidence_chain`, and the `_BELIEF` gate they share),
+`navigation.confidenceMin`, `sdk.approve`'s `confidence_delta`, and the
+journal records both belief-clearing writers emit. Each is pinned for the
+whole rule, not one shape: absent / half pair / zero-total pair / mirror-only
+/ measured.
+
+Deliberately OUT of this file's scope: `battery/arms/a4_tortoise.py` (an eval
+arm, not a product surface) and `sdk.get_confidence` /
+`TortoiseEP.compute_confidence`, which remain the EP prior read under
+`require_calibration=False` and still answer 0.5 for an absent claim — the
+one stated exception, recorded in the #11702 decision comment
+(issuecomment-6781252637).
 """
 from __future__ import annotations
 
@@ -582,3 +588,97 @@ def test_entity_profile_floor_reads_a_posterior_only_belief(sdk):
     assert absent_kid not in ids(0.3), "an absent belief cleared a real floor"
     assert {measured_kid, absent_kid} <= ids(0.0), (
         "the no-op floor must keep an absent claim (0.0 is the #11702 default)")
+    """`belief_value` is the Python twin of the Cypher presence+precedence rule.
+
+    Every surface that holds a plain property dict (navigation's floor,
+    `sdk.approve`'s delta) calls THIS, so the "a half pair is no belief" rule
+    cannot be re-decided differently per surface — which is exactly how
+    `tortoise_analyze` came to answer `1/4` for a β-only row.
+    """
+    from tortoise.search_engine import belief_value
+
+    assert belief_value(confidence=0.95) == pytest.approx(0.95)
+    assert belief_value(posterior_alpha=2.0, posterior_beta=2.0) == pytest.approx(0.5)
+    assert belief_value(ep_alpha=10.0, ep_beta=1.0) == pytest.approx(10 / 11)
+    # mirror leads over the pair (the #2206 served value)
+    assert belief_value(confidence=0.4, posterior_alpha=9.0,
+                        posterior_beta=1.0) == pytest.approx(0.4)
+    # every absent shape
+    assert belief_value() is None
+    assert belief_value(posterior_alpha=2.0) is None            # half pair
+    assert belief_value(posterior_beta=3.0) is None             # half pair
+    assert belief_value(posterior_alpha=0.0, posterior_beta=0.0) is None
+
+
+def test_analyze_reports_no_belief_for_a_half_pair(sdk):
+    """The `analyze` templates gate on the SHARED predicate, not a local sum.
+
+    A private sum called a β-only row a belief (`coalesce(…, 1.0)` supplied the
+    missing α) and reported `1/4`, which `_order_by_belief` then ordered on —
+    the exact inversion §6.3 removes, on a surface whose own comment claimed
+    the fix.
+    """
+    from tests._embedded import _wipe_or as wipe
+    from tortoise.analyze import analyze
+
+    proj = sdk._get_proj()
+    wipe(proj)
+    g = proj.g
+    g.query("CREATE (:Point {id:'half', content:'half pair support', "
+            "is_operator:false, status:'live', posterior_beta:3.0})")
+    g.query("CREATE (:Point {id:'low', content:'measured low support', "
+            "is_operator:false, status:'live', posterior_alpha:1.0, "
+            "posterior_beta:9.0})")
+    g.query("CREATE (:Point {id:'tgt', content:'evidence ai strategy is working', "
+            "is_operator:false, status:'live'})")
+    g.query("CREATE (:Point {id:'op', content:'IMPL', op_type:'IMPL', "
+            "is_operator:true, status:'live'})")
+    g.query("MATCH (h:Point {id:'half'}), (b:Point {id:'low'}), "
+            "(o:Point {id:'op'}), (t:Point {id:'tgt'}) "
+            "CREATE (h)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:1}]->(t), "
+            "       (b)<-[:IMPL {idx:0}]-(o)-[:IMPL {idx:2}]->(t)")
+    answer = analyze("show me the evidence chain for the AI strategy",
+                     proj=proj, use_llm=False)["answer"]
+    assert "half pair support" in answer and "measured low support" in answer, answer
+    assert "0.25" not in answer, (
+        "a β-only row was scored 0.25 — the half-pair fabrication: " + answer)
+    assert (answer.index("measured low support")
+            < answer.index("half pair support")), (
+        "the absent half-pair row must sort after the measured 0.1 row: " + answer)
+
+
+def test_set_point_baseline_journals_the_mirror_it_writes(sdk, tmp_path):
+    """The baseline write now MOVES `n.confidence`; the record must say so.
+
+    The fold writes only the keys a record carries, so a record with just the
+    two posterior clears left the mirror stale on replay: live `baseline`/0.75,
+    rebuilt `absent`/None. The payload is the value the statement committed.
+    """
+    import json as _json
+
+    from tortoise.sdk import TortoiseSDK
+
+    db = str(tmp_path / "b.db")
+    events = tmp_path / "bevents"
+    events.mkdir()
+    j = TortoiseSDK(db, event_log_path=str(events / "events.jsonl"))
+    try:
+        pid = j.create_point("statement", "baseline journal claim",
+                             dedup=False, status="live")["id"]
+        j.set_point_baseline(pid, 3.0, 1.0)
+        mirror = j._get_proj().g.query(
+            "MATCH (n:Point {id:$id}) RETURN n.confidence",
+            params={"id": pid}).result_set[0][0]
+        assert mirror == pytest.approx(0.75, abs=1e-4), mirror
+        recs = [r for r in (_json.loads(line)
+                            for line in (events / "events.jsonl").read_text().splitlines()
+                            if line.strip())
+                if r.get("type") == "ConfidenceChanged" and r.get("id") == pid]
+        assert recs, "set_point_baseline journaled no ConfidenceChanged"
+        carried = [r["confidence"] for r in recs if "confidence" in r]
+        assert carried, (
+            "the record omitted `confidence` while the statement wrote it — a "
+            "rebuild would leave the mirror stale (live baseline/0.75 -> rebuilt absent)")
+        assert carried[-1] == pytest.approx(0.75, abs=1e-4), carried
+    finally:
+        j.close()

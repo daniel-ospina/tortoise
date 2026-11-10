@@ -439,6 +439,36 @@ def ep_state(*, posterior_alpha, ep_alpha, confidence=None,
             else EP_STATE_BASELINE)
 
 
+def belief_value(*, confidence=None, posterior_alpha=None,
+                 posterior_beta=None, ep_alpha=None, ep_beta=None,
+                 round_to: int | None = None):
+    """The belief VALUE for a set of raw columns — ``None`` when there is none.
+
+    THE Python twin of the value expression the Cypher surfaces build, so a
+    surface holding a plain property dict (``navigation.confidenceMin``,
+    ``sdk.approve``) does not re-decide precedence or presence for itself. That
+    re-decision is the defect class this issue exists for: it produced a
+    HALF pair read as a belief (``1/4`` from the ``coalesce(…, 1.0)`` default),
+    a mirror-only read that called a measured claim absent, and a mirror-only
+    write that a rebuild could not reproduce.
+
+    Precedence is #2206's: the ``n.confidence`` mirror is the SERVED belief and
+    leads (it is what every ranker prefers), with the pair mean as the fallback
+    for a node whose flush never reached it. Presence is
+    :func:`ep_state`'s rule — mirror, or BOTH coalesced operands with
+    ``α + β > 0`` — so a zero-total or half pair answers ``None``.
+    """
+    if confidence is not None:
+        value = float(confidence)
+    else:
+        alpha = posterior_alpha if posterior_alpha is not None else ep_alpha
+        beta = posterior_beta if posterior_beta is not None else ep_beta
+        if alpha is None or beta is None or (alpha + beta) <= 0:
+            return None
+        value = float(alpha) / (float(alpha) + float(beta))
+    return round(value, round_to) if round_to is not None else value
+
+
 def ep_state_resolve(state: str, *, measured: bool) -> str:
     """Fold the #2490 terminal gate into a presence-derived state name.
 

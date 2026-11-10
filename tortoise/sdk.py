@@ -29797,6 +29797,11 @@ class TortoiseSDK:
     def file_human_approval(self, approver_id: str, artifact_id: str,
                             point_ids: list[str],
                             decision_content: str | None = None) -> dict:
+        # #11702: lazy import (the `_created_sort_key` convention in this file) —
+        # `annotate_ep_batch` is the ONE belief read the rankers use, and importing
+        # it at module scope would pull `search_engine` into every `sdk` import.
+        from .search_engine import annotate_ep_batch
+
         """Record a human approval of a planning artifact (#531).
 
         Canonical approval pattern (research #421): an Event
@@ -29911,14 +29916,18 @@ class TortoiseSDK:
 
         # 7. EP with evidence prior on the approval Point: Beta(10,1) is a
         #    strong positive prior — dependents strengthen (issue #531).
-        before = {}
-        for pid in point_ids:
-            p = self.get_point(pid)
-            # #11702: `None` when the claim carries no belief — the 0.5 default
-            # invented a baseline that never existed, so a claim taken from
-            # nothing to 0.9 reported `+0.4`. `get_point` omits the key for a
-            # never-measured claim, which is the honest reading here.
-            before[pid] = (p.get("confidence") if p else None)
+        # #11702: both endpoints come from the SHARED belief reader
+        # (`annotate_ep_batch`, the same value `search`/`recall`/`why` report),
+        # never from `get_point(...)["confidence"]`. That key is the EP-flush
+        # MIRROR: it is absent on a claim whose belief lives in its posterior
+        # pair, so reading it alone reported `None` for a claim measured at
+        # 0.75 — "the belief did not exist" about one that did. `None` now means
+        # exactly what the docstring says.
+        before = {
+            bd_id: bd.confidence_mean
+            for bd_id, bd in annotate_ep_batch(
+                self._get_proj().g, list(point_ids)).items()
+        }
         # #344: conscious opt-out from the fail-closed gate. #7739 scoped the
         # no-arg gate to the dirty roots and their closure (it is no longer
         # graph-wide), and this call still passes no anchors/factors — but the
@@ -29929,17 +29938,20 @@ class TortoiseSDK:
         # gate for any other caller: each one opts out explicitly or not at all.
         self.compute_confidence(evidence={decision_id: (10, 1)},
                                 require_calibration=False)
+        after = {
+            bd_id: bd.confidence_mean
+            for bd_id, bd in annotate_ep_batch(
+                self._get_proj().g, list(point_ids)).items()
+        }
         deltas = {}
         for pid in point_ids:
-            p = self.get_point(pid)
-            after = (p.get("confidence") if p else None)
             # #11702: a delta needs TWO numbers. Against a `None` endpoint the
             # only truthful answer is `None` (the claim went from "no belief"
             # to a value, which is not a delta on the same axis) — reporting
             # `0.9 - 0.5` claimed a movement that never happened.
-            deltas[pid] = (round(after - before[pid], 4)
-                           if after is not None and before[pid] is not None
-                           else None)
+            was, now = before.get(pid), after.get(pid)
+            deltas[pid] = (round(now - was, 4)
+                           if now is not None and was is not None else None)
 
         # 8. Approval seeds the grounding a-vector — re-compute (api.py pattern)
         if hasattr(proj, "compute_grounding"):
@@ -33657,15 +33669,24 @@ class TortoiseSDK:
         # pre-write writes `ep_alpha`/`ep_beta` CONDITIONALLY on the
         # pre-existing `baseline_set`, so the correct payload is the
         # statement's OUTCOME, not its input params) and is filed as a
-        # residual for the controller. `confidence` is untouched here.
+        # residual for the controller.
+        #
+        # ⛔ #11702: the mirror IS journaled, because this statement now MOVES
+        # it (`n.confidence = $c` above). Leaving it out made live and rebuilt
+        # disagree — live `baseline`/0.75, rebuilt `absent`/None — because the
+        # fold is presence-conditional and only writes the keys a record
+        # carries. The payload is the value the statement itself committed, so
+        # replay cannot differ from the write.
         # NOTE (#6151 review P3): `_stamp_authored_word` — the other writer in
         # this family — carries the SAME live≠rebuild gap on the
         # existing-point paths; its docstring records the mechanism, the
         # measured symptom, and why closing it is not a small change.
         if self._event_log_path:
+            _mirror = (round(alpha / (alpha + beta), 4)
+                       if (alpha + beta) > 0 else 0.5)
             for row in written:
                 self._emit_event(
-                    "ConfidenceChanged", id=row[0],
+                    "ConfidenceChanged", id=row[0], confidence=_mirror,
                     posterior_alpha=None, posterior_beta=None)
         # Dreaming (#85, P1): a baseline change alters the prior — neighbors
         # whose confidence derived from this claim are now stale.
