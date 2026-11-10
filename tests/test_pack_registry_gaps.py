@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import os
 import sys
+import types
 from pathlib import Path
 
 import yaml
@@ -23,6 +24,37 @@ from tortoise.value_extractor import compile_kind_index_spec
 
 REPO = Path(__file__).resolve().parent.parent
 PACKS_DIR = REPO / "packs"
+
+
+@pytest.fixture(autouse=True)
+def _isolate_search_engine_state():
+    """Isolate every test here from `search_engine`'s MODULE-LEVEL state.
+
+    Both halves are module-global, so a test that drives a leg leaks into the
+    next one in the same process:
+
+    * the per-strategy **circuit breaker** (`_BREAKERS`) — a leg that records a
+      failure counts toward tripping it, and an OPEN breaker does not raise, it
+      short-circuits the leg to an empty result. The form-scope pin below drives
+      `run_structural_query` and the real `tortoise_fts_query`, and its failure
+      message would then name the widening when the actual cause was breaker
+      state — the false-diagnosis class this pin was rewritten to remove. The
+      sibling suites (`test_search_engine_gaps.py`) install this same autouse
+      reset for the same reason.
+    * the **retrieval tally** (`retrieval_metering._ACTIVE`, a ContextVar) —
+      `run_structural_query` notes its leg unconditionally, so a tally armed by
+      an outer fixture would be incremented by a test that never asked for it.
+      `take_and_reset()` is the public claim-and-clear: it detaches the tally
+      WITHOUT writing a ledger row, so nothing this file runs can reach the
+      ledger.
+    """
+    from tortoise import retrieval_metering, search_engine
+
+    search_engine.reset_circuit_breakers()
+    retrieval_metering.take_and_reset()
+    yield
+    search_engine.reset_circuit_breakers()
+    retrieval_metering.take_and_reset()
 
 
 # ── Validation edge cases ──────────────────────────────────────────────────
@@ -2062,11 +2094,14 @@ class TestCoreHierarchy:
         test is the correction: `_validate` does restrict a `subclassOf` parent
         to core kinds (true — pinned below), but ALL 16 of the
         `CANONICAL_OBJECT_KINDS` are THEMSELVES children of `Object` (the row is
-        that canonical set), so every declared pair is the chain
+        that canonical set), so a declared pair is the chain
         `pack kind ⊑ core child ⊑ Object`
-        (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
-        17 declared pairs had a parent that is an Object child, and
-        `expand_kind("Object")` carried none of them.
+        (`dev:bug ⊑ Problem ⊑ Object`) — but not EVERY pair:
+        `product-strategy:architecture ⊑ Document` has no `Object` in its chain
+        (`Document` is a `CORE_ENTITY_TYPES` member with no `CORE_SUBCLASSES`
+        row at all, by design — a document is a `:Source`). Measured at the
+        one-hop head: 16 of the 17 declared pairs had a parent that is an Object
+        child, and `expand_kind("Object")` carried none of them.
 
         Both directions are asserted, because they are different relations:
         DOWN (a root gathers its whole subtree) and UP (a child inherits its
@@ -2257,8 +2292,9 @@ class TestCoreHierarchy:
 
         `portfolio:allocationTarget` (an `objectKind`) subclasses `target`, and
         `target` is a canonical POINT kind as well (§5; the overlap is the #7813
-        owner ruling — confidence propagates across `:Point`/`:Object`/`:Event`,
-        so the duplication is the model, not residue).
+        owner ruling — confidence propagates across
+        `:Point`/`:Subject`/`:Object`/`:Event` (`docs/ONTOLOGY.md`), so the
+        duplication is the model, not residue).
 
         Consequence, recorded rather than discovered: `sdk.query(kind=
         "portfolio:allocationTarget")` builds `n.pointKind IN [...]`, so after
@@ -2286,6 +2322,328 @@ class TestCoreHierarchy:
         # child (this was already true before the fix — asserted so the two
         # directions cannot be confused).
         assert "portfolio:allocationTarget" in shipped.expand_kind("target")
+
+    def test_the_object_and_point_rows_overlap_exactly(self, shipped):
+        """The FOUR core kinds that are children of BOTH `Object` and `Point`.
+
+        The failure this prevents: `expand_kind("Object")` carrying point-kind
+        NAMES changes what a `kind="Object"` read matches, and nothing named it.
+        ⚠️ But the consequence is LABEL-SCOPED, not cross-layer — every read is
+        `MATCH (n:<label>)` for its own `entity_type`
+        (`read_ledger.label_for_entity_type`), so an object read widens inside the
+        `:Object` label only; it does NOT return `:Point` rows. A
+        `sdk.query(kind="Object")` (a `MATCH (n:Point)` read) matches **`:Point`
+        rows** whose `pointKind` is one of those four. The two read paths widen
+        inside their own label space.
+        ⛔ And inside the object read the widening is FORM-SCOPED: the two forms of
+        `tortoise_fts_query(..., entity_type="object")` disagree, and the widening
+        claim above holds of the TEXT-QUERY form only. A text-query read
+        (`query` + `kind`) widens — its FTS/vector pool carries no kind predicate,
+        so the expansion is applied post-retrieval (`sdk.py`:
+        `if kind and query is not None and result_ids:`). A kind-only read
+        (`query=None` → `is_full_scan`) runs the structural leg only, which matches
+        `n.objectKind = $kind` EXACTLY (`search_engine.py`'s structural
+        where-clause), handed the UNEXPANDED `kind` (`sdk.py`:
+        `struct_kind = structural_kind if structural_kind is not None else kind`)
+        — so it does NOT widen. Measured on a live store holding one `:Object`
+        with `objectKind='goal'` and one literal `objectKind='Object'`:
+        `tortoise_fts_query(kind="Object", entity_type="object")` returned only
+        the literal row; `tortoise_fts_query("widget", kind="Object",
+        entity_type="object")` returned both. ⚠️ Widening the full scan is a
+        BEHAVIOUR change, not a doc fix — #11690 owns it.
+        ⚠️ And the cause is LEG B, not the closure: `CORE_SUBCLASSES["Object"]` is
+        the same SET as `CANONICAL_OBJECT_KINDS` (a `tuple(sorted(...))` against a
+        `frozenset`, so equality of members, not identity), so registering the §6
+        rows already put these four in `expand_kind("Object")` at ONE hop; the
+        closure only adds the pack kinds beneath them.
+
+        ⚠ It is a consequence of the mandated contract, not an implementation
+        error — #7813's ruling is that confidence propagates across
+        `:Point`/`:Subject`/`:Object`/`:Event`, so the duplication IS the model (the same
+        reasoning `test_a_cross_axis_parent_is_a_recorded_decision` records for
+        the far milder `portfolio:allocationTarget`). But the milder case was
+        pinned as a decision while this one was unnamed, which is backwards. The
+        set is asserted EXACTLY so a fifth shared kind has to be acknowledged
+        here instead of sliding in.
+        """
+        from tortoise.pack_registry import CANONICAL_POINT_KINDS
+
+        shared = set(CORE_SUBCLASSES["Object"]) & set(CORE_SUBCLASSES["Point"])
+        assert shared == {"goal", "plan", "strategy", "target"}, (
+            "the set of core kinds that are children of BOTH Object and Point "
+            f"changed — an object read widens by this much: {sorted(shared)}")
+
+        # …and the consequence, measured on the table rather than implied: every
+        # shared kind is reachable from `Object` and is a live point kind.
+        for kind in sorted(shared):
+            assert kind in CANONICAL_POINT_KINDS, kind
+            assert kind in shipped.expand_kind("Object"), (
+                f"expand_kind('Object') does not carry {kind!r} — the overlap "
+                "stopped widening, so this pin's premise is stale")
+
+    def test_the_object_read_asymmetry_the_docstring_states_still_holds(
+            self, tmp_path):
+        """The FORM-SCOPE the docstring above states, pinned where it is produced.
+
+        `test_the_object_and_point_rows_overlap_exactly` can only read the TABLE;
+        the read-path consequence it describes has no assertion in it, so the
+        sentence could go stale in exactly the way this PR exists to remove. This
+        pin holds all THREE mechanisms the sentence names:
+
+        * the structural leg matches the kind **exactly** — driven with a
+          recording graph, so the assertion is on the Cypher it really issues.
+          Mutation: give the leg the expansion (`n.{kind_field} IN [...]`) and the
+          exact-match assertion goes red, which is the same edit that would make
+          the docstring's "does NOT widen" false.
+        * the SDK hands that leg the **UNEXPANDED** kind, and applies the
+          expansion post-retrieval, gated on a text query — driven through the
+          REAL `tortoise_fts_query` with `degradation_chain` captured, so the
+          assertion is on the arguments the SDK actually passes; and the
+          EXPANSION is observed reaching that filter, so deleting the widening
+          reds here (the bare kind is not the expansion).
+
+        ⛔ BOTH are behavioural on purpose. An earlier version of this pin grepped
+        `sdk.py` for `source.count(snippet) == 1`; that reds on a
+        semantics-preserving reflow (the statement wrapped over two lines) and on
+        a comment that merely QUOTES the statement — the habit this very docstring
+        uses — and its message then sends the next lane hunting a behaviour change
+        that does not exist. What it did NOT cover is the CALL SITE: the plain
+        hand-off edit (`struct_kind = … else expanded_kinds`) removed one of its
+        literal snippets and did red, but forwarding the expansion at the call
+        (`degradation_chain(graph, query, sorted(expanded_kinds) if expanded_kinds
+        else struct_kind, …)`) left it green — and that is the edit the behavioural
+        capture below catches. No text or AST anchor is used: every mechanism
+        including the post-retrieval expansion gate is DRIVEN (the gate by giving
+        the kind-only read a non-empty pool and asserting no call carries an
+        expansion member), so a reflow, a comment quoting a statement, a hoisted
+        condition and a renamed local are all green.
+        ⚠️ The `strategies` assertion is what carries the "kind-only is a full
+        scan" half: `classify_query` runs no FTS or vector leg when there is no
+        text query, which is why the expansion has nothing to filter there.
+        """
+        from tortoise import sdk as sdk_module
+        from tortoise import search_engine
+        from tortoise.search_engine import run_structural_query
+
+        class _Result:
+            def __init__(self):
+                self.result_set: list = []
+
+        class _RecordingGraph:
+            def __init__(self):
+                self.calls: list = []
+
+            def query(self, cypher, params=None, timeout=None):
+                self.calls.append((cypher, params))
+                return _Result()
+
+        graph = _RecordingGraph()
+        assert run_structural_query(
+            graph, "Object", entity_type="object", limit=5) == []
+        (cypher, params), = graph.calls
+        # Scoped to the KIND clause, not to `" IN ["` anywhere in the Cypher: an
+        # unrelated set predicate (`_exclude_status_clause` growing an `IN [...]`
+        # form) would otherwise red HERE with a message accusing the kind leg.
+        # Ordered BEFORE the exact-match assertion so that the edit this guards —
+        # the leg carrying the EXPANSION — reds with the message that names the
+        # widening rather than with a bare mismatch the leg could also produce.
+        assert "n.objectKind IN" not in cypher, (
+            "the structural leg now carries a kind SET — that is the widening "
+            f"this docstring says does not happen on the kind-only read: {cypher}")
+        assert "n.objectKind = $kind" in cypher, cypher
+        assert params["kind"] == "Object", (
+            "the structural leg must be handed the UNEXPANDED kind, never "
+            f"expand_kind(...): {params['kind']!r}")
+
+        # ── the SDK's half, captured at the hand-off ──────────────────────
+        captured: list[dict] = []
+        original_chain = search_engine.degradation_chain
+
+        def _capture(graph_, query, struct_kind, query_vec, strategies, **kw):
+            captured.append(
+                {"query": query, "struct_kind": struct_kind,
+                 "strategies": strategies})
+            return {}
+
+        search_engine.degradation_chain = _capture
+        sdk = None
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope.db"),
+                namespace=f"form_scope_{os.urandom(6).hex()}")
+            # the kind-only form, then the text-query form — the two the
+            # docstring says disagree
+            sdk.tortoise_fts_query(kind="Object", entity_type="object")
+            sdk.tortoise_fts_query(
+                "widget", kind="Object", entity_type="object")
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
+        kind_only, text_query = captured
+        for form in (kind_only, text_query):
+            assert form["struct_kind"] == "Object", (
+                "the structural leg must be handed the UNEXPANDED kind on both "
+                f"forms, never expand_kind(...): {form['struct_kind']!r}")
+        # …and the kind-only form carries NO text query, so the post-retrieval
+        # `if kind and query is not None and result_ids:` expansion filter cannot
+        # run — the structural `=` is the only kind predicate on that read.
+        assert kind_only["query"] is None, kind_only
+        assert kind_only["strategies"] == {
+            "fts": False, "vector": False, "structural": True}, kind_only
+        # …while the text-query form carries one, which is what reaches the
+        # expansion filter — the widening the docstring attributes to it ALONE.
+        assert text_query["query"] == "widget", text_query
+
+        # ── and the EXPANSION reaching the post-retrieval filter ───────────
+        # The capture above proves the gate is REACHABLE only on a text query; it
+        # cannot prove the filter is handed the EXPANSION rather than the bare
+        # kind — and the expansion is the widening DM4 MEASURES. Driven with one
+        # fake result so the filter block actually runs, and the sdk's projection
+        # replaced by a recorder, so the assertion is on the Cypher params the
+        # read really issues. `expanded = [kind]` (the widening deleted, DM4's
+        # measurement then false) takes the ONE-member branch and leaves a single
+        # bare `kind` param here — `kind_0…n` is created only by the multi-member
+        # branch (the `len(expanded) == 1` test INSIDE the post-retrieval filter
+        # selects between the two spellings; cited by shape, not by line — a line
+        # number in a 40k-line module is stale by the next unrelated edit), so
+        # naming `kind_0` would send a reader after a parameter the mutant never
+        # produces. `_kind_values` reads the params BY VALUE, so either spelling
+        # is seen.
+        class _FilterGraph:
+            def __init__(self):
+                self.calls: list[tuple[str, dict]] = []
+
+            def query(self, cypher, params=None, timeout=None, **kw):
+                self.calls.append((cypher, dict(params or {})))
+                return _Result()
+
+        filter_graph = _FilterGraph()
+
+        def _kind_values(params: dict, expected: set[str]) -> set[str]:
+            """The EXPANSION's members a filter call carries — BY VALUE, not by name.
+
+            Deliberately form-insensitive: the read may spell the set as
+            `kind_0..n` scalars, as one `kinds` list, or as `kind` alone, and the
+            result pool may be called anything. Reading the parameter NAMES
+            would make a semantics-preserving consolidation of that filter (or a
+            rename of the pool) a FALSE RED whose message claims the widening was
+            deleted — the exact false-diagnosis path this pin was rewritten to
+            avoid (see the docstring above). Intersecting with `expected` is what
+            drops the pool ids and any other incidental string. The equality below
+            is then what catches a deletion — `expected` CONTAINS the bare kind, so
+            a deleted expansion yields `{kind}`, not the empty set — while
+            `len(carriers)` catches a filter that disappeared altogether.
+            """
+            out: set[str] = set()
+            for value in params.values():
+                if isinstance(value, str):
+                    out.add(value)
+                elif isinstance(value, (list, tuple, set, frozenset)):
+                    out.update(v for v in value if isinstance(v, str))
+            return out & expected
+
+        def _one_hit(graph_, query, struct_kind, query_vec, strategies, **kw):
+            # a non-empty fused pool is what makes the filter block run at all
+            return {"fts": [("obj-1", 1.0)]}
+
+        sdk = None
+        search_engine.degradation_chain = _one_hit
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope_widen.db"),
+                namespace=f"form_scope_widen_{os.urandom(6).hex()}")
+            sdk._get_proj = lambda: types.SimpleNamespace(g=filter_graph)
+            sdk.tortoise_fts_query(
+                "widget", kind="Object", entity_type="object")
+            # The set the CODE UNDER TEST must use is the READ FILTER's, not the
+            # membership set: #11679 split them, and deriving `expected` from
+            # `_expand_kind` stated a claim about the other accessor. Scope, said
+            # plainly: at THIS kind the two sets coincide (measured — 52 members
+            # either way, and `test_a_root_read_filter_is_unchanged` ASSERTS that
+            # coincidence for every CORE root), so this arm cannot by itself tell
+            # a read filter from a membership set. The split's own pins are the
+            # `#11679` arms in this file (`test_a_filter_is_transitive_down`,
+            # `test_the_membership_set_still_answers_up`); what THIS arm catches
+            # is a filter narrowed back to the bare kind.
+            expected = set(sdk._read_filter_kinds("Object"))
+            # ONE call must carry the expansion. Asserting the union across every
+            # recorded call would let an auxiliary call that happens to carry
+            # `expand_kind(...)` MASK a filter narrowed back to the bare kind —
+            # the fail-open direction this pin exists to close.
+            carriers = [
+                (cypher, values) for cypher, params in filter_graph.calls
+                if (values := _kind_values(params, expected))]
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
+
+        # The guard has to make ITS OWN claim true. `len(expected) > 1` did not
+        # (review round 3, P3-2): the `spelling` direction (#11000's fourth) keeps
+        # TWO members alive with the subclass widening deleted —
+        # `expand_kind("Object")` is then `['Object', 'core:Object']`, the head in
+        # both spellings — so the count passed on exactly the collapse it names
+        # and this pin stayed GREEN on the mutant. The head's spellings are named
+        # exhaustively below, so "at least one member that is NOT the head" is the
+        # property the pin needs; a count of 2 is a fact about the spelling rule,
+        # not about the widening. (A literal pack kind would be the other way to
+        # say it, but it would false-red when a pack drops or renames that kind —
+        # the false diagnosis this pin was rewritten to avoid.)
+        head_spellings = {"Object", "core:Object"}
+        assert expected - head_spellings, (
+            "`read_filter_kinds('Object')` collapsed to the head and its `core:` "
+            "spelling, so this pin cannot distinguish an expansion from its "
+            f"head: {sorted(expected)}")
+        assert len(carriers) == 1, (
+            "exactly one call must hand the filter the EXPANSION; "
+            f"{len(carriers)} did: {[c for c, _ in carriers]}")
+        filter_cypher, observed_expansion = carriers[0]
+        assert observed_expansion == expected, (
+            "the post-retrieval kind filter was handed "
+            f"{sorted(observed_expansion)}, not the READ-FILTER set "
+            f"{sorted(expected)} — the text-query read no longer widens, and "
+            "the measurement DM4 records is false again")
+        assert "n.objectKind IN" in filter_cypher, filter_cypher
+
+        # ── and the GATE itself, DRIVEN rather than shape-anchored ─────────
+        # The captures above pin the arguments; they do not pin that the
+        # expansion filter is REACHABLE ONLY on a text query. Dropping the
+        # `query is not None` conjunct makes the KIND-ONLY read widen too — the
+        # exact claim this docstring makes false — and that IS drivable without a
+        # DB: give the kind-only read a non-empty pool and assert NO call carries
+        # any of the expansion. A gate that dropped the conjunct issues the
+        # filter, and this reds with the right message.
+        #
+        # ⛔ An earlier version anchored the AST instead, and its docstring
+        # claimed this "cannot be driven without a DB". That claim was FALSE (the
+        # assertion below drives it), and the anchor it justified was
+        # shape-coupled: hoisting the condition to a local, or renaming `kind` in
+        # a 40k-line module, was a false red whose message asserted a behaviour
+        # change that had not happened.
+        kind_only_graph = _FilterGraph()
+        sdk = None
+        search_engine.degradation_chain = _one_hit
+        try:
+            sdk = sdk_module.TortoiseSDK(
+                str(tmp_path / "form_scope_gate.db"),
+                namespace=f"form_scope_gate_{os.urandom(6).hex()}")
+            sdk._get_proj = lambda: types.SimpleNamespace(g=kind_only_graph)
+            sdk.tortoise_fts_query(kind="Object", entity_type="object")
+        finally:
+            search_engine.degradation_chain = original_chain
+            if sdk is not None:
+                sdk.close()
+
+        leaked = [
+            (cypher, sorted(values))
+            for cypher, params in kind_only_graph.calls
+            if (values := _kind_values(params, expected))]
+        assert not leaked, (
+            "the KIND-ONLY object read issued the expansion filter "
+            f"({leaked}) — `query is None` must gate it out, or the read this "
+            "docstring says does NOT widen does widen")
+
 
 # ── #11679: the read-filter set is DOWN, the membership set is UP ───────────
 # `expand_kind` is a MEMBERSHIP set: it answers "is this kind a `<parent>`?" and

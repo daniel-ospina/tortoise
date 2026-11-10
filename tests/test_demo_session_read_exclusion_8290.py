@@ -802,35 +802,75 @@ def test_the_census_check_verb_reds_on_a_stale_figure(tmp_path, monkeypatch):
     at all. Mutating ``if stated == want:`` to ``if True:`` left ``--check``
     reporting "every stated figure is the measured one" with RC 0 and the whole
     fast suite green. The two arms below are the discriminating pair.
+
+    ⛔ THE SHIPPED FIGURES ARE DELIBERATELY NOT ASSERTED HERE. They describe a
+    population that belongs to EVERY tracked file — any file adding a
+    ``hosted_api.py:<N>`` cite moves it (measured: ~1 commit in 30) — so comparing
+    the shipped notes to the tree in the fast suite reds a PR whose only remedy is
+    prose in a module it never opened. That is the FALSE BLOCK #11576 removed: see
+    `tools/hosted_api_cite_census.py`'s docstring, the note in
+    `tortoise/activation_scorecard.py`, and `.github/workflows/main-health-nightly.yml`
+    (`census-drift` — nightly, report-only, "deliberately NOT as a per-PR check").
+    The arm below was added back in that same commit and re-created the block: it
+    redded #11685, a docs PR whose nine markdown artifacts legitimately cite seven
+    more `hosted_api.py` lines (population 449 → 456). Arm 1 therefore proves the
+    ROUND TRIP on the throwaway copies — a degraded figure must be restated to the
+    MEASURED one, and `--check` must then call the result green — which is all this
+    test can own about a population it must not assert.
     """
     from tools import hosted_api_cite_census as census_mod
 
     repo = _census_tmp_repo(tmp_path, monkeypatch)
     measured = census_mod.census(_PIVOT)
+    scorecard = repo / census_mod._SCORECARD
+    below_sentence = r"\*\*(\d+)\*\* have a number smaller"
 
-    # arm 1: the notes as written agree with the tree — green.
+    # arm 1: the round trip, FORCED so it is exercised at every head. This arm
+    # degrades a figure on the copy FIRST: when the shipped notes are already
+    # current a bare refresh rewrites nothing, so the rewrite half would never run
+    # (measured at #11685's own head: refresh rewrote 0 files, and a broken
+    # `_restate` — `str(value)` → `str(value + 1)` — survived a `refresh-then-check`
+    # arm while the note it wrote was never read).
+    text = scorecard.read_text(encoding="utf-8")
+    stated = _stated(below_sentence, text)  # whatever THIS tree ships
+    # ⛔ `assert degraded != text` would be DEAD here — `_stated` just matched
+    # `**<stated>** have a number smaller`, so the token is provably present — and
+    # it would FIRE only if the count ever reached 999, i.e. as a false positive.
+    # The reachable form reads the degradation back THROUGH the same sentence: it
+    # reds the day the first `**<stated>**` in the file is not the BELOW sentence
+    # (an ABOVE/BELOW count collision), which is the arm's real targeting risk.
+    bogus = 999 if stated != 999 else 998
+    degraded = text.replace(f"**{stated}**", f"**{bogus}**", 1)
+    scorecard.write_text(degraded, encoding="utf-8")
+    assert _stated(below_sentence, degraded) == bogus, (
+        f"the degradation did not land in the BELOW sentence: the first "
+        f"`**{stated}**` in the file belongs to a different figure, so this arm "
+        "would be degrading one number and reading back another")
+    assert census_mod._sweep(measured, refresh=True) == 1, (
+        "a deliberately degraded figure is stale work: the restatement pass must "
+        "report it (1), not 0")
+    assert _stated(below_sentence, scorecard.read_text(encoding="utf-8")) == (
+        measured["below_pivot"]), (
+        "the restatement pass did not put the MEASURED below-pivot figure back — "
+        "the rewrite and the sentence it targets have diverged")
     assert census_mod._sweep(measured, refresh=False) == 0, (
-        "the shipped notes must be in agreement with the measured census")
+        "the notes now agree with the measured census and `--check` still called "
+        "them stale — the verb is not reading the sentence it just wrote")
 
     # arm 2: degrade ONE figure by hand — the verb must now report stale (1), not 0.
-    scorecard = repo / census_mod._SCORECARD
     text = scorecard.read_text(encoding="utf-8")
-    # ⛔ DERIVE the figure to degrade; never spell it. A hard-coded literal here
-    # reds the moment `--refresh` moves the census — which is exactly what happened
-    # to the former `**436**`: an honest restatement left this arm pointing at a
-    # number the note no longer states, and the arm failed on the ARM rather than on
-    # the verb it exists to convict. A literal that must be re-pointed by hand is
-    # the bump-fragility the branch already removed from the Pi-seam row (#11662).
-    import re as _re
-
-    figures = _re.findall(r"\*\*(\d+)\*\*", text)
-    assert figures, (
-        "the scorecard note states no bold figure to degrade — the census restates "
-        "these with `uv run python tools/hosted_api_cite_census.py --refresh`; this "
-        "arm needs one of them")
-    stated = figures[0]
-    scorecard.write_text(text.replace(f"**{stated}**", "**999**", 1),
-                         encoding="utf-8")
+    # DERIVED, never a literal: the degradation tracks the figure the copy actually
+    # states (arm 1 just proved that is the measured one), so no restatement
+    # anywhere in the tree can silently turn this arm into a no-op — the previous
+    # `**434**` literal had to be re-pointed by hand on every restatement.
+    below = measured["below_pivot"]
+    bogus = 999 if below != 999 else 998
+    degraded = text.replace(f"**{below}**", f"**{bogus}**", 1)
+    scorecard.write_text(degraded, encoding="utf-8")
+    # same reachable targeting check as arm 1 (see the note there)
+    assert _stated(below_sentence, degraded) == bogus, (
+        f"the degradation did not land in the BELOW sentence: the first "
+        f"`**{below}**` in the file belongs to a different figure")
     assert census_mod._sweep(measured, refresh=False) == 1, (
         "`--check` green-lit a note whose stated figure is not the measured one — "
         "that is the false green the nightly census-drift job exists to prevent")

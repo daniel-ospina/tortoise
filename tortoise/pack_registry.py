@@ -3707,13 +3707,27 @@ class PackRegistry:
         # The declaration model is depth 2, not depth 1. `_validate` restricts a
         # `subclassOf` parent to `CANONICAL_OBJECT_KINDS | CORE_ENTITY_TYPES`, so
         # a pack kind is never a parent — but all 16 of the
-        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row IS
-        # that canonical set), so every declared pair is the chain
+        # `CANONICAL_OBJECT_KINDS` are themselves children of `Object` (the row's
+        # members ARE that canonical set), so a declared pair is the chain
         # `pack kind ⊑ core child ⊑ Object`
-        # (`dev:bug ⊑ Problem ⊑ Object`). Measured at the one-hop head: 16 of the
-        # 17 declared pairs have a parent that is itself an `Object` child, and
-        # `expand_kind("Object")` carried NONE of them — so `query(kind="Object")`
-        # still returned no pack Objects, half-fixing the very defect #11000 is.
+        # (`dev:bug ⊑ Problem ⊑ Object`) — but not EVERY pair: `Document` is a
+        # `CORE_ENTITY_TYPES` member and not an `Object` child (it has no
+        # `CORE_SUBCLASSES` row at all, by design), so
+        # `product-strategy:architecture ⊑ Document` has no `Object` in its
+        # chain. Measured at the one-hop head: 16 of the
+        # 17 declared pairs had a parent that is an `Object` child, and
+        # `expand_kind("Object")` carried NONE of them — half-fixing the very
+        # defect #11000 is. ⚠️ The instrument that reads `kind=` for OBJECTS is the
+        # object entity read path — `tortoise_fts_query(..., entity_type="object")`
+        # (the `tortoise_search` surface), whose object kind field is `objectKind`.
+        # **NOT `sdk.query()`**, which is `MATCH (n:Point)` (`sdk.py`): it can
+        # never return an `:Object`, so citing it as evidence that the widening
+        # happened is vacuous. ⚠️ It is not inert either — `query(kind=…)` filters
+        # `n.pointKind IN read_filter_kinds(kind)` (`sdk.py`; the DOWN set since
+        # #11684), and `goal`/`plan`/`strategy`/`target` are DOWN children of
+        # `Object` in `CORE_SUBCLASSES["Object"]`, so a `query(kind="Object")` DOES
+        # return `:Point` rows with those `pointKind`s. It answers a DIFFERENT
+        # question (`:Point` rows), before and after this fix — see DM4.
         #
         # ⛔ The closure must be DIRECTIONAL. A plain "add the members of every
         # member's bucket" fixpoint is WRONG: `WorkItem`'s bucket contains all
@@ -3761,6 +3775,35 @@ class PackRegistry:
         # build at the end of this builder runs after this point but creates no
         # key either: it grows from `down_base`, the bucket snapshot taken before
         # the closure below.
+        # ⛔ The STORED-ROW fact this seed's cost rests on, measured rather than
+        # assumed — a first version of this note claimed "no writer stores
+        # `subjectKind='Subject'`", which is FALSE: `create_subject(subjectKind=
+        # "Subject")` and `create_subject(subjectKind="core:Subject")` are both
+        # accepted and STORED as written, so a root-kinded Subject row exists for
+        # `expand_kind("team")`'s `Subject` member to reach.
+        # ⚠️ The READ-PATH consequence that fact was written to name is
+        # SUPERSEDED, and the split is the point: this widening was observable
+        # through `n.subjectKind IN expand_kind(...)` until `#11684` gave reads
+        # `read_filter_kinds` (DOWN only — measured at this head:
+        # `read_filter_kinds("team") == ["team", "core:team"]`, no `Subject`), so
+        # a `kind="team"` subject read no longer returns the root-kinded row in
+        # either form. What the seed still buys is the MEMBERSHIP contract —
+        # `expand_kind(child) ⊇ {child, parent}`, transitive — and an `IN` clause
+        # must take `read_filter_kinds` (#11684): feeding it `expand_kind` is
+        # exactly what made a narrow filter match broader-kinded rows.
+        #
+        # …and seeding it is CORRECT on the membership side, because the `Object`
+        # row has had exactly this property since the §6 table was first read:
+        # `create_object(objectKind="Object")` is likewise accepted and STORED, so
+        # `"Object"` is a member of `expand_kind("dev:issue")` just as `Subject` is
+        # a member of `expand_kind("team")`. The Subject row was the anomaly,
+        # not the Object row. Declining the seed would leave the stated contract
+        # (`expand_kind(child) ⊇ {child, parent}`, transitive) violated for one of
+        # the four `CORE_SUBCLASSES` rows (`Object`/`Subject`/`Point`/`Event` — §6
+        # declares only `Object`/`Document`/`Subject`, so `Point` AND `Event` are
+        # this module's extension) while the other three already behave this way.
+        # Applied for UNIFORMITY, with the membership widening named rather than
+        # denied.
         for endpoint in (list(direct_parents) + list(direct_children)
                          + list(equivalences) + list(bare_inherits)):
             expansions.setdefault(endpoint, [endpoint])
