@@ -233,6 +233,22 @@ def test_the_amendment_entry_names_the_issue_and_the_required_set_is_unmoved():
         "an amendment that names a measurement date claims an A-row run this change does not have")
 
 
+def test_every_rows_adding_amendment_is_indexed_once_in_the_record():
+    """FAILS IF a re-registration that adds rows to the criteria table is missing from
+    `amendments` — the machine-visible half of §10's disclosure, which is what a consumer
+    reads to learn the table grew. `#11673` added `E6` and was the one entry absent."""
+    amendments = _record()["amendments"]
+    issues = [a.get("issue") for a in amendments]
+    assert len(issues) == len(set(issues)), f"an issue is filed twice: {issues}"
+    entry = [a for a in amendments if a.get("issue") == 11673]
+    assert len(entry) == 1, issues
+    assert entry[0]["criterion"] == "E6", entry[0]
+    assert entry[0]["measurement_date"] == "2026-11-08", (
+        "E6's census artefact (f5c69f7478) predates the registration, so the date is required and "
+        "measurement_visible_to_author must be disclosed as true (§10.21)")
+    assert "6664402530" in entry[0]["kind"], "the ruling this row rests on must be cited in the record"
+
+
 def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
     """⛔ An invariant, not a sentence: the probe PARSES the bars out of the record.
 

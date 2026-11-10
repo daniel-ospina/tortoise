@@ -232,6 +232,14 @@
       "registration_added": "2026-10-21",
       "measurement_date": null,
       "kind": "five A-rows ADDED to the criteria table and to criteria[] — no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; required_criteria_rows stays [E1..E5], so the new rows are registered and reported, never demanded by the gate (a required row would red every existing verdict table for rows nobody has run); the superseded pins line and the table's E-only shape are quoted in PRE-REGISTRATION.md section 10.11. ⛔ Review round 2 corrected three things in this amendment: (a) `a1_relation_families` pinned the DECLARED spellings `decomposesInto`/`hasPart`, but `decomposesInto` is never a written label — both hierarchy entries are written `hasPart` (tortoise/pack_hierarchy.py:215-224, tortoise/projection/edges.py:1513), so the '>= 1 edge for EACH family' bar was unsatisfiable; the pin is now the one WRITTEN family, with `a1_relation_family_fold` naming the declared spellings that fold onto it. (b) `measurement_visible_to_author` stays false for all five on the `a6085af84` anchor, and A1/A3/A4/A5 all had a figure in view, but the stated GROUND was the gate's blind spot rather than history: A1/A3/A4/A5 were written with the owner's 2026-11-04 hand reading in view, and A1/A5 are also readable on the pinned corpus from the committed capstone-measured-9152448d.log (31f996f91, 2026-11-04) — section 0 now carries the A-rows and states the post-visible discount. (c) the floors are SEVEN counts of 30 plus the two non-count refusal boundaries (`a1_rollup_queries: 1`, `a3_event_root_coverage: 0.50`) that existed only in section 3.1 prose and are now pinned."
+    },
+    {
+      "issue": 11673,
+      "criterion": "E6",
+      "amended": "2026-11-10",
+      "registration_added": "2026-10-21",
+      "measurement_date": "2026-11-08",
+      "kind": "the sixth capstone row ADDED to the criteria table, to criteria[] and to required_criteria_rows on the owner's 2026-11-05 ruling (#7949 comment 6664402530); no existing row's metric, denominator, threshold, class set or floor moves, and no committed verdict is re-scored; the census artefact (f5c69f7478, 2026-11-08) PRECEDES this registration, so measurement_visible_to_author stays true and is disclosed in PRE-REGISTRATION.md section 10.21"
     }
   ],
   "steps": {
