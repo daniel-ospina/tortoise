@@ -820,19 +820,27 @@ def _cardinality_of(token: str) -> int | None:
 def _cardinality_claims_in(source: str) -> list[str]:
     """Every cardinality claim in the `#:` block above `_DELIBERATE_BARE_FORM`.
 
-    ONE seam, deliberately: the region selection, the `#:` filtering, the formatting
-    normalisation and the claim match all happen here, so the pin cannot drift from what
-    `test_the_prose_pin_reads_through_formatting_but_not_wording` measures. The earlier
-    split — helpers used by the pin, each tested separately — let a revert of the pin's
-    CALL SITE leave the whole suite green while the false red returned; measured in
-    review of #11777 (R8/R9/R10 green, R11 red), which is the `[pin-defensive-claim]`
-    class: measure the pin's effect, not the helper's.
+    ONE seam, deliberately: the region walk, the `#:` filtering, the formatting
+    normalisation and the claim match all happen here, so the pieces cannot drift apart
+    the way they did when the pin called two helpers inline. Which of those four the
+    tests actually MEASURE is stated per arm below, rather than claimed for all four at
+    once (#11777 review round 2, findings 1 and 2):
 
-    The region is the COMMENT REGION immediately above the definition, not every `#:`
-    line in the file — the scoping is load-bearing, because a decoy earlier in the file
-    otherwise satisfies a leftmost search while the block that actually describes the
-    set drifts (measured, #11754 review: decoy above + prose `three` over a four-member
-    set PASSED).
+      * region scoping — measured by the decoy-outside-the-region arm;
+      * `#:` filtering — measured by the same arm (the decoy is a `#:` line past the code
+        that ends the region, so reading the whole file head would satisfy the pin);
+      * normalisation and the claim match — measured by the formatting and reword rows.
+
+    What no behavioural test can measure is the pin's CALL SITE; that is
+    `test_the_pin_reads_through_the_seam_rather_than_its_own_copy`'s job, and the reason
+    it exists (measured in review of #11777: with the pin inlined and the seam intact,
+    the whole file stayed green).
+
+    The region is the COMMENT REGION immediately above the definition — bounded by the
+    first line that is not part of the comment block — which is what keeps a decoy
+    earlier in the file from satisfying the pin while the block that actually describes
+    the set drifts (measured, #11754 review: decoy above + prose `three` over a
+    four-member set PASSED).
     """
     before = source.partition("_DELIBERATE_BARE_FORM: frozenset")[0]
     prose = _normalise_prose(
@@ -902,9 +910,10 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
     was present and correct (measured, #11754 review F5).
 
     These cases are built as synthetic SOURCE blocks and fed to `_cardinality_claims_in`
-    — the same function the pin calls — so that reverting the pin's call site (leaving
-    the helpers in place as dead tolerance) reds here instead of passing the whole file
-    (measured in review of #11777: R8/R9 green before this seam existed, R11 red).
+    — the same seam the pin reads — and each arm is labelled with the mechanism it is
+    there to measure. What this test does NOT observe is the pin's call site (it drives
+    the seam directly, so an inlined pin passes it); that is the next test's job, and
+    #11777's review round 1 (R8/R9) is why the two are separate.
 
     The opposite direction matters just as much — a REWORDED sentence must still read as
     absent, or the pin becomes a fuzzy match that passes on prose it never read.
@@ -913,6 +922,9 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
     def claims(*comment_lines: str) -> list[str]:
         block = "".join(f"#: {line}\n" for line in comment_lines)
         return _cardinality_claims_in(f"{block}_DELIBERATE_BARE_FORM: frozenset({{}})")
+
+    def claims_in_source(source: str) -> list[str]:
+        return _cardinality_claims_in(source)
 
     for variant in (
         "while the four entries below do not.",
@@ -925,9 +937,21 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
         assert stated, f"{variant!r}: a formatting difference must not read as absence"
         assert _cardinality_of(stated[0]) == 4, f"{variant!r} -> {stated}"
 
-    # A re-wrap (the sentence split across lines by a bare `#` separator) is formatting
-    # too: the round-2 correction this seam descends from exists for exactly this case.
+    # A re-wrap — the sentence split across lines of the comment block — is formatting
+    # too, and the round-2 correction this seam descends from exists for exactly this
+    # case. The middle line is an empty `#:` line, which is what the artifact's real
+    # paragraph breaks look like (`:601`); a BARE `#` separator is the other shape the
+    # region walk tolerates, so both are exercised (#11777 review round 2, finding 2: an
+    # earlier version of this comment called an empty `#:` line "a bare `#` separator").
     assert _cardinality_of(claims("while the **four**", "", "entries below do not.")[0]) == 4
+    assert _cardinality_of(
+        claims_in_source(
+            "#: while the **four**\n"
+            "#\n"
+            "#: entries below do not.\n"
+            "_DELIBERATE_BARE_FORM: frozenset({})"
+        )[0]
+    ) == 4
 
     assert claims("while the entries below are exempt") == [], (
         "a reworded sentence must read as ABSENT, not as an approximate hit"
@@ -938,8 +962,22 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
     assert unknown == ["some"], unknown
     assert _cardinality_of(unknown[0]) is None
     assert _cardinality_of("fourteen") is None
-    # Scoping survives the seam: a decoy copy INSIDE the block is still two claims.
+    # A duplicate INSIDE the block is two claims — the pin's `len(matches) == 1` arm is
+    # what rejects it. (This is the duplicate arm, NOT the scoping arm.)
     assert len(claims("while the four entries below do not.", "while the four entries below do not.")) == 2
+    # SCOPING and FILTERING, and the reason they are measured here rather than trusted:
+    # a `#:` copy of the sentence ABOVE the code that ends the comment block is a
+    # different block and may not be read, and a bare `#` line inside the block is prose
+    # the seam does not parse. Dropping EITHER the region walk or the `#:` filter makes
+    # this RED — which is what pins those two mechanisms, rather than claiming them
+    # measured (#11777 review round 2, finding 1).
+    assert claims_in_source(
+        "#: while the nine entries below do not.\n"
+        "ROOT = Path(__file__).resolve().parent\n"
+        "# a bare hash line: while the seven entries below do not.\n"
+        "#: while the four entries below do not.\n"
+        "_DELIBERATE_BARE_FORM: frozenset({})"
+    ) == ["four"], "neither the decoy above the block nor the bare `#` line is a claim"
 
 
 def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
@@ -956,9 +994,20 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     an adversarial edit, and it lands in a visible diff; the class being prevented here
     is the accidental revert, which it does catch. `AGENTS.md`'s `[pin-defensive-claim]`
     row is the reason the limit is written down instead of implied.
+
+    One non-adversarial edit can also trip it: RENAMING the pin. The partition below
+    then finds no marker, and a bare `[""]` slice would report "it has its own copy of
+    the extraction again" about a body that calls the seam fine (#11777 review round 2,
+    finding 3). So the missing-marker case is its own failure with its own remedy.
     """
     source = Path(__file__).read_text(encoding="utf-8")
-    pin = source.partition("def test_the_record_exemption_prose_counts_the_set_it_describes()")[2]
+    marker = "def test_the_record_exemption_prose_counts_the_set_it_describes("
+    assert marker in source, (
+        "this test's own marker for the cardinality pin is gone — if you RENAMED the pin, "
+        f"update the literal {marker!r} here; do not delete this test, which is the only "
+        "thing that observes the pin still calling `_cardinality_claims_in`."
+    )
+    pin = source.partition(marker)[2]
     body = pin.partition("\ndef ")[0]
     assert "_cardinality_claims_in(" in body, (
         "the cardinality pin no longer reads through `_cardinality_claims_in` — it has "
