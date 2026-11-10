@@ -3354,11 +3354,53 @@ class PackRegistry:
         an empty result set, because a wrong-empty is indistinguishable from a
         true-empty to the caller.
 
+        ⛔ This is the **MEMBERSHIP** set, not the read-filter set. It answers
+        "is this kind a `<parent>`?" and therefore carries a child's ANCESTORS.
+        A read filter asks the opposite question — "rows whose stored kind is
+        this kind or NARROWER" — and feeding these values to
+        ``n.pointKind IN [...]`` makes a narrow filter match broader-kinded
+        rows. Read paths use :meth:`read_filter_kinds` (#11679).
+
         Pre-computed at load_all() time, O(1) dict lookup at query time.
         """
         if not hasattr(self, '_kind_expansions'):
             self._build_kind_expansions()
         return self._kind_expansions.get(kind, [kind])
+
+    def read_filter_kinds(self, kind: str) -> list[str]:
+        """The READ-FILTER set: every stored kind value a filter for ``kind``
+        must match — the kind, its declared DESCENDANTS, its equivalents, and
+        every stored spelling of those. **Never an ancestor.**
+
+        Why this is a second surface and not a parameter on ``expand_kind``:
+        the two callers of the kind hierarchy need opposite directions, and one
+        list cannot be correct for both (#11679).
+
+        * ``expand_kind`` — **membership**: ``"operator" in expand_kind(kind)``
+          (``sdk._operator_scope_clauses``), i.e. "is this kind a `parent`?".
+          Needs UP: the child's bucket must carry its ancestors.
+        * ``read_filter_kinds`` — **read filter**: ``n.pointKind IN [...]``
+          (``query``/``paginated_query``/``hybrid_search``,
+          ``domain_validators._expand``), i.e. "which rows are this kind or
+          narrower?". Needs DOWN only.
+
+        Two methods rather than one with a ``direction=`` argument on purpose: a
+        boolean the next caller forgets is exactly how the two idioms collapsed
+        into one list. The regression this closes was measured at ``d26f3c6d``:
+        ``search(kind="product-strategy:feature", entity_type="object")``
+        filtered ``objectKind IN [… 'WorkItem', 'core:WorkItem' …]`` and returned
+        every ``core:WorkItem`` object the classifier had labelled.
+
+        The set is the membership bucket MINUS the ancestors (and their stored
+        spellings), so everything that is not broader survives untouched: it
+        equals the pre-#11667 read behaviour for a pack child
+        (``read_filter_kinds("dev:issue") == ["dev:issue", "pm:issue"]``) while
+        a root with no ancestors (``Object``, ``Subject``, ``Point``, ``Event``,
+        ``Document``) is unchanged.
+        """
+        if not hasattr(self, '_kind_read_filters'):
+            self._build_kind_expansions()
+        return self._kind_read_filters.get(kind, [kind])
 
     def _build_kind_expansions(self) -> None:
         """Build the pre-computed kind expansion table.
@@ -3636,6 +3678,34 @@ class PackRegistry:
                     bucket.append(member)
             if core not in base:
                 base.append(core)
+
+        # ── #11679: the READ-FILTER table, the other direction ─────────────
+        # `expand_kind` is a MEMBERSHIP set (it carries a child's ANCESTORS, so
+        # `"operator" in expand_kind(kind)` answers "is this kind a parent?").
+        # A read filter asks the opposite question — "rows stored as this kind
+        # or NARROWER" — and `n.pointKind IN [...]` fed the ancestor names, so a
+        # narrow filter matched broader-kinded rows. Derived here by
+        # SUBTRACTION from the membership bucket, which is what makes it safe:
+        # every member that is NOT an ancestor (the kind itself, its declared
+        # descendants, its equivalents, its bare/`core:`/legacy spellings)
+        # survives in its original order, so this is exactly the pre-#11667
+        # read behaviour for a pack child and a no-op for a root.
+        #
+        # The ancestors are collected over the same relations the closure walks
+        # (`_parents_of` is equivalence-aware; `bare_inherits` makes a bare kind
+        # a name for its namespaced forms), and each ancestor brings its
+        # equivalence class — the membership closure adds an ancestor TOGETHER
+        # with its `core:`/legacy spelling, so subtracting only the bare name
+        # would leave `core:WorkItem` matching in a `dev:issue` filter.
+        read_filters: dict[str, list[str]] = {}
+        for kind, bucket in expansions.items():
+            ancestors: set[str] = set()
+            for peer in _equivalence_class(kind) | bare_inherits.get(kind, set()):
+                for ancestor in _ancestors(peer):
+                    ancestors.add(ancestor)
+                    ancestors |= _equivalence_class(ancestor)
+            read_filters[kind] = [m for m in bucket if m not in ancestors]
+        self._kind_read_filters = read_filters
 
         self._kind_expansions = expansions
 

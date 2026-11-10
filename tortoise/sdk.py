@@ -24127,7 +24127,7 @@ class TortoiseSDK:
             from .search_engine import _exclude_status_clause
             clauses.append(_exclude_status_clause("n"))
         if kind:
-            expanded = self._expand_kind(kind)
+            expanded = self._read_filter_kinds(kind)
             if len(expanded) == 1:
                 clauses.append("n.pointKind = $kind")
                 params["kind"] = expanded[0]
@@ -24198,7 +24198,7 @@ class TortoiseSDK:
             from .search_engine import _exclude_status_clause
             clauses.append(_exclude_status_clause("n"))
         if kind:
-            expanded = self._expand_kind(kind)
+            expanded = self._read_filter_kinds(kind)
             if len(expanded) == 1:
                 clauses.append("n.pointKind = $kind")
                 params["kind"] = expanded[0]
@@ -37829,8 +37829,10 @@ class TortoiseSDK:
         strategies = classify_query(query, kind)
         is_full_scan = (query is None and kind is not None)
 
-        # Expand kind early for pack-aware structural query + kind filter
-        expanded_kinds = self._expand_kind(kind) if kind else None
+        # Expand kind early for pack-aware structural query + kind filter.
+        # #11679: the KIND FILTER below feeds `n.{kind_field} IN [...]`, so it
+        # takes the read-filter set (descendants, never ancestors).
+        expanded_kinds = self._read_filter_kinds(kind) if kind else None
 
         # C6 (#2520): resolve the freshness intent ONCE and derive the
         # DENSE-leg query. The anchor touches the embedding only — the
@@ -42763,12 +42765,29 @@ class TortoiseSDK:
     # ── Helpers ───────────────────────────────────────────────────
 
     def _expand_kind(self, kind: str) -> list[str]:
-        """Expand kind via subclassOf + equivalentTo for Cypher IN clause.
+        """Expand kind via subclassOf + equivalentTo for a MEMBERSHIP test.
 
         Uses PackRegistry.expand_kind(). Registry is loaded once and cached.
         Returns [kind] if no packs loaded or kind is unknown.
+
+        ⛔ The set carries a child's ANCESTORS — ``"operator" in
+        _expand_kind(kind)`` is the idiom this exists for. A read filter
+        (``n.pointKind IN [...]``) must use :meth:`_read_filter_kinds`
+        instead: the ancestor names there match rows BROADER than the kind
+        asked for (#11679).
         """
         return _get_kind_expander().expand_kind(kind)
+
+    def _read_filter_kinds(self, kind: str) -> list[str]:
+        """Expand kind to the values a READ FILTER may match — never an ancestor.
+
+        Uses PackRegistry.read_filter_kinds(): [kind] + descendants +
+        equivalents + stored spellings. Every Cypher ``n.<kind_field> IN [...]``
+        filter in this module uses this one, so a narrow-kind read cannot return
+        a broader-kinded row (#11679). Membership tests use
+        :meth:`_expand_kind`.
+        """
+        return _get_kind_expander().read_filter_kinds(kind)
 
     def _resolve_traversal_path(self, path: str) -> dict | None:
         """Resolve 'Product→Feature' to {predicate, fromKind, toKind} from pack registry.

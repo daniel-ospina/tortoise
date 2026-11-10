@@ -59,13 +59,16 @@ def _bare(kind: str) -> str:
 
 
 def _expand(kind: str) -> list[str]:
-    """Pack-aware kind expansion (subclasses + equivalents) for Cypher IN
-    clauses — mirrors sdk._expand_kind via the same cached registry, so the
-    migrated validator resolves kinds IDENTICALLY to the legacy check_structure.
-    Falls back to [kind] when packs are unavailable (ponytail)."""
+    """Read-filter kind expansion (descendants + equivalents) for Cypher IN
+    clauses — mirrors sdk._read_filter_kinds via the same cached registry, so
+    the migrated validator resolves kinds IDENTICALLY to the legacy
+    check_structure. ⛔ NOT ``expand_kind``: that is the MEMBERSHIP set and it
+    carries a child's ANCESTORS, so a vocabulary built from it would accept a
+    broader kind than the rule names (#11679). Falls back to [kind] when packs
+    are unavailable (ponytail)."""
     try:
         from .sdk import _get_kind_expander
-        return _get_kind_expander().expand_kind(kind)
+        return _get_kind_expander().read_filter_kinds(kind)
     except Exception:
         return [kind]
 
