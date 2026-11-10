@@ -573,16 +573,54 @@ class TestResolutionNarrative:
         assert not closing.startswith(forged_marker)
         assert prompt.index(forged_marker) < prompt.index(closing)
 
-    def test_narrative_is_bounded_by_a_constant(self):
-        """The narrative is a whole session story: unbounded, it would make
-        the prompt cost grow with session length. Head is kept, tail is not."""
-        head = "Michael, our contact at Kaironis. "
-        tail = "ZZUNREACHABLE_TAIL"
-        long_story = head + ("filler sentence. " * 5000) + tail
+    def test_the_narrative_augments_the_lexical_rule_it_does_not_replace_it(
+            self):
+        """P1 (review): the narrative is ADDITIONAL evidence, never the only
+        kind. A phase-2 call on any real run HAS a story, so a clause that
+        said "resolve only what the narrative evidences" would instruct away
+        the pre-existing diminutive/variant folding on 100% of runs — and
+        S1's compressed narration need not repeat a name it already named.
+
+        The fake below models exactly that: it folds the lexical alias unless
+        the prompt narrows the basis to the narrative alone.
+        """
+        class _M:
+            def complete(self, *, system, user, max_tokens=None, **_kw):
+                if "resolve only what the narrative evidences" in user.lower():
+                    return json.dumps({"resolutions": []})
+                if "Joseph" in user and "Joe" in user:
+                    return json.dumps({"resolutions": [
+                        {"name": "Joe", "resolves_to": "obj_joseph"}]})
+                return json.dumps({"resolutions": []})
+
+        story = "Joseph signed the renewal."   # names Joseph, never "Joe"
+        res = v2.resolve_entities(
+            [{"name": "Joe", "kind": "core:person"}],
+            {"entities": [{"id": "obj_joseph", "name": "Joseph",
+                            "kind": "core:person"}],
+             "points": [], "events": []},
+            model=_M(), narrative=story)
+        assert res["map"]["Joe"]["id"] == "obj_joseph", (
+            "a lexical alias must still fold when a narrative is present")
+
+    def test_a_long_narrative_keeps_evidence_from_both_ends(self):
+        """P3 (review): head-ONLY truncation drops the late mention.
+
+        A narrative introduces who someone is early and re-uses the short form
+        later; on a long story both facts must survive the cap.
+        """
+        head_fact = "Michael, our contact at Kaironis."
+        tail_fact = "Later, Mike signed."
+        middle = "ZZONLY-IN-THE-ELIDED-MIDDLE"
+        story = (head_fact + " filler sentence." * 2000 + middle
+                 + " filler sentence." * 2000 + tail_fact)
         prompt = v2._resolution_prompt(self._existing(), ["Mike"],
-                                       narrative=long_story)
-        assert "Kaironis" in prompt, "the head (the disambiguating fact) stays"
-        assert tail not in prompt, "the tail is truncated, not carried"
+                                       narrative=story)
+        assert "Kaironis" in prompt, "the head (who this is) survives"
+        assert "Mike signed" in prompt, "the tail (the alias re-use) survives"
+        assert middle not in prompt, "the middle is what gets elided"
+        assert v2._RESOLUTION_NARRATIVE_ELISION.strip() in prompt, (
+            "the elision is marked, so a reader can see evidence is missing")
         # bound = the narrative cap + the fixed overhead (envelope clause +
         # begin/end markers + the identity rule + the candidate table) — O(1)
         # in the story's length, which is the property under test.

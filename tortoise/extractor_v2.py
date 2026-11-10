@@ -5802,6 +5802,21 @@ _RESOLUTION_SYSTEM = (
 # already carries ``story_arc`` at, so the prompt cost stays O(1) in the
 # narrative's length rather than growing with the session.
 _RESOLUTION_NARRATIVE_MAX_CHARS = 4000
+#: When the story is longer than the cap, HEAD **and** TAIL are kept and the
+#: middle is elided. A head-only window loses exactly the evidence this input
+#: exists to carry: a narrative introduces who someone is early and re-uses the
+#: short form later, so "Michael … our contact at Kaironis" (head) and "Mike
+#: said" (tail) can sit on opposite sides of a long session.
+_RESOLUTION_NARRATIVE_ELISION = "\n[… story truncated …]\n"
+
+
+def _bounded_narrative(story: str) -> str:
+    """``story`` trimmed to the constant, keeping both ends."""
+    cap = _RESOLUTION_NARRATIVE_MAX_CHARS
+    if len(story) <= cap:
+        return story
+    half = cap // 2
+    return f"{story[:half]}{_RESOLUTION_NARRATIVE_ELISION}{story[-half:]}"
 
 
 def _resolution_prompt(existing: list[dict], new_names: list[str],
@@ -5837,18 +5852,22 @@ def _resolution_prompt(existing: list[dict], new_names: list[str],
     # The helper returns "" for an empty body, which is what keeps the
     # narrative-absent render byte-identical to the pre-#11654 prompt.
     block = _render_untrusted_block(
-        "S1 STORY", story[:_RESOLUTION_NARRATIVE_MAX_CHARS])
+        "S1 STORY", _bounded_narrative(story))
     if block:
         context = ("NARRATIVE (the S1 story of the conversation these names "
                    "come from — the evidence that answers whether a new "
                    "name and an existing entity are the SAME real "
                    f"entity):\n{block}\n\n")
-        rule = ("Use the NARRATIVE to decide identity: a new name that the "
-                "narrative establishes as the same referent as an existing "
-                "entity (an alias, a short form, a surname, a company's "
-                "short name) resolves to it. Resolve ONLY what the "
-                "narrative evidences — a name the narrative does not tie "
-                "to an existing entity is ambiguous → omit.")
+        rule = ("The NARRATIVE is ADDITIONAL evidence for identity: when it "
+                "establishes that a new name and an existing entity are the "
+                "same referent (an alias, a short form, a surname, a "
+                "company's short name), resolve to it. It supplements — it "
+                "never replaces — the spelling evidence named in your "
+                "system instructions (case, variant and abbreviation "
+                "forms): a name the narrative does not mention can still be "
+                "the same entity, so use the narrative to resolve what the "
+                "spellings alone leave uncertain. Where neither establishes "
+                "identity, the name is ambiguous → omit.")
     else:
         context = ""
         rule = ""
