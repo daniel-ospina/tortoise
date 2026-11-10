@@ -58,6 +58,77 @@ GATING_WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 RESOLVER_FLAG = "--non-gating-subtree-files"
 
 
+def _strip_shell_comment(line: str) -> str:
+    """Drop a shell comment, whole-line or trailing.
+
+    Quote-aware, and deliberately not a parser: `#` starts a comment only at the
+    start of a line or preceded by whitespace, and never inside `'…'` / `"…"`.
+    That is enough for workflow `run:` bodies, and it is what makes the arms below
+    about EXECUTION rather than text: a commented-out command, or a trailing
+    `# was: …` note quoting the argv, must not satisfy a pin (measured — a fully
+    commented-out line left two arms in this file green).
+    """
+    quote = ""
+    for index, char in enumerate(line):
+        if quote:
+            if char == quote:
+                quote = ""
+            continue
+        if char in "'\"":
+            quote = char
+            continue
+        if char == "#" and (index == 0 or line[index - 1].isspace()):
+            return line[:index].rstrip()
+    return line
+
+
+def _logical_commands(body: str) -> list[str]:
+    """A step body's shell commands: comments dropped, `\\`-continuations joined.
+
+    Needed because "the body mentions this" is not "the body RUNS this": the
+    resolve step's own comments mention `pytest` while the run step is the one
+    that must consume the list (measured — with the run step hardcoded, a
+    body-level arm stayed green because those comments were in a different
+    step). Joining continuations keeps a wrapped command a single command, so a
+    rewrap cannot turn a correct workflow red.
+    """
+    logical: list[str] = []
+    buf = ""
+    for raw in body.splitlines():
+        line = _strip_shell_comment(raw.strip()).strip()
+        if not line:
+            continue
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        logical.append(buf + line)
+        buf = ""
+    if buf:
+        logical.append(buf)
+    return logical
+
+
+def _workflow_run_bodies(path: Path) -> list[str]:
+    """Every `run:` body in a workflow, PARSED — never substring-scanned.
+
+    A substring arm over a whole workflow file is how a guard silently stops
+    guarding: the token it searches for also appears in comments (measured — the
+    report flag occurs 2,000 lines below its step, and the selector name occurs
+    in four comments of `evals-on-demand.yml`), so the arm stays green with the
+    step deleted. Trying to fix that by scanning `run:` LINES is the mirror
+    failure: the canonical `run: |` block and a wrapped command both red a
+    command that is present and correct (measured, four ways).
+
+    Parsing keys the arm on the command itself, so a step rename, a rewrap or a
+    comment that happens to quote the command changes nothing.
+    """
+    doc = yaml.safe_load(path.read_text())
+    return [
+        step["run"] for job in (doc.get("jobs") or {}).values()
+        for step in (job.get("steps") or []) if step.get("run")
+    ]
+
+
 def _resolver_output() -> list[str]:
     """RUN the resolver — the same command the workflow's step runs.
 
@@ -79,6 +150,23 @@ def _resolver_output() -> list[str]:
 
 
 
+#: The `push_legs()` keys `_gating_sets()` walks. Every OTHER key the producer
+#: returns must be named in `_NON_GATING_LEG_KEYS`, or the pin below is silent
+#: about a gating set nobody measured — a producer-side leg (say `"telemetry":
+#: []`) is invisible to a check that only compares the sets `_gating_sets()`
+#: itself built (measured: all 8 tests in this file stayed green when one was
+#: added). Two literals, because deriving either side from the other makes the
+#: check tautological.
+_WALKED_LEG_KEYS = frozenset({"shards", "slow_shards", "carve_shards",
+                             "slow", "env_broken", "carve_out"})
+
+#: Producer keys that are deliberately NOT walked, and why: `on_demand` is the
+#: manual `eval` lane's own selection — not a gating leg, so the set it produces
+#: is asserted elsewhere (reachability is pinned by
+#: `test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file`).
+_NON_GATING_LEG_KEYS = frozenset({"on_demand"})
+
+
 def _manifest() -> dict:
     return cs.load_manifest()
 
@@ -96,6 +184,167 @@ def _bare(name: str) -> str:
     return name[:-3] if name.endswith(".py") else name
 
 
+#: The changed-file probes for the tier-2 (PR) selection — one surface-owner of
+#: each subtree, plus a direct eval-test edit.
+_TIER2_CHANGES = ("tests/eval/ask/test_ask_corpus.py",
+                  "tests/longmem_eval/test_vector_arm.py",
+                  "tools/longmem_eval/run.py",
+                  "tortoise/embeddings.py")
+
+
+#: The leg KINDS, which stay LITERAL — the DECLARED side of the equality, so a
+#: kind `_gating_sets()` starts producing without a matching entry here reds.
+#: ⚠️ The reverse cases are guarded elsewhere, not here: a `push_legs()` key the
+#: selector gains is refused by `_WALKED_LEG_KEYS`/`_NON_GATING_LEG_KEYS` in the
+#: leak test, and a leg whose CONTENT is emptied, filtered or SWAPPED with
+#: another while its name survives is refused there too — every leg family (all
+#: FIVE declared flat legs, all three shard families, both tier-2 families) is
+#: read back against the producer's own set, per family, so any map-side mutation
+#: of a leg's membership reds. Two classes this file does NOT enforce (and does
+#: not claim anyone else does): a filter applied to the PRODUCER itself moves both
+#: sides together, and a new key `select()` RETURNS is enumerated by nothing.
+_LEG_KINDS = frozenset({"fast_pool", "slow", "env_broken", "carve_out",
+                        "push slow_selected"})
+
+
+def _expected_legs(manifest: dict) -> set[str]:
+    """The leg names `_gating_sets()` must produce, at THIS manifest's counts.
+
+    The shard LABELS are DERIVED from the three reviewed literals the producers
+    themselves read (`fast_shards` / `slow_shards` / `carve_shards`, through the
+    selector's own accessors) rather than being spelled out here a second time.
+
+    Why derived, and not `"abcdefghij"` (#11698): a hardcoded label list is a
+    second copy of a config value whose own comment calls it a WALL-CLOCK LEVER
+    — so bumping it is a legitimate, reviewed change. When `fast_shards` became
+    11 (#11576 / `efc472108f6a`), that copy reddened `main` with "the leg list
+    this test walks changed — a new gating set was added ... NOT covered here",
+    which was false in both halves: no gating set was added, and the 11th shard
+    WAS covered (the leak assertions walk every shard the manifest declares). A
+    tripwire that fires on the config's own reviewed value accuses the selector
+    of a change that did not happen, and a false red of this shape is repaired by
+    editing the literal — which is how the drift is absorbed instead of reported.
+
+    What the derivation does NOT give up: if the selector produces a shard set
+    that differs from this derivation's — a real defect — the equality below
+    still fails, and it now names the declared count rather than a stale one.
+    What it does NOT catch is a rename that flows through `shard_labels()` itself:
+    both sides read that accessor, so a renamed label arrives on both sides
+    unchanged (measured: renaming label index 2, i.e. a shard named differently
+    from the manifest's `a`..`k` sequence, leaves this file 8 passed). Label
+    spelling is therefore pinned by the seams that would refuse a merge:
+    `test_ci_selection.py::test_shard_labels_are_a_superset_when_s_changes` for
+    the `test (a)`/`test (b)` names the rail subtracts (and NOT a rename past the
+    first two labels — measured green), and
+    `test_ci_selection.py::test_shard_count_is_stable_regardless_of_the_selection_size`
+    for the `a`..`i` positional sequence it builds (a NINE-shard matrix, so a
+    rename past the ninth label is caught by a THIRD seam, not this one —
+    measured: index 10 renamed leaves both of the above green and reds
+    `test_ci_selection.py::test_push_legs_partitions_every_classified_file`).
+    What this pin refuses is the DECLARED side: a leg `_gating_sets()` produces
+    that is not declared here (a gating set added or moved below without
+    `_LEG_KINDS`/this derivation following) reds, and the message names both
+    sides. The leg KINDS stay literal (`_LEG_KINDS`) so the declared side cannot
+    drift along with the map — which is also why DELETING a leg from the map's
+    body reds (as a `KeyError` from the per-family read-back, or in that
+    read-back's own comparison; the per-family arms run first, so the
+    `declared-but-missing` message is not always the one you see).
+
+    ⚠️ Two gaps, named precisely, because this docstring has now been wrong twice
+    in the same direction (each version claiming a guard for a class the guard
+    could not see):
+
+    1. A `push_legs()` KEY the selector gains that `_gating_sets()` never reads
+       appears on neither side. Its measured counterexample was a new
+       `"telemetry": []` key on `push_legs()`' return, which left all 8 tests in
+       this file green. That class is now refused by the producer-key assertion in
+       `test_no_subtree_file_is_in_any_gating_leg`, which diffs
+       `set(push_legs(manifest))` against `_WALKED_LEG_KEYS |
+       _NON_GATING_LEG_KEYS` (the same mutant now reds, naming `telemetry`), and
+       both constants are pinned so neither can grow as a quiet one-liner.
+    2. A leg that keeps its NAME but loses its CONTENT — `_gating_sets()` emptying
+       a shard, or dropping a file from any leg — red an equality whose two sides
+       are BOTH built from that map, i.e. nothing in this file (measured at
+       #11675: 8 passed for every family, before the arms below existed).
+       That one is now refused by TWO arms in the same test: every gating leg
+       must be non-empty (only `tier-2 slow_selected [...]` is exempt, and for a
+       stated reason), and every leg family is read back against the producer's
+       own set — all FIVE flat legs (`fast_pool`, `slow`, `env_broken`,
+       `carve_out`, `push slow_selected`), all three shard families, and both
+       tier-2 families — so a filter inside the map reds even though the leg
+       names survive. The arms are pinned to the DECLARED flat-leg set
+       (`set(producer_by_family) == set(_LEG_KINDS)`), so a sixth flat leg cannot
+       be declared without this test demanding its read-back. The two sides are
+       different code paths (`push_legs()`/`select()` vs this map); an earlier
+       version of this test compared two PRODUCER calls, which no map edit can
+       reach, and its reviewer measured that.
+
+       ⛔ What this file does NOT enforce, stated without naming anyone else as
+       the owner — the earlier versions of this paragraph did, and every review of
+       it found one of those attributions false (a function that is informational,
+       a pin that reds only on synthetic fixtures, a universal that held for one
+       dropped file and not the next). Who else guards a class is a separate
+       question, answered by measuring, not by this docstring:
+
+       (a) a filter applied to the PRODUCER itself (in `tools/ci_selection.py`)
+           moves both sides together, so the read-backs above cannot see it;
+       (b) nothing here enumerates the keys `select()` RETURNS, so a new gating
+           key there is unguarded — including by the leak check below, which
+           iterates only the keys this map built. The absence of such a key today
+           is not a guard: a key that does not exist yet cannot be caught.
+
+    ⚠️ One class this docstring used to leave unstated, now guarded rather than
+    claimed away (`#11675` round-13 review): the tier-2 PROBE LIST. `_TIER2_CHANGES`
+    was a second copy on `main` — `_gating_sets()` spelled the four paths inline
+    while this derivation read the constant, so editing one side red the equality.
+    Both sides (and the per-family read-back) now read the ONE constant, which means
+    a shrunken probe list moves all three together and reads as a pass over a
+    surface nobody selected for (measured: `_TIER2_CHANGES` cut to one entry left
+    the equality 26 == 26 green). The list is therefore pinned against a literal in
+    `test_no_subtree_file_is_in_any_gating_leg`, so dropping a probe is a second,
+    deliberate edit with a reviewer-visible message.
+
+    The count is the manifest's, never a second copy in this file: the two
+    `core` rows #11642 added move no shard count at all (measured over
+    `push_legs` — strip both and the names are still `a`..`k`; only the file
+    count moves, and that number decays with every unrelated registration, so
+    the claim here is the NAMES, never the total). Nor is it a pool-size
+    threshold — `fast_shard_count` reads the manifest's `fast_shards` literal, and
+    `split_fast_gate` says as much ("N comes from the manifest's `fast_shards` …
+    NOT capped by the file count"), so a lane that unregisters files must not
+    drop a label.
+    ⛔ AND THE DERIVATION ALONE IS A TAUTOLOGY ON THE COUNT (`#11681` review P2,
+    main's guard, folded in here by this merge): `push_legs` builds its bins from
+    the SAME `fast_shard_count`, so a code-side collapse — the helper falling back
+    to a pool-size threshold and ignoring `config/ci-surfaces.yml` — moves BOTH
+    sides and the set equality stays green while the selector partitions CI into
+    two shards (measured on `main` with `cs.fast_shard_count` forced to return 2:
+    set equality True, i.e. green). So the counts are ALSO asserted against the
+    manifest's RAW LITERAL, which reds that collapse and still does not red a
+    legitimate re-partition, because a re-partition moves both sides together.
+    """
+    for key, got in (
+        ("fast_shards", cs.fast_shard_count(manifest)),
+        ("slow_shards", cs.slow_shard_count(manifest)),
+        ("carve_shards", cs.carve_shard_count(manifest)),
+    ):
+        assert got == manifest[key], (
+            f"`{key}` in config/ci-surfaces.yml is {manifest[key]!r} but the "
+            f"selector's helper reads {got!r} — the shard count must come from "
+            f"that manifest LITERAL and never from a pool-size threshold, or a "
+            f"lane that unregisters files silently re-partitions CI (#11642)")
+    return {
+        *_LEG_KINDS,
+        *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
+        *(f"test-slow ({c})"
+          for c in cs.shard_labels(cs.slow_shard_count(manifest))),
+        *(f"test-carve-out ({c})"
+          for c in cs.shard_labels(cs.carve_shard_count(manifest))),
+        *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
+        *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
+    }
+
+
 def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     """Every GATING file set the selector produces, bare-named, per leg.
 
@@ -103,8 +352,14 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     push matrix's fast shards, its slow/carve-out/env-broken legs, the tier-2
     selection for a change in each relevant surface, and the full selection. A
     set added to the selector later is covered only if it is added here too —
-    which is why `_expected_legs()` below asserts this map's leg list, so a silent
-    omission is impossible to mistake for a pass.
+    which is why the equality below (`assert set(legs) == expected`) compares this
+    map's leg KIND list to `_expected_legs()`'s, so a KIND missing there reds.
+    ⚠️ Two ways this map can go wrong, stated so a
+    reader does not infer a guard that is not there: a leg whose CONTENT is
+    emptied, filtered or swapped reds in the per-family read-backs — but a key
+    `select()` newly RETURNS is enumerated by nothing (the leak check below walks
+    only the keys THIS map built), and a filter applied to the PRODUCER moves both
+    sides together. Neither is this file's to enforce. See `_expected_legs()`.
     """
     legs = cs.push_legs(manifest)
     out: dict[str, set[str]] = {
@@ -122,10 +377,7 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     # Tier-2 (PR) selection: the path that would re-select the eval files if the
     # lane were subtracted on `push` only. Driven by one changed file per
     # surface-owner of these subtrees, plus a direct eval-test edit.
-    for changed in ("tests/eval/ask/test_ask_corpus.py",
-                    "tests/longmem_eval/test_vector_arm.py",
-                    "tools/longmem_eval/run.py",
-                    "tortoise/embeddings.py"):
+    for changed in _TIER2_CHANGES:
         sel = cs.select([changed], "pull_request", manifest)
         out[f"tier-2 test_files [{changed}]"] = {_bare(f) for f in sel["test_files"]
                                                  if f != "ALL"}
@@ -134,75 +386,6 @@ def _gating_sets(manifest: dict) -> dict[str, list[str]]:
     full = cs.select([], "push", manifest)
     out["push slow_selected"] = {_bare(f) for f in full["slow_selected"]}
     return out
-
-
-#: The leg FAMILIES this map enumerates. ⛔ The shard LETTERS are NOT typed here —
-#: they are derived from the selector's own counts (``fast_shard_count`` /
-#: ``slow_shard_count`` / ``carve_shard_count``, which read ``fast_shards`` and its
-#: siblings out of `config/ci-surfaces.yml`) by `_expected_legs` below. The typed
-#: form was a count that rotted silently in the wrong direction: `#11576` raised
-#: ``fast_shards`` 10 -> 11 to cut the critical leg's wall clock, and this leg then
-#: redded on `test (k)` — a COUNT change, not a coverage change, since the leak
-#: loop below walks every leg `cs.push_legs` actually produces. Deriving the
-#: letters keeps the tripwire that matters (a new FAMILY of gating set, which the
-#: map would not enumerate) while a re-shard is not a false block.
-_LEG_FAMILIES = {
-    "fast_pool", "slow", "env_broken", "carve_out",
-    "push slow_selected",
-}
-#: Surfaces the tier-2 legs are driven with, one changed file per subtree owner.
-_TIER2_CHANGES = (
-    "tests/eval/ask/test_ask_corpus.py", "tests/longmem_eval/test_vector_arm.py",
-    "tools/longmem_eval/run.py", "tortoise/embeddings.py",
-)
-
-
-def _expected_legs(manifest: dict) -> set[str]:
-    """`_LEG_FAMILIES` + the shard legs, whose labels come from the PRODUCER.
-
-    `cs.shard_labels` is the selector's own naming helper, so this map cannot
-    drift from the legs it is compared against — the typed letters were exactly
-    that drift (`test (k)`).
-
-    ⛔ BUT DERIVING FROM THE HELPER ALONE IS A TAUTOLOGY ON THE COUNT (#11681
-    review, P2). `push_legs` builds its bins from the SAME `fast_shard_count`, so
-    a code-side collapse — the helper falling back to a pool-size threshold and
-    ignoring `config/ci-surfaces.yml` — moves BOTH sides and the set comparison
-    stays green while the selector partitions CI into two shards (measured with
-    `cs.fast_shard_count` forced to return 2: set equality True, i.e. green).
-    So the counts are ALSO asserted against the manifest's RAW LITERAL, which
-    reds that collapse and still does not red a legitimate re-partition, because a
-    re-partition moves both sides together.
-
-    ⛔ The count is the manifest LITERAL (`fast_shard_count` — and
-    `split_fast_gate` says so: *"N comes from the manifest's `fast_shards` … NOT
-    capped by the file count"*), never a pool-size threshold. So a lane that
-    UNREGISTERS files must not drop a label: the two `core` rows #11642 added
-    move no shard count at all (measured over `push_legs`: strip both and the
-    names are still `a`..`k`; only the file count moves, and that number decays
-    with every unrelated registration). Deriving from `fast_shard_count` is what
-    keeps the claim the NAMES — which is the claim this pin makes.
-    """
-    for key, got in (
-        ("fast_shards", cs.fast_shard_count(manifest)),
-        ("slow_shards", cs.slow_shard_count(manifest)),
-        ("carve_shards", cs.carve_shard_count(manifest)),
-    ):
-        assert got == manifest[key], (
-            f"`{key}` in config/ci-surfaces.yml is {manifest[key]!r} but the "
-            f"selector's helper reads {got!r} — the shard count must come from "
-            f"that manifest LITERAL and never from a pool-size threshold, or a "
-            f"lane that unregisters files silently re-partitions CI (#11642)")
-    return {
-        *_LEG_FAMILIES,
-        *(f"test ({c})" for c in cs.shard_labels(cs.fast_shard_count(manifest))),
-        *(f"test-slow ({c})"
-          for c in cs.shard_labels(cs.slow_shard_count(manifest))),
-        *(f"test-carve-out ({c})"
-          for c in cs.shard_labels(cs.carve_shard_count(manifest))),
-        *(f"tier-2 test_files [{c}]" for c in _TIER2_CHANGES),
-        *(f"tier-2 slow_selected [{c}]" for c in _TIER2_CHANGES),
-    }
 
 
 def test_the_subtree_is_not_empty():
@@ -245,10 +428,163 @@ def test_no_subtree_file_is_in_any_gating_leg():
     """
     manifest = _manifest()
     legs = _gating_sets(manifest)
-    assert set(legs) == _expected_legs(manifest), (
+    expected = _expected_legs(manifest)
+    unaccounted = set(cs.push_legs(manifest)) - _WALKED_LEG_KEYS - _NON_GATING_LEG_KEYS
+    assert set(_NON_GATING_LEG_KEYS) == {"on_demand"}, (
+        "`_NON_GATING_LEG_KEYS` grew: it is the one way to silence the "
+        "producer-key assertion, so growing it must be a SECOND edit that a "
+        f"reviewer cannot miss (now {sorted(_NON_GATING_LEG_KEYS)}). A gating "
+        "set declared non-gating here stops being walked with every guard "
+        "green — the exact failure mode (a) this file exists to prevent. "
+        "Update this assertion deliberately, in the same change, if the new "
+        "key really gates nothing.")
+    assert not unaccounted, (
+        "`push_legs()` produces leg key(s) that `_gating_sets()` does not walk "
+        f"and does not declare non-gating: {sorted(unaccounted)}. A gating set "
+        "added on the PRODUCER side is invisible to the equality below, which "
+        "compares only the sets `_gating_sets()` built itself — so it would "
+        "read as a pass over a set nobody walked (failure mode (a)). A new "
+        "gating leg needs THREE deliberate edits: walk it in `_gating_sets()`, "
+        "add its key to `_WALKED_LEG_KEYS` (pinned immediately below, so it "
+        "cannot be a quiet one-liner), and its legs then join the equality — "
+        "or declare it in `_NON_GATING_LEG_KEYS` with the reason it gates "
+        "nothing, which is pinned too.")
+    assert set(_WALKED_LEG_KEYS) == {
+        "shards", "slow_shards", "carve_shards", "slow", "env_broken",
+        "carve_out"}, (
+        "`_WALKED_LEG_KEYS` changed. It is the silent half of the assertion "
+        "above: adding a key here without ALSO walking it in `_gating_sets()` "
+        f"clears the check (now {sorted(_WALKED_LEG_KEYS)}). Change this list "
+        "deliberately, in the same commit that walks the new leg.")
+    # A leg that keeps its NAME but loses its CONTENT is invisible to the
+    # equality above (`legs` and `expected` are both built from this map).
+    # Measured at #11675: emptying a shard in `_gating_sets()`, or dropping a file
+    # from every fast shard, left all 8 tests green.
+    empty = sorted(k for k, v in legs.items()
+                   if not v and not k.startswith("tier-2 slow_selected "))
+    assert not empty, (
+        f"gating leg(s) with NO files: {empty}. An empty leg is a lane that "
+        "runs nothing while reading as coverage — and the declared-side "
+        "equality cannot see it, because both sides are built from this map. "
+        "(Only `tier-2 slow_selected [...]` is exempt: it is keyed by a "
+        "SYNTHETIC changed file, so one that selects no slow set is the "
+        "probe's ANSWER about that surface, not an empty lane. A "
+        "`tier-2 test_files [...]` leg is a real gating file list and must "
+        "not be empty.)")
+    # Content that is FILTERED while the leg NAME survives is invisible to the
+    # equality above (`legs` and `expected` are both built from this map), so
+    # every leg family is read back against the producer's own set. Measured at
+    # #11675: filtering one file out of ANY family in `_gating_sets()` left all
+    # 8 tests green before these arms existed.
+    #
+    # The two sides are DIFFERENT code paths — the producer (`push_legs()` /
+    # `select()`) vs this map — which is the whole point: an arm with both sides
+    # from the producer (an earlier version of this test) cannot see a map edit.
+    producer = cs.push_legs(manifest)
+
+    def _shard_sets(entries):
+        return {e["name"]: set(e["files"]) for e in entries}
+
+    producer_by_family = {
+        "fast_pool": {_bare(f) for f in cs.fast_pool(manifest)},
+        "slow": set(producer["slow"]),
+        "env_broken": set(producer["env_broken"]),
+        "carve_out": set(producer["carve_out"]),
+        "push slow_selected": {_bare(f)
+                               for f in cs.select([], "push",
+                                                  manifest)["slow_selected"]},
+    }
+    # Pinned as a SET, so a fifth flat leg cannot be added to the map without
+    # someone deciding whether it gets a read-back here — an arm that is never
+    # written is an arm that cannot fire (measured: dropping the
+    # `push slow_selected` arm left this file 8 passed, and a filter on that leg
+    # then went green too).
+    # The arms must cover exactly the flat legs DECLARED in `_LEG_KINDS` — not a
+    # third copy of that list. Comparing against `_LEG_KINDS` is what makes the
+    # decision unavoidable: a sixth flat leg cannot be declared there (the
+    # declared-side equality requires it) without this assertion then demanding
+    # its read-back. An arm that is never written is an arm that cannot fire —
+    # this file has already shipped that mistake once (`push slow_selected` had
+    # no read-back, and only the fact that its arm happened to exist kept it
+    # honest).
+    assert set(producer_by_family) == set(_LEG_KINDS), (
+        "the per-family read-back does not cover exactly the declared flat "
+        f"legs: missing {sorted(set(_LEG_KINDS) - set(producer_by_family))}, "
+        f"extra {sorted(set(producer_by_family) - set(_LEG_KINDS))}. A leg "
+        "with no read-back has nothing checking its membership.")
+    for family, producer_set in producer_by_family.items():
+        assert legs[family] == producer_set, (
+            f"the `{family}` leg does not carry the producer's own set — a "
+            "filter applied inside `_gating_sets()` while the leg NAME survives "
+            "reds here. It is invisible to the declared-side equality (both "
+            f"sides are built from that map).\nonly-in-map: "
+            f"{sorted(legs[family] - producer_set)[:8]}\nonly-in-producer: "
+            f"{sorted(producer_set - legs[family])[:8]}")
+    for family, prefix, entries in (
+            ("shards", "test (", producer["shards"]),
+            ("slow_shards", "test-slow (", producer["slow_shards"]),
+            ("carve_shards", "test-carve-out (", producer["carve_shards"])):
+        want = _shard_sets(entries)
+        got = {k[len(prefix):-1]: v for k, v in legs.items()
+               if k.startswith(prefix)}
+        assert got == want, (
+            f"the `{family}` legs do not carry the producer's own shard sets — "
+            "a filter (or a dropped/renamed shard) applied inside "
+            "`_gating_sets()` while the leg NAME survives reds here, and the "
+            "declared-side equality cannot see it because both sides are built "
+            f"from that map.\nshards-only-in-map: "
+            f"{sorted(set(got) - set(want))[:8]}\nshards-only-in-producer: "
+            f"{sorted(set(want) - set(got))[:8]}\ncontent-differs: "
+            f"{sorted(k for k in set(got) & set(want) if got[k] != want[k])[:8]}")
+    assert set(_TIER2_CHANGES) == {
+            "tests/eval/ask/test_ask_corpus.py",
+            "tests/longmem_eval/test_vector_arm.py",
+            "tools/longmem_eval/run.py",
+            "tortoise/embeddings.py",
+    }, (
+        "`_TIER2_CHANGES` changed. It is the probe list the tier-2 family is driven "
+        "with — one surface-owner of each eval subtree plus a direct eval-test edit "
+        "— and it is pinned here against a literal for the same reason "
+        "`_LEG_KINDS` is: this file's map, its declared side AND its per-family "
+        "read-back all read the one constant, so a shrunken list moves all three "
+        "together and the equality stays green over surfaces nobody selected for "
+        "(measured before this pin: cut to one entry, still 26 == 26). Dropping or "
+        "replacing a probe is legitimate, but it must be a SECOND, deliberate "
+        "edit here, with a reviewer reading the message — not a quiet narrowing "
+        "of what the tier-2 legs cover."
+    )
+    for changed in _TIER2_CHANGES:
+        sel = cs.select([changed], "pull_request", manifest)
+        for key, field, drop_all in (
+                (f"tier-2 test_files [{changed}]", "test_files", True),
+                (f"tier-2 slow_selected [{changed}]", "slow_selected", False)):
+            want = {_bare(f) for f in sel[field] if not (drop_all and f == "ALL")}
+            assert legs[key] == want, (
+                f"the `{key}` leg does not carry the producer's own `{field}` "
+                "set — a filter applied inside `_gating_sets()` while the leg "
+                "NAME survives reds here. The declared-side equality cannot "
+                f"see it (both sides come from that map).\nonly-in-map: "
+                f"{sorted(legs[key] - want)[:8]}\nonly-in-producer: "
+                f"{sorted(want - legs[key])[:8]}")
+    # The producer's own packing invariant, which no map edit can reach: the fast
+    # shards carry `fast_pool()` PLUS any registered `push_extra` (that key is a
+    # supported lever — `push_legs()` spreads it round-robin across the shards).
+    shard_union = {_bare(f) for f in cs.all_shard_files(producer)}
+    pool = {_bare(f) for f in cs.fast_pool(manifest)}
+    extra = {_bare(f) for f in manifest.get("push_extra", [])}
+    assert shard_union == pool | extra, (
+        "the fast shards do not carry `fast_pool()` plus the registered "
+        "`push_extra` files — this arm is about the PRODUCER's packing, and it "
+        "reads two producer calls, so a map-side filter cannot reach it (the "
+        "per-family arms above are what guard the map)."
+        f"\nonly-in-shards: {sorted(shard_union - pool - extra)[:8]}\n"
+        f"only-in-pool: {sorted((pool | extra) - shard_union)[:8]}")
+    assert set(legs) == expected, (
         "the leg list this test walks changed — a new gating set was added to "
         "the selector (or one renamed) and is NOT covered here, which reads as "
-        "a pass over a set nobody checked")
+        f"a pass over a set nobody checked.\ndeclared-but-missing: "
+        f"{sorted(expected - set(legs))}\nproduced-but-declared-absent: "
+        f"{sorted(set(legs) - expected)}")
     subtree = {_bare(f) for f in _subtree_files()}
     leaks = {leg: sorted(subtree & files) for leg, files in legs.items()
              if subtree & files}
@@ -328,14 +664,33 @@ def test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file():
         "entries — the lane and the runner have drifted: "
         f"resolved-only={sorted(set(resolved) - set(expected))[:5]} "
         f"disk-only={sorted(set(expected) - set(resolved))[:5]}")
-    # ... and the workflow's step must invoke THAT verb, not merely mention it.
-    step = text.split("Resolve the non-gating", 1)[-1]
-    assert f"tools/ci_selection.py {RESOLVER_FLAG}" in step, (
-        "the workflow's resolve step must RUN `tools/ci_selection.py "
+    # ... and the workflow's resolve step must invoke THAT verb, not merely
+    # mention it. Parsed steps, keyed on the command — a step rename or a rewrap
+    # must not red a workflow that is correct, and a comment quoting the argv
+    # must not satisfy the arm. `_logical_commands` is what makes the second half
+    # true: the step body CONTAINS its comments, so a body-level substring test
+    # stays green with the call commented out (measured, for both arms here).
+    bodies = _workflow_run_bodies(EVAL_WORKFLOW)
+    resolve_cmds = [
+        cmd for b in bodies for cmd in _logical_commands(b)
+        if f"ci_selection.py {RESOLVER_FLAG}" in cmd]
+    assert resolve_cmds, (
+        "the workflow must RUN `tools/ci_selection.py "
         f"{RESOLVER_FLAG}` — the argv verified above")
-    assert "> /tmp/lane.txt" in step, (
+    assert any("> /tmp/lane.txt" in cmd for cmd in resolve_cmds), (
         "the resolve step must capture the resolver's stdout to the file the run "
         "step reads")
+    # …and the RUN step must consume it: a resolve step whose output nobody reads
+    # resolves nothing. Both tokens in the same step BODY, so a wrapped command
+    # still passes and a file-level comment cannot satisfy it.
+    consumers = [
+        cmd for b in bodies for cmd in _logical_commands(b)
+        if "pytest" in cmd and "< /tmp/lane.txt" in cmd]
+    assert consumers, (
+        "the run step must pass the RESOLVED list to pytest (`< /tmp/lane.txt`) — "
+        "otherwise the resolver's list is bypassed and the lane runs whatever "
+        "the workflow hardcodes, which is the exclusion silently ceasing to "
+        "exclude")
 
 
 def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
@@ -360,15 +715,27 @@ def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
     assert "test_perf_lane_volunteer_context.py" in lane
     assert {f for f in lane if f.startswith("eval/")} == {
         "eval/retrieval/test_integration.py"}, (
-        "only the LITERAL survives from the eval subtree in this runner — the "
-        "other 25 belong to eval-suite-manual.yml (docker shape), not here")
+        "only the LITERAL survives from the eval subtree in this runner — every "
+        "other `eval/` file belongs to eval-suite-manual.yml (docker shape), not "
+        "here. This assertion states the CLASS and deliberately not a total: it "
+        "drifts with every registration (it read 'the other 25' when #10198 "
+        "landed and 27 when measured at #11675) and the drift is unobservable.")
     # And the workflow must READ that function, not re-inline the subtraction.
-    text = EMBEDDED_WORKFLOW.read_text()
-    assert "on_demand_literal_runner_files" in text, (
+    # The bare NAME occurs in four comments in that file, so a name-substring is
+    # true with the call deleted — pin the CALL in a parsed step body, on its
+    # EXECUTABLE commands: the parsed body still carries its comments, so a
+    # body-level substring is satisfied by a commented-out call (measured).
+    # Tolerating a hoisted manifest (the argument is a local, not a shape we care
+    # about).
+    bodies = _workflow_run_bodies(EMBEDDED_WORKFLOW)
+    commands = [cmd for body in bodies for cmd in _logical_commands(body)]
+    calls = [cmd for cmd in commands if "on_demand_literal_runner_files(" in cmd]
+    assert calls, (
         "evals-on-demand.yml must resolve its lane through the pinned selector "
         "function rather than re-deriving the subtraction in a heredoc")
-    assert "on_demand_files(load_manifest())" not in text, (
-        "the wholesale subtraction is the bug this test pins")
+    reinline = [cmd for cmd in commands if "on_demand_files(" in cmd]
+    assert not reinline, (
+        f"the wholesale subtraction is the bug this test pins: {reinline[:3]}")
 
 
 def test_the_gating_workflow_still_logs_what_it_does_not_run():
@@ -376,13 +743,21 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
 
     "the evals aren't running" and "the evals are excluded on purpose" are the
     same log line unless the gating run prints the exclusion. This pins that the
-    report step exists in the gating workflow and reads the selector (not a
+    report step exists in the gating workflow and RUNS the selector (not a
     hand-copied table).
     """
-    text = GATING_WORKFLOW.read_text()
-    assert "--non-gating-report" in text, (
+    # Parsed step bodies, not a line scan: the flag also appears in a comment
+    # ~2,000 lines below (so a whole-file substring passes with the step
+    # deleted), and a `run: |` block would red a command that is present.
+    report_cmds = [
+        cmd for b in _workflow_run_bodies(GATING_WORKFLOW)
+        for cmd in _logical_commands(b) if "--non-gating-report" in cmd]
+    assert report_cmds, (
         "the gating run must log the non-gating lane and the shard → file-count "
-        "map, so the 42 absent files are visible rather than inferred")
+        "map, so the non-gating files are visible rather than inferred")
+    assert all("tools/ci_selection.py" in cmd for cmd in report_cmds), (
+        "the report must come from the selector, never a hand-copied table: "
+        f"command(s) = {report_cmds}")
     report = cs.non_gating_report(_manifest())
     assert "eval/**" in report and "longmem_eval/**" in report
     assert "test (i)" in report, "the report must list every gating fast shard"
@@ -439,5 +814,6 @@ def test_mutation_m1_one_eval_path_back_on_the_gate_reddens_the_guard():
         "with `eval/**` removed from the lane an eval file must reappear on a "
         "gating leg — if this passes, the guard test next door cannot fail for "
         "the regression it names")
-    assert "eval/ask/test_ask_corpus" in {f for files in leaks.values() for f in files}, (
-        f"the mutant must name the file, got {leaks}")
+    assert "eval/ask/test_ask_corpus" in {
+        f for files in leaks.values() for f in files
+    }, f"the mutant must name the file, got {leaks}"

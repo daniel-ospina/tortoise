@@ -2434,6 +2434,55 @@ jobs:
           # Epic #1647 Task 10 (P4): URI-less e2e surface — the URI-required
           # enforcement opt-in.
           TORTOISE_TEST_CARVE_OUT: "1"
+      # ⛔ #10305's step, one job over, and its ABSENCE here was measured at the
+      # cost of a whole fix cycle on PR #11675. The servers' OWN logs are the only
+      # place that says WHY a preview red happened, and nothing on the runner read
+      # them when the SPECS failed — the two boot steps `cat` their log only when
+      # the BOOT fails, which is the opposite case. `dashboard-e2e` got this step
+      # for #10305; `legal-e2e` did not, so its red at job 129650228746 was
+      # undiagnosable after the fact: `:8808` was ready at 05:42:03Z, the suite ran
+      # to 05:44:09Z, 11 app-origin specs failed `ERR_CONNECTION_REFUSED`, and the
+      # teardown step afterwards reported `app (pid 983187) already exited` while
+      # the marketing preview was still RUNNING (its own pids were stopped, not
+      # found dead) — i.e. the DASHBOARD PREVIEW DIED MID-RUN, and `app.log` sat
+      # unread. The liveness verdict below is what
+      # separates that from "the specs were wrong" (#8059 is the same misreading:
+      # a dead preview reported as a `--d1`/`dist` problem).
+      #
+      # ⛔ And the log is the ONLY datum that can name it: upstream, `wrangler dev`/
+      # `pages dev` EXITS instead of recovering when workerd crashes mid-rebuild —
+      # the esbuild `all goroutines are asleep - deadlock!` that #8059 measured is a
+      # SECONDARY symptom of that exit (cloudflare/workers-sdk#14926) — so a restart
+      # wrapper is not a fix (nothing resumes a suite already in flight), and
+      # `--no-bundle` cannot replace the watcher because `website/apps/dashboard/
+      # functions/` is TypeScript.
+      - name: Dump the preview servers' logs, and say whether each preview DIED
+        if: failure()
+        run: |
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
+          # Both servers, by name, through the same per-run/per-job state dir the
+          # boot steps wrote to (#10283) — never a shared path under `$TMPDIR`
+          # that a peer job's write could point at.
+          #
+          # ⛔ ONE call per server answers the whole question (`preview-server.sh
+          # alive`), and the helper's OWN message names the state. This step used
+          # to branch on a bare `kill -0 "$pid"`, which is wrong three ways: a
+          # ZOMBIE answers kill(0) forever, a RECYCLED pid is a stranger, and a
+          # stopped preview (whose pid file `stop` deletes) was reported as never
+          # having started. `alive` applies `pid_running` (not a zombie) AND the
+          # boot-time start witness (the same PID-REUSE GUARD `stop` uses), and
+          # keeps "alive but not serving" distinct from "our process is still
+          # running". The step only decides whether a verdict is an annotation.
+          for name in marketing app; do
+            if out="$(bash "$PREVIEW" alive --name "$name")"; then
+              echo "$out"
+            else
+              echo "::error::${out}"
+            fi
+            echo "--- ${PREVIEW_STATE}/${name}.log ---"
+            tail -80 "${PREVIEW_STATE}/${name}.log" 2>/dev/null || echo "(no ${name}.log)"
+          done
       - name: Stop wrangler dev servers (scoped to this job's pids)
         if: always()
         # #10283: `stop-all` signals the pids THIS job recorded (and their
@@ -2656,8 +2705,24 @@ jobs:
       - name: Dump the preview servers' logs (a preflight red leaves no other trace)
         if: failure()
         run: |
-          PREVIEW_STATE="$(bash "$GITHUB_WORKSPACE/.github/scripts/preview-server.sh" dir)"
+          PREVIEW="$GITHUB_WORKSPACE/.github/scripts/preview-server.sh"
+          PREVIEW_STATE="$(bash "$PREVIEW" dir)"
+          # The liveness verdict is #11675's addition, shared with `legal-e2e`'s
+          # step: a log alone still leaves the reader guessing whether the server
+          # died or the specs were wrong, and #8059 is that misreading measured
+          # (a dead preview reported as a `--d1`/`dist` problem). Same shape in
+          # both jobs, so the next preview red names its own cause.
+          #
+          # ⛔ ONE call per server (`preview-server.sh alive`) answers it, and it is
+          # deliberately not a bare `kill -0`: a ZOMBIE answers kill(0) forever, a
+          # RECYCLED pid belongs to a stranger, and "no pid file" means a stop ran
+          # as often as it means no boot. See `cmd_alive`'s header.
           for name in auth app; do
+            if out="$(bash "$PREVIEW" alive --name "$name")"; then
+              echo "$out"
+            else
+              echo "::error::${out}"
+            fi
             echo "--- ${PREVIEW_STATE}/${name}.log ---"
             tail -80 "${PREVIEW_STATE}/${name}.log" 2>/dev/null || echo "(no ${name}.log)"
           done
