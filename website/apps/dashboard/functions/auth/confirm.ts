@@ -147,6 +147,16 @@ function escapeHtml(value: string): string {
  * Server-rendered and self-contained (matching the inline-HTML convention of the
  * sibling auth routes) so no new asset pipeline is introduced and the page
  * cannot be stale relative to the handler.
+ *
+ * ⚠️ "Self-contained" has ONE exception: the three icon `<link>`s in the head, so
+ * the tab shows the real mark instead of the browser's generic glyph. Those are
+ * same-origin SUBRESOURCE requests made while `token_hash` — a credential — is in
+ * this page's own URL, which is why the response sets `Referrer-Policy: no-referrer`
+ * (the same rule and the same remedy as `_middleware.ts`'s `strayReturnRefusal`).
+ * Under the browser default (`strict-origin-when-cross-origin`) a SAME-ORIGIN
+ * referrer carries the full path and query, so without that header the token would
+ * reach the icon requests and then edge/CDN logs. Do not remove the header without
+ * removing the links, and vice versa.
  */
 // Exported for the regression guard (#3525): `src/securityHeaders.test.js` calls
 // this and asserts the REAL response carries `no-store`, the flow cookie, and a
@@ -177,6 +187,9 @@ export function emailInterstitial(email: string | null, pendingId: string, kind:
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>Confirm your sign-in — Tortoise</title>
+<link rel="icon" href="/favicon.ico?v=62885cadb6d1" sizes="32x32 48x48">
+<link rel="icon" type="image/png" href="/favicon.png?v=49f77b817262" sizes="256x256">
+<link rel="apple-touch-icon" href="/apple-touch-icon.png?v=d528e4e4021a">
 <style nonce="${nonce}">
   :root { --bg:#060b14; --surface:#0d1a2d; --text:#cbd5e1; --dim:#94a3b8; --accent:#06b6d4; --red:#ef4444; --border:#1e293b;
           --mono: ui-monospace, SFMono-Regular, 'SF Mono', Menlo, 'Cascadia Code', 'Fira Code', 'JetBrains Mono', monospace; --serif:Georgia,'Times New Roman',serif; }
@@ -252,6 +265,12 @@ export function emailInterstitial(email: string | null, pendingId: string, kind:
     // header because `strictCspWithNonce` already carries it, and #3525's guard
     // pins the served policy to exactly that one value.
     "X-Frame-Options": "DENY",
+    // The head makes three same-origin icon requests and this page's URL carries
+    // `token_hash`, so the default same-origin Referer (full path + query) would leak
+    // a credential into those requests and their logs. Same rule, same remedy as
+    // `_middleware.ts`'s `strayReturnRefusal`. `_headers` does not reach Functions
+    // output, so it is stamped here rather than inherited.
+    "Referrer-Policy": "no-referrer",
     "Content-Security-Policy": strictCspWithNonce(nonce),
   });
   headers.append("Set-Cookie", buildCookie(FLOW_COOKIE, pendingId, RECOVERY_MAX_AGE_S));
