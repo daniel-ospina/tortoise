@@ -5965,12 +5965,16 @@ class TestSiteIconAndSocialPreviewContract:
         # staged to `dist/admin/` and served on the APP origin, so a browser there asks for
         # `/favicon.ico` — the UNVERSIONED path — unless the page declares a versioned link.
         # It declared none, so a stale console tab after a re-export was still possible while
-        # every other surface was covered (review round 1). Its links resolve against the app
+        # every on-disk surface was covered (review round 1). Its links resolve against the app
         # root, and it may name that origin absolutely, so it grades with the app surface.
         surfaces = {
             "marketing": (self._pages(), self.WEB, self.SITE_ORIGINS),
+            # `rglob`, not `glob`: a page in a SUBDIRECTORY of `public/` is served on the
+            # same origin by the same project, so `glob("*.html")` would leave it silently
+            # ungraded — the "a page the guard never discovers" shape. There is no nested
+            # HTML today, so this changes no current result; it closes the door on one.
             "app": ([self.WEB / "apps" / "dashboard" / "index.html",
-                     *sorted(self.DASHBOARD_ROOT.glob("*.html"))],
+                     *sorted(self.DASHBOARD_ROOT.rglob("*.html"))],
                     self.DASHBOARD_ROOT, self.ICON_ORIGINS),
             "app-admin": ([self.WEB / "apps" / "blog-admin" / "index.html"],
                           self.DASHBOARD_ROOT, self.ICON_ORIGINS),
@@ -5982,6 +5986,30 @@ class TestSiteIconAndSocialPreviewContract:
                 violations += self._surface_icon_violations(
                     label, page.name, page.read_text(), root, expected, origins)
             assert not violations, "\n".join(violations)
+
+        # ⛔ NO GLOB REACHES THESE — they are STRINGS in TypeScript, not pages on disk, so
+        # each is graded by exact `href` instead. The blog head is the surface a shared link
+        # opens. The other two are on the APP origin and rendered a full `<head>` with NO
+        # icon link at all, so both fell back to the UNVERSIONED `/favicon.ico` — the defect
+        # this test exists to stop, one file over (review round 2).
+        # ⚠️ `website/functions/_middleware.ts`'s refusal page is a deliberate EXCEPTION and
+        # stays unlinked: its own contract forbids an outbound request while a credential is
+        # in the URL — so it is excluded by DECISION, not by oversight.
+        self_rendered = {
+            "website/functions/blog/_lib.ts": (
+                self.WEB / "functions" / "blog" / "_lib.ts"),
+            "website/apps/dashboard/functions/auth/confirm.ts": (
+                self.WEB / "apps" / "dashboard" / "functions" / "auth" / "confirm.ts"),
+            "website/apps/dashboard/functions/admin/[[path]].ts": (
+                self.WEB / "apps" / "dashboard" / "functions" / "admin" / "[[path]].ts"),
+        }
+        for source_label, source in self_rendered.items():
+            rendered = source.read_text()
+            for path, version in expected.items():
+                href = f'href="{path}?v={version}"'
+                assert href in rendered, (
+                    f"{source_label} does not declare {href} — a tab opened on that document "
+                    "would fall back to the UNVERSIONED path and keep drawing a stale mark")
 
     def _surface_icon_violations(self, label: str, page_name: str, head: str,
                                  root: Path, expected: dict[str, str],
@@ -6128,13 +6156,8 @@ class TestSiteIconAndSocialPreviewContract:
             "substring filter refused this correct page:\n" + "\n".join(grade(masked)))
 
         # The blog's head is a STRING in the SSR function, not a page on disk, so no glob
-        # reaches it — and it is the surface a shared link opens.
-        blog = (self.WEB / "functions" / "blog" / "_lib.ts").read_text()
-        for path, version in expected.items():
-            href = f'href="{path}?v={version}"'
-            assert href in blog, (
-                f"the blog SSR head does not declare {href} — a post's tab icon would differ "
-                "from the page that links it")
+        # reaches it — it is graded in `test_every_surface_declares_the_same_versioned_icon_set`
+        # alongside the other two self-rendered documents, where the whole surface is graded.
 
     def test_the_app_tree_accepts_an_absolute_href_on_its_own_origin(self):
         """NON-VACUITY for `origins` — it must CHANGE AN ANSWER, in both directions.
@@ -6148,7 +6171,7 @@ class TestSiteIconAndSocialPreviewContract:
         files" — a FALSE RED on a correct page, with a message that misnames the cause
         (the file IS one of the three).
 
-        The same read made `origins` UNOBSERVABLE: all 19 graded pages use root-relative
+        The same read made `origins` UNOBSERVABLE: all 20 graded pages use root-relative
         hrefs, which `_icon_ref` resolves through `SITE_ORIGINS` whether `origins` is
         passed or not, so replacing `ICON_ORIGINS` with `SITE_ORIGINS` — or deleting the
         parameter and its four call sites — left every assertion green. A check whose
