@@ -246,8 +246,7 @@ version: 1
 #     `not-implemented`, pointing at the epic the design itself names.
 #
 # ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that the fourteen rows below
-# are
-# every mechanism either document names. It is the set that carries a MARKER (see
+# are every mechanism the SCANNED DOCUMENTS name. It is the set that carries a MARKER (see
 # the limits above) plus the one structure this file can compare mechanically
 # (§4.2's table). A mechanism declared only in unmarked prose is still invisible;
 # the markers are the convention that makes the comparison possible, and adding a

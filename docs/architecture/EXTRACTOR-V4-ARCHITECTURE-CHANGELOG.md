@@ -1811,20 +1811,35 @@ blob does not carry, two unlisted call sites and a typo). The mechanism's absenc
 that is built.
 
 **One INHERITED red fixed here too, because it blocked this PR's own CI (`test (c)`).** `#11665` added a sentence
-to this document's §3 opening *"⚠️ **The exemption is about CONTENT, not the declaration site …**"*, and `#11665`
-was a docs-only diff, so CI selected only the docs surfaces and
-`tests/test_9397_about_edge_properties.py` never ran. That suite's
-`MARKERS_ABSENT_BY_DESIGN["the exemption"]` declares the phrase absent-by-design (it is a `DENIAL_MARKERS` member —
-the owner's decision forbids calling a counted WRITER *"an exemption"*), so the first selection that ran the file
-reddened on a raw substring: *"these markers are declared absent-by-design but DO appear in the documents: ['the
-exemption']"*. The sentence's subject is **not** a census row — it is the source-type profile's carve-out, whose
+to this document's §3 opening *"⚠️ **The exemption is about CONTENT, not the declaration site …**"*, and that
+suite's `MARKERS_ABSENT_BY_DESIGN["the exemption"]` declares the phrase absent-by-design (it is a `DENIAL_MARKERS`
+member — the owner's decision forbids calling a counted WRITER *"an exemption"*), so the first selection that ran
+the file reddened on a raw substring: *"these markers are declared absent-by-design but DO appear in the documents:
+['the exemption']"*. The sentence's subject is **not** a census row — it is the source-type profile's rule, whose
 point is that prompt CONTENT is what the rule reaches — so the phrase was never live: the denial rule only reads a
 sentence that names a census symbol, and that one names `memory_granularity`, `sourceTypes` and a pack manifest.
+⚠️ **Do not blame the SELECTION for this, which an earlier draft of this entry did.** The file IS selected on a
+docs-only diff — measured here, `select(['docs/architecture/EXTRACTOR-V4-ARCHITECTURE.md'], "pull_request", …)`
+returns 84 files and `test_9397_about_edge_properties.py` is in them (it is `core` AND `tier1`, and a docs-only diff
+is the empty-surface / `tier1` arm). It did not run at `#11665`'s head because that run's fast shards `test (d)`–
+`(j)` were **cancelled** (`test (a)`/`(b)`/`(c)` succeeded) and the file is assigned to shard **d** — cancellation,
+not selection. Stating the cause correctly matters beyond this entry: the wrong version teaches the next lane that
+a docs-only diff skips doc-subject guards, which is the opposite of what the surface table says.
 
-**So the DOCUMENT was reworded, not the tripwire** (*"The carve-out is about CONTENT, not the declaration site"* —
-the document's own term, used ten times in it). Loosening `MARKERS_ABSENT_BY_DESIGN` to a frame-aware
+**So the DOCUMENT was reworded, not the tripwire** — and the noun took a second pass, because the first replacement
+collided again and the second time with a REGISTRY ROW. *"The carve-out is about CONTENT"* reads as
+`state_value_carve_out` (E2, `#1534`), which is a declared mechanism this same document carries at §4.3 and this
+same gate scans: nine of the document's ten `carve-out` occurrences name that mechanism, and only §3's sentence
+meant this one. The sentence now says *"**This clause** is about CONTENT"*, a phrase that names no mechanism at all.
+Loosening
+`MARKERS_ABSENT_BY_DESIGN` to a frame-aware
 read would have narrowed a deliberately COARSE instrument, which is the shape this file's cycle-5 note refuses
-(*"A denial the documents' plural noun can satisfy is not a denial"* — a DENIAL the documents' own noun satisfies
-is not a denial), and the exemption's own `MARKERS_ABSENT_BY_DESIGN` entry now records why the bare noun belongs to
+(*"A denial the documents' plural noun can satisfy is not a denial"*), and the exemption's own
+`MARKERS_ABSENT_BY_DESIGN` entry now records why the bare noun belongs to
 the denial vocabulary: a document that wants a synonym for an exemption must not borrow the denial's own noun.
 Nothing about the design changed — the sentence states the same rule with a different noun.
+
+**⚠️ A fail-open this lane measured and did NOT fix here (filed separately):** `#11665`'s head merged with Python CI
+showing seven of ten fast shards `cancelled` and only `test (a)`/`(b)`/`(c)` executed. A merge rail that reads a
+cancelled shard as "nothing to see" is a false PASS on the merge path, and it is how a red `main` is created — the
+red this PR inherits is that mechanism's product.
