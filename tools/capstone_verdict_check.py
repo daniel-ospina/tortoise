@@ -4,7 +4,8 @@
 The epic states its own closing rule verbatim: *"Close this epic only when
 E1–E5 all have evidence attached to this issue — not when the children close.
 A child closing is a claim; this epic is where the claim is checked against the
-pipeline running end to end."* A rule in prose is not a gate: nothing fails
+pipeline running end to end."* `CRITERIA` below is that rule in code. A rule in
+prose is not a gate: nothing fails
 when a row is marked green on a closed child, on an evidence file that does not
 exist, or on a denominator inherited from a different corpus. This tool is the
 mechanical form of that rule, and it is the second half of the issue's own
@@ -36,7 +37,11 @@ marked green off closed children, with no artifact at all. This closes that.
 ## The rule set (each finding carries a stable code)
 
     V1  root schema is ``capstone-verdict-v1``
-    V2  exactly five rows, ids E1..E5, one each — no missing, no duplicate
+    V2  the five rows every table carries, ids E1..E5, one each — no missing, no
+        duplicate — and it is ALSO the epic's closing set (V9). ⛔ ``E6``
+        (#11673) is RECOGNISED, not required and not closing: #7949's recorded
+        close condition is the five-row sentence, and the A1–A5 precedent §3.7
+        records is that a row is registered and reported before it may gate
     V3  per-row required fields; verdict/evidence_kind in vocabulary; sha SHAPE
         (always fatal, every row, whatever its verdict). Resolvability is
         REPORTED and fails only under ``--require-resolvable`` — see V11
@@ -92,7 +97,8 @@ marked green off closed children, with no artifact at all. This closes that.
         row on another corpus is exactly what this rule exists to refuse.
     V8  a row naming a ``sibling`` must match that sibling's numerator AND
         denominator — the denominators are carried, not restated
-    V9  --require-green (the EPIC's closing rule): 5/5 GREEN
+    V9  --require-green (the EPIC's closing rule): E1-E5 all GREEN (#7949's
+        five-row close condition; `E6` is recognised, not closing)
     V10 a MEASURED E4 whose denominator is 4 fails the criterion on the row's
         own rule, and E4's row must carry the SAME denominator the run's
         ``e4_receipt`` computed. A MEASURED E4 must also carry a POSITIVE INT
@@ -132,8 +138,27 @@ from datetime import datetime
 from pathlib import Path
 
 SCHEMA = "capstone-verdict-v1"
-#: The rows the epic CLOSES on. V2 demands one row per member, so this tuple may only grow when
-#: the epic's own closing rule grows (#7949: "5/5").
+#: The rows every verdict TABLE must carry (V2's MISSING arm) AND the epic's CLOSING set (V9).
+#: `#7949`'s recorded close condition is the five-row sentence and nothing else — *"Close this epic
+#: only when E1–E5 all have evidence attached to this issue"* — so V9 running over this tuple IS the
+#: mechanical form of the recorded rule.
+#:
+#: ⛔ ``E6`` (#11673) IS DELIBERATELY NOT IN IT, and the history is worth keeping because it was got
+#: wrong twice. It is not here as a ROW DEMAND because the tables that must carry these rows are
+#: FROZEN EVIDENCE: a shipped log's bytes are never revised in place (§7 item 2 measures an in-place
+#: edit of an evidence log against its add-commit), so demanding a sixth row of `capstone.log` and
+#: `capstone-measured-9152448d.log` would permanently red the bundle's own structural pin on two
+#: artifacts nobody may edit — a false block, the same class the ``A_CRITERIA`` note below refuses.
+#: It is not here as a CLOSING row either: an interim revision of this file grew a
+#: ``CLOSING_CRITERIA = (*CRITERIA, "E6")`` so a five-row GREEN table could not close, and the
+#: owner's issue says the opposite. `#11673`'s review reverted its own edit to `#7949`'s close
+#: condition and relayed the precedent that governs: the five ``A``-rows were *"registered here,
+#: before any ``A``-row run is scored … registered, measured, reported, **not closing**"* (§3.7).
+#: ``E6`` follows that pattern — the RECORD must carry it (``REQUIRED_CRITERIA`` in
+#: ``capstone_preregistration_check.py``), a table may score it (``RECOGNISED_CRITERIA``), and an
+#: epic CAN close 5-of-5 with it red. That is the recorded rule, not an oversight; promoting a row
+#: into the closing set is a re-registration (V2's row set, V9's `5/5` and §3.1 all change), which
+#: is the owner's call.
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 #: The object-layer rows `#10982` registered (`PRE-REGISTRATION.md` §3.7). They are RECOGNISED but
 #: NOT REQUIRED, and the distinction is load-bearing: a required row cannot be inferred from the
@@ -142,7 +167,28 @@ CRITERIA = ("E1", "E2", "E3", "E4", "E5")
 #: has run yet. `#10984`–`#10988` own those runs. A table that carries one is checked by V1–V12
 #: exactly as an `E`-row is, `V12`'s CLOSED-``blocked_by`` refusal included.
 A_CRITERIA = ("A1", "A2", "A3", "A4", "A5")
-RECOGNISED_CRITERIA = CRITERIA + A_CRITERIA
+#: The capstone row `#11673` registered on the owner's 2026-11-05 ruling (`#7949` comment
+#: `6664402530`): per-pack *declared → writable → written*.
+#:
+#: ⛔ IT IS RECOGNISED, AND NOT A CLOSING ROW. `#7949`'s recorded close condition is the FIVE-row
+#: sentence (*"Close this epic only when **E1–E5** all have evidence attached to this issue"*), which
+#: is what V9 implements over ``CRITERIA``. `E6` is registered on the same pattern §3.7 records for
+#: the five ``A``-rows — *"registered here, before any ``A``-row run is scored … registered,
+#: measured, reported, **not closing**"* — so the epic CAN close 5-of-5 with `E6` red. Promoting it
+#: is a re-registration (V2's row set, V9's `5/5`, §3.1) and therefore the owner's call, not a
+#: lane's.
+#:
+#: What recognition DOES buy is that the row is SCOREABLE at all: before this, a table carrying `E6`
+#: was refused as *"not an E1–E5 or A1–A5 criterion"*, so the registration's own `§8` precondition
+#: (its add-commit strictly earlier than any `E6` scored log) could never be exercised. A table that
+#: carries it is checked by V1–V12 exactly as an `E`-row is, `V12`'s CLOSED-`blocked_by` refusal
+#: included, and it is held to the DECIDED-ONCE rule like every other recognised id.
+E6_CRITERIA = ("E6",)
+#: Every id this tool ACCEPTS as a criterion id. Membership here is what V2's unknown-criterion arm
+#: reads and what the DECIDED-ONCE arm counts over — it is vocabulary, never a requirement, and it
+#: is deliberately wider than both `CRITERIA` (the closing set) and `REQUIRED_CRITERIA` in
+#: ``capstone_preregistration_check.py`` (what the RECORD must carry).
+RECOGNISED_CRITERIA = (*CRITERIA, *E6_CRITERIA, *A_CRITERIA)
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 #: The two states a CONDITIONAL step may be accounted in (#10215). ``observed``
 #: means the pass did work; ``idle`` means its flag was ON, it did no work, and
@@ -900,7 +946,10 @@ def check(record: dict, *, repo: Path,
     seen = [r.get("criterion") for r in rows
             if isinstance(r, dict)
             and isinstance(r.get("criterion"), HASHABLE_SCALARS)]
-    # ⛔ MISSING is over `CRITERIA` (the epic closes on 5/5, so only those five can be demanded);
+    # ⛔ MISSING and the CLOSE both read `CRITERIA` — one constant, because #7949's close condition
+    # IS "these five have evidence". `E6` is recognised (scoreable, decided-once) and not required:
+    # demanding it of the frozen tables that predate it is the false block §7 item 2 forbids, and
+    # making it a closing row would re-register the epic's close, which is the owner's call.
     # `DECIDED-ONCE` is over `RECOGNISED_CRITERIA` — an A-row a table chooses to carry is decided
     # once exactly as an E-row is. Running the duplicate half over `CRITERIA` alone meant two
     # contradictory `A1` rows were accepted with no finding, while `[E1, E1]` red: the widening of
@@ -908,9 +957,10 @@ def check(record: dict, *, repo: Path,
     # REFUSED as unknown) without replacing it (#10982 review round 2).
     for criterion in CRITERIA:
         if seen.count(criterion) == 0:
-            f.add("V2", f"rows[{criterion}]", "row is MISSING — the epic closes "
-                                              "on 5/5, so an absent row can "
-                                              "never be inferred from the rest")
+            f.add("V2", f"rows[{criterion}]", "row is MISSING — every table "
+                                              "carries these five, so an "
+                                              "absent row can never be "
+                                              "inferred from the rest")
     for criterion in RECOGNISED_CRITERIA:
         n = seen.count(criterion)
         if n > 1:
@@ -919,7 +969,7 @@ def check(record: dict, *, repo: Path,
     for criterion in seen:
         if criterion not in RECOGNISED_CRITERIA:
             f.add("V2", f"rows[{criterion}]",
-                  "not an E1–E5 or A1–A5 criterion")
+                  "not an E1–E5, A1–A5 or E6 criterion")
 
     # A block that is `[]`/`"x"`/`5` is REPORTED here and read as empty below.
     # `.get` on a non-object raised AttributeError and escaped as exit 1 on a
@@ -1443,13 +1493,20 @@ def check(record: dict, *, repo: Path,
                                                "commit is still reachable")
 
     # ── V9 the epic's closing rule ───────────────────────────────────────
+    # ⛔ OVER `CRITERIA` — the five rows `#7949`'s close condition names, verbatim: *"Close this
+    # epic only when E1–E5 all have evidence attached to this issue"*. An earlier revision ran
+    # this arm over a six-row `CLOSING_CRITERIA` (a `#11673` review finding that was itself wrong);
+    # `#7949` was corrected back to the five-row sentence and the arm follows it. `E6` is
+    # RECOGNISED and, per §3.7's `A`-row precedent, not closing — so a 5/5 GREEN table closes the
+    # epic even with `E6` red, by rule and not by oversight. `#11695` owns the row's producer.
     if require_green:
         red = [c for c in CRITERIA
                if (by_id.get(c) or {}).get("verdict") != "GREEN"]
         if red:
-            f.add("V9", "epic #7949", f"--require-green: {len(red)}/5 rows are "
-                                      f"not green ({', '.join(red)}) — the "
-                                      "epic is NOT closeable")
+            f.add("V9", "epic #7949", f"--require-green: {len(red)}/"
+                                      f"{len(CRITERIA)} rows are not "
+                                      f"green ({', '.join(red)}) — the epic is "
+                                      "NOT closeable")
 
     return f
 
@@ -1466,9 +1523,9 @@ def main(argv: list[str] | None = None) -> int:
                          "never reaches main, so requiring it would red a "
                          "shipped bundle after merge")
     ap.add_argument("--require-green", action="store_true",
-                    help="the EPIC's closing rule: exit 0 only when 5/5 rows "
-                         "are green (without this, an honest all-blocked table "
-                         "is clean)")
+                    help="the EPIC's closing rule: exit 0 only when E1-E5 rows "
+                         f"are all GREEN ({len(CRITERIA)} rows; without "
+                         "this, an honest all-blocked table is clean)")
     ap.add_argument("--blocker-states", default=None, metavar="PATH",
                     help="JSON record of the tracker state of the issues the "
                          f"rows cite (default: {BLOCKER_STATES_DEFAULT}, when "
@@ -1633,8 +1690,15 @@ def main(argv: list[str] | None = None) -> int:
         blockers_note = (
             f"every cited blocker verified {blocker_states['_checked_at']} "
             f"({sum(1 for k in blocker_states if k.startswith('#'))} on record)")
-    print("✅ verdict table is structurally sound: 5/5 rows carry an evidence "
-          "artifact + sha, denominators agree, no row is green without a file; "
+    # ⛔ `{len(CRITERIA)}/{len(CRITERIA)}` was a TAUTOLOGY printed as if it were a derived ratio
+    # (#11673 review round 1, finding 2): it could only ever read `5/5`, proving nothing, and on a
+    # table that legitimately carries more rows (an `A`-row, or `E6`) it ALSO understated what was
+    # checked. The two facts are reported separately now — how many rows the table carried, and how
+    # many rows the close requires.
+    print(f"✅ verdict table is structurally sound: {len(rows)} row(s) carry an "
+          "evidence artifact + sha, all "
+          f"{len(CRITERIA)} rows V2 requires are present, denominators agree, "
+          "no row is green without a file; "
           f"blocker states: {blockers_note}")
     return 0
 
