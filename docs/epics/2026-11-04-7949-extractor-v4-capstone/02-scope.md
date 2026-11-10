@@ -91,7 +91,7 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
    acceptance run through a **named transport** (see §Scope Decisions).
 9. **Reporting** — every number lands on `#7949` as evidence, with its corpus, command and head sha.
 
-10. **E6 evidence** — the **sixth** acceptance criterion, registered on this epic by **`#11083`** (2026-11-07): for
+10. **E6 evidence** — the **sixth** acceptance criterion, **built by `#11083`** (2026-11-07) and **registered on this epic by `#11673`** (`24e53f2b2256`, merged as `#11688`; `#11083` closed **without** registering the row): for
    **each installed pack**, every declared relation whose endpoints both occur in the corpus is **materialised**, and
    a census reports **declared → writable → written** with the delta named. ⚠️ It was **missing from this pipeline's
    own artifacts** until 2026-11-07 (they were built on E1–E5 + A1–A5). Its *writable* column is `#11484`'s, its

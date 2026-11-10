@@ -48,8 +48,8 @@ jobs:
     # distinct `hosted_api.py:<N>` cite targets there are, how many sit below the
     # pivot, and how many files cite it at all — and
     # `tools/hosted_api_cite_census.py --check` is the command that answers whether
-    # they are still true. ⛔ The FIGURES live in those two notes and nowhere else,
-    # this comment included: `--check`/`--refresh` read a capture-group table of the
+    # they are still true. ⛔ The cite-population FIGURES live in the two notes (plus the
+    # `_PIVOT` pin in the test arm), never in a comment: `--check`/`--refresh` read a capture-group table of the
     # notes' sentences, so a figure restated here would be a number no verb can
     # verify and the next `--refresh` would leave it silently stale — the hand-paste
     # class the tool exists to end.
