@@ -1103,11 +1103,15 @@ def test_a_report_claiming_more_nodes_than_the_graph_holds_does_not_prove():
     nodes on a 120/120 report — a licence for 120 nodes in an empty graph, which is
     the number a sweeper would size itself from.
     """
-    # ⚠️ The fixture makes the POPULATION statement over-count too (`turn`: 120 on a
-    # 5-node graph), because that is the only way this guard is reachable now: the
-    # population bound in `assess` refuses a claim above the population FIRST, and a bad
-    # mirror of an instrument's predicate is exactly what this second check still
-    # catches. With an honest population count the report is demoted one gate earlier.
+    # ⚠️ The fixture makes the POPULATION statement over-count past the whole graph
+    # (`turn`: 120 on a 5-node graph), because that is the only shape this guard can
+    # reach: the trigger is `resident_population >= claim > node_total`, i.e. the CLAIM is
+    # above every node the graph holds. ⛔ A widened PREDICATE cannot produce it (a
+    # subgraph count never exceeds the total) and a modest row-multiplication does not
+    # either (the claim stays under the total) — that class is covered solely by
+    # `test_the_population_count_mirrors_the_instrument`, and
+    # `test_a_row_multiplying_count_statement_is_a_documented_residual` pins what this
+    # guard does NOT catch.
     g = _FakeGraph({"Point": 5}, populations={"turn": 120})
     c = _FakeClient(used=900, maxmemory=1_000)
     stale = ParityReport(instrument="tools/turn_parity_census.py", verdict="CLEAN",
@@ -2153,3 +2157,40 @@ def test_a_population_with_no_count_statement_is_a_refusal_not_a_guess():
 
     with pytest.raises(CacheReadError):
         population_resident_count(_Graph(), "no-such-population")
+
+
+def test_a_row_multiplying_count_statement_is_a_documented_residual():
+    """⛔ WHAT THE WHOLE-GRAPH BACKSTOP DOES NOT CATCH — pinned so nobody believes it does.
+
+    A count statement whose query shape multiplies rows (a join, a second `MATCH`, an
+    `UNWIND`) inflates the population's ceiling. When the REPORT's claim then sits under
+    the graph's whole node count, BOTH guards pass: the per-population bound validates
+    the claim against the inflated ceiling, and the whole-graph check compares the CLAIM
+    (never the mirror's count) against the total. No total-based comparison can separate
+    that from "the population grew since the report", so it is a RESIDUAL — covered
+    solely by `test_the_population_count_mirrors_the_instrument`, which binds the mirror
+    to the instrument's executed constant.
+
+    This test asserts the residual rather than the desired behaviour on purpose: the
+    alternative is a suite that reads as though the backstop covered the class, which is
+    how the mirror pin gets retired as "belt and braces".
+    """
+    # 25,000 nodes; the mirror answers 30,000 (a row-multiplying statement, inflating
+    # ABOVE the graph total); the report claims 20,000 — under the total, so the backstop
+    # is silent, and under the inflated ceiling, so the population bound is silent too.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
+    c = _FakeClient(used=900, maxmemory=1_000)
+    report = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
+                          measured_nodes=20_000, total_nodes=20_000,
+                          graph_name="tortoise")
+
+    result = assess(c, g, "tortoise", ceiling_bytes=100,
+                    parity_reports={PARITY_INSTRUMENTS["turn"]: report})
+
+    assert result.verdict == "PLAN", result.problems
+    assert result.plan["evictable"][0]["nodes"] == 20_000, result.plan["evictable"]
+    assert not any("claims 20000" in problem for problem in result.problems), (
+        "the population bound must not be described as catching a claim that sits under "
+        "the inflated ceiling"
+    )
+    assert g.mutated == []
