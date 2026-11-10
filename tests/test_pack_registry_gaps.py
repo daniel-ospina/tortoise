@@ -2317,6 +2317,21 @@ class TestReadFilterKinds:
                       <= set(shipped.expand_kind(k))]
         assert not missing_self, f"read filter dropped its own kind: {missing_self}"
         assert not not_subset, f"read filter is not a subset: {not_subset}"
+        # …and the table must have a bucket for EVERY kind. A missing key falls
+        # back to `[kind]` (PackRegistry.read_filter_kinds), which satisfies both
+        # assertions above and returns a WRONG-EMPTY for every descendant — the
+        # #6146 class. The table is built from a snapshot taken before the
+        # closure, so a kind created only by a later pass would land exactly
+        # here: the earlier `_equivalent(...)` registrations are what save
+        # `core:`-aliased kinds today, and this pins that they still do.
+        assert set(shipped._kind_read_filters) == set(shipped._kind_expansions), (
+            "the read-filter table is missing kinds present in the membership "
+            f"table: {sorted(set(shipped._kind_expansions) - set(shipped._kind_read_filters))}")
+        # A mid-level `core:`-aliased kind (Problem ⊒ dev:bug): its bucket exists
+        # because the alias is registered as an equivalence BEFORE the snapshot.
+        assert set(shipped.read_filter_kinds("core:Problem")) == \
+            set(shipped.read_filter_kinds("Problem"))  # order differs: own kind first
+        assert "dev:bug" in shipped.read_filter_kinds("core:Problem")
 
     def test_a_pack_child_filter_is_the_pre_11667_read_set(self, shipped):
         """The measured regression, exactly: `dev:issue` reads its own rows only.

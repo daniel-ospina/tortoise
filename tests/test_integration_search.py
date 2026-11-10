@@ -644,8 +644,6 @@ class TestKindReadFilterReadPaths:
     """
 
     def test_a_narrow_kind_query_does_not_return_a_broader_kinded_row(self):
-        import contextlib
-
         sdk = TortoiseSDK()
         created: list[str] = []
         try:
@@ -674,7 +672,5 @@ class TestKindReadFilterReadPaths:
             assert "WorkItem" not in sdk._read_filter_kinds("dev:issue")
             assert "WorkItem" in sdk._expand_kind("dev:issue")
         finally:
-            for pid in created:
-                with contextlib.suppress(Exception):
-                    sdk.delete_point(pid)
+            _cleanup_sdk(sdk, *created)
             sdk.close()

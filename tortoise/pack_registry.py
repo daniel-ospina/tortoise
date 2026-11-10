@@ -3464,6 +3464,31 @@ class PackRegistry:
         def _descendants(kind: str) -> set[str]:
             return _walk(kind, _children_of)
 
+        def _closure(kind: str, *, down_only: bool) -> set[str]:
+            """Everything `kind` inherits or gathers, through the relations
+            below and the equivalence class of every result.
+
+            ONE home for the source expression (#11679 cycle 2). The two tables
+            this builder produces differ ONLY in `down_only`: the membership set
+            takes ancestors and descendants, the read-filter set takes
+            descendants only. Keeping the expression in one function is what
+            stops a future directional source being added to one walk and not
+            the other — the harmful direction being a filter that silently drops
+            a descendant (a wrong-empty, #6146).
+            """
+            gained: set[str] = set()
+            for peer in _equivalence_class(kind) | bare_inherits.get(kind, set()):
+                gained.add(peer)
+                gained |= _descendants(peer)
+                if not down_only:
+                    gained |= _ancestors(peer)
+            # …and the equivalence class of everything just gained, so an
+            # ancestor's (or descendant's) stored legacy spelling arrives with it
+            # (`expand_kind("Event")` gains `deployment` AND `dev:deployment`).
+            for member in list(gained):
+                gained |= _equivalence_class(member)
+            return gained
+
         # ONTOLOGY §6's core rows are the first half of the subclass relation.
         for core_parent, core_children in CORE_SUBCLASSES.items():
             for child in core_children:
@@ -3644,16 +3669,7 @@ class PackRegistry:
             kind: list(bucket) for kind, bucket in expansions.items()}
 
         for kind in list(expansions):
-            gained: set[str] = set()
-            sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
-            for peer in sources:
-                gained.add(peer)
-                gained |= _ancestors(peer) | _descendants(peer)
-            # …and the equivalence class of everything just gained, so an
-            # ancestor's stored legacy spelling arrives with the ancestor
-            # (`expand_kind("Event")` gains `deployment` AND `dev:deployment`).
-            for member in list(gained):
-                gained |= _equivalence_class(member)
+            gained = _closure(kind, down_only=False)
             bucket = expansions[kind]
             for member in sorted(gained.difference(bucket)):
                 bucket.append(member)
@@ -3711,13 +3727,7 @@ class PackRegistry:
         # spelling rides the equivalence class, and so does a descendant's).
         read_filters: dict[str, list[str]] = dict(down_base)
         for kind in list(read_filters):
-            gained: set[str] = set()
-            sources = _equivalence_class(kind) | bare_inherits.get(kind, set())
-            for peer in sources:
-                gained.add(peer)
-                gained |= _descendants(peer)
-            for member in list(gained):
-                gained |= _equivalence_class(member)
+            gained = _closure(kind, down_only=True)
             bucket = read_filters[kind]
             for member in sorted(gained.difference(bucket)):
                 bucket.append(member)
