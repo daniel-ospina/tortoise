@@ -105,17 +105,19 @@ twin **builders** for 9 and 10 are the two gaps.
 
 ### The PR's own files — the seven-document table is not the branch's file count
 
-The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extractor-v4-capstone/`, and a reader can mistake that for the branch. It is the bundle, not the diff. The PR also carries five files that are not markdown, so that no merger has to discover them:
+The bundle's headline lists **7 files** under `docs/epics/2026-11-04-7949-extractor-v4-capstone/`, and a reader can mistake that for the branch. It is the bundle, not the diff: the PR touches **14** files. The other seven are stated here so that no merger has to discover them, and so that 7 + 7 is the arithmetic rather than 7 assumed:
 
-| file | what changes | runtime behaviour |
+| file | what changes | effect |
 |---|---|---|
-| `tortoise/activation_scorecard.py` | two figures in a comment, **re-taken** by `tools/hosted_api_cite_census.py --refresh` (434→441 below the pivot, 449→456 distinct targets) | none — the code line is untouched |
-| `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none |
+| `docs/00_index.md` | one row registering the new bundle directory | index only |
+| `docs/architecture/STORAGE-ARCHITECTURE-CHANGELOG.md` | one clause added to the `#10149` round-4 correction already in that changelog, reconciling `the exemption`'s declaration with `#11704` and `#11688` | prose; this is one of the two documents the 9397 census flattens, so it is inside that census's own subject |
+| `tortoise/activation_scorecard.py` | two figures in a comment, **re-taken** by `tools/hosted_api_cite_census.py --refresh` (434→441 below the pivot, 449→456 distinct targets) | none — no code line changes |
+| `tortoise/hosted_api.py` | the same census's `179 tracked files`/`449 distinct targets` figures, re-taken to `185`/`456` | none — comment text |
 | `.github/workflows/main-health-nightly.yml` | the `census-drift` job's **comment block**, removing the restated figures the `--refresh` verb cannot verify | none — no job, trigger, permission or step changes |
-| `tests/test_demo_session_read_exclusion_8290.py` | the census verb's arm 1 becomes a forced degrade→refresh→read-back round trip | **CI-enforcement change**: it reds a stale figure the old arm passed |
-| `tests/test_9397_about_edge_properties.py` | `the exemption`'s absence declaration restored (see D5's amendment) | **CI-enforcement change**: it reds an absence declaration the corpus contradicts |
+| `tests/test_9397_about_edge_properties.py` | `the exemption`'s absence declaration is **restored** (see D5's amendment) | **CI effect: a leg RED on `main` goes green.** The spelling is absent from both flattened documents again (#11688 reworded §3), so the declaration is true |
+| `tests/test_demo_session_read_exclusion_8290.py` | the census verb's arm 1 stops asserting the **shipped** figures — that arm is what redded this docs PR — and instead forces a degrade→refresh→read-back round trip on a throwaway copy; arm 2's degraded figure is derived, not the `**434**` literal | **CI effect: a guard MOVES, it is not added.** Stale *shipped* figures are no longer caught in the fast suite; that detection is the nightly, report-only `census-drift` job. The arm that replaces it guards a broken `_restate` |
 
-The two figures above are comment text, so the PR body's *"no runtime behaviour change"* holds; its shorter *"no code"* does not, and this table is the reconciliation rather than a restatement of it.
+So the PR body's *"no runtime behaviour change"* holds — both module edits are comment text — while its shorter *"no code"* does not. This table is the reconciliation, and the one consequence a merger should weigh is the 8290 row: a fast-suite detection is traded for a nightly one, deliberately, because that arm produced a false block on this very PR.
 
 ---
 
