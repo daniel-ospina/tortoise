@@ -428,6 +428,14 @@ cmd_alive() {
   dir="$(state_dir)"
   pfile="$dir/${name}.pid"
   port="$(cat "$dir/${name}.port" 2>/dev/null || true)"
+  # ⛔ The SAME absent-vs-unreadable rule as the pid file and the start-time
+  # witness below: `cat … || true` collapses them, and a port that EXISTS but
+  # cannot be read is a permissions/torn-state fault, not "alloc never ran". The
+  # sentence may not name an absence the probe did not observe.
+  local port_unreadable=""
+  if [[ -z "$port" && -f "$dir/${name}.port" ]]; then
+    port_unreadable="${name}.port"
+  fi
   local at_port="" stranger=""
   [[ -n "$port" ]] && at_port=" on :${port}"
   # …and the RECYCLED sentence cannot splice an empty `at_port` into the middle of
@@ -519,7 +527,7 @@ cmd_alive() {
   # of defect as the bare `kill -0` this verb replaced (#11675 review, finding 1).
   local identity ident=0
   if [[ -n "$witness_missing" ]]; then
-    identity="a start-time witness EXISTS (${name}.start) but could NOT be read, so its IDENTITY was NOT checked"
+    identity="a start-time witness EXISTS (${name}.start) but could not be read (unreadable, or empty), so its IDENTITY was NOT checked"
   elif [[ -z "$recorded" ]]; then
     identity="no start-time witness was recorded, so its IDENTITY was NOT checked"
   else
@@ -542,12 +550,17 @@ cmd_alive() {
     # Same rule as the two verdicts below: `0`/`7` re-word when the identity leg
     # was not taken, and this branch may not say "our recorded process" in the same
     # clause that says the identity was never checked (measured: both variants of
-    # `identity` printed the claim side by side with its own denial).
+    # `identity` printed the claim side by side with its own denial). And a port
+    # file that EXISTS but could not be read is not "no port was recorded".
+    local no_port_why="no port was recorded for this name"
+    if [[ -n "$port_unreadable" ]]; then
+      no_port_why="a port file EXISTS (${port_unreadable}) but could not be read, so no port is known"
+    fi
     if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
-      printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but no port was recorded for this name, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
+      printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but ${no_port_why}, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
       return 9
     fi
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE (not a zombie, and ${identity}) — but no port was recorded for this name, so whether it was still SERVING was NOT checked, and 'it is still OUR process' is NOT established by this probe. This is NOT an alive-and-serving verdict; the log is the next read."
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE (not a zombie, and ${identity}) — but ${no_port_why}, so whether it was still SERVING was NOT checked, and 'it is still OUR process' is NOT established by this probe. This is NOT an alive-and-serving verdict; the log is the next read."
     return 9
   fi
 

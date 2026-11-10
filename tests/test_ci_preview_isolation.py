@@ -1163,6 +1163,64 @@ def test_an_unreadable_pid_file_is_not_the_gone_verdict(tmp_path: Path, state) -
         _reap(victim.pid)
 
 
+def test_the_no_port_verdict_does_not_borrow_an_untaken_identity_leg(
+    tmp_path: Path, state
+) -> None:
+    """Exit 9 reports liveness only, so its SENTENCE may not claim identity.
+
+    `0` and `7` were re-worded when the identity leg was not taken; this branch
+    was missed, and it printed "our recorded process" in the same clause that
+    admitted the identity was never checked. Nothing pinned either sentence, so a
+    revert to the single-printf form left the whole file green (measured).
+
+    Also pins the ABSENT-vs-unreadable distinction for the two files this branch
+    reads: a `.start`/`.port` that EXISTS but cannot be read may not be reported
+    as one that was never written — the same conflation `12` exists to prevent
+    for the pid file.
+    """
+    victim = _spawn(["/bin/sleep", "120"], tmp_path)
+    _wait_alive(victim.pid)
+    state_dir = Path(state["PREVIEW_STATE"])
+    try:
+        assert _script(
+            "record", "--name", "app", "--pid", str(victim.pid), env=state
+        ).returncode == 0
+
+        # The matched-witness shape keeps the claim: positive control.
+        verified = _script("alive", "--name", "app", env=state)
+        assert verified.returncode == 9, verified.stdout + verified.stderr
+        assert "our recorded process" in verified.stdout, (
+            "the positive control lost the verified claim: " + verified.stdout)
+
+        # No witness at all: the verdict may say the leg was not taken…
+        (state_dir / "app.start").unlink()
+        absent = _script("alive", "--name", "app", env=state)
+        assert absent.returncode == 9, absent.stdout + absent.stderr
+        assert "no start-time witness was recorded" in absent.stdout, absent.stdout
+        assert "our recorded process" not in absent.stdout, (
+            "an untaken identity leg was still reported as a verified one: "
+            + absent.stdout)
+
+        # …and a witness that EXISTS but cannot be read must not be called absent.
+        (state_dir / "app.start").write_text("")
+        empty = _script("alive", "--name", "app", env=state)
+        assert "EXISTS" in empty.stdout and "could not be read" in empty.stdout, (
+            "an empty witness was reported as one that was never recorded: "
+            + empty.stdout)
+        assert "no start-time witness was recorded" not in empty.stdout, empty.stdout
+        assert "our recorded process" not in empty.stdout, empty.stdout
+
+        # Same rule for the port file: EXISTS-but-unreadable is not "never".
+        (state_dir / "app.port").write_text("")
+        port_gone = _script("alive", "--name", "app", env=state)
+        assert port_gone.returncode == 9, port_gone.stdout + port_gone.stderr
+        assert "port file EXISTS" in port_gone.stdout, (
+            "an empty port file was reported as one that was never recorded: "
+            + port_gone.stdout)
+    finally:
+        _reap(victim.pid)
+
+
 def test_ready_refuses_a_witness_that_no_longer_describes_the_recorded_pid(
     tmp_path: Path, state
 ) -> None:
