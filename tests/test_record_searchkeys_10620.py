@@ -882,14 +882,75 @@ def test_the_record_flattener_agrees_with_the_graph_flattener():
         flatten_search_keys_prop,
     )
 
+    # ⛔ A non-empty FLOOR first: emptying BOTH declarations satisfies the
+    # equality below AND empties the behavioural loop, which is the one polarity
+    # that silently stores `["a b", "c"]` again while every assertion passes
+    # (#11706 re-record review). A rule that names no key flattens nothing.
+    assert record_projection._POINT_FLATTEN_COLUMNS, (
+        "the record flatten declaration is EMPTY — the equality below cannot "
+        "see it, and neither can the loop below it"
+    )
+    assert _POINT_FLATTEN_LIST_PROPS, (
+        "the graph flatten declaration is EMPTY — same vacuity, graph side"
+    )
+
     # The two declarations must name the SAME set: a key flattened on one side
     # and not the other is the #10620 drift in whichever direction it points.
-    assert set(record_projection._POINT_FLATTEN_COLUMNS) == set(
-        _POINT_FLATTEN_LIST_PROPS), (
+    #
+    # ⛔ SNAKE-INVARIANCE IS PART OF THE RULE, NOT A PREFERENCE. The record side
+    # normalises the property name (`_split_properties` calls `snake()` BEFORE
+    # `_record_column_value` ever sees it); the GRAPH side does not —
+    # `flatten_search_keys_prop` looks the property up by the EXACT declared key.
+    # So a graph-declared key that is not snake-invariant makes the two rules act
+    # on DIFFERENT properties: with the graph declaring `searchKeys` and the
+    # record column `search_keys`, a payload written under the snake spelling is
+    # flattened by the record and stored as the array the fulltext index cannot
+    # match by the graph (#11706 re-record review, measured — before this arm,
+    # comparing through `snake()` made exactly that defect AGREE).
+    for key in sorted(_POINT_FLATTEN_LIST_PROPS):
+        assert record_projection.snake(key) == key, (
+            f"{key!r} is declared as a flattened list prop but is not "
+            f"snake-invariant ({record_projection.snake(key)!r}) — the graph "
+            f"flattens the prop named {key!r} while the record flattens "
+            f"{record_projection.snake(key)!r}, so one spelling of the payload "
+            "gets the array the fulltext index cannot match"
+        )
+    assert set(_POINT_FLATTEN_LIST_PROPS) == set(
+        record_projection._POINT_FLATTEN_COLUMNS), (
         "the record and graph flatten declarations disagree: record="
         f"{sorted(record_projection._POINT_FLATTEN_COLUMNS)} graph="
         f"{sorted(_POINT_FLATTEN_LIST_PROPS)}"
     )
+
+    # ⛔ REACHABILITY, MEASURED THROUGH THE REAL SPLITTER. Membership in the
+    # `point` column set is NOT enough, and that is measured rather than assumed:
+    # `_split_properties` diverts a column BEFORE `_record_column_value` sees it —
+    # `_BOOKKEEPING_COLUMNS` sends the property to the props TAIL with its raw
+    # list, `GENERATED_COLUMNS` and the `drop` set drop it entirely — so `props`,
+    # `node_key`, `graph_id`, `embedding_vec` and `cache_tier` are all real `point`
+    # columns that satisfy a membership test while the rule flattens NOTHING
+    # (#11706 re-record review, measured: declaring `props` on both sides left
+    # every assertion in this arm green). The check below is the production call,
+    # so it fails on whichever of those a future declaration picks.
+    columns = record_projection.table_columns()
+    refused = record_projection.refused_props_names()
+    for key in sorted(_POINT_FLATTEN_LIST_PROPS):
+        col_values, tail = record_projection._split_properties(
+            "point", {key: ["a b", "c"]},
+            columns=columns, refused=refused,
+            drop=record_projection._RECORD_ONLY_KEYS,
+        )
+        assert col_values.get(key) == "a b c", (
+            f"{key} is declared as a flattened list prop but the record's own "
+            f"splitter never reaches `_record_column_value` with it "
+            f"(columns={col_values!r}, tail={tail!r}) — the value is stored as the "
+            "array the fulltext index cannot match, or dropped entirely"
+        )
+        # NOTE: no `assert key not in tail` here. `_split_properties` gives a
+        # property exactly ONE destination, so a key that failed the assertion
+        # above is the only way it can be in the tail — a second assertion would be
+        # unreachable (#11706 re-record review), and its message is subsumed by the
+        # failure text printed above, which already shows `tail={tail!r}`.
 
     cases = [
         ["err4032", "release"],
