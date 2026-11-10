@@ -4898,7 +4898,12 @@ def test_every_record_migration_selects_core_and_both_readers():
     assert rf["slow_run"] is True, rf
     assert any("test_ci_selection.py" in s for s in rf["slow_selected"]), rf
     # …and the same must hold for a REGISTERED record migration alone, not only
-    # for the synthetic one.
+    # for the synthetic one. ⚠️ Honest attribution (round 7): under every mutant of
+    # this diff these two assertions can only red TOGETHER with `rf`'s, so this arm
+    # is attribution redundancy rather than extra coverage — the arm that
+    # discriminates the registered case is the per-member `surfaces == ["core"]`
+    # loop above. Kept because a future change that arms the slow legs only for
+    # structurally-claimed (rather than entry-claimed) paths would separate them.
     rm = _sel([f"supabase/migrations/{migrations[0]}"])
     assert rm["slow_run"] is True, rm
     assert any("test_ci_selection.py" in s for s in rm["slow_selected"]), rm
