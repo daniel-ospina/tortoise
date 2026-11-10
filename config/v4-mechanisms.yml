@@ -859,11 +859,16 @@ mechanisms:
       LAYOUT_RETAINED), 7 form-excluded (not checkable) and 1 DROPPED** —
       the remaining 13 carry no state value to state (6 a determiner-only quote,
       1 whose quote binds no slot at all, 2 a determiner-only quote under a
-      divergent layout, 4 no slot on the quote side); the 62 is the rule's REACH, not its retention. ⚠️ A MAGNITUDE
-      difference (`12 million` against `12 billion`, or `12000000` against
-      `12 million`) is UNJUDGED here, not lost: `#2817` rules out the magnitude
-      table such a comparison needs (residual (m)), so the class is stated and
-      empty on this corpus rather than silently folded into either direction. ⚠️ That split is the census
+      divergent layout, 4 no slot on the quote side); the 62 is the rule's REACH, not its retention. ⚠️ A MAGNITUDE the projection cannot
+      FOLD is UNJUDGED here, not lost: `2000 thousand` against `2 million` and
+      `12000000` against `12 million` are ONE number spelled two ways, and
+      `#2817` rules out the magnitude table such a comparison needs (residual
+      (m)) — the class is stated and empty on this corpus rather than silently
+      folded into either direction. ⛔ TWO scale words under the SAME mantissa is
+      NOT that case and is LOST: if `m1 == m2` and the words differ then
+      `m1·s1 ≠ m2·s2` always, so `12 thousand` against `12 million` (and
+      `12 million` against `12 billion`) is a 1000× rewrite the projection
+      DECIDES by string comparison alone — no table, no ruling crossed. ⚠️ That split is the census
       corpus, NOT the flags-on E2 arm, so it does not move (b2); ⚠️ Unchanged by (ii-bis):
       the separator exclusion moved neither number on this corpus (re-measured
       after it landed, 62 judged / 0 refused), which is why the pin did not have

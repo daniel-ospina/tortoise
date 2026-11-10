@@ -6256,13 +6256,17 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 # voids a whole side's slots and a copy here could drift from it (#11730 review,
 # cycle 15).
 #
-# ⛔ WHAT IT DELIBERATELY CANNOT JUDGE: a MAGNITUDE difference. The engine has no
-# magnitude table (`#2817` rules one out; residual (m) records that `12 million`
-# against `12 billion` is unfused), so `12 million` and `12 thousand` bind the
-# SAME core and differ only on the slot's scale — and `12000000` binds a
-# different core from `12 million` with no scale at all. Neither pair is a value
+# ⛔ WHAT IT DELIBERATELY CANNOT JUDGE: a MAGNITUDE FOLD. The engine has no
+# magnitude table (`#2817` rules one out; residual (m)), so `12000000` binds a
+# different core from `12 million` with no scale at all, and `2000 thousand`
+# against `2 million` is two cores under two scale words. Neither pair is a value
 # this classifier can call LOST or RETAINED without adding the very table the
 # recorded ruling excludes, so both land in `LAYOUT_UNJUDGED`.
+# ⛔ WHAT IT *CAN* JUDGE, and does (#11730 review, the equal-mantissa finding):
+# the SAME mantissa under two DIFFERENT scale words. `m1 == m2` with `s1 != s2`
+# means `m1*s1 != m2*s2` always, so `12 thousand` against `12 million` is a
+# 1000x rewrite that needs no table — it is LOST, not unjudged. That distinction
+# is why the row's `LAYOUT_UNJUDGED` class is the FOLD, not "a magnitude".
 
 _CLOCK_FORM = re.compile(r"\b\d{1,2}:\d{2}\s*(?:am|pm)?\b|\b\d{1,2}\s*(?:am|pm)\b",
                          re.IGNORECASE)
@@ -6430,16 +6434,22 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
     SET, so `we shipped 2 bugs` against `… and 2 fixes` counted as retained).
 
     A magnitude is in play only where the missing slot has a COUNTERPART among
-    the leftovers:
-      * the two sides carry DIFFERENT scale words (`12 thousand` against
-        `12 million`, and `2000 thousand` against `2 million`, where the
-        mantissas differ too) — two spellings of one magnitude, no way to say
-        which is right. The SAME scale word with a different mantissa is not
-        this case: the scale cancels, the mantissa is what differs, and the
-        shipped `_value_slot_divergence` JUDGES that pair — a classifier that
-        called it unjudged would refuse a judgement the rule makes;
+    the leftovers that is ONE NUMBER spelled two ways:
       * the digits are zero-extended (`12000000` against `12 million`) — one
-        value, a numeric form and a scaled one, with a scale word on one side.
+        value, a numeric form and a scaled one, with a scale word on one side;
+      * … and the same relation holds ACROSS two different scale words when the
+        mantissas relate by exactly the factor the words differ by (`2000
+        thousand` against `2 million`, `1200 thousand` against `1.2 million`).
+    ⛔ TWO scale words under the SAME mantissa is NOT this case, and it is not a
+    magnitude question at all (#11730 review, the equal-mantissa finding): if
+    `m1 == m2` and the scale words differ then `m1*s1 != m2*s2` ALWAYS, so
+    `12 thousand` against `12 million` is a 1000x rewrite this projection can
+    DECIDE — no magnitude table is used or needed, because `_SCALE_WORDS` is a
+    closed set of distinct magnitudes and their inequality is string-decidable.
+    Filing it UNJUDGED claimed an uncertainty that does not exist, and since
+    UNJUDGED is not a DROP it hid a real one. The SAME scale word cancels for
+    the same reason (`1000 million` against `1 million`), and the shipped rule
+    judges that pair.
 
     ⛔ EVERY missing slot must be explained, not just one (review cycle 10):
     returning True on the first explained pair certified the whole row, so a
@@ -6471,31 +6481,28 @@ def _magnitude_explains_slot(quote_core: tuple, quote_scale: str | None,
     review, cycle 16: `12000000`/`12 million` was published as a DROP).
     """
     for _ca, content_core, content_scale in content_slots:
-        if quote_scale and content_scale:
-            # ⛔ TWO DIFFERENT SCALE WORDS ARE A MAGNITUDE QUESTION — but only
-            # for the SAME value (#11730 review, cycles 12 and 14). `2000
-            # thousand` against `2 million` is one value, and requiring equal
-            # digits filed it as a positive claim (a value ABSENT) that this
-            # projection cannot support. ⛔ THE MANTISSAS MUST RELATE, though:
-            # accepting ANY differently-scaled leftover let an unrelated
-            # `7 billion` at another anchor explain a dropped `3 million`,
-            # which is the launder the docstring says is closed. Equal digits
-            # or a zero-extended form are the two relations that make the pair
-            # one value at two magnitudes. The SAME scale word is never a
-            # magnitude question: the scale cancels, the mantissa is what
-            # differs, and the shipped rule JUDGES it (`1.2 million` against
-            # `12 million`).
-            if (quote_scale != content_scale
-                    and (str(content_core[1]) == str(quote_core[1])
-                         or _same_magnitude_number(content_core, quote_core))):
-                return True
-        elif ((quote_scale or content_scale)
-              and _same_magnitude_number(content_core, quote_core)):
-            # ⛔ A SCALE WORD MUST BE ON ONE OF THE TWO SIDES (#11730 review,
-            # cycle 11): `2000 batches` against `2 batches` is a 1000x
-            # DIFFERENT number with no scale word anywhere, and the shipped
-            # rule JUDGES that pair — the zero-extension relation only
-            # bridges a numeric form and a scaled one.
+        # ⛔ A SCALE WORD MUST BE ON ONE OF THE TWO SIDES (#11730 review, cycle
+        # 11): `2000 batches` against `2 batches` is a 1000x DIFFERENT number
+        # with no scale word anywhere, and the shipped rule JUDGES that pair —
+        # the zero-extension relation only bridges a numeric form and a scaled
+        # one.
+        if not (quote_scale or content_scale):
+            continue
+        # ⛔ THE SAME scale word cancels, so the MANTISSA is what differs and
+        # the shipped rule JUDGES it (`1000 million` against `1 million` is a
+        # 1000x rewrite). This clause is pinned by its own row — a
+        # zero-extended mantissa under ONE scale word, which the relation below
+        # would otherwise explain.
+        if quote_scale and content_scale and quote_scale == content_scale:
+            continue
+        # ⛔ AND THE MANTISSAS MUST RELATE (#11730 review, cycles 12, 14 and the
+        # equal-mantissa finding). Accepting ANY differently-scaled leftover let
+        # an unrelated `7 billion` at another anchor explain a dropped `3
+        # million`; accepting equal mantissas under different scale words let a
+        # 1000x rewrite (`12 thousand` against `12 million`) claim an uncertainty
+        # that does not exist. `_same_magnitude_number` is the ONLY bridge: the
+        # two spellings must be one number.
+        if _same_magnitude_number(content_core, quote_core):
             return True
     return False
 
@@ -6548,10 +6555,14 @@ def _retention_class(content: str, quote: str) -> str | None:
                             is still stated in the content (a DETECTION gap).
     LAYOUT_LOST           — the layouts differ and a value the quote binds is
                             not stated in the content.
-    LAYOUT_UNJUDGED       — the layouts differ and a MAGNITUDE is in play, which
-                            this projection cannot compare (#2817 rules out a
-                            magnitude table; residual (m)). Neither retained nor
-                            lost: unjudged.
+    LAYOUT_UNJUDGED       — the layouts differ and the two sides spell ONE number
+                            at two magnitudes (`12000000` against `12 million`),
+                            which this projection cannot compare without the
+                            magnitude table `#2817` rules out (residual (m)).
+                            Neither retained nor lost: unjudged. ⛔ A scale
+                            difference the projection CAN decide — the SAME
+                            mantissa under two DIFFERENT scale words, which is
+                            never one value — is not this class: it is LOST.
     CONTENT_EXCLUDED_FORM — the content binds no slot, but states the value in
                             a form the row excludes by design ((c)): a CLOCK, an
                             ISO date, a SEPARATOR-BEARING numeral (`1,234`,
@@ -6608,11 +6619,18 @@ def _retention_class(content: str, quote: str) -> str | None:
         return "ALIGNED"
     missing, leftovers = _unstated_quote_slots(content_slots, quote_slots)
     if missing:
-        # ⛔ A MAGNITUDE is not comparable here: `12 million` against
-        # `12 billion` binds the same core (residual (m)), and `12000000`
-        # against `12 million` binds two, with no magnitude table to fold them
-        # (#2817 rules one out). Calling either LOST would accuse a truthful
-        # point; calling it RETAINED would certify a six-orders drop. Unjudged.
+        # ⛔ A MAGNITUDE this projection cannot FOLD is not comparable here:
+        # `12000000` against `12 million` binds two different cores, and `2000
+        # thousand` against `2 million` two different cores under two different
+        # scale words, with no magnitude table to fold either (#2817 rules one
+        # out). Calling either LOST would accuse a truthful point; calling it
+        # RETAINED would certify a six-orders drop. Unjudged.
+        # ⛔ BUT AN EQUAL MANTISSA UNDER TWO DIFFERENT SCALE WORDS IS DECIDABLE
+        # (#11730 review, the equal-mantissa finding): `12 thousand` against
+        # `12 million` is a 1000x rewrite, and `12 million` against `12 billion`
+        # is a 1000x rewrite the other way. No table is needed — `_SCALE_WORDS`
+        # is a closed set of DISTINCT magnitudes, so two different words under
+        # the same mantissa are never one value. Those pairs are LOST.
         #
         # ⛔ AND THE SCALE TEST IS KEYED ON THE MAGNITUDE, NOT ON AN ANCHOR, in
         # both directions (#11730 review, three cycles):
@@ -6907,14 +6925,25 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                                      "the TTL is 20 minutes") == ()
     assert _retention_class("the deploy uses a short TTL",
                             "the TTL is 20 minutes") == "CONTENT_NO_VALUE"
-    # 2b. A MAGNITUDE difference is UNJUDGED, not LOST and not RETAINED — the
-    #    engine has no magnitude table (`#2817` rules one out; residual (m)), so
-    #    neither direction can be read without adding the table the ruling
-    #    excludes. Both directions are pinned, or the class is unpinned.
-    assert _retention_class("we have 12 thousand events",
-                            "we have 12 million events") == "LAYOUT_UNJUDGED"
+    # 2b. A MAGNITUDE the projection cannot FOLD is UNJUDGED, not LOST and not
+    #    RETAINED — `12000000` and `12 million` are ONE number spelled two ways,
+    #    and reading which is stated needs the magnitude table `#2817` rules out
+    #    (residual (m)), so neither direction can be read.
     assert _retention_class("we have 12000000 events",
                             "we have 12 million events") == "LAYOUT_UNJUDGED"
+    #    ⛔ BUT AN EQUAL MANTISSA UNDER TWO DIFFERENT SCALE WORDS IS DECIDABLE
+    #    (#11730 review, the equal-mantissa finding): `12 thousand` against
+    #    `12 million` is a 1000x rewrite, and no table is needed to know the two
+    #    are different — a scale word's magnitude never cancels another's. The
+    #    pre-fix classifier filed this pair UNJUDGED, claiming an uncertainty
+    #    that does not exist (and, since UNJUDGED is not a DROP, hiding one).
+    #    MEASURED pre-fix: `LAYOUT_UNJUDGED`; pinned both ways below.
+    assert _retention_class("we have 12 thousand events",
+                            "we have 12 million events") == "LAYOUT_LOST", (
+        "equal mantissas under two different scale words are never one value")
+    assert _retention_class("we have 12 million events",
+                            "we have 12 billion events") == "LAYOUT_LOST", (
+        "the row's own worked example, decided without a magnitude table")
     # 2c. ⛔ AND THE SCALE TEST IS KEYED ON THE MAGNITUDE, NOT ON AN ANCHOR, in
     #    BOTH directions (#11730 review, two cycles — each direction is a real
     #    failure of the naive spellings, so both are pinned).
@@ -6939,6 +6968,9 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
                             "we are ingesting 12 million events") == (
         "LAYOUT_UNJUDGED"), (
             "a reworded anchor must not turn a magnitude pair into a loss")
+    # ⛔ AND THE RULE FAILS OPEN ON THE PAIR (2b) THE CENSUS DECIDES — which is
+    #    not a contradiction: the census measures RETENTION, the rule's fail-open
+    #    set measures REACH (the row publishes both, and `62` is the reach).
     assert v2._value_slot_divergence("we have 12 thousand events",
                                      "we have 12 million events") == ()
     # 2d. ⛔ THREE SHAPES THE CYCLE-9 REVIEW MEASURED, all of them the same
@@ -7000,12 +7032,25 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #     (a3) … and the compensated-scale pair is NOT a magnitude question when
     #         the scale words are the SAME: `1.2 million` against `12 million` is a
     #         10x rewrite the shipped rule JUDGES, so the classifier must not
-    #         call it unjudged. This is the only shape that distinguishes the
-    #         `quote_scale != content_scale` clause.
+    #         call it unjudged. ⛔ THIS ROW DOES NOT PIN THE SAME-SCALE CLAUSE: it
+    #         is decided by the MANTISSA relation (`1.2` and `12` are the same
+    #         digits, which is not a magnitude pair), so reverting that clause
+    #         leaves it green — measured. (a4) is the clause's own pin.
     assert _retention_class("we have 1.2 million events",
                             "we are ingesting 12 million events") == (
         "LAYOUT_LOST"), (
             "the same scale word cancels, so a different mantissa is a rewrite")
+    #     (a4) ⇒ the SAME-SCALE CLAUSE pinned by the one shape only it decides:
+    #         one scale word on both sides and a ZERO-EXTENDED mantissa (`1000
+    #         million` against `1 million`). Without the clause the
+    #         zero-extension relation explains the pair and a 1000x rewrite is
+    #         filed UNJUDGED — MEASURED: reverting the clause alone flips this
+    #         row to `LAYOUT_UNJUDGED` and leaves (a3) green.
+    assert _retention_class("we ingested 1000 million records",
+                            "we shipped 1 million events") == (
+        "LAYOUT_LOST"), (
+            "the same scale word cancels, so a zero-extended mantissa is a "
+            "rewrite, not a magnitude question")
     #     (b) a zero extension with NO scale word on either side is a different
     #         number the shipped rule JUDGES, not a magnitude question;
     assert _retention_class("we ordered 2000 batches",
