@@ -1908,8 +1908,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 - ⛔ **Superseded for the merged tree by §10.21.** The numbers above are the head this entry
   names, and they are byte-identical to `main`'s copy of that entry — a history entry is not
   re-pointed in place (this entry's own warning, and the handling §10.17→§10.18 used). This
-  branch's S3-hold diff inserts 128 lines into `extractor_v2.py` above every one of them, so
-  the live values are §10.21's.
+  branch's own inserts above every one of them total **+293** lines — `_collect_classify_items`
+  measures `:11402` on `main` and `:11695` here — so the live values are §10.21's.
 
 ### 10.20 — the merge of `#11523`, and the door-read pin re-pointed for THIS tree (2026-11-09, `#11534`)
 
@@ -1943,7 +1943,9 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
 
 - **Why this entry exists rather than an edit to an earlier one.** This branch's S3-hold fix
   (`#11653`, `d26a6020c2` and the `_strip_reference_sets`/`_prune_held_operators` work after it)
-  inserts 128 lines into `tortoise/extractor_v2.py` ABOVE every cite in §11's block, and `main`'s
+  inserts **+293** net lines into `tortoise/extractor_v2.py` above every cite in §11's block
+  (measured at the collector: `:11402` on `main` → `:11695` here; `main` moved no line of that
+  file between the merge base and its head, so the whole delta is this branch's), and `main`'s
   `#11660` moved `tortoise/sdk.py` (+44) and `projection/__init__.py`. A forward merge of `main`
   then had to re-derive the block, and an earlier revision of that merge re-pointed §10.15,
   §10.16 and §10.19 IN PLACE. That was reverted: §10.19's own text forbids it — *"an entry
@@ -1966,8 +1968,8 @@ re-cut from the resolved document (§8), and no committed verdict is re-scored.
   failed`; `:14457` opens `result["classify_later"]` and `:14467` opens `result["vet"]`;
   `:16651` is `embed_list, vet_s2_stats, _w, vet_s2_pool = _run_vet_pass(` and `:14226` is
   `complete_list, vet_union_stats, _w, _ = _run_vet_pass(`. The two constants differ between
-  the sides (`+128` for this branch's own insert, `+44` for `#11660`'s `sdk.py` move), which is
-  exactly why a constant could not be trusted here.
+  the sides (`+293` for this branch's own inserts above the collector, `+44` for `#11660`'s
+  `sdk.py` move), which is exactly why a constant could not be trusted here.
 - **What moved: nothing else.** No metric, denominator, threshold, class set or corpus pin is
   touched — every §1–§9 value and the E4 denominator are the ones this record froze.
   `document_sha256` is re-cut in this same merge, per §8's rule for *any* edit to this file.

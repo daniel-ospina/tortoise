@@ -5987,29 +5987,22 @@ def resolve_entities(entity_refs: list[dict], search: dict,
     for u in unmatched:
         name = u["name"]
         if name in resolved:
-            # ⛔ PHASE 2 MAY HAVE RESOLVED AN *UNMATCHED* NAME — that is its
-            # whole job (a phase-1 `none`/`ambiguous` candidate the resolver
-            # mapped to a candidate). Such a name is RESOLVED, so it belongs to
-            # neither population; labelling it `held` (or `new`) would publish a
-            # hold that did not happen on the SUCCESS path and feed I2's census a
-            # false claim (measured in review: `Joe -> Joseph` reported
-            # "Joe — identity UNRESOLVED (disambiguation_undecided)" while the
-            # run created Joseph). The mutation this guards is the missing
-            # `continue`.
+            # ⛔ PHASE 2 MAY HAVE RESOLVED AN *UNMATCHED* NAME — that is its whole
+            # job. Such a name belongs to neither population; labelling it `held`
+            # would publish a hold that did not happen (measured: `Joe -> Joseph`
+            # reported "identity UNRESOLVED" while the run created Joseph).
             continue
         if u["mode"] == "ambiguous":
-            # A mechanical collision the resolver did not pick between. §4.4's
-            # S3 disambiguation row is FAIL-CLOSED on `new`: a name that matches
-            # SEVERAL existing entities is the last one that may be created as a
-            # third. Nothing but a positive choice attaches it.
+            # A mechanical collision the resolver did not pick between: §4.4's S3
+            # row is FAIL-CLOSED on `new`, so nothing but a positive choice
+            # attaches a name matching SEVERAL existing entities.
             reason = HOLD_AMBIGUOUS
         elif disambiguation_failed:
             reason = HOLD_DISAMBIGUATION_FAILED
         elif disambiguation_ran and name not in declared_new:
-            # ⛔ The old contract made this state INVISIBLE: "ambiguous → omit"
-            # meant an undecided name and a confidently-absent name both left the
-            # answer empty, and the caller created both. An omission is now the
-            # HOLD signal and `declared_new` the only ADD licence.
+            # ⛔ The old contract made this state INVISIBLE: "ambiguous → omit" let
+            # an undecided name and a confidently-absent one both leave the answer
+            # empty and the caller created both. An omission is now the HOLD signal.
             reason = HOLD_DISAMBIGUATION_UNDECIDED
         else:
             # Phase 1 found no candidate of this name and no resolver that
@@ -6020,8 +6013,15 @@ def resolve_entities(entity_refs: list[dict], search: dict,
         warnings.append(
             f"entity '{name[:60]}' — identity UNRESOLVED ({reason}): HELD, not "
             "created (§4.4 I1, #11653)")
-    return {"map": resolved, "records": records, "held": held,  # F4: `new` below is filtered on `_norm` — the SAME identity F3's gate keys on, so the ADD licence cannot publish an alias spelling of an identity this call holds (measured, review F2 on #11693)
-            "new": [n for n in new if _norm(n) not in {_norm(h["name"]) for h in held}], "warnings": warnings}
+    # F4/F2: identity is `_norm` (F3). A raw-name subtraction licensed an alias of a
+    # held identity; dropped from `new` alone it is in neither population → HOLD.
+    _alias = {_norm(h["name"]): h["reason"] for h in held}
+    _kind_of = {u["name"]: u["kind"] for u in unmatched}
+    held += [{"name": n, "kind": _kind_of.get(n, ""), "reason": _alias[_norm(n)]}
+             for n in new if _norm(n) in _alias]
+    return {"map": resolved, "records": records, "held": held,
+            "new": [n for n in new if _norm(n) not in _alias],
+            "warnings": warnings}
 
 
 def _apply_entity_resolution(embed_list: dict, resolution_map: dict) -> dict:
@@ -11560,13 +11560,11 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
             _why = str(_r.get("reason") or _lookup)
             _reasons[_why] = _reasons.get(_why, 0) + 1
         _why_text = ", ".join(f"{k}={v}" for k, v in sorted(_reasons.items()))
-        # ⛔ The carry-forward clause describes what ACTUALLY persisted, not
-        # whether a store object was passed (#10997 review round 4, P3). With a
-        # store that raises on write (read-only volume, full disk, bad
-        # permissions) each per-occurrence warning already said "the hold store
-        # write FAILED … so it is NOT carried forward", and this aggregate line
-        # said the opposite — two contradicting warnings in one list, on the line
-        # an operator/census reads.
+        # ⛔ Describes what ACTUALLY persisted, not whether a store was passed
+        # (#10997 round 4 P3). The ENTITY-only case is the same defect from the
+        # other side — nothing was carried, so claiming it was is a false claim in
+        # the line a census reads, and the entity clause then says the opposite
+        # (measured, #11653 review F4).
         # #11653: ENTITY holds are excluded from that arithmetic on purpose —
         # they are never written to the store (its drain mints POINTS, so an
         # entity record there would re-mint a claim for a node), so counting them
@@ -11578,6 +11576,8 @@ def execute_embed(embed_list: dict, search: dict, *, session_id: str,
         _persisted = sum(1 for r in _endpoint_holds if r.get("persisted"))
         if hold_store is None:
             _carried = "; NOT carried forward — no hold store was supplied"
+        elif not _endpoint_holds:
+            _carried = ""  # only ENTITY holds: nothing endpoint-side was carried
         elif _persisted == len(_endpoint_holds):
             _carried = ("; carried in the hold store for the next run against "
                         "this graph")

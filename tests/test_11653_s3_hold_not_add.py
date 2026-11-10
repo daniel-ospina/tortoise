@@ -351,6 +351,13 @@ class TestTheOtherArms:
         permitting exactly the create the run itself refused. Measured before
         the fix: `new == ['ACME']` beside `held == [{'name': 'Acme', …}]`.
         Identity is one predicate or it is two contracts.
+
+        ⛔ …and the subtraction alone is NOT the fix, because it leaves the
+        dropped spelling in NEITHER population (measured: `Acme` vanished from
+        `map`, `new` and `held` alike). That falsifies the docstring's "a RESOLVED
+        name is in neither" and I2's "never dropped", and it under-counts
+        `resolution_held`/`held_entities` — so the alias JOINS the hold, carrying
+        the reason of the identity it aliases.
         """
         res = v2.resolve_entities(
             [{"name": "Acme", "kind": "core:organisation"},
@@ -364,6 +371,52 @@ class TestTheOtherArms:
         assert not ({norm(n) for n in res["new"]} & {norm(n) for n in held}), (
             f"`new` licenses an alias spelling of a held identity: {res}")
         assert set(res["new"]) & set(held) == set(), res
+        # ⛔ TOTALITY: both spellings are accounted for, in the SAME population.
+        assert {norm(n) for n in held} == {"acme"}, res["held"]
+        assert {norm(n) for n in res["new"]} | {norm(n) for n in held} == {
+            "acme"}, res
+        assert len(res["held"]) == 2, (
+            f"the alias spelling must be HELD too, not dropped from both "
+            f"populations: {res}")
+
+
+class TestTheAggregateHoldSentenceIsTrue:
+    """⛔ The run-level S3-HOLD line must not assert the opposite of what happened.
+
+    Review F4 on #11693's last cycle: the carry-forward arithmetic is
+    `_persisted == len(_endpoint_holds)`, and an ENTITY-only hold list has zero
+    endpoint holds — so `0 == 0` took the "carried in the hold store for the next
+    run" arm, and the entity clause appended "N ENTITY hold(s) are NOT carried
+    forward" to the SAME sentence. Two contradicting clauses on the line an
+    operator and the census read — exactly the class `#10997` review round 4
+    fixed from the other side (a store that raises on write).
+
+    Measured pre-fix: `…; carried in the hold store for the next run against this
+    graph; 1 ENTITY hold(s) are NOT carried forward …`. Entity holds are never
+    written to the store by construction (its drain mints POINTS), so there is
+    nothing endpoint-side to carry and the aggregate must not say there was.
+    """
+
+    def test_entity_only_holds_are_not_reported_as_carried(self):
+        class _Store:
+            def hold(self, *a, **k):
+                return {"path": "<mem>"}
+
+            def summary(self):
+                return {"path": "<mem>", "total": 0,
+                        "by_state": {}, "by_kind": {}}
+
+        embed = {"entities": [{"name": "Acme", "kind": "core:organisation"}],
+                 "events": [], "chain_notes": [], "link_before_create": [],
+                 "points": [], "operators": []}
+        res = v2.execute_embed(embed, {}, session_id="s1", hold_store=_Store(),
+                               held_entities={"Acme": "ambiguous"})
+        aggregate = [w for w in res["warnings"] if "S3 HOLD (#10997)" in w]
+        assert len(aggregate) == 1, res["warnings"]
+        assert "ENTITY hold(s) are NOT carried forward" in aggregate[0], aggregate[0]
+        assert "carried in the hold store for the next run" not in aggregate[0], (
+            "the aggregate sentence claims the holds were carried and then says "
+            f"they were not: {aggregate[0]}")
 
 
 class TestTheHoldRemovesOneNodeNotTheSession:
