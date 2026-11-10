@@ -2448,6 +2448,14 @@ jobs:
       # unread. The liveness verdict below is what
       # separates that from "the specs were wrong" (#8059 is the same misreading:
       # a dead preview reported as a `--d1`/`dist` problem).
+      #
+      # ⛔ And the log is the ONLY datum that can name it: upstream, `wrangler dev`/
+      # `pages dev` EXITS instead of recovering when workerd crashes mid-rebuild —
+      # the esbuild `all goroutines are asleep - deadlock!` that #8059 measured is a
+      # SECONDARY symptom of that exit (cloudflare/workers-sdk#14926) — so a restart
+      # wrapper is not a fix (nothing resumes a suite already in flight), and
+      # `--no-bundle` cannot replace the watcher because `website/apps/dashboard/
+      # functions/` is TypeScript.
       - name: Dump the preview servers' logs, and say whether each preview DIED
         if: failure()
         run: |
