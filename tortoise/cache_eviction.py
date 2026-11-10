@@ -57,10 +57,10 @@ CAN serve a node; `#7879` (the record epic) is still open, but that is a stateme
 about the record's role as system of record, not about whether it can serve one
 today. What withholds a licence is the **absence of a CLEAN parity census report for
 the graph being swept** — nothing schedules that instrument, so no graph has one
-until an operator runs it. Nor is the verdict `REFUSED` for every class: the verdict
-is the census's BYTE state, so a production cache under its byte ceiling answers
-`CLEAN` with `plan["evictable"] == []` (see `tortoise/cache_evictor.py`'s header for
-which gate actually refuses). The point of writing the rule down as code, rather than
+until an operator runs it. Nor is the verdict `REFUSED` for every class: the verdict's
+`CLEAN`/over-ceiling half is its BYTE state, so a production cache under its byte ceiling
+answers `CLEAN` with `plan["evictable"] == []` (see `tortoise/cache_evictor.py`'s header
+for which gate actually refuses). The point of writing the rule down as code, rather than
 as prose, is that the verdict flips by itself once a census is CLEAN, and that a
 future sweeper cannot be written without consuming a verdict that says which classes
 were proven.
@@ -1277,8 +1277,9 @@ def assess(
     #
     # i.e. THE CLAIM ITSELF is above every node the graph holds (which implies the
     # mirror's count is at least that large — eligibility already required
-    # `claim <= resident_population`). Both halves matter, and neither of the two
-    # sentences that used to sit here was right:
+    # `claim <= resident_population`). Every sentence that has sat in this block has been
+    # wrong about the reach in one direction or the other; the criterion above is the
+    # whole of it, and the two arms that pin it are named below.
     #
     # - A count statement whose PREDICATE is too wide (dropping the `:Point` half) never
     #   trips it: a subgraph count cannot exceed `MATCH (n) RETURN count(n)`.
@@ -1295,8 +1296,8 @@ def assess(
     #   test that pins this residual. Keep the pin; this check does not replace it.
     #
     # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
-    # NARROWLY in BOTH directions, because each of the three sentences that have sat here
-    # was wrong in one of them:
+    # NARROWLY in BOTH directions, because earlier versions of this paragraph overstated
+    # the reach in both of them:
     #
     # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
     #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`, so the claim

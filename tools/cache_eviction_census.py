@@ -270,13 +270,14 @@ def main(argv: list[str] | None = None) -> int:
     for flag in _REFUSED_FLAGS:
         if any(a == flag or a.startswith(f"{flag}=") for a in argv):
             print(
-                f"REFUSED {flag}: this census does not sweep, and cannot.\n"
-                f"  #10976 gates eviction on the record being able to serve. #10593 "
-                f"(the record's write path) closed COMPLETED on 2026-11-06, so the "
-                f"record CAN serve; only #7879 (the epic) remains open, which is about "
-                f"the record as system of record, not its ability to serve a node. A "
-                f"pass that cannot prove the record serves a class must refuse rather "
-                f"than sweep.\n"
+                f"REFUSED {flag}: this census MEASURES; the pass that SPENDS a licence is "
+                f"`tortoise/cache_evictor.py` (gates 1-5, including the per-node record "
+                f"probe this tool never issues).\n"
+                f"  #10976 gates eviction on a census that proves the record serves a "
+                f"class — a CLEAN report from this tool proves the COUNT, never that the "
+                f"record serves each node. #10593 (the record's write path) closed "
+                f"COMPLETED on 2026-11-06, so record readiness is not what stops a "
+                f"sweep.\n"
                 f"  Run without {flag} to get the plan and the refusal reasons.",
                 file=sys.stderr,
             )

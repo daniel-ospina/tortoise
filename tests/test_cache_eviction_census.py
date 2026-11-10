@@ -524,7 +524,17 @@ def _cli():
 
 @pytest.mark.parametrize("flag", ["--execute", "--sweep", "--purge", "--evict"])
 def test_the_cli_refuses_a_destructive_flag_by_name(capsys, flag):
-    """A missing flag reads as a typo; a REFUSED flag reads as the gate it is."""
+    """A missing flag reads as a typo; a REFUSED flag reads as the gate it is.
+
+    ⚠️ WHAT THIS PIN ASSERTS CHANGED with #11709's claim correction, and the change is the
+    point rather than a relaxation. It used to require `#10593` **and** `#7879` in the
+    message, because the message used to say eviction was gated on those two record gates
+    being open. `#10593` closed COMPLETED on 2026-11-06, so neither id names the reason any
+    more: the message now names the live tracker (`#10976`), the module that owns the
+    spending gates (`cache_evictor.py`), and the closed id only as the fact that record
+    readiness is NOT the trigger. Pinning the two old ids would have pinned the expired
+    cause — the failure this PR exists to remove — so the assertion follows the reason.
+    """
     cli = _cli()
 
     code = cli.main(["--graph-uri", "docker://h:1/g", "--graph", "g", flag])
@@ -532,7 +542,12 @@ def test_the_cli_refuses_a_destructive_flag_by_name(capsys, flag):
     assert code == 3
     err = capsys.readouterr().err
     assert "REFUSED" in err
-    assert "#10593" in err and "#7879" in err
+    # the live tracker, and the module that actually spends a licence
+    assert "#10976" in err
+    assert "cache_evictor.py" in err
+    # ⛔ and NOT a gate that has closed: the message may mention #10593 only as the
+    # readiness fact it is not gated on.
+    assert "#10593" in err and "closed" in err
 
 
 def test_the_cli_refuses_a_graph_that_disagrees_with_its_uri(capsys):
@@ -1201,8 +1216,8 @@ def test_an_inflated_ceiling_does_not_arm_the_backstop_at_the_total():
     at the population's count, so the trigger is ``resident_population >= claim >
     node_total``. An inflated count statement therefore does NOT arm it by itself: with the
     same 25,000-node graph and the same 30,000 `turn` ceiling (a 60x multiplication on 500
-    real turns), a CLEAN report licensing **25,000** nodes is below the total, so neither
-    guard fires and the 25,000-node licence is ISSUED.
+    real turns), a CLEAN report licensing **25,000** nodes sits AT the total — the guard is a
+    strict ``>`` — so neither guard fires and the 25,000-node licence is ISSUED.
 
     That is the residual band ``true_population < claim <= node_total`` — and it is why two
     earlier comments on this file and on `cache_eviction.py` were wrong in opposite
