@@ -7103,11 +7103,15 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     # no-prompt-text rule, not a census row excused — which is why it also stays
     # out of the census: `_denies_the_class_by_pattern` still requires the writer's
     # own name, so `test_no_corrected_passage_denies_a_verdict_the_census_counts`
-    # reads it as one more true sentence. This is the SAME resolution the `exempt`
-    # stem got ("the entries were deleted rather than left as dead coverage"): the
-    # vocabulary follows the documents, never the reverse. Removing the entry does
-    # not weaken the liveness tripwire — it strengthens it, since `unpinned` below
-    # now demands this marker appear, and will red the day a reword drops it.
+    # reads it as one more true sentence. This is the same doctrine that DELETED the
+    # bare `exempt` stem from the marker tuples: the documents write only
+    # `exempts`/`exemptions`/`exempting`, so the stem's one live effect was a FALSE
+    # RED on §13's true sentence, and it was removed rather than kept as coverage
+    # that fires on prose (`#10200` review, cycle 5) — and the same doctrine that
+    # deleted the `#10200` cycle-9 orphans ("the entries were deleted rather than
+    # left as dead coverage"). Removing the entry does not weaken the liveness
+    # tripwire — it strengthens it, since `unpinned` below now demands this marker
+    # appear, and will red the day a reword drops it.
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "
         "both documents until someone writes it (`#10200` review, cycle 6)"
