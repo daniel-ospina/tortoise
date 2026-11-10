@@ -775,6 +775,43 @@ def test_gate_expected_zero_is_census_error():
     assert GATE_REASON_CENSUS_ERROR in res["reasons"]
 
 
+def test_gate_healthy_signature_census_does_not_fold():
+    """#11653: ``entity_identity_held`` is the FIX working (S3 held an
+    unresolved identity instead of minting it), not an extraction failure.
+
+    It is bumped with NO paired ``errors`` entry, so the error fold's own
+    contract (a session extraction EXCEPTION) does not cover it. Folding it
+    returned ``reasons == []`` — this gate's GREEN — without running a single
+    tier, for a question with no error at all: a no-op gate on the normal
+    eval path (phase-2 resolution runs on any ingest that has candidates).
+    The tiers must RUN, so this session's absent answer session is flagged.
+    """
+    q = _q("mini_ie_user_001")
+    sdk = _fresh_sdk()
+    _seed_question(sdk._get_proj(), q["question_id"], {0: 3})  # s1 absent
+    res = run_integrity_gate(
+        sdk._get_proj(), q, q["question_id"],
+        ingest_stats={"turns": 6, "chunks": 0, "points": 0,
+                      "error_census": {"entity_identity_held": 1}})
+    assert res["census"].get("error_fold") is None
+    assert GATE_REASON_ANSWER_SESSION_ABSENT in res["reasons"]
+
+
+def test_gate_benign_census_is_reported_not_folded():
+    """The held-class signal survives the fix in its own bucket."""
+    q = _q("mini_ie_user_001")
+    sdk = _fresh_sdk()
+    _seed_question(sdk._get_proj(), q["question_id"], {0: 3, 1: 3},
+                   marks={1: 1})
+    res = run_integrity_gate(
+        sdk._get_proj(), q, q["question_id"],
+        ingest_stats={"turns": 6, "chunks": 0, "points": 0,
+                      "evidence_points": 1,
+                      "benign_census": {"entity_identity_held": 1}})
+    assert res["reasons"] == []
+    assert res["census"]["benign_census"] == {"entity_identity_held": 1}
+
+
 def test_gate_retrieval_only_exempt():
     q = _q("mini_ie_user_001")
     sdk = _fresh_sdk()
