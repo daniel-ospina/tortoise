@@ -174,7 +174,8 @@ below still state what a marker comparison cannot reach.
     there today; a NON-markdown link is an uncovered source, as above;
   * a DIRECTORY in a surface that cannot be READ (one that exists but refuses
     `scandir`, at the surface root or at any depth below it) is a verdict, not an
-    empty design: `is_dir()` answers about the inode, and `Path.rglob` swallows
+    empty design: `is_dir()` answers about the inode, and `Path.rglob` — the
+    primitive this scan used to walk with — swallowed
     the `PermissionError` and yields nothing, so without that probe an unreadable
     directory was indistinguishable from a declaration-free one — the gate's
     primary direction silently empty. Measured before the guard on a `0o000`
@@ -637,9 +638,10 @@ def declaration_markers(
     at two depths).
 
     ⛔ A SYMLINK to a DOCUMENT or to a DIRECTORY in the surface is a REFUSAL, not a
-    document. The surface is read two ways — this scan WALKS it (`rglob`) while
+    document. The surface is read two ways — this scan WALKS it (`os.walk` with
+    `followlinks=False`, so a refused read is reported rather than swallowed) while
     attribution RESOLVES each `declared_in:` entry — and those two readings cannot
-    be kept identical across a link: `rglob` does not descend a linked DIRECTORY (a
+    be kept identical across a link: `os.walk(followlinks=False)` does not descend a linked DIRECTORY (a
     `v4-mechanism:` marker inside one would get NO verdict at all, the fail-open
     direction), and a linked DOCUMENT whose target lies outside the surface is
     walked under its link name while resolving outside it, so a row naming the
@@ -698,8 +700,9 @@ def declaration_markers(
         ]
     # ⛔ AN UNREADABLE DIRECTORY ANYWHERE IN A SURFACE IS ITS OWN VERDICT (review
     # cycles 4 and 5, P2). `is_dir()` answers about the inode, not about
-    # permission to read it, and `Path.rglob` SWALLOWS the `PermissionError` that
-    # `os.scandir` raises and yields NOTHING — at the surface ROOT and at every
+    # permission to read it, and the `Path.rglob` this scan used to enumerate
+    # with SWALLOWED the `PermissionError` that `os.scandir` raises and yielded
+    # NOTHING — at the surface ROOT and at every
     # depth below it — so an unreadable directory was indistinguishable from a
     # declaration-free one, and the gate's PRIMARY direction (a marker with no
     # registry row) went silently empty for every document behind it. Measured on
@@ -709,8 +712,9 @@ def declaration_markers(
     # documents), and probing only the ROOT left the nested case open (measured:
     # `docs/architecture/sub` at `0o000` holding a marker with no row still
     # reported `markers: {}` with no verdict). So the walk collects its own errors
-    # instead of using `rglob`, which is the one shape that reports a read it was
-    # refused. This is the `#5064` shape at the directory rather than the file: a
+    # (`os.walk(onerror=…)`), which is the one shape that reports a read it was
+    # refused, and the scan does not use `rglob` at all. This is the `#5064` shape
+    # at the directory rather than the file: a
     # scan that could not look must never report "nothing declared".
     walk_errors: list[str] = []
     documents: list[tuple[Path, Path]] = []
@@ -867,7 +871,7 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
     """The declared documents that resolve INSIDE the gate's scanned surface.
 
     ONE definition of the surface, shared with :func:`declaration_markers`, which
-    walks it with `docs_dir.rglob("*")`: containment (recursive, so a
+    walks it with `os.walk(..., followlinks=False)`: containment (recursive, so a
     `docs/architecture/sub/x.md` IS inside) AND a `.md` suffix (so a non-markdown
     source is not) — the two halves cannot disagree about what a scanned document
     is, which is what made a nested document invisible to the scan while being
@@ -5913,7 +5917,7 @@ def test_membership_treats_a_non_markdown_source_inside_the_surface_as_unscanned
 def test_membership_refuses_a_linked_directory_in_the_surface(tmp_path) -> None:
     """A linked DIRECTORY is not descended, so its markers would get NO verdict.
 
-    `rglob` does not follow a directory symlink, while `_scanned_targets` resolves
+    `os.walk(followlinks=False)` does not follow a directory symlink, while `_scanned_targets` resolves
     a `declared_in:` entry — so a marker inside `docs/architecture/linked/` would
     be invisible to the scan, and a mechanism declared only there would read as
     nothing at all: the fail-open direction. A symlink in the surface is therefore
@@ -7715,7 +7719,7 @@ def test_a_surface_that_cannot_be_read_is_a_verdict_not_an_empty_design(
 
     Measured before the guard (review cycle 4, P2): a surface at mode `0o000`
     holding a marker with NO registry row returned `markers: {}`, `errors: []` —
-    `Path.rglob` swallows the `PermissionError` that `os.listdir` raises and
+    `Path.rglob` swallowed the `PermissionError` that `os.listdir` raises and
     yields `[]`, so an unreadable surface read exactly like a declaration-free
     one and the gate's PRIMARY direction (a marker with no row) went silently
     empty for every document behind it. `missing` cannot catch it — `is_dir()`
@@ -7759,8 +7763,9 @@ def test_an_unreadable_SUBDIRECTORY_is_a_verdict_too(tmp_path) -> None:
     Measured at the head that added the root probe (review cycle 5, P2):
     `docs/architecture/sub` at `0o000` holding a marker with no registry row
     reported `markers: {}`, `errors: []` and NO membership or state verdict —
-    because `os.listdir` only asks whether the SURFACE is listable while `rglob`
-    swallows the `PermissionError` raised at every depth. The gate's primary
+    because `os.listdir` only asks whether the SURFACE is listable while the
+    `rglob` the scan then walked with swallowed the `PermissionError` raised at
+    every depth. The gate's primary
     direction was still silently empty, one directory down, under a comment
     claiming the opposite. The walk now collects its own errors instead.
     """
