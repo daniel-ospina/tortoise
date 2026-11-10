@@ -96,6 +96,9 @@ _NO_SECOND_POPULATION = re.compile(r"`([^`]+)`")
 #: than by shape, so a second population cannot dodge the comparison by spelling.
 _NON_POPULATION_SPAN = re.compile(r"[^\s→]+")
 
+#: The pathspec a quoted `git grep` in §5's measurement clause must carry.
+_PATHSPEC = re.compile(r"--\s+(\S+)\s*$")
+
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
 #: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
@@ -1770,12 +1773,36 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         paragraph_end = section.find("\n\n", close_at + 1)
         sentence_end = len(section) if paragraph_end == -1 else paragraph_end
     tail = section[open_at + 1 : sentence_end]
-    extra = [
+    # ⛔ ODD PARITY fails closed. Positional pairing cannot read a span whose backticks
+    # are unbalanced, and the unbalanced span is then dropped by the filters below — so a
+    # stray backtick was a way to name a second population and stay green.
+    assert tail.count("`") % 2 == 0, (
+        "§5's measurement clause has an unbalanced backtick, so the spans this pin reads "
+        "cannot be paired — a half-quoted population would be dropped silently. Fix the "
+        "backticks"
+    )
+    spans = _NO_SECOND_POPULATION.findall(tail)
+    # A `git grep` span is judged by its PATHSPEC: `_QUOTED_GREP` requires the two pinned
+    # commands to carry `-- tortoise/`, but a THIRD command added to the clause was read by
+    # nothing, so `git grep -n ':Document' -- tests/` sat green beside the correct pair.
+    wrong_pathspec = []
+    for span in spans:
+        if not span.startswith("git grep"):
+            continue
+        pathspec = _PATHSPEC.search(span)
+        if pathspec is None or pathspec.group(1).rstrip("/") != _TRACKED_DIR:
+            wrong_pathspec.append(span)
+    extra = wrong_pathspec + [
         token
-        for token in _NO_SECOND_POPULATION.findall(tail)
+        for token in spans
         if not token.startswith(("git grep", ":"))
         and _NON_POPULATION_SPAN.fullmatch(token)
-        and not (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
+        # Exempt the measured population by VALUE — but never through a `..` segment:
+        # `tortoise/../tests/` starts with the pinned directory and resolves somewhere else.
+        and not (
+            ".." not in token
+            and (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
+        )
     ]
     assert not extra, (
         f"§5's measurement parenthetical names another path after the quote — "
