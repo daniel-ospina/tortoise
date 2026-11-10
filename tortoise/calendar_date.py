@@ -431,7 +431,7 @@ def _string_instant(s: str) -> datetime | None:
     # ⚠ NOT the same shape set as the day view, and the difference is
     # DELIBERATE (cycle 7, finding 1 — an earlier version of this comment
     # claimed parity, which would invite the one change this module forbids).
-    # TWO kinds of divergence IN THIS ARM (not a closed count of the whole
+    # THREE kinds of divergence IN THIS ARM (not a closed count of the whole
     # module — see the exceptions named below), with different mechanisms:
     #
     # 1. the day view's TOLERANT PREFIX fallback dates a value whose tail is
@@ -440,7 +440,7 @@ def _string_instant(s: str) -> datetime | None:
     #    INSTANT is unknown while the stated DAY is known; deriving an instant
     #    there would fabricate one, which is the whole distinction this module
     #    exists to keep;
-    # 2. one WHOLE-VALUE shape also diverges, and it is NOT the prefix:
+    # 2. an HOUR-24 WHOLE-VALUE shape also diverges, and it is NOT the prefix:
     #    ``2023-05-20T24:00:00`` matches BOTH views' grammar. The day view takes
     #    its stated DATE (``_match_date``), while the instant view refuses the
     #    hour (``_match_naive`` → ``None``) — hour 24 is not a clock reading, so
@@ -448,15 +448,25 @@ def _string_instant(s: str) -> datetime | None:
     #    the day is still dated. ⛔ Do not "fix" this by letting ``_match_naive``
     #    roll 24:00 to the next midnight: that invents an instant from an hour
     #    the value does not have.
+    # 3. a STATED-BUT-IMPOSSIBLE OFFSET also diverges, through a DELIBERATE
+    #    GUARD: ``_match_offset`` returns ``None`` for BOTH "no offset stated"
+    #    and "offset stated and refused", so without the guard at the top of
+    #    this function a value naming a bad offset (``+25:00``, ``+00:99``)
+    #    would fall through to the naive reading and be dated. The DAY view
+    #    dates it (its calendar day is stated); the INSTANT cannot be computed,
+    #    so it is refused. Not a ruling and not a gap — removing the guard
+    #    would make ``validity._names_an_instant`` report ``END_KNOWN`` for a
+    #    bound whose instant cannot be computed, the exact false PASS #9202
+    #    exists to deny.
     #
     # So, in THREE separate statements — they are different gates, and
     # conflating them is how this comment went wrong before:
     #
     # A. ACCEPTANCE. The INSTANT view takes a whole-value family only when it can
     #    state the instant; the DAY view takes everything whose calendar day is
-    #    readable, by whole-value grammar OR by prefix. Two whole-value families
-    #    are refused by ``calendar_datetime``, and they are NOT the same kind of
-    #    refusal:
+    #    readable, by whole-value grammar OR by prefix. THREE whole-value
+    #    families are refused by ``calendar_datetime``, and they are NOT the same
+    #    kind of refusal:
     #      * an EPOCH SPELLED AS A STRING — refused BY RULING (#9202; the
     #        asymmetry is stated in the module docstring);
     #      * a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY spelling —
@@ -465,15 +475,20 @@ def _string_instant(s: str) -> datetime | None:
     #        all refused here, because ``_string_instant`` has no arm for the
     #        family at all. That is a GAP, not a ruling — tracked as #11708 —
     #        and it is not the hour-24 case above, whose grammar both views
-    #        share.
+    #        share;
+    #      * a STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``,
+    #        ``…+00:99``) — refused by a DELIBERATE GUARD, neither a ruling nor a
+    #        gap: the DAY is stated and dated, the INSTANT cannot be computed,
+    #        and refusing it is what keeps ``END_UNKNOWN`` honest (see item 3
+    #        above).
     #
     # B. ORDERABILITY. A DIFFERENT gate, and it is about ``_created_sort_key``,
-    #    not about acceptance: its gate is a substring test for a ``-``, ``T``
-    #    or ``/`` ANYWHERE in the value. So ``20230520+05:00``, ``20230520Z``
-    #    and ``2026W243+05:00`` never reach it, while the extended ISO-week
-    #    ``2023-W43-2+05:00`` does (its DATE carries ``-``) despite its positive
-    #    offset, and ``2026W243-05:00`` does because its negative offset
-    #    supplies the ``-``. A SEPARATOR asymmetry, not a sign one. Both
+    #    not about acceptance: its gate is ``s[0].isdigit() and len(s) >= 10
+    #    and ("-" in s or "T" in s or "/" in s)``. So ``20230520+05:00``,
+    #    ``20230520Z`` and ``2026W243+05:00`` never reach it, while the extended
+    #    ISO-week ``2023-W43-2+05:00`` does (its DATE carries ``-``) despite its
+    #    positive offset, and ``2026W243-05:00`` does because its negative
+    #    offset supplies the ``-``. A SEPARATOR asymmetry, not a sign one. Both
     #    predate #11646, are untouched here, and are named rather than left to
     #    be rediscovered as violations of this comment.
     if _COMPACT_DATETIME_RE.match(s) is not None:

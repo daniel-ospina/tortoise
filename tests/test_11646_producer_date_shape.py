@@ -679,15 +679,18 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     module docstring) and a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY
     spelling — ``20230520+05:00``, ``20230520-05:00``, ``20230520Z``,
     ``2026W243+05:00`` and ``2023-W43-2+05:00`` are all day-dated and all
-    refused here (the gap named on #11708), and an HOUR-24 spelling
+    refused here (the gap named on #11708), an HOUR-24 spelling
     (``2023-05-20T24:00:00``, which the day view dates by the whole-value
-    grammar and the instant view refuses at ``_match_naive``).
+    grammar and the instant view refuses at ``_match_naive``), and a
+    STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``, refused by the
+    deliberate guard in ``_string_instant``).
 
-    ORDERABILITY is a separate gate (``_created_sort_key``'s substring test for
-    ``-``, ``T`` or ``/``): the extended ``2023-W43-2+05:00`` orders despite its
-    positive offset, ``20230520+05:00`` does not, and ``2026W243-05:00`` does
-    only because its negative offset supplies the ``-``. A description claiming
-    every whole-value shape would invite the widening this module forbids.
+    ORDERABILITY is a separate gate (``_created_sort_key``'s
+    ``s[0].isdigit() and len(s) >= 10 and ("-" in s or "T" in s or "/" in s)``):
+    the extended ``2023-W43-2+05:00`` orders despite its positive offset,
+    ``20230520+05:00`` does not, and ``2026W243-05:00`` does only because its
+    negative offset supplies the ``-``. A description claiming every whole-value
+    shape would invite the widening this module forbids.
 
     ⛔ The last block is the FALSIFIER for the distinction cycle 7 restored: the
     day view dates a value whose TAIL is unreadable, and the instant view must
@@ -699,7 +702,11 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     assert calendar_datetime("20230520T02:21:00Z") is not None
     assert calendar_date("2023-W43-2T11:00:00") == date(2023, 10, 24)
     assert calendar_datetime("2023-W43-2T11:00:00") is not None
-    # a stated-but-impossible offset is still refused, in BOTH views
+    # a stated-but-impossible offset: the DAY is dated, the INSTANT is not. This
+    # is the third divergence class, and it is refused by a DELIBERATE GUARD
+    # (the day is stated; no instant can be computed) — not by the prefix
+    # fallback and not by a gap.
+    assert calendar_date("2023/05/20T02:00:00+25:00") == date(2023, 5, 20)
     assert calendar_datetime("2023/05/20T02:00:00+25:00") is None
     # ⛔ the DAY is known, the INSTANT is not: the day view dates these and the
     # instant view must keep refusing them. Fabricating UTC midnight here would
