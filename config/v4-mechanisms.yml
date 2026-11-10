@@ -1622,10 +1622,12 @@ mechanisms:
       the commit shape will have cleaned it.
       ⚠️ WHAT IS NOT BUILT IN THE PAYLOAD, AND IS NOW BUILT BESIDE IT (the
       PERSISTENCE half, landed by #11239): DM1's home is the claim Point, and the
-      record now reaches it. `hosted_api._execute_commit_writes` passes
-      `mentions=` on both its create legs, and the SDK capture seam carries it on
-      its create branch exactly as it carries `validFrom` — stored, never
-      advertised. ⛔ `mentions` is deliberately NOT in
+      record now reaches it. `hosted_api._execute_commit_writes` sets
+      `point_props["mentions"]` on both of its create legs — ONLY when the
+      payload carries a record, because an explicit `None` would CLEAR the
+      stored one — and forwards it through `**point_props`; the SDK capture seam
+      carries it on its create branch exactly as it carries `validFrom` —
+      stored, never advertised. ⛔ `mentions` is deliberately NOT in
       `sdk._CAPTURE_PASSTHROUGH_ORDER`: that set is the public capture RESPONSE
       surface (#2949 response parity), so widening it would advertise a field no
       client model declares. Neither REST `CreatePointRequest` (hosted or

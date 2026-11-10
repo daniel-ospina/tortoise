@@ -99,8 +99,10 @@ persisted it). The record is built as a payload (`commit_schema.Mention` bounds 
 fields it declares a bound on — `claim_ref` and `rule_id` are cut by the producer,
 not the schema — while the clamp and the dedupe are the producer's —
 `extractor_v2._clamped_mention` / `_dedupe_mentions`) **and it now reaches the
-claim Point**: `hosted_api._execute_commit_writes` passes `mentions=` on both its
-create legs, and the SDK capture seam carries it on its create branch exactly as it
+claim Point**: `hosted_api._execute_commit_writes` sets `point_props["mentions"]`
+on both of its create legs (only when the payload carries a record — an explicit
+`None` would CLEAR the stored one) and forwards it through `**point_props`, and
+the SDK capture seam carries it on its create branch exactly as it
 carries `validFrom` — **stored, never advertised** (it is deliberately NOT in
 `sdk._CAPTURE_PASSTHROUGH_ORDER`, `#2949`'s public response surface). On the node the
 value is ONE compact JSON scalar (`projection.entities.encode_json_record_props`,
