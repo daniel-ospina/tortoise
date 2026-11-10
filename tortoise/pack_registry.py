@@ -2780,8 +2780,8 @@ class PackRegistry:
                     )
                 # Parent shape: PascalCase core entity types / named object
                 # kinds (Subject…Source, Project, WorkItem, Problem) OR a
-                # canonical lowercase object kind from ONTOLOGY §5 (document,
-                # tag, strategy, plan, goal, target — #2727). The PascalCase
+                # canonical lowercase object kind from ONTOLOGY §5 (tag,
+                # strategy, plan, goal, target — #2727). The PascalCase
                 # heuristic predates the commitment-state family and would
                 # reject those valid parents; it is therefore scoped to refs
                 # that are NOT canonical object kinds, so camelCase typos like
@@ -3448,15 +3448,24 @@ class PackRegistry:
         # widening is inert on the `search`/object path, where `core:WorkItem` is
         # the spelling the classifier actually emits.
         #
-        # It is declared HERE, as an equivalence, rather than copied into each
-        # `core:` bucket afterwards, and that is what makes it transitive: the
-        # closure seeds every endpoint named in `equivalences`, then re-adds
+        # Declaring it HERE, as an equivalence, does three things at once: it
+        # makes `core:X` an endpoint (so the endpoint seed below gives it a
+        # bucket), it makes `_equivalence_class` reachable from either spelling
+        # inside both walks (`_parents_of` / `_children_of`), and it makes the
+        # closure GRAIN everything one spelling gains to the other.
+        #
+        # It is declared here rather than copied into each `core:` bucket
+        # afterwards, and that is what makes it transitive: the closure seeds
+        # every endpoint named in `equivalences`, then re-adds
         # `_equivalence_class(member)` for everything a bucket gains, so a bucket
         # reaches the other spelling AND every stored legacy spelling of it
         # (`expand_kind("core:deployment")` carries `dev:deployment`) whatever
-        # order the constants are folded in. A post-closure copy pass used to sit
-        # below the closure claiming to be load-bearing; it appended nothing to
-        # any of the 311 buckets and was deleted (post-merge review of #11667).
+        # order the constants are folded in. So this seed is the ONLY mechanism
+        # that unifies the two spellings — there is no later copy pass, and none
+        # is needed. A post-closure copy pass used to sit below the closure
+        # claiming to be load-bearing; it appended nothing to any of the 311
+        # buckets and was deleted (post-merge review of #11667, landed as
+        # #11680).
         for kind in CORE_ALIASED_KINDS:
             _equivalent(kind, f"core:{kind}")
 
