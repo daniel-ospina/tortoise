@@ -58,6 +58,53 @@ GATING_WORKFLOW = REPO / ".github" / "workflows" / "python-ci.yml"
 RESOLVER_FLAG = "--non-gating-subtree-files"
 
 
+def _logical_commands(body: str) -> list[str]:
+    """A step body's shell commands: comments dropped, `\\`-continuations joined.
+
+    Needed because "the body mentions this" is not "the body RUNS this": the
+    resolve step's own comments mention `pytest` while the run step is the one
+    that must consume the list (measured — with the run step hardcoded, a
+    body-level arm stayed green because those comments were in a different
+    step). Joining continuations keeps a wrapped command a single command, so a
+    rewrap cannot turn a correct workflow red.
+    """
+    logical: list[str] = []
+    buf = ""
+    for raw in body.splitlines():
+        line = raw.strip()
+        if not line or line.startswith("#"):
+            continue
+        if line.endswith("\\"):
+            buf += line[:-1] + " "
+            continue
+        logical.append(buf + line)
+        buf = ""
+    if buf:
+        logical.append(buf)
+    return logical
+
+
+def _workflow_run_bodies(path: Path) -> list[str]:
+    """Every `run:` body in a workflow, PARSED — never substring-scanned.
+
+    A substring arm over a whole workflow file is how a guard silently stops
+    guarding: the token it searches for also appears in comments (measured — the
+    report flag occurs 2,000 lines below its step, and the selector name occurs
+    in four comments of `evals-on-demand.yml`), so the arm stays green with the
+    step deleted. Trying to fix that by scanning `run:` LINES is the mirror
+    failure: the canonical `run: |` block and a wrapped command both red a
+    command that is present and correct (measured, four ways).
+
+    Parsing keys the arm on the command itself, so a step rename, a rewrap or a
+    comment that happens to quote the command changes nothing.
+    """
+    doc = yaml.safe_load(path.read_text())
+    return [
+        step["run"] for job in (doc.get("jobs") or {}).values()
+        for step in (job.get("steps") or []) if step.get("run")
+    ]
+
+
 def _resolver_output() -> list[str]:
     """RUN the resolver — the same command the workflow's step runs.
 
@@ -546,29 +593,29 @@ def test_the_eval_workflow_is_manual_and_reachable_by_every_subtree_file():
         "entries — the lane and the runner have drifted: "
         f"resolved-only={sorted(set(resolved) - set(expected))[:5]} "
         f"disk-only={sorted(set(expected) - set(resolved))[:5]}")
-    # ... and the workflow's step must invoke THAT verb, not merely mention it.
-    # Bounded to the resolve STEP (up to the next `- name:`), because an
-    # unbounded tail makes the arm below true for any file that mentions the
-    # path anywhere afterwards.
-    step = text.split("Resolve the non-gating", 1)[-1]
-    step = step.split("- name:", 1)[0]
-    assert f"tools/ci_selection.py {RESOLVER_FLAG}" in step, (
-        "the workflow's resolve step must RUN `tools/ci_selection.py "
+    # ... and the workflow's resolve step must invoke THAT verb, not merely
+    # mention it. Parsed steps, keyed on the command — a step rename or a rewrap
+    # must not red a workflow that is correct, and a comment quoting the argv
+    # must not satisfy the arm.
+    bodies = _workflow_run_bodies(EVAL_WORKFLOW)
+    resolve_bodies = [b for b in bodies if f"ci_selection.py {RESOLVER_FLAG}" in b]
+    assert resolve_bodies, (
+        "the workflow must RUN `tools/ci_selection.py "
         f"{RESOLVER_FLAG}` — the argv verified above")
-    assert "> /tmp/lane.txt" in step, (
+    assert any("> /tmp/lane.txt" in b for b in resolve_bodies), (
         "the resolve step must capture the resolver's stdout to the file the run "
         "step reads")
-    # …and the RUN step must actually consume it: a resolve step whose output
-    # nobody reads resolves nothing. The consumed form is a redirect on the
-    # pytest invocation itself (`$(tr '\n' ' ' < /tmp/lane.txt)`), so require the
-    # file as an input to a pytest command line, not as a bare mention.
-    assert any(
-        "pytest" in line and "< /tmp/lane.txt" in line
-        for line in text.splitlines()), (
+    # …and the RUN step must consume it: a resolve step whose output nobody reads
+    # resolves nothing. Both tokens in the same step BODY, so a wrapped command
+    # still passes and a file-level comment cannot satisfy it.
+    consumers = [
+        cmd for b in bodies for cmd in _logical_commands(b)
+        if "pytest" in cmd and "< /tmp/lane.txt" in cmd]
+    assert consumers, (
         "the run step must pass the RESOLVED list to pytest (`< /tmp/lane.txt`) — "
-        "otherwise the resolve step's output is read by nobody and the lane runs "
-        "whatever it hardcodes, which is the 'off the gate AND runs nowhere' "
-        "failure this file exists to prevent")
+        "otherwise the resolver's list is bypassed and the lane runs whatever "
+        "the workflow hardcodes, which is the exclusion silently ceasing to "
+        "exclude")
 
 
 def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
@@ -600,13 +647,20 @@ def test_the_embedded_runner_keeps_the_literal_inside_the_subtree():
         "landed and 27 when measured at #11675) and the drift is unobservable.")
     # And the workflow must READ that function, not re-inline the subtraction.
     # The bare NAME occurs in four comments in that file, so a name-substring is
-    # true with the call deleted — pin the CALL instead, which occurs once.
-    text = EMBEDDED_WORKFLOW.read_text()
-    assert "on_demand_literal_runner_files(load_manifest())" in text, (
+    # true with the call deleted — pin the CALL in a parsed step body, tolerating
+    # a hoisted manifest (the argument is a local, not a shape we care about).
+    bodies = _workflow_run_bodies(EMBEDDED_WORKFLOW)
+    calls = [
+        line for body in bodies for line in body.splitlines()
+        if "on_demand_literal_runner_files(" in line]
+    assert calls, (
         "evals-on-demand.yml must resolve its lane through the pinned selector "
         "function rather than re-deriving the subtraction in a heredoc")
-    assert "on_demand_files(load_manifest())" not in text, (
-        "the wholesale subtraction is the bug this test pins")
+    reinline = [
+        line for body in bodies for line in body.splitlines()
+        if "on_demand_files(" in line]
+    assert not reinline, (
+        f"the wholesale subtraction is the bug this test pins: {reinline[:3]}")
 
 
 def test_the_gating_workflow_still_logs_what_it_does_not_run():
@@ -617,19 +671,18 @@ def test_the_gating_workflow_still_logs_what_it_does_not_run():
     report step exists in the gating workflow and RUNS the selector (not a
     hand-copied table).
     """
-    text = GATING_WORKFLOW.read_text()
-    # The flag also appears in a comment ~2,000 lines below, so a whole-file
-    # substring would pass with the step deleted. Pin the `run:` line instead.
-    report_runs = [
-        line.strip() for line in text.splitlines()
-        if line.strip().startswith("run:") and "--non-gating-report" in line
-    ]
-    assert report_runs, (
+    # Parsed step bodies, not a line scan: the flag also appears in a comment
+    # ~2,000 lines below (so a whole-file substring passes with the step
+    # deleted), and a `run: |` block would red a command that is present.
+    report_cmds = [
+        cmd for b in _workflow_run_bodies(GATING_WORKFLOW)
+        for cmd in _logical_commands(b) if "--non-gating-report" in cmd]
+    assert report_cmds, (
         "the gating run must log the non-gating lane and the shard → file-count "
         "map, so the non-gating files are visible rather than inferred")
-    assert any("tools/ci_selection.py" in line for line in report_runs), (
+    assert all("tools/ci_selection.py" in cmd for cmd in report_cmds), (
         "the report must come from the selector, never a hand-copied table: "
-        f"run line(s) = {report_runs}")
+        f"command(s) = {report_cmds}")
     report = cs.non_gating_report(_manifest())
     assert "eval/**" in report and "longmem_eval/**" in report
     assert "test (i)" in report, "the report must list every gating fast shard"
