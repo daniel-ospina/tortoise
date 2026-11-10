@@ -627,10 +627,18 @@ class TestResolutionNarrative:
         # ... and the constant states what the region actually carries: the
         # marker is inside the budget, not stacked on top of it (measured at
         # 4023 when the marker was added after cap//2 + cap//2).
-        assert len(v2._bounded_narrative(story)[0]) <= (
-            v2._RESOLUTION_NARRATIVE_MAX_CHARS)
-        assert len(v2._bounded_narrative("x" * 10_000_000)[0]) <= (
-            v2._RESOLUTION_NARRATIVE_MAX_CHARS)
+        #
+        # UNPACK, never index: on a bare-`str` return `body[0]` is the FIRST
+        # CHARACTER, so an indexed assertion is `1 <= 4000` and passes on
+        # exactly the over-counting shape these lines exist to pin, while an
+        # unpack raises TypeError there. Review round 3 measured the indexed
+        # form passing at 73518ae116 with the real body at 4023.
+        body, truncated = v2._bounded_narrative(story)
+        assert truncated is True, "an 8000-char story must report truncation"
+        assert len(body) <= v2._RESOLUTION_NARRATIVE_MAX_CHARS
+        long_body, long_truncated = v2._bounded_narrative("x" * 10_000_000)
+        assert long_truncated is True
+        assert len(long_body) <= v2._RESOLUTION_NARRATIVE_MAX_CHARS
 
     def test_a_session_cannot_claim_a_truncation_that_did_not_happen(self):
         """Review round 2: the elision marker is a CONSTANT inside the
@@ -661,11 +669,16 @@ class TestResolutionNarrative:
         assert not closing.startswith(forged), (
             "a forged marker in the retained tail must not close the region")
         assert "ZZMIDDLE" not in prompt, "the middle is still elided"
-        # bound = the narrative cap + the fixed overhead (envelope clause +
-        # begin/end markers + the identity rule + the candidate table) — O(1)
-        # in the story's length, which is the property under test.
-        assert len(prompt) < (v2._RESOLUTION_NARRATIVE_MAX_CHARS
-                              + 1500), "prompt stays O(1) in story length"
+        # O(1) in the story's length is the property. Measure it by DOUBLING
+        # the story: the rendered body must not grow at all. Asserting on the
+        # whole prompt with a 1500-char allowance (review round 3) measured
+        # nothing — it passed on the 4023-char over-count AND sat 74 characters
+        # from reddening on an unrelated wording change.
+        doubled, _ = v2._bounded_narrative(story * 2)
+        single, _ = v2._bounded_narrative(story)
+        assert len(doubled) == len(single), (
+            "the rendered body must not grow when the story doubles")
+        assert len(doubled) <= v2._RESOLUTION_NARRATIVE_MAX_CHARS
 
     # ── the resolver: both directions ─────────────────────────────────
 
