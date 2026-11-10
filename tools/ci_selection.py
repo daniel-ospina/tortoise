@@ -1521,16 +1521,20 @@ SOURCE_PATTERNS = {
 # one regex — has no room to carry.
 # ⛔ THE SHARED `supabase/migrations/2026101200000` PREFIX ENTRY IS **NOT** REDUNDANT,
 # and it sits inside that enumeration, so the paragraph above must not be read as
-# covering it (measured, #11728 review P2). The prefix is a DIRECTORY PREFIX, so
-# it also claims `20261012000006_recover_team_key_expiry.sql` — which is NOT a
-# member of this family (`is_record_migration_path()` is False for it, and it is
-# not in `RECORD_MIGRATIONS`). That entry is that file's ONLY claim: with it
-# removed, `select([…/20261012000006_recover_team_key_expiry.sql])` goes from
-# `surfaces: ['core']` (n=801) to `surfaces: []` (n=84), i.e. the #1349/#3332/#3616
-# silent-drop class — and nothing reds, because the completeness pin below covers
-# only `*_record_*.sql`. `tests/test_ci_selection.py::
-# test_every_record_migration_selects_core_and_its_readers` pins that file's claim
-# explicitly for this reason.
+# covering it (#11728 review P2). The prefix is a DIRECTORY PREFIX, so it also
+# claims `20261012000006_recover_team_key_expiry.sql` — which is NOT a member of
+# this family (`is_record_migration_path()` is False for it, and it is not in
+# `RECORD_MIGRATIONS`). That entry is that file's ONLY claim: with it removed,
+# `select([…/20261012000006_recover_team_key_expiry.sql])` drops from
+# `surfaces: ['core']` to `surfaces: []` — the #1349/#3332/#3616 silent-drop class.
+# At that time nothing redded, because the completeness pin covered only
+# `*_record_*.sql`; so the pin now ALSO asserts this file's claim — the arm at the
+# end of `tests/test_ci_selection.py::
+# test_every_record_migration_selects_core_and_its_readers`, which reds on exactly
+# this deletion. Both `surfaces` values are the claim, deliberately not quoted as
+# `n=` counts: this block's own rule is that a count here is a dated anchor, and
+# the tier-1 size behind `surfaces: []` moves with ANY new tier-1 test. Re-derive
+# either in one `select()` call.
 RECORD_MIGRATION_DIR = "supabase/migrations/"
 # Deliberately the family the wheel SHIPS and the record reader PARSES. Three facts,
 # stated exactly because two earlier versions of this comment got them wrong:
