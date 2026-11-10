@@ -1,0 +1,48 @@
+admin-merge: repo daniel-ospina/tortoise (resolved from checkout origin (/home/cmux/tortoise/.worktrees/prd-11722)) — checkout daniel-ospina/tortoise
+admin-merge: PR #11722 head c19a261bba3a8a470664f9f8eeb19ef361eeb781
+admin-merge: · the head's unfinished set is NOT only the rail's own body-edit run generation — 1 run(s) belong to the lane's own CI; §1b's lane-terminal precondition decides (unchanged).
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (63s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (185s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (427s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (730s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1031s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1333s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1636s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (1938s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: the head's run list could not be read (2244s of the 3900s window) — waiting. unreachable is not empty.
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (2546s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (2848s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (3150s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (3451s of the 18064s ceiling; stall bound 8760s) — waiting. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: … FIRST-CHECKS wait: 1 run(s) still queued/in progress, no change observed yet (3753s of the 18064s ceiling; stall bound 8760s) — the bound is now spent, so this is the CLOSING observation. first observation: run 42778585815: 4 job(s): 2 completed, 2 not — changes queued step 0/0; surface-guard queued step 0/0
+admin-merge: ✗ BLOCK — REFUSED(check-unresolved) after 3753s
+   (bound ADMIN_MERGE_CHECK_UNRESOLVED_BOUND=3600s) — a check on
+   head c19a261bba3a8a470664f9f8eeb19ef361eeb781 still has NO CONCLUSION, and an unresolved check is not a pass.
+   REFUSED(check-unresolved:test (e):in_progress/-)
+   REFUSED(check-unresolved:test (f):in_progress/-)
+   REFUSED(check-unresolved:test (g):queued/-)
+   REFUSED(check-unresolved:test (h):queued/-)
+   REFUSED(check-unresolved:test (i):queued/-)
+   REFUSED(check-unresolved:test (j):queued/-)
+   REFUSED(check-unresolved:test (k):queued/-)
+   last observed: run 42778585815 status=queued conclusion=- created=2026-11-10T07:54:29Z
+   what was missing: this is NOT a stall and NOT a slow run. A stall means nothing moved;
+   here the run KEEPS moving (job transitions advance the fingerprint, so no progress clock
+   can ever fire) while ONE check never produces a conclusion — typically a required
+   aggregator whose own jobs are queued behind a saturated runner pool and so cannot start.
+   Next: read the run named above; if a job is queued with no runner, free capacity or
+   re-run it. Nothing was compared, no evidence was posted and nothing was merged.
+admin-merge: ✗ BLOCK — precondition unmet: run still in_progress — no classification attempted.
+   The test lane has NOT finished for head c19a261bba3a8a470664f9f8eeb19ef361eeb781:
+   1 run(s) still queued/in progress (lane: python-ci.yml).
+   This is the FIRST-CHECKS precondition, which gates BEFORE any comparison;
+   the FIRST-CHECKS wait is closed (see above) and it says WHICH way it closed:
+   a STALL (nothing moved), a CEILING (still moving, out of room), or the legacy
+   window (no run appeared, or the surface could not be read).
+   Next: re-run the rail once those runs complete, or raise
+   ADMIN_MERGE_FIRST_CHECKS_CEILING (currently 18064s) for a run that
+   is still progressing, or ADMIN_MERGE_FIRST_CHECKS_STALL (currently 8760s)
+   for one that is not. ADMIN_MERGE_FIRST_CHECKS_WAIT (currently 3900s) bounds
+   only the states with no progress to observe: no run yet, or an unreadable surface.
+   Nothing was compared, no evidence was posted and nothing was merged.
