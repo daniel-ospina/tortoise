@@ -1217,16 +1217,24 @@ def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> 
     text = SCRIPT.read_text()
     body = _function_body(text, "cmd_alive")
     assert body, "`.github/scripts/preview-server.sh` has no `cmd_alive` function"
-    assert "pid_running" in body, (
-        "`alive` no longer uses the zombie-aware predicate `record`/`stop` use, so an "
-        "unreaped preview reads as a surviving one:\n" + body
+    # ⛔ EXECUTABLE lines only for the POSITIVE pins: the function's own prose names
+    # `pid_running` and the boot witness, so a comment satisfied a body-substring
+    # assertion and a mutant that DELETED the liveness block passed the whole file
+    # (measured: `# Zombies answer kill(0) forever: liveness is `pid_running`…`
+    # alone kept this arm green, while the helper returned ALIVE-and-SERVING for a
+    # process that had already exited). `code_only` is built here, before the
+    # assertions, not after them for the negative arms.
+    code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
+    assert "pid_running" in code_only, (
+        "`alive` no longer CALLS the zombie-aware predicate `record`/`stop` use, so an "
+        "unreaped preview reads as a surviving one (naming it in a comment is not "
+        "calling it):\n" + body
     )
-    assert "pid_identity" in body, (
+    assert "pid_identity" in code_only, (
         "`alive` no longer takes its identity from the shared predicate `record` and "
         "`ready` use, so one question has two answers again (the drift that made it "
         "print a comparison it never ran):\n" + body
     )
-    code_only = "\n".join(_cut_comment(line) for line in body.splitlines())
     assert not re.search(r"\bpid_starttime\b", code_only), (
         "`alive` re-derives the start-time comparison instead of reading the shared "
         "predicate's answer, so a witness it could not READ can be reported as a "
@@ -1236,7 +1244,7 @@ def test_alive_takes_its_liveness_and_identity_from_the_guarded_predicates() -> 
         "`alive` decides liveness with a bare `kill -0`, which a zombie answers "
         "forever:\n" + body
     )
-    assert "booted" in body, (
+    assert "booted" in code_only, (
         "`alive` cannot tell a preview that was recorded and then STOPPED from one "
         "that never started (that is what `record`'s boot witness is for):\n" + body
     )

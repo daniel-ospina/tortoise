@@ -489,7 +489,17 @@ cmd_alive() {
     printf '%s\n' "${PROG}: ${name}: PID FILE UNREADABLE — ${pfile} is present but no pid could be read from it (unreadable, empty, or not numeric), so this dump took NO verdict: the process may be alive or dead. Read the log and the boot step; do NOT read this as GONE."
     return 12
   fi
+  # ⛔ ABSENT and UNREADABLE are different causes, and `cat … || true` collapses
+  # them. A witness file that EXISTS and cannot be read sends the reader to a
+  # permission/directory problem; only a missing one means `record` never wrote a
+  # witness. The pid file above earned its own code (12) for the same reason; this
+  # read cannot afford a code (the liveness leg still stands), but it must not
+  # assert an absence it did not observe.
   recorded="$(cat "$dir/${name}.start" 2>/dev/null || true)"
+  local witness_missing=""
+  if [[ -z "$recorded" && -f "$dir/${name}.start" ]]; then
+    witness_missing=".start"
+  fi
 
   # Zombies answer kill(0) forever: liveness is `pid_running`, never bare kill -0.
   if ! pid_running "$pid"; then
@@ -508,7 +518,9 @@ cmd_alive() {
   # re-read says so instead of asserting a match nobody performed — the same class
   # of defect as the bare `kill -0` this verb replaced (#11675 review, finding 1).
   local identity ident=0
-  if [[ -z "$recorded" ]]; then
+  if [[ -n "$witness_missing" ]]; then
+    identity="a start-time witness EXISTS (${name}.start) but could NOT be read, so its IDENTITY was NOT checked"
+  elif [[ -z "$recorded" ]]; then
     identity="no start-time witness was recorded, so its IDENTITY was NOT checked"
   else
     pid_identity "$pid" "$recorded" || ident=$?
@@ -527,7 +539,15 @@ cmd_alive() {
   fi
 
   if [[ -z "$port" ]]; then
-    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but no port was recorded for this name, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
+    # Same rule as the two verdicts below: `0`/`7` re-word when the identity leg
+    # was not taken, and this branch may not say "our recorded process" in the same
+    # clause that says the identity was never checked (measured: both variants of
+    # `identity` printed the claim side by side with its own denial).
+    if [[ -n "$recorded" && "$ident" -eq 0 ]]; then
+      printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE — our recorded process: not a zombie, and ${identity} — but no port was recorded for this name, so whether it was still SERVING was NOT checked. This is NOT an alive-and-serving verdict; the log is the next read."
+      return 9
+    fi
+    printf '%s\n' "${PROG}: ${name}: pid ${pid} is ALIVE (not a zombie, and ${identity}) — but no port was recorded for this name, so whether it was still SERVING was NOT checked, and 'it is still OUR process' is NOT established by this probe. This is NOT an alive-and-serving verdict; the log is the next read."
     return 9
   fi
 
