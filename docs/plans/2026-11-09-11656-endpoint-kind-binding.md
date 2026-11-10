@@ -35,7 +35,11 @@ edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 ca
 > 34 `IMPL` + 1 `NAND`, 28 Object→Object (33 direct-shape), 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
-> they were measured on. Reproduce with the one-liner in the research brief §2.1. Code citations below are **symbol-keyed** (`path.py::symbol`), never by line
+> they were measured on. Every figure is re-derived on every run by
+> `tests/test_11656_endpoint_kind_binding_scope.py` (`TestTheInventoryTheScopeCites`), which reads
+> `packs/*/manifest.yaml` directly — that pin, not a one-liner in a neighbouring doc, is the reproduction
+> route. Code citations below are **symbol-keyed** (`path.py::symbol`) and manifest citations by YAML key
+> path (`packs/*/manifest.yaml::key.path`), never by line
 > number, per this repo's recorded rule (`docs/architecture/S2-DECISION-SEAM.md`: *"assertions by NAME —
 > never by line number"*) — a line number rots on the next `main` merge, which is how 24 of them went
 > stale in an earlier revision of this document.
@@ -345,11 +349,11 @@ undeclared.
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
 ⚠️ **This table is the pin set #11656's GATE lands with — it is not the count of the file that ships in THIS PR.**
-This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **24 test functions / 26 collected**
+This PR lands `tests/test_11656_endpoint_kind_binding_scope.py`, which holds **25 test functions / 27 collected**
 (one is parametrised over the two docs). The two populations are deliberately different: the file pins the
 **scoping facts this document rests on** — the inventory (§2.1), the three doors (§1.1), the two replay folds
 (§1.2 item 6), the four readers (§5.5), and the two docs' registration/resolution — while the 19 rows above
-(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔24 difference is the
+(`1…15`, `15b`, `16–18`) are the pins the *implementation* must satisfy. The 19↔25 difference is the
 reader-and-doc pins the review cycles added. A body or summary that reported "18 pins" was reporting this
 table's row count against that file, and was stale on both.
 

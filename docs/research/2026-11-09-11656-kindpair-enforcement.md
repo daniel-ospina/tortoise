@@ -24,12 +24,18 @@ The issue's O/I/T is sound as a *goal statement*. Its **prescribed location is w
 records what was measured, what the field does, what already exists in the repo, and the four decisions
 that must be settled before a scope can converge.
 
-> **Citations are by SYMBOL, not by line number** (`path.py::symbol`), per this repo's recorded rule
-> (`docs/architecture/S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*). The COUNTS
-> below were first measured at `e809803e` and re-measured at the merge head — and they are re-derived on
-> every run by `tests/test_11656_endpoint_kind_binding_scope.py`, so no sha has to be carried here. See the
-> scope's §1 note for the count revision `main`'s pack edits forced. A line number
-> would rot on the next `main` merge, which is why none is carried here.
+> **Citations are by SYMBOL, not by line number** — `path.py::symbol` for code, and a YAML **key path**
+> (`packs/product-strategy/manifest.yaml::ontology.subclassOf.requirement`) for a manifest — per this repo's
+> recorded rule (`docs/architecture/S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*).
+> The COUNTS below were first measured at `e809803e` and re-measured at the merge head — and they are
+> re-derived on every run by `tests/test_11656_endpoint_kind_binding_scope.py`, so no sha has to be carried
+> here. See the scope's §1 note for the count revision `main`'s pack edits forced. A line number would rot on
+> the next `main` merge, which is why none is carried here — and that is now **enforced, not asserted**:
+> `test_neither_doc_cites_a_line_keyed_reference` scans both documents for a `.<ext>:<line>` suffix on `.py`,
+> `.yaml`/`.yml`, `.md` and `.json` (the first revision of that ban matched `.py` only, so this paragraph was
+> false while two manifest line numbers sat below it — review F2 at `09f20512`), and
+> `test_every_cited_yaml_locator_resolves` resolves every manifest key path cited here against the manifest
+> itself.
 
 ---
 
@@ -272,8 +278,9 @@ reaches grandchildren (`Object` carries `dev:epic` *through* `Project` — a COR
 ⚠️ **Correction (revision 4):** this example used to name `dev:requirement`, reached downward from `WorkItem`,
 and was wrong twice over (review P3-1, PR #11671). `dev:requirement` is a **read-only legacy spelling** of
 `product-strategy:requirement` (`pack_registry.LEGACY_KIND_ALIASES`), not a declared kind — it surfaces inside
-an expansion while never being one, and `dev` says so itself (`packs/dev/manifest.yaml:33-35`). And the row
-that exists, `requirement: WorkItem` (`packs/product-strategy/manifest.yaml:21`), is a **direct child** of
+an expansion while never being one, and `dev` says so itself — its `ontology.pointKinds` lists only
+`technicalDebt` and `risk` (`packs/dev/manifest.yaml::ontology.pointKinds`). And the row
+that exists, `requirement: WorkItem` (`packs/product-strategy/manifest.yaml::ontology.subclassOf.requirement`), is a **direct child** of
 `WorkItem`, not a grandchild either way. Both halves are pinned, so the example cannot rot back:
 `test_every_carries_example_resolves_to_a_declared_kind` and
 `test_the_downward_example_is_a_pack_kind_two_levels_below_a_core_kind` in

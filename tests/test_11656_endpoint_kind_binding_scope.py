@@ -30,13 +30,17 @@ have shipped because nothing reads prose:
     named `04-plan.md`), so the reference did not resolve from the citing document. ⛔ No hard count is
     carried here on purpose: the count rotted the moment this PR stopped adding an eighth `04-plan.md`,
     and the assertion's own message derives it.
-  * the two docs carried **line-keyed `.py:<line>` citations**, and the branch's own final `main` merge moved
-    every one of them into unrelated code (`sdk.py` +44…+62, `projection/__init__.py` +128) while both docs
-    asserted the numbers were verified at the merge head. They are now **symbol-keyed** (`path.py::symbol`),
-    per this repo's recorded rule (`S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*), and
-    the ban below is what keeps a later edit from reintroducing the class. ⛔ Same reasoning as above: no
-    count is written into an assertion, but this header says 44 in the scope and 36 in the brief at the
-    pre-fix head, because that is the size of the defect the ban covers.
+  * the two docs carried **line-keyed citations**, and the branch's own final `main` merge moved every one of
+    the `.py:<line>` ones into unrelated code (`sdk.py` +44…+62, `projection/__init__.py` +128) while both docs
+    asserted the numbers were verified at the merge head. They are now **symbol-keyed** (`path.py::symbol`;
+    a manifest by YAML key path, `packs/*/manifest.yaml::key.path`), per this repo's recorded rule
+    (`S2-DECISION-SEAM.md`: *"assertions by NAME — never by line number"*), and the ban below is what keeps a
+    later edit from reintroducing the class. ⛔ The ban's first revision matched **`.py` only**, so it was
+    green over two `packs/*/manifest.yaml:<line>` citations the brief still carried while its header said
+    none was carried (review F2 at `09f20512`); it now covers `.py`, `.yaml`/`.yml`, `.md` and `.json`, and
+    `test_every_cited_yaml_locator_resolves` holds the replacement locator form to a real key. ⛔ Same
+    reasoning as above: no count is written into an assertion, but this header says 44 in the scope and 36 in
+    the brief at the pre-fix head, because that is the size of the defect the ban covers.
 """
 from __future__ import annotations
 
@@ -750,9 +754,43 @@ class TestTheDocsAreDiscoverableAndResolve:
             f"file itself ({functions} / {collected}) — F2 named both sites, so both are held here"
         )
 
+    def test_every_cited_yaml_locator_resolves(self):
+        """A manifest citation is a YAML **key path**, and it is resolved against the manifest itself.
+
+        The brief carried two manifest citations as line ranges (`packs/dev/manifest.yaml:33-35`,
+        `packs/product-strategy/manifest.yaml:21`) while its own header asserted no line number was carried,
+        and the ban below could not see either one because it matched `.py` only (review F2 at `09f20512`).
+        A pack edit inserted above the cited line re-stales the claim silently and green — the exact rot this
+        PR removed for python citations — so both citations now name a key path, and this row walks the
+        loaded manifest to that key: a moved or renamed key reds here instead of leaving a reader with a
+        pointer into a different declaration.
+        """
+        citations = []
+        for doc in (SCOPE_DOC, BRIEF_DOC):
+            for rel, keypath in re.findall(
+                r"`(packs/[A-Za-z0-9_./-]+\.ya?ml)::([A-Za-z0-9_.\-\[\]]+)`", doc.read_text()
+            ):
+                citations.append((doc, rel, keypath))
+        assert citations, (
+            "neither doc cites a manifest by key path (`packs/…/manifest.yaml::key.path`) — either the "
+            "scanner is broken or the manifest citations were deleted rather than re-keyed"
+        )
+        for doc, rel, keypath in citations:
+            manifest = REPO_ROOT / rel
+            assert manifest.exists(), f"{doc.name} cites `{rel}`, which does not resolve"
+            node = yaml.safe_load(manifest.read_text())
+            walked = ""
+            for part in keypath.split("."):
+                walked = f"{walked}.{part}" if walked else part
+                assert isinstance(node, dict) and part in node, (
+                    f"{doc.name} cites `{rel}::{keypath}` but `{walked}` is not a key in that manifest — a "
+                    "key path that names nothing sends the reader to a different declaration"
+                )
+                node = node[part]
+
     @pytest.mark.parametrize("doc", [SCOPE_DOC, BRIEF_DOC], ids=["scope", "brief"])
-    def test_neither_doc_cites_a_python_line_number(self, doc):
-        """A `file.py:<line>` citation is not a citation — it rots on the next `main` merge.
+    def test_neither_doc_cites_a_line_keyed_reference(self, doc):
+        """A `file:<line>` citation is not a citation — it rots on the next `main` merge.
 
         Measured, not assumed: this branch's own final `main` merge (`59e27baa`) shifted `sdk.py` by +44 in
         the bulk and by +56/+62 around `_resolve_traversal_path`, and `projection/__init__.py` by +128 — so a
@@ -765,13 +803,20 @@ class TestTheDocsAreDiscoverableAndResolve:
         number"*), and nothing read these two docs' numbers, so the rot was silent. Fixing one number would
         re-rot on the next merge; this ban removes the class. The count is DERIVED for the message, never
         hard-coded in the assertion — a hard number here is the same rot in a new costume.
+
+        ⛔ The ban's first revision matched `.py` only, and the brief was green under it while carrying two
+        `packs/*/manifest.yaml:<line>` citations *and* a header claiming none was carried (review F2 at
+        `09f20512`). A manifest or `.md` line number rots identically, so the class is closed for every file
+        type these docs cite; the replacement locator form is held by
+        `test_every_cited_yaml_locator_resolves` above.
         """
         text = doc.read_text()
-        offenders = re.findall(r"[A-Za-z_/]+\.py:[0-9]+(?:-[0-9]+)?", text)
+        offenders = re.findall(r"[A-Za-z0-9_./-]+\.(?:py|ya?ml|md|json):[0-9]+(?:-[0-9]+)?", text)
         assert not offenders, (
-            f"{doc.name} carries {len(offenders)} line-keyed `.py:<line>` citation(s) "
-            f"({sorted(set(offenders))}). Cite the SYMBOL instead (`path.py::symbol`): a line number rots on "
-            "the next `main` merge and sends the reader to unrelated code."
+            f"{doc.name} carries {len(offenders)} line-keyed citation(s) "
+            f"({sorted(set(offenders))}). Cite the SYMBOL instead (`path.py::symbol`; a manifest by YAML key "
+            "path, `packs/*/manifest.yaml::key.path`): a line number rots on the next `main` merge and sends "
+            "the reader to unrelated code."
         )
         # The ban must not be vacuous in the other direction either: the doc DOES cite python files, by symbol.
         symbols = re.findall(r"`[A-Za-z_/]+\.py::[A-Za-z_.]+", text)
