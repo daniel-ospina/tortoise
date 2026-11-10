@@ -355,7 +355,7 @@ one that pins the wiring.
 
 ⛔ **And PRESENT is not RAN.** `extract_session_v2` emits both keys UNCONDITIONALLY — on the
 flag-OFF arm and on its early-return path the block is `{"enabled": False, "s2": {}, "union":
-{}}` (`extractor_v2.py:13672-13676` — the classify block starts at `:13672`, the vet surface at `:13676` — and `:14457-14343`, the two result blocks). An acceptance test of "a non-empty dict"
+{}}` (`extractor_v2.py:13672-13676` — the classify block starts at `:13672`, the vet surface at `:13676` — and `:14457-14471`, the two result blocks). An acceptance test of "a non-empty dict"
 therefore takes an OFF block as the witness for *the pass ran* and prints `step S2.2 WITNESSED …
 enabled=false, s2={}`: the moment `#9116` copies the sibling key — exactly what this bundle
 instructs — both steps would be WITNESSED on **every** run, including one measured with the
