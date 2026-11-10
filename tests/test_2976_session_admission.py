@@ -485,9 +485,10 @@ def test_tr_complete_sessions_splices_a_padded_session_id_11382(monkeypatch):
     ``retrieval.session_key_of`` (the #10540 change), so it inherits the
     normalisation — but only because the pool key is normalised. The fixture
     below keeps the POOL side REAL (``_hit`` stamps a padded SNAKE
-    ``session_id``, ``"  sid-a  "``) and stubs the GRAPH side to the
-    NORMALISED value (``seeded_sessions`` returns ``"sid-a"``, and
-    ``by_session`` is keyed ``"sid-a"``), which is exactly the shape the fix
+    ``session_id``, ``"  sid-a  "``) and stubs the SEED and GROUP keys to the
+    NORMALISED value (``seeded_sessions`` returns ``"sid-a"``, and the
+    fetched ``by_session`` is keyed ``"sid-a"``), which is exactly the shape
+    the fix
     exists for: before it the two sides were produced independently, so the
     RAW pool key could never equal the normalised group key — one session,
     two keys — and the group was fetched, charged against the total budget

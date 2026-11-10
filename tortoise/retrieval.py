@@ -848,8 +848,13 @@ def session_key_of(hit: dict) -> str:
     pre-fix → post-fix is inside these three classes, and ⚠️ no COUNT is
     published on purpose — a count is a property of the probe's shape list,
     not of the rule (different natural shape lists give different totals), so
-    the claim worth making is the classes, and each is pinned behaviourally by
-    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``:
+    the claim worth making is the classes, and each is pinned behaviourally —
+    the padded and whitespace-only classes by
+    ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``, and
+    the non-``str`` class by ``test_wire_identity_never_moves_an_existing_key``
+    (id-bearing: ``idx:point:p``) together with
+    ``test_a_non_str_session_identity_is_discarded_not_keyed_11382`` (no id:
+    ``idx:-1``). The shapes are:
     ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id
     — #9599's shape — whose key moves because it is the defect: it could only
     ever half-match the graph's raw group key); ``session_id=5`` ⇒ ``5`` →
