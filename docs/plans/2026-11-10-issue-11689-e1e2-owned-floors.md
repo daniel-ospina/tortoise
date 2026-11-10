@@ -306,7 +306,7 @@ a grandfathered log after the thresholds were written and the add-commit cannot 
 
 Measured, not argued — the re-take made the required check fail:
 
-```
+```text
 $ python3 tools/capstone_preregistration_check.py --dir docs/evidence/7949-capstone \
       --no-corpus --base-ref origin/main
 FAIL — 1 problem(s):
