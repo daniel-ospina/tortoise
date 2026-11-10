@@ -1296,8 +1296,9 @@ def assess(
     #   test that pins this residual. Keep the pin; this check does not replace it.
     #
     # What this DOES catch is a claim above every node the graph holds. ⛔ Read that
-    # NARROWLY in BOTH directions, because earlier versions of this paragraph overstated
-    # the reach in both of them:
+    # NARROWLY in BOTH directions, because earlier versions of this paragraph were wrong
+    # about the reach in OPPOSITE directions — first as unreachable on a quiescent graph,
+    # then as triggered by a large multiplication:
     #
     # - It is NOT a detector for a misplaced PREDICATE: a widened predicate yields a
     #   subgraph count, which cannot exceed `MATCH (n) RETURN count(n)`, so the claim

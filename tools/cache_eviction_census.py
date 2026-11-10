@@ -274,8 +274,11 @@ def main(argv: list[str] | None = None) -> int:
                 f"`tortoise/cache_evictor.py` (gates 1-5, including the per-node record "
                 f"probe this tool never issues).\n"
                 f"  #10976 gates eviction on a census that proves the record serves a "
-                f"class — a CLEAN report from this tool proves the COUNT, never that the "
-                f"record serves each node. #10593 (the record's write path) closed "
+                f"class — the report that proves the COUNT is the PARITY INSTRUMENT's "
+                f"(`--parity-report`, e.g. `tools/turn_parity_census.py --json`), which "
+                f"this tool CONSUMES; this tool's own verdict is its BYTE state, so a "
+                f"CLEAN verdict here never proves the record serves each node. #10593 "
+                f"(the record's write path) closed "
                 f"COMPLETED on 2026-11-06, so record readiness is not what stops a "
                 f"sweep.\n"
                 f"  Run without {flag} to get the plan and the refusal reasons.",
