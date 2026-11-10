@@ -4849,24 +4849,37 @@ def test_every_record_migration_selects_core_and_its_readers():
     # reason: each is registered on `core` and is NOT in `tier1`, so it is ABSENT
     # from the tier-1-only return that a `surfaces: []` selection produces
     # (`select()`'s `"surfaces": [], "full": False` return emits `tier1` minus
-    # `uri_requiring` minus `on_demand`; none of the three is in `_tier1()`).
+    # `slow` minus `uri_requiring` minus `on_demand`; none of the three is in
+    # `_tier1()`).
     # ⚠️ NOT because they are slow files — an earlier version of
     # this comment said that and the mechanism is INVERTED: `select()` SUBTRACTS
     # `slow` from both tiers (`files -= slow`, #1371), so a slow reader could never
     # appear in `test_files` and the assertions below would red on every arm.
     # `test_record_schema_placement.py` stood here until the #11728 P3 and cannot
-    # fail: it is tier1 (config/ci-surfaces.yml), and on THE RETURN PATH THIS ARM
-    # PRODUCES — `surfaces: []` — `test_files` is `tier1` minus `uri_requiring` minus
-    # `on_demand`, so every tier-1 member is present (measured: the `off_family`
-    # selection below — `surfaces: []`, `n=84` at `2026-11-10` — still carries it).
+    # fail: it is tier1 (config/ci-surfaces.yml), and on a `surfaces: []` return
+    # `test_files` is declared `tier1` minus `slow` minus `uri_requiring` minus
+    # `on_demand` (`tools/ci_selection.py`).
+    # ⚠️ That is a MEASUREMENT of one selection, not a consequence of the
+    # subtraction, and the selection is the SEPARATE `off_family` one below —
+    # `surfaces: []`, `n=84` at `2026-11-10` — NOT the `['core']` path this test's
+    # own loop produces. The arm cannot fail only while tier-1 intersects none of
+    # the three subtracted sets, which is empty TODAY (measured `2026-11-10`:
+    # `tier1 & slow`, `tier1 & uri_requiring` and `tier1 & on_demand` are each
+    # `[]`, and the `off_family` `test_files` carries all 84 of 84). `select()`
+    # keeps its subtraction "instead of depending on that staying true", and
+    # `test_uri_requiring_selection.py::test_docs_only_early_return_subtracts_the_lane`
+    # INJECTS a `uri_requiring` member into tier-1 precisely because the
+    # intersection is allowed to move — which is why the `in test_files` arm is
+    # backstopped by the `reader not in tier1` pin below rather than by prose.
     # ⚠️ The invariant is NOT `tier1 ⊆ test_files` on every return path, which an
     # earlier version of this comment claimed: the tier-2 path ALSO subtracts
     # `slow` and `carve_out` (`tools/ci_selection.py`), and three tier-1 members
     # are `carve_out` (`test_config.py`, `test_guard.py`,
     # `test_reaper_orphan.py`), so they are absent from `test_files` on e.g. the
-    # `api` selection. Scoped to the path measured, because the over-broad form
-    # is exactly the vacuity this block exists to prevent. A vacuous assertion is
-    # worse than none: it reads as coverage.
+    # `api` selection (measured `2026-11-10`: 81 of 84 present on this test's own
+    # `['core']` selections, `n=802`). Scoped to the path measured, because the
+    # over-broad form is exactly the vacuity this block exists to prevent. A
+    # vacuous assertion is worse than none: it reads as coverage.
     #
     # #11728 review P2: that axis is PINNED below, not merely described — a reader
     # promoted into `tier1` (an ordinary edit for a fast DB-free pin) would make its
@@ -4882,9 +4895,9 @@ def test_every_record_migration_selects_core_and_its_readers():
         assert reader not in tier1, (
             f"{reader} is in tier1, so its `in test_files` arm below can no longer "
             "discriminate (on the `surfaces: []` return, `test_files` is `tier1` "
-            "minus `uri_requiring` minus `on_demand`, so a tier-1 member is always "
-            "present there) — pick a `core`-registered reader that is not in "
-            "tier1, or drop the arm"
+            "minus `slow` minus `uri_requiring` minus `on_demand`, and none of the "
+            "three intersects tier-1 today — measured, not guaranteed) — pick a "
+            "`core`-registered reader that is not in tier1, or drop the arm"
         )
     # Non-vacuity, measured on the PRE-FIX state and stated exactly: with the
     # structural rule disabled AND this member's `CORE_ALSO` entry removed,
