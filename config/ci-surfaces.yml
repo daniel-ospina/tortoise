@@ -5943,6 +5943,13 @@ surfaces:
   # `carve_out`: its `pytestmark` is `embedded_only`, so a `core`-only
   # registration would leave the manifest green and the file never executed.
   - test_context_enrich_8488.py
+  # #11739: the deterministic composed embedding text (`tortoise/embed_compose.py`
+  # — a NEW module, so it matches no SOURCE_PATTERNS entry and falls through to
+  # `core`, like its lexical sibling #11682/#11706 and its vector sibling
+  # #8488 above). NOT in `carve_out:`: the file builds its own embedded store
+  # and its assertions hold on either lane, so a docker redirect changes
+  # nothing it pins.
+  - test_11739_composed_embed_text.py
   - test_determinism_tie_order_3019.py
   # #7704: the RRF positional-rank guard — two documents a leg scored
   # IDENTICALLY must not come out of fusion with different relevance (the
@@ -11986,6 +11993,12 @@ durations:
   test_ci_runner_label_coverage.py: 2.4
   test_container_reaper.py: 0.3
   test_context_enrich_8488.py: 6.9
+  # #11739: a PR-ADDED row takes DEFAULT_FAST_WEIGHT (2.0) — the map's own
+  # rule (`test_a_file_the_fold_added_carries_the_flat_default_not_a_local_reading`),
+  # so this is NOT a hand-picked wall clock. The local reading is context only,
+  # not the weight: "33 passed in 6.46s" (33 cases from 22 `def test_`,
+  # embedded SDK fixture, this host, this head) — a later junit sweep re-cuts it.
+  test_11739_composed_embed_text.py: 2.0
   test_next_work.py: 7.5
   test_oauth_stray_code_refusal.py: 2.3
   test_reader_aggregation_aware.py: 0.1
