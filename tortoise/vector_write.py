@@ -154,6 +154,7 @@ __all__ = [
     "statement_stores_embedding_in_a_map",
     "statement_unattributed_set_items",
     "statement_uses_unmodelled_scope",
+    "statement_vector_in_a_foreign_property",
     "statement_write_aliases",
     "statement_write_target_problem",
     "stored_embedding_vector_expr",
@@ -879,6 +880,61 @@ def statement_conflicting_bindings(
             if len({frozenset(labels) for labels in sets}) > 1}
 
 
+#: A ``SET`` item whose RIGHT-HAND SIDE produces a vector — ``vecf32(…)``, or a bare ``$embedding``.
+#: Paired with the item's target property to catch the store the alias readers cannot see: the
+#: vector lands on a SERVED node, in a property no read path ever queries.
+_VECTOR_EXPR_RE = re.compile(
+    r"\bvecf32\s*\(|\$" + re.escape(EMBEDDING_PROPERTY) + r"\b", re.IGNORECASE)
+
+#: The target property of a ``SET`` item — ``e.`embedding` = …`` reads ``embedding``, and a
+#: whole-alias write (``SET e += $props`` / ``SET e = {…}``) reads ``None`` (no single property).
+_SET_ITEM_PROPERTY_RE = re.compile(
+    r"^\s*\.\s*`?(?P<prop>[A-Za-z_][A-Za-z_0-9]*)`?")
+
+
+def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
+    """``SET`` items that put a vector in a property OTHER than ``embedding``.
+
+    ⛔ A DIFFERENT AXIS FROM EVERY OTHER READER IN THIS MODULE, and the one `#11641`'s review round 7
+    measured live: the write-target leg proves WHICH NODE a store lands on and says nothing about
+    WHICH PROPERTY. So
+    ``MATCH (e:Event {eventId:$eid}) SET e.vector = vecf32($embedding)`` was ACCEPTED — a served
+    node, a `Vectorf32`, and no ``run_vector_query`` call can reach it, because the read path queries
+    :data:`EMBEDDING_PROPERTY` and nothing else. That is `#5090` DoD row 2's own sentence
+    ("no vector is stored without a path to query it") defeated on the label that is supposed to be
+    safe.
+
+    Refused, not reasoned about: no writer in this repo stores a vector in any other property, so the
+    cheap fail-closed reading costs nothing. It is the same judgement as
+    :func:`statement_stores_embedding_in_a_map`, one grammar level over.
+
+    ⚠️ It does NOT cover a whole-alias write (``SET e += $props``) whose MAP carries an
+    ``embedding`` — that item has no single target property, and the key arrives from data rather
+    than from the statement's text. That is the pre-existing `#4520` hole (`$props` can carry a plain
+    ``List`` into the vector property), tracked on its own; refusing every ``SET e += $props`` here
+    would refuse the product's own event write.
+    """
+    text = _blank_comments(statement)
+    depths = _depths(text)
+    foreign: list[str] = []
+    for keyword, start, end in _clause_bodies(text, depths):
+        if keyword != "SET":
+            continue
+        base = depths[start] if start < len(depths) else 0
+        for item in _split_items(text, start, end, base, depths):
+            head = _item_head(item)
+            if head is None:
+                continue
+            match = _SET_ITEM_PROPERTY_RE.match(head[1])
+            if match is None:
+                continue  # a whole-alias write — no single property, see the warning above
+            if match.group("prop").lower() == EMBEDDING_PROPERTY:
+                continue
+            if _VECTOR_EXPR_RE.search(head[1]):
+                foreign.append(item.strip())
+    return tuple(foreign)
+
+
 #: The embedding property as a map KEY — `{embedding: …}`. A property MAP is a third way to place a
 #: vector (beside a `SET` clause and a rendered clause builder), and it is the one no alias-based
 #: reader can follow: `CREATE ({…})` binds no alias at all, and `CREATE (e)-[r:R {…}]->()` writes to a
@@ -1200,6 +1256,13 @@ def statement_write_target_problem(statement: str, allowed) -> str | None:
             "ANONYMOUS pattern lands on a node with no label at all, and a map on a relationship "
             "lands where `run_vector_query` never looks, so no alias-based reader can prove where "
             "it goes; write the vector through a `SET` clause on a labelled alias instead")
+    foreign_props = statement_vector_in_a_foreign_property(statement)
+    if foreign_props:
+        problems.append(
+            f"it stores a VECTOR in a property that is not `{EMBEDDING_PROPERTY}` "
+            f"({list(foreign_props)}) — the read path queries `{EMBEDDING_PROPERTY}` and nothing "
+            "else, so a vector in any other property is paid for and unreachable; store it in "
+            f"`{EMBEDDING_PROPERTY}` on a labelled alias")
     diverged = sorted(alias for alias in targets if alias in conflicting)
     if diverged:
         rendered = ", ".join(f"{alias} bound to {[sorted(s) for s in conflicting[alias]]}"

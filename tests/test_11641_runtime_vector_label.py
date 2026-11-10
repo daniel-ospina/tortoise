@@ -72,6 +72,7 @@ from tortoise.vector_write import (
     statement_rebound_aliases,
     statement_unattributed_set_items,
     statement_uses_unmodelled_scope,
+    statement_vector_in_a_foreign_property,
     statement_write_aliases,
     statement_write_target_problem,
 )
@@ -1427,6 +1428,144 @@ def test_a_pre_d10_document_dump_still_restores_under_the_repair_path(tmp_path) 
     served = proj.g.query(
         "MATCH (p:Point {id:'p1'}) RETURN typeof(p.embedding)").result_set
     assert served and served[0][0] == "Vectorf32", served
+
+
+# ── the EDGE property bag — the same defect, one row type over (#11641 review round 7) ─────────
+#
+# `_require_served_restore_labels` was fed `node_rows` and nothing else, while the very next phase
+# writes each edge as `CREATE (a)-[r:{type}]->(b) SET r = $p` — the dump's property bag, verbatim. A
+# relationship has NO label at all, so an `embedding` in that bag is unserved by construction, and it
+# arrived through the DEFAULT path while every node-level claim read true. Measured on the round-7
+# head before this fix: strict restore returned `{'nodes': 2, 'edges': 1}` and the vector sat on the
+# relationship as a `List`.
+
+
+def _dump_with_edge_props(props: dict) -> dict:
+    """A served-node dump whose ONE edge carries ``props`` — the shape the node check cannot see."""
+    return {
+        "format": DUMP_FORMAT,
+        "nodes": [
+            {"dump_id": 1, "labels": ["Point"],
+             "props": {"id": "p1", "content": "a", "pointKind": "claim"}},
+            {"dump_id": 2, "labels": ["Point"],
+             "props": {"id": "p2", "content": "b", "pointKind": "claim"}},
+        ],
+        "edges": [{"src": 1, "dst": 2, "type": "SUPPORTS", "props": props}],
+    }
+
+
+def test_restore_graph_refuses_a_vector_in_an_EDGE_property_bag(tmp_path) -> None:
+    """The BLOCKING finding of review round 7: a relationship is a store no read path reaches.
+
+    Asserts the refusal is PRE-MUTATION too — the check must run before the nodes are created, or a
+    rejected artifact leaves a half-restored graph (the #3895 discipline, which the node half already
+    honours and the edge half did not).
+    """
+    proj = _proj(tmp_path)
+    with pytest.raises(ValueError) as refused:
+        restore_graph(proj.g, _dump_with_edge_props(
+            {"weight": 1.0, "embedding": VEC}))
+    message = str(refused.value)
+    assert "RELATIONSHIP" in message and "SUPPORTS" in message, message
+    assert "no read path" in message or "run_vector_query" in message, message
+
+    from tortoise.hosted_api import _is_export_skip_node
+    left = [
+        list(row[0] or []) for row in proj.g.query(
+            "MATCH (n) RETURN labels(n), properties(n)").result_set
+        if not _is_export_skip_node(list(row[0] or []), dict(row[1] or {}))
+    ]
+    assert left == [], (
+        f"the EDGE refusal left {left} behind — it must run in the pre-mutation pass with the node "
+        "check, not beside the edge write"
+    )
+
+
+def test_an_EDGE_vector_is_DROPPED_and_reported_under_the_repair_path(tmp_path) -> None:
+    """The repair direction, and the half that makes it a repair rather than a disable.
+
+    The EDGE survives with its other properties — an edge without its embedding is still the edge —
+    and the relationship type is reported, so the operator sees what was lost. A served NODE vector
+    in the same dump still lands, so the flag is not blanket.
+    """
+    proj = _proj(tmp_path)
+    artifact = _dump_with_edge_props({"weight": 1.0, "embedding": VEC})
+    artifact["nodes"][0]["props"]["embedding"] = VEC  # a benign, SERVED vector, same dump
+    counts = restore_graph(proj.g, artifact, allow_unserved_vectors=True)
+
+    assert counts["nodes"] == 2 and counts["edges"] == 1, counts
+    assert counts["dropped_vectors"] == 1, counts
+    assert counts["dropped_vector_labels"] == ["<relationship:SUPPORTS>"], counts
+
+    rows = proj.g.query(
+        "MATCH (:Point {id:'p1'})-[r:SUPPORTS]->(:Point {id:'p2'}) "
+        "RETURN typeof(r.embedding), r.weight, properties(r)").result_set
+    assert rows, "the edge was dropped entirely — the repair path must KEEP it"
+    assert rows[0][0] == "Null", (
+        f"the edge vector survived the repair path: {rows[0][2]}"
+    )
+    assert rows[0][1] == 1.0, (
+        f"the edge lost properties it did not need to lose: {rows[0][2]}"
+    )
+    # …the served NODE vector in the same dump still landed.
+    served = proj.g.query(
+        "MATCH (p:Point {id:'p1'}) RETURN typeof(p.embedding)").result_set
+    assert served and served[0][0] == "Vectorf32", served
+
+
+def test_the_repair_path_ALWAYS_carries_the_drop_counts(tmp_path) -> None:
+    """Review round 7 finding 4: the docstring promised the dict CARRIES the counts.
+
+    With nothing to drop the keys were absent, so the exact expression `restore_backup`'s own
+    docstring prescribes — ``restored["restored"]["dropped_vectors"]`` — raised KeyError on the
+    healthy path. The keys are now unconditional under the flag; ``dropped_edges`` keeps its old
+    only-when-dropped shape, and the docstring says which is which.
+    """
+    proj = _proj(tmp_path)
+    counts = restore_graph(
+        proj.g,
+        _dump([{"dump_id": 1, "labels": ["Point"],
+                "props": {"id": "p1", "content": "a", "pointKind": "claim",
+                          "embedding": VEC}}]),
+        allow_unserved_vectors=True,
+    )
+    assert counts["dropped_vectors"] == 0, counts
+    assert counts["dropped_vector_labels"] == [], counts
+    assert "dropped_edges" not in counts, (
+        "dropped_edges changed shape too — this fix was scoped to the VECTOR counts"
+    )
+
+
+def test_a_vector_in_a_FOREIGN_property_is_refused_by_the_door() -> None:
+    """Review round 7 finding 2: the write-target leg proves the NODE, never the PROPERTY.
+
+    So `SET e.vector = vecf32($embedding)` was ACCEPTED on a served, labelled `:Event` — a
+    `Vectorf32` in a property no read path queries, which is row 2's own sentence defeated on the
+    label that is supposed to be safe. Both directions: the embedding property is accepted, and the
+    product's real event write is untouched.
+    """
+    foreign = ("MATCH (e:Event {eventId:'seed'}) SET e.vector = vecf32($embedding)")
+    assert statement_vector_in_a_foreign_property(foreign) == (
+        "e.vector = vecf32($embedding)",), statement_vector_in_a_foreign_property(foreign)
+    problem = statement_write_target_problem(foreign, {"Event"})
+    assert problem is not None and "VECTOR" in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, foreign, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "VECTOR" in str(refused.value), str(refused.value)
+
+    # ACCEPT: the embedding property itself, spelled through the seam and inline.
+    for ok in (
+        "MATCH (e:Event {eventId:'seed'}) SET " + set_embedding_clause("e"),
+        "MATCH (e:Event {eventId:'seed'}) SET e.embedding = $embedding",
+    ):
+        assert statement_vector_in_a_foreign_property(ok) == (), ok
+        assert statement_write_target_problem(ok, {"Event"}) is None, ok
+
+    # ACCEPT: a WHOLE-ALIAS write carries no single target property, so this reader stays out of it
+    # (the `$props`-carried embedding is the pre-existing #4520 hole, tracked separately).
+    assert statement_vector_in_a_foreign_property(
+        "MATCH (e:Event {eventId:'seed'}) SET e += $props") == ()
 
 
 def test_restore_graph_still_restores_a_served_label(tmp_path) -> None:

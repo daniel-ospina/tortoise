@@ -923,8 +923,8 @@ def _first_live_node_id(g, ids: set[int]) -> int | None:
 
 
 def _require_served_restore_labels(
-    node_rows, *, allow_unserved_vectors: bool = False,
-) -> tuple[set[int], list[str]]:
+    node_rows, edge_rows=(), *, allow_unserved_vectors: bool = False,
+) -> tuple[set[int], list[str], frozenset[int]]:
     """``#11641`` — a restored vector may only land on a label the read path serves.
 
     Runs in `restore_graph`'s PRE-MUTATION validation pass, beside ``#3895``'s dangling-edge check
@@ -951,10 +951,18 @@ def _require_served_restore_labels(
     DROPS the unserved vector, KEEPS the node (so the relabel can still run) and REPORTS every label
     it dropped — never silently, and never as the default.
 
-    Returns ``(dump ids to strip, sorted labels whose vectors were dropped)`` — empty unless
-    ``allow_unserved_vectors``. The ids are returned rather than the props being mutated here,
-    because a validator that edits the artifact it validated is how a refusal and a repair start
-    disagreeing about what was checked.
+    ⛔ AND A RELATIONSHIP IS THE SAME DEFECT WITH NO LABEL AT ALL (review round 7). The dump's edge
+    rows carry a property bag too — ``CREATE (a)-[r:{type}]->(b) SET r = $p`` writes it verbatim —
+    so an edge whose props hold an ``embedding`` lands a vector on a RELATIONSHIP: no label, nothing
+    ``run_vector_query`` can reach, and it arrived through the DEFAULT path while every node-level
+    claim above read true. The artifact is not exotic: the bag is caller-supplied exactly as the
+    nodes are, and ``dump_graph`` round-trips whatever it is given. So the edge rows are scanned by
+    the same rule, and a relationship type joins the dropped-label report as ``<relationship:TYPE>``.
+
+    Returns ``(dump node ids to strip, sorted labels whose vectors were dropped, dump edge indexes to
+    strip)`` — all empty unless ``allow_unserved_vectors``. The ids are returned rather than the
+    props being mutated here, because a validator that edits the artifact it validated is how a
+    refusal and a repair start disagreeing about what was checked.
     """
     # The declaration must still name labels the query path serves. Fail closed at the seam, not
     # only in a test: a vocabulary that shrank under this constant would otherwise turn every
@@ -963,6 +971,7 @@ def _require_served_restore_labels(
         _VECTOR_RESTORE_LABEL_SET, writer="tortoise.hosted_backup::restore_graph")
     strip: set[int] = set()
     dropped: set[str] = set()
+    strip_edges: set[int] = set()
     for dump_id, labels, props in node_rows:
         if not isinstance(props.get(EMBEDDING_PROPERTY), list):
             continue
@@ -985,7 +994,25 @@ def _require_served_restore_labels(
             "`allow_dangling_edges` is not (#3895): it is a repair an operator runs after seeing the "
             "drop, not a customer-side option that would hide it."
         )
-    return strip, sorted(dropped)
+    for index, (src, dst, rel_type, props) in enumerate(edge_rows):
+        if not isinstance(props, dict) or not isinstance(
+                props.get(EMBEDDING_PROPERTY), list):
+            continue
+        if allow_unserved_vectors:
+            strip_edges.add(index)
+            dropped.add(f"<relationship:{rel_type}>")
+            continue
+        raise ValueError(
+            f"Malformed dump edge {src!r}->{dst!r} ({rel_type}): it carries a vector in its "
+            "property bag, and a RELATIONSHIP has no label at all — so no `entity_type` reaches it "
+            "and `run_vector_query` never looks there. Restoring it would store a vector no read "
+            "path can reach, so the artifact is refused before the target graph is touched "
+            "(#11641). An OPERATOR can still recover the artifact: "
+            "`restore_backup(..., allow_unserved_vectors=True)` restores every node and edge, drops "
+            "only this vector and reports it. That lever is deliberately NOT exposed on the "
+            "customer import route, for the same reason `allow_dangling_edges` is not (#3895)."
+        )
+    return strip, sorted(dropped), frozenset(strip_edges)
 
 
 def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
@@ -995,7 +1022,9 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     Returns ``{"nodes": N, "edges": M}``; with ``allow_dangling_edges=True``
     the returned dict additionally carries ``dropped_edges`` and
     ``dropped_edge_endpoints``, and with ``allow_unserved_vectors=True`` it
-    carries ``dropped_vectors`` and ``dropped_vector_labels``.
+    ALWAYS carries ``dropped_vectors`` and ``dropped_vector_labels`` (zero and
+    empty when nothing was dropped — unlike ``dropped_edges``, which appears only
+    when something was, so a caller reading either key needs no guard).
 
     Raises ValueError on unsafe labels/types, unsupported dump format, or an
     edge whose endpoint is not in the dump's node list. The last one is the
@@ -1029,6 +1058,14 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
     edge, DROPS the unserved vectors, KEEPS the nodes so the migration can still
     run, and reports the count + the dropped labels. Never the default, and not
     revision-gated (see the note at the check itself).
+
+    ⛔ The bound covers the dump's EDGE property bags as well as its nodes, and
+    the strict path refuses both. A relationship carries no label at all, so an
+    ``embedding`` in an edge bag is unserved by construction — and ``SET r = $p``
+    writes the bag verbatim, which made that the one restore shape that could
+    still land a vector where nothing queries it (review round 7). Under the flag
+    such a vector is dropped from the edge, the edge itself is kept, and its
+    relationship type is reported as ``<relationship:TYPE>``.
     """
     if not isinstance(dump, dict) or dump.get("format") != DUMP_FORMAT:
         raise ValueError(
@@ -1084,18 +1121,6 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         node_rows.append((
             _coerce_dump_id(n["dump_id"], "node dump_id"), safe_labels, props))
 
-    # #11641: the VECTOR half of the same pre-mutation validation (#3895's discipline). A node that
-    # carries a vector is about to be written label-scoped below, so the label it will be written
-    # against must be one `run_vector_query` serves. Checked HERE, before any node is created, so a
-    # refusal leaves the target untouched and the import endpoint quarantines the artifact.
-    # ⛔ NOT revision-gated, unlike `allow_dangling_edges`: a dangling edge was a defect of ONE
-    # writer version (rev 2 provably cannot produce one), whereas an unserved vector is a property
-    # of the graph's CONTENT and can sit in a dump of ANY revision — a graph written before D10
-    # still holds `:Document`. A version gate here would refuse the very artifacts the repair path
-    # exists for.
-    strip_vector_ids, dropped_vector_labels = _require_served_restore_labels(
-        node_rows, allow_unserved_vectors=allow_unserved_vectors)
-
     edge_rows: list[tuple[int, int, str, dict]] = []
     for e in edges:
         if not isinstance(e, dict) or not all(
@@ -1110,6 +1135,22 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
             _sanitize_label(e["type"]),
             dict(raw_props),
         ))
+
+    # #11641: the VECTOR half of the same pre-mutation validation (#3895's discipline). A node that
+    # carries a vector is about to be written label-scoped below, so the label it will be written
+    # against must be one `run_vector_query` serves; an EDGE that carries one is refused outright,
+    # because a relationship has no label at all and `SET r = $p` writes the bag verbatim. Checked
+    # HERE, before any node or edge is written, so a refusal leaves the target untouched and the
+    # import endpoint quarantines the artifact.
+    # ⛔ NOT revision-gated, unlike `allow_dangling_edges`: a dangling edge was a defect of ONE
+    # writer version (rev 2 provably cannot produce one), whereas an unserved vector is a property
+    # of the graph's CONTENT and can sit in a dump of ANY revision — a graph written before D10
+    # still holds `:Document`. A version gate here would refuse the very artifacts the repair path
+    # exists for.
+    (strip_vector_ids, dropped_vector_labels,
+     strip_edge_vector_indexes) = _require_served_restore_labels(
+        node_rows, edge_rows,
+        allow_unserved_vectors=allow_unserved_vectors)
 
     # The function REBUILDS a graph — it does not merge into one. Rejecting a
     # dirty target keeps the returned counts coherent (they describe the dump's
@@ -1213,9 +1254,16 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
         if endpoint not in present_ids
     })
 
-    for s, d, safe_type, props in edge_rows:
+    for index, (s, d, safe_type, props) in enumerate(edge_rows):
         if s not in present_ids or d not in present_ids:
             continue
+        if index in strip_edge_vector_indexes:
+            # `_require_served_restore_labels` marked this row: it carries a vector, and a
+            # relationship has no label at all, so the vector is unserved by construction. Drop the
+            # VECTOR, keep the edge and its other properties — the repair path's contract is "drop
+            # only what no read path can reach", and an edge without its embedding is still the edge.
+            props = {k: v for k, v in props.items() if k != EMBEDDING_PROPERTY}
+            dropped_vectors += 1
         g.query(
             f"MATCH (a {{{_DUMP_ID_PROP}:$s}}), (b {{{_DUMP_ID_PROP}:$d}}) "
             f"CREATE (a)-[r:{safe_type}]->(b) SET r = $p",
@@ -1303,6 +1351,11 @@ def restore_graph(g, dump: dict, *, allow_dangling_edges: bool = False,
             "allow_unserved_vectors=True (nodes kept so a relabel migration can repair them)",
             dropped_vectors, dropped_vector_labels,
         )
+    if allow_unserved_vectors:
+        # Unconditional under the flag, unlike `dropped_edges` above: the docstring promises the
+        # returned dict CARRIES these keys, and a caller writing `restored["dropped_vectors"]` — the
+        # form `restore_backup`'s own docstring prescribes — got a KeyError on the healthy path where
+        # nothing was dropped (review round 7, finding 4).
         result["dropped_vectors"] = dropped_vectors
         result["dropped_vector_labels"] = dropped_vector_labels
     return result
