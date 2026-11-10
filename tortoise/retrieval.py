@@ -2486,15 +2486,20 @@ def _session_admission_key(
     divergence — "raw in the pool, stripped here"; #11382 removed it by
     normalising the pool leg through :func:`normalize_session_key` too, the
     same ``.strip()`` this function applies, so both grains now read a padded
-    id as the one identity it is. No module under ``tortoise/`` imports it
-    (measured by AST over ``tortoise/**/*.py``: zero ``Import``/``ImportFrom``
-    nodes naming it — an AST result rather than a text search, because the
-    name also appears in prose cross-references in this package, so a text hit
-    is not an import; the only importers are ``tools/longmem_eval/retrieve.py``
-    and four test modules), so the ``-1``
+    id as the one identity it is. No module under ``tortoise/`` imports
+    ``session_reinjection`` (measured by AST over ``tortoise/**/*.py``: zero
+    ``Import``/``ImportFrom`` nodes naming it — an AST result rather than a
+    text search, because the name also appears in prose cross-references in
+    this package, so a text hit is not an import; the only importers are
+    ``tools/longmem_eval/retrieve.py`` and four test modules), so the ``-1``
     shape arrives only through the EVAL
     annotator (``session_id: ""`` plus ``lme_session_index`` defaulted to
-    ``-1``, ``tools/longmem_eval/retrieve.py``).
+    ``-1``, ``tools/longmem_eval/retrieve.py``). ⚠️ The symbol is NAMED above,
+    not called "it": this paragraph sits in :func:`_session_admission_key`'s
+    docstring, whose own importer count is one test file, and the nearest
+    other symbol (:func:`normalize_session_key`) has one importer under
+    ``tortoise/`` — so a bare pronoun made a reviewer audit the wrong symbol
+    and read this (true) list as false.
 
     ⚠️ "ONE shape" is the REACHED enumeration, NOT a proof of
     exhaustiveness — further seams diverge too, and none of them FUSES in an
