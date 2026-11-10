@@ -198,9 +198,11 @@ def test_docs_scanning_gates_stay_in_tier1():
     assert "test_v4_declared_mechanisms.py" in tier1, (
         "#9778 review (P1): the declared-mechanism MEMBERSHIP gate derives the "
         "declared set from the `<!-- v4-mechanism: <id> state: <state> -->` markers in "
-        "docs/architecture/**/*.md — `docs/` is in NON_PYTHON_PREFIXES, so a "
+        "docs/architecture/**/*.md and docs/epics/**/*.md — `docs/` is in "
+        "NON_PYTHON_PREFIXES, so a "
         "docs-only diff runs tier1 only (EXTRACTOR-V4-ARCHITECTURE.md takes "
-        "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, and "
+        "the early return, STORAGE-ARCHITECTURE.md selects `onboarding`, an "
+        "epic plan takes the empty-surface return too, and "
         "`core` is added only when NOTHING matched); registered in `core` "
         "alone, deleting or renaming a marker merged green while the gate was "
         "red on main (#4309/#3616 class, same dual registration as the six "
@@ -252,15 +254,15 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
     file's idiom for such a registration is a behavioural assertion (as at
     :func:`test_g5_destructive_half_doc_guards_run_on_a_docs_only_diff`).
 
-    Measured at this head: 155 files for the STORAGE diff, 78 for the EXTRACTOR
+    Measured at this head: 165 files for the STORAGE diff, 84 for the EXTRACTOR
     diff (empty surfaces, the early return); the gate is in the selected set in
     both, and dropping the `tier1` row removes it from both. ⚠️ BOTH are
     measurements, not constants, and they move for DIFFERENT reasons:
 
-    * the **155** is `onboarding` ∪ `tier1` **minus 14** — the union is 169 at
-      this head (97 + 78 − 6 shared) and `select()` drops 3 `carve_out` and 11
+    * the **165** is `onboarding` ∪ `tier1` **minus 14** — the union is 179 at
+      this head (101 + 84 − 6 shared) and `select()` drops 3 `carve_out` and 11
       `uri_requiring` files, so it is the union minus those, never the union;
-    * the **78** is `tier1`'s own size — the entire set an empty-surface diff
+    * the **84** is `tier1`'s own size — the entire set an empty-surface diff
       selects. It is NOT "the whole `full`-less fast pool" — that is a
       DIFFERENT measurement, `len(fast_pool(manifest))`, and this bullet
       deliberately carries no figure for it: these three registrations do not
@@ -270,9 +272,10 @@ def test_v4_membership_gate_runs_on_both_architecture_docs():
       itself, so a hand count of the classification sets lands one high — which
       is how a figure re-derived by counting can look like it disagrees with the
       code that produced it (#11064 review r15, P3).
-      The `60` this sentence carried was that same `tier1` set **18 rows ago**
-      (measured: `len(tier1)` is 60 at `609eb72d3`, the commit that wrote it,
-      and 78 here), i.e. the very "a past state quoted as a current one"
+      The `60` this sentence carried was that same `tier1` set **as it stood when
+      the line was written** (measured: `len(tier1)` is 60 at `609eb72d3`, the
+      commit that wrote it, and 84 here), i.e. the very "a past state quoted as a
+      current one"
       defect the line below warns about — and the constant it used to publish
       decayed in three consecutive commits, which is why the figure is gone
       rather than corrected again (#11064 review r15, r16 P2, r17 P2).

@@ -167,7 +167,8 @@
 # while the seven-entry gate stayed green. So every mechanism this registry knows
 # about carries a `<!-- v4-mechanism: <id> state: <state> -->` marker in each
 # scanned document
-# (`docs/architecture/**/*.md`, recursive) that its row names, and
+# (`docs/architecture/**/*.md` and `docs/epics/**/*.md`, both recursive) that its
+# row names, and
 # `membership_errors()` in the gate fails closed in BOTH directions — a marker
 # with no row, and a row with no marker — AND holds each row to its OWN declared
 # documents: every scanned document a row names must carry its marker (a marker
@@ -183,7 +184,8 @@
 # ⚠️ ONE DECLARING SOURCE IS OUTSIDE THE GATE'S SCANNED SURFACE, and it is named
 # here rather than assumed covered: `packs/dev/manifest.yaml` (`embed_gate`'s
 # policy source) is YAML, and the marker convention is a markdown-comment
-# convention over `docs/architecture/**/*.md`. A row that declares such a source
+# convention over the two markdown surfaces (`docs/architecture/**/*.md`,
+# `docs/epics/**/*.md`). A row that declares such a source
 # must ALSO declare a scanned document carrying its marker — `membership_errors`
 # refuses a row whose every declaring document is outside the surface, because
 # an unfindable declaration must not read as a marked one. So the "every
@@ -220,8 +222,10 @@ version: 1
 # the v4 design declares and classify each as built / unbuilt / descriptive —
 # this enumeration does not exist and is the first deliverable of Scope"*). The
 # eight came from the issue's O/I/T indicator (1) plus the carve-out; the five
-# added here were declared by a canonical ENUMERATION in
-# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row:
+# added then were declared by a canonical ENUMERATION in
+# `EXTRACTOR-V4-ARCHITECTURE.md` and had no row. THE FOURTEENTH CAME FROM A
+# SURFACE NONE OF THEM WERE READ FROM (see below), so the current set is
+# fourteen — read the count off `mechanisms:`, never off this paragraph:
 #
 #   - §4.1's step list / §4.2's "resulting order" block declare `S2.2a-α EXACT
 #     DEDUP` and `S2.2a-β NEAR-DUP DETECT` as steps with a named rule; the
@@ -241,12 +245,22 @@ version: 1
 #     status (*"a SPEC, not a description of what runs"*): `failure_policy`,
 #     `not-implemented`, pointing at the epic the design itself names.
 #
-# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that these thirteen are
-# every mechanism either document names. It is the set that carries a MARKER (see
+# ⚠️ WHAT THIS ENUMERATION IS NOT: it is not a claim that the fourteen rows below
+# are every mechanism the SCANNED DOCUMENTS name. It is the set that carries a MARKER (see
 # the limits above) plus the one structure this file can compare mechanically
 # (§4.2's table). A mechanism declared only in unmarked prose is still invisible;
 # the markers are the convention that makes the comparison possible, and adding a
 # row is how a lane that FINDS such a declaration makes it visible from then on.
+#
+# ⭐ AND THAT IS HOW THE FOURTEENTH ARRIVED — `mention_record` (DM1, #11239), from
+# a SURFACE this registry did not scan. Every row above was declared in
+# `docs/architecture/`; DM1 (*"a mention is a property on the claim Point that
+# carried it"*) is declared in the epic plan
+# (`docs/epics/2026-11-05-5087-extractor-v4/05-plan.md` §4), and the write path
+# persists nothing, so the design declared a home the code does not have — #5064's
+# root, one directory outside the scan. `docs/epics/**/*.md` is a declaration
+# surface now, for the same reason the architecture docs are: it is where this
+# substrate's design is written down.
 mechanisms:
   - id: vet
     name: "S2.2 VET — adversarial candidate review (validity + coverage)"
@@ -1515,3 +1529,55 @@ mechanisms:
       would turn the registry into a pipeline-step list — the scope line the
       design draws at the head of §4.3 (*"The step list is the SHAPE, not a
       complete specification"*).
+
+  - id: mention_record
+    name: "DM1 — the mention record is a property on the claim Point"
+    declared_in:
+      - docs/epics/2026-11-05-5087-extractor-v4/05-plan.md  # §4 DM1
+    state: not-implemented
+    tracking_issue: 11239
+    pins:
+      - tests/test_referentiality_11021.py::test_the_mention_record_is_payload_only_and_says_so
+    code:
+      - tortoise/commit_schema.py
+    tests:
+      - tests/test_referentiality_11021.py
+    symbols:
+      - Mention
+    note: >-
+      DM1 declares the mention as *"a property on the claim Point that carried
+      it"* (`05-plan.md` §4, closed 2026-11-05 against the Postgres branch), and
+      this row exists because that declaration lives in the EPIC PLAN rather than
+      in `docs/architecture/` — one directory outside the surface this gate used
+      to walk, which is how a declared-and-absent mechanism kept reading as
+      shipped (#5064's root, with one directory of margin).
+      ⚠️ WHAT IS BUILT (the PAYLOAD half): `commit_schema.Mention` carries
+      `surface`, `span_start`/`span_end` and `kind_guess` and bounds the fields it
+      DECLARES a bound on (`surface`, `quote`, `kind_guess`, the span offsets);
+      `claim_ref` and `rule_id` carry NO schema bound — they are cut by the
+      producer (`_mention_ref` / `_mention_rule`). It has no list-level validator,
+      so it neither clamps nor dedupes the list either. The clamp and the dedupe
+      live in the PRODUCER — `extractor_v2._clamped_mention` and
+      `extractor_v2._dedupe_mentions` — reached from `_mentions_for_claim` (both),
+      `execute_embed` (both — the `mentions_recorded` accounting the next
+      paragraph is about) and `extract_session_v2` (both — the evidence block),
+      and from `route_mentions`, which builds through `_mention_record` and then
+      dedupes (`_clamped_mention` does NOT run on that path) — and the producer
+      channel publishes the result (`result["embed_list"]["mentions"]` /
+      `result["s2_embed"]["mentions"]`). A future write door that persists the
+      payload VERBATIM therefore stores what it was handed; it must not assume
+      the commit shape will have cleaned it.
+      ⚠️ WHAT IS NOT BUILT (the PERSISTENCE half, and why this row is not
+      `implemented`): NO declared write door carries `mentions` — the REST
+      `CreatePointRequest` has no such field, the SDK capture whitelist
+      (`sdk._CAPTURE_PASSTHROUGH_ORDER`) is
+      `quote/when/search_keys/source_turn_id/span_start/span_end` only, and
+      neither `hosted_api` nor `selfhost_api` names it. So a capture's
+      `stats["mentions_recorded"]` counts records the write DISCARDS, on either
+      deployment, and a graph read after a capture holds the claim and no mention
+      on it — DM1's home on the Point is declared but unfulfilled. `#11239`
+      tracks persisting it (or an explicit session-evidence-only ruling, which
+      would move the DECLARATION instead). Pinned by
+      `test_the_mention_record_is_payload_only_and_says_so`, which asserts the
+      payload-only shape and says so — the day a write door persists the record
+      it reds and this row must flip.
