@@ -109,22 +109,39 @@ def test_live_skill_exists_at_the_defined_path():
     # tools/list hides it and" left one mention, containing "retired", and this
     # guard PASSED while the document instructed a name absent from `tools/list`.
     # The count alone cannot tell the disclosure from an instruction either (that
-    # is finding 1, one head earlier). So: exactly ONE mention, and the sentence
-    # that mention sits in must BE the disclosure — the one that names the NAME as
-    # retired, says it is absent from `tools/list`, and says it will not appear in
-    # the connector's grant. Matched against the whitespace-normalised document so
-    # re-wrapping the paragraph cannot red a correct document the way a
-    # line-shaped pin would; a legitimate REWORD of the disclosure moves this pin
-    # with it, deliberately, because the sentence is what the served document
-    # promises the ChatGPT reader.
-    _retired_hits = [ln for ln in content.splitlines() if "tortoise_health" in ln]
+    # is finding 1, one head earlier). So the property is: the document names the
+    # retired tool EXACTLY ONCE, and that occurrence is the disclosure — the one
+    # that names the NAME as retired, says it is absent from `tools/list`, and
+    # says it will not appear in the connector's grant.
+    #
+    # ⛔ THE COUNT IS OVER OCCURRENCES OF THE NAME, NOT LINES (#11719 review,
+    # fourth head, finding 1 — measured there before this was written). A count of
+    # LINES says nothing about what else shares the line: appending an instruction
+    # to the disclosure — "…tool grant (#3883) — but call `tortoise_health` anyway
+    # if the container is missing." — leaves ONE line naming it, and the
+    # line-count form PASSED (measured: 20 passed) while the document instructed a
+    # name absent from `tools/list`. Counting the NAME closes it: with
+    # `_flat.count(name) == 1` AND the disclosure present, the single occurrence
+    # of the name is necessarily INSIDE the disclosure sentence, so no second site
+    # can exist — on that line or any other. (Pre-fix blob: 11 occurrences. This
+    # head: 1, the disclosure alone.)
+    #
+    # Matched against the whitespace-normalised document so re-wrapping the
+    # paragraph cannot red a correct document the way a line-shaped pin would; a
+    # legitimate REWORD of the disclosure moves this pin with it, deliberately,
+    # because the sentence is what the served document promises the ChatGPT
+    # reader.
+    _flat = " ".join(content.split())
     _disclosure = ("`tortoise_health` name is retired, so it is absent from "
                    "`tools/list` and will not appear in this connector's tool "
                    "grant (#3883)")
-    assert len(_retired_hits) == 1 and _disclosure in " ".join(content.split()), (
-        "the served document must name the RETIRED `tortoise_health` ONLY in its "
-        f"retirement disclosure; found {len(_retired_hits)} line(s) naming it: "
-        f"{_retired_hits[:3]}. The disclosure sentence is {_disclosure!r}. "
+    _retired_hits = [ln for ln in content.splitlines() if "tortoise_health" in ln]
+    _occurrences = _flat.count("tortoise_health")
+    assert _occurrences == 1 and _disclosure in _flat, (
+        "the served document must name the RETIRED `tortoise_health` ONLY inside "
+        f"its retirement disclosure; found {_occurrences} occurrence(s) of the "
+        f"name across {len(_retired_hits)} line(s): {_retired_hits[:3]}. The "
+        f"disclosure sentence is {_disclosure!r}. "
         'The verify call is tortoise_graph_overview(section="health") (#5439)')
     assert '1. Call `tortoise_graph_overview(section="health")`' in content, (
         "the §4 verify step must name the ADVERTISED health section — a retired "
