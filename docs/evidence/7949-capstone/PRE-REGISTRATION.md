@@ -2002,7 +2002,7 @@ to answer.
 
 ### 10.21 — the §11 cite block re-pointed for `#11654`'s S3 narrative (+108 / +112) (2026-11-10, `#11654`)
 
-- **Baseline — measured at `6496f534c1f6`, this branch's head before the S3 narrative was threaded:**
+- **Baseline — measured at `a577d0e25cb3`, this branch's BASE (the merge-base with `main`, before the S3 narrative was threaded):**
   the two `if items:` gates at `:13763`/`:13916`, the two fail-open `except` arms at
   `:13776`/`:13927`, the two result blocks at `:14105` (closing `:14111`) and `:14115`
   (closing `:14119`), and `_run_vet_pass`'s S2.2 call at `:16286` (the post-S4 union call at
