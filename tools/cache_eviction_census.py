@@ -296,12 +296,15 @@ def main(argv: list[str] | None = None) -> int:
                               "graph is REFUSED, so a CLEAN census of another graph "
                               "cannot be re-badged by repeating --graph here. "
                               "⚠️ The NAME check is name-only: a graph of the same "
-                              "name on a different INSTANCE is NOT detected here. "
-                              "STALENESS is detected separately, by the report's own "
-                              "`measured_at`: a report that carries no measurement "
-                              "time, or one measured EARLIER than this pass's bound "
-                              "($TORTOISE_PARITY_REPORT_MAX_AGE_S, default 3600 s), "
-                              "is demoted to cannot-answer and licenses nothing."))
+                              "name on a different INSTANCE, or measured EARLIER, is "
+                              "NOT detected here. STALENESS is bounded downstream on "
+                              "two axes: the report's own `measured_at` (a report "
+                              "carrying no measurement time, or one measured EARLIER "
+                              "than this pass's bound — $TORTOISE_PARITY_REPORT_MAX_AGE_S, "
+                              "default 3600 s — is demoted to cannot-answer), and then "
+                              "the population's own resident count (a report claiming "
+                              "more nodes than its population now holds is REFUSED, "
+                              "as is a claim above the graph's whole node count)."))
     parser.add_argument("--ceiling-bytes", type=int, default=None,
                         metavar="N",
                         help=("a declared ceiling; defaults to "

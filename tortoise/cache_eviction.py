@@ -197,8 +197,10 @@ PARITY_INSTRUMENTS: dict[str, str] = {
 #: ``cache_evictor``/``licence_remaining`` spends — became **40x** the population it
 #: bounds. Nothing unserved could be deleted (gate 3 asks the record per node), but the
 #: property the cap exists for — *"evicting more nodes than the instrument measured is
-#: evicting nodes nothing proved"* — was weakened by two orders of magnitude on a small
-#: population. Measured on a lane container: `docs/evidence/10976-licence/`.
+#: evicting nodes nothing proved"* — was weakened by **40x** on a small population (the
+#: multiple is the report's claim over the real population; nothing here is a square, so
+#: do not restate it as an order of magnitude). Measured on a lane container:
+#: `docs/evidence/10976-licence/`.
 #:
 #: ⚠️ THE PREDICATE IS THE INSTRUMENT'S, NOT THIS MODULE'S. `tools/turn_parity_census.py`
 #: owns the turn population's shape (#3551) — ``_GRAPH_EPISODIC_COUNT_CYPHER`` — and this

@@ -2371,7 +2371,7 @@ def test_a_stale_report_cannot_size_a_sweep_beyond_its_own_population():
     CLEAN report with `verdict: PLAN` and `plan["evictable"] = [{population: turn, nodes:
     20000}]` — a cap **40x** the population it bounds, because 20,000 < 25,000. The
     executor spends that cap directly (`licence_remaining`), so the runaway guard the
-    cap exists for was two orders of magnitude too loose.
+    cap exists for was 40x too loose.
 
     Nothing unserved could be deleted (gate 3 asks the record per node) — but "evicting
     more nodes than the instrument measured is evicting nodes nothing proved" was false
@@ -2561,30 +2561,37 @@ def test_a_row_multiplying_count_statement_is_a_documented_residual():
     `UNWIND`) inflates the population's ceiling. When the REPORT's claim then sits under
     the graph's whole node count, BOTH guards pass: the per-population bound validates
     the claim against the inflated ceiling, and the whole-graph check compares the CLAIM
-    (never the mirror's count) against the total. No total-based comparison can separate
-    that from "the population grew since the report", so it is a RESIDUAL — covered
-    solely by `test_the_population_count_mirrors_the_instrument`, which binds the mirror
-    to the instrument's executed constant.
+    (never the mirror's count) against the total.
+
+    ⛔ WHY THIS IS THE IRREDUCIBLE BAND, and not a checker someone forgot to write:
+    refusing on the MIRROR's count vs the graph total (`resident_population >
+    node_total`) is not sound — it cannot tell an inflated statement from a live cache
+    that gained nodes between the two reads (the total is read first), so it would
+    false-block. Refusing on `resident_population > report.total_nodes` is worse: the
+    report's total is frozen at measurement time, so it would refuse every legitimate
+    growth. That is why the residual rests on the identity pin
+    (`test_the_population_count_mirrors_the_instrument`), which binds the mirror to the
+    instrument's executed constant.
 
     This test asserts the residual rather than the desired behaviour on purpose: the
     alternative is a suite that reads as though the backstop covered the class, which is
     how the mirror pin gets retired as "belt and braces".
     """
-    # 25,000 nodes; the mirror answers 30,000 (a row-multiplying statement, inflating
-    # ABOVE the graph total); the report claims 20,000 — under the total, so the backstop
-    # is silent, and under the inflated ceiling, so the population bound is silent too.
-    g = _FakeGraph({"Point": 25_000}, populations={"turn": 30_000})
+    # 25,000 nodes; the mirror answers 2,000 for a 500-node population (a row-multiplying
+    # statement); the report claims 1,500 — under the graph total, so the backstop is
+    # silent, and under the inflated ceiling, so the population bound is silent too.
+    g = _FakeGraph({"Point": 25_000}, populations={"turn": 2_000})
     c = _FakeClient(used=900, maxmemory=1_000)
     report = ParityReport(instrument=PARITY_INSTRUMENTS["turn"], verdict="CLEAN",
-                          measured_nodes=20_000, total_nodes=20_000,
+                          measured_nodes=1_500, total_nodes=1_500,
                           graph_name="tortoise")
 
     result = assess(c, g, "tortoise", ceiling_bytes=100,
                     parity_reports={PARITY_INSTRUMENTS["turn"]: report})
 
     assert result.verdict == "PLAN", result.problems
-    assert result.plan["evictable"][0]["nodes"] == 20_000, result.plan["evictable"]
-    assert not any("claims 20000" in problem for problem in result.problems), (
+    assert result.plan["evictable"][0]["nodes"] == 1_500, result.plan["evictable"]
+    assert not any("claims 1500" in problem for problem in result.problems), (
         "the population bound must not be described as catching a claim that sits under "
         "the inflated ceiling"
     )
