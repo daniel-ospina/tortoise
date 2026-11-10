@@ -17,7 +17,7 @@ Non-vacuity (measured): with `timeout=30_000` restored in the fixture's
 constant left defined, the "fixture uses the constant" arm reds — a dead constant
 is exactly how this pin would otherwise be satisfied by nothing.
 """
-from __future__ import annotations  # noqa: I001
+from __future__ import annotations
 
 from pathlib import Path
 
