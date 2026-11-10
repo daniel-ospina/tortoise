@@ -3669,11 +3669,13 @@ _DECORATION_TIMEOUT_MS = 200
 #: the reader's offset CANCELS and every host agrees — except where the pair
 #: straddles an OFFSET TRANSITION on that host (a DST change OR a permanent
 #: standard-offset change) that leaves a local time in a nonexistent hour: the two
-#: values then carry different offsets, and the verdict moves only when the pair's
-#: separation is AT MOST that offset change (equality is enough: the shifted value
-#: need only reach the other bound, and a zero-length window is well-formed).
-#: Measured at a 60 min shift: 20 min, 30 min and 60 min separations flip, 61 min
-#: does not. The US spring-forward pair is REFUSED at UTC and ACCEPTED at
+#: values then carry different offsets, and when the verdict moves follows the
+#: ORIENTATION, because only the non-existent bound is shifted: as the END,
+#: ``separation <= shift`` flips (at a 60 min shift, 20/30/60 min flip, 61 does
+#: not); as the START the flip needs ``separation < shift``, since at exactly the
+#: shift the shifted start lands ON the end bound and both hosts accept that
+#: zero-length window (measured: 20 and 59 min flip, 60 min agrees).
+#: The US spring-forward pair is REFUSED at UTC and ACCEPTED at
 #: ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
 #: change does the same with no DST at all. Separately, two hosts 1h apart
 #: disagree about a pair 13h30 apart, while a pair 20h apart answers the same on

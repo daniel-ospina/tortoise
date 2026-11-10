@@ -746,18 +746,21 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     bounds producer-shaped ONE host reads both, so the reader's offset CANCELS
     — except across an OFFSET TRANSITION on that host (a DST change OR a
     permanent standard-offset change) that leaves a local time in a nonexistent
-    hour. The two values then carry different offsets, and the verdict moves
-    only when the pair's separation is AT MOST the offset change — the shifted
-    value need only REACH the other bound, and a zero-length window is
-    well-formed (measured at a 60 min shift: 20, 30 and 60 min separations flip,
-    61 min does not): the US spring-forward pair is REFUSED at
-    ``UTC``/``Asia/Kolkata`` and ACCEPTED at ``America/Los_Angeles``, and
-    ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00 change does the same under its
-    30 min shift with no DST at all (the class is NOT DST-specific — review
-    cycle 10). Two hosts therefore disagree only when the separation falls
-    between their offsets, the closed end being the ACCEPTING host's offset —
-    higher for a producer-as-START, lower for a producer-as-END — so the two
-    orientations close at opposite ends (measured: the END pair with a 7200 s
+    hour. The two values then carry different offsets, and WHEN the verdict moves
+    follows the ORIENTATION, because only the non-existent bound is shifted — as
+    the END, ``separation <= shift`` flips (at a 60 min shift: 20, 30 and 60 min
+    separations flip, 61 min does not), while as the START the flip needs
+    ``separation < shift``, because at exactly the shift the shifted start lands
+    ON the end bound and BOTH hosts accept that zero-length window (measured: 20
+    and 59 min flip, 60 min agrees). Measured instances: the US spring-forward
+    pair is REFUSED at ``UTC``/``Asia/Kolkata`` and ACCEPTED at
+    ``America/Los_Angeles``, and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
+    change does the same under its 30 min shift with no DST at all (the class is
+    NOT DST-specific — review cycle 10). For a MIXED pair, two hosts therefore
+    disagree only when the separation falls between their offsets, the closed end
+    being the ACCEPTING host's offset — higher for a producer-as-START, lower for
+    a producer-as-END — so the two orientations close at opposite ends (measured:
+    the END pair with a 7200 s
     separation is ACCEPTED at ``Africa/Johannesburg`` +02:00 and REFUSED at
     ``Asia/Kolkata`` +05:30). The distance alone decides nothing: two hosts 1h apart can disagree
     about a pair 13h30 apart, and a pair 20h apart answers the same on every
@@ -860,7 +863,8 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         assert observed[zone][6] == expected, (zone, observed[zone])
     # …and the class is NOT DST-specific: Asia/Pyongyang's offset changed
     # PERMANENTLY (+08:30 -> +09:00 on 2018-05-05, no DST on either side), which
-    # leaves 00:00-00:30 nonexistent all the same, so the same wall-inverted pair
+    # leaves 2018-05-04 23:30-24:00 nonexistent all the same, so the same
+    # wall-inverted pair
     # un-inverts there. Pinned, because "it is only DST" is the wrong rule.
     pyongyang = subprocess.run(
         [sys.executable, "-c", script], capture_output=True, text=True,

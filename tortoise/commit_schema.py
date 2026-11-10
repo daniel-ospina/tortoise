@@ -529,19 +529,26 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
       CANCELS — EXCEPT where the pair straddles an OFFSET TRANSITION on that
       host (a DST change OR a permanent standard-offset change) that leaves one
       of the two local times in a NONEXISTENT HOUR: the two values then carry
-      different offsets. That alone does NOT move the verdict — it moves only
-      when the pair's wall separation is AT MOST the offset change, because the
-      shifted value need only REACH the other bound and a zero-length window is
-      well-formed (measured at a 60 min shift: 20 min, 30 min and 60 min
-      separations flip, 61 min does not). Measured instances: the US
+      different offsets. That alone does NOT move the verdict, and WHEN it
+      moves follows the orientation, because only the NONEXISTENT bound is
+      shifted:
+        - non-existent bound is the END: ``separation <= shift`` flips — the
+          shifted end need only REACH the other bound (measured at a 60 min
+          shift: 20, 30 and 60 min separations flip, 61 min does not);
+        - non-existent bound is the START: the flip needs ``separation <
+          shift``; at EXACTLY the shift the shifted start lands ON the end
+          bound, a well-formed zero-length window, and BOTH hosts accept it
+          (measured: 20 and 59 min flip, 60 min agrees).
+      Measured instances: the US
       spring-forward pair ``("2023/03/12 (Sun) 03:10", "2023/03/12 (Sun)
       02:50")`` is REFUSED at ``UTC``/``Asia/Kolkata`` and ACCEPTED at
       ``America/Los_Angeles``; and ``Asia/Pyongyang``'s PERMANENT +08:30 → +09:00
       change (2018-05-05, no DST either side) does the same to a 20 min pair
       under its 30 min shift — so the class is NOT DST-specific.
 
-    Two hosts therefore disagree only when the separation falls between their
-    offsets, and WHICH end is closed follows from the orientation — it is closed
+    For a MIXED pair (one bound zone-less, one stated), two hosts therefore
+    disagree only when the separation falls between their offsets, and WHICH end
+    is closed follows from the orientation — it is closed
     at the offset of the host that ACCEPTS: ``O_low < separation <= O_high``
     when the producer's shape is the START (the lower-offset host refuses), and
     ``O_low <= separation < O_high`` when it is the END (the higher-offset host

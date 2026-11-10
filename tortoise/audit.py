@@ -929,10 +929,13 @@ def audit_graph(proj, point_kinds: list[str] | None = None) -> AuditResult:
     # BOTH bounds are naive ONE host reads both, so the reader's offset CANCELS
     # — except where the pair straddles an OFFSET TRANSITION on that host (a DST
     # change OR a permanent standard-offset change) that leaves a local time in a
-    # nonexistent hour: the two values then carry different offsets, and the
-    # verdict MOVES only when the pair's separation is AT MOST the offset change
-    # (equality is enough — a zero-length window is well-formed; measured at a
-    # 60 min shift: 20/30/60 min flip, 61 min does not). Measured: the US
+    # nonexistent hour: the two values then carry different offsets, and when
+    # the verdict moves follows the orientation, because only the NONEXISTENT
+    # bound is shifted — as the END, ``separation <= shift`` flips (measured at a
+    # 60 min shift: 20/30/60 min flip, 61 min does not); as the START the flip
+    # needs ``separation < shift``, because at exactly the shift the shifted
+    # start lands ON the end bound and both hosts accept that zero-length
+    # window (measured: 20 and 59 min flip, 60 min agrees). Measured: the US
     # spring-forward pair flips between UTC and America/Los_Angeles, and
     # Asia/Pyongyang's PERMANENT +08:30 → +09:00 change
     # in 2018 does the same with no DST at all. This check reports rather than
