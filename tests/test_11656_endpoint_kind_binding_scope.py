@@ -527,7 +527,19 @@ def _pytest_collects_class(node: ast.ClassDef) -> bool:
     """
     if _class_refuses_collection(node):
         return False
-    return not any(
+    return not _class_declares_init_or_new(node)
+
+
+def _class_declares_init_or_new(node: ast.ClassDef) -> bool:
+    """True if the class body declares `__init__` or `__new__` — `Class.collect`'s two name-path refusals.
+
+    Split out of `_pytest_collects_class` because the FORCED arm needs it WITHOUT the `__test__` half: an
+    out-of-body `helper.__test__ = True` legitimately overrides an in-body falsy `__test__`, but it does
+    not stop `hasinit`/`hasnew` from refusing the class. Measured (round-31 P2, reviewer round 3):
+    `class helper: __init__(self); test_h` + `helper.__test__ = True` collects **0** (plus a
+    `PytestCollectionWarning`), while the derivation counted `(1, 1)`.
+    """
+    return any(
         isinstance(stmt, (ast.FunctionDef, ast.AsyncFunctionDef))
         and stmt.name in ("__init__", "__new__")
         for stmt in node.body
@@ -659,9 +671,13 @@ def _derive_population(source: str) -> tuple[int, int]:
         fact, and at module level it decides every test in the file
       * an explicit `__abstractmethods__` assignment, or a `metaclass=` this file does not model — both
         move `inspect.isabstract`'s set out of a static read
-      * a decorator that merely ENDS in `fixture`, or mentions `abstract` without being one of `abc`'s
-        four abstract markers — the spelling is not the object pytest reads (`getfixturemarker`,
-        `__isabstractmethod__`), so the shape is refused
+      * a decorator that merely ENDS in `fixture`/`parametrize`, or mentions `abstract` without being one of
+        `abc`'s four abstract markers — the spelling is not the object pytest reads (`getfixturemarker`,
+        `__isabstractmethod__`, `MarkDecorator`), so the shape is refused
+      * an out-of-body `__test__` bound through `setattr(...)`, on an object this module does not declare,
+        to a non-literal, or to BOTH a truthy and a falsy value (which one pytest reads is source order)
+      * a name declared TWICE in one scope — pytest collects only the last binding, and which declaration a
+        `__test__` binding names is not tracked here
     """
     tree = ast.parse(source)
 
@@ -749,7 +765,7 @@ def _derive_population(source: str) -> tuple[int, int]:
         if not isinstance(node, ast.ClassDef):
             continue
         if any(
-            isinstance(decorator, ast.Call) and ast.unparse(decorator.func).endswith("parametrize")
+            isinstance(decorator, ast.Call) and _decorator_leaf(decorator) == "parametrize"
             for decorator in node.decorator_list
         ):
             parametrised_classes.add(node.name)
@@ -785,13 +801,23 @@ def _derive_population(source: str) -> tuple[int, int]:
     #: `TestA::test_b` and NOTHING else. The bare-name key dropped `TestC::test_b` too — two classes with a
     #: same-named method is ordinary — and reported `(0, 0)` where `--collect-only` collects **1**.
     _declared: dict[str, ast.AST] = {}
+    #: Every declaration's path, by node id — ⛔ EVERY declaration, not just the last one per name: a
+    #: scope may declare the same name twice, and `_declared` keeps only the winner, so deriving this from
+    #: `_declared` left the SHADOWED node unmapped and it escaped every out-of-body refusal (measured,
+    #: reviewer round 3: `def test_a()` twice + `test_a.__test__ = False` collects **0** where head gave
+    #: `(1, 1)` — a regression the qualified-path rewrite introduced).
+    _path_of: dict[int, str] = {}
+    _duplicate_paths: set[str] = set()
 
     def _index_scope(scope_body: list[ast.stmt], prefix: str) -> None:
         for _n in scope_body:
             if not isinstance(_n, (ast.ClassDef, ast.FunctionDef, ast.AsyncFunctionDef)):
                 continue
             _path = f"{prefix}{_n.name}"
+            if _path in _declared:
+                _duplicate_paths.add(_path)
             _declared[_path] = _n
+            _path_of[id(_n)] = _path
             if isinstance(_n, ast.ClassDef):
                 _index_scope(_n.body, _path + ".")
 
@@ -883,8 +909,8 @@ def _derive_population(source: str) -> tuple[int, int]:
     # ⛔ A refused object drops EVERY node beneath it: `nodes` holds methods, not classes, so filtering on
     # the class's own name left `TestX.__test__ = False` still counting `TestX::test_a`. Path prefixes do
     # that, and they also keep an unrelated class's same-named method (round-31 P2).
-    _path_of: dict[int, str] = {id(_node): _path for _path, _node in _declared.items()}
-
+    # `_path_of` is populated by `_index_scope`, which maps EVERY declaration — re-deriving it from the
+    # last-wins `_declared` dict is what lost the shadowed one.
     def _refused(node: ast.AST) -> bool:
         """True when this node IS a refused object or lives under one (`TestX` refuses `TestX::test_a`)."""
         path = _path_of.get(id(node))
@@ -894,13 +920,45 @@ def _derive_population(source: str) -> tuple[int, int]:
 
     nodes = [node for node in nodes if not _refused(node)]
     _already_counted = {id(node) for node in nodes}
+
+    def _class_selected(path: str, node: ast.ClassDef) -> bool:
+        """True when pytest obtains a COLLECTOR for this class — i.e. reads its members' `__test__` at all."""
+        if not _pytest_collects_class(node) or _is_abstract_class(node):
+            return False
+        if node.name in _case_names:
+            return True
+        return node.name.startswith("Test") or _test_dunder(node.body) is True or path in _forced_paths
+
     for _path, _cand in sorted(_declared.items()):
         if _path not in _forced_paths:
             continue
+        # ⛔ A METHOD's `__test__ = True` is read only through a collector that ALREADY collects its class
+        # (round-31 P2, reviewer round 3 — measured three ways): forcing a member of a class pytest never
+        # collects selects NOTHING (`class Helper: test_b` + `Helper.test_b.__test__ = True` → **0**), a
+        # `unittest.TestCase` member is invisible to that path at all (only `testMethodPrefix` is iterated:
+        # `FoldCase.helper.__test__ = True` → **1**, i.e. `test_a` only), while a member of a COLLECTED
+        # `Test*` class IS selected even without a `test` name (`TestX.helper.__test__ = True` → **1**).
+        _container_path = _path.rsplit(".", 1)[0] if "." in _path else ""
+        if _container_path:
+            _container = _declared.get(_container_path)
+            if not isinstance(_container, ast.ClassDef):
+                unreadable.append(
+                    f"`{_path}.__test__ = True` names a member of `{_container_path}`, which is not a "
+                    "class this module declares — pytest reads a method's `__test__` only through a "
+                    "collector for its class, which cannot be identified here"
+                )
+                continue
+            if _container.name in _case_names:
+                continue
+            if not _class_selected(_container_path, _container):
+                continue
         if (
             id(_cand) in _already_counted
             or _is_fixture_function(_cand)
-            or (isinstance(_cand, ast.ClassDef) and _is_abstract_class(_cand))
+            or (
+                isinstance(_cand, ast.ClassDef)
+                and (_is_abstract_class(_cand) or _class_declares_init_or_new(_cand))
+            )
         ):
             continue
         # `__test__ = True` is a POSITIVE selection at `istestclass`/`istestfunction`, so a name the
@@ -945,6 +1003,45 @@ def _derive_population(source: str) -> tuple[int, int]:
                 "whether pytest sees it is a runtime fact this derivation cannot read"
             )
 
+    # ⛔ Two declarations of one name in one scope: the walk counts BOTH, pytest sees only the LAST binding.
+    # Measured (reviewer round 3): `def test_a(): …` twice collects **1** while the derivation said `(2, 2)`,
+    # and a `test_a.__test__ = False` on the survivor left the shadowed one counted. The refusal is
+    # deliberate: which declaration a `__test__` binding names is a source fact this walk does not track.
+    for _path in sorted(_duplicate_paths):
+        unreadable.append(
+            f"`{_path}` is declared more than once in the same scope; pytest collects only the LAST "
+            "binding of a name, and this walk cannot tell which declaration a `__test__` binding names"
+        )
+    # ⛔ `setattr(obj, "__test__", value)` binds out of body too, and pytest honours it (measured,
+    # reviewer round 3: `setattr(TestX, "__test__", False)` on an otherwise collected class collects **0**
+    # while a scan of `obj.__test__ = …` saw nothing). Refused rather than modelled: the object may be
+    # anything this walk does not index.
+    for _call in ast.walk(tree):
+        if not isinstance(_call, ast.Call) or len(_call.args) < 2:
+            continue
+        if _decorator_leaf(_call.func) != "setattr":
+            continue
+        _name_arg = _call.args[1]
+        if isinstance(_name_arg, ast.Constant) and _name_arg.value == "__test__":
+            unreadable.append(
+                f"`{ast.unparse(_call)[:72]}` binds `__test__` through `setattr`, which this scan does "
+                "not model — the object it names cannot be resolved here"
+            )
+    # ⛔ A `parametrize` matched by SUFFIX is the same spelling guess this derivation removed for `fixture`
+    # and the `abstract` markers, and `@myparametrize("x", [1, 2, 3])` is an ordinary decorator: pytest
+    # collects **1** where the suffix model added the three cases and reported `(1, 3)` (measured,
+    # reviewer round 3).
+    for _node in ast.walk(tree):
+        if not isinstance(_node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+            continue
+        for _decorator in _node.decorator_list:
+            _leaf = _decorator_leaf(_decorator)
+            if _leaf.endswith("parametrize") and _leaf != "parametrize":
+                unreadable.append(
+                    f"`{getattr(_node, 'name', '?')}` is decorated with "
+                    f"`{ast.unparse(_decorator)[:48]}`, which merely ENDS in `parametrize` — it is not "
+                    "`pytest.mark.parametrize`, so whether it multiplies cases cannot be read here"
+                )
     # ⛔ An IMPORTED base is a shape this derivation cannot model: `PyCollector.collect` walks the whole
     # `__mro__` for methods, and `hasinit`/`hasnew` use `getattr`, so the parent can contribute BOTH cases
     # and refusals from another module. The same-module `inheriting` arm covers only what it can see.
@@ -1044,7 +1141,7 @@ def _derive_population(source: str) -> tuple[int, int]:
         arms = [
             decorator
             for decorator in getattr(node, "decorator_list", [])
-            if isinstance(decorator, ast.Call) and ast.unparse(decorator.func).endswith("parametrize")
+            if isinstance(decorator, ast.Call) and _decorator_leaf(decorator) == "parametrize"
         ]
         if len(arms) > 1:
             unreadable.append(
@@ -2587,6 +2684,25 @@ class TestTheDocsAreDiscoverableAndResolve:
             "out-of-body `__test__` on an object this module does not declare": (
                 "class TestX:\n    def test_a(self):\n        pass\nother.TestX.__test__ = False\n"
             ),
+            # ⛔ Round-31 P3 — `setattr(obj, "__test__", …)` is an out-of-body binding pytest honours
+            # (measured: 0 collected) and the assignment scan cannot see.
+            "out-of-body `__test__` bound through `setattr`": (
+                "class TestX:\n    def test_a(self):\n        pass\nsetattr(TestX, \"__test__\", False)\n"
+            ),
+            # ⛔ Round-31 P3 — a `parametrize` matched by SUFFIX is the spelling guess removed for `fixture`
+            # and the `abstract` markers; `@myparametrize('x', [1,2,3])` collects **1**, not 3.
+            "a decorator that merely ENDS in `parametrize`": (
+                "def myparametrize(*a):\n    return lambda fn: fn\n"
+                "@myparametrize('x', [1, 2, 3])\ndef test_a(x):\n    pass\n"
+            ),
+            # ⛔ Round-31 P2 — two declarations of one name in one scope: pytest sees only the LAST binding,
+            # and which one a `__test__` binding names is a source fact this walk does not track.
+            "a name declared twice in one scope": (
+                "def test_a():\n    pass\n\ndef test_a():\n    pass\n"
+            ),
+            "a name declared twice, then refused out of body": (
+                "def test_a():\n    pass\n\ndef test_a():\n    pass\ntest_a.__test__ = False\n"
+            ),
         }
         for label, source in unmodellable.items():
             with pytest.raises(AssertionError, match="cannot derive the collected count"):
@@ -2660,6 +2776,25 @@ class TestTheDocsAreDiscoverableAndResolve:
             "`module_level` is back on the collection walk. It was declared and never read, while a call "
             "site passed `module_level=True` for a CLASS body — a rule nothing implemented. Remove it, or "
             "implement the distinction it names."
+        )
+
+        # --- Round-31 P3 (reviewer round 3) — the `@myfixture` pin above CANNOT fail on the wording it
+        # protects: the suffix REFUSAL arm fires first, so reverting `_is_fixture_function` to
+        # `endswith("fixture")` left all 33 tests green and the docstring's "EXACT, never endswith"
+        # unprotected. Pin the predicate DIRECTLY, on both sides.
+        _fixture_probe = ast.parse(
+            "def myfixture(fn):\n    return fn\n@myfixture\ndef test_a():\n    pass\n"
+        )
+        _probe_fn = next(n for n in _fixture_probe.body if getattr(n, "name", None) == "test_a")
+        assert _is_fixture_function(_probe_fn) is False, (
+            "`_is_fixture_function` matched a decorator by SUFFIX: `@myfixture` is an ordinary decorator, "
+            "not a fixture, so the function IS collected (measured: pytest collects 1)"
+        )
+        _real_fixture = ast.parse("import pytest\n@pytest.fixture\ndef test_f():\n    pass\n")
+        _real_fn = next(n for n in _real_fixture.body if getattr(n, "name", None) == "test_f")
+        assert _is_fixture_function(_real_fn) is True, (
+            "`_is_fixture_function` no longer recognises `@pytest.fixture` — a fixture named `test_*` is "
+            "NOT collected (`istestfunction` ends on `getfixturemarker(obj) is None`)"
         )
 
         # --- Round-31 P2 — the three shapes the delta review measured as UNDERCOUNTS, re-measured with
