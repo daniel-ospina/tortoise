@@ -145,7 +145,11 @@ __all__ = [
     "served_store_labels",
     "set_embedding_clause",
     "statement_interpolates_label",
+    "statement_label_mutations",
     "statement_node_labels",
+    "statement_pattern_labels",
+    "statement_write_aliases",
+    "statement_write_target_problem",
     "stored_embedding_vector_expr",
 ]
 
@@ -212,6 +216,12 @@ def statement_node_labels(statement: str) -> frozenset[str]:
     ``CREATE``. That breadth is deliberate (a keyword-anchored form missed a stray second pattern,
     measured) and it errs in the REFUSING direction: a false positive costs a writer a clear error,
     where a false negative stores a vector somewhere no read path reaches.
+
+    ⛔ THIS IS THE *NAMING* QUESTION, NOT THE *STORING* ONE. It answers "which labels does the
+    statement mention"; :func:`statement_write_target_problem` answers "where does the vector land",
+    and a bound that asks only the first is a false PASS — `MATCH (e:Event …) CREATE (p) SET p += …`
+    returns `{'Event'}` here while storing on the label-less node `[]` (measured, #11641). A door
+    must ask both; the two live here so the answers cannot drift apart.
     """
     return frozenset(_STATEMENT_LABEL_RE.findall(statement))
 
@@ -230,6 +240,378 @@ def statement_interpolates_label(statement: str) -> bool:
     one by interpolation* (this). Nothing here inspects a graph — it is a text-level bound.
     """
     return bool(_INTERPOLATED_LABEL_RE.search(statement))
+
+
+#: ── the WRITE TARGET: the node the statement writes TO (#11641) ──────────────────────────────
+#: The three readers above answer *what does the statement NAME*. That is NOT the question a bound
+#: on ``stores=(...)`` has to answer: a statement can name a served label in a ``MATCH`` and store
+#: the vector on a DIFFERENT, partly or wholly unlabelled alias — measured on this PR, where
+#: ``MATCH (e:Event …) CREATE (p) SET p += $props, <embedding clause on p>`` passed every reader
+#: above and landed a ``Vectorf32`` on the label-less node ``[]``, which no ``entity_type`` reaches.
+#: The readers below answer the question the register's declaration actually makes: **where does the
+#: vector land**, at the same seam, so the answer has one home rather than one per writer.
+#:
+#: ⛔ WHY THE ANSWER IS TEXT AND NOT A BINDABLE PARAMETER. A Cypher label is query STRUCTURE, not a
+#: value: Neo4j's Cypher Manual (Parameters — *"Parameters cannot be used for the following
+#: constructs, as these form part of the query structure that is compiled into a query plan: … Node
+#: labels; ``MATCH (n:$param)`` is invalid"*), and this engine is the same family. A door that
+#: EXECUTES a caller's statement therefore has no parameter to ask and no engine API that reports
+#: "which label did that statement write to". The only two options are (a) a reader over the
+#: statement TEXT, or (b) stop executing caller text for the store; this module is the one home of
+#: (a), and it is written to fail CLOSED.
+#:
+#: ⚠️ A TEXT READER'S COMPLETENESS IS NOT KNOWABLE A PRIORI — so breadth is spent in the REFUSING
+#: direction, exactly as :func:`statement_node_labels` does, and the shapes it still cannot see are
+#: named at :func:`statement_write_target_problem` rather than left implied.
+
+#: A Cypher statement's clause keywords. Used only to find where a clause BODY ends, so a keyword
+#: inside a quoted string, inside a bracket, or as a ``.property`` / ``:Label`` component is not one.
+#: ``ON`` is included so ``MERGE (…) ON CREATE SET …`` ends its pattern list at ``ON``.
+_CLAUSE_KEYWORD_RE = re.compile(
+    r"(?<![\w$.:])(MATCH|MERGE|CREATE|SET|REMOVE|DELETE|DETACH|RETURN|WITH|UNWIND|WHERE|"
+    r"FOREACH|CALL|ORDER\s+BY|LIMIT|SKIP|UNION|ON)(?![\w$:])",
+    re.IGNORECASE,
+)
+
+#: The characters that, IMMEDIATELY before a ``(`` with no space between them, make it a function
+#: CALL rather than a node pattern. ``vecf32($embedding)``, ``coalesce(…)`` and every other call are
+#: excluded by this rule alone, so the reader needs no list of function names. A space before the
+#: ``(`` is not a call — that is what ``MATCH (e:Event …)`` depends on — so only the IMMEDIATE
+#: predecessor is tested (see :func:`_scan_node_patterns`).
+_NOT_A_PATTERN_PREFIX = re.compile(r"[A-Za-z0-9_$)\]}]", re.UNICODE)
+
+#: A Cypher alias / label identifier.
+_IDENTIFIER_RE = re.compile(r"[A-Za-z_]\w*")
+
+#: A clause item's head: the alias a ``SET``/``REMOVE`` item writes, then the rest of the item
+#: (``.prop = …``, ``+= $map``, ``= $map``, ``:Label``).
+_ITEM_HEAD_RE = re.compile(r"\s*([A-Za-z_]\w*)\s*(.*)\Z", re.DOTALL)
+
+
+def _depths(statement: str) -> list[int]:
+    """The bracket nesting depth BEFORE each character; ``-1`` marks a QUOTED span.
+
+    ``-1`` is what keeps a comma, a paren or a keyword inside a string literal out of every reader
+    below: a quote opens a span that runs to its matching quote (with ``\\`` escapes), and every
+    character in it — the quotes included — is marked ``-1``. A comma inside ``'a, b'`` therefore
+    cannot split a ``SET`` list, and ``'{not: a label}'`` cannot be read as a map literal.
+    """
+    depth = 0
+    quote: str | None = None
+    escaped = False
+    depths: list[int] = [0] * len(statement)
+    for index, char in enumerate(statement):
+        if quote is not None:
+            depths[index] = -1
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == quote:
+                quote = None
+            continue
+        if char in ("'", '"', "`"):
+            quote = char
+            depths[index] = -1
+        elif char in "([{":
+            depths[index] = depth
+            depth += 1
+        elif char in ")]}":
+            depth -= 1
+            depths[index] = depth
+        else:
+            depths[index] = depth
+    return depths
+
+
+def _clause_bodies(statement: str, depths: list[int]) -> list[tuple[str, int, int]]:
+    """``(KEYWORD, body_start, body_end)`` for every clause, at ANY nesting depth.
+
+    Depth-relative on purpose: a store nested in ``FOREACH`` or in a ``CALL { … }`` subquery is
+    still a store, and a reader that only looked at depth 0 would let it through while the outer
+    statement's own target looked fine.
+    """
+    bodies: list[tuple[str, int, int]] = []
+    for match in _CLAUSE_KEYWORD_RE.finditer(statement):
+        start = match.start()
+        if depths[start] < 0:  # a keyword inside a quoted string is text, not a clause
+            continue
+        base = depths[start]
+        end = len(statement)
+        for index in range(match.end(), len(statement)):
+            inner = depths[index]
+            if inner < 0:
+                continue
+            if inner < base:
+                end = index
+                break
+            if inner == base and _CLAUSE_KEYWORD_RE.match(statement, index):
+                end = index
+                break
+        bodies.append((match.group(1).upper(), match.end(), end))
+    return bodies
+
+
+def _split_items(statement: str, start: int, end: int, base: int,
+                 depths: list[int]) -> list[str]:
+    """Split a clause body on the commas at ITS OWN depth — never on a comma inside a map, a
+    list, a function call or a string (``SET e.meta = {a: {b: 1}}`` is ONE item)."""
+    items: list[str] = []
+    current = start
+    for index in range(start, end):
+        if depths[index] == base and statement[index] == ",":
+            item = statement[current:index].strip()
+            if item:
+                items.append(item)
+            current = index + 1
+    tail = statement[current:end].strip()
+    if tail:
+        items.append(tail)
+    return items
+
+
+def _scan_node_patterns(statement: str, depths: list[int],
+                        start: int = 0, end: int | None = None
+                        ) -> list[tuple[str | None, frozenset[str], int]]:
+    """Every node PATTERN beginning in ``[start, end)``, as ``(alias, labels, pattern_start)``.
+
+    A pattern is a ``(`` that is not a function call (see :data:`_NOT_A_PATTERN_PREFIX`) and whose
+    body parses as ``(:Label…)``, ``(alias)``, ``(alias:Label…)`` or ``(alias{…})``. Once a pattern
+    is recognised its whole span is SKIPPED, so a ``(`` inside its property map cannot be read as a
+    second pattern.
+
+    ``labels`` is EMPTY when the pattern binds no label — and that absence is the fact the door
+    needs: an alias bound with no label is a node no ``entity_type`` reaches.
+    """
+    patterns: list[tuple[str | None, frozenset[str], int]] = []
+    length = len(statement) if end is None else min(end, len(statement))
+    index = start
+    while index < length:
+        if statement[index] != "(" or depths[index] < 0:
+            index += 1
+            continue
+        previous = index - 1
+        # ⛔ Only an IMMEDIATE identifier/bracket predecessor makes this a function call: a space
+        # before the ``(`` is a pattern (`MATCH (e:Event …)`), no space is a call
+        # (`vecf32($embedding)`). Skipping whitespace here would read every `MATCH (` as a call.
+        if (previous >= 0 and not statement[previous].isspace()
+                and _NOT_A_PATTERN_PREFIX.match(statement[previous])):
+            index += 1
+            continue
+        base = depths[index]
+        close = None
+        for candidate in range(index + 1, length):
+            if depths[candidate] == base and statement[candidate] == ")":
+                close = candidate
+                break
+        if close is None:
+            index += 1
+            continue
+        cursor = index + 1
+        while cursor < close and statement[cursor].isspace():
+            cursor += 1
+        alias: str | None = None
+        labels: set[str] = set()
+        recognised = True
+        if cursor >= close:                       # `()` — an anonymous empty pattern
+            pass
+        elif statement[cursor] == ":":           # `(:Label …)` — anonymous, labelled
+            labels = _read_labels(statement, cursor + 1, close)
+        elif statement[cursor] == "{":           # `({…})` — anonymous, properties only
+            pass
+        else:
+            identifier = _IDENTIFIER_RE.match(statement, cursor)
+            if identifier is None:
+                recognised = False
+            else:
+                after = identifier.end()
+                while after < close and statement[after].isspace():
+                    after += 1
+                tail = statement[after] if after < close else ")"
+                if tail == "(":               # `name(` — a function call, not a pattern
+                    recognised = False
+                elif tail == ":":
+                    alias = identifier.group(0)
+                    labels = _read_labels(statement, after + 1, close)
+                elif tail in "){-<|" or tail == "]":
+                    alias = identifier.group(0)
+                else:                          # `(x IN …)`, `(x WHERE …)` — not a pattern
+                    recognised = False
+        if recognised:
+            patterns.append((alias, frozenset(labels), index))
+            index = close + 1
+        else:
+            index += 1
+    return patterns
+
+
+def _read_labels(statement: str, cursor: int, close: int) -> set[str]:
+    """Read ``Label`` / ``Label:Other`` starting at ``cursor``, stopping at anything else.
+
+    A rendered label (``:{expr}`` or ``:$(expr)``) yields NO label here and leaves the alias
+    UNLABELLED — the fail-closed reading, since an unlabelled binding is refused by the door. The
+    interpolation shapes are also refused on their own by :func:`statement_interpolates_label`.
+    """
+    labels: set[str] = set()
+    while cursor < close:
+        while cursor < close and statement[cursor].isspace():
+            cursor += 1
+        if cursor >= close:
+            break
+        if statement[cursor] in "{$":       # a rendered label — unreadable, so no label recorded
+            break
+        identifier = _IDENTIFIER_RE.match(statement, cursor)
+        if identifier is None:
+            break
+        labels.add(identifier.group(0))
+        cursor = identifier.end()
+        while cursor < close and statement[cursor].isspace():
+            cursor += 1
+        if cursor < close and statement[cursor] == ":":
+            cursor += 1
+            continue
+        break
+    return labels
+
+
+def statement_pattern_labels(statement: str) -> dict[str, frozenset[str]]:
+    """Every ALIAS a node pattern binds, to the labels that statement binds it to.
+
+    ⛔ ``frozenset()`` — an alias bound with **no label** — is the load-bearing value: it is the
+    absence the door refuses, because a node carrying no label is reachable by no ``entity_type``
+    at all (`#5090` DoD row 2's own defect).
+
+    An alias bound by several patterns maps to the UNION of their labels (a repeated alias in one
+    ``MATCH`` denotes the same node, so the union is what the node is known to carry). Anonymous
+    patterns (``(:Label)``, ``()``, ``({…})``) bind no alias and are not reported — there is nothing
+    for a following clause to write to.
+
+    ⚠️ This is the BINDING reader, not the write reader: it does not say which of those aliases the
+    statement writes. Pair it with :func:`statement_write_aliases`.
+    """
+    depths = _depths(statement)
+    bindings: dict[str, frozenset[str]] = {}
+    for alias, labels, _start in _scan_node_patterns(statement, depths):
+        if alias is None:
+            continue
+        bindings[alias] = bindings.get(alias, frozenset()) | labels
+    return bindings
+
+
+def statement_write_aliases(statement: str) -> frozenset[str]:
+    """Every alias the statement WRITES TO — the aliases a stored property can land on.
+
+    * the head of every ``SET`` clause item (``SET a += …``, ``SET a = …``, ``SET a.prop = …``,
+      ``SET a:Label``), and
+    * every alias a ``CREATE`` / ``MERGE`` node pattern introduces (the created/merged node).
+
+    ⛔ ``REMOVE a.prop`` is deliberately NOT here: removing the embedding property writes a
+    property, not a node, and :func:`clear_then_set_prefix`'s own ``REMOVE e.embedding`` guard must
+    stay accepted — the `#4520` clear-then-set invariant every overwrite writer depends on.
+    ``REMOVE a:Label`` is a LABEL mutation and is reported separately by
+    :func:`statement_label_mutations`.
+
+    Scanned at ANY depth, so a store nested in ``FOREACH`` / ``CALL { … }`` contributes its alias
+    instead of hiding behind a well-behaved outer clause.
+    """
+    depths = _depths(statement)
+    aliases: set[str] = set()
+    for keyword, start, end in _clause_bodies(statement, depths):
+        base = depths[start] if start < len(depths) else 0
+        if keyword in ("CREATE", "MERGE"):
+            for alias, _labels, _pattern_start in _scan_node_patterns(
+                    statement, depths, start, end):
+                if alias is not None:
+                    aliases.add(alias)
+        elif keyword == "SET":
+            for item in _split_items(statement, start, end, base, depths):
+                head = _ITEM_HEAD_RE.match(item)
+                if head is not None:
+                    aliases.add(head.group(1))
+    return frozenset(aliases)
+
+
+def statement_label_mutations(statement: str) -> frozenset[str]:
+    """Aliases whose LABEL the statement mutates — ``SET a:Label`` / ``REMOVE a:Label``.
+
+    A label mutation decides what the node IS at the moment the vector lands, so it is refused
+    rather than reasoned about: ``REMOVE e:Event SET e:Foo`` moves a served store onto ``:Foo``
+    AFTER the pattern reader has seen ``(e:Event …)``, which is why naming a served label cannot be
+    the bound. ``REMOVE a.prop`` / ``REMOVE a.embedding`` is a PROPERTY removal and is NOT a
+    mutation — it is how :func:`clear_then_set_prefix` clears a vector before rewriting it.
+    """
+    depths = _depths(statement)
+    aliases: set[str] = set()
+    for keyword, start, end in _clause_bodies(statement, depths):
+        if keyword not in ("SET", "REMOVE"):
+            continue
+        base = depths[start] if start < len(depths) else 0
+        for item in _split_items(statement, start, end, base, depths):
+            head = _ITEM_HEAD_RE.match(item)
+            if head is not None and head.group(2).startswith(":"):
+                aliases.add(head.group(1))
+    return frozenset(aliases)
+
+
+def statement_write_target_problem(statement: str, allowed) -> str | None:
+    """Report what is wrong with the WRITE TARGET of ``statement``, or ``None`` when nothing is.
+
+    The one helper a door calls. It refuses — with a sentence a caller can act on — every alias the
+    statement writes to that is
+
+    * **ABSENT** — never bound by a node pattern in this statement;
+    * **UNLABELLED** — bound, but to no label, so no ``entity_type`` reaches the node; or
+    * **OUTSIDE** — bound to a label in ``allowed``'s complement;
+
+    and it refuses a statement that MUTATES a label (``SET a:Label`` / ``REMOVE a:Label``). A
+    statement that exposes NO write target the reader can prove is refused too — the fail-closed
+    reading, because "I could not find where it writes" is not "it writes somewhere safe".
+
+    ⛔ ACCEPTED RESIDUAL — what a text reader cannot see, named here rather than left implied:
+    a store rendered by a shape the clause grammar does not phrase as ``SET``/``REMOVE``/``CREATE``/
+    ``MERGE`` (a stored procedure that mutates the node, ``CALL apoc.*``, or a helper that builds
+    the clause text) is invisible to this reader. That is the same class of limit
+    :func:`statement_node_labels` states for labels it cannot read off, and it is why the door's
+    own docstring says the bound is on the statement TEXT: a caller that renders its store through
+    a procedure defeats it, and that case stays a matter for review rather than a claim of
+    totality.
+    """
+    allowed_labels = {str(label) for label in allowed}
+    bindings = statement_pattern_labels(statement)
+    targets = statement_write_aliases(statement)
+    mutations = statement_label_mutations(statement)
+
+    problems: list[str] = []
+    if mutations:
+        problems.append(
+            f"it MUTATES a label on alias(es) {sorted(mutations)} (`SET <a>:X` / `REMOVE <a>:X`), "
+            "so the label at the moment the vector lands is decided by the statement's own "
+            "effects rather than by any pattern")
+    if not targets:
+        problems.append(
+            "it exposes NO write target this reader can prove (no `SET <alias> …` item and no "
+            "node pattern introduced by `CREATE`/`MERGE`)")
+    unbound = sorted(alias for alias in targets if alias not in bindings)
+    unlabelled = sorted(alias for alias in targets
+                        if alias in bindings and not bindings[alias])
+    outside = {alias: sorted(bindings[alias] - allowed_labels) for alias in sorted(targets)
+               if alias in bindings and (bindings[alias] - allowed_labels)}
+    if unbound:
+        problems.append(
+            f"it writes to alias(es) {unbound} that NO node pattern in the statement binds, so the "
+            "label the vector lands on is not in the statement at all")
+    if unlabelled:
+        problems.append(
+            f"it writes to alias(es) {unlabelled} bound by a node pattern with NO LABEL, so the "
+            "vector lands on a node no `entity_type` reaches")
+    if outside:
+        rendered = ", ".join(f"{alias} bound to {labels}" for alias, labels in outside.items())
+        problems.append(
+            f"it writes to an alias bound to a label outside the allowed set ({rendered}; allowed "
+            f"{sorted(allowed_labels)})")
+    if not problems:
+        return None
+    return "; ".join(problems)
 
 
 def require_served_store_labels(labels, *, writer: str) -> None:

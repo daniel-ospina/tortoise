@@ -144,7 +144,12 @@ symbol's own body (plus one hop of module constants) executes no store clause, w
 same as proving the writer stores nothing — a door that EXECUTES A CALLER-SUPPLIED statement
 (`sdk::_event_raw_write_door`) carries no marker and is caught only by review. ⚠️ `#11641` gave
 that door a BOUND (`sdk::_RAW_WRITE_DOOR_LABELS`, refused at the seam) rather than a marker:
-review still catches the label it names, and the bound only catches a label OUTSIDE it.
+review still catches the label the declaration names, and the bound catches a label OUTSIDE it PLUS
+the alias the statement WRITES TO (`tortoise.vector_write::statement_write_target_problem`) — a
+store on an unbound, unlabelled or label-mutated target is refused too, so a caller can no longer
+pass by naming a served label it does not store on. ⚠️ That reader sees statement TEXT: a store
+rendered by a mutating procedure, or by clause text a helper builds, stays outside it — the door's
+own docstring names that residual instead of claiming totality.
 
 **Discovery, and the edge of the guard.** The guard's population comes from
 `tools/dod_5090_probe.py::embedding_writers()`, so the guard is exactly as wide as that discovery —
@@ -848,17 +853,23 @@ _DECLARATIONS: tuple[tuple[str, WriterClass], ...] = (
             "#10541",
             # `#11641`: a LABEL SET, because the door no longer INHERITS its label. It owns one —
             # `tortoise.sdk::_RAW_WRITE_DOOR_LABELS` — and refuses, before the journal append and
-            # before the write, any caller statement naming a label outside it, and any statement
+            # before the write, any caller statement naming a label outside it, any statement
             # that renders a label by INTERPOLATION (`(n:{…})`, which no bound can read off the
-            # text). So this is no
+            # text), and any statement whose WRITE TARGET alias is unbound, unlabelled, outside
+            # the set, or whose labels it mutates (`tortoise.vector_write::
+            # statement_write_target_problem`). That third reading is the one the register's own
+            # sentence needs: the first two are about what the statement NAMES, and naming a served
+            # label does not prove where the vector lands. So this is no
             # longer a claim about CALLERS that nothing re-derives: the door's own body enforces
             # the set, and the register's constant pin re-derives it in both directions.
             # ⛔ `no-live-vector` would still be false (that is the exact mistake `#11492`'s review
             # caught in this entry) — the store is real; only its LABEL is now the door's to name,
             # because the record it journals replays through `_upsert_event`, which MERGEs `:Event`
             # and nothing else. A caller writing elsewhere would have its vector come back on a
-            # different label after a rebuild. Cited by SYMBOL, never by line — this file's own
-            # rule, for the reason the census learned.
+            # different label after a rebuild. ⚠️ The residual is a TEXT reader's: a store rendered
+            # by a mutating procedure or by clause text a helper builds is outside it, and that is
+            # named in the door's own docstring rather than claimed away. Cited by SYMBOL, never by
+            # line — this file's own rule, for the reason the census learned.
             stores=("Event",),
         ),
     ),

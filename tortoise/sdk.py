@@ -75,6 +75,7 @@ from .vector_write import (  # #4520: the ONE clear-then-set vector seam
     set_embedding_clause,
     statement_interpolates_label,
     statement_node_labels,
+    statement_write_target_problem,  # #11641: WHERE it lands, not only what it NAMES
 )
 # #4282 phase 2: retired public names fail with their replacement named (#3836 (c)).
 from .sdk_retired import retirement_hint
@@ -12953,14 +12954,31 @@ class TortoiseSDK:
         the node and widened the approval set (`#9068`, the P0 this shares a
         root with). ``_doc_write`` already gates its frontmatter the same way.
 
-        ⛔ THE DOOR OWNS ITS LABEL (#11641). Every label this door's statement NAMES must be one of
-        :data:`_RAW_WRITE_DOOR_LABELS`, and every one of those must be a label `run_vector_query`
-        serves; anything else is refused HERE, before the journal append and before the write. That
-        is what makes ``stores=("Event",)`` in `tortoise.embed_writer_register` an enforced fact
-        instead of a claim about callers — and it closes a real divergence, not only a measurement:
-        the record this door appends replays through `_upsert_event`, which MERGEs `:Event` and
-        nothing else, so a caller writing a vector on any other label would get its vector back on
-        a DIFFERENT label after a rebuild, silently, with every existing test green.
+        ⛔ THE DOOR OWNS ITS LABEL **AND ITS WRITE TARGET** (#11641). Every label this door's
+        statement NAMES must be one of :data:`_RAW_WRITE_DOOR_LABELS`; every label that statement
+        renders by INTERPOLATION is refused; and every alias it WRITES TO (`SET <a> …`,
+        `CREATE (<a> …`, `MERGE (<a> …`) must be bound in the SAME statement to one of those labels.
+        Anything else is refused HERE, before the journal append and before the write. That is what
+        makes ``stores=("Event",)`` in `tortoise.embed_writer_register` an enforced fact instead
+        of a claim about callers — and it closes a real divergence, not only a measurement: the
+        record this door appends replays through `_upsert_event`, which MERGEs `:Event` and nothing
+        else, so a caller writing a vector on any other label would get its vector back on a
+        DIFFERENT label after a rebuild, silently, with every existing test green.
+
+        ⚠️ WHY THREE CHECKS AND NOT ONE: the first two are about what the statement MENTIONS, and
+        mentioning is not storing — `MATCH (e:Event {…}) CREATE (p) SET p += $props, …embedding`
+        passes both while the vector lands on the label-less node `[]`, which no `entity_type`
+        reaches (`#5090` DoD row 2's own defect, measured). The third check is the one that makes
+        the register's sentence true, and the two above are kept beside it because a caller's
+        error message is more useful the more specific it is.
+
+        ⚠️ ACCEPTED RESIDUAL, named rather than implied: the write-target reader is a TEXT reader
+        (a Cypher label cannot be a bindable parameter — Neo4j's own Cypher Manual states it), so a
+        store rendered by a shape it cannot phrase as `SET`/`REMOVE`/`CREATE`/`MERGE` — a mutating
+        procedure (`CALL apoc.*`), or clause text built by a helper — is outside it. A caller that
+        renders its store through a procedure therefore defeats this bound, which is why the door
+        is a bound on the statement TEXT and not a claim of totality. Where the reader cannot prove
+        a target it REFUSES (see :func:`tortoise.vector_write::statement_write_target_problem`).
         """
         _declared_labels = {label for label, _id_prop in _RAW_WRITE_DOOR_LABELS}
         _named_labels = statement_node_labels(statement)
@@ -12989,6 +13007,20 @@ class TortoiseSDK:
             )
         require_served_store_labels(
             _declared_labels, writer="tortoise.sdk::_event_raw_write_door")
+        # ⛔ THE THIRD, NARROWER CHECK — WHERE the vector lands (#11641). The three checks above are
+        # all about what the statement NAMES: a served label mentioned anywhere satisfies them while
+        # the vector lands on a DIFFERENT alias, which is a false PASS (`stores=("Event",)` and row 2
+        # stay green over a `Vectorf32` on the label-less node `[]`). The register's declaration is
+        # about the node the statement WRITES TO, so the bound has to read the write target too.
+        _target_problem = statement_write_target_problem(statement, _declared_labels)
+        if _target_problem is not None:
+            raise ValueError(
+                "_event_raw_write_door: the statement's WRITE TARGET is not proved — "
+                f"{_target_problem}. This is a different question from the labels the statement "
+                "NAMES: naming a served label somewhere (a `MATCH (e:Event …)`) does not prove "
+                "where the vector lands, so the bound reads the aliases the statement WRITES TO, "
+                "not only the labels it mentions (#11641)."
+            )
         if self._journal_event_raw_write(
                 event_id, props, graph=getattr(proj, "g", None),
                 event_kind=event_kind, embedding=embedding) is False:

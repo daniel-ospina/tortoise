@@ -1812,11 +1812,15 @@ def score_rule_bullet() -> Row:
 #: writer's own body executes no store clause, which is NOT the same as proving it stores nothing —
 #: a door that EXECUTES A CALLER-SUPPLIED statement (`sdk::_event_raw_write_door`) cannot be pinned
 #: from its own body at all. `#11641` gave that door a BOUND instead of a body-shaped pin — it owns
-#: `sdk::_RAW_WRITE_DOOR_LABELS` and REFUSES a statement naming any other label (or one it renders
-#: by INTERPOLATION, which no bound can read off the text) — and
+#: `sdk::_RAW_WRITE_DOOR_LABELS`, REFUSES a statement naming any label outside that set (or one it
+#: renders by INTERPOLATION, which no bound can read off the text), and — since the write-target
+#: reader landed — REFUSES a statement whose WRITE TARGET alias is unbound, unlabelled, outside the
+#: set, or whose labels it mutates. And
 #: `tests/test_embed_writer_register.py::LABEL_EVIDENCE` now carries a needle for it. ⚠️ The bound
 #: narrows that half; it does not close it: review still catches WHICH label the door's own
-#: declaration names, and the bound only catches a label OUTSIDE it.
+#: declaration names, and the bound only catches what the writer's statement TEXT proves — a store
+#: rendered by a mutating procedure (`CALL apoc.*`) or by clause text a helper builds is outside a
+#: text reader, and that residual is named in the door's own docstring rather than left implied.
 ROW2_REGISTER_MODULE = REGISTER_MODULE
 
 

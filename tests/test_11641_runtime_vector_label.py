@@ -12,8 +12,10 @@ its own:
 * the **bound** — a vector store onto a label the read path does not serve is REFUSED at the seam
   (`restore_graph` pre-mutation, so a refusal cannot leave a half-restored graph; the door before
   the journal append, so a refusal cannot leave a record with no node);
-* the **legitimate path** — a served-label vector still restores, still lands as `vecf32`, and is
-  still reachable through `run_vector_query`; a real `:Event` write still goes through the door.
+* the **legitimate path** — a served-label vector still restores, still lands as `vecf32`, and a
+  door-written one is still reachable through `run_vector_query` (asserted by ID, not by type —
+  type is not reachability, and for a door-written vector it can be false); a real `:Event` write
+  still goes through the door.
 
 RED proof (each assertion fails on the pre-fix tree):
 
@@ -21,6 +23,9 @@ RED proof (each assertion fails on the pre-fix tree):
   vector onto `:Batch` (a label nothing queries) and returned counts as if all was well;
 * `test_the_door_refuses_a_statement_outside_its_label` — before the fix the door executed any
   caller statement, and the register's own reason says the label was "not the door's to name";
+* `test_the_door_refuses_a_statement_that_WRITES_TO_an_unproved_target` — before the write-target
+  reader the door proved only the labels a statement NAMES, so `MATCH (e:Event …) CREATE (p) SET
+  p += $props, <embedding on p>` passed and landed a `Vectorf32` on the label-less node `[]`;
 * `test_the_declared_restore_labels_are_the_served_vocabulary` — before the fix `restore_graph`
   declared `LABELS_AT_RUNTIME`, so row 2 had no label to compare and read `PARTIAL`.
 """
@@ -46,12 +51,17 @@ from tortoise.hosted_backup import (
 )
 from tortoise.projection import FalkorProjection
 from tortoise.sdk import _RAW_WRITE_DOOR_LABELS, TortoiseSDK
+from tortoise.search_engine import run_vector_query
 from tortoise.vector_write import (
     clear_then_set_prefix,
     served_store_labels,
     set_embedding_clause,
     statement_interpolates_label,
+    statement_label_mutations,
     statement_node_labels,
+    statement_pattern_labels,
+    statement_write_aliases,
+    statement_write_target_problem,
 )
 
 RESTORE_WRITER = "tortoise.hosted_backup::restore_graph"
@@ -183,6 +193,14 @@ def test_the_door_refuses_a_statement_outside_its_label(statement: str) -> None:
 def test_every_real_door_shape_is_inside_the_bound(statement: str) -> None:
     """The accept direction: the bound must not refuse the product's own six statements."""
     assert statement_node_labels(statement) == {"Event"}, statement
+    # …and the WRITE-TARGET reader is satisfied too — the check the door now runs, asserted on the
+    # real shapes rather than only on the synthetic ones. A reader that refused here would break
+    # ingestion, so this is the anti-vacuity half of the refuse rows below.
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        statement_write_target_problem(statement, {"Event"})
+    )
+    assert statement_write_aliases(statement) == {"e"}, statement_write_aliases(statement)
+    assert statement_label_mutations(statement) == frozenset(), statement
     # …and the bound itself accepts them (past the raise, onto the journal refusal — which is what
     # proves the guard let them through).
     with pytest.raises(AssertionError, match="journal was reached"):
@@ -239,7 +257,13 @@ def test_no_real_door_shape_is_mistaken_for_an_interpolation() -> None:
 
 
 def test_a_real_event_write_still_lands_on_event(tmp_path) -> None:
-    """End to end: the door's bound does not break the writer it guards (live, not simulated)."""
+    """End to end: the door's bound does not break the writer it guards (live, not simulated).
+
+    ⛔ The last assertion is a READ-BACK, not a type check: `typeof(n.embedding) == 'Vectorf32'`
+    says a vector is stored, never that the query leg can reach it — and for a door-written vector
+    reachability is exactly what the `#5090` row-2 defect falsifies. So the node must come back out
+    of `run_vector_query(entity_type="event")`, by ID.
+    """
     sdk = TortoiseSDK(str(tmp_path / f"{uuid4().hex}.db"))
     try:
         proj = sdk._get_proj()
@@ -258,8 +282,118 @@ def test_a_real_event_write_still_lands_on_event(tmp_path) -> None:
             "MATCH (e:Event {eventId:'evt-11641'}) RETURN typeof(e.embedding)"
         ).result_set
         assert rows and rows[0][0] == "Vectorf32", rows
+        # …and it is REACHABLE through the query leg's own door (#5090 row 2's question).
+        hits = run_vector_query(proj.g, VEC, limit=10, is_embedded=True,
+                                entity_type="event", excluded_statuses=())
+        assert "evt-11641" in [hit[0] for hit in hits], (
+            "the door wrote a vector the query leg cannot reach — a stored vector with no path to "
+            f"query it is the exact defect row 2 is scored on: {hits}"
+        )
     finally:
         sdk.close()
+
+
+# ── the door: the WRITE TARGET, not only the named labels (#11641 P1) ─────────────────────────
+
+@pytest.mark.parametrize("statement, named, problem_fragment, door_fragment", [
+    # The review's reproduction: a served label is NAMED in the MATCH, and the vector is stored on
+    # a `CREATE`d alias that carries no label at all. `statement_node_labels` returns `{'Event'}`, so
+    # the old bound passed this and the vector landed on the label-less node `[]`.
+    ("MATCH (e:Event {eventId:'seed'}) CREATE (p) SET p += $props, "
+     + set_embedding_clause("p"), {"Event"}, "NO LABEL", "WRITE TARGET"),
+    # The same via a relationship: the alias is still bound with no label.
+    ("MATCH (e:Event {eventId:'seed'}) CREATE (e)-[:R]->(p) SET p += $props, "
+     + set_embedding_clause("p"), {"Event"}, "NO LABEL", "WRITE TARGET"),
+    # An unlabelled MERGE target.
+    ("MATCH (e:Event {eventId:'seed'}) MERGE (p) SET p += $props, "
+     + set_embedding_clause("p"), {"Event"}, "NO LABEL", "WRITE TARGET"),
+    # LABEL MUTATION: the alias IS bound to a served label, and the statement then removes it and
+    # attaches another one — so the label at the moment the vector lands is not the one the pattern
+    # reader saw. Nothing but a mutation check reaches this.
+    ("MATCH (e:Event {eventId:'seed'}) REMOVE e:Event SET e:Foo, "
+     + set_embedding_clause("e"), {"Event"}, "MUTATES", "WRITE TARGET"),
+    # A vector store on an alias bound to a label OUTSIDE the door's set. The named-label bound
+    # refuses this shape too — the row pins that the WRITE-TARGET reader independently reports the
+    # alias, which is the reader the other four rows depend on.
+    ("MATCH (p:Batch {id:$eid}) SET p.embedding = $embedding", {"Batch"},
+     "outside the allowed set", "names label"),
+])
+def test_the_door_refuses_a_statement_that_WRITES_TO_an_unproved_target(
+        statement: str, named: set[str], problem_fragment: str, door_fragment: str) -> None:
+    """The refused shapes a reader of NAMED labels cannot see (P1, the review's reproduction).
+
+    `statement_node_labels` returns the labels a statement MENTIONS, so every one of these passes
+    that bound while the vector lands somewhere else — on a label-less node (reachable by no
+    `entity_type`), or on a label the statement itself mutates.
+
+    ⛔ NON-VACUITY, asserted first: the old readers really do see nothing wrong with the statement.
+    `statement_node_labels(statement) == named` proves the named-label bound had a label to read and
+    was satisfied by it, and `statement_write_target_problem(...)` being non-None proves the write
+    target is what refuses it. On the pre-fix tree the door therefore reached the JOURNAL (the fake
+    raises), which is the RED direction for every row.
+    """
+    assert statement_node_labels(statement) == named, statement_node_labels(statement)
+    problem = statement_write_target_problem(statement, {"Event"})
+    assert problem is not None, (
+        f"the write-target reader did NOT see this store: {statement}"
+    )
+    assert problem_fragment in problem, problem
+    with pytest.raises(ValueError) as refused:
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+    assert "_event_raw_write_door" in str(refused.value), (
+        "the refusal must name the writer a reader can go look at"
+    )
+    assert door_fragment in str(refused.value), str(refused.value)
+
+
+def test_a_property_removal_is_not_read_as_a_label_mutation() -> None:
+    """⛔ `REMOVE e.embedding` is a PROPERTY removal, not a label mutation — it must stay accepted.
+
+    `clear_then_set_prefix`/`clear_embedding` REMOVE the embedding property before rewriting it
+    (the #4520 invariant). A mutation reader that keyed on the `REMOVE` keyword alone would refuse
+    the product's own clear guard and break every overwrite — so the boundary is pinned here on the
+    reader AND on the door.
+    """
+    statement = ("MATCH (e:Event {eventId:$eid}) " + clear_then_set_prefix("e")
+                 + "SET e += $props, " + set_embedding_clause("e"))
+    assert "REMOVE e.embedding" in statement, statement
+    assert statement_label_mutations(statement) == frozenset(), statement_label_mutations(
+        statement)
+    assert statement_write_target_problem(statement, {"Event"}) is None, (
+        statement_write_target_problem(statement, {"Event"})
+    )
+    with pytest.raises(AssertionError, match="journal was reached"):
+        DOOR(_NoJournal(), None, statement, event_id="e1", props={},
+             embedding=VEC, lane="test")
+
+
+def test_the_target_readers_see_the_alias_a_pattern_binds_and_nothing_else() -> None:
+    """The readers' shapes, pinned so a later simplification cannot quietly widen or narrow them.
+
+    A naive `SET.*,` splitting regex is the obvious wrong implementation, and it is fooled by two
+    shapes that occur in the product: a comma-separated MATCH pattern list, and a nested map
+    literal in a `SET` item. Both are asserted here.
+    """
+    # Comma-separated MATCH patterns: `(b:Batch …)` is a SECOND pattern, not a second clause.
+    statement = "MATCH (e:Event {eventId:$eid}), (b:Batch {id:$b}) SET e += $props"
+    assert statement_pattern_labels(statement) == {
+        "e": frozenset({"Event"}), "b": frozenset({"Batch"})}
+    assert statement_write_aliases(statement) == {"e"}, statement_write_aliases(statement)
+
+    # A nested map literal with commas is ONE `SET` item, and it writes to `e` only.
+    statement = "MATCH (e:Event {eventId:$eid}) SET e.meta = {a: {b: 1}}, e += $props"
+    assert statement_write_aliases(statement) == {"e"}, statement_write_aliases(statement)
+    assert statement_write_target_problem(statement, {"Event"}) is None
+
+    # An alias bound with NO label maps to the EMPTY frozenset — the absence the door refuses.
+    assert statement_pattern_labels("MATCH (e:Event), (p) SET p += $props")["p"] == frozenset()
+
+    # A label MUTATION is reported; a property removal is not.
+    assert statement_label_mutations("MATCH (e:Event) REMOVE e:Event") == {"e"}
+    assert statement_label_mutations("MATCH (e:Event) REMOVE e.embedding") == frozenset()
+    assert statement_label_mutations("MATCH (e:Event) SET e:Foo") == {"e"}
+
 
 
 # ── restore_graph: refused artifact, and the legitimate one it must still restore ─────────────
