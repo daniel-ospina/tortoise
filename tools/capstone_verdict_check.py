@@ -97,7 +97,8 @@ marked green off closed children, with no artifact at all. This closes that.
         row on another corpus is exactly what this rule exists to refuse.
     V8  a row naming a ``sibling`` must match that sibling's numerator AND
         denominator — the denominators are carried, not restated
-    V9  --require-green (the EPIC's closing rule): E1-E6 all GREEN (#7949)
+    V9  --require-green (the EPIC's closing rule): E1-E5 all GREEN (#7949's
+        five-row close condition; `E6` is recognised, not closing)
     V10 a MEASURED E4 whose denominator is 4 fails the criterion on the row's
         own rule, and E4's row must carry the SAME denominator the run's
         ``e4_receipt`` computed. A MEASURED E4 must also carry a POSITIVE INT
