@@ -503,7 +503,7 @@ DOOR_PINNED_OFF = ("TORTOISE_SESSION_EXTRACTOR", "TORTOISE_EXTRACTOR",
 #: which changes the embed list a run measures without changing the arm.
 DOOR_PINNED_ON = (("TORTOISE_S4_DELTA", "1"), ("TORTOISE_JSON_MODE", "1"),
                   # cycle 9 (#10983): `sparse.py:226` `env_flag(IDENTIFIER_ENV,
-                  # True)` — default-ON, read through `projection/entities.py:1236`
+                  # True)` — default-ON, read through `projection/entities.py:1239`
                   # on the write path (`create_point` -> `point_identifier_aliases`),
                   # so it REWRITES `search_keys` on every ``:Point`` the run writes.
                   # Pinned to the SHIPPED default, not off: an ambient `=0` is the
@@ -2889,7 +2889,7 @@ def _a1_object_edges(projection) -> dict:
          "edges": int(row[3] or 0)}
         for row in projection.g.query(
             # ⛔ `objectKind`, NOT `kind`: the writer stamps `o.objectKind=coalesce($ok,'other')`
-            # (tortoise/projection/entities.py:4727) and the pack declares `fromKind`/`toKind`
+            # (tortoise/projection/entities.py:4730) and the pack declares `fromKind`/`toKind`
             # (packs/dev/manifest.yaml:144-149). Reading `a.kind` returned NULL on every real graph
             # — the "by endpoint kind" half reported as measured while measuring nothing (#10982
             # review, finding 3).
@@ -2986,9 +2986,9 @@ def _a4_pointkind(projection) -> dict:
 
     ⛔ Two further folds that would have manufactured that same win (#10982 review, finding 4):
     a **blank** `pointKind` (`''` is what the #548 rebuild SNAPSHOT synthesis writes for an operator
-    with no kind — `tortoise/projection/__init__.py:13739-13741`, `# Ensure pointKind is present
+    with no kind — `tortoise/projection/__init__.py:13738-13740`, `# Ensure pointKind is present
     (operators often lack it)` / `clean["pointKind"] = ""`; the live write is
-    `projection/entities.py:2630`, which leaves the property ABSENT instead) is ABSENT, not typed;
+    `projection/entities.py:2633`, which leaves the property ABSENT instead) is ABSENT, not typed;
     and **capture rows** are
     not claims — turn rows carry `pointKind='event'`: the row dict is written with `"k": "event"`
     and lands through the capture path's turn writer `_TURN_WRITE_CYPHER` (`tortoise/sdk.py:2499`)
@@ -2998,7 +2998,7 @@ def _a4_pointkind(projection) -> dict:
     and reported, never silently dropped.
     """
     # ⛔ TRUTHINESS, not `IS NULL`: `create_point(is_episodic=False)` really writes the property
-    # (`projection/entities.py:2768`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
+    # (`projection/entities.py:2771`), so an explicit `false` is a CLAIM — `IS NULL` dropped it
     # from the denominator while the capture count reported it as a turn row it is not. The same
     # predicate the file's own `POINT_COMPOSITION_CYPHER` uses; ⛔ NOT `tortoise/quota.py:1133`,
     # which tests `is_episodic` ALONE and would count an operator Point as a claim (#10982 review
