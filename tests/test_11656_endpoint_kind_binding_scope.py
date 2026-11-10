@@ -306,7 +306,16 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
     module-level `def test_...` — which pytest DOES collect — left the population pin GREEN while the
     real population grew. A nested `def test_` is not collected and is not counted here either.
     """
-    tree = ast.parse(source)
+    return _nodes_collected_from_body(ast.parse(source).body)
+
+
+def _nodes_collected_from_body(body: list[ast.stmt]) -> list[ast.AST]:
+    """The nodes pytest collects from ONE body — the recursion `_collected_test_nodes` runs.
+
+    Split out so a class FORCED into collection from outside its own body (`helper.__test__ = True`) is
+    expanded into what pytest actually yields for it. Counting the class itself as one node was both a
+    crash and a silent undercount; see the forced-selection arm in `_derive_population`.
+    """
     nodes: list[ast.AST] = []
 
     def _walk(body: list[ast.stmt], *, module_level: bool) -> None:
@@ -382,7 +391,7 @@ def _collected_test_nodes(source: str) -> list[ast.AST]:
                 # (`TestOuter::TestInner::test_...` — measured with `--collect-only`).
                 _walk(node.body, module_level=False)
 
-    _walk(tree.body, module_level=True)
+    _walk(body, module_level=True)
     return nodes
 
 
@@ -776,8 +785,33 @@ def _derive_population(source: str) -> tuple[int, int]:
                 continue
             # `__test__ = True` is a POSITIVE selection at `istestclass`/`istestfunction`, so a name the
             # walk skipped for its SPELLING must still be counted — measured: `helper.__test__ = True`
-            # makes pytest collect `helper` (2 for that module) even though it is not `test`-named.
-            nodes.append(_cand)
+            # makes pytest collect `helper` even though it is not `test`-named.
+            # ⛔ A CLASS is not one case. pytest yields the same members it would for a `Test*` class:
+            # `class helper: test_h, test_i` + `helper.__test__ = True` collects **2**
+            # (`helper::test_h`, `helper::test_i`), and one holding a nested `TestInner` collects **2** as
+            # well (`helper::TestInner::test_x`, `helper::test_h`) — measured round-31 P3. Appending the
+            # ClassDef itself reported **1** for both (the silently-low direction) and then CRASHED the
+            # parametrize-arm loop below with `'ClassDef' object has no attribute 'args'`, because that
+            # loop reads `node.args` off what `nodes` holds. Expanding it through the walk fixes both.
+            if isinstance(_cand, ast.ClassDef):
+                nodes.extend(_nodes_collected_from_body(_cand.body))
+            else:
+                nodes.append(_cand)
+
+    # ⛔ A `__test__` bound under a CONDITION (round-31 P3, measured both ways). `__test__ = True` followed
+    # by `if FLAG: __test__ = False` collects **0** when `FLAG` is true and **1** when it is false: the value
+    # pytest reads is a runtime fact, so reading only the DIRECT assignment is a guess in whichever direction
+    # the flag happens to fall. At MODULE level it decides every test in the file — measured `0` collected
+    # where the derivation returned `(1, 1)`, an OVERCOUNT.
+    for _scope, _scope_body in [
+        ("module", tree.body),
+        *((f"class `{n.name}`", n.body) for n in ast.walk(tree) if isinstance(n, ast.ClassDef)),
+    ]:
+        for _rendered in _conditional_test_dunder_binds(_scope_body):
+            unreadable.append(
+                f"{_scope}: `{_rendered}` binds `__test__` under a conditional/loop/try/with block, so "
+                "whether pytest sees it is a runtime fact this derivation cannot read"
+            )
 
     # ⛔ An IMPORTED base is a shape this derivation cannot model: `PyCollector.collect` walks the whole
     # `__mro__` for methods, and `hasinit`/`hasnew` use `getattr`, so the parent can contribute BOTH cases
@@ -2295,6 +2329,33 @@ class TestTheDocsAreDiscoverableAndResolve:
             "class inheriting a base from another module": (
                 "from other import Base2\nclass TestChild(Base2):\n    def test_c(self):\n        pass\n"
             ),
+            # ⛔ Round-31 P3 — a `unittest.TestCase` nested inside a `Test*` class whose BASE is declared
+            # one body up. pytest collects it, and re-collects the parent's methods THROUGH it: measured
+            # **4** (`MyCase::test_a`, `TestOuter::Inner::test_a`, `TestOuter::Inner::test_b`,
+            # `TestOuter::test_c`) where a body-local base map derived **(2, 2)** — an UNDERCOUNT, and the
+            # parent's methods are not in the child's AST, so it is a refusal rather than a number. The
+            # same shape one level in (`class Base` beside `class Inner(Base)` in the `Test*` body)
+            # collects 4 where the derivation derived (3, 3).
+            "`unittest.TestCase` nested in a `Test*` class, base declared one body up": (
+                "import unittest\n"
+                "class MyCase(unittest.TestCase):\n"
+                "    def test_a(self):\n        pass\n"
+                "class TestOuter:\n"
+                "    class Inner(MyCase):\n"
+                "        def test_b(self):\n            pass\n"
+                "    def test_c(self):\n        pass\n"
+            ),
+            # ⛔ Round-31 P3 — `__test__` bound UNDER A CONDITION. Whether the binding runs is a runtime
+            # fact, so reading only the direct assignment is a guess: `__test__ = True` then
+            # `if FLAG: __test__ = False` collects **0** with `FLAG` true and **1** with it false. Measured
+            # 0 collected / derived `(1, 1)` for both the module and the class form.
+            "`__test__` bound under an `if` (module level)": (
+                "FLAG = True\n__test__ = True\nif FLAG:\n    __test__ = False\ndef test_a():\n    pass\n"
+            ),
+            "`__test__` bound under an `if` in a class body": (
+                "FLAG = True\nclass TestX:\n    __test__ = True\n    if FLAG:\n        __test__ = False\n"
+                "    def test_a(self):\n        pass\n"
+            ),
             "`unittest.TestCase` whose `__init__` is a collection ERROR": (
                 "import unittest\n"
                 "class CaseBareInit(unittest.TestCase):\n"
@@ -2332,6 +2393,22 @@ class TestTheDocsAreDiscoverableAndResolve:
                 "def test_disabled():\n    pass\ntest_disabled.__test__ = False\n"
                 "def test_ok():\n    pass\n",
                 (1, 1),
+            ),
+            # ⛔ A CLASS forced in by `helper.__test__ = True` is not ONE case: pytest yields its members,
+            # exactly as for a `Test*` class. Measured: two `test_` methods collect **2**; one method plus
+            # a nested `TestInner` collects **2**. Appending the class node itself reported **1** for both
+            # and crashed the arm loop with `'ClassDef' object has no attribute 'args'`.
+            (
+                "`helper.__test__ = True` SELECTS a non-`test`-named CLASS, member by member",
+                "class helper:\n    def test_h(self):\n        pass\n    def test_i(self):\n        pass\n"
+                "helper.__test__ = True\n",
+                (2, 2),
+            ),
+            (
+                "a forced class's nested `Test*` class is collected too",
+                "class helper:\n    class TestInner:\n        def test_x(self):\n            pass\n"
+                "    def test_h(self):\n        pass\nhelper.__test__ = True\n",
+                (2, 2),
             ),
         ):
             assert _derive_population(source) == expected, f"{label}: {_derive_population(source)}"
