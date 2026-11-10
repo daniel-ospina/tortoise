@@ -4631,6 +4631,19 @@ def test_the_advertised_form_filter_is_not_deaf():
     # clause left the suite GREEN (measured). It is keyed by (path, stripped line),
     # so the census's own first entry is the only honest subject.
     record_rel, record_line = sorted(census._DELIBERATE_BARE_FORM)[0]
+    # ...and the chosen subject must CARRY a bare invocation, or the assertion below
+    # passes vacuously and the RECORD clause could be deleted with the suite green.
+    # `sorted(...)[0]` follows the ALPHABETICAL order of the paths, so adding a plan
+    # doc under `docs/plans/` silently re-points this row at a different entry than
+    # the one it was written against (#11754 re-pointed it off
+    # `docs/research/…-4503-edge-accounting/measurement.md` and onto the `11689` plan
+    # doc). Both happen to carry the form today; the assertion is what makes that a
+    # property of the row rather than a coincidence.
+    assert census._BARE_INVOCATION.search(record_line), (
+        f"the census RECORD subject chosen here ({record_rel!r}) carries no bare "
+        f"invocation, so the exemption assertion below passes vacuously — this row "
+        f"would test nothing. Line: {record_line!r}"
+    )
     assert not _advertise_offenders(record_rel, record_line, census), (
         f"a census RECORD exemption must stay exempt ({record_rel!r}): rewriting "
         f"recorded evidence to satisfy a gate falsifies provenance, which is why the "
