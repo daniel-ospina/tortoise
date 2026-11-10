@@ -713,7 +713,7 @@ def normalize_session_key(value: object) -> str:
     ``_session_admission_key`` carries its own equivalent ``.strip()`` (it is
     a different grain's key, and it keeps its own encoding), and seams such
     as ``session_source_migration._move_in`` and
-    ``context_assembly_arms.metric9_present`` compare ids raw — each is its
+    ``tools/longmem_eval/context_assembly_arms.metric9_present`` compare ids raw — each is its
     own decision, and none of them is a side of THIS arm's comparison.
 
     The rule is ``.strip()``, and it is deliberately NOT
@@ -857,7 +857,8 @@ def session_key_of(hit: dict) -> str:
     the padded and whitespace-only classes by
     ``test_one_session_id_resolves_to_one_key_whichever_spelling_11382``, and
     the non-``str`` class by ``test_wire_identity_never_moves_an_existing_key``
-    (id-bearing: ``idx:point:p``) together with
+    (id-bearing: ``idx:point:e6`` in its fixture — ``idx:point:{id}`` in general)
+    together with
     ``test_a_non_str_session_identity_is_discarded_not_keyed_11382`` (no id:
     ``idx:-1``). The shapes are:
     ``session_id='  s1  '`` ⇒ ``'  s1  '`` → ``'s1'`` (a padded-but-real id

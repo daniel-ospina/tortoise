@@ -1034,9 +1034,15 @@ def test_wire_session_identity_keys_the_pool_and_seeds_the_session():
 def test_wire_identity_never_moves_an_existing_key():
     """#10540's inertness claim, and the reason the camel source sits AFTER
     the ``lme_session_index`` bucket: **every key an IDENTIFIED hit already
-    had stays byte-identical** (a snake ``session_id``; an
+    had that is not PADDED stays byte-identical** (a snake ``session_id``; an
     ``lme_session_index`` bucket), so the census #8713 measured cannot move.
-    Only the PHANTOM keys change — those are the defect being fixed.
+
+    ⚠️ #11382 scoped that sentence: a PADDED-but-real snake id is an
+    IDENTIFIED key and it DOES move (``'  s1  '`` → ``'s1'``), on purpose —
+    that is the defect, not a phantom (`retrieval.session_key_of`'s own page
+    says so, and the flagged key below skips it for exactly that reason).
+    What stays byte-identical is every key that is a real identity already in
+    normal form; the PHANTOM keys are the other class that changes.
 
     The eval's pool hits carry the snake ``session_id``
     (``tools/longmem_eval/retrieve.py``: ``{"session_id": p.get("session_id",
@@ -2818,8 +2824,11 @@ def test_a_non_str_custom_key_is_dropped_not_stringified_11382():
     and only one is right. ``_merge_key(5)`` returning ``""`` (not a session,
     so the group is dropped) and returning ``"5"`` (a session literally named
     "5", which can FUSE with a real one) both leave every other test green —
-    measured: the one-line ``else str(value)`` mutant passes the whole 849-test
-    seam batch. So the arm needed a row of its own, exactly like the fail-closed
+    measured: the one-line ``else str(value)`` mutant passed the entire
+    six-file seam batch with only this test red once it existed (before it, the
+    batch was green: 849 on the head of the round that found the gap, 852 when
+    the pin landed — the batch's size moves with every test added, so the figure
+    that matters is "nothing else reds"). So the arm needed a row of its own, exactly like the fail-closed
     snake-id arm one helper over.
 
     ⚠️ And the docstring's story is the MEASURED one, not the tidy one: with a
@@ -2891,8 +2900,9 @@ def test_two_raw_spellings_of_one_session_both_deliver_11382():
     ``source_session_chunk_pass`` now emits one normalised key per group, so a
     duplicate can only come from a BESPOKE caller that builds ``added_by_session``
     itself. Measured on a copy with the union replaced by assignment
-    (``groups_in[sid] = list(rows or [])``): the whole 851-test seam batch stays
-    GREEN, and ``t1`` is silently LOST —
+    (``groups_in[sid] = list(rows or [])``): the whole six-file seam batch stays
+    GREEN (851 at the head that found the gap; only this test reds once it
+    exists), and ``t1`` is silently LOST —
 
         head   -> ['p1','t1','p2','t9','t2']   (both spellings delivered)
         mutant -> ['p1','t2','p2','t9']        ('t1' dropped, no error)

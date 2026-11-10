@@ -599,6 +599,13 @@ def source_session_chunk_pass(
         # Collapsing two raw spellings of one session (``s1`` / ``  s1  ``)
         # into one group is the intended reading — they ARE one identity —
         # and the per-session cap then counts them jointly.
+        # ⚠️ The ``str(...)`` here is a THIRD rule for a non-``str`` stored id
+        # (it coerces it to a name, where :func:`retrieval.session_key_of`
+        # discards it and :func:`_merge_key` maps it to ``""``). It is
+        # pre-existing and unreachable through the shipped write door
+        # (``ids.session_id_refusal`` refuses a non-``str``), so the "one
+        # helper on every side" invariant above holds for ``str`` identities
+        # only — stated rather than left to be inferred.
         sid = normalize_session_key(str(sid or ""))
         pid = str(pid or "")
         if not sid or not pid or pid in seen_pids:
