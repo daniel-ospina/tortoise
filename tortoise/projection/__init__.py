@@ -19462,6 +19462,23 @@ class FalkorProjection(
         would make the marker trustworthy. Until one of them lands, this is
         what not losing points silently costs.
 
+        ⚠️ THOSE FIGURES ARE THE PRE-#11682, ONE-DISJUNCT SHAPE and the
+        per-point constant above no longer describes the shipped statement.
+        The single probe now carries one ``typeof`` disjunct per key in
+        ``_POINT_FLATTEN_LIST_PROPS``, so the same label scan evaluates two
+        predicates per row. Re-measured on the docker lane (4.20.x), median of
+        five, this host: **1.25 ms @1k, 2.74 ms @5k, 7.91 ms @20k against
+        0.99 / 1.99 / 5.77 ms for the `search_keys`-only shape** — i.e. the
+        widening costs **≈ +27 % / +38 % / +37 %**, about **+2.1 ms per
+        construction at 20k Points** on top of the numbers above. That is the
+        honest price of the third field, and it grows with each key added.
+        ⛔ Do NOT read the change as free, and do NOT "optimise" it by
+        dropping the ``IS NOT NULL`` conjuncts: measured on the same sweep that
+        saves only ~17–22 % (6.57 ms vs 7.91 ms at 20k) and it is within the
+        run-to-run spread at 1k/5k, which is not worth spending the probe's
+        fail-closed clarity on. If this cost ever has to come down, the route
+        is #5444's write-maintained signal — not a narrower predicate.
+
         ``event_fts_v2`` is deliberately NOT consulted: no data fixup rides it
         (it guards only the drop→recreate churn), and a fresh graph sets the
         Event two-field index WITHOUT setting that marker — only the

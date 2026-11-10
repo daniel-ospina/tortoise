@@ -214,19 +214,21 @@ itself.
 ⚠️ **A later probe delta DOES render, and the log is not edited for it.** #9553's insertion into
 `tortoise/sdk.py` (+86 lines) moved the symbols this bundle cites, so the `file:line` numbers in the
 probe's `E3_RULE` and in the S2.2/S2.3 cause strings were re-derived — and those strings RENDER into
-a log. ⚠️ **The SHIPPED log's own cites are as-of ITS stamp too, and this branch has since moved
+a log. ⚠️ **The SHIPPED log's own cites are as-of ITS stamp too, and `main` has since moved
 them.** That log renders, for the capture path's `proj.link_source_to_event` call, the number
 `tortoise/sdk.py` line 15506, and for `_TURN_WRITE_CYPHER` the number `tortoise/sdk.py` line 2408
 — written here WITHOUT the `file:line` form on purpose, because these are not live cites and must
 not be read as such. At the base it ships from (`9152448d7`) those lines are exactly those symbols;
-at THIS head they are a **blank line** and a line **inside a docstring**, because six commits merged
-to `main` after the run moved `sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`,
-`5028881f8`, `63981d152`, `2180f0054` — `git log 9152448d7..HEAD -- tortoise/sdk.py`). ⛔ **Not
-`#10215` and not this branch:** `8bc2fbed1` touches no `tortoise/` file at all, and neither does
-this PR, so the movers are `main`'s — which is why the symbols now sit at `_TURN_WRITE_CYPHER` and
-the `proj.link_source_to_event` call site instead of at those numbers. Neither number is a defect
-and the log is not edited for it — a log is the record of what the run rendered — but do NOT
-follow them as pointers at this head.
+at THIS head neither number resolves: measured, `15506` is the closing `)` of an unrelated
+`_logger.warning(...)` call and `2408` is a `#:` comment line (the one that records *"Do NOT
+reintroduce a literal tuple at this site"*). Six commits merged to `main` after the run moved
+`sdk.py` around them (`a33af140f`, `c833c41cd`, `62e3f2f61`, `5028881f8`, `63981d152`, `2180f0054`
+— `git log 9152448d7..HEAD -- tortoise/sdk.py`) and `#11682`'s own `sdk.py` insertions moved them
+further, so the symbols live at `_TURN_WRITE_CYPHER` and the `proj.link_source_to_event` call site
+(§"The entry point the run drives" below carries this head's numbers). ⛔ **Not `#10215`:** its
+`8bc2fbed1` touches no `tortoise/` file at all, which is why the movers are `main`'s plus this
+PR's. Neither number is a defect and the log is not edited for it — a log is the record of what the
+run rendered — but do NOT follow them as pointers at this head.
 
 The **SUPERSEDED** `capstone-measured-e0fc940b.log` carried the cites **as-of its own
 stamp**, and those are the numbers listed here — the ones that log rendered, exactly as it
