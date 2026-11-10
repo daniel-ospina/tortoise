@@ -838,7 +838,9 @@ mechanisms:
       class reads the content's FORM and never its agreement with the quote, so
       they are form-excluded, NOT checkable; the same class also covers the third
       excluded form, a SEPARATOR-bearing numeral `1,234` — `#2817`'s "no
-      separator rule at all" — which this corpus carries no row of), 4 have no
+      separator rule at all" — and a fourth, an ACCOUNTING PARENTHETICAL `($4)`,
+      which voids the whole side's slots (`_PAREN_NUMERAL_RE`) so nothing on it is
+      read; this corpus carries no row of either), 4 have no
       slot on the quote side,
       and 8 state no value — of which exactly ONE drops a state value the quote
       carries (the `thirty seconds` lease grace,

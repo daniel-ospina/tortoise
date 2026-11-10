@@ -6247,10 +6247,14 @@ def test_the_registry_rows_measured_disclosures_are_pinned():
 # (b2) — that number needs an E2 LLM arm run and stays `UNMEASURED`.
 #
 # The classifier is deliberately THIN and reuses the shipped predicates
-# (`_carries_value`, `_value_slots_scaled`, `_write_span`) rather than minting a
-# second value layer — the discipline `_value_slot_divergence` is held to. The
-# clock/ISO detector is LOCAL to this section on purpose: it classifies a
-# residual the row already declares, and is not a new value predicate.
+# (`_carries_value`, `_value_slots_scaled`, `_write_span`, `_PAREN_NUMERAL_RE`)
+# rather than minting a second value layer — the discipline `_value_slot_divergence`
+# is held to. The clock/ISO/separator detectors are LOCAL to this section on
+# purpose: they classify a residual the row already declares, and are not a new
+# value predicate. The accounting-parenthetical probe is NOT local — it asks the
+# engine's own `_PAREN_NUMERAL_RE`, because that is the exact shape whose presence
+# voids a whole side's slots and a copy here could drift from it (#11730 review,
+# cycle 15).
 #
 # ⛔ WHAT IT DELIBERATELY CANNOT JUDGE: a MAGNITUDE difference. The engine has no
 # magnitude table (`#2817` rules one out; residual (m) records that `12 million`
@@ -6463,6 +6467,46 @@ def _magnitude_in_play(missing: list[tuple], content_slots: list[tuple]) -> bool
     return True
 
 
+def _unstated_quote_slots(content_slots: tuple, quote_slots: tuple
+                          ) -> tuple[list[tuple], list[tuple]]:
+    """``(missing, leftovers)``: the quote slots NO content slot accounts for.
+
+    The ONE matcher this file uses, so the class a row receives and the identity
+    set the census publishes cannot disagree about the same row (#11730 review,
+    cycle 15). It matches a quote slot to a content slot by exact core, or by
+    `_identity_agrees` — the ENGINE's tolerance, the one that makes `20 percent`
+    and `20%` one value. It also CONSUMES the match, so a duplicate value in the
+    quote cannot be satisfied twice by one content value.
+
+    ``leftovers`` are the content slots no quote slot claimed, which is what
+    `_magnitude_in_play` reads.
+    """
+    missing: list[tuple] = []
+    leftovers = list(content_slots)
+    for anchor, core, scale in quote_slots:
+        # ⛔ THE MATCH USES THE ENGINE'S OWN TOLERANCE, not string equality
+        # (#11730 review, cycle 11): `20 percent` and `20%` are one value the
+        # shipped rule tolerates, so exact-core matching called a truthful
+        # restatement a LOSS as soon as the anchor moved. `_value_identity_matches`
+        # is the same predicate `_value_slot_divergence` applies, so the census
+        # cannot accuse a pair the rule would pass.
+        found = None
+        for index, (_ca, content_core, content_scale) in enumerate(leftovers):
+            if (str(content_core), content_scale) == (str(core), scale):
+                found = index
+                break
+            if _identity_agrees(content_core, content_scale, core, scale):
+                found = index
+                break
+        if found is None:
+            missing.append((anchor, core, scale))
+        else:
+            # consume ONE content slot per quote slot, so a duplicate value in
+            # the quote cannot be satisfied twice by one content value
+            leftovers.pop(found)
+    return missing, leftovers
+
+
 def _retention_class(content: str, quote: str) -> str | None:
     """Which half of the census a value-bearing point falls in.
 
@@ -6477,9 +6521,11 @@ def _retention_class(content: str, quote: str) -> str | None:
                             lost: unjudged.
     CONTENT_EXCLUDED_FORM — the content binds no slot, but states the value in
                             a form the row excludes by design ((c)): a CLOCK, an
-                            ISO date, or a SEPARATOR-BEARING numeral (`1,234`),
-                            the three forms `_value_form_outside_judged` puts
-                            outside the judged set.
+                            ISO date, a SEPARATOR-BEARING numeral (`1,234`), or
+                            an ACCOUNTING PARENTHETICAL (`($4)`) — the three
+                            token forms `_value_form_outside_judged` puts outside
+                            the judged set, plus the text-level exclusion
+                            `_PAREN_NUMERAL_RE` applies to the WHOLE text.
                             ⛔ NOT counted as STATED: the class reads the
                             content's FORM, never its agreement with the quote.
     CONTENT_NO_VALUE      — the content binds no slot and carries no excluded form.
@@ -6507,8 +6553,18 @@ def _retention_class(content: str, quote: str) -> str | None:
         # Neither is reachable on this corpus (the 7 excluded rows' CONTENTS bind
         # no slot; 5 of their quotes carry no value and the 2 that do are ISO dates
         # the content restates), and `len(dropped) == 1` would red if one were added.
+        # ⛔ THE TEST IS THE ENGINE'S OWN EXCLUSION SET, not a local guess at it
+        # (#11730 review, cycle 15). `_value_slots_scaled` returns `()` for FOUR
+        # reasons: the three token forms above, and an accounting parenthetical
+        # ANYWHERE in the text (`_PAREN_NUMERAL_RE`, applied to the whole `_text`
+        # before a single binding is read). Missing the fourth published
+        # `CONTENT_NO_VALUE` — "states no value at all" — over a content whose
+        # slots the projection deliberately never read, and counted every quote
+        # slot on that row as a DROPPED value. Census-inert (no row on this
+        # corpus carries the form), pinned synthetically in §24 item 3a2.
         if (_CLOCK_FORM.search(content) or _ISO_DATE_FORM.search(content)
-                or _SEPARATOR_FORM.search(content)):
+                or _SEPARATOR_FORM.search(content)
+                or v2._PAREN_NUMERAL_RE.search(content)):
             return "CONTENT_EXCLUDED_FORM"
         return "CONTENT_NO_VALUE"
     if not quote_slots:
@@ -6516,29 +6572,7 @@ def _retention_class(content: str, quote: str) -> str | None:
     if (tuple((a, s) for a, _, s in content_slots)
             == tuple((a, s) for a, _, s in quote_slots)):
         return "ALIGNED"
-    missing = []
-    leftovers = list(content_slots)
-    for anchor, core, scale in quote_slots:
-        # ⛔ THE MATCH USES THE ENGINE'S OWN TOLERANCE, not string equality
-        # (#11730 review, cycle 11): `20 percent` and `20%` are one value the
-        # shipped rule tolerates, so exact-core matching called a truthful
-        # restatement a LOSS as soon as the anchor moved. `_value_identity_matches`
-        # is the same predicate `_value_slot_divergence` applies, so the census
-        # cannot accuse a pair the rule would pass.
-        found = None
-        for index, (_ca, content_core, content_scale) in enumerate(leftovers):
-            if (str(content_core), content_scale) == (str(core), scale):
-                found = index
-                break
-            if _identity_agrees(content_core, content_scale, core, scale):
-                found = index
-                break
-        if found is None:
-            missing.append((anchor, core, scale))
-        else:
-            # consume ONE content slot per quote slot, so a duplicate value in
-            # the quote cannot be satisfied twice by one content value
-            leftovers.pop(found)
+    missing, leftovers = _unstated_quote_slots(content_slots, quote_slots)
     if missing:
         # ⛔ A MAGNITUDE is not comparable here: `12 million` against
         # `12 billion` binds the same core (residual (m)), and `12000000`
@@ -6581,6 +6615,31 @@ def _census_rows() -> list[tuple[str, str, str, str, str]]:
                     continue
                 rows.append((session, arm, klass, content, quote))
     return rows
+
+
+def _lost_rows(rows: list[tuple]) -> set[tuple]:
+    """The ``(session, arm, (anchor, core))`` identity set of the LOST rows.
+
+    ⛔ THIS IS THE CENSUS'S OWN CODE PATH, extracted so it can be fed rows that
+    are not on the corpus (#11730 review, cycle 15). The set is built from
+    `_unstated_quote_slots` — the SAME matcher `_retention_class` used to give
+    the row its class — so a second, stricter matcher cannot publish a DROP the
+    classifier does not believe in. It used to do exactly that: exact-core set
+    membership over every content slot, so a `LAYOUT_LOST` row that ALSO restates
+    a value in unit form (`20 percent` against `20%`) had that pair added here as
+    a dropped value, over a pair the shipped rule passes — a false accusation,
+    in the one direction this census exists to prevent, with a fix message that
+    invites the next lane to enshrine it in `LAYOUT_LOST_ROWS`.
+    """
+    lost = set()
+    for session, arm, klass, content, quote in rows:
+        if klass != "LAYOUT_LOST":
+            continue
+        missing, _leftovers = _unstated_quote_slots(
+            v2._value_slots_scaled(content), v2._value_slots_scaled(quote))
+        for anchor, core, _scale in missing:
+            lost.add((session, arm, (anchor, str(core))))
+    return lost
 
 
 #: The split, measured at this head through the shipped helpers. Re-run
@@ -6660,21 +6719,32 @@ def test_the_fail_open_half_is_MEASURED_so_a_gap_is_not_read_as_a_LOSS():
         f"the `state_value_carve_out` row does not publish the measured "
         f"{stated} of 112 STATED")
 
-    lost = set()
-    retained = []
-    for session, arm, klass, content, quote in rows:
-        if klass == "LAYOUT_RETAINED":
-            retained.append((content, quote))
-        if klass != "LAYOUT_LOST":
-            continue
-        stated_cores = {(core, scale) for _a, core, scale in
-                        v2._value_slots_scaled(content)}
-        for anchor, core, scale in v2._value_slots_scaled(quote):
-            if (str(core), scale) not in {(str(c), s) for c, s in stated_cores}:
-                lost.add((session, arm, (anchor, str(core))))
+    lost = _lost_rows(rows)
+    retained = [(content, quote) for _s, _a, klass, content, quote in rows
+                if klass == "LAYOUT_RETAINED"]
     assert lost == LAYOUT_LOST_ROWS, (
         "the LAYOUT_LOST set moved — a state value was dropped, which is the "
         f"finding this pin exists to surface: {sorted(lost)}")
+    # ⛔ AND THE MATCHER THAT PRODUCED IT IS THE CLASSIFIER'S OWN, pinned on a
+    # row the corpus does not carry (#11730 review, cycle 15). The census rows are
+    # all exact-core matches, so `lost` above cannot tell "uses the engine's
+    # tolerance" from "uses string equality" — this pair can: `20 percent` and
+    # `20%` are ONE value the shipped rule passes, and only `300 nodes` is really
+    # dropped. The pre-fix set membership over every content slot reported BOTH,
+    # i.e. it accused a truthful restatement of being a DROPPED value. Census-0:
+    # a false accusation here would send the next lane to `LAYOUT_LOST_ROWS`.
+    assert _lost_rows([
+        ("synthetic", "raw", "LAYOUT_LOST",
+         "we cut 20 percent of the fleet",
+         "we cut 20% of the fleet and dropped 300 nodes"),
+    ]) == {("synthetic", "raw", ("dropped", "('', '300', None)"))}, (
+        "a unit-form restatement must not be published as a DROPPED value")
+    #     … and the pair it must NOT report is the one the classifier tolerates;
+    #     asserted directly so the red names the false accusation, not just a
+    #     size mismatch.
+    assert _retention_class("we cut 20 percent of the fleet",
+                            "we cut 20% of the fleet and dropped 300 nodes") == (
+        "LAYOUT_LOST")
 
     # ⛔ AND THE RETAINED HALF IS CHECKED AGAINST THE OTHER ARTEFACT, not
     # re-derived from the classifier: the shipped rule fails open on EVERY row
@@ -6932,6 +7002,24 @@ def test_the_classifier_DISCRIMINATES_in_both_directions():
     #     the projection CAN bind stays in the judged set.
     assert _retention_class("we have 1234 events",
                             "we have 1234 events") == "ALIGNED"
+    # 3a2. ⛔ AND THE FOURTH EXCLUSION — an ACCOUNTING PARENTHETICAL. It is not a
+    #      token form: `_value_slots_scaled` returns `()` for the WHOLE text as
+    #      soon as `_PAREN_NUMERAL_RE` matches anywhere, so nothing on that side is
+    #      ever read. Without the arm the row fell into `CONTENT_NO_VALUE`, whose
+    #      published meaning is "states no value at all", and every quote slot on
+    #      it counted as a DROPPED value — a positive claim about text the
+    #      projection never looked at (#11730 review, cycle 15). Census-inert: no
+    #      row on this corpus carries the form (`(€|\$|\u00a3|\u00a5|[-+])\s*\d` and an
+    #      inner separator both return 0 hits over the sealed receipts).
+    assert _retention_class("we saved ($4) on the run and dropped 300 nodes",
+                            "we saved $4 on the run and dropped 300 nodes") == (
+        "CONTENT_EXCLUDED_FORM")
+    #      … the probe is the ENGINE's predicate, not a second regex here: the
+    #      narrow accounting shape above is exactly what `_PAREN_NUMERAL_RE`
+    #      defines, and a bare parenthetical numeral keeps its slots.
+    assert v2._PAREN_NUMERAL_RE.search("we saved ($4) on the run")
+    assert _retention_class("the audit (2019) says 12 events",
+                            "the audit (2019) says 12 events") == "ALIGNED"
     # 3b. The excluded-form class is a MEASURED class on the census, not only a
     #     synthetic shape: those 7 rows really do carry a clock or ISO token and
     #     really are rows the shipped slot projection finds nothing to align in.
