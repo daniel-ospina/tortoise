@@ -516,15 +516,28 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     is the naive one, so state it exactly rather than as one predicate:
 
     * producer as the START, other bound a stated instant (the pinned pair):
-      refusal is ``reader_offset < (validFrom - validTo)``;
-    * producer as the END: the sign INVERTS —
-      ``reader_offset > (validTo - validFrom)``;
+      refusal is ``reader_offset < separation``, where ``separation`` is the
+      NAIVE bound's WALL CLOCK minus the other bound's instant (here 02:21 over
+      an anchored UTC midnight = 2h21 = 8460 s). ⚠ It is the SEPARATION, not the
+      difference of the two sort keys: the key of the naive bound has already
+      absorbed the reader's offset (measured at ``Africa/Johannesburg``, where
+      the key difference is 1260 s while the true threshold is 8460 s, so a
+      formula written in keys predicts the wrong verdict for both orientations);
+    * producer as the END: the same separation, and the comparison INVERTS —
+      ``reader_offset > separation``;
     * BOTH bounds producer-shaped: the offsets CANCEL, so the verdict is the
       same on every host.
 
-    Two hosts therefore disagree only when one host's offset is below the pair's
-    separation and the other is not — the OFFSETS decide it, and the distance
-    alone decides nothing (measured: the pair
+    Two hosts therefore disagree only when the separation falls between their
+    offsets, and WHICH end is closed follows from the orientation — it is closed
+    at the offset of the host that ACCEPTS: ``O_low < separation <= O_high``
+    when the producer's shape is the START (the lower-offset host refuses), and
+    ``O_low <= separation < O_high`` when it is the END (the higher-offset host
+    refuses). Measured: for the END pair ``("2023-05-20", "2023/05/20 (Sat)
+    02:00")`` (separation 7200 s) ``Africa/Johannesburg`` (+02:00) ACCEPTS and
+    ``Asia/Kolkata`` (+05:30) REFUSES — no offset is below the separation, so a
+    direction-blind "the higher offset inclusive" rule would mispredict it. The
+    OFFSETS decide it, and the distance alone decides nothing (measured: the pair
     ``("2023/05/20 (Sat) 02:21", "2023-05-20")`` is refused at ``UTC`` and
     ``America/Los_Angeles`` and accepted at ``Asia/Kolkata``, while
     ``…, "2023-05-19"`` and ``…, "2023-05-21"`` agree on all three; two hosts
@@ -536,10 +549,12 @@ def validate_validity_window(valid_from: object, valid_to: object) -> None:
     #11646 (it would make this guard deterministic without touching #3982's
     dashed date-TIME reading, at the cost of a slash-vs-dashed asymmetry), and
     is not a reopen. Either way it is escalated as a decision rather than fixed
-    here. The divergence is PINNED —
+    here. The divergence is PINNED for BOTH orientations —
     ``tests/test_11646_producer_date_shape.py::test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded``
-    asserts the verdict at three zones, so a change that moves it reds before it
-    can move silently.
+    asserts the producer-as-START verdict (refused / refused / accepted) AND the
+    producer-as-END verdict (accepted / accepted / refused) at three zones, so a
+    change that moves either reds before it can move silently. The both-naive
+    case is recorded here and asserted in the same test.
 
     #6140 — an unorderable START is not refused here, and this function does
     not warn about it either. Its caller

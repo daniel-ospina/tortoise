@@ -431,8 +431,10 @@ def _string_instant(s: str) -> datetime | None:
     # ⚠ NOT the same shape set as the day view, and the difference is
     # DELIBERATE (cycle 7, finding 1 — an earlier version of this comment
     # claimed parity, which would invite the one change this module forbids).
-    # THREE kinds of divergence IN THIS ARM (not a closed count of the whole
-    # module — see the exceptions named below), with different mechanisms:
+    # THREE MECHANISMS of divergence, described here — plus TWO further
+    # divergences in this same arm that have NO mechanism at all (a RULING and a
+    # missing ARM), named in A below. So this list is not a count of the arm's
+    # refusals, only of the ones that have a mechanism to explain:
     #
     # 1. the day view's TOLERANT PREFIX fallback dates a value whose tail is
     #    unreadable (``2023-05-20 02:21 PDT``, ``… (approx)``, ``T+05:00``), and
@@ -455,27 +457,39 @@ def _string_instant(s: str) -> datetime | None:
     #    would fall through to the naive reading and be dated. The DAY view
     #    dates it (its calendar day is stated); the INSTANT cannot be computed,
     #    so it is refused. Not a ruling and not a gap — removing the guard
-    #    would make ``validity._names_an_instant`` report ``END_KNOWN`` for a
-    #    bound whose instant cannot be computed, the exact false PASS #9202
-    #    exists to deny.
+    #    would make ``validity._names_an_instant`` return ``True`` (it is a
+    #    boolean predicate) and therefore ``validity.end_state`` report
+    #    ``END_KNOWN`` for a bound whose instant cannot be computed, the exact
+    #    false PASS #9202 exists to deny.
     #
-    # So, in THREE separate statements — they are different gates, and
-    # conflating them is how this comment went wrong before:
+    # So, in TWO separate statements — they are different gates, and conflating
+    # them is how this comment went wrong before:
     #
-    # A. ACCEPTANCE. The INSTANT view takes a whole-value family only when it can
-    #    state the instant; the DAY view takes everything whose calendar day is
-    #    readable, by whole-value grammar OR by prefix. THREE whole-value
-    #    families are refused by ``calendar_datetime``, and they are NOT the same
-    #    kind of refusal:
+    # A. ACCEPTANCE. The INSTANT view takes a whole-value family when the
+    #    value's own grammar yields a coherent CLOCK READING. A ZONE-less
+    #    reading is still taken and left NAIVE for #3982 to place in the
+    #    READER's zone — which is what ``2023/05/20 (Sat) 02:21`` gets — so an
+    #    unstated ZONE is never a refusal here. What IS refused is an unreadable
+    #    clock (hour 24, an impossible offset) or a family with no arm at all.
+    #    The DAY view takes everything whose calendar day is readable, by
+    #    whole-value grammar OR by prefix. FOUR whole-value families are refused
+    #    by ``calendar_datetime`` — the HOUR-24 spelling is the first (item 2
+    #    above), the other three follow — and they are NOT the same kind of
+    #    refusal:
     #      * an EPOCH SPELLED AS A STRING — refused BY RULING (#9202; the
     #        asymmetry is stated in the module docstring);
-    #      * a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY spelling —
+    #      * a COMPACT / ISO-week DATE + OFFSET (or ``Z``) carrying NO TIME —
     #        ``20230520-05:00``, ``2026W243-05:00``, ``2023-W43-2+05:00`` and
     #        ``20230520Z`` are all day-dated (:func:`_compact_date_offset`) and
     #        all refused here, because ``_string_instant`` has no arm for the
-    #        family at all. That is a GAP, not a ruling — tracked as #11708 —
-    #        and it is not the hour-24 case above, whose grammar both views
-    #        share;
+    #        COMPACT / ISO-WEEK form at all. ⚠ The axis is the FORM, NOT the
+    #        separators: the CALENDAR form is armed by ``_INSTANT_RE``'s
+    #        date-only branch, so ``2023-05-20+05:00``, ``2023-05-20Z`` and
+    #        ``2023/05/20+05:00`` ARE accepted as that offset's midnight — while
+    #        the DASHED ISO-WEEK spelling ``2023-W43-2+05:00`` is refused like
+    #        the rest of its family. That is a GAP for the compact/ISO-week
+    #        family, not a ruling — tracked as #11708 — and it is not the
+    #        hour-24 case above, whose grammar both views share;
     #      * a STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``,
     #        ``…+00:99``) — refused by a DELIBERATE GUARD, neither a ruling nor a
     #        gap: the DAY is stated and dated, the INSTANT cannot be computed,

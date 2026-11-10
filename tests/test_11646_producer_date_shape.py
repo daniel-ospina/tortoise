@@ -676,10 +676,14 @@ def test_the_instant_view_takes_whole_value_date_times_and_refuses_unreadable_ta
     Scoped to the DATE+TIME families on purpose: the whole-value shapes the day
     view dates but this view deliberately refuses are an EPOCH spelled as a
     STRING (the #9202 owner ruling, the asymmetry stated in ``calendar_date``'s
-    module docstring) and a DATE + OFFSET (or ``Z``) carrying NO TIME, in EVERY
-    spelling — ``20230520+05:00``, ``20230520-05:00``, ``20230520Z``,
+    module docstring), a COMPACT / ISO-WEEK DATE + OFFSET (or ``Z``) carrying NO
+    TIME — ``20230520+05:00``, ``20230520-05:00``, ``20230520Z``,
     ``2026W243+05:00`` and ``2023-W43-2+05:00`` are all day-dated and all
-    refused here (the gap named on #11708), an HOUR-24 spelling
+    refused here (the gap named on #11708; ⚠ the axis is the FORM, not the
+    separators: the CALENDAR form ``2023-05-20+05:00`` IS accepted, by
+    ``_INSTANT_RE``'s date-only branch, as that offset's midnight, while the
+    DASHED ISO-week ``2023-W43-2+05:00`` is refused like the rest of its
+    family), an HOUR-24 spelling
     (``2023-05-20T24:00:00``, which the day view dates by the whole-value
     grammar and the instant view refuses at ``_match_naive``), and a
     STATED-BUT-IMPOSSIBLE OFFSET (``2023/05/20T02:00:00+25:00``, refused by the
@@ -734,13 +738,20 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     #11646: ``_created_sort_key`` bucketed the shape as unparseable, so
     ``validate_validity_window`` (which orders with the SAME measure) skipped
     the pair on every host. Now the bound IS orderable, and what a mixed pair's
-    verdict is depends on the orientation: producer as the START gives
-    ``reader_offset < (validFrom - validTo)``, producer as the END inverts the
-    sign, and with BOTH bounds producer-shaped the offsets cancel so every host
-    agrees. Two hosts therefore disagree only when one host's offset is below
-    the pair's separation and the other is not — the distance alone decides
-    nothing: two hosts 1h apart can disagree about a pair 13h30 apart, and a
-    pair 20h apart answers the same on every host.
+    verdict is depends on the orientation: producer as the START refuses when
+    ``reader_offset < separation`` (the naive bound's WALL CLOCK minus the other
+    bound's instant — 2h21 = 8460 s here, NOT the 1260 s difference of the two
+    sort keys: the naive key has already absorbed the reader's offset), producer
+    as the END uses the same separation with the comparison INVERTED, and with
+    BOTH bounds producer-shaped the offsets cancel so every host agrees. Two
+    hosts therefore disagree only when the separation falls between their
+    offsets, the closed end being the ACCEPTING host's offset — higher for a
+    producer-as-START, lower for a producer-as-END — so the two orientations
+    close at opposite ends (measured: the END pair with a 7200 s separation is
+    ACCEPTED at ``Africa/Johannesburg`` +02:00 and REFUSED at ``Asia/Kolkata``
+    +05:30). The distance alone decides nothing: two hosts 1h apart can disagree
+    about a pair 13h30 apart, and a pair 20h apart answers the same on every
+    host.
 
     Recorded, not endorsed: fixing it means either revisiting the ``#3982``
     ruling or giving the producer's shape its own deterministic anchor — the
@@ -760,12 +771,16 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
     script = (
         "from tortoise.search_engine import _created_sort_key as k\n"
         "from tortoise.commit_schema import validate_validity_window as v\n"
+        "def verdict(a, b):\n"
+        "    try:\n"
+        "        v(a, b)\n"
+        "        return 'accepted'\n"
+        "    except ValueError:\n"
+        "        return 'refused'\n"
         "print(k('" + PRODUCER_SESSION_DATE + "'))\n"
-        "try:\n"
-        "    v('" + PRODUCER_SESSION_DATE + "', '2023-05-20')\n"
-        "    print('accepted')\n"
-        "except ValueError:\n"
-        "    print('refused')\n"
+        "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023-05-20'))\n"
+        "print(verdict('2023-05-20', '" + PRODUCER_SESSION_DATE + "'))\n"
+        "print(verdict('" + PRODUCER_SESSION_DATE + "', '2023/05/21 (Sun) 03:00'))\n"
     )
     env_base = {"PATH": str(Path(sys.executable).parent), "PYTHONPATH": str(
         Path(__file__).resolve().parent.parent)}
@@ -774,19 +789,29 @@ def test_a_mixed_producer_pair_is_host_dependent_and_that_is_recorded():
         out = subprocess.run([sys.executable, "-c", script], capture_output=True,
                              text=True, timeout=120,
                              env={**env_base, "TZ": zone}, check=True).stdout
-        key, verdict = out.strip().splitlines()[-2:]
-        observed[zone] = (key, verdict)
+        lines = out.strip().splitlines()
+        key, forward, reverse, both_naive = lines[-4:]
+        observed[zone] = (key, forward, reverse, both_naive)
     # all three order the value now (before #11646 every one of them bucketed)
-    assert all("(0," in k for k, _ in observed.values()), observed
+    assert all("(0," in k for k, *_ in observed.values()), observed
     # the epoch — and therefore the window verdict — is decided by the HOST
-    assert len({k for k, _ in observed.values()}) == 3, observed
+    assert len({k for k, *_ in observed.values()}) == 3, observed
     # ⚠ scoped: the split follows the pair's separation against the two hosts'
     # OFFSETS, not the pair's own distance — these three zones span far more
     # than this pair's 2h21 separation, which is why it splits. A pair further
     # apart than the offset range (~14h one way, ~12h the other) agrees
-    # everywhere, and this pin covers the producer-as-START orientation only,
-    # so it is not "a mixed window is host-dependent" in general (review of PR
-    # 11705).
+    # everywhere, so this is not "a mixed window is host-dependent" in general
+    # (review of PR 11705).
+    #
+    # BOTH orientations are asserted, because the recorded divergence names both
+    # and one orientation's verdict can move without the other's (review cycle 5
+    # of PR 11705).
     assert observed["UTC"][1] == "refused"
     assert observed["Asia/Kolkata"][1] == "accepted"
     assert observed["America/Los_Angeles"][1] == "refused"
+    # producer as the END: the mirror image, in the same three zones
+    assert observed["UTC"][2] == "accepted"
+    assert observed["Asia/Kolkata"][2] == "refused"
+    assert observed["America/Los_Angeles"][2] == "accepted"
+    # BOTH bounds zone-less: the reader's offset cancels, so every host agrees
+    assert {v for *_, v in observed.values()} == {"accepted"}, observed
