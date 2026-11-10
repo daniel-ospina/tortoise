@@ -494,8 +494,8 @@ mapped logically."* That reframes A1, and the check found a gap that A1 as scope
    nothing emits it.
 3. ⛔ **Every business predicate in V3 routes to the OPERATOR path** — and, except for the two core structural words the
    packs re-declare (`hasPart`, `dependsOn`, whose `relation_write_paths()` is `('operator','structural')`), not to the
-   structural one — because each carries
-   `mechanism: IMPL`, and `relation_write_paths()` binds the `operator` path on `mechanism ∈ CORE_PREDICATES`. So
+   structural one — because each carries a **core `mechanism`** (`IMPL`, or `NAND` for `competesWith`), and
+   `relation_write_paths()` binds the `operator` path on `mechanism ∈ CORE_PREDICATES`. So
    `funds`, `producedBy`, `holds`, `dependsOn`, `addresses`, `competesWith` are consumed as **epistemic IMPL/NAND edges**
    (belief propagation, EP confidence) with the pack's word as a **label** — not as structural business facts.
 
@@ -596,27 +596,19 @@ receipt, not on the status code:**
 | retryable | `502` `503` `504`, **and `409`/`429` after the door's own `Retry-After`** - retried **once**, by re-POSTing the **SAME `session_id`** |
 | terminal | `402` (quota - a refusal, not a failure), `422` (malformed payload). **`409` is NOT terminal** - the door publishes `Retry-After: 30` on it |
 | replay guard | read the receipt: `meta.mode == "replayed"` **and** a `capture_ok` that is **not** false => `REFUSED(replayed, no extraction)`, **no row scored**. A re-POST is a **TRUE retry** exactly when the stored `capture_ok` is `false` - which is what `#3129`'s abandoned marker exists to write |
+| breaker | **two consecutive refusals at one head stop dispatching that run** |
+| census | **not** retried (a partial census is a refused run, not a best-effort one); W2c's read-only census inherits this and needs no breaker |
+| model-proposed arms | re-run **once** for the repeat policy. "A third run is a policy violation" was narration - nothing counts runs. It is frozen as a **record field** (`max_realizations`) with a **CI pin over the committed run artefacts**; absent that, it is a reporting convention and the plan says so instead of calling it a violation |
 
 ⛔⛔ **P1 from the `duplication-architecture` review: the first version INVERTED this contract.** It said "retry with
 a **fresh** `session_id`" - which **discards the door's own convergence machinery and mints a second session's
 points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
-lane is the TRUE retry (`hosted_api.py:17288-17297`, `retry_failed_capture`, blocked for `m2`); a **replay** fires
-only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"` (`:17761`); and `#3129`'s abandoned
+lane is the TRUE retry (`hosted_api.py:18111-18114`, `retry_failed_capture`, blocked for `m2`); a **replay** fires
+only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"` (`hosted_api.py:18674-18701`; the field at `:18697`); and `#3129`'s abandoned
 marker writes `capture_ok=false` **precisely so that** a same-session retry is a true retry. §5.4's citation
-(`:17212-17217`) was also wrong - that is the **422 empty-conversation** branch, not the replay path. **The retry
+(`:17212-17217`) was also wrong — that is the `session_id` `max_length` comment, while the **422
+empty-conversation** branch is `:18026-18030`, not the replay path. **The retry
 contract is the door's; the plan declares it, it does not restate a different one.**
-| breaker | **two consecutive refusals at one head stop dispatching that run** |
-| census | **not** retried (a partial census is a refused run, not a best-effort one); W2c's read-only census inherits this and needs no breaker |
-⛔⛔ **P1 from the `duplication-architecture` review: the first version INVERTED this contract.** It said "retry with
-a **fresh** `session_id`" — which **discards the door's own convergence machinery and mints a second session's
-points**, double-minting silently. The door already owns the retry semantics: a same-session re-POST on a convergent
-lane is the TRUE retry (`hosted_api.py:17288-17297`, `retry_failed_capture`, blocked for `m2`); a **replay** fires
-only when `capture_ok` is `True`/legacy-`None` and returns `mode: "replayed"` (`:17761`); and `#3129`'s abandoned
-marker writes `capture_ok=false` **precisely so that** a same-session retry is a true retry. §5.4's citation
-(`:17212-17217`) was also wrong — that is the **422 empty-conversation** branch, not the replay path. **The retry
-contract is the door's; the plan declares it, it does not restate a different one.**
-
-| model-proposed arms | re-run **once** for the repeat policy. "A third run is a policy violation" was narration - nothing counts runs. It is frozen as a **record field** (`max_realizations`) with a **CI pin over the committed run artefacts**; absent that, it is a reporting convention and the plan says so instead of calling it a violation |
 
 ---
 
