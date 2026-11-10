@@ -1182,13 +1182,16 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
         in review answering 300 for an unmarked item under `PYTEST_TIMEOUT=120`,
         i.e. passing over a budget of 120.
 
-        The marker is asserted, not assumed: dropping `pytestmark` leaves the
-        ORDERING green (300 still exceeds 280) while silently handing this file
-        back to the shard's 300 s default, which is the flake this commit
-        removes — so this block pins the declared value and the resolved one.
+        The marker is asserted, not assumed: dropping `pytestmark` leaves a
+        bare `budget > bound` comparison green (the shard's 300 s still exceeds
+        280) while silently handing this file back to the shard's 300 s default,
+        which is the flake this commit removes — so this block pins the declared
+        value AND the resolved one, because the comparison cannot see the drop.
 
         There is no separate `item_budget > bound` assert: it follows from the
-        resolved-equality and coverage arms, so it could never fail alone.
+        resolved-equality and coverage arms, so it could never fail alone (and
+        this docstring no longer points at one — it used to say "the ORDERING
+        below stays green", naming an arm review round 3 had removed).
         """
         tc, _ = hosted
 
@@ -1218,11 +1221,11 @@ class TestAWaiterRefusalCannotPoisonTheNextCapture:
             f"this module must ask for its {_ITEM_BUDGET_S} s per-item budget "
             f"explicitly (pytestmark); found "
             f"{'no timeout marker' if mark is None else mark.args}. Dropping it "
-            f"leaves the ORDERING below green (the shard's 300 s still exceeds "
-            f"the transport bound) while handing this file back to a budget it "
-            f"cold-loads past — 124.53 s measured, 204.64 s observed under CI "
-            f"load — i.e. the `Failed: Timeout` flake this suite bound exists to "
-            f"remove")
+            f"leaves a bare budget>bound comparison green (the shard's 300 s "
+            f"still exceeds the transport bound) while handing this file back "
+            f"to a budget it cold-loads past — 124.53 s measured, 204.64 s "
+            f"observed under CI load — i.e. the `Failed: Timeout` flake this "
+            f"suite bound exists to remove")
         assert item_budget == float(_ITEM_BUDGET_S), (
             f"the RESOLVED per-item budget is {item_budget:g} s, not "
             f"{_ITEM_BUDGET_S} s: a marker override, `PYTEST_TIMEOUT`, "
