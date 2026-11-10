@@ -297,11 +297,11 @@ def parse_measured_at(raw: Any) -> float | None:
     the wrong direction on a freshness bound.
 
     ⛔ A value that cannot be parsed is a :class:`CacheReadError`, NOT ``None``.
-    ``None`` means "this artifact carries no time" (a shape from before the field
-    existed); an unparseable one means the artifact DOES claim a time and the claim is
-    unreadable. Flattening the two would let a typo'd stamp read as undated and be
-    refused for the wrong reason, and the caller would go looking for a missing field
-    that is present.
+    ``None`` means "this artifact carries no time": either a shape from before the
+    field existed, or a field PRESENT and EMPTY (``""`` names no instant, so it is
+    that same shape — and :func:`assess` refuses both, naming the missing time). An
+    unparseable one means the artifact DOES claim a time and the claim is unreadable.
+    Flattening the two would let a typo'd stamp read as undated, for the wrong reason.
     """
     if raw is None:
         return None
