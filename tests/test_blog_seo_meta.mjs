@@ -1936,6 +1936,14 @@ console.log("the blog's link preview and icon");
   ]) {
     const tag = links.find((t) => (linkAttr(t, "rel") ?? "").split(/\s+/).includes(rel)
       && hrefPath(t) === href);
+    // ⛔ A MISSING LINK IS ALREADY A REPORTED FAILURE ABOVE, AND `assert` DOES NOT THROW IN
+    // THIS FILE (`fail` only increments a counter). Dereferencing `undefined` here threw an
+    // uncaught `TypeError`, which aborts the MODULE — so the card assertions below never ran
+    // and the aggregate summary never printed. Measured on a `_lib.ts` copy with the
+    // `favicon.png` link removed: 31,713 assertions executed and no summary, against 31,729
+    // and a printed summary with this guard (16 lost). One defect must not hide the rest
+    // (the same rule `test_website_static.py` states for its foreign-href direction).
+    if (tag === undefined) continue;
     assert(
       /\?v=[0-9a-f]{12}$/.test(linkAttr(tag, "href") ?? ""),
       `the blog shell links ${href} with a ?v=<sha256[:12]> cache-buster that moves when the bytes do (#11407) — got ${linkAttr(tag, "href")}`,
