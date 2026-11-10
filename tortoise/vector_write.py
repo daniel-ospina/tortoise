@@ -928,10 +928,11 @@ def statement_vector_in_a_foreign_property(statement: str) -> tuple[str, ...]:
       refuse the product's own event write. ⛔ A map written as a LITERAL in the statement text is
       NOT this residual — its key is in the text — and it is read by the sibling
       :func:`statement_vector_in_a_foreign_map_key`.
-    * a vector that arrives as a bare PARAMETER under some other name (``SET e.vector = $vec``) is
-      invisible to a TEXT reader: nothing in the statement says ``$vec`` is a ``Vectorf32``, and
-      refusing every ``SET <alias>.<prop> = $param`` would refuse the product's own scalar writes.
-      The same class as `#4520`'s data-typed key, and it needs a typed seam, not a wider regex.
+    * a vector that arrives as a bare PARAMETER under some other name (``SET e.vector = $vec``, or a
+      map VALUE such as ``{vector: $vec}``) is invisible to a TEXT reader: nothing in the statement
+      says ``$vec`` is a ``Vectorf32``, and refusing every ``SET <alias>.<prop> = $param`` would
+      refuse the product's own scalar writes. The same class as `#4520`'s data-typed key, and it
+      needs a typed seam, not a wider regex.
 
     Strings and comments are blanked before the search, so ``SET e.note = 'vecf32($e) is the shape'``
     is TEXT and is accepted — reading a literal as code refused a legitimate statement with a message

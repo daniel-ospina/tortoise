@@ -34,7 +34,15 @@ RED proof (each assertion fails on the pre-fix tree):
   negative and deleted every following clause from the reader, so a `CREATE (p) SET
   p.embedding = …` behind a comment was invisible and accepted;
 * `test_the_declared_restore_labels_are_the_served_vocabulary` — before the fix `restore_graph`
-  declared `LABELS_AT_RUNTIME`, so row 2 had no label to compare and read `PARTIAL`.
+  declared `LABELS_AT_RUNTIME`, so row 2 had no label to compare and read `PARTIAL`;
+* `test_a_vector_in_a_FOREIGN_property_is_refused_by_the_door` / `…_FOREIGN_MAP_KEY_…` — the bound
+  proved WHICH NODE a store lands on and never WHICH PROPERTY, so `SET e.vector = vecf32(…)` and
+  `SET e += {vector: vecf32(…)}` were accepted on the served `:Event` label and landed a `Vectorf32`
+  in a property `run_vector_query` never reads (row 2's own sentence, defeated on the safe label);
+* `test_a_vector_MENTIONED_in_a_STRING_does_not_refuse_the_statement` — the same guard searched the
+  RAW item, so a string literal NAMING the shape (`SET e.note = 'vecf32($e) is the shape'`) refused
+  a legitimate statement with a message that was not true, the class `_blank_string_literals` exists
+  to remove (round 5's `SET e.note = '(b:Batch)'`).
 """
 from __future__ import annotations
 
