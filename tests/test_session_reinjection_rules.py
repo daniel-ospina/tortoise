@@ -1059,8 +1059,31 @@ def test_wire_identity_never_moves_an_existing_key():
     assert session_key_of({"id": "e4", "sessionId": None}) == "idx:point:e4"
     assert session_key_of({"id": "e5", "sessionId": ""}) == "idx:point:e5"
     # non-str spellings are refused by the isinstance guard, not stringified
+    # — on BOTH spellings (#11382). Before #11382 only the camel leg had the
+    # guard: the snake leg returned the value verbatim, so
+    # ``{"session_id": 5}`` keyed the int ``5`` and THREE callers then raised
+    # ``AttributeError`` on ``.startswith`` (``seeded_sessions``,
+    # ``coverage_loop.coverage_gap``, ``reader_window_displacement``), while an
+    # UNHASHABLE one (``[1]``) raised ``TypeError`` at the first dict-key. The
+    # loop runs both spellings on purpose: two per-branch blocks would let a
+    # one-sided regression pass, which is the shape #11382 exists to close.
     for junk in (0, 5, True, {"a": 1}, ["s"]):
-        assert session_key_of({"id": "e6", "sessionId": junk}) == "idx:point:e6"
+        for spell in ("sessionId", "session_id"):
+            assert session_key_of({"id": "e6", spell: junk}) == (
+                "idx:point:e6"), spell
+
+    # ... and with NO ``id`` at all the two spellings land on the same phantom
+    # bucket: a non-str identity is DISCARDED rather than keyed, so it shares
+    # the identity-less ``idx:-1`` bucket instead of becoming a bucket of its
+    # own. Pinned deliberately, because this is the one place the fail-closed
+    # leg FUSES two values (the int ``5`` and the int ``6`` are the same bucket
+    # here) and the fusion is invisible unless asserted. It is the same answer
+    # the camel leg has given since #10540, and it binds only the untyped seam
+    # ``retrieval.session_key_of`` documents — no in-repo pool carries a
+    # non-``str`` session id, and the alternative (keying the raw int) is the
+    # raising shape this arm replaces.
+    assert session_key_of({"session_id": 5}) == "idx:-1"
+    assert session_key_of({"sessionId": 5}) == "idx:-1"
 
 
 def test_wire_identity_is_stripped_like_the_reader_names_it():
