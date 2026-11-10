@@ -240,7 +240,8 @@ not closed by anything found here.** A4's target remains unset.
 
 **⚠️ The tiered-linking finding contradicts D6 unless it is routed — and it is routed.**
 `EXTRACTOR-V4-ARCHITECTURE.md:1400` records D6: *"Two distinct connection sets — within-batch and to-graph,
-both **proposed by the model**"*, and `:977` says *"D6 as ruled"*. The field's convergent answer (tiered:
+both **proposed by the model**"*, and `:1095` says *"D6 as ruled — the model proposes both sets"* (`:977` is the
+`#5087` seam STATUS block, not D6). The field's convergent answer (tiered:
 mechanical candidates + LLM only for borderline) is **not** D6. Per the **contradiction test** and the
 Adoption Gate, a convergent standard that contradicts a recorded decision is **not adoptable at all** — the
 route is a reopen with the evidence in front of the owner. ⇒ this finding is **input to the §13.8 Q1 ask**

@@ -23,9 +23,9 @@ stage: epic-verify
 | artifact | present | note |
 |---|---|---|
 | strategy alignment decision (`epic-align`) | ✅ | `00-align.md`, **rev 9**, gate **`NO ISSUES FOUND`** |
-| research brief (`epic-research`) | ✅ | `01-research-brief.md`, canonical 5 sections + `## Raw Notes`; **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only |
+| research brief (`epic-research`) | ✅ | `01-research-brief.md`, canonical 5 sections + `## Raw Notes`; **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only — ⚠️ those verdicts are recorded in the **`#7949` pipeline comment of 2026-11-08T00:17:36Z**, not in the brief (whose only in-file trace is its own *"[updated 2026-11-05 — appended, review cycles 2–3]"* line) |
 | scope + high-level E2E (`epic-scope`) | ✅ | `02-scope.md` — 10 in-scope items, 8 E2E cases, D-S1…D-S5, value map, complexity |
-| integration-surface map (Test-Design Gate) | ✅ | `03-test-design.md`, filed as **#11454** (18 surfaces — 1–17 plus `10a` — + the CI tier rule) |
+| integration-surface map (Test-Design Gate) | ✅ | `03-test-design.md`, filed as **#11454** (18 surfaces — 1–17 plus `10a` — + the CI tier rule). ⚠️ The issue's own body still says **17 / 8 CI / 9 Tier E** and names neither `10a` nor E6; the correction (18 rows = 7 CI + 10 Tier E + 1 split, `10a` = E6, and the re-derived 155.5 s family row) is **relayed on the issue** rather than silently assumed |
 | epic plan, 8 substeps (`epic-plan`) | ✅ | `04-plan.md` §1–§8 |
 | dependency-ordered issue list (`epic-decompose`) | ✅ | `#10982`–`#10990` + `#11484` + `#11496`, all sub-issues of `#7949` |
 | per-issue + MECE review records | ✅ | `#7949` comment (Stage 5), plus per-issue blocker corrections on `#10984`/`#10985`/`#10986` |
@@ -76,15 +76,15 @@ twin **builders** for 9 and 10 are the two gaps.
 | phase | gate | status | evidence |
 |---|---|---|---|
 | `epic-align` | strategy review | ✅ **9 cycles recorded**, 5 of them P-counted → `NO ISSUES FOUND` at cycle 9 | `00-align.md` §6 (7×P1 + 17×P2 fixed across cycles 1/2/5/6/7; cycle 8 cosmetic-only; cycle 3 never run and cycle 4 caught by the decompose gate — both rows record it) |
-| `epic-research` | research brief review | ✅ **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only → fixed | `01-research-brief.md` |
+| `epic-research` | research brief review | ✅ **GATE B `NO ISSUES FOUND`**, GATE A cosmetic-only → fixed | **not in `01-research-brief.md`** — that file carries the artifact, not the gate record; the record is the **`#7949` pipeline comment of 2026-11-08T00:17:36Z**, row `01-research-brief.md \| epic-research \| ✅ GATE B \`NO ISSUES FOUND\`, GATE A cosmetic-only` |
 | `epic-scope` | scope review | ✅ **3 cycles** → cosmetic-only, **the findings fixed in later stages** | **not in `02-scope.md`** (that file carries no scope-review section by design — its last line says the two reviews are recorded after confirmation). The record is the `#7949` pipeline comment of **2026-11-08T00:17:36Z**, whose row reads: **`epic-scope ×3 + duplication-architecture` — ✅ cosmetic-only; D&A `ISSUES — DEGRADED` (registry 401), verdicts recorded** — i.e. the comment records **cosmetic-only**, and does not itself say "all fixed" |
 | `epic-scope` | **`duplication-architecture`** | ✅ ran, **`ISSUES — DEGRADED`** (registry 401); verdicts recorded, **not** fix-looped | `02-scope.md` §"verdicts recorded" |
 | Test-Design Gate | issue filed with the full map | ✅ **#11454** | — |
 | UX Design Gate | `UX_RATING` determination | ✅ **low**, no routing (below the ≥ medium threshold) | `02-scope.md` §3 |
-| `epic-plan` §1–4 | design gate | ✅ → 8 findings fixed | `04-plan.md` |
-| `epic-plan` §5 | architecture gate | ✅ → **15** findings fixed | `04-plan.md` §5 |
-| `epic-plan` §6–7 | contracts + detailed E2E gate | ✅ → **12** findings fixed | `04-plan.md` §6/§7 |
-| `epic-plan` §8 | coherence + risk gate | ✅ → **5** findings fixed | `04-plan.md` §8 |
+| `epic-plan` §1–4 | design gate | ✅ → 8 findings fixed | **not a total in `04-plan.md`** — the record is the same pipeline comment (`2026-11-08T00:17:36Z`), row `04-plan.md \| 4 substep gates + D&A ×2 \| ✅ 40 findings fixed, incl. 3 P0`; the per-gate split (8 / 15 / 12 / 5 = 40) is this audit's accounting, not a per-gate record |
+| `epic-plan` §5 | architecture gate | ✅ → **15** findings fixed | same pipeline-comment row; `04-plan.md` §5 carries the findings themselves, no per-gate total |
+| `epic-plan` §6–7 | contracts + detailed E2E gate | ✅ → **12** findings fixed | same pipeline-comment row; `04-plan.md` §6/§7 carry the findings, no per-gate total |
+| `epic-plan` §8 | coherence + risk gate | ✅ → **5** findings fixed | same pipeline-comment row; `04-plan.md` §8 carries the findings, no per-gate total |
 | `epic-plan` §5 | **`duplication-architecture`** | ✅ ran, `ISSUES` — **2×P0**, verdicts folded | `04-plan.md` §8.5 |
 | `epic-plan` §8 | **`duplication-architecture` re-check** | ✅ ran, `ISSUES` — **1×P0 + 3×P1**, folded | `04-plan.md` §5.3a |
 | `epic-decompose` | per-issue gate | ✅ ran — **8 of 10 children fail it, 1 partly, 1 mostly**; every correction is named per issue | `#7949` Stage-5 comment (2026-11-08T00:01:58Z, "Gate A — per-issue verdicts (10 issues)") |
