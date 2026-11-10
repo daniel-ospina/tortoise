@@ -114,6 +114,15 @@ ROOT = Path(__file__).resolve().parents[1]
 #: The corpus the guards were applied to (see module docstring).
 CORPUS_DIRS = ("tools", "graph-scripts")
 
+#: Every root the doc/usage sweep walks — `CORPUS_DIRS` plus the docs tree. One
+#: definition, consumed by the sweep AND by the non-vacuity leg below, so the
+#: root LIST cannot drift between them (the leg asks the same containment
+#: question, below): a leg that restated this tuple would report a widened
+#: root's entries as "outside the swept roots" (false red) and would keep
+#: certifying entries a narrowed sweep no longer walks (false pass, in the leg
+#: whose whole purpose is catching entries that permit nothing).
+DOC_SWEPT_ROOTS = (*CORPUS_DIRS, "docs")
+
 #: Package markers, not entry points: never invoked as a script.
 EXCLUDED_NAMES = frozenset({"__init__.py"})
 
@@ -590,6 +599,13 @@ _SURFACES_OUT_OF_SCOPE: dict[str, str] = {
 #: `docs/ci/merge-throughput-measurements.md:524` stay `uv run python` while the
 #: three entries below do not.
 #:
+#: #11744 (main red at `3173971283f9`): the `11689` plan doc's entry is the
+#: `$`-prompted transcript WITH its captured `FAIL — 1 problem(s): …` output, under
+#: "Measured, not argued — the re-take made the required check fail" — the second
+#: record bullet above, not a plan-doc smoke step. The paragraph beneath it reads as
+#: a receipt too (`main` passes the same command; only the re-take reds it), so the
+#: text records what a machine printed rather than asking a reader to reproduce it.
+#:
 #: Rewriting a record FALSIFIES evidence provenance, which is strictly worse than
 #: the doc/guard contradiction this test exists to prevent. Keyed by
 #: (path, stripped line) rather than by line NUMBER, so an edit above cannot
@@ -612,6 +628,19 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
             "$ python3 tools/edge_census.py census --uri "
             "'docker://:falkordb@localhost:6379' \\",
         ),
+        # RETIRED — do NOT re-add this key (#11757). It exempted the plan doc's
+        # `$ python3 tools/capstone_preregistration_check.py …` transcript. #11756
+        # then rewrote that line to `uv run python` (measured: the new form
+        # reproduces the block's recorded FAIL output verbatim, so the record still
+        # describes a command that runs), which left this key matching NO live line —
+        # `test_the_record_exemptions_all_still_match_a_live_line` reddened main.
+        # The exemption is dead weight now, not protection: the doc no longer
+        # carries the bare form, so the doc-scan test does not need it either.
+        # ⛔ Re-adding THIS key reddens the dead-key test again, because its text
+        # (`$ python3 …`) no longer appears in the doc. Membership is the exact
+        # stripped line, so an exemption can only be revived by restoring the line
+        # it names — never by re-declaring the key. If that record is ever put back
+        # in the bare form, re-derive the key from the live line and say why there.
     }
 )
 
@@ -622,8 +651,25 @@ def test_the_record_exemptions_all_still_match_a_live_line():
     line is re-flagged, but worse, an entry can also linger for text that no
     longer exists while the occurrence it was written for is now uncovered.
     Assert every key still matches a line in its file, so the set cannot rot.
+
+    NON-VACUITY (#11744): matching a live line is not enough for an entry to do
+    any WORK. An entry is INERT — it exempts nothing and reads as though the
+    sweep permits something that it does not — when its file is outside the
+    swept roots (moved), when its suffix is one the walk skips, when the sweep's
+    `git ls-files` intersection does not carry it (untracked), when
+    `_BARE_INVOCATION` never matches the line (a stray key), or when EVERY
+    invocation on it is already a `RUNTIME_39`/`UNGUARDABLE` carve-out
+    (redundant). An inert entry is the same defect as a dead one, one level
+    quieter: the set reads as though it guards every record it lists while it
+    permits fewer, and nothing else in the file would notice.
+
+    The carve-out branch tests EVERY match, not the first: the sweep exempts the
+    whole LINE, so an entry that exempts a second, guarded invocation on the same
+    line is doing real work even when the first invocation is a carve-out (#11753
+    review). Reporting that entry inert would be a false red.
     """
     dead: list[str] = []
+    tracked = set(_git_lines("ls-files", "--", *DOC_SWEPT_ROOTS))
     for rel, line in _DELIBERATE_BARE_FORM:
         path = ROOT / rel
         if not path.is_file():
@@ -631,9 +677,36 @@ def test_the_record_exemptions_all_still_match_a_live_line():
             continue
         if line not in {ln.strip() for ln in path.read_text().splitlines()}:
             dead.append(f"{rel} :: {line[:70]}")
+            continue
+        #: Test containment the way the sweep WALKS it: `rglob` from each root
+        #: yields DESCENDANTS only — never the root itself — so "under root X"
+        #: means `rel` starts with `X/`, at any nesting depth, and NOT `rel == X`.
+        #: That exclusion is load-bearing: a root that is a FILE is walked by
+        #: nothing, so an entry keyed on it would exempt nothing while passing
+        #: every other branch here. A first-segment test
+        #: (`rel.split("/", 1)[0] == root`) agrees only while every root is a
+        #: single path segment, and silently false-reds a nested root's entries
+        #: (`#11753` review rounds 3-4).
+        if not any(
+            rel.startswith(root.rstrip("/") + "/") for root in DOC_SWEPT_ROOTS
+        ):
+            dead.append(f"{rel} (outside the swept roots {DOC_SWEPT_ROOTS})")
+        elif path.suffix not in _DOC_SUFFIXES:
+            dead.append(f"{rel} (suffix {path.suffix!r} is not walked)")
+        elif rel not in tracked:
+            dead.append(f"{rel} (untracked: the sweep skips it via `git ls-files`)")
+        else:
+            matches = list(_BARE_INVOCATION.finditer(line))
+            if not matches:
+                dead.append(f"{rel} :: {line[:70]} (not a bare invocation)")
+            elif all(
+                m.group(1) and f"{m.group(1)}/{m.group(2)}" in _CARVE_OUTS
+                for m in matches
+            ):
+                dead.append(f"{rel} :: {line[:70]} (already a carve-out)")
     assert not dead, (
-        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, so "
-        f"their exemption is dead and the occurrence may be uncovered: {dead}"
+        "these `_DELIBERATE_BARE_FORM` entries no longer match a live line, or "
+        f"match one that their exemption does nothing for: {dead}"
     )
 
 
@@ -669,8 +742,8 @@ def test_no_doc_or_usage_advertises_the_form_the_guard_refuses():
     it).
     """
     offenders: list[str] = []
-    tracked = set(_git_lines("ls-files", "--", *CORPUS_DIRS, "docs"))
-    for base in (*CORPUS_DIRS, "docs"):
+    tracked = set(_git_lines("ls-files", "--", *DOC_SWEPT_ROOTS))
+    for base in DOC_SWEPT_ROOTS:
         for path in sorted((ROOT / base).rglob("*")):
             if not path.is_file() or path.suffix not in _DOC_SUFFIXES:
                 continue
@@ -1314,6 +1387,16 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
 
     Pinned by PROVING the claim rather than by reading the string alone: the form
     the refusal names must resolve, and the bare path must NOT.
+
+    ⚠️ `rc == 2` alone does not measure "a USAGE error" here: `2` is also this
+    tool's documented NO-VERDICT (`tortoise/embedding_residual_scan.py:78`
+    `EXIT_UNAVAILABLE = 2`, returned when `--graph-uri` is absent), so making all
+    three required arguments optional would leave the bare form parsing, refusing
+    the graph half, and still exiting 2 — green on the code while the property the
+    message states is false. (One of the three alone is not enough: the other two
+    still fail at parse time, which is why the assert looks redundant until you
+    read the tool's exit contract.) The CAUSE is pinned too (`#11744` review,
+    round 4).
     """
     path = (Path(__file__).resolve().parents[1]
             / "tools" / "embedding_residual_scan.py")
@@ -1345,3 +1428,10 @@ def test_the_residual_scan_guard_names_an_invocation_that_actually_resolves(
         "the bare path must stay a USAGE error (argparse, `--org` is "
         f"required) — if it stops being one, this guard's advice is no longer the "
         f"only form that resolves: rc={bare.returncode}, {bare.stderr[-300:]!r}")
+    # `2` is not unique to argparse on this tool (it is also `EXIT_UNAVAILABLE`),
+    # so the CODE above cannot distinguish "usage error" from "a store could not
+    # be read". Pin argparse's own text, which only the missing-token path emits.
+    assert "the following arguments are required" in bare.stderr, (
+        "the bare path exited 2, but not on argparse's missing-token error — `2` "
+        "is also this tool's NO-VERDICT exit, so the code alone does not prove "
+        f"the bare path is unusable: {bare.stderr[-300:]!r}")
