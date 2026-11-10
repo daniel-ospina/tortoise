@@ -7099,8 +7099,9 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     # check on `main` itself (`test (c)`, run 42760976461 @ `2bb22d9e`: *"these
     # markers are declared absent-by-design but DO appear in the documents:
     # ['the exemption']"*) and on this branch's own head `d7ed9c0e4` (`test (i)`,
-    # run 42768411220 — `cancelled`, so that one is the branch evidence and is
-    # NOT a run on main).
+    # job 129686875245, concluded `failure` with the same assertion — the RUN's
+    # aggregate is `cancelled` and its event is `pull_request` on `feat/9664-tm`,
+    # so it is branch evidence, not a push run on main).
     # The marker is NOT weakened or exempted: it stays in `DENIAL_MARKERS`, where
     # `_denies_the_class` still judges it per occurrence against a sentence that
     # names a counted row — the direction the owner's decision governs. Only the
