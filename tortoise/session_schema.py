@@ -36,12 +36,12 @@ module is the write-side twin of) states for itself.
 **The demo session's id is declared here too** (``demo_session_id``), for the
 reason #2360 gives for ``_DEMO_POINT_IDS``: ONE derivation for the seeder's
 write — ``hosted_api._seed_demo_graph`` calls it rather than re-spelling the
-f-string. ⚠️ **The read-side exclusion is NOT implemented for the Session
-container.** #2360's exclusion is Point-scoped (``_DEMO_POINT_IDS``: the demo
-Points and the sentinel), so the demo ``:Session`` is still returned by
-``GET /v1/sessions``, ``GET /v1/sessions/{id}`` and ``TortoiseSDK.get_session``.
-That is recorded here as an open gap, never read as coverage — tracked on
-**#8290**.
+f-string. ✅ **The read-side exclusion is implemented for the Session container
+on all three surfaces** (``demo_session_id`` / ``is_demo_session_id``, #8290):
+``GET /v1/sessions``, ``GET /v1/sessions/{id}`` and
+``TortoiseSDK.get_session`` all exclude it, mirroring #2360's owner-recorded
+Point-scoped exclusion so no two surfaces disagree about whether the sample
+content is the user's own.
 """
 
 from __future__ import annotations
@@ -61,26 +61,126 @@ __all__ = [
     "SessionWriter",
     "audit_session_retrofit",
     "demo_session_id",
+    "is_demo_session_id",
     "session_property_owners",
 ]
 
 #: The prefix the demo/sample seeder derives its Session id with. ONE
 #: declaration: ``hosted_api._seed_demo_graph`` writes the id through
-#: :func:`demo_session_id`. The session READ surfaces do NOT exclude it today —
-#: #2360's exclusion covers the demo POINTS (``_DEMO_POINT_IDS``), not the demo
-#: Session container — and that gap is recorded rather than claimed closed
-#: (**#8290** tracks the decision).
+#: :func:`demo_session_id`, and every READ surface excludes it by that SAME
+#: declared prefix — the detail door and the SDK mirror through
+#: :func:`is_demo_session_id`, the list query by binding THIS constant as a
+#: ``$demo_prefix`` Cypher parameter — so the writer and the exclusion cannot
+#: drift because none of them re-spells the prefix. ⛔ It is also a RESERVED id namespace:
+#: the capture doors refuse a caller-supplied id carrying it
+#: (``tortoise.ids.session_id_refusal``), so no real capture can name itself into
+#: the excluded set.
+#:
+#: #8290 (closed): the session read surfaces DID NOT exclude the demo Session,
+#: while #2360's owner-recorded exclusion removed the demo POINTS from the
+#: count-of-record digest. A demo-seeded org therefore showed the sample
+#: ``:Session`` in "Captured sessions" — a capture the user never made — while
+#: the same sample's Points were excluded a screen away. Two surfaces disagreed
+#: about whether the demo content was "the user's own". The exclusion now
+#: mirrors #2360 on all three session read surfaces: ``GET /v1/sessions``,
+#: ``GET /v1/sessions/{id}`` and ``TortoiseSDK.get_session``.
+#:
+#: ⚠️ The prefix test is sound by CONSTRUCTION, not by convention, and the
+#: construction has TWO halves — both required, because either alone leaves a
+#: hole the exclusion would silently swallow:
+#:
+#: 1. **Minted ids cannot enter the namespace.** Every capture door MINTS
+#:    ``mint_session_id()`` = ``session_<12 hex>`` (``tortoise/ids.py``), and
+#:    ``demo_`` is neither hex nor 12 chars long, so no minted id can carry
+#:    :data:`DEMO_SESSION_ID_PREFIX`.
+#: 2. **Caller-supplied ids cannot enter it either** — and this half was
+#:    MISSING until the #8290 review: the doors are not mint-only
+#:    (``SessionRequest.session_id`` / the two SDK doors accept a caller's id of
+#:    any shape), so a genuine capture filed as ``session_demo_…`` used to be
+#:    written and then invisible on all three surfaces. The namespace is now
+#:    RESERVED at ALL FOUR caller-id doors by ``ids.session_id_refusal`` (the
+#:    ONE predicate every door shares), so such a capture is refused loudly
+#:    instead of disappearing quietly.
+#:
+#:    ⚠️ ALL FOUR, or not at all. The second review pass found the first
+#:    reservation gated three of them: ``commit_schema.CommitPayload`` — the
+#:    Layer-1 model of the PUBLIC ``POST /v1/sessions/commit`` — still carried
+#:    its own ad-hoc blank test, so ``{"session_id": "session_demo_…"}`` was
+#:    accepted, and ``_execute_commit_writes`` wrote it verbatim as a
+#:    ``:Session`` (plus an ``AgentSession`` ``:Event``) that the list, the
+#:    detail door and the SDK then all hide. A namespace is reserved only if
+#:    EVERY id-accepting boundary refuses it; the payload validator now
+#:    delegates to the same predicate.
+#:
+#: ``tests/test_demo_session_read_exclusion_8290.py`` pins both halves — a
+#: 1000-mint population for (1), the door/exclusion agreement for (2), and one
+#: reserved-id refusal per real door — all FOUR of them: the two SDK doors, the
+#: hosted ``SessionRequest`` boundary, and ``commit_schema.CommitPayload`` —
+#: because a vacuous prefix test would hide every leak instead of one.
+#:
+#: ⚠️ RESIDUAL, stated and not claimed closed: the reservation is NOT
+#: retroactive. A capture a caller filed under this prefix BEFORE the doors
+#: refused it (any graph written by an older tree, since the doors accepted
+#: arbitrary ids) is still hidden by the read exclusion and stays hidden — no
+#: migration un-hides it, because nothing can distinguish such a row from the
+#: sample by id alone. The repair is a re-capture under an un-reserved id, and
+#: the graph row is reachable only by id from an operator, not by the product.
+#:
+#: ⚠️ SECOND RESIDUAL, named rather than silently left (the #8290 review's P1
+#: second half): the commit lane (`POST /v1/sessions/commit`) also writes an
+#: ``AgentSession`` Event under ``sessionId=<the same id>``, and
+#: ``TortoiseSDK.search_sessions`` / ``get_events(eventKind='AgentSession')``
+#: read that node kind WITHOUT this exclusion — so a reserved-prefix
+#: ``AgentSession`` Event is reachable through the SEARCH reads while
+#: ``get_session`` answers ``None`` for the same id: one id, two answers.
+#:
+#: The commit lane can no longer MINT one — the door that carried
+#: ``payload.session_id`` now refuses the prefix — but the reservation is on
+#: SESSION ids at the four session doors, NOT on every ``sessionId`` a caller
+#: can set through the other doors that accept one (``create_event(...,
+#: sessionId=…)`` persists it as-is), and an Event left by an older tree stays
+#: indexed either way.
+#:
+#: Deliberate: the repair is a read filter on two further surfaces this issue's
+#: scope does not own (the ``:Session`` container, the detail door and the SDK
+#: mirror are what #8290 names), and widening the exclusion there would hide a
+#: caller's legitimately-indexed session content that merely happens to name the
+#: prefix. Same repair as the residual above — re-capture under an un-reserved id.
 DEMO_SESSION_ID_PREFIX = "session_demo_"
 
 
 def demo_session_id(org_id: str) -> str:
     """The deterministic demo-session id for an org.
 
-    The seeder's WRITER derives the id here, so a read-surface exclusion (when
-    one is written) reuses this derivation instead of re-spelling the f-string
-    and drifting. Today the only consumer is ``_seed_demo_graph``.
+    The seeder's WRITER derives the id here, so the read-surface exclusion
+    reuses this derivation instead of re-spelling the f-string and drifting.
+    Consumers: ``hosted_api._seed_demo_graph`` (write) and the three session
+    read surfaces — the detail door and the SDK mirror via
+    :func:`is_demo_session_id`, the list query by binding
+    :data:`DEMO_SESSION_ID_PREFIX` as a ``$demo_prefix`` parameter.
     """
     return f"{DEMO_SESSION_ID_PREFIX}{org_id[:8]}"
+
+
+def is_demo_session_id(session_id: str | None) -> bool:
+    """True when ``session_id`` names a demo/sample Session (#8290).
+
+    The predicate the THREE production callers share, derived from
+    :data:`DEMO_SESSION_ID_PREFIX`: the DETAIL DOOR (``hosted_api``) and the SDK
+    MIRROR (``sdk.get_session``), plus ``activation_scorecard.stage_counts``,
+    which filters the scorecard's rows through it rather than writing a second
+    Cypher spelling of the prefix. The third read surface — the list query —
+    cannot call Python, so it binds that same constant as a ``$demo_prefix``
+    Cypher parameter instead. A surface that re-spelled the prefix (or compared
+    against a literal id) would exclude a DIFFERENT set than the others, which is
+    the disagreement #8290 reported.
+
+    A blank/absent id is NOT a demo id: it is the caller's error to report, and
+    answering ``True`` here would turn a blank id into a silent 404 on the
+    surfaces that use this as a guard.
+    """
+    return isinstance(session_id, str) and session_id.startswith(
+        DEMO_SESSION_ID_PREFIX)
 
 
 # ── the writers ────────────────────────────────────────────────────────────
