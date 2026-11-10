@@ -2294,12 +2294,27 @@ class TestCoreHierarchy:
         NAMES changes what a `kind="Object"` read matches, and nothing named it.
         ⚠️ But the consequence is LABEL-SCOPED, not cross-layer — every read is
         `MATCH (n:<label>)` for its own `entity_type`
-        (`read_ledger.label_for_entity_type`), so a read for
-        `entity_type="object"`, `kind="Object"` now also matches **`:Object` rows**
-        whose `objectKind` is `goal`/`plan`/`strategy`/`target`; it does NOT return
-        `:Point` rows. A `sdk.query(kind="Object")` (a `MATCH (n:Point)` read)
-        matches **`:Point` rows** whose `pointKind` is one of those four. The two
-        read paths widen inside their own label space.
+        (`read_ledger.label_for_entity_type`), so an object read widens inside the
+        `:Object` label only; it does NOT return `:Point` rows. A
+        `sdk.query(kind="Object")` (a `MATCH (n:Point)` read) matches **`:Point`
+        rows** whose `pointKind` is one of those four. The two read paths widen
+        inside their own label space.
+        ⛔ And inside the object read the widening is FORM-SCOPED: the two forms of
+        `tortoise_fts_query(..., entity_type="object")` disagree, and the widening
+        claim above holds of the TEXT-QUERY form only. A text-query read
+        (`query` + `kind`) widens — its FTS/vector pool carries no kind predicate,
+        so the expansion is applied post-retrieval (`sdk.py`:
+        `if kind and query is not None and result_ids:`). A kind-only read
+        (`query=None` → `is_full_scan`) runs the structural leg only, which matches
+        `n.objectKind = $kind` EXACTLY (`search_engine.py`'s structural
+        where-clause), handed the UNEXPANDED `kind` (`sdk.py`:
+        `struct_kind = structural_kind if structural_kind is not None else kind`)
+        — so it does NOT widen. Measured on a live store holding one `:Object`
+        with `objectKind='goal'` and one literal `objectKind='Object'`:
+        `tortoise_fts_query(kind="Object", entity_type="object")` returned only
+        the literal row; `tortoise_fts_query("widget", kind="Object",
+        entity_type="object")` returned both. ⚠️ Widening the full scan is a
+        BEHAVIOUR change, not a doc fix — #11690 owns it.
         ⚠️ And the cause is LEG B, not the closure: `CORE_SUBCLASSES["Object"]` IS
         `CANONICAL_OBJECT_KINDS`, so registering the §6 rows already put these four
         in `expand_kind("Object")` at ONE hop; the closure only adds the pack kinds
@@ -2328,3 +2343,62 @@ class TestCoreHierarchy:
             assert kind in shipped.expand_kind("Object"), (
                 f"expand_kind('Object') does not carry {kind!r} — the overlap "
                 "stopped widening, so this pin's premise is stale")
+
+    def test_the_object_read_asymmetry_the_docstring_states_still_holds(self):
+        """The FORM-SCOPE the docstring above states, pinned where it is produced.
+
+        `test_the_object_and_point_rows_overlap_exactly` can only read the TABLE;
+        the read-path consequence it describes has no assertion in it, so the
+        sentence could go stale in exactly the way this PR exists to remove. This
+        pin holds the two mechanisms the sentence names:
+
+        * the structural leg matches the kind **exactly** — driven with a
+          recording graph, so the assertion is on the Cypher it really issues.
+          Mutation: give the leg the expansion (`n.{kind_field} IN [...]`) and the
+          exact-match assertion goes red, which is the same edit that would make
+          the docstring's "does NOT widen" false.
+        * the SDK hands that leg the **UNEXPANDED** kind, and only applies the
+          expansion post-retrieval, gated on a text query. Those are statement
+          SHAPES, not line numbers (measured: `sdk.py`'s cited line numbers had
+          drifted ~610 lines by the time #5534 anchored them, so an anchor on the
+          statement is the form that survives a merge).
+        """
+        from tortoise import sdk as sdk_module
+        from tortoise.search_engine import run_structural_query
+
+        class _Result:
+            def __init__(self):
+                self.result_set: list = []
+
+        class _RecordingGraph:
+            def __init__(self):
+                self.calls: list = []
+
+            def query(self, cypher, params=None, timeout=None):
+                self.calls.append((cypher, params))
+                return _Result()
+
+        graph = _RecordingGraph()
+        assert run_structural_query(
+            graph, "Object", entity_type="object", limit=5) == []
+        (cypher, params), = graph.calls
+        assert "n.objectKind = $kind" in cypher, cypher
+        assert " IN [" not in cypher, (
+            "the structural leg now carries a kind SET — that is the widening "
+            f"this docstring says does not happen on the kind-only read: {cypher}")
+        assert params["kind"] == "Object", (
+            "the structural leg must be handed the UNEXPANDED kind, never "
+            f"expand_kind(...): {params['kind']!r}")
+
+        source = Path(sdk_module.__file__).read_text(encoding="utf-8")
+        for snippet in (
+            # a kind-only read IS a full scan …
+            "is_full_scan = (query is None and kind is not None)",
+            # … and the expanded kind filter is gated on a TEXT query …
+            "if kind and query is not None and result_ids:",
+            # … while the structural leg gets the unexpanded kind.
+            "struct_kind = structural_kind if structural_kind is not None else kind",
+        ):
+            assert source.count(snippet) == 1, (
+                "the sdk.py statement this docstring's asymmetry depends on is "
+                f"gone or duplicated ({source.count(snippet)} hits): {snippet!r}")
