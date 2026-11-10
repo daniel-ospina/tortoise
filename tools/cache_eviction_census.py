@@ -8,8 +8,8 @@ record CAN serve today, and this docstring said otherwise:** `#10593` (the recor
 write path) closed COMPLETED on 2026-11-06, so the `22P02` rejection cited here is
 gone; only `#7879` (the epic) is open, which is about the record as system of record,
 not its ability to serve a node. What withholds a licence is the absence of a CLEAN
-parity census for the graph being swept — and since nothing here sweeps, an
-`--execute` would delete nodes whose only copy is the graph.
+parity census for the graph being swept — and an `--execute` would delete nodes whose
+only copy is the graph.
 The `--execute` flag is therefore REFUSED BY NAME rather than absent, so a caller
 that tries it learns why instead of concluding the flag was misspelled.
 
