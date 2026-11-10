@@ -290,7 +290,8 @@ def test_the_bars_are_the_frozen_ones():
     assert bars["floors"] == {"e1_objects": 30,
                              "e1_min_before_share": 0.2,
                              "e2b_surviving_units": 30,
-                             "e3_derived_nodes": 30, "e5_rate_min_sentences": 10}
+                             "e3_derived_nodes": 30, "e5_rate_min_sentences": 10,
+                             "e6_declared_rows": 30}
 
 
 def test_a_threshold_edited_in_the_record_moves_the_bar():
@@ -965,7 +966,8 @@ _E4_ON_PIN = "tests/eval/write_path/receipts/w2b-operator-2026-10-24-8503-b.json
 def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
           *, e2_verdict: str = "RED",
           log_corpus_sha: str = "sha256:" + "d" * 64,
-          e4: dict | None = None) -> list[dict]:
+          e4: dict | None = None,
+          e6: dict | None = None) -> list[dict]:
     parsed = measure.measure_e1_e2(_REPO)
     return measure.build_rows(
         head="a" * 40, out_path=out_path, log_corpus_sha=log_corpus_sha,
@@ -983,7 +985,19 @@ def _rows(out_path: str = "docs/evidence/9889/e1-e2-scores.json",
             "sha": "a999be41e", "corpus_sha256": log_corpus_sha,
             "evidence": _E4_ON_PIN, "note": "E4 note"} if e4 is None else e4,
         e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-            "note": "E5 note"})
+            "note": "E5 note"},
+        # ⛔ `#11673`: the sixth row. RED with a NON-EMPTY population by default, because the
+        # `blocked_by`/`corpus_sha256` invariants the table-shape arms assert are the NON-GREEN
+        # ones — a GREEN default would silently move what those arms are testing.
+        e6={"verdict": "RED", "counts": _e6_counts(),
+            "evidence": measure.E6_CENSUS_ARTIFACT, "sha": "a" * 40} if e6 is None else e6)
+
+
+def _e6_counts(*, declared: int = 42, unbound: int = 2) -> dict:
+    """`E6`'s cells, shaped as `measure.e6_counts` returns them."""
+    return {"declared": declared, "unbound": [], "directionless": [],
+            "unbound_and_unexplained": unbound, "written": {},
+            "named": ["dev/madeUp"] * unbound}
 
 
 def _e1_kwargs() -> dict:
@@ -1004,9 +1018,21 @@ def _e1_kwargs() -> dict:
             "below_floor": parsed["below_floor"]}
 
 
-def test_the_table_is_five_rows_in_the_gates_order():
+def test_the_table_is_six_rows_in_the_closing_order():
+    """The table carries the SIX rows the epic closes on (`#11673` review P2).
+
+    ⛔ THE SIXTH ROW IS THE POINT. Registering `E6` made the registration gate accept it, but the
+    epic's closing rule (`#7949`: *"Close this epic only when E1–E6 all have evidence"*) demands a
+    row no probe could EMIT — so the close was uncertifiable by construction. The pin is therefore
+    against the gate's own closing set, not against a local five: a probe that emits a table the
+    gate cannot close is the defect this row exists to remove.
+
+    Non-vacuity: with the `build_e6_row(...)` entry deleted from `build_rows`, this reads
+    `['E1'..'E5'] != ['E1'..'E6']`.
+    """
     rows = _rows()
-    assert [row["criterion"] for row in rows] == list(cvc.CRITERIA)
+    assert [row["criterion"] for row in rows] == list(cvc.CLOSING_CRITERIA)
+    assert [row["criterion"] for row in rows] == list(measure.TABLE_CRITERIA)
     for row in rows:
         assert set(cvc.VERDICTS) >= {row["verdict"]}
         assert row["evidence_kind"] == "measurement"
@@ -6199,7 +6225,7 @@ def test_the_three_routes_to_the_e1_e2_verdict_state_the_records_verdict():
     is 25 Objects … with no before arm", "E2 … carried by no committed artifact") and
     `E1-E5-PROOFS.md`'s E2a/E2b rows ("the bundle's README marks the row BLOCKED because
     the frozen 14-unit denominator is carried by no committed artifact"), whose
-    `README.md:69` pointer now lands on a row that NAMES the re-run reading
+    `README.md:77` pointer now lands on a row that NAMES the re-run reading
     (`RED 8/14`) while its committed verdict cell still reads
     `⛔ **BLOCKED** (#10360)`. Nothing read that prose, so the suite stayed green while the
     bundle's own entry point told a reader the opposite of the table beside it.
@@ -7815,7 +7841,9 @@ def test_a_row_cites_the_receipt_the_selector_chose():
         e4={"verdict": "RED", "numerator": 5, "denominator": 15, "sha": "a" * 9,
             "corpus_sha256": "sha256:" + "d" * 64, "note": "E4 note",
             "evidence": "tests/eval/write_path/receipts/w2b-operator-selected.json"},
-        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"})
+        e5={"verdict": "RED", "numerator": 12, "denominator": 25, "note": "E5 note"},
+        e6={"verdict": "RED", "counts": _e6_counts(),
+            "evidence": measure.E6_CENSUS_ARTIFACT, "sha": "a" * 40})
     by_criterion = {row["criterion"]: row for row in rows}
     assert (by_criterion["E4"]["evidence"]
             == "tests/eval/write_path/receipts/w2b-operator-selected.json")
@@ -7848,7 +7876,9 @@ def test_a_row_with_no_evidence_path_is_refused_not_defaulted_to_the_constant():
                 "sha": "a" * 9, "corpus_sha256": "sha256:" + "d" * 64,
                 "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-                "note": "E5 note"})
+                "note": "E5 note"},
+            e6={"verdict": "RED", "counts": _e6_counts(),
+                "evidence": measure.E6_CENSUS_ARTIFACT, "sha": "a" * 40})
     assert "REFUSED" in str(exc.value), str(exc.value)
     assert "evidence" in str(exc.value), str(exc.value)
 
@@ -7880,7 +7910,9 @@ def test_a_mapping_missing_corpus_sha256_is_refused_by_name_too():
             e4={"verdict": "RED", "numerator": 5, "denominator": 15,
                 "sha": "a" * 9, "evidence": _E4_ON_PIN, "note": "E4 note"},
             e5={"verdict": "RED", "numerator": 12, "denominator": 25,
-                "note": "E5 note"})
+                "note": "E5 note"},
+            e6={"verdict": "RED", "counts": _e6_counts(),
+                "evidence": measure.E6_CENSUS_ARTIFACT, "sha": "a" * 40})
     message = str(exc.value)
     assert "REFUSED" in message, message
     # The NAMED part is the leading clause; the explanatory tail legitimately mentions
@@ -11192,7 +11224,8 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     and a later drift reds the arm while leaving this sentence stale — which is the
     #11555 convention exactly (cite the number beside the symbol; let the arm derive it) —
     `probes/capstone_measure.py:2238-2243`
-    ->`:2747-2749`, which was `:2738-2740` before this branch's own +9
+    ->`:2948-2950`, which was `:2747-2749` before the `E6` producer landed above it
+    (and `:2738-2740` before this branch's own +9
     `TORTOISE_PARTIAL_GAP_FILL` pin landed above it, and `:2726-2728` before main's #11517
     landed +12 above it;
     `extractor_v2.py:1764` unchanged — the relations schema that spells the predicate
@@ -11204,7 +11237,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     #11376 did not move these lines), the `:12929` `vet_enabled` live-cite, the
     bundle's `hasPart`/`hierarchies` split, and the four further LIVE cites a fresh
     review found still unwatched (`pack_hierarchy.py:431`, the
-    `probes/capstone_measure.py:275-283` window and the `sdk.py:17637` cite it carries
+    `probes/capstone_measure.py:300-308` window and the `sdk.py:17637` cite it carries
     INSIDE it, `identity_hold.py:125`, `value_gate.py:81`) — and, measured before
     this pin existed, re-staling ANY of them
     left every suite green: the record is in no `_BUNDLE_DOCS` entry and
@@ -11641,7 +11674,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
         if n:
             per_file[relpath.removeprefix("docs/evidence/7949-capstone/")] = n
     assert per_file == {"PRE-REGISTRATION.md": 23, "preregistration.json": 9,
-                        "probes/capstone_measure.py": 10}, (
+                        "probes/capstone_measure.py": 12}, (
         f"the bundle's hasPart/hierarchies mentions are {per_file} — the record's §5 "
         "self-matching note states them per file; re-derive the note (and this map) "
         "rather than deleting the qualifier, or it reads as 'no output' when it is not")
@@ -12026,13 +12059,13 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # window (measured) — the content simply slid along inside the shifted slice, so the arm
     # added BECAUSE this cite rots by insertion did not detect an insertion. The two content
     # facts below then hold the window's MEANING, and the record-side assert holds its number.
-    assert probe[275 - 1].strip() == 'ANCHOR_OUT = ("extractedFrom",)', (
-        f"capstone_measure.py:275 reads {probe[275 - 1].strip()!r}, not the window's opening line")
-    assert probe[283 - 1].strip() == "#: is on the same link, but the DERIVED node is its TARGET.", (
-        f"capstone_measure.py:283 reads {probe[283 - 1].strip()!r}, not the window's closing line")
-    _probe_win = "\n".join(probe[275 - 1:283])
+    assert probe[300 - 1].strip() == 'ANCHOR_OUT = ("extractedFrom",)', (
+        f"capstone_measure.py:300 reads {probe[300 - 1].strip()!r}, not the window's opening line")
+    assert probe[308 - 1].strip() == "#: is on the same link, but the DERIVED node is its TARGET.", (
+        f"capstone_measure.py:308 reads {probe[308 - 1].strip()!r}, not the window's closing line")
+    _probe_win = "\n".join(probe[300 - 1:308])
     assert "link_source_to_event" in _probe_win, (
-        "probes/capstone_measure.py:275-283 no longer names `link_source_to_event` — the "
+        "probes/capstone_measure.py:300-308 no longer names `link_source_to_event` — the "
         "record cites that window as the `references` writer, so re-derive the cite")
     # ⛔ The record states this window TWICE — as the cite pinned above and as the
     # reproduction command — and only the first was watched (measured: re-staling the second
@@ -12040,7 +12073,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # sibling capture-path cite, which was watched from the start.
     assert re.findall(
         r"sed -n '(\d+),(\d+)p' docs/evidence/7949-capstone/probes/capstone_measure\.py",
-        text) == [("275", "283")], (
+        text) == [("300", "308")], (
         "the record's reproduction command must name the SAME window the cite and the arms "
         "above do — it is the second statement of these two numbers")
     assert f"tortoise/sdk.py:{ref_line}" in _probe_win, (
@@ -12061,7 +12094,7 @@ def test_the_reconcile_cites_resolve_where_the_record_says_they_do():
     # contradicts the docstring's "re-staling a cite in the RECORD reds it". The window's
     # RANGE is asserted as the range its endpoints were just verified at, so the record cannot
     # name a different window than the one pinned above.
-    for _cite in ("`pack_hierarchy.py:431`", "`probes/capstone_measure.py:275-283`",
+    for _cite in ("`pack_hierarchy.py:431`", "`probes/capstone_measure.py:300-308`",
                   "`identity_hold.py:125`", "`tortoise/value_gate.py:81`"):
         assert _cite in text, (
             f"the record must still cite {_cite} — the arm below pins the line it names, "

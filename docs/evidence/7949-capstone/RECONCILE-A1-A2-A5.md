@@ -190,13 +190,13 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    ⚠️ **Scoped on purpose.** The narrower claim is the one the command proves. "The extraction lane emits
    no structural edge of ANY kind" would be **false** — `references` is a valid structural predicate
    (`docs/ONTOLOGY.md` §3.9), and the measured run writes **7** of them (`(Source)-[:references]->…`,
-   produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:275-283`, reached from
+   produced by `_EdgeHandlers.link_source_to_event` — `probes/capstone_measure.py:300-308`, reached from
    the capture path at `tortoise/sdk.py:17637`). (The probe's own docstring cites it too and was
    re-derived with it — `#11212` had already corrected a stale `:17465` there, and `#11459`'s +102
    insertion then moved both; both now read `17637`.) What is missing is the *declared part-whole* edge, not every structural
    edge — and saying otherwise would send a lane off to build a writer the graph already has (the "second
    producer" the epic forbids).
-3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2747-2749`
+3. **The census cannot observe the edge even if it existed.** `probes/capstone_measure.py:2948-2950`
    enumerates **every** relationship type (`MATCH ()-[r]->() RETURN type(r) …`), and the registered
    scored census (`capstone-measured-9152448d.log:299-309`) lists 9 types — `CONTAINS` 309, `IMPL` 65,
    `INPUT` 68, `NAND` 14, `aboutObject` 248, `aboutSubject` 21, `extractedFrom` 150, `mitigated_by` 11,
@@ -206,7 +206,7 @@ gap is **closed**, and `#10984`'s blocker `#11001` is **CLOSED** (2026-11-06T19:
    `4e6a3ce612bd^` every one of its hits is this file's own lines — so the operand has to name the
    bundle alone, with this file excluded:
    `git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 42 hits are the bundle's own registration**
+   ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'` → **all 44 hits are the bundle's own registration**
    (#10982 landed it after this record was written) — the bundle CITES the predicate, it does not
    produce it; the producer claim is the call-shaped grep above, which is still empty. The **0 hits**
    the `exit 1` in earlier revisions of this record was taken at is that EXCLUDED command in the tree
@@ -758,7 +758,7 @@ tools/who-is-on.sh 10984 --repo .                           # exit 0 = complete 
 uv run python tools/collision_preflight.py 10984 --repo .    # the dispatch-time gate (exit 0 = clear)
 grep -n -i -E 'hierarch|hasPart|part-whole|11001|10984' config/v4-mechanisms.yml      # no output
 # …and the structural edges that DO exist on the capture path, which is why the claim above is scoped:
-sed -n '275,283p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
+sed -n '300,308p' docs/evidence/7949-capstone/probes/capstone_measure.py   # `references`, via link_source_to_event
 sed -n '17637p' tortoise/sdk.py                             # the call (`references`'s writer)
 git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup query anywhere
 # ⚠️ self-matching, and now no longer empty: exclude this record, and the hits are the
@@ -766,10 +766,10 @@ git grep -in 'rollup' -- '*.py' '*.md'                      # no graph rollup qu
 # not a producer — the bundle CITES the predicate, it does not produce it. The producer
 # claim is the call-shaped grep above, which is still empty:
 git grep -rn -E 'hasPart|hierarchies|decomposesInto' -- 'docs/evidence/7949-capstone/' \
-    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 42 lines, exit 0 — all in the bundle
+    ':!docs/evidence/7949-capstone/RECONCILE-A1-A2-A5.md'    # 44 lines, exit 0 — all in the bundle
                                                             # (PRE-REGISTRATION.md 23,
                                                             # preregistration.json 9,
-                                                            # probes/capstone_measure.py 10)
+                                                            # probes/capstone_measure.py 12)
 
 # A2 (§2) — the shipped arm moves the share by exactly zero, on a tree that HAS #10997
 .venv/bin/python3 docs/evidence/7949-capstone/probes/e1_e2_probe.py --json-out /tmp/e1e2.json \

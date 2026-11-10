@@ -3,7 +3,7 @@
 
 This is the first half of the issue's own acceptance command. It exists because
 the epic owns no implementation and its closing rule is an *execution*:
-*"Close this epic only when E1–E5 all have evidence attached to this issue —
+*"Close this epic only when E1–E6 all have evidence attached to this issue —
 not when the children close. A child closing is a claim; this epic is where the
 claim is checked against the pipeline running end to end."*
 
@@ -198,6 +198,17 @@ OWNERS = {
     # the epic's own row already named alongside #7947. A row moves only by
     # RE-RUNNING this probe; it never moves by reading an issue's state.
     "E5": "#9075",
+    # ⛔ `#11673`: the sixth row. It names `#5087` and NOT a criterion lane, because no lane OWNS
+    # this row's evidence the way `#9076`/`#5199`/`#9077` own E1–E4's: E6 is measured hermetically
+    # off the pack registry by the census `#11083` already landed
+    # (`docs/evidence/11083/pack-relation-census.json`), so there is nothing left to land before it
+    # can be scored. `#5087` is the same pointer this table's unowned rows already use (E5 does),
+    # and it is OPEN while the epic is, so V12 can VERIFY it rather than read a CLOSED one.
+    # ⚠️ THIS PROBE DOES NOT MEASURE E6 — it is the S0→S6 extraction probe, and E6's population is
+    # the packs' declarations, not a graph. The row is present so a refusal table NAMES the sixth
+    # criterion instead of being silent about it; the SCORED row is produced by
+    # `probes/capstone_measure.py::build_e6_row`, which is what the epic closes on.
+    "E6": "#5087",
 }
 # Criterion-specific causes that survive the pre-registration landing: named in
 # the row's note so the reader is not told "#9075" for a row #9075 cannot fix.
@@ -669,7 +680,7 @@ def evidence_path(out: Path | None) -> str:
 def refused_rows(reason: str, *, prereg_ok: bool,
                  prereg_unread: bool = False,
                  evidence: str | None = None) -> list[dict]:
-    """The 5 rows of a REFUSED run.
+    """The 6 rows of a REFUSED run.
 
     A refusal cannot make a row green, so every row is non-green and names its
     cause. ``UNPREREGISTERED`` is reserved for E1/E2 when the pre-registration
@@ -684,7 +695,7 @@ def refused_rows(reason: str, *, prereg_ok: bool,
     misattribution (#9089 review) and it lived on in the REACHABLE path.
     """
     rows = []
-    for cid in ("E1", "E2", "E3", "E4", "E5"):
+    for cid in ("E1", "E2", "E3", "E4", "E5", "E6"):
         # `UNPREREGISTERED` CLAIMS the pre-registration is the missing thing, so
         # it needs a run that actually looked (G0). A gate that stopped at G-1
         # never consulted it and must not say either way: every row is BLOCKED
@@ -701,6 +712,17 @@ def refused_rows(reason: str, *, prereg_ok: bool,
                  if prereg_ok and not prereg_unread else OWNERS[cid])
         note = f"gate refused: {reason}; this criterion's evidence is owned by "
         note += owner
+        if cid == "E6":
+            # ⛔ E6's evidence is NOT owned by #5087 (that pointer is the epic's, because no criterion
+            # lane owns this row): what produces it is the committed census. Saying "owned by #5087"
+            # would send the next reader to the epic to look for a measurement nobody there owns.
+            note = (f"gate refused: {reason}; E6's evidence is the declared-relation "
+                    "census over the installed packs "
+                    "(docs/evidence/11083/pack-relation-census.json, #11083), which this "
+                    "S0→S6 extraction probe does not measure — its population is the packs' "
+                    "declarations, not the graph. The SCORED row is emitted by "
+                    "probes/capstone_measure.py::build_e6_row, hermetically")
+            note += f" / pointer {owner} (the epic; no criterion lane owns this row)"
         if cid in ALSO_BLOCKED_BY:
             note += f" / the measurement itself is {ALSO_BLOCKED_BY[cid]}"
         if owner in LANDED_GATES:
@@ -727,7 +749,7 @@ def refused_rows(reason: str, *, prereg_ok: bool,
 
 def completed_rows(*, head: str, corpus_sha: str,
                    receipt: dict, evidence: str | None = None) -> list[dict]:
-    """The 5 rows of a COMPLETED run (G6).
+    """The 6 rows of a COMPLETED run (G6).
 
     ⛔ Reached ONLY after G0 read the frozen pre-registration, so no row here
     can be blaming it. The pre-fix rows said ``evidence_kind="refusal"`` and
@@ -742,12 +764,18 @@ def completed_rows(*, head: str, corpus_sha: str,
     nothing can pin.
 
     E4 alone carries ``numerator``/``denominator`` (from ``receipt``). The other
-    four criteria have no receipt on this surface yet, and a fabricated zero
-    would read as a measurement; E4's numbers are the ones the run actually
-    computed, so they belong in the row the gate reads.
+    criteria have no receipt on this surface yet, and a fabricated zero would
+    read as a measurement; E4's numbers are the ones the run actually computed,
+    so they belong in the row the gate reads.
+
+    ⛔ `E6` IS PRESENT AND STILL BLOCKED HERE, and that is not an omission: this is the extraction
+    probe, and E6's population is the packs' DECLARATIONS, which no extraction run creates. The row
+    exists so the table is not SILENT about a criterion the epic closes on (`#7949`: "E1–E6"), and
+    it names the reason instead of leaving a hole. The SCORED sixth row — the one that can be GREEN —
+    is `probes/capstone_measure.py::build_e6_row`, which measures the census hermetically.
     """
     rows: list[dict] = []
-    for cid in ("E1", "E2", "E3", "E4", "E5"):
+    for cid in ("E1", "E2", "E3", "E4", "E5", "E6"):
         owner = ALSO_BLOCKED_BY.get(cid, OWNERS[cid])
         rows.append({
             "criterion": cid, "verdict": "BLOCKED",
@@ -772,6 +800,16 @@ def completed_rows(*, head: str, corpus_sha: str,
         if cid in ALSO_BLOCKED_BY:
             rows[-1]["note"] += (f" / the pre-registration half is "
                                  f"{OWNERS[cid]}")
+        if cid == "E6":
+            # Same correction as `refused_rows`: #5087 is a POINTER, not an owner. E6's evidence is
+            # the census over the packs' declarations, and it is scored by the measurement probe.
+            rows[-1]["note"] = (
+                "the run completed with all eight steps accounted for; E6 is NOT one of "
+                "them — its population is the packs' declarations, which this extraction "
+                "run does not create. The SCORED row is emitted by "
+                "probes/capstone_measure.py::build_e6_row, hermetically, from "
+                f"docs/evidence/11083/pack-relation-census.json (#11083) / pointer {owner} "
+                "(the epic; no criterion lane owns this row)")
         rows[-1]["note"] += _landed_suffix(cid)
         rows[-1]["sibling"] = "E2" if cid == "E1" else ("E1" if cid == "E2"
                                                        else None)

@@ -235,6 +235,11 @@ E4_RECEIPT_DIR = "tests/eval/write_path/receipts"
 E4_RECEIPT_GLOB = "*.json"
 E4_RECEIPT = "tests/eval/write_path/receipts/w2b-operator-2026-10-19.json"
 E5_RESCORE = "docs/evidence/7949-capstone/e5-rescore.json"
+#: The artifact `E6`'s row CITES (`#11673`): the committed `#11083` census. The row's NUMBERS are
+#: re-derived at this head by `e6_census()` — the census is hermetic and cheap, so a stale committed
+#: snapshot is not what the row reports — and the committed artifact is cited because it is where a
+#: reader can see the same census's per-row `written` cells without re-running anything.
+E6_CENSUS_ARTIFACT = "docs/evidence/11083/pack-relation-census.json"
 ARMS_DIR = "tests/eval/write_path/receipts/7947-arms-2026-10-18"
 CORPUS_DIR = "tests/eval/write_path"
 
@@ -242,6 +247,26 @@ SCHEMA = "capstone-verdict-v1"
 BEGIN = "=== CAPSTONE-VERDICT-BEGIN ==="
 END = "=== CAPSTONE-VERDICT-END ==="
 CRITERIA = ("E1", "E2", "E3", "E4", "E5")
+#: The capstone row `#11673` registered on the owner's 2026-11-05 ruling (`#7949` comment
+#: `6664402530`): per-pack *declared → writable → written*, barred on
+#: ``unbound_and_unexplained = 0``.
+#:
+#: ⛔ IT IS A ROW THIS PROBE SCORES, and that is the half `#11673`'s review (P2) found missing: the
+#: registration gate accepted an `E6` row while NOTHING could emit one, so the epic's closing rule
+#: (``E1–E6``, `#7949`) demanded a row no probe could produce — a close no instrument could ever
+#: certify. ``build_e6_row`` below is the producer; it reads the ONE existing census
+#: (`tools/pack_relation_census.py`, `#11083`) rather than re-counting the packs here.
+#:
+#: ⚠️ `E6` is measured HERMETICALLY — from the pack registry, never from this run's graph — because
+#: the criterion's population is the packs' DECLARATIONS, which no extraction run creates. So the
+#: row is scoreable even on a run whose graph half is blocked, and it is the one row of the six that
+#: a graph failure cannot make unmeasurable.
+E6_CRITERIA = ("E6",)
+#: The rows this probe's table carries, in the order V2/V9 read them: the five the table has always
+#: carried plus the sixth the epic now closes on. `CRITERIA` above stays the five-row set because a
+#: FROZEN historical table carries five (see `capstone_verdict_check.CRITERIA`); this tuple is what
+#: the table THIS probe emits must match.
+TABLE_CRITERIA = (*CRITERIA, *E6_CRITERIA)
 STEPS = ("S0", "S1", "S2.1", "S2.2", "S2.3", "S3", "S5", "S6")
 
 #: The node classes the pre-registration's E3 denominator names: ``Point`` (the anchor sits on the
@@ -1051,6 +1076,10 @@ def parse_bars(prereg: dict) -> dict:
             "e2b_surviving_units": floor("e2b_surviving_units"),
             "e3_derived_nodes": floor("e3_derived_nodes"),
             "e5_rate_min_sentences": floor("e5_rate_min_sentences"),
+            # `#11673`: E6's population floor. Without it a registry that failed to load its
+            # packs reports `declared: 0`, and `unbound_and_unexplained: 0` over an absent
+            # subject reads GREEN — the silent-zero shape §3.8 registers the floor to refuse.
+            "e6_declared_rows": floor("e6_declared_rows"),
         },
     }
 
@@ -1468,9 +1497,175 @@ def e2_row_note(e1: dict, e2a_result: dict, e2b_result: dict,
         f"instead of leaving it empty")
 
 
+def e6_census(packs_dir: Path | str | None = None) -> dict:
+    """The declared-relation census `E6` is measured over — the ONE existing instrument.
+
+    ⛔ NOT a second census (`#11673` review P2, and `#11083`'s own rule): `tools/pack_relation_census.py`
+    already emits every cell this criterion reads per row (`verdict`, `declaration_only`,
+    `declaration_only_reason`, `effective_direction`, `written`) and derives ``population.declared``.
+    A re-count here would be a second instrument grading the same fact, which is how this bundle's
+    two probes came to grade one fact oppositely.
+
+    It is HERMETIC: no graph, no DB, no `TORTOISE_DB_URI`. `E6`'s population is the packs'
+    DECLARATIONS, and no extraction run creates those, so this measurement is the one row of the six
+    a dead graph cannot make unmeasurable.
+    """
+    from tools.pack_relation_census import build_census
+
+    return build_census(Path(packs_dir) if packs_dir is not None else ROOT / "packs")
+
+
+def e6_counts(census: dict) -> dict:
+    """`E6`'s two cells, DERIVED from a census — and the rows that made the numerator what it is.
+
+    The metric (§3.1, `#11673`) counts declared rows that are **unbound and unexplained**:
+
+      * a row whose `relation_write_verdict` is ``predicate-not-in-allowlist`` and which is NOT
+        marked ``declarationOnly: true`` with a reason — an unbound declaration nobody explained; and
+      * every row that BINDS a write path but reports no ``effective_direction`` — bound, but the
+        sense the write records was never resolved.
+
+    Both surfaces count: ``relations[]`` AND ``hierarchies[]``. The census's ``verdicts`` aggregate
+    covers ``relations[]`` only, which is exactly why this reads the ROWS (the `#11673` registration
+    says so in §3.1 and §10.21).
+
+    ⛔ The ``written`` column is REPORTED, never the bar (PRE-REGISTRATION §3.8/§10.21): `A1` already
+    measures what the WRITTEN graph answers, and a bar here would let one defect red two rows.
+
+    A pack set that resolves to nothing is NOT a zero-unbound population — `build_census` raising, or
+    a census with no ``packs`` block, must be refused by the caller rather than scored. This function
+    reports what it was given; `e6_outcome` applies the frozen floor.
+    """
+    packs = census.get("packs")
+    if not isinstance(packs, dict) or not packs:
+        raise ValueError("the census carries no per-pack block, so E6's population "
+                         "is absent rather than empty — an absent pack set cannot "
+                         "score a zero")
+    rows: list[dict] = []
+    for section in packs.values():
+        rows.extend(section.get("relations") or [])
+        rows.extend(section.get("hierarchies") or [])
+    declared = len(rows)
+    unbound = []
+    directionless = []
+    for row in rows:
+        explained = (bool(row.get("declaration_only"))
+                     and bool(row.get("declaration_only_reason")))
+        if row.get("verdict") == "predicate-not-in-allowlist" and not explained:
+            unbound.append(row)
+        binds = bool(row.get("write_path")) or bool(row.get("write_paths"))
+        if binds and not row.get("effective_direction"):
+            directionless.append(row)
+    written: dict[str, int] = {}
+    for row in rows:
+        cell = str(row.get("written") or "none")
+        written[cell] = written.get(cell, 0) + 1
+    return {
+        "declared": declared,
+        "unbound": unbound,
+        "directionless": directionless,
+        "unbound_and_unexplained": len(unbound) + len(directionless),
+        "written": written,
+        # Named, not averaged: a RED row has to say WHICH declarations are unbound, or the next
+        # lane re-derives the population to find out.
+        "named": [f"{row.get('pack')}/{row.get('predicate')}" for row in
+                  [*unbound, *directionless]],
+    }
+
+
+def e6_outcome(counts: dict, bars: dict) -> dict:
+    """E6's verdict, through the ONE comparison-to-verdict function (`outcome`).
+
+    A population under the frozen floor is REFUSED (``BLOCKED``), never RED and never GREEN: the
+    pre-registration's own word for a floored population is *"REFUSED, which is neither a pass nor a
+    fail"*, and a zero-tolerance count on a population that is not there is the false PASS the floor
+    exists to refuse (§3.8, and the `e6_declared_rows` floor's own entry).
+    """
+    floor = bars["floors"]["e6_declared_rows"]
+    return outcome(
+        measured=True,
+        below_floor=counts["declared"] < floor,
+        passed=counts["unbound_and_unexplained"] == 0,
+        bar=f"unbound_and_unexplained = 0 (declared rows floor {floor})",
+        value=(f"{counts['unbound_and_unexplained']}/{counts['declared']} declared "
+               f"rows unbound and unexplained"
+               + (f" — {', '.join(counts['named'])}" if counts["named"] else "")))
+
+
+def build_e6_row(*, verdict: str, counts: dict | None, evidence: str, sha: str | None,
+                 log_corpus_sha: str, error: str | None = None) -> dict:
+    """The `E6` row — the sixth the epic closes on (`#11673`).
+
+    ``numerator`` is `unbound_and_unexplained` and ``denominator`` the population it was counted
+    over, so the row states the metric's own two cells rather than a bare verdict word. The `written`
+    column travels in the NOTE, reported beside and never the bar (§3.8/§10.21).
+
+    ``counts is None`` is the census that could not be read: the row is BLOCKED with BOTH cells
+    empty and the reason in the note — a zero on a population nobody counted is the silent-zero
+    shape the `e6_declared_rows` floor exists to refuse, and it is the shape a probe reports by
+    accident when it catches an exception and carries on with ``0``.
+
+    ⛔ `corpus_sha256` carries THIS RUN'S corpus even though the row's population is the pack
+    registry, and the note says so: V7's rule is "two corpora cannot share one verdict", and the row
+    IS part of this run's table — it is produced at this head, from this checkout. The population is
+    different; the revision is not. Declaring ``artifact_corpus_sha256`` instead would tell a machine
+    consumer a corpus was compared and found different, when E6 compares no corpus at all.
+    """
+    if counts is None:
+        return {
+            "criterion": "E6", "verdict": verdict, "evidence_kind": "measurement",
+            "evidence": evidence, "sha": sha,
+            "numerator": None, "denominator": None, "corpus_sha256": log_corpus_sha,
+            "blocked_by": None if verdict == "GREEN" else "#5087",
+            "note": ("NOT MEASURED — the declared-relation census could not be read: "
+                     f"{error}. Both cells are empty rather than 0: a zero over a "
+                     "population nobody counted is exactly the silent-zero the "
+                     "`e6_declared_rows` floor refuses (PRE-REGISTRATION §3.8)"),
+        }
+    written = counts["written"] or {}
+    # The write probe is a GRAPH fact and needs a live store; `E6`'s bar does not, so this pass does
+    # not run it. Say that rather than printing forty-two `UNMEASURED` cells as if the census had
+    # looked and found nothing.
+    if written and all(str(cell).startswith("UNMEASURED") for cell in written):
+        written_cell = ("not measured in this pass — the `written` cells need "
+                        "`tools/pack_relation_census.py --write-probe` (a graph), and "
+                        "they are the committed census's to report")
+    else:
+        written_cell = ", ".join(f"{k}:{v}" for k, v in sorted(written.items())) or "none"
+    return {
+        "criterion": "E6",
+        "verdict": verdict,
+        "evidence_kind": "measurement",
+        "evidence": evidence,
+        "sha": sha,
+        "numerator": counts["unbound_and_unexplained"],
+        "denominator": counts["declared"],
+        "corpus_sha256": log_corpus_sha,
+        # `#5087` is the epic every other unowned-lane row here points at (`E5` does); it is OPEN
+        # while the epic is, so V12 can verify the pointer instead of reading a CLOSED one.
+        # ⛔ GREEN and BLOCKED are mutually exclusive (V5 refuses a green row carrying a blocker),
+        # so the pair is resolved here exactly as `build_rows.row()` resolves it for the other five.
+        "blocked_by": None if verdict == "GREEN" else "#5087",
+        "note": (
+            "measured hermetically from the pack registry by "
+            "tools/pack_relation_census.py build_census, NOT from this run's graph: "
+            "E6's population is the packs' declarations, which no extraction run creates "
+            "(the row's `corpus_sha256` is this table's single-corpus identity, not a "
+            "population E6 was counted over). "
+            f"{counts['unbound_and_unexplained']} of {counts['declared']} declared rows "
+            "are unbound and unexplained"
+            + (f" ({', '.join(counts['named'])})" if counts["named"] else "")
+            + ". The census's `written` column is reported BESIDE this row and is never "
+            f"its bar ({written_cell}) — A1 already measures what the written graph "
+            "answers, and a bar on `written` would let one defect red two rows "
+            "(PRE-REGISTRATION §3.8/§10.21)"),
+    }
+
+
 def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
-               e3: dict, e4: dict, e5: dict, e1: dict, e2: dict) -> list[dict]:
-    """The five table rows — one per criterion, each with the artifact behind it.
+               e3: dict, e4: dict, e5: dict, e1: dict, e2: dict,
+               e6: dict) -> list[dict]:
+    """The SIX table rows — one per criterion, each with the artifact behind it.
 
     ``evidence`` is the path of the artifact that ACTUALLY CARRIES the number.
     ``capstone_run.py`` hard-coded ``EVIDENCE_DIR/capstone.log`` regardless of
@@ -1599,6 +1794,12 @@ def build_rows(*, head: str, out_path: str, log_corpus_sha: str,
         row("E5", verdict=e5["verdict"], evidence=E5_RESCORE, sha=head,
             numerator=e5["numerator"], denominator=e5["denominator"],
             corpus_sha256=log_corpus_sha, blocked_by="#5087", note=e5["note"]),
+        # ⛔ THE SIXTH ROW (`#11673`). It is last because that is the order the record lists the
+        # criteria in and V2/V9 read the table by criterion, not by position — but the position is
+        # what a reader sees, and E6 is the row the epic grew, not one it always had.
+        build_e6_row(verdict=e6["verdict"], counts=e6["counts"],
+                     evidence=e6["evidence"], sha=e6["sha"],
+                     log_corpus_sha=log_corpus_sha, error=e6.get("error")),
     ]
 
 
@@ -4162,6 +4363,22 @@ def main(argv: list[str] | None = None) -> int:
     except ValueError as exc:
         raise SystemExit(f"capstone-measure: REFUSED — {exc}") from exc
     corpus_sha = check_corpus(prereg)
+    # ── E6, measured HERE with the other pre-flight reads and HERMETICALLY ──
+    # ⛔ Its population is the PACK REGISTRY, which nothing this run's graph does can change, so it
+    # is resolved before the expensive half and it cannot be lost to a graph failure. A census that
+    # cannot be READ is a NAMED BLOCKED row with both cells empty, never a zero: `0 unbound` over a
+    # pack set that failed to load is the exact false PASS the `e6_declared_rows` floor refuses, and
+    # it is what a caught exception with a `0` default produces (PRE-REGISTRATION §3.8, §10.21).
+    try:
+        e6_tally = e6_counts(e6_census())
+    except Exception as exc:  # a pack tree that cannot be read is a NAMED gap
+        e6_row = {"verdict": "BLOCKED", "counts": None,
+                  "evidence": E6_CENSUS_ARTIFACT, "sha": head,
+                  "error": census_reason(exc)}
+    else:
+        e6_row = {"verdict": verdict_word(e6_outcome(e6_tally, bars)),
+                  "counts": e6_tally, "evidence": E6_CENSUS_ARTIFACT,
+                  "sha": head, "error": None}
     # ⛔ THE E4 ARTIFACT IS RESOLVED HERE, WITH THE OTHER PRE-FLIGHT READS, AND FOR
     # THE SAME REASON: `select_e4_receipt` has ~8 refusal arms (absent pin, no match
     # on the pin, unreadable / non-object / non-UTF-8 file, non-string `corpus_hash`,
@@ -4342,7 +4559,7 @@ def main(argv: list[str] | None = None) -> int:
     }
 
     rows = build_rows(head=head, out_path=out_path, log_corpus_sha=corpus_sha,
-                      e3=e3, e4=e4, e5=e5_row, e1=e1_row, e2=e2_row)
+                      e3=e3, e4=e4, e5=e5_row, e1=e1_row, e2=e2_row, e6=e6_row)
 
     text = render_log(head=head, prereg_sha=prereg_sha, bars=bars,
                       corpus_sha=corpus_sha, graph=graph, runs=runs,

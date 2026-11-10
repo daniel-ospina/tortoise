@@ -238,6 +238,13 @@ def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
 
     FAILS IF the amendment moved any E-row bar — the property the amendment entry claims — because
     the probe's own `parse_bars` reads them out of this record and nothing else.
+
+    ⛔ `e6_declared_rows` is NOT a moved bar, and the distinction is why this map is exact rather
+    than a subset check: `#11673` registered a SIXTH e-floor for a row that did not exist when the
+    five above were written. A moved bar is one of the five below changing value; a new row's own
+    floor is an addition, and the census that registers it declares it in the same record. The
+    exact-map form is what keeps BOTH properties: a changed value still reds here, and an
+    unregistered key still reds here, so neither a silent edit nor a silent addition passes.
     """
     probe = _probe()
     bars = probe.parse_bars(_record())
@@ -250,7 +257,7 @@ def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
     assert bars["E5"] == {"ratio": 0.9, "raw_absolute": 0.8}
     assert bars["floors"] == {"e1_objects": 30, "e1_min_before_share": 0.2,
                              "e2b_surviving_units": 30, "e3_derived_nodes": 30,
-                             "e5_rate_min_sentences": 10}
+                             "e5_rate_min_sentences": 10, "e6_declared_rows": 30}
 
 
 def test_the_amended_record_still_passes_its_own_gate():
