@@ -4920,8 +4920,10 @@ def test_every_record_migration_selects_core_and_its_readers():
     # OUTSIDE it that NOTHING ELSE claims keeps selecting no surface, so this fix
     # does not widen to the whole migrations directory — and one that DOES select
     # `core` without being a record migration does so through its own `CORE_ALSO`
-    # entry, not through this rule (the prefix block at the end of this test is
-    # exactly that case). ⚠️ Deliberately no live count here: it moves on ANY new
+    # entry, not through this rule (the shared `2026101200000` PREFIX entry is
+    # exactly that case; its claim is pinned by
+    # `test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`,
+    # not here). ⚠️ Deliberately no live count here: it moves on ANY new
     # `supabase/migrations/*.sql` — not just a record one — and nothing reds on the
     # sentence, so a count written here rots into a false claim in the very file
     # whose subject is claims that rot.
@@ -4930,19 +4932,71 @@ def test_every_record_migration_selects_core_and_its_readers():
 
     # The scope limit is NOT the same statement as "only `*_record_*.sql` is
     # claimed": the shared `supabase/migrations/2026101200000` CORE_ALSO PREFIX
-    # also claims `20261012000006_recover_team_key_expiry.sql`, which is OUTSIDE
-    # this family (`is_record_migration_path()` is False for it). That prefix is
-    # that file's ONLY claim, so it is the one entry in the enumeration above that
-    # must never be tidied away as "redundant" (#11728 review P2). Pinned here
-    # rather than left to the comment, because a comment rots and this reds.
+    # also claims a NON-member. That entry's claim is a different subject, so it
+    # is pinned in its own test rather than here —
+    # `test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`.
+
+
+def test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family(
+    monkeypatch,
+):
+    # #11728 review P2 (round 10; re-scoped in round 11): the shared
+    # `supabase/migrations/2026101200000` CORE_ALSO PREFIX claims
+    # `20261012000006_recover_team_key_expiry.sql`, which is OUTSIDE the record
+    # family — `is_record_migration_path()` is False for it — so the prefix entry
+    # is that file's ONLY claim and the one entry in the family enumeration that
+    # must never be tidied away as "redundant": without it the file silently
+    # selects no surface (#1349/#3332/#3616 silent-drop class).
+    #
+    # WHY ITS OWN TEST. The subject here is a NON-member, so it does not belong in
+    # `test_every_record_migration_selects_core_and_its_readers`, whose name
+    # (renamed in round 10 to match what it asserts) scopes it to the family. A
+    # pin filed under a test named for a different subject set is found by no one
+    # — the same name/assertion mismatch this series already fixed once.
     neighbour = "supabase/migrations/20261012000006_recover_team_key_expiry.sql"
+    # The FILE must exist, or this pin is VACUOUS rather than covering it:
+    # `select()` never stats a path, so `_sel()` on a renamed, deleted or wholly
+    # synthetic name still returns `['core']` from the PREFIX. Measured on this
+    # head: `_sel(["supabase/migrations/20261012000006_does_not_exist.sql"])` ->
+    # `surfaces: ['core']`, n=802. Without this arm the pin outlives its own
+    # subject and still READS as coverage — the failure mode this file calls out
+    # as "a vacuous assertion is worse than none".
+    assert (REPO / neighbour).is_file(), neighbour
     assert not cs.is_record_migration_path(neighbour), neighbour
+    # "its ONLY claim" is MEASURED here, not asserted in prose: enumerating the
+    # claimants means a SECOND one reds, at which point the `CORE_ALSO` comment in
+    # `tools/ci_selection.py` is false and must be narrowed — which is the point
+    # of pinning a claim instead of commenting on it.
+    claimants = [p for p in cs.CORE_ALSO if neighbour.startswith(p)]
+    assert claimants == ["supabase/migrations/2026101200000"], (
+        "the shared-prefix claim on this migration is no longer the ONLY one — "
+        "narrow the `CORE_ALSO` comment in tools/ci_selection.py and this test "
+        "rather than deleting the arm",
+        claimants,
+    )
     rn = _sel([neighbour])
     assert rn["surfaces"] == ["core"], (
         f"{neighbour} lost its only claim — it is NOT a record migration, so the "
         "family rule does not cover it and only the shared `2026101200000` "
         "CORE_ALSO prefix entry does; removing that entry silently un-claims it",
         rn,
+    )
+    # NON-VACUITY, proven by the suite rather than asserted in prose: with that one
+    # entry removed, the same selection drops to `surfaces: []` (n=84, the
+    # tier-1-only return). `select()` reads `CORE_ALSO` at call time, so the
+    # `monkeypatch` of the module global IS the deletion — the same mechanism the
+    # #11728 review's mutation used.
+    monkeypatch.setattr(
+        cs,
+        "CORE_ALSO",
+        tuple(p for p in cs.CORE_ALSO if p != "supabase/migrations/2026101200000"),
+    )
+    rn_off = _sel([neighbour])
+    assert rn_off["surfaces"] == [], (
+        f"removing the shared `2026101200000` CORE_ALSO prefix entry did NOT "
+        f"un-claim {neighbour} — so the arm above proves nothing about that "
+        "entry, and the comment naming it as this file's only claim is wrong",
+        rn_off,
     )
 
 

@@ -1529,13 +1529,16 @@ SOURCE_PATTERNS = {
 # `select([…/20261012000006_recover_team_key_expiry.sql])` drops from
 # `surfaces: ['core']` to `surfaces: []` — the #1349/#3332/#3616 silent-drop class.
 # At that time nothing redded, because the completeness pin covered only
-# `*_record_*.sql`; so the pin now ALSO asserts this file's claim — the arm at the
-# end of `tests/test_ci_selection.py::
-# test_every_record_migration_selects_core_and_its_readers`, which reds on exactly
-# this deletion. Both `surfaces` values are the claim, deliberately not quoted as
-# `n=` counts: this block's own rule is that a count here is a dated anchor, and
-# the tier-1 size behind `surfaces: []` moves with ANY new tier-1 test. Re-derive
-# either in one `select()` call.
+# `*_record_*.sql`; so this file's claim is pinned too, in its own test —
+# `tests/test_ci_selection.py::
+# test_the_shared_prefix_is_the_only_claim_on_a_migration_outside_the_family`.
+# That test asserts the file EXISTS (without that arm the pin would outlive a
+# rename: `select()` never stats a path, so a wholly synthetic name still returns
+# `surfaces: ['core']` from this prefix), reds on exactly this deletion, and reds
+# if a second claimant appears. Both `surfaces` values are the claim, deliberately
+# not quoted as `n=` counts: this block's own rule is that a count here is a dated
+# anchor, and the tier-1 size behind `surfaces: []` moves with ANY new tier-1 test.
+# Re-derive either in one `select()` call.
 RECORD_MIGRATION_DIR = "supabase/migrations/"
 # Deliberately the family the wheel SHIPS and the record reader PARSES. Three facts,
 # stated exactly because two earlier versions of this comment got them wrong:
