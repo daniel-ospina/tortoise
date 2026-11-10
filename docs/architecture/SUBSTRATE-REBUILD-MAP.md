@@ -266,8 +266,8 @@ census's own note on why node labels do not partition the node set
 count, being a new file), #8447's ingest door (`tortoise/ingest.py`, the
 `REFUSED_NOT_FOUND` enum docstring), and #11729's runtime-label writers
 (`tortoise/hosted_backup.py` — an EXISTING file that carried no `:Document`
-mention at `4f68a2aa7`, which is the second file the count gained; its six added
-mentions are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
+mention at `4f68a2aa7`, which is the second file the count gained; its added mentions
+are the dump-and-restore prose about pre-D10 artifacts). All three are the point rather
 than an accident: this population grows for good reasons, so the figure tracks
 the tree and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
@@ -278,13 +278,13 @@ a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
 and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
-lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:956` comment, plus three of `hosted_backup.py`'s
+lines — the RST literals in `migrate_kinds.py:63,170`, that same
+`cache_eviction.py:956` comment, and the ones in `hosted_backup.py`
 (`:116`, `:948`, `:3429`) that name the pre-D10 node shape in double-backtick
-literals. Six of sixty-three is still the exception, so the exclusion argument
-stands; a guard carrying a hand-maintained allowlist of
-docstrings is a guard nobody can trust, so the label claim stays evidence
-recorded here rather than a check that would have to be argued with.
+literals. The exception is still an exception, so the exclusion argument stands;
+a guard carrying a hand-maintained allowlist of docstrings is a guard nobody can
+trust, so the label claim stays evidence recorded here rather than a check that
+would have to be argued with.
 
 ---
 

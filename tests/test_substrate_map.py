@@ -52,6 +52,25 @@ _LABEL_CLAIM = re.compile(
 
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
+#: The narrow-pattern half of §5's measurement, as the document states it — a
+#: WORD, not a digit (`still matches **six** lines`). Parsed rather than left to
+#: the literal pin in the test below, because that literal is a number hard-coded
+#: HERE: a document saying "seven" against a tree that measures six used to pass,
+#: since `narrow == N` never reads the doc. This is the doc→tree link the
+#: LINES/FILES pair already gets from `_LABEL_CLAIM`, applied to the third number
+#: §5 states.
+_NARROW_CLAIM = re.compile(r"still matches \*\*(\w+)\*\*")
+
+#: The SAME two numbers restated in §5 as the quoted `git grep` output — a second
+#: statement of the measurement, inside the same sentence and outside
+#: `_LABEL_CLAIM`'s shape, so a hand-edit there could contradict the bold claim
+#: and stay green (measured: the quote alone set to 57 / 18 passed). Pinned to the
+#: same `_label_hits()` tuple, exactly once, because §5 stating a number twice is
+#: the drift the document exists to stop.
+_QUOTED_GREP = re.compile(
+    r"`git grep -n ':Document'` → (\d+) lines,\s*\n`git grep -l ':Document'` → (\d+) files"
+)
+
 #: The population §5's claim is stated in: every **tracked** file under
 #: `tortoise/`, any suffix. Derived from the index rather than from an extension
 #: filter so the check measures the same set the sentence's `git grep` does —
@@ -1574,12 +1593,42 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     §5's exclusion argument stops being true, and the honest response is to re-measure
     it, never to widen the assertion. Six of sixty-three is still the exception, so
     the argument stands at this head.
+
+    Every statement of the three MEASURED FIGURES in §5's measurement sentence is
+    read OUT OF THE DOC and compared to `_label_hits()`: `_LABEL_CLAIM` for the bold
+    lines/files pair, `_QUOTED_GREP` for the same pair as quoted command output,
+    `_NARROW_CLAIM` for the word — each searched inside §5 only and required to
+    appear EXACTLY ONCE, so neither a decoy elsewhere in the document nor a second
+    statement inside §5 can bind the pin. That anchoring is not theoretical: an
+    unanchored `search` binds the first match ANYWHERE, so a decoy
+    `still matches **six**` earlier in the doc satisfied the narrow pin while §5
+    itself said **seven** (measured, before this pin existed), and `smc._section`
+    binds the FIRST copy of its heading, so a duplicate heading above §5 could do
+    the same — hence the heading-count assertion. The literal pin below is then the
+    doc-independent backstop.
     """
     doc = _doc()
-    match = _LABEL_CLAIM.search(doc)
+    heading = "## 5. The interface map — what changes hands"
+    assert doc.count(heading) == 1, (
+        f"the document carries {doc.count(heading)} copies of §5's heading — "
+        "`_section` binds the FIRST, so a duplicate heading above the real §5 would "
+        "let these pins read a different section; keep one heading"
+    )
+    section = smc._section(doc, heading)
+    assert section, (
+        "§5's heading `## 5. The interface map — what changes hands` is gone — these "
+        "pins anchor to it; re-state the heading rather than falling back to a "
+        "whole-document search"
+    )
+    match = _LABEL_CLAIM.search(section)
     assert match, (
         "§5's `:Document` measurement sentence is gone or was reworded — re-measure "
         "it rather than dropping it; the no-regex-check decision rests on it"
+    )
+    assert len(_LABEL_CLAIM.findall(section)) == 1, (
+        "§5 now states the line/file count MORE THAN ONCE inside the anchored section "
+        "— `search` binds the first, so a second statement is drift this pin would "
+        "silently read past; keep one statement, or pin each one"
     )
     claimed_lines = int(match.group(1))
     claimed_files = int(match.group(2)) if match.group(2) else None
@@ -1592,6 +1641,44 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     assert (claimed_lines, claimed_files) == (lines, files), (
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
+    )
+    quoted = _QUOTED_GREP.findall(section)
+    assert quoted, (
+        "§5 no longer quotes its `git grep` output — keep each command on its own "
+        "line so the two results stay readable, or re-state the measurement and "
+        "re-measure it rather than dropping it"
+    )
+    assert len(quoted) == 1, (
+        f"§5 quotes its `git grep` output {len(quoted)} times inside the anchored "
+        "section — this pin wants exactly one restatement, so a second cannot drift "
+        "unnoticed; keep one, or pin each one"
+    )
+    assert tuple(int(n) for n in quoted[0]) == (lines, files), (
+        f"§5's quoted `git grep` output says {quoted[0][0]} lines / {quoted[0][1]} "
+        f"files; the tree has {lines} lines across {files} files — re-measure the "
+        "quote too: it states the same measurement, and it used to be unpinned"
+    )
+    narrow_claim = _NARROW_CLAIM.search(section)
+    assert narrow_claim, (
+        "§5's narrow `\\(\\w*:Document` sentence is gone or was reworded — re-measure "
+        "it rather than dropping it; the exclusion argument rests on it"
+    )
+    assert len(_NARROW_CLAIM.findall(section)) == 1, (
+        "§5 now states the narrow count MORE THAN ONCE inside the anchored section — "
+        "`search` binds the first, so a second statement is drift that this pin would "
+        "silently read past; keep one statement, or pin each one"
+    )
+    word = narrow_claim.group(1).lower()
+    assert word in _COUNT_WORDS, (
+        f"§5 states the narrow count as {word!r}, which is not a count word this pin "
+        f"can decode ({', '.join(_COUNT_WORDS)}); the tree measures {narrow} — state "
+        "it as a word, or extend _COUNT_WORDS deliberately"
+    )
+    claimed_narrow = _COUNT_WORDS.index(word) + 1
+    assert claimed_narrow == narrow, (
+        f"§5 says the narrow `\\(\\w*:Document` pattern still matches "
+        f"{claimed_narrow} lines; the tree measures {narrow} — re-measure the claim "
+        "(§5), never widen the assertion"
     )
     assert narrow == 6, (
         f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 6 "

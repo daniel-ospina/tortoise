@@ -51,15 +51,17 @@ tree disagree:
 - **whether any issue is open or closed.** That is the tracker's job and it needs
   the network; the document records the measurement command and a dated result
   instead (§1 / §9 of the doc).
-- **whether `:Document` is still minted.** `:Document` occurs on 55 lines across
-  17 files under `tortoise/` in the tree this was written against (`git grep -n`
-  counts LINES, `git grep -l` counts FILES — the two are not the same number,
-  and the doc's figure is the line one), and every one of those lines is prose
-  naming the *retired* label (a docstring, a comment, an RST literal). A pattern
-  loose enough to catch a mint catches those; one narrow enough to skip them still
-  matches the RST literals. The honest options were a hand-maintained allowlist of
-  docstrings or no regex check at all, so the label claim stays evidence in the
-  doc (§5).
+- **whether `:Document` is still minted.** In the tree this was written against
+  (`4f68a2aa7`) `:Document` occurs on 55 lines across 17 files under `tortoise/`
+  (`git grep -n` counts LINES, `git grep -l` counts FILES — the two are not the
+  same number, and the doc's figure is the line one). §5 of the doc carries the
+  same measurement against the tree it ships with, re-measured whenever that
+  population moves; this paragraph is the argument, not the number. Every one of
+  those lines is prose naming the *retired* label (a docstring, a comment, an RST
+  literal). A pattern loose enough to catch a mint catches those; one narrow
+  enough to skip them still matches the RST literals. The honest options were a
+  hand-maintained allowlist of docstrings or no regex check at all, so the label
+  claim stays evidence in the doc (§5).
 
 A guard that claimed either and silently could not deliver it would be the same
 false PASS the document exists to prevent.
