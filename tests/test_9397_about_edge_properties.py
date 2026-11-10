@@ -7093,7 +7093,14 @@ MARKERS_ABSENT_BY_DESIGN: dict[str, str] = {
     "the exemption": (
         "contradiction vocabulary — the definite-articled form. Absent from both "
         "documents until someone writes it; the documents write `both exemptions` "
-        "and `merely exempting` instead, neither of which is a denial"
+        "and `merely exempting` instead, neither of which is a denial. ⚠️ A bare "
+        "noun is only the denial when it NAMES the row, which is why the "
+        "`#11665` sentence that used it for a different concept — the "
+        "source-type profile's carve-out, whose subject is prompt CONTENT and "
+        "not a census row — now says `The carve-out is about CONTENT`. Rewording "
+        "the document (not this vocabulary) is what keeps the tripwire COARSE: "
+        "an occurrence anywhere is the signal, so a doc that wants a synonym for "
+        "an exemption must not borrow the denial's own noun"
     ),
     "counts as a writer": (
         "contradiction vocabulary — the VERB form of 'called counted', absent from "

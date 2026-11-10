@@ -829,6 +829,14 @@ def _scanned_targets(entries: list[str], docs_dir) -> set[Path]:
             # Resolved against the surface's OWN root (`<root>/docs/epics`
             # -> `<root>`): an entry is repo-relative, so the root its surface
             # belongs to is the base every `declared_in:` path is written from.
+            # ⚠️ STATED ASSUMPTION: every surface sits exactly TWO levels below
+            # the root, so `parent.parent` IS that root. True for both surfaces
+            # today (`docs/architecture`, `docs/epics`), and a third surface at
+            # a different depth would resolve entries against the wrong root and
+            # report the row's declaring document as UNNAMED — a FALSE RED, whose
+            # remedy names a document that is in fact on disk and marked, never a
+            # silent pass. So: add a surface here only at this depth, or derive
+            # the root from the surface instead of counting its parents.
             surface_root = surface.parent.parent
             try:
                 resolved = (surface_root / rel).resolve()

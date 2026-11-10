@@ -1809,3 +1809,22 @@ final head: the clamp/dedupe attribution and the stale selection counts — both
 blob does not carry, two unlisted call sites and a typo). The mechanism's absence is unchanged and still tracked by
 `#11239`; `#5064`'s Target 3 is not moved by this change, because a gate that can SEE an absence is not a mechanism
 that is built.
+
+**One INHERITED red fixed here too, because it blocked this PR's own CI (`test (c)`).** `#11665` added a sentence
+to this document's §3 opening *"⚠️ **The exemption is about CONTENT, not the declaration site …**"*, and `#11665`
+was a docs-only diff, so CI selected only the docs surfaces and
+`tests/test_9397_about_edge_properties.py` never ran. That suite's
+`MARKERS_ABSENT_BY_DESIGN["the exemption"]` declares the phrase absent-by-design (it is a `DENIAL_MARKERS` member —
+the owner's decision forbids calling a counted WRITER *"an exemption"*), so the first selection that ran the file
+reddened on a raw substring: *"these markers are declared absent-by-design but DO appear in the documents: ['the
+exemption']"*. The sentence's subject is **not** a census row — it is the source-type profile's carve-out, whose
+point is that prompt CONTENT is what the rule reaches — so the phrase was never live: the denial rule only reads a
+sentence that names a census symbol, and that one names `memory_granularity`, `sourceTypes` and a pack manifest.
+
+**So the DOCUMENT was reworded, not the tripwire** (*"The carve-out is about CONTENT, not the declaration site"* —
+the document's own term, used ten times in it). Loosening `MARKERS_ABSENT_BY_DESIGN` to a frame-aware
+read would have narrowed a deliberately COARSE instrument, which is the shape this file's cycle-5 note refuses
+(*"A denial the documents' plural noun can satisfy is not a denial"* — a DENIAL the documents' own noun satisfies
+is not a denial), and the exemption's own `MARKERS_ABSENT_BY_DESIGN` entry now records why the bare noun belongs to
+the denial vocabulary: a document that wants a synonym for an exemption must not borrow the denial's own noun.
+Nothing about the design changed — the sentence states the same rule with a different noun.
