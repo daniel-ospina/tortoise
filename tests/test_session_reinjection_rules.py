@@ -1136,9 +1136,12 @@ def test_wire_identity_is_stripped_like_the_reader_names_it():
     ``retrieval.normalize_session_key``) instead of tightening one; the
     one-sided shape is pinned as the red case by
     ``test_padded_session_id_is_not_charged_then_dropped_11382``. What is
-    still OPEN is #9599: the STORED spelling, i.e. whether the write door
+    still UNSETTLED is the STORED spelling, i.e. whether the write door
     should refuse or normalise a padded id, and whether two nodes (``s1`` /
-    ``  s1  ``) can coexist. The key normalisation neither merges nor rejects
+    ``  s1  ``) can coexist — an OPEN OWNER QUESTION recorded on the CLOSED
+    #9599, whose home is ``tortoise/ids.py``; do not read that issue's closure
+    as a decision about padding. The key normalisation neither merges nor
+    rejects
     what the write door accepted. On a REAL product hit the strip is a
     no-op, because ``sdk.tortoise_fts_query`` sanitises the wire value at
     the producer. What this test therefore pins is exactly the hand-built

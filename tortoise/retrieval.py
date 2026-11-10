@@ -729,9 +729,14 @@ def normalize_session_key(value: object) -> str:
     with :func:`_safe_session_tag`, i.e. ALREADY stripped (``sdk.py`` entity
     branch), while neither ``p.session_id`` nor the ``:Session`` id is
     stripped at the write door. Whether the write door should refuse or
-    normalise a padded id is #9599, which is **still open** — so this helper
+    normalise a padded id is NOT settled here, and ⚠️ #9599 is not the
+    tracker item to read for it: that issue is **CLOSED** (it landed the BLANK
+    half), and the PADDED position it deliberately left alone remains an
+    **OPEN OWNER QUESTION recorded in a comment on it**, whose home is
+    ``ids.py`` (three candidate answers, already cited there). Do
+    not read #9599's closure as a decision about padding. So this helper
     settles nothing about storage. It makes the READ/COMPARE seam agree
-    whichever way #9599 lands, and a padded-but-real id (``"  s1  "``) keeps
+    whichever way that question lands, and a padded-but-real id (``"  s1  "``) keeps
     its identity rather than becoming nameless.
     """
     if not isinstance(value, str):
@@ -910,9 +915,11 @@ def session_key_of(hit: dict) -> str:
     normalises the group key through this same helper, and the splice lookup
     that joins a group back to its base hits does too. The comparison is now
     one function applied to every side of it, which is the only shape in
-    which the keys cannot drift. ⚠️ What #9599 still owns, untouched: the
+    which the keys cannot drift. ⚠️ What this does NOT settle, untouched: the
     STORED spelling, and therefore whether two nodes (``s1`` and ``  s1  ``)
-    can both exist. This key maps both to one identity; it does not merge or
+    can both exist. That is an OPEN OWNER QUESTION recorded on the CLOSED
+    #9599 — ``ids.py`` is its home — not a decision this key makes.
+    This key maps both to one identity; it does not merge or
     reject what the write door accepted.
 
     Pinned by ``tests/test_session_reinjection_rules.py::test_session_key_
@@ -2453,8 +2460,10 @@ def _session_admission_key(
 
     ⛔ The camel leg is here so this grain AGREES with the pool authority
     (:func:`session_key_of`) on every hit whose identity BOTH grains read in
-    the SAME spelling AND the same normalisation (neither padded nor
-    whitespace-only; the divergences below are where they part) — before
+    the SAME spelling AND the same normalisation — the classes where they
+    still part are enumerated further down as the remaining divergences, and
+    a PADDED id used to be one of them until #11382 normalised both sides
+    (the same docstring records that removal) — before
     it, a camel-only pool was N per-hit phantom buckets whose cap never bound
     and which ``seeded_sessions`` read as NO session, while ``session_blocks``
     built N singleton blocks, so ``assemble_session_context`` degraded to the
@@ -2489,8 +2498,10 @@ def _session_admission_key(
 
     ⚠️ "ONE shape" is the REACHED enumeration, NOT a proof of
     exhaustiveness — further seams diverge too, and none of them FUSES in an
-    in-repo pool (measured: item 4's id IS writer-producible, its bucket
-    partner is not). Two of them USED to diverge on the pool side and no
+    in-repo pool (measured: the WIRE ``idx:``-spelling seam's id IS
+    writer-producible, its bucket partner is not — named rather than numbered,
+    because #11382 reordered this enumeration and the old "item 4" ordinal
+    pointed at nothing). Two of them USED to diverge on the pool side and no
     longer do, both closed by #11382's normalisation (marked, so neither is
     read as a live divergence — see the reached shape above for what still
     does): a TRUTHY non-``str`` snake id
