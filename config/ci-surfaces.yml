@@ -5674,6 +5674,17 @@ surfaces:
   - test_time_aware_sdk_2520.py  # #2520: the SDK dense-leg date anchor (C6, docker-lane)
   - test_time_aware_eval_2520.py  # #2520: the eval-lane reorder placement + census (C6, docker-lane)
   - test_time_aware_run_2520.py  # #2520: the run-layer arm wiring (C6; hermetic + docker legs)
+  # #11646: the producer's `YYYY/MM/DD (Day) HH:MM` calendar-date shape, read at
+  # every seam that previously assumed ISO — `assembly._norm_date`,
+  # `time_aware._as_date` / `_as_iso_date`, `validity.end_state`,
+  # `coverage_loop._calendar_date` and `search_engine._created_sort_key`, all of
+  # which route through the new `tortoise/calendar_date.py`. `core` is the right
+  # surface and needs no dual: `tortoise/calendar_date.py` matches no
+  # SOURCE_PATTERNS row (measured: `ci_selection.py --changed-files` over this
+  # diff yields `surfaces: ["core"]`), and the sibling date/temporal pins
+  # (`test_time_aware_*`, `test_calendar_anchors.py`) live here too. Hermetic
+  # (pure parsing, no DB, no URI).
+  - test_11646_producer_date_shape.py
   - test_retrieval.py
   # #7209: DUAL-REGISTERED with `sdk` (`tortoise/sdk.py` is a SHARED_MODULE, so
   # a change to it selects this file). `tortoise/exceptions.py` is a
