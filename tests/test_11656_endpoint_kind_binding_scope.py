@@ -354,6 +354,72 @@ def _citation_path(rel: str) -> Path:
     return REPO_ROOT / "tortoise" / rel
 
 
+#: The citation FORM itself (`path.py::symbol`), quoted as prose in both docs — not a citation.
+_CITATION_FORM_PROSE = ("path.py", "symbol")
+
+#: One scanner for `path.py::symbol`, with NO backtick requirement.
+#: ⛔ The resolver below matched closing backticks until round 24, so an UNBACKTICKED citation was invisible
+#: to it: `sdk.py::NoSuchSymbol` — the same defect one character outside the quotes — shipped GREEN while its
+#: backticked twin reddened. Measured at this head, the widened and the backtick-only scans return the SAME
+#: set for both documents — no bare citation exists today — so widening costs nothing now and closes the
+#: variant for the next edit: the same fail-open the round-18 review filed against the ban, one level down (a
+#: scanner that requires a decoration, not a citation).
+_PY_SYMBOL_CITATION = re.compile(r"([A-Za-z0-9_./-]+\.py)::([A-Za-z_][A-Za-z0-9_.]*)")
+
+
+def _python_symbol_citations(text: str) -> set[tuple[str, str]]:
+    """Every `path.py::symbol` citation in `text` — backticked or not, that is prose decoration, not identity."""
+    return set(_PY_SYMBOL_CITATION.findall(text))
+
+
+def _module_for(path: Path) -> str | None:
+    """The import path for a citation's file, or `None` when the file is not importable as `tortoise.*`."""
+    rel = path.relative_to(REPO_ROOT).as_posix()
+    if not rel.startswith("tortoise/"):
+        return None
+    p = rel[len("tortoise/") :]
+    if p == "__init__.py":
+        return "tortoise"
+    if p.endswith("/__init__.py"):
+        return "tortoise." + p[: -len("/__init__.py")].replace("/", ".")
+    return "tortoise." + p[: -len(".py")].replace("/", ".")
+
+
+def _unresolved_python_citations(text: str, label: str) -> list[str]:
+    """Every citation in `text` that names a file or symbol the repo does not hold, as readable failures.
+
+    Extracted from the document row so the reach of the resolver can be proved on a SYNTHETIC string: the
+    live documents no longer carry the shapes it must catch, which is exactly why a live-only pin cannot
+    fail on them (the round-20 lesson this file is built on).
+    """
+    unresolved: list[str] = []
+    for rel, symbol in sorted(_python_symbol_citations(text)):
+        if (rel, symbol) == _CITATION_FORM_PROSE:
+            continue
+        # ⛔ The FILE is resolved FIRST, and a file that does not exist is a failure.
+        # An earlier revision folded "not a `tortoise/` module" and "no such file" into one
+        # `None` and skipped both, so an invented module (`sdkk.py::…`) passed green — the very
+        # dead end this row exists to close, one level up. A missing file is not a scope decision.
+        path = _citation_path(rel)
+        if not path.exists():
+            unresolved.append(f"{label}: `{rel}::{symbol}` — no such file `{rel}`")
+            continue
+        module_name = _module_for(path)
+        if module_name is None:
+            if not _ast_declares(path, symbol):
+                unresolved.append(f"{label}: `{rel}::{symbol}` — `{path.name}` declares no `{symbol}`")
+            continue
+        node = importlib.import_module(module_name)
+        try:
+            for part in symbol.split("."):
+                node = getattr(node, part)
+        except Exception as exc:  # AttributeError in practice; an import hole surfaces too
+            unresolved.append(
+                f"{label}: `{rel}::{symbol}` does not resolve in `{module_name}` ({type(exc).__name__})"
+            )
+    return unresolved
+
+
 def _ast_declares(path: Path, symbol: str) -> bool:
     """True when `symbol` resolves down `path`'s AST the way `getattr` resolves against a module.
 
@@ -1147,62 +1213,51 @@ class TestTheDocsAreDiscoverableAndResolve:
         dead end this row exists to close, one level up. A `tests/` or `tools/` citation is checked by NAME
         against that file's own AST instead of being imported (importing a test module into a test module is a
         side effect this pin does not need), so an invented test symbol reds too.
+
+        ⛔ Round-24: the scanner required CLOSING BACKTICKS, so the same wrong symbol written one character
+        outside them was invisible to the resolver and shipped green. The scan is now backtick-agnostic
+        (`_python_symbol_citations`) and the resolution is `_unresolved_python_citations`, whose reach is
+        proved on a synthetic string by `test_the_citation_resolver_sees_an_UNBACKTICKED_citation`.
         """
-
-        def _module_for(path: Path) -> str | None:
-            """The import path for a citation's file, or `None` when the file is not importable as `tortoise.*`."""
-            rel = path.relative_to(REPO_ROOT).as_posix()
-            if not rel.startswith("tortoise/"):
-                return None
-            p = rel[len("tortoise/") :]
-            if p == "__init__.py":
-                return "tortoise"
-            if p.endswith("/__init__.py"):
-                return "tortoise." + p[: -len("/__init__.py")].replace("/", ".")
-            return "tortoise." + p[: -len(".py")].replace("/", ".")
-
-        unresolved = []
+        unresolved: list[str] = []
         for doc in (SCOPE_DOC, BRIEF_DOC):
-            found = sorted(
-                set(
-                    re.findall(
-                        r"`([A-Za-z0-9_./-]+\.py)::([A-Za-z_][A-Za-z0-9_.]*)`", doc.read_text()
-                    )
-                )
-            )
-            for rel, symbol in found:
-                # `path.py::symbol` is the citation FORM, quoted as prose in both docs — not a citation.
-                if (rel, symbol) == ("path.py", "symbol"):
-                    continue
-                # ⛔ The FILE is resolved FIRST, and a file that does not exist is a failure.
-                # An earlier revision folded "not a `tortoise/` module" and "no such file" into one
-                # `None` and skipped both, so an invented module (`sdkk.py::…`) passed green — the very
-                # dead end this row exists to close, one level up. A missing file is not a scope decision.
-                path = _citation_path(rel)
-                if not path.exists():
-                    unresolved.append(f"{doc.name}: `{rel}::{symbol}` — no such file `{rel}`")
-                    continue
-                module_name = _module_for(path)
-                if module_name is None:
-                    if not _ast_declares(path, symbol):
-                        unresolved.append(
-                            f"{doc.name}: `{rel}::{symbol}` — `{path.name}` declares no `{symbol}`"
-                        )
-                    continue
-                node = importlib.import_module(module_name)
-                try:
-                    for part in symbol.split("."):
-                        node = getattr(node, part)
-                except Exception as exc:  # AttributeError in practice; an import hole surfaces too
-                    unresolved.append(
-                        f"{doc.name}: `{rel}::{symbol}` does not resolve in `{module_name}` "
-                        f"({type(exc).__name__})"
-                    )
+            unresolved += _unresolved_python_citations(doc.read_text(), doc.name)
         assert not unresolved, (
             "these citations name a symbol that does not exist, so a lane implementing the issue opens the "
             "module and lands nowhere — cite the symbol that actually holds the behaviour (or the class that "
             "holds the method):\n  " + "\n  ".join(unresolved)
         )
+
+    def test_the_citation_resolver_sees_an_UNBACKTICKED_citation(self):
+        """A citation is a citation whether or not it is wrapped in backticks — the resolver must not care.
+
+        Round-24, measured: the resolver's regex closed on a backtick, so
+        `sdk.py::TortoiseSDK.this_method_does_not_exist` — the exact defect round 18 filed, spelled the way a
+        hurried edit spells it — produced an EMPTY unresolved list and the row stayed green. The live
+        documents write every citation inside backticks today (the widened and the backtick-only scans agree on
+        both, so there is no bare one to find), so this is
+        a variant no live edit exercises: a live-only pin cannot fail on it, which is the round-20 lesson this
+        file is built on. Proved here end-to-end against the resolver, in both directions.
+        """
+        bare_bad = "a lane should read sdk.py::TortoiseSDK.this_method_does_not_exist before writing"
+        quoted_bad = "a lane should read `sdk.py::TortoiseSDK.this_method_does_not_exist` before writing"
+
+        assert _python_symbol_citations(bare_bad) == _python_symbol_citations(quoted_bad) == {
+            ("sdk.py", "TortoiseSDK.this_method_does_not_exist")
+        }, "the scanner still requires the backtick decoration — an unbackticked citation is invisible to it"
+        assert _unresolved_python_citations(bare_bad, "synthetic") == _unresolved_python_citations(
+            quoted_bad, "synthetic"
+        ), "the resolver treats an unbackticked citation differently from a backticked one"
+        assert _unresolved_python_citations(bare_bad, "synthetic"), (
+            "the resolver accepted a symbol that does not exist — the row could not fail on the defect it "
+            "exists to catch"
+        )
+        # The control: a citation that DOES resolve must stay clean, or the row above would pass on any input.
+        assert _unresolved_python_citations(
+            "see `sdk.py::TortoiseSDK.create_direct_edge`", "synthetic"
+        ) == []
+        # …and the citation FORM itself, quoted as prose in both docs, is excused by NAME, not by shape.
+        assert _unresolved_python_citations("cite as `path.py::symbol`", "synthetic") == []
 
     def test_this_pin_carries_no_line_keyed_citation(self):
         """The file that SHIPS the ban must obey the SAME ban the docs do — not a weaker one.
