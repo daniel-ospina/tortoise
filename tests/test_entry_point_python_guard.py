@@ -955,6 +955,15 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
             "_DELIBERATE_BARE_FORM: frozenset({})"
         )[0]
     ) == 4
+    # WHITESPACE is the other half of the normalisation and has its own carrier: extra
+    # spaces inside a `#:` line, which the `" ".join` does not collapse (#11777 review
+    # round 5, finding 1 — this branch had no arm; without it a re-spaced sentence reads as
+    # *gone*, which is the false red that hands the author the de-pinning remedy).
+    respaced = claims_in_source(
+        "#:  while  the four entries below do not.\n_DELIBERATE_BARE_FORM: frozenset({})"
+    )
+    assert respaced, "a re-spaced sentence must still be READ, not reported as absent"
+    assert _cardinality_of(respaced[0]) == 4
 
     assert claims("while the entries below are exempt") == [], (
         "a reworded sentence must read as ABSENT, not as an approximate hit"
@@ -1012,12 +1021,14 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     substring check over the body is satisfied by a COMMENT naming the seam, so a pin that
     re-derived the extraction and *mentioned* `_cardinality_claims_in` in prose passed
     (measured: green with the comment, red without — #11777 review round 4). So the
-    assertion is on the CALL: the pin's own body must contain a call to the seam and must
-    not call the pieces it composes.
+    assertion is on the ASSIGNMENT: the pin's `matches` must be assigned FROM a call to the
+    seam, and the pin must not call the pieces the seam composes.
 
-    Two non-adversarial edits can trip it — RENAMING the pin, and DELETING it. Both are
-    named in the failure, because a remedy that does not exist for the case in hand is
-    how the round-3 version sent a deletion to "update `name` here".
+    Two non-adversarial edits can trip it — RENAMING the pin, and DELETING it — and both are
+    named in the failure, because a remedy that does not exist for the case in hand is how
+    the round-3 version sent a deletion to "update `name` here". A third, partial one is
+    named too: renaming the SEAM at its definition and real call sites while leaving this
+    test's reference stale reds the assertion below, and its message says so.
     """
     source = Path(__file__).read_text(encoding="utf-8")
     name = "test_the_record_exemption_prose_counts_the_set_it_describes"
@@ -1034,17 +1045,31 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
         "here. If you DELETED it, restore it or retire this call-site pin in the same "
         "change — this is the only thing that observes the pin still reading through "
         "`_cardinality_claims_in`, and without it a pin that re-derives the extraction is "
-        "green (#11775 returns)."
+        "green (#11775 returns). (If you renamed the SEAM instead, the assertion below is "
+        "the one that fires — update its name too.)"
     )
     called = {
         node.func.id
         for node in ast.walk(pin)
         if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
     }
-    assert "_cardinality_claims_in" in called, (
-        "the cardinality pin no longer CALLS `_cardinality_claims_in` — it has its own "
-        "copy of the extraction again, so the formatting tolerance is dead code and the "
-        "next `**four**` reds with 'the sentence is gone' (that is #11775). Call the seam."
+    # ASSIGNMENT, not mere presence: a name-only check is satisfied by a dead
+    # `assert _cardinality_claims_in(src)` beside an inline re-derivation, which leaves the
+    # tolerance dead and the pin green (#11777 review round 5, finding 2 — measured).
+    reads_the_seam = any(
+        isinstance(node, ast.Assign)
+        and any(isinstance(target, ast.Name) and target.id == "matches" for target in node.targets)
+        and isinstance(node.value, ast.Call)
+        and isinstance(node.value.func, ast.Name)
+        and node.value.func.id == "_cardinality_claims_in"
+        for node in ast.walk(pin)
+    )
+    assert reads_the_seam, (
+        "the cardinality pin does not assign `matches` FROM `_cardinality_claims_in` — it "
+        "has its own copy of the extraction again (or keeps a dead call to the seam beside "
+        "one), so the formatting tolerance is dead code and the next `**four**` reds with "
+        "'the sentence is gone' (that is #11775). Read through the seam. If you RENAMED "
+        "`_cardinality_claims_in`, update this assertion's name as well."
     )
     rederived = called & {"_normalise_prose", "_stated_cardinalities", "_comment_region_above"}
     assert not rederived, (
