@@ -232,6 +232,35 @@ class TestTheThirdDoorExists:
         doc = inspect.getdoc(TortoiseSDK._point_mediated_route) or ""
         assert "Object↔Object" in doc and "operator-mediated" in doc
 
+    def test_the_direct_door_has_its_OWN_replay_fold(self):
+        """⛔ The P1 a fresh review found: there are **two** replay folds, not one.
+
+        §1.2 of the scope listed only the operator fold (`_EdgeHandlers._create_edges`). `create_direct_edge`'s
+        writes are replayed by the `DirectEdgeCreated` fold in `rebuild_all`'s pass-2b — a SEPARATE site that
+        MERGEs the journaled rel type, so gating the door live and not here reproduces the
+        `derived == replay(journal)` divergence on the door §1.1 calls dominant.
+
+        Pinned as a SHAPE, not a line: the fold's own code names the rels it carries (`ownedBy`/`hasPart`/
+        `dependsOn`, #9553 class 4), which is the evidence that they are DECLARED predicates. If that note or
+        the fold goes, the scope's §1.2 item 6 and pin 15b have to be re-derived — so this reds rather than
+        letting the claim rot.
+        """
+        source = (REPO_ROOT / "tortoise" / "projection" / "__init__.py").read_text()
+        assert "fold ``DirectEdgeCreated``" in source or "fold `DirectEdgeCreated`" in source, (
+            "the DirectEdgeCreated fold is no longer recognisable in projection/__init__.py — re-derive §1.2 "
+            "item 6 and pin 15b"
+        )
+        assert "#9553 class 4" in source, (
+            "the note naming the rels this fold carries is gone — the evidence that they are DECLARED "
+            "predicates (ownedBy/hasPart/dependsOn) needs re-deriving"
+        )
+        # The edges this fold writes are parameterised: a literal rel type would make the fold
+        # unable to carry a declared predicate, and the scope's item 6 would be wrong.
+        assert 'f"MERGE (a)-[:{etype}]->(b)"' in source, (
+            "the DirectEdgeCreated fold no longer writes a PARAMETERISED rel type — if it is now a literal, "
+            "re-derive whether a declared predicate can reach it at all"
+        )
+
 
 class TestThePairHasThreeProductionReaders:
     """⛔ The review's P1: "exactly one place" is false, and the prevention half must not build a fourth."""
@@ -290,7 +319,7 @@ class TestTheDocsAreDiscoverableAndResolve:
                 target = (REPO_ROOT / token) if token.startswith("docs/") else (doc.parent / token)
                 assert target.exists(), f"{doc.name} cites `{token}`, which does not resolve"
             else:
-                assert basenames[token] <= 1, (
-                    f"{doc.name} cites `{token}` bare, but {basenames[token]} files under docs/ share that "
-                    "name — cite it with a path"
+                assert basenames[token] == 1, (
+                    f"{doc.name} cites `{token}` bare, but {basenames[token]} files under docs/ carry that "
+                    "name — cite it with a path (0 means it resolves to nothing at all)"
                 )

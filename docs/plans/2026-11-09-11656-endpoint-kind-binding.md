@@ -60,16 +60,29 @@ not-terminal, and the claim-class override. `undeclared_relation` fires only in 
 Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).
 
-### 1.2 Five call sites, and one of them is the replay fold
+### 1.2 Six call sites, and **two** of them are replay folds
 
 1. `sdk.create_operator` — and `ingest`'s reified arm inherits it.
 2. `sdk.create_direct_edge` — and `link_entities` + `ingest`'s plain-operator arm inherit it.
 3. `projection/edges.py::_EdgeHandlers.create_edge`
 4. `projection/edges.py::_EdgeHandlers.create_about_edge`
-5. `projection/edges.py::_EdgeHandlers._create_edges` (**the replay fold**, `:1497`, from
+5. `projection/edges.py::_EdgeHandlers._create_edges` (**the operator replay fold**, `:1497`, from
    `projection/entities.py:3021`) — it MERGEs operator edges directly and never calls `create_edge`. A
    live-only gate **diverges on `rebuild_all`**: the `derived == replay(journal)` class. The code says the
    two write one shape (*"#7902 fold-parity"*).
+6. `projection/__init__.py`, the **`DirectEdgeCreated` replay fold** (`rebuild_all` pass-2b, fold starts
+   `:16955`; the edge MERGE is `:17109`, *"mirroring create_direct_edge byte-for-byte on the edge shape"*)
+   — the second fold, one for the *other* label door. ⛔ **This is not a corner:** its own code records the
+   rels a `DirectEdgeCreated` can carry — *"the structural-edge lane's `ownedBy`/`hasPart`/`dependsOn`/…
+   (#9553 class 4)"* (`:17065`) — i.e. **declared predicates**. Gating item 2 live and this fold not gated
+   reproduces the same divergence as item 5, on the door §1.1 says is dominant.
+
+⚠️ **This list is an inventory, NOT a completeness claim — and that distinction is the point.** The scoping
+lane's own handoff on #11656 (comment 3020037081) records the failure class: four rounds each asserted a writer
+set ("two" → three → five → six) and each was wrong, because a hand-count over `MERGE (a)-[:{rel}]->(b)` sites
+misses one. So completeness is **measured, not claimed**: pin 18 re-derives the set of parameterised-rel-type
+Cypher writers from the tree on every CI run and reds when one of them does not route through the rule. A lane
+implements pins 1–18; it does **not** treat this list as the specification.
 
 ### 1.3 A declaration cannot be keyed on the predicate name
 
@@ -136,7 +149,7 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 | New manifest key + new per-graph policy record | unnecessary — `extraction.enforcement.relations` + `resolve_enforcement` exist; only the kind-pair **default** is new (§2.1). |
 | Reuse `_resolve_traversal_path` as the gate | it matches by **bare suffix, case-insensitive, first-match-wins** — ambiguous by construction, and it returns ONE relation. Fine for a query hint, wrong for enforcement. |
 
-## 4. The rule (one function, five call sites)
+## 4. The rule (one function, six call sites — two of them folds)
 
 ```python
 kind_pair_verdict(*, predicate, from_kind, to_kind, bound_ns) -> Verdict
@@ -264,13 +277,17 @@ undeclared.
 | 12 | a layer-valued declaration (`toKind: Subject`) is `unbound` **and** the pin names #11000 | false refusals, and a silent un-pin when §6 lands |
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
 | 14 | **`create_direct_edge`** refuses a declared mismatched label (both `link_entities` and `ingest` arms) | the P0 — an ungated third door |
-| 15 | the **replay fold** produces the same verdict as live | `rebuild_all` divergence |
+| 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live | `rebuild_all` divergence |
+| 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live, for a declared rel it carries (`ownedBy`/`hasPart`/`dependsOn`) | the same divergence on the second fold — the door §1.1 calls dominant |
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
 | 17 | the prevention guidance lists the declared pairs for an endpoint pair and omits none | a silent gap between gate and guidance |
+| 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
 
-**Do not** assert on `create_edge` only — it covers 2 of 35 and leaves **33** untested. **No** extractor call
-counts as evidence for the prevention half: `extractor_v2.py` has **0** `create_edge` / **0**
-`create_operator` calls today, so pin 17 is a **unit/contract** test.
+**Do not** assert on `create_edge` only — it covers 2 of 35 and leaves **33** untested. **Do not** gate one
+replay fold: there are **two** (pins 15, 15b), and each covers a different door. **No** extractor call counts
+as evidence for the prevention half: `extractor_v2.py` has **0** `create_edge` / **0** `create_operator` calls
+today, so pin 17 is a **unit/contract** test. Pin 18 is what makes pins 1–17's *population* trustworthy: it
+asserts the writer set rather than restating it.
 
 **Tier E (#11454, never a merge gate):** on a real corpus, a declared relation reaches the graph only between
 the declared kinds; a read-side census reports the pre-existing population.
@@ -280,7 +297,8 @@ the declared kinds; a read-side census reports the pre-existing population.
 | touch point | type | covered by |
 |---|---|---|
 | `sdk.create_operator` / `sdk.create_direct_edge` | write path | §4 |
-| `projection/edges.py` `create_edge` / `create_about_edge` / `_create_edges` | write path | §4 |
+| `projection/edges.py` `create_edge` / `create_about_edge` / `_create_edges` | write path | §4 (pin 15) |
+| `projection/__init__.py` `DirectEdgeCreated` fold (pass-2b, `:16955`/`:17109`) | write path | §4 (pin 15b) — the second replay fold |
 | `pack_state.resolved_pack_set_for_graph` | DB read | reused — its `graph_kind_namespaces` leg is **O(nodes)**; **must not** run per write (derive from the `:PackInstall` leg, or cache keyed on the data leg) |
 | `enforcement.resolve_enforcement` | decision seam | fixed in §5.4 |
 | `pack_registry.expand_kind` / `status_folds.kind_forms_for` | vocabulary | reused, union |
@@ -316,10 +334,12 @@ the declared kinds; a read-side census reports the pre-existing population.
 | revision 1 claim | the truth | how it was found |
 |---|---|---|
 | "two writers: `create_operator` + `create_edge`" | **three** — `create_direct_edge` takes a `label` and validates nothing | fresh review (P0) |
-| "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the four were `semantics: hasPart` on different predicates. Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |
+| "`hasPart` declared by 4 packs with 4 different pairs" | `hasPart` as a predicate is declared **once**; the **five** rows that produced the miscount carried `semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`, `partOfSprint`). Real evidence: `addresses` ×6, `contains` ×2, `targets` ×2 | fresh review (P1), confirmed by recount |
 | "`fromKind`/`toKind` acted on in exactly one place" | **three** readers, incl. `_resolve_traversal_path` which is D5's own job | fresh review (P1) |
 | "`_relation_endpoint_refs` has no production consumer" | it is **wired**, for kind co-selection | `[VGATE]` round 1 |
 | "30 of 32 declare a mechanism" | **35 of 35** (34 IMPL + 1 NAND), incl. `hasPart`/`dependsOn` | `[VGATE]` round 1 |
 | "`mismatch` → refuse, unconditionally" beside "read the level through `resolve_enforcement`" | contradictory — the map's default is `warn` and no pack declares a level. Fixed by §2.1 | fresh review (P1) |
 | "both kinds in the declaring pack's vocabulary" | disables **8** of 35 cross-universe declarations. Fixed by §5.2 | fresh review (P1) |
 | "leaves 31 untested" | `create_edge` covers 2 ⇒ leaves **33** | fresh review (P2) |
+| "five call sites" / "four writers" (revision 3) | **six**, and **two** of them are replay folds — the operator fold *and* the `DirectEdgeCreated` fold (`projection/__init__.py` pass-2b), which carries `ownedBy`/`hasPart`/`dependsOn`. Fixed by §1.2 item 6, §4, pins 15/15b | fresh review (P1) — found by opening the second fold's own `#9553 class 4` note |
+| the list of call sites presented as the specification | an **inventory**, not a completeness claim: four review rounds each asserted a writer set and each was wrong. Completeness is now **measured** (pin 18) | the scoping lane's handoff on #11656, confirmed by a fresh review |

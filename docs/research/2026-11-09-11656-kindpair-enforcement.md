@@ -139,9 +139,10 @@ turned on.
 | `dependsOn` | `dev:api → dev:database` (**1** declaration) | **17** | **0** — all between `evidence`, `option`, `question`, `plan`, `incident`, `risk` |
 | `hasPart` | `dev:theme → dev:epic` (**1** declaration) | **47** | **0** — `evidence→operator`, `observation→operator`, `evidence→evidence` |
 
-⚠️ **Correction (revision 2).** An earlier version of this table said `hasPart` was declared by *"4 packs,
-4 different pairs"*. **It is declared once.** The four were `semantics: hasPart` on **different predicates**
-(`decomposesInto`, `contains` ×2, `partOf`) — `semantics` was read as `predicate`. The 47 live `hasPart`
+**Correction (revision 2).** An earlier version of this table said `hasPart` was declared by *"4 packs,
+4 different pairs"*. **It is declared once.** The **five** rows that produced the miscount carried
+`semantics: hasPart` over **four** different predicates (`decomposesInto`, `contains` ×2, `partOf`,
+`partOfSprint`) — `semantics` was read as `predicate`. The 47 live `hasPart`
 edges are the operator **part/whole shape** (`edge_type = "hasPart" if op_type not in ("IMPL","NAND")`),
 which is why the single declaration matches none of them.
 
@@ -163,14 +164,27 @@ therefore does not describe a rule — it describes one pack's use of a shared w
 would refuse edges that were never about that pack. This is the sharpest finding and it is **not in the issue
 body**.
 
-### 3.3 A gate at the two live primitives leaves the replay fold ungated
+### 3.3 A gate at the two live primitives leaves **both** replay folds ungated
 
 `create_operator` (live) and `_EdgeHandlers._create_edges` (`projection/edges.py:1497`, replay/fold,
 reached from `projection/entities.py:3021`) are the two writers of the *same* operator-edge shape, and
 the code says so (*"#7902 fold-parity: live create_operator writes the same typed + INPUT edges this
 replay does"*). A live-only gate **diverges on `rebuild_all`** — the documented `derived == replay(journal)`
-failure class. Beyond that, a two-door gate cannot reach five further writers: `_link_source`,
-`hosted_api`'s raw `MERGE` sites (8 of them), `near_dup_merge`, `cache_projection`, `hosted_backup`.
+failure class.
+
+⚠️ **There are TWO folds, not one, and the second is the direct door's.** `create_direct_edge`'s writes are
+replayed by the **`DirectEdgeCreated` fold** in `rebuild_all`'s pass-2b (`projection/__init__.py`, fold from
+`:16955`, edge MERGE at `:17109`, *"mirroring create_direct_edge byte-for-byte on the edge shape"*). It is not
+a corner case: its own code names the rels that reach it — *"the structural-edge lane's
+`ownedBy`/`hasPart`/`dependsOn`/… (#9553 class 4)"* (`:17065`) — all **declared** predicates. So a gate that
+covers the operator fold and not this one is exactly one door short, on the door §2.4 calls dominant.
+
+Beyond that, a two-door gate cannot reach five further writers: `_link_source`,
+`hosted_api`'s raw `MERGE` sites (8 of them), `near_dup_merge`, `cache_projection`, `hosted_backup`. ⛔ **Which is
+why the writer set must be MEASURED, not listed:** the scoping lane's handoff on #11656 records four review
+rounds that each asserted a different writer count and each were wrong. The scope therefore ships a **writer
+census pin** (§6 pin 18) that re-derives the parameterised-rel-type Cypher write sites on every CI run —
+completeness becomes measured, and a new writer cannot silently bypass the gate.
 
 **No extraction path emits either primitive today** (`extractor_v2.py`: **0** `create_edge`, **0**
 `create_operator` calls). So the gate's live population today is agent/tool writes — SDK, MCP (3 call
@@ -627,7 +641,7 @@ legibility, per the AX admission test:**
 This is **not** a reversal of #1934: #1934's warn contract covers the *undeclared* pair, and §9.1 keeps
 warn exactly for the case where no remedy is performable. It should still be **stated on #1934** so the
 distinction is recorded where the next lane reads it, with a line naming the default it departs from
-(refuse-everything).
+(**#1934's warn-not-block**, which is what `resolve_enforcement` falls back to — `enforcement.py:65`).
 
 **D2 — subclass acceptance: unchanged from §5** (closure over `expand_kind(declared)`, both spellings
 folded, `equivalentTo` included). The graph already holds the confirming constraint: *"the closure must be
