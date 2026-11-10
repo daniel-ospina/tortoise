@@ -1010,8 +1010,10 @@ def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
     So the call site is held the way the body is held: by execution. `_cardinality_claims_in`
     is replaced for the duration of one real run of the pin test. A body that reads through the
     seam takes its VALUE and reds when the value disagrees; a body that re-implements the
-    extraction never consults the stub at all, and reds on ARM 1 below — with the remedy,
-    since the tolerance test cannot fail in that direction.
+    extraction never consults the stub at all, and reds on ARM 1 below — as `DID NOT RAISE`,
+    since the tolerance test cannot fail in that direction. ARM 2's `assert seen` is kept as the
+    named check for the same property, but ARM 1 is what makes it ungameable: a vestigial call
+    satisfies `seen` while leaving the value unread, and only the value can tell them apart.
 
     ⛔ ARM 1 exists because call-presence is NOT the property, and the first version of this
     test asserted only that (`assert seen`, `assert seen[0] == …`). A pin body that keeps ONE
