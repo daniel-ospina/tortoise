@@ -2224,8 +2224,10 @@ def test_the_population_count_mirrors_the_instrument():
     )
     # …and the predicate must keep the two halves that make it the POPULATION rather
     # than the label: `:Point` (turns live there) and `is_episodic` (the recorded
-    # delete predicate, #10017). `is_episodic` is stamped on `:Source`/`:Object` nodes
-    # too, so dropping `:Point` would INFLATE the ceiling.
+    # delete predicate, #10017). `is_episodic` rides non-`:Point` labels too —
+    # `:Session`/`:Event`/`:Source` (`graph-scripts/backfill_is_episodic.py`) and
+    # `:Object` (`TortoiseSDK.create_entity(is_episodic=…)`) — so dropping `:Point`
+    # would INFLATE the ceiling.
     assert ":Point" in POPULATION_RESIDENT_COUNT["turn"]
     assert "is_episodic" in POPULATION_RESIDENT_COUNT["turn"]
 
