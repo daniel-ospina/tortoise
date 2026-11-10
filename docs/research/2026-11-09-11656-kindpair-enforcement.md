@@ -96,7 +96,7 @@ visible **only as call arguments**, never as an edge.
 Consequences, both load-bearing:
 
 1. `create_operator` is the correct seam, and it is also the *cheap* seam: kinds are already in hand there
-   (§4.1). The two seams were written anticipating this change and name it — `sdk.py::TortoiseSDK.create_operator` (*"the
+   (the scope's §4 takes each call site to its kind source — none needs an extra round trip). The two seams were written anticipating this change and name it — `sdk.py::TortoiseSDK.create_operator` (*"the
    kind-pair leg is an epic-level gap"*) and `sdk.py::TortoiseSDK.create_operator` (*"(3) endpoint kinds → `direction_basis
    'kind-pair'` — a SEPARATE scoped change, not implemented here"*).
 2. **A post-hoc census over stored edges cannot see a violation at all** without reconstructing
@@ -213,11 +213,17 @@ predicate no pack declares — returns `unbound`, and never enforces the dominan
 operator fold and not this one is one door short.
 
 Beyond that, a two-door gate cannot reach five further writers: `_link_source`,
-`hosted_api`'s raw `MERGE` sites (8 of them), `near_dup_merge`, `cache_projection`, `hosted_backup`. ⛔ **Which is
+`hosted_api`'s raw edge `MERGE` sites (**11** of them, over **7** distinct LITERAL rel types —
+`produces`, `references`, `aboutObject`, `TAGGED`, `SUPPORTS`, `INFORMED_BY`, `CONTAINS`; **0**
+parameterised and **0** `CREATE (…)-[:…]`), `near_dup_merge`, `cache_projection`, `hosted_backup`. ⛔ **Which is
 why the writer set must be MEASURED, not listed:** the scoping lane's handoff on #11656 records four review
 rounds that each asserted a different writer count and each were wrong. The scope therefore ships a **writer
 census pin** (§6 pin 18) that re-derives the parameterised-rel-type Cypher write sites on every CI run —
-completeness becomes measured, and a new writer cannot silently bypass the gate.
+completeness becomes measured, and a new writer cannot silently bypass the gate. ⚠️ **The census's declared
+population is PARAMETERISED rel types**, so `hosted_api`'s literal-rel sites are outside it BY CONSTRUCTION —
+they are listed here as writers, not as census coverage. That is safe today because none of those seven literals
+is a declared predicate (so a declared label cannot ride them), and it is stated rather than implied so the
+census's scope is not mistaken for completeness.
 
 **No extraction path emits either primitive today** (`extractor_v2.py`: **0** `create_edge`, **0**
 `create_operator` calls). So the gate's live population today is agent/tool writes — SDK, MCP (3 call

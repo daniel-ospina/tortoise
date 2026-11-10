@@ -125,6 +125,108 @@ def _kind_bearing(rows: list[dict]) -> list[dict]:
     return [r for r in rows if r.get("fromKind") and r.get("toKind")]
 
 
+def _collected_test_nodes(source: str) -> list[ast.AST]:
+    """The test functions pytest would collect from `source`: module level + class methods.
+
+    ⛔ Not `^    def test_`. That regex silently assumed every test is a 4-space-indented method, so a
+    module-level `def test_...` — which pytest DOES collect — left the population pin GREEN while the
+    real population grew. A nested `def test_` is not collected and is not counted here either.
+    """
+    nodes: list[ast.AST] = []
+
+    def _walk(body: list[ast.stmt]) -> None:
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
+                nodes.append(node)
+            elif isinstance(node, ast.ClassDef):
+                # ⛔ RECURSE: pytest collects a nested-class method
+                # (`TestOuter::TestInner::test_...` — measured with `--collect-only`), so a one-level walk
+                # undercounts it. Every other class body is walked for the same reason.
+                _walk(node.body)
+
+    _walk(ast.parse(source).body)
+    return nodes
+
+
+def _derive_population(source: str) -> tuple[int, int]:
+    """`(functions, collected)` for `source`, derived from the AST and **failing closed**.
+
+    `collected` = functions + the extra cases of every `parametrize` arm. An earlier revision derived the
+    extras by `re.findall(...)[...].split(",")` on source TEXT, which counts commas INSIDE a tuple
+    (`[(1,2),(3,4)]` → 3 extras instead of 2) and misses every form its regex cannot spell — a tuple
+    `argnames`, a case list held in a module-level name, a parametrised class. An UNDERCOUNT that happens
+    to agree with a stale doc number is green; an OVERCOUNT reds against a TRUE number, and the tempting
+    "fix" is then to write the derived figure into the doc — so the pin would certify a false figure.
+    A form this function cannot read is therefore an ERROR, never a silent zero.
+    """
+    nodes = _collected_test_nodes(source)
+    extra = 0
+    unreadable: list[str] = []
+    for node in nodes:
+        for decorator in getattr(node, "decorator_list", []):
+            if not isinstance(decorator, ast.Call):
+                continue
+            if not ast.unparse(decorator.func).endswith("parametrize"):
+                continue
+            if len(decorator.args) < 2:
+                unreadable.append(f"`{node.name}`: `parametrize` with no case argument")
+                continue
+            cases = decorator.args[1]
+            if not isinstance(cases, (ast.List, ast.Tuple)):
+                unreadable.append(
+                    f"`{node.name}`: case list is `{ast.unparse(cases)[:48]}`, not an inline list/tuple"
+                )
+                continue
+            extra += max(len(cases.elts) - 1, 0)
+    assert not unreadable, (
+        "this pin cannot derive the collected count from these `parametrize` arms, so it must not guess — "
+        "the number it states is what a reader uses to judge coverage:\n  " + "\n  ".join(unreadable)
+    )
+    return len(nodes), len(nodes) + extra
+
+
+def _citation_path(rel: str) -> Path:
+    """The file a `path.py::symbol` citation names.
+
+    A bare `sdk.py` is relative to `tortoise/` (that is how both docs write a `tortoise/` module); an
+    explicit `tortoise/…` or a non-production root (`tests/`, `tools/`) is repo-relative.
+    """
+    if rel.startswith("tortoise/") or rel.split("/", 1)[0] in _NON_IMPORTABLE_ROOTS:
+        return REPO_ROOT / rel
+    return REPO_ROOT / "tortoise" / rel
+
+
+def _ast_declares(path: Path, symbol: str) -> bool:
+    """True when `symbol` resolves down `path`'s AST the way `getattr` resolves against a module.
+
+    The first part must be declared at MODULE level; each later part must be declared in the body of the
+    `ClassDef` the previous part resolved to. Flattening every name in the file into one set — the first
+    revision of this helper — accepts `SomeOtherClass.method` and even a function-local variable, which is
+    the same wrong-qualifier defect (`_EdgeHandlers._upsert_point_edges`) this pin exists to catch.
+    """
+
+    def _scope(body: list[ast.stmt]) -> dict[str, dict]:
+        declared: dict[str, dict] = {}
+        for node in body:
+            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                declared[node.name] = {}
+            elif isinstance(node, ast.ClassDef):
+                declared[node.name] = _scope(node.body)
+            elif isinstance(node, (ast.Assign, ast.AnnAssign)):
+                targets = node.targets if isinstance(node, ast.Assign) else [node.target]
+                for target in targets:
+                    if isinstance(target, ast.Name):
+                        declared[target.id] = {}
+        return declared
+
+    scope = _scope(ast.parse(path.read_text()).body)
+    for part in symbol.split("."):
+        if part not in scope:
+            return False
+        scope = scope[part]
+    return True
+
+
 class TestTheInventoryTheScopeCites:
     """§1 of the scope: the counts that decide which doors must be gated.
 
@@ -759,29 +861,12 @@ class TestTheDocsAreDiscoverableAndResolve:
         (round-17 P2-1).
         """
         source = Path(__file__).read_text()
-        # pytest collects MODULE-LEVEL functions and CLASS methods — never a nested `def`. Counting with
-        # `^    def test_` silently assumed every test is a 4-space-indented method, so a module-level
-        # `def test_...` left this pin GREEN while the file's real population grew (review round 19, P3):
-        # the pin would then be certifying a coverage figure it had under-counted. Derive the population the
-        # way the collector does, not the way the file happens to be indented today.
-        tree = ast.parse(source)
-        functions = 0
-        for node in tree.body:
-            if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)) and node.name.startswith("test_"):
-                functions += 1
-            elif isinstance(node, ast.ClassDef):
-                functions += sum(
-                    1
-                    for member in node.body
-                    if isinstance(member, (ast.FunctionDef, ast.AsyncFunctionDef))
-                    and member.name.startswith("test_")
-                )
-        # `collected` = functions + the extra cases of every `@pytest.mark.parametrize` arm.
-        extra = sum(
-            len(cases.split(",")) - 1
-            for cases in re.findall(r"@pytest\.mark\.parametrize\(\"[a-z_]+\", \[([^\]]+)\]", source)
-        )
-        collected = functions + extra
+        # pytest collects MODULE-LEVEL functions and CLASS methods — never a nested `def`. Both halves are
+        # derived from the AST by `_derive_population`, which fails closed on a `parametrize` form it cannot
+        # read instead of silently contributing zero extras. This row used to count with `^    def test_`
+        # (missed a module-level test) and derive the extras with `split(",")` on source text (counts commas
+        # inside `[(1,2),(3,4)]`, and cannot see a tuple argnames or a case list held in a name).
+        functions, collected = _derive_population(source)
 
         scope = SCOPE_DOC.read_text()
         stated = set(re.findall(r"\*\*(\d+) test functions / (\d+) collected\*\*", scope))
@@ -865,8 +950,10 @@ class TestTheDocsAreDiscoverableAndResolve:
         Measured, not assumed: this branch's own final `main` merge (`59e27baa`) shifted `sdk.py` by +44 in
         the bulk and by +56/+62 around `_resolve_traversal_path`, and `projection/__init__.py` by +128 — so a
         reader cannot even shift by a constant, and the offsets differ per file. Both docs nonetheless stated
-        the numbers were *"verified at the same merged head"*. 24 of them pointed at unrelated code: a lane
-        implementing #11656 opened `create_direct_edge`'s citation and landed in `list_batch`'s docstring.
+        the numbers were *"verified at the same merged head"*. **8 of the 45 distinct citation targets** (71
+        occurrences) landed in a different enclosing symbol after that merge — measured by resolving each
+        cited line to its enclosing `def`/`class` before and after — and one of them sent a lane implementing
+        #11656 from `create_direct_edge` to `list_batches`.
 
         The repo's recorded convention is the opposite of line-keyed (`docs/architecture/S2-DECISION-SEAM.md`:
         *"assertions by NAME — never by line number"*; `tortoise/hosted_api.py`: *"Cited by SYMBOL, not line
@@ -922,16 +1009,6 @@ class TestTheDocsAreDiscoverableAndResolve:
         side effect this pin does not need), so an invented test symbol reds too.
         """
 
-        def _citation_path(rel: str) -> Path:
-            """The file a `path.py::symbol` citation names.
-
-            A bare `sdk.py` is relative to `tortoise/` (that is how both docs write a `tortoise/` module); an
-            explicit `tortoise/…` or a non-production root (`tests/`, `tools/`) is repo-relative.
-            """
-            if rel.startswith("tortoise/") or rel.split("/", 1)[0] in _NON_IMPORTABLE_ROOTS:
-                return REPO_ROOT / rel
-            return REPO_ROOT / "tortoise" / rel
-
         def _module_for(path: Path) -> str | None:
             """The import path for a citation's file, or `None` when the file is not importable as `tortoise.*`."""
             rel = path.relative_to(REPO_ROOT).as_posix()
@@ -943,37 +1020,6 @@ class TestTheDocsAreDiscoverableAndResolve:
             if p.endswith("/__init__.py"):
                 return "tortoise." + p[: -len("/__init__.py")].replace("/", ".")
             return "tortoise." + p[: -len(".py")].replace("/", ".")
-
-        def _ast_declares(path: Path, symbol: str) -> bool:
-            """True when `symbol` resolves down `path`'s AST the way `getattr` resolves against a module.
-
-            The first part must be declared at MODULE level; each later part must be declared in the body of
-            the `ClassDef` the previous part resolved to. Flattening every name in the file into one set —
-            the first revision of this helper — accepts `SomeOtherClass.method` and even a function-local
-            variable, which is the same wrong-qualifier defect (`_EdgeHandlers._upsert_point_edges`) this
-            row exists to catch, so class qualification is resolved rather than erased.
-            """
-
-            def _scope(body: list[ast.stmt]) -> dict[str, dict]:
-                declared: dict[str, dict] = {}
-                for node in body:
-                    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
-                        declared[node.name] = {}
-                    elif isinstance(node, ast.ClassDef):
-                        declared[node.name] = _scope(node.body)
-                    elif isinstance(node, (ast.Assign, ast.AnnAssign)):
-                        targets = node.targets if isinstance(node, ast.Assign) else [node.target]
-                        for target in targets:
-                            if isinstance(target, ast.Name):
-                                declared[target.id] = {}
-                return declared
-
-            scope = _scope(ast.parse(path.read_text()).body)
-            for part in symbol.split("."):
-                if part not in scope:
-                    return False
-                scope = scope[part]
-            return True
 
         unresolved = []
         for doc in (SCOPE_DOC, BRIEF_DOC):
@@ -1051,4 +1097,129 @@ class TestTheDocsAreDiscoverableAndResolve:
             "a line number rots on the next `main` merge and lands the reader in unrelated code. If it is the "
             "record of a defect already fixed, add it to the `historical` allowlist above so the exception is "
             "declared rather than invisible."
+        )
+
+    def test_these_DERIVATIONS_hold_on_a_synthetic_file(self, tmp_path):
+        """The two derivations this class rests on must be able to FAIL — on the shapes the repo does not hold.
+
+        Round-20 P3, measured: both derivations were only ever run against THIS file, where the shape they
+        get wrong does not exist — no module-level `test_`, and no `parametrize` whose case list the old regex
+        could not spell. So a revert to the broken form was GREEN twice over: the pin's own "every assertion
+        must be able to fail" rule, violated by the pin itself.
+
+        This arm builds the shapes in a throwaway module and holds both derivations to them, so the fix is
+        exercised without needing a document to cite a `tests/` symbol or this file to grow a module-level test.
+        """
+        synthetic = tmp_path / "synthetic_mod.py"
+        synthetic.write_text(
+            "import pytest\n"
+            "\n"
+            "def test_module_level():\n"
+            "    pass\n"
+            "\n"
+            "class TestOuter:\n"
+            "    def test_a_method(self):\n"
+            "        pass\n"
+            "\n"
+            "    class TestInner:\n"
+            "        def test_nested_class_method(self):\n"
+            "            pass\n"
+            "\n"
+            "@pytest.mark.parametrize(('a', 'b'), [(1, 2), (3, 4)])\n"
+            "def test_tuple_argnames_two_cases(a, b):\n"
+            "    pass\n"
+            "\n"
+            "CASES = [1, 2, 3]\n"
+            "\n"
+            "@pytest.mark.parametrize('x', CASES)\n"
+            "def test_module_level_case_list(x):\n"
+            "    pass\n"
+            "\n"
+            "def helper_with_a_local():\n"
+            "    local_name = 1\n"
+            "    return local_name\n"
+        )
+
+        # --- ISSUE 3: a module-level test IS collected; a nested-class method is NOT (outer only). ---
+        readable = tmp_path / "readable_mod.py"
+        readable.write_text(
+            "import pytest\n"
+            "\n"
+            "def test_module_level():\n"
+            "    pass\n"
+            "\n"
+            "class TestOuter:\n"
+            "    def test_a_method(self):\n"
+            "        pass\n"
+            "\n"
+            "    class TestInner:\n"
+            "        def test_nested_class_method(self):\n"
+            "            pass\n"
+            "\n"
+            "@pytest.mark.parametrize(('a', 'b'), [(1, 2), (3, 4)])\n"
+            "def test_tuple_argnames_two_cases(a, b):\n"
+            "    pass\n"
+        )
+        functions, collected = _derive_population(readable.read_text())
+        assert functions == 4, (
+            f"expected 4 collected test functions (2 module-level, 1 method, 1 nested-class method), got "
+            f"{functions} — a `^    def test_` regex reports 2 and misses BOTH module-level ones"
+        )
+        # `[(1, 2), (3, 4)]` is 2 cases on a function that would otherwise be 1, so the file collects 5.
+        assert collected == 5, (
+            f"expected 5 collected cases, got {collected} — the old `split(\",\")` derivation counts the comma "
+            "INSIDE each tuple and would report 2 extras instead of 1"
+        )
+
+        # A `parametrize` form the derivation cannot read must RAISE, never contribute a silent zero:
+        # an undercount that coincides with a stale doc number is green, and an overcount reds against a
+        # TRUE number — in which case the tempting fix is to falsify the document.
+        unreadable = tmp_path / "unreadable_mod.py"
+        unreadable.write_text(
+            "import pytest\n"
+            "CASES = [1, 2, 3]\n"
+            "@pytest.mark.parametrize('x', CASES)\n"
+            "def test_case_list_in_a_name(x):\n"
+            "    pass\n"
+        )
+        with pytest.raises(AssertionError, match="cannot derive the collected count"):
+            _derive_population(unreadable.read_text())
+
+        # --- ISSUE 2: the AST symbol check keeps class qualification. ---
+        assert _ast_declares(synthetic, "TestOuter.test_a_method") is True
+        assert _ast_declares(synthetic, "TestOuter.TestInner.test_nested_class_method") is True
+        assert _ast_declares(synthetic, "test_module_level") is True
+        # wrong class, function-local name, and a name that is only a loop/assign target inside a function
+        assert _ast_declares(synthetic, "TestInner.test_a_method") is False, (
+            "`test_a_method` is declared on `TestOuter`, not `TestInner` — the flat-set form accepted this, "
+            "which is the `_EdgeHandlers._upsert_point_edges` wrong-qualifier defect one level down"
+        )
+        assert _ast_declares(synthetic, "helper_with_a_local.local_name") is False, (
+            "a function-local name is not addressable as `module.function.name`"
+        )
+        assert _ast_declares(synthetic, "no_such_name_at_all") is False
+
+    def test_the_inventory_in_the_LEDGER_matches_the_pinned_copies(self):
+        """`docs/00_index.md` restates the headline inventory — so it is a copy that must be pinned too.
+
+        Round-20 P3: the index row carries 36 / 35 / 34 `IMPL` + 1 `NAND` / 33-of-35 verbatim, and no
+        assertion read it, so a pack edit would red `TestTheInventoryTheScopeCites` against the two documents
+        while the ledger — the file a lane actually uses to FIND the doc — stayed green on a stale number.
+        Same reasoning as the `config/ci-surfaces.yml` population registration: a stated figure is either
+        pinned or it is prose waiting to rot.
+        """
+        rows = _declared_relations()
+        kinded = _kind_bearing(rows)
+        index = INDEX_DOC.read_text()
+
+        assert f"{len(rows)} declared relations" in index, (
+            f"the index row no longer states {len(rows)} declared relations — the pinned figure"
+        )
+        assert f"{len(kinded)} carrying `fromKind`/`toKind`" in index, (
+            f"the index row no longer states {len(kinded)} carrying `fromKind`/`toKind`"
+        )
+        mechanisms = Counter(r.get("mechanism") for r in kinded)
+        derived_split = f"{mechanisms['IMPL']} `IMPL` + {mechanisms['NAND']} `NAND`"
+        assert derived_split in index, (
+            f"the index row no longer states the mechanism split the packs drive (`{derived_split}`)"
         )

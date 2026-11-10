@@ -5600,7 +5600,7 @@ surfaces:
   # `.py`/`.yaml`/`.yml`/`.md`/`.json`: 40 in the scope + 33 in the brief at `12040d1554c1` — the maximum
   # across every commit touching either doc — went stale on one `main` merge;
   # cited by SYMBOL now, and every `packs/*/manifest.yaml::key.path` citation is resolved to a real key).
-  # 27 test functions / 29 collected.
+  # 29 test functions / 31 collected.
   # Offline, no graph, ~5s. ⚠️ DUAL-REGISTERED with `tier1` (below): `core` is the not-found FALLBACK, so
   # this row alone leaves a docs-only diff running the pin zero times (#11656 review F1).
   - test_11656_endpoint_kind_binding_scope.py
