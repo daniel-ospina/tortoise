@@ -87,6 +87,26 @@ _POPULATION_CLAIM = re.compile(
 #: clause's path tokens are the thing to read — one rule, and every spelling is covered.
 _PATH_TOKEN = re.compile(r"[A-Za-z0-9_.\-]+(?:/[A-Za-z0-9_.\-]*)+")
 
+#: A bare word that could be a population spelled WITHOUT a slash (`tests`, `docs`).
+#: The earlier "a population always contains a `/`" premise was a spelling assumption —
+#: the class this pin exists to stop — and it left `and tests is counted in both figures`
+#: green. Words are matched against the index's own top-level directory names, so the rule
+#: is derived from the tree rather than from a list someone has to remember to extend.
+_BARE_WORD = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.\-]*")
+
+
+def _top_level_dirs() -> frozenset[str]:
+    """Every top-level directory that holds a tracked file.
+
+    `git ls-files -z -- .` yields repo-relative paths, so the first segment is the
+    top-level entry; files at the root have one segment and are skipped.
+    """
+    return frozenset(
+        path.relative_to(REPO).parts[0]
+        for path in _tracked_files_under(".")
+        if len(path.relative_to(REPO).parts) > 1
+    )
+
 _COUNT_WORDS = ("one", "two", "three", "four", "five", "six", "seven", "eight")
 
 #: The narrow pattern §5 quotes as its evidence, as ONE owner: `_label_hits()`
@@ -1773,18 +1793,40 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
     # itself, and anything under it, pass; anything else — a second population in prose,
     # a third command with a different pathspec, a `..` that starts inside the directory
     # and resolves outside it — is a false scope with every number still green.
-    clause = section[population_match.start() : close_at + 1]
+    # The sentence, not just the parenthetical: a second population can sit BEFORE the
+    # quote ("… `:Document`, as in `tests/`, occurs on **63** lines …") or AFTER the
+    # parenthetical's close, and both were measured GREEN on slices anchored at the match.
+    sentence_start = section.rfind(". ", 0, population_match.start())
+    sentence_start = 0 if sentence_start == -1 else sentence_start + 2
+    clause = section[sentence_start:sentence_end]
+    # A third `git grep` is unjudged by the path rule alone when it names NO pathspec —
+    # and a pathless `git grep` measures the WHOLE repo, so the sentence goes false with
+    # every number green. The clause carries exactly the two pinned commands; a third is
+    # a different measurement, not a re-statement.
+    assert clause.count("git grep") == 2, (
+        f"§5's measurement clause quotes {clause.count('git grep')} `git grep` commands, "
+        "and this pin reads exactly the two in `_QUOTED_GREP`'s shape — a third measures "
+        "something else (a pathless one measures the whole repo) while the figures stay "
+        "green. State the one reproducible pair"
+    )
+    top_level = _top_level_dirs()
     extra = [
         token
         for token in _PATH_TOKEN.findall(clause)
         if ".." in token
         or not (token == _TRACKED_DIR or token.startswith(_TRACKED_DIR + "/"))
     ]
+    # A population can be spelled WITHOUT a slash too; that is a spelling, not an
+    # exemption, so a bare word that is a real top-level directory is judged the same way.
+    extra += [
+        word
+        for word in _BARE_WORD.findall(clause)
+        if word in top_level and word != _TRACKED_DIR
+    ]
     assert not extra, (
-        f"§5's measurement parenthetical names another path after the quote — "
-        f"{extra!r} — so the figure is stated over a population this pin does not "
-        "measure, while every number stays green. State the figure over one "
-        "population, or measure the one you name"
+        f"§5's measurement clause names another path — {extra!r} — so the figure is "
+        "stated over a population this pin does not measure, while every number stays "
+        "green. State the figure over one population, or measure the one you name"
     )
     assert populations == [_TRACKED_DIR + "/"], (
         f"§5 states its `:Document` figure over {populations!r}, but this pin measures "
