@@ -7,10 +7,10 @@ give `C3`–`C7` a fixed bar to report against.
 
 Three properties are pinned here, and each names the mutation that makes it FAIL:
 
-1. **the record registers them, and does NOT require them** — `required_criteria_rows` stays
-   `[E1, E2, E3, E4, E5]`, because a required row cannot be inferred from the rest (`V2`) and making
-   them required would red every verdict table that predates their scoring runs, the committed
-   `capstone-measured-9152448d.log` included;
+1. **the record registers them, and does NOT require them** — `required_criteria_rows` gains `E6`
+   (the capstone's sixth row, `#11673`) and still carries no `A`-row, because a required row cannot be
+   inferred from the rest (`V2`) and making an `A`-row required would red every verdict table that
+   predates its scoring run, the committed `capstone-measured-9152448d.log` included;
 2. **the amendment is an amendment** — §10.11 quotes the superseded pins line verbatim, so the change
    is findable rather than a quiet overwrite (`#9736` is the model, not a new registration);
 3. **the census reports, and where it cannot measure it says so** — a population no instrument has
@@ -120,12 +120,20 @@ def test_the_a_rows_are_registered_but_not_REQUIRED():
 
     FAILS IF `required_criteria_rows` grows — that would demand `A1`–`A5` of every verdict table,
     including the committed one, for rows nobody has run yet (`#10984`–`#10988` own those runs).
+
+    ⛔ AND THE SET DID MOVE ONCE, FOR A ROW THAT IS NOT AN `A`-ROW (`#11673`). `E6` is the capstone's
+    sixth row, added on the owner's 2026-11-05 ruling (`#7949` comment `6664402530`), and it is
+    REQUIRED — so the assertion below is no longer "unchanged since §10.11", it is "exactly the six
+    `E`-rows and no `A`-row". Both halves are asserted: the equality alone would pass on a set that
+    happened to have the right length, and the A-row half is the one this test has always protected.
     """
-    assert check.REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5")
+    assert check.REQUIRED_CRITERIA == ("E1", "E2", "E3", "E4", "E5", "E6")
+    assert not (set(A_ROWS) & set(check.REQUIRED_CRITERIA)), (
+        "an A-row became REQUIRED — that demands rows nobody has run from every verdict table")
     text = PREREG.read_text()
-    assert "required_criteria_rows: [E1, E2, E3, E4, E5]" in text
+    assert "required_criteria_rows: [E1, E2, E3, E4, E5, E6]" in text
     pins = check.parse_pins(text)
-    assert pins["required_criteria_rows"] == ["E1", "E2", "E3", "E4", "E5"]
+    assert pins["required_criteria_rows"] == ["E1", "E2", "E3", "E4", "E5", "E6"]
     # …and the RECOGNISED set did grow, or the rows would be unreachable.
     assert set(pins["criteria"]) >= set(A_ROWS)
     # ⛔ The A1 family pin exists in BOTH artefacts, and must be the same list: the pins fence is the
@@ -223,6 +231,22 @@ def test_the_amendment_entry_names_the_issue_and_the_required_set_is_unmoved():
     assert entry[0]["criterion"] == "A1+A2+A3+A4+A5"
     assert entry[0]["measurement_date"] is None, (
         "an amendment that names a measurement date claims an A-row run this change does not have")
+
+
+def test_every_rows_adding_amendment_is_indexed_once_in_the_record():
+    """FAILS IF a re-registration that adds rows to the criteria table is missing from
+    `amendments` — the machine-visible half of §10's disclosure, which is what a consumer
+    reads to learn the table grew. `#11673` added `E6` and was the one entry absent."""
+    amendments = _record()["amendments"]
+    issues = [a.get("issue") for a in amendments]
+    assert len(issues) == len(set(issues)), f"an issue is filed twice: {issues}"
+    entry = [a for a in amendments if a.get("issue") == 11673]
+    assert len(entry) == 1, issues
+    assert entry[0]["criterion"] == "E6", entry[0]
+    assert entry[0]["measurement_date"] == "2026-11-08", (
+        "E6's census artefact (f5c69f7478) predates the registration, so the date is required and "
+        "measurement_visible_to_author must be disclosed as true (§10.21)")
+    assert "6664402530" in entry[0]["kind"], "the ruling this row rests on must be cited in the record"
 
 
 def test_no_existing_bar_moved_the_probe_reads_the_same_seven():
