@@ -256,17 +256,20 @@ symbol pair this guard does check: the writers' retired-key allowlist
 `relabel_legacy_documents` (`migrate_kinds.py:167`).
 
 ⚠️ **The claim "`:Document` is not minted" is deliberately NOT regex-checked**,
-and the reason is measured: `:Document` occurs on **57** lines across **18**
-files under `tortoise/` (`git grep -n ':Document'` → 57 lines,
-`git grep -l ':Document'` → 18 files — the file count is not the line count).
-It was **55** across **17** when this was first measured at `4f68a2aa7`, and
-two independent lines have since been added, one per workstream: the #10976
-census's own note on why node labels do not partition the node set
-(`cache_eviction.py:894`, which is also the one that lifted the file count,
-being a new file), and #8447's ingest door (`tortoise/ingest.py`, the
-`REFUSED_NOT_FOUND` enum docstring). Both are the point rather than an
-accident: this population grows for good reasons, so the figure tracks the tree
-and not a past commit.
+and the reason is measured: `:Document` occurs on **63** lines across **19**
+files under `tortoise/` (`git grep -n ':Document'` → 63 lines,
+`git grep -l ':Document'` → 19 files — the file count is not the line count).
+It was **55** across **17** when this was first measured at `4f68a2aa7`, and it
+has moved twice since, each time on a workstream that names the retired label
+for its own reason. First **57** across **18**: the #10976 census's own note on
+why node labels do not partition the node set (`cache_eviction.py:894`, which
+is also the one that lifted the file count, being a new file), and #8447's
+ingest door (`tortoise/ingest.py`, the `REFUSED_NOT_FOUND` enum docstring).
+Then **63** across **19**: `tortoise/hosted_backup.py` gained six such lines in
+the #11641 vector work (#11729), because a dump or a restore that spans the
+D10 relabel has to say which `:Document` shape it is carrying. Every move is
+the point rather than an accident: this population grows for good reasons, so
+the figure tracks the tree and not a past commit.
 `tests/test_substrate_map.py` re-derives both numbers over the **same**
 population this sentence is stated in — every *tracked* file under `tortoise/`,
 any suffix, not a `.py` walk — so the figure cannot go stale silently. Every one
@@ -274,9 +277,13 @@ of those lines is prose that *names the retired label* —
 a docstring, a comment, a printed message, or an RST literal in
 `migrate_kinds.py:63` describing the pre-D10 shape. A pattern loose enough to
 catch a mint also catches those,
-and one narrow enough to skip them (`\(\w*:Document`) still matches **three**
-lines — the two RST literals in `migrate_kinds.py:63,170`, plus that same
-`cache_eviction.py:894` comment. A guard carrying a hand-maintained allowlist of
+and one narrow enough to skip them (`\(\w*:Document`) still matches **six**
+lines — the two RST literals in `migrate_kinds.py:63,170`, that same
+`cache_eviction.py:894` comment, and the three `(:Document {id, …})` speller
+literals in `tortoise/hosted_backup.py` (`:116`, `:948`, `:3429`) that #11729
+added. Six matches over 63 lines is still the shape the argument needs: the
+narrow form is a hand-maintained allowlist's SIZE, and it stays small enough
+that maintaining it would be the whole guard. A guard carrying a hand-maintained allowlist of
 docstrings is a guard nobody can trust, so the label claim stays evidence
 recorded here rather than a check that would have to be argued with.
 

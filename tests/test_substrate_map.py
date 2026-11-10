@@ -1553,12 +1553,15 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
 
     The figure is pinned to the TREE, not to `4f68a2aa7`, because that is what §5
     claims it is: population = every tracked file under `tortoise/`. It has since
-    moved to **57** lines across **18** files, in two moves, one per workstream:
+    moved to **63** lines across **19** files, in three moves, one per workstream:
     `cache_eviction.py:894` (the #10976 census's note on why labels do not partition
-    the node set) is one, and #8447's ingest door (`tortoise/ingest.py`, the
-    `REFUSED_NOT_FOUND` enum docstring) is the other. That move is the mechanism
-    working: the census landed, this check reddened, and §5 was re-measured instead
-    of the number being quietly widened or the guard loosened.
+    the node set) and #8447's ingest door (`tortoise/ingest.py`, the
+    `REFUSED_NOT_FOUND` enum docstring) took it 55/17 → 57/18, and #11729's #11641
+    vector work added six lines in `tortoise/hosted_backup.py` (a dump or a restore
+    that spans the D10 relabel has to say which `:Document` shape it carries),
+    carrying it to 63/19. Each move is the mechanism working: the census landed,
+    this check reddened, and §5 was re-measured instead of the number being quietly
+    widened or the guard loosened.
 
     §5's second number is pinned with it: the narrow `\\(\\w*:Document` pattern
     matching **three** lines now — the two RST literals in `migrate_kinds.py:63,170`
@@ -1587,10 +1590,11 @@ def test_the_document_label_prose_count_is_the_LINE_count() -> None:
         f"§5 claims {claimed_lines} lines across {claimed_files} files; the tree has "
         f"{lines} lines across {files} files — re-measure the claim (§5)"
     )
-    assert narrow == 3, (
-        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 3 "
-        "§5 records (2 RST literals in `migrate_kinds.py` + the `cache_eviction.py` "
-        "comment) — the exclusion argument needs re-measuring"
+    assert narrow == 6, (
+        f"the narrow `\\(\\w*:Document` pattern now matches {narrow} lines, not the 6 "
+        "§5 records (2 RST literals in `migrate_kinds.py`, the `cache_eviction.py` "
+        "comment, and `hosted_backup.py`'s 3 `(:Document {id, …})` spellers) — the "
+        "exclusion argument needs re-measuring"
     )
 
 
@@ -1718,7 +1722,7 @@ def test_every_cited_line_in_this_section_still_carries_the_prose_it_describes()
     the pointer was not. A reader re-examining the no-regex-check decision follows
     that pointer as the evidence — and lands on `)`.
 
-    The count pin above cannot catch this: it pins the NUMBER (57/18), not where the
+    The count pin above cannot catch this: it pins the NUMBER (63/19), not where the
     number came from. This is the same silent-staleness class the PR closed for
     `Pinned by tests/…` citations with
     `test_every_pin_reference_in_ci_selection_names_a_test_that_exists`: a citation
