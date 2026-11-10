@@ -645,18 +645,25 @@ _DELIBERATE_BARE_FORM: frozenset[tuple[str, str]] = frozenset(
         # correction was unparseable):
         #   · `#11756` (`7c45d5af1f`) rewrote the record to `uv run python`, leaving
         #     this key matching no live line;
-        #   · `#11757` deleted a key that was LIVE at its own head — its merge parent
-        #     `215e7d9d8b` already contained `#11759` (restored 37 s earlier; `#11757`
-        #     merged 3 min after it) and the file was GREEN there, so the removal
-        #     CREATED the doc-scan red rather than clearing a dead key. It is not the
-        #     model to copy (#11774);
+        #   · `#11757` deleted a key that was LIVE at its MERGE PARENT — `215e7d9d8b`
+        #     already contained `#11759` (restored 37 s earlier; `#11757` merged 3 min
+        #     after it) and the file was GREEN there, so the removal CREATED the doc-scan
+        #     red rather than clearing a dead key. It is not the model to copy (#11774).
+        #     "Merge parent" is the measured anchor and no other: the key is present (1) at
+        #     `#11757`'s own base `24e53f2b22`, where the doc line was already `uv run
+        #     python` so the key matched no live line (DEAD), and ABSENT (0) at its own head
+        #     `64726782f2` and at its merge commit `900d4aafc6` — so "live at its own head" is
+        #     false under both readings of "its own head" this block uses (#11777 review
+        #     round 10);
         #   · `#11759` restored the `python3` record, and this key with it, at 15:18:13Z
         #     (`179e688661`) — 15 min after `#11756` merged (15:03:02Z) — and its own merge
-        #     (15:45:12Z) preceded `#11757`'s merge parent `215e7d9d8b` (15:45:48Z);
-        #     `#11757` removed the key 3 min 35 s after that, on a base where it had just
-        #     been revived — so the record relied on a key that was live when it was written,
-        #     not one "already removed" (#11777 review round 8: an earlier phrasing of this
-        #     bullet re-anchored bullet 2's 37 s to `#11756`, where the true gap is 42 min).
+        #     (15:45:12Z) preceded `#11757`'s merge parent `215e7d9d8b` (15:45:49Z, PR
+        #     #11753's `mergedAt`; the commit's own clock reads 15:45:48Z, which would make the
+        #     37 s above a 36 s);
+        #     `#11757` removed the key 3 min 35 s after `#11759`'s merge, on a base where it
+        #     had just been revived — so the record relied on a key that was live when it was
+        #     written, not one "already removed" (#11777 review round 8: an earlier phrasing of
+        #     this bullet re-anchored bullet 2's 37 s to `#11756`, where the true gap is 42 min).
         # The merged tree therefore advertised the refused form with nothing exempting
         # it: `test_no_doc_or_usage_advertises_the_form_the_guard_refuses` red on
         # `origin/main` at `900d4aafc61a`, with no branch content involved.
@@ -847,13 +854,18 @@ def _cardinality_claims_in(source: str) -> list[str]:
         alone leaves `['seven', 'four']` and reds the arm (measured, #11777 round 3);
       * normalisation and the claim match — measured by the formatting and reword rows.
 
-    The pin's CALL SITE is measured too, and by behaviour rather than by shape:
-    `_assert_the_prose_names_the_set_size` is where the pin's assertions live, and it takes its
-    source as a parameter, so `test_the_prose_pin_reads_through_formatting_but_not_wording`
-    drives it with synthetic sources. An inlined extraction reds there on the first `**four**`
-    variant, which is the edit that would otherwise leave this seam as dead code reading as
-    coverage (measured in review of #11777: with the pin inlined and the seam intact, the whole
-    file stayed green — that is why the call site is measured at all).
+    The pin's CALL SITE is measured too, and by behaviour rather than by shape — but by a test
+    of its OWN, not by the tolerance test. `_assert_the_prose_names_the_set_size` is where the
+    pin's assertions live and takes its source as a parameter, so the tolerance test drives that
+    function's BODY with synthetic sources; it cannot see the pin TEST's body, so an extraction
+    inlined there leaves this seam dead code while the whole file stays green (measured at
+    `354ef36c0a`, #11777 review round 7, finding 1: the file was GREEN, and a `**four**` in the
+    live sentence then reds with *"no longer carries the sentence"* — the #11775 false red,
+    back, with CI green and nothing announcing it). The call site is held the way the body is
+    held, by execution: `test_the_prose_pin_is_the_code_path_the_artifact_runs` replaces this
+    seam for the duration of one REAL run of the pin test, so a body that reads through the seam
+    records the source it was handed and a body that re-implements the extraction records
+    nothing and reds there.
 
     The region is the COMMENT REGION immediately above the definition — bounded by the
     first line that is not part of the comment block — which is what keeps a decoy
@@ -875,8 +887,9 @@ def _cardinality_claims_in(source: str) -> list[str]:
 def _assert_the_prose_names_the_set_size(source: str) -> None:
     """The `_DELIBERATE_BARE_FORM` prose pin over `source` — its body AND its call site.
 
-    Taking the source as a PARAMETER is what makes the call site measurable, and it replaces
-    the shape pin that four review rounds failed to get right. A shape pin has to answer *"does
+    Taking the source as a PARAMETER is what makes this function's BODY drivable by the
+    tolerance test below — synthetic sources, no read of this file at that level — and it
+    replaces the shape pin that four review rounds failed to get right. A shape pin has to answer *"does
     this function read through the seam?"* by reading its syntax, and every phrasing of that
     question was answered wrongly by a NON-adversarial edit: a text search was defeated by its
     own marker string (round 3); a bare substring check was satisfied by a comment naming the
@@ -888,11 +901,25 @@ def _assert_the_prose_names_the_set_size(source: str) -> None:
     inlined extraction drifts against the seam.
 
     Here there is one copy and it is EXECUTED. The tolerance test below drives THIS function
-    with synthetic sources, so an edit that re-implements the extraction inline — however it is
-    spelled, wrapped or named — reds on the first `**four**` variant, PROVIDED the copy drops
-    any part of the behaviour: the emphasis or whitespace normalisation, the region scoping, or
-    the `#:` filter. That is the copy #11775 is about, and it is measured (a verbatim
+    with synthetic sources, so an edit that re-implements the extraction inline in THIS body —
+    however it is spelled, wrapped or named — reds on the first `**four**` variant, PROVIDED the
+    copy drops any part of the behaviour: the emphasis or whitespace normalisation, the region
+    scoping, or the `#:` filter. That is the copy #11775 is about, and it is measured (a verbatim
     `re.findall` inline reds with *"no longer carries the sentence"*).
+
+    This body is NOT the whole call site, and an earlier draft of this docstring said it was:
+    the extraction can equally be inlined into the pin TEST's body, which leaves this function
+    dead and the tolerance test still green on it, so the file is GREEN with the seam covered by
+    nothing — and a `**four**` in the live sentence then reds as *"no longer carries the
+    sentence"*, the #11775 false red restored behind a green CI (#11777 review round 7, finding
+    1, measured at `354ef36c0a`: inline copy → 553 passed, 2 skipped; inline copy + `**four**`
+    → 1 failed, 552 passed). The pin test's body is therefore held separately and the same way,
+    by execution: `test_the_prose_pin_is_the_code_path_the_artifact_runs` replaces
+    `_cardinality_claims_in` for two real runs of the pin test, so a body that reads through the
+    seam takes its VALUE — a deliberately wrong claim must make the pin raise — while a body
+    that re-implements the extraction never consults the stub. Call-presence alone is not the
+    property: one vestigial `_dead = _cardinality_claims_in(...)` beside an inline copy
+    satisfied the earlier version of that test (measured, #11777 review at `a1809fde`).
 
     The boundary, stated rather than glossed: a copy that re-assembles the same helpers in the
     same order is BEHAVIOURALLY IDENTICAL to the seam, so no behavioural test can tell them
@@ -902,12 +929,15 @@ def _assert_the_prose_names_the_set_size(source: str) -> None:
     lives, which is a reviewable diff choice, not a silently-lost guarantee — and it is why the
     seam's docstring claims one seam rather than claiming a duplicate is impossible.
 
-    What is NOT out of scope is the property disappearing with the suite green: the tolerance
-    test below asserts the artifact's own prose as well as the synthetic arms, and the pin
-    asserts it through this function, so DELETING EITHER test still leaves the other measuring
-    the real file (measured, #11777 review round 8, finding 1: before that second call, deleting
-    the pin left the suite green with the prose unguarded). The edit that defeats both is
-    rewriting this body AND deleting both tests, which is a visibly larger diff.
+    Nor does the property disappear with the suite green. The tolerance test below asserts the
+    artifact's own prose as well as its synthetic arms, and the pin asserts it through this
+    function, so DELETING EITHER test still leaves the other measuring the real file (measured,
+    #11777 review round 8, finding 1: before that second call, deleting the pin left the suite
+    green with the prose unguarded). Defeating every arm therefore takes TWO edits: an inline
+    extraction in this body or in the pin test's body, AND the removal of the test that measures
+    THAT body — the tolerance test below, or the call-site test beside it — and, for the
+    artifact's own prose, both tests. A visibly larger diff than any edit that leaves one arm
+    standing.
     """
     matches = _cardinality_claims_in(source)
     assert matches, (
@@ -965,6 +995,68 @@ def test_the_record_exemption_prose_counts_the_set_it_describes():
     `test_the_record_exemptions_all_still_match_a_live_line` applies to the keys.
     """
     _assert_the_prose_names_the_set_size(Path(__file__).read_text(encoding="utf-8"))
+
+
+def test_the_prose_pin_is_the_code_path_the_artifact_runs(monkeypatch):
+    """The PIN TEST's body must read through `_cardinality_claims_in` — measured by CALLING it.
+
+    The tolerance test drives `_assert_the_prose_names_the_set_size`, so it measures that
+    function's BODY. It cannot see the pin TEST's body: inline the extraction there and
+    `_assert_the_prose_names_the_set_size` becomes dead code that the tolerance test goes on
+    exercising, so the whole file stays green — measured at `354ef36c0a` (#11777 review round 7,
+    finding 1), and with the inline copy in place a `**four**` in the live sentence reds with
+    *"no longer carries the sentence"*, i.e. the #11775 false red is back while CI is green.
+
+    So the call site is held the way the body is held: by execution. `_cardinality_claims_in`
+    is replaced for the duration of one real run of the pin test. A body that reads through the
+    seam takes its VALUE and reds when the value disagrees; a body that re-implements the
+    extraction never consults the stub at all, and reds on ARM 1 below — with the remedy,
+    since the tolerance test cannot fail in that direction.
+
+    ⛔ ARM 1 exists because call-presence is NOT the property, and the first version of this
+    test asserted only that (`assert seen`, `assert seen[0] == …`). A pin body that keeps ONE
+    vestigial `_dead = _cardinality_claims_in(source)` call beside an inline copy satisfies
+    both of those while reading nothing from the seam — measured, #11777 review at `a1809fde`:
+    `1 passed` with the inline copy shipped, and with `**four**` in the live sentence the pin
+    went GREEN on a stray quote elsewhere in this file instead of reding, i.e. exactly the
+    cover the round-7 finding said this test removes. A stub whose VALUE must drive the
+    outcome cannot be satisfied by a call whose value is discarded.
+
+    The stubbed claim is derived from `len(_DELIBERATE_BARE_FORM)` — the set the prose
+    describes — so these arms measure the CALL SITE and nothing else; whether the live prose
+    states that size is the pin test's own job, above.
+    """
+    seen: list[str] = []
+    stated = str(len(_DELIBERATE_BARE_FORM))
+
+    # ARM 1 — a WRONG claim from the seam must make the pin RAISE. An inline copy never asks
+    # the stub, sees the live (correct) prose, and so never raises: this arm reds, by name.
+    monkeypatch.setattr(
+        sys.modules[__name__],
+        "_cardinality_claims_in",
+        lambda source: [str(len(_DELIBERATE_BARE_FORM) + 1)],
+    )
+    with pytest.raises(AssertionError, match="but the set holds"):
+        test_the_record_exemption_prose_counts_the_set_it_describes()
+
+    # ARM 2 — the CORRECT claim must let it pass, and must be handed THIS file's source.
+    def record_and_answer(source: str) -> list[str]:
+        seen.append(source)
+        return [stated]
+
+    monkeypatch.setattr(sys.modules[__name__], "_cardinality_claims_in", record_and_answer)
+    test_the_record_exemption_prose_counts_the_set_it_describes()
+
+    assert seen, (
+        "the cardinality pin's body no longer reads through `_cardinality_claims_in`. A copy "
+        "that re-implements the extraction there leaves the seam dead while every other test "
+        "keeps passing (measured, #11777 review round 7), so restore the call to "
+        "`_assert_the_prose_names_the_set_size` — that call IS the pin's one path through it."
+    )
+    assert seen[0] == Path(__file__).read_text(encoding="utf-8"), (
+        "the pin reads through the seam, but not with THIS FILE's source — it must hand over "
+        "`Path(__file__).read_text(...)`, or the pin measures a sample instead of the artifact."
+    )
 
 
 def test_the_prose_pin_reads_through_formatting_but_not_wording():
