@@ -4270,13 +4270,16 @@ DENIAL_MARKERS: tuple[str, ...] = (
     # ⚠️ `the exemption` is LIVE as of the `#11665` clause in the extractor's §3
     # (*"The exemption is about CONTENT, not the declaration site"*): a TOPIC use —
     # the noun naming the exempt class, not a sentence calling a counted writer an
-    # exemption. ⛔ Its failure direction is OVER-red, never a miss: this tuple is
-    # consulted only for a sentence the enclosing leg has already keyed on a NAMED
-    # census writer, and each occurrence is then judged per-occurrence
-    # (`_denies_the_class`, `#11714`) — so a sentence that names a counted writer AND
-    # carries the phrase in the affirmative DOES red, which is why the topic use is
-    # tolerable only where it is not a claim about a writer. Its absence declaration
-    # was deleted — why is recorded at `MARKERS_ABSENT_BY_DESIGN` below.
+    # exemption. ⛔ IN THE DENIAL LEG this tuple is consulted only for a sentence that
+    # leg has already keyed on a NAMED census writer, and each occurrence is then
+    # judged per-occurrence (`_denies_the_class`, `#11714`) — so THERE the failure
+    # direction is OVER-red, never a miss: a sentence naming a counted writer that
+    # carries the phrase affirmatively DOES red, which is why the topic use is
+    # tolerable only where it is not a claim about a writer. ⛔ Leg 36 ALSO consults
+    # this tuple CORPUS-WIDE, with no writer key (`families`, `~:7224`), for liveness
+    # only — so the marker must keep appearing in §3, and that half (plus why the
+    # absence declaration was deleted) is recorded at `MARKERS_ABSENT_BY_DESIGN`
+    # below.
     "the exemption",
     "carries nothing",
     "writes nothing",

@@ -887,13 +887,21 @@ def who_holds(issue: int, repo_arg: str | None, gh_bin: str, git_bin: str,
         #     string is the whole `surface.note`, and `scan_issue_surface` appends
         #     an `issue state=…` sentence to it, so on a LANDED answer the heading
         #     sat over a clause that is not part of that read.
+        #   • the parenthetical promised the store disclosure UNCONDITIONALLY ("a
+        #     CLEAN that rested on ONE liveness store says so here"), but on a
+        #     pre-#11202 board the note carries only `board source: …` — so the
+        #     promise sat over a note naming NO store, which is the same "a CLEAN
+        #     that read them all" misread one level down, asserted by this block's
+        #     own heading (`#11681` review, round 2). It is now scoped to a board
+        #     that RECORDED the provenance.
         # Re-composing a filtered string is not an option (the note must stay the
         # GATE's own string), so the heading is narrowed to the row it belongs to.
         lines.append("CLAIM GATE [" + cp.SURFACE_ISSUE + "] — the gate's own note "
                      "for the `" + cp.SURFACE_ISSUE + "` row")
-        lines.append("             (separate from any surface hit listed above; a "
-                     "CLEAN that rested on ONE")
-        lines.append("             liveness store says so here):")
+        lines.append("             (separate from any surface hit listed above; where "
+                     "the board recorded")
+        lines.append("             its liveness provenance, a CLEAN that rested on ONE "
+                     "store says so here):")
         lines.append("  " + _clean(holder_surface.note.strip()))
     if unknown_detail:
         lines.append("")

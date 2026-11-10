@@ -802,6 +802,14 @@ exec {real} "$@"
         self.assertIn("board source:", out)
         self.assertNotIn("liveness:", out)
         self.assertNotIn("unreadable store(s)", out)
+        # ⛔ THE HEADING'S PROMISE IS CONDITIONAL TOO (#11681 review, round 2): the
+        # block prints whenever the note is non-empty, and on THIS shape the note
+        # names no store — so a heading that promised the disclosure outright would
+        # sit over a note that made none, which is the same "a CLEAN that read them
+        # all" misread one level down. Both directions are pinned, so reverting the
+        # qualification reds.
+        self.assertIn("where the board recorded", out)
+        self.assertNotIn("liveness store says so here", out)
 
     # ── fail-closed: could-not-check is never "nobody" ───────────────────────
 
