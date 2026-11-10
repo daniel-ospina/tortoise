@@ -105,8 +105,11 @@ Two callers reach it with a declared label:
 - `ingest`'s plain-operator arm (`sdk.py:28497`).
 
 **And it is the dominant shape, not a corner.** `_point_mediated_route` (`sdk.py:25041`) reifies only when a
-`:Point` is involved — *"Object↔Object keeps the direct shape"* — and **32 of the 35** kind-bearing
-declarations are Object→Object. So a declared IMPL label over a mismatched Object pair is writable today with
+`:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is operator-mediated …
+`Subject`/`Event` endpoints are not Point-bearing and take the Object path"* (`sdk.py:25058-25060`) — and the
+declarations partition as **28 Object↔Object**, **5 more direct-shape but not Object↔Object** (3
+`Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2 Point-involved**. So a declared IMPL label over
+a mismatched **direct-shape** pair is writable today with
 no gate, and a scope that excludes this door leaves the issue's own target false. It is **in scope**, gating
 the `label` only (its epistemic semantics are untouched).
 
@@ -363,14 +366,16 @@ safe one here. No decision needed unless the owner wants a migration.
 ⛔ **This extends to the replay folds, and the scope states it there too:** a fold that hits `mismatch` must
 do neither of the two obvious things — it must not raise (that aborts `rebuild_all` on a committed record)
 and must not skip the write (that is the live≠replay divergence the fold-parity pins exist to prevent). It
-computes the verdict, emits and counts it, **and writes anyway**; the fold pins assert **verdict** equality.
-"Refuse" is a live-write disposition, not a replay one.
+computes the verdict, emits and counts it, **and writes anyway**. ⚠️ **Verdict equality is not enough to pin
+this:** a fold that classifies then `continue`s before its `MERGE` still produces the same verdict, so the
+fold pins assert **verdict equality AND edge-presence equality**. "Refuse" is a live-write disposition, not a
+replay one.
 
 ## 6. Scope corrections this research establishes (no owner decision needed)
 
 | issue says | measured | effect |
 |---|---|---|
-| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`sdk.py:18070-18078`) and `ingest` reaches it too (`sdk.py:28497`), it validates nothing about declarations, and `_point_mediated_route` keeps Object↔Object on the direct shape, and `Subject`/`Event` endpoints are not Point-bearing and take the same path — so **all 35** declarations are reachable through it (32 of the 35 are Object→Object; 3 are `Subject`-ended). See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + **both** replay folds (`_create_edges` **and** `projection/__init__.py`'s pass-2b `DirectEdgeCreated` fold); `ingest` inherits all of them |
+| gate `create_edge` / `create_direct_edge` / `ingest` | ⚠️ **Corrected (revision 2): `create_direct_edge` is IN scope.** It takes a `label` (`sdk.py:29040`), `link_entities` passes one (`sdk.py:18070-18078`) and `ingest` reaches it too (`sdk.py:28497`), it validates nothing about declarations, and `_point_mediated_route` keeps `Object↔Object` on the direct shape while `Subject`/`Event` take the same path (`sdk.py:25058-25060`) — so **33 of the 35** declarations are reachable through it by the public routes (28 `Object↔Object`, 3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and the other 2 are Point-involved (`agent-ops:groundedIn`, `product-strategy:addresses` `useCase→feature`) so `link_entities`/`ingest` reify them — a raw `create_direct_edge` call still writes them, it has no Point guard. See §2.4 | gate **`create_operator`** + **`create_direct_edge`** (both label doors) + `create_edge`/`create_about_edge` (**2/35**, which also bind the operator path) + **both** replay folds (`_create_edges` **and** `projection/__init__.py`'s pass-2b `DirectEdgeCreated` fold); `ingest` inherits all of them |
 | "one write gate, not two" | live and replay are **two writers of one shape** | the rule is one *function*; **both** folds (`_create_edges` and the pass-2b `DirectEdgeCreated` fold) must call it too — and the second must read the predicate from `ev["label"]` when present, else `ev["edge_type"]` (§3.3) — or `rebuild_all` diverges |
 | reads `pack_state.graph_installed_namespaces` | that read is **O(nodes)** (8 whole-graph property scans; ~6 ms at 300 nodes, linear) and deliberately uncached | must not run per write. `resolved_pack_set_for_graph` exists for bare-graph seams; a cache must be data-leg-keyed or it reintroduces #5163 |
 | depends on `#11484` (corrected) | ⚠️ **I10 does not carry the pair map.** `docs/epics/2026-11-04-7949-extractor-v4-capstone/04-plan.md:632` defines `allowed_predicates(graph)` as `predicate -> {admitted_by, verb, record_carried}` with `verb ∈ {create_edge, create_about_edge, ingest}` — **no `fromKind`/`toKind` field**, and the verb enum excludes `create_operator`, the door 35/35 ride. I10 supplies the predicate→verb/namespace map **only.** | #11656 derives the pair map itself from `list_relations()` (**36** declared relations, **35** of them kind-bearing — `pm:onBoard` is `declarationOnly` and maps no pair — over **34** distinct `(fromKind, toKind)` pairs; `venture:asset→venture:program` is declared twice). **Not a blocking dependency.** If the owner wants I10 to own the pairs, that is an I10 amendment — do not assume it. |

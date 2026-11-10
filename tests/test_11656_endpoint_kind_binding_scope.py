@@ -130,6 +130,52 @@ class TestTheInventoryTheScopeCites:
         assert {r["predicate"] for r in semantics_only} == {
             "decomposesInto", "contains", "partOf", "partOfSprint"}, sorted({r["predicate"] for r in semantics_only})
 
+    def test_the_direct_shape_partition_28_object_and_33_non_point(self):
+        """§1.1 / the brief's §2.4: **28** Object↔Object, **33** direct-shape, **2** Point-involved.
+
+        ⚠️ This pins a figure that has already been got wrong once: the first revision said "32 of the 35 are
+        Object→Object", which is the **non-`Subject`** count (35 − 3) relabelled — it absorbed the four
+        non-`Subject` non-Object rows, and two of those are Point-involved. `_point_mediated_route` reifies
+        only on `:Point` (`sdk.py:25058-25060`), so the direct-shape population is "not Point-involved", which
+        is 33, not 32. An implementer building pin 14's fixture from the richest documented predicate
+        (`addresses`, 6 declarations) would pick the `useCase→feature` row, watch it reify, and conclude the
+        direct door is not the dominant shape.
+        """
+        registry = PackRegistry(PACKS_DIR)
+        registry.load_all()
+
+        axis: dict[str, str] = {}
+        for pack in registry.packs.values():
+            for attr, name in (("object_kinds", "object"), ("document_kinds", "object"),
+                               ("event_kinds", "event"), ("point_kinds", "point")):
+                for k in getattr(pack, attr, None) or []:
+                    axis[f"{pack.namespace}:{k}"] = name
+        from tortoise import pack_registry as pr
+
+        for kind in pr.CORE_ENTITY_TYPES:
+            axis[kind] = "subject"
+        for const, name in ((pr.CANONICAL_OBJECT_KINDS, "object"),
+                            (pr.CANONICAL_EVENT_KINDS, "event"),
+                            (pr.CANONICAL_POINT_KINDS, "point")):
+            for k in const:
+                axis.setdefault(k if ":" in k else f"core:{k}", name)
+
+        partition: Counter = Counter()
+        for rel in _kind_bearing(_declared_relations()):
+            a, b = axis.get(rel["fromKind"]), axis.get(rel["toKind"])
+            assert a and b, (
+                f"{rel['_ns']}:{rel['predicate']} names a kind whose axis is unknown "
+                f"({rel['fromKind']} -> {rel['toKind']}) — the kind catalog moved; re-derive §1.1's partition"
+            )
+            partition[(a, b)] += 1
+
+        assert partition[("object", "object")] == 28, partition
+        assert partition[("object", "subject")] == 3, partition
+        point_involved = partition[("object", "point")] + partition[("point", "object")]
+        assert point_involved == 2, partition
+        direct_shape = sum(n for (_a, b), n in partition.items() if b != "point" and _a != "point")
+        assert direct_shape == 33, partition
+
     def test_the_repeated_predicates_are_addresses_contains_targets(self):
         """D3's evidence, on the correct rows (the corrected §1.3 / brief §4.4)."""
         bearing = _kind_bearing(_declared_relations())
@@ -226,11 +272,15 @@ class TestTheThirdDoorExists:
         assert "self.create_direct_edge(" in ingest and "label=label" in ingest
 
     def test_point_mediated_route_only_reifies_a_point_pair(self):
-        """Object↔Object keeps the direct shape — 32 of the 35 declarations."""
+        """Object↔Object keeps the direct shape; the partition is pinned above (28 / 33 / 2)."""
         from tortoise.sdk import TortoiseSDK
 
         doc = inspect.getdoc(TortoiseSDK._point_mediated_route) or ""
         assert "Object↔Object" in doc and "operator-mediated" in doc
+        assert "not Point-bearing" in doc, (
+            "the docstring no longer says Subject/Event endpoints are not Point-bearing — §1.1's 33-of-35 rests "
+            "on them taking the Object path"
+        )
 
     def test_the_direct_door_has_its_OWN_replay_fold(self):
         """⛔ The P1 a fresh review found: there are **two** replay folds, not one.

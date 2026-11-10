@@ -32,7 +32,7 @@ edge's endpoints have those kinds.** 36 declared relations across 7 packs; 35 ca
 > kind-bearing declarations (`pm:blocks` → `pm:card→pm:card`, `pm:partOfSprint` → `pm:sprint→pm:card`,
 > `pm:assignedTo` → `pm:card→Subject`, all `IMPL`) plus `pm:onBoard`, which declares one `from`/`to` and no kinds. The figures below were first measured at `e809803e` (32 kind-bearing, 31 `IMPL` + 1 `NAND`,
 > 30 Object→Object, 7 disabled by §5.2) and are restated here at **this** head: **35 kind-bearing,
-> 34 `IMPL` + 1 `NAND`, 32 Object→Object, 8 disabled by §5.2**. The argument does not move — every
+> 34 `IMPL` + 1 `NAND`, 28 Object→Object (33 direct-shape), 8 disabled by §5.2**. The argument does not move — every
 > kind-bearing declaration still rides the operator path, and `create_edge` is still the wrong seam — but the
 > counts are what a lane implements against and what pins 1, 8 and 16 assert, so they are stated at the head
 > they were measured on. Reproduce with the one-liner in the research brief §2.1. The `.py:line` citations
@@ -54,10 +54,16 @@ issue's own target.** Measured:
 not-terminal, and the claim-class override. `undeclared_relation` fires only in `create_operator`
 (`sdk.py:23196`).
 
-**And the direct door is the *dominant* shape for Object↔Object, not a corner.** `_point_mediated_route`
-(`sdk.py:25041`) reifies only when a `:Point` is involved — *"Object↔Object keeps the direct shape"* — and
-**32 of the 35** kind-bearing declarations are Object→Object. So a declared IMPL label over a mismatched
-Object pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
+**And the direct door is the *dominant* shape, not a corner.** `_point_mediated_route` (`sdk.py:25041`)
+reifies only when a `:Point` is involved — *"`Object↔Object` keeps the direct shape … `Point↔Object` is
+operator-mediated … `Subject`/`Event` endpoints are not Point-bearing and take the Object path"*
+(`sdk.py:25058-25060`) — and the 35 kind-bearing declarations partition as **28 Object↔Object**, **5 more
+direct-shape but not Object↔Object** (3 `Object→Subject`, 1 `Object→Event`, 1 `Event→Object`), and **2
+Point-involved** (`agent-ops:groundedIn` via `pointKinds: rationale`, `product-strategy:addresses`
+`useCase→feature` via `pointKinds: useCase`) — so **33 of the 35** take the direct shape through
+`link_entities`/`ingest`, and the other 2 reify into an operator. ⚠️ The earlier "32 of 35" figure was the
+**non-`Subject`** count relabelled (35 − 3 `Subject`), which absorbed the four non-`Subject` non-Object rows.
+So a declared IMPL label over a mismatched **direct-shape** pair is writable today with no gate. **⇒ `create_direct_edge` is IN scope, gating the `label` only**
 (its epistemic semantics are untouched).
 
 ### 1.2 Six call sites, and **two** of them are replay folds
@@ -154,7 +160,7 @@ with a different answer, so it gets its own default. Both are pinned (§6 pins 8
 | alternative | why rejected |
 |---|---|
 | Gate `create_edge` only (the issue's own prescription) | covers 2 of 35 — 6 %. |
-| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape for the 32 Object→Object declarations. |
+| Exclude `create_direct_edge` (revision 1) | **false**: it takes a `label`, and it is the dominant shape — 33 of the 35 declarations are direct-shape (§1.1). |
 | Predicate-name-global constraint | refuses most of `addresses`' six pairs (and the 17/47 live edges). The modelling error RDFS names. |
 | Refuse on unknown kind too | contradicts `EXTRACTOR-V4-ARCHITECTURE.md` §4.4 S2.3 (*"FAIL-OPEN, never raises … `unclassified` is honest"*) and the AX admission test. |
 | Warn-only everywhere | the permanently-degraded signal (brief §9.2); graph holds `pt_656aa190…` *"partial enforcement reads as fixed"*. |
@@ -176,11 +182,17 @@ kind_pair_verdict(*, predicate, from_kind, to_kind, bound_ns) -> Verdict
 
 ⛔ **At a replay fold (§1.2 items 5 and 6) the `mismatch` arm does NOT raise, and does NOT skip.**
 `rebuild_all` must never refuse a committed record — R1 and the brief's D4 — and it must not *omit* the write
-either, because a skip is exactly the live≠replay divergence that pins 15/15b exist to prevent. The fold
-**computes the same verdict, emits and counts it, and writes anyway**; pins 15/15b assert **verdict equality**,
-never refusal equality. Getting this wrong in either direction is a shipped defect, so it is stated here rather
-than left to the implementation: "refuse" is a *live-write* disposition, and the fold's disposition is
-"classify and report" (the same shape `pack_state.graph_kind_namespaces` / #9068 uses for the same reason).
+either, because a skip is exactly the live≠replay divergence this work exists to prevent. The fold
+**computes the same verdict, emits and counts it, and writes anyway**. Getting this wrong in either direction is
+a shipped defect, so it is stated here rather than left to the implementation: "refuse" is a *live-write*
+disposition, and the fold's disposition is "classify and report" (the same shape
+`pack_state.graph_kind_namespaces` / #9068 uses for the same reason).
+
+⚠️ **And the pins must be WRITE-aware, or they cannot see a skip.** A fold that computes `mismatch`, emits and
+counts it, then `continue`s before its `MERGE` still "produces the same verdict as live" — so verdict equality
+alone is green over exactly the defect this paragraph forbids. Pins 15 and 15b therefore assert **verdict
+equality AND edge-presence equality** (the committed edge is still written); pin 18 cannot cover it either,
+because a fold that classifies then skips still "routes through" the rule.
 
 Endpoint kinds are normalised with **`status_folds.kind_forms_for` ∪ `PackRegistry.expand_kind`** — neither is
 a superset (measured: `kind_forms_for('dev:issue')` has `issue` but not `pm:issue`; `expand_kind` has
@@ -300,8 +312,8 @@ undeclared.
 | 12 | a layer-valued declaration (`toKind: Subject`) is `unbound` **and** the pin names #11000 | false refusals, and a silent un-pin when §6 lands |
 | 13 | **mutation**: deleting the binding test reds ≥1 pin | the guard asserted by prose |
 | 14 | **`create_direct_edge`** refuses a declared mismatched label (both `link_entities` and `ingest` arms) | the P0 — an ungated third door |
-| 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live | `rebuild_all` divergence |
-| 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live — **and it reads the predicate from `ev["label"]` when present, else `ev["edge_type"]`** (§1.2 item 6) | the same divergence on the second fold; and a gate keyed on `edge_type` alone sees only `IMPL`/`NAND` for `create_direct_edge` records and silently never enforces the dominant door |
+| 15 | the **operator** replay fold (`_create_edges`) produces the same verdict as live **and still writes the committed edge** (verdict equality alone is satisfied by a fold that classifies then `continue`s before its `MERGE`) | `rebuild_all` divergence |
+| 15b | the **`DirectEdgeCreated`** replay fold (`projection/__init__.py` pass-2b) produces the same verdict as live **and still writes the committed edge**, and it reads the predicate from `ev["label"]` when present, else `ev["edge_type"]` (§1.2 item 6) | the same divergence on the second fold; a verdict-only pin is green over a skip; and a gate keyed on `edge_type` alone sees only `IMPL`/`NAND` for `create_direct_edge` records and silently never enforces the dominant door |
 | 16 | `resolve_enforcement` resolves over **installed** packs, not the catalog max | one pack blocking another's predicate |
 | 17 | the prevention guidance lists the declared pairs for an endpoint pair and omits none | a silent gap between gate and guidance |
 | 18 | **writer census** — a mechanical re-derivation of every parameterised-rel-type Cypher write site under `tortoise/` (regex over `MERGE`/`CREATE (…)-[:{rel}]->`, filtered to a non-literal rel type), asserting each routes through `kind_pair_verdict` or is named in a declared exemption list | **a new writer silently bypassing the gate** — the completeness claim that failed four review rounds on #11656 (§1.2). A hand-counted list cannot prevent this; a census can |
