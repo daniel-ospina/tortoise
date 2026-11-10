@@ -62,8 +62,23 @@ note **or a justified skip citing the brief**. Both are **justified skips**, cit
 4. **A5 evidence** — the `Subject` layer either populated (count + the four subject-edge families + the
    customer-visible readers) **or** the honest finding that it is not, with the reason — *"which of
    `#4889` / 'still empty' is true"*.
-5. **A4 attribution only** — the provenance of today's typed-point population, typed/`statement`/`NULL` shares.
-   **No target** (blocked on the D3 reopen).
+5. **A4 evidence — the declared labels appear on the right nodes.** **A4, in plain words.** Every node in the graph is a claim, a thing, or an event, and each carries a label saying
+what kind it is (`statement`, `plan`, `goal`, `workItem`, `code`, `decision`, `deployment`). The core ontology declares
+those labels and packs add more — and **those labels are what decide what may connect to what**. The August decision
+was never "one kind of thing": it was *claims carry `statement`; plans, goals and decisions belong on the thing and
+event layers.* So the criterion is:
+
+> after a capture, **things and events carry the labels the ontology declares for them** — a plan is labelled `plan`,
+> a decision is labelled `decision` — and we report that **per layer** (things, events, claims) rather than as one
+> blended percentage, so a failing layer cannot hide in an average.
+
+Measured as **appears + labelled**, with the percentage reported rather than chased: the declared kinds the corpus
+should produce actually appear at all, and things/events are not sitting unlabelled. A coverage percentage over
+unknown corpora is a number that gets optimised instead of understood.
+
+⚠️ **This replaces "attribute the typed population, no target"**, which counted labels on the *claim* layer — the one
+layer that is deliberately uniform — and therefore could not fail. **The D3 question it was blocked on is answered**
+(owner, 2026-11-09: classification is on by default; the declared kinds are the point), so A4 has a target now.
 6. **E1 + E2** — the registered volume criterion and the value-survival / no-fusion guard. ⚠️ **Corrected
    twice:** not "same run" (two lanes are involved) and **not "same corpus as 1–5"** — the E-row denominators
    are properties of the **fixture** (`value_bearing_units: 14`, `planted_units: 90`,
@@ -151,7 +166,7 @@ only value is "easier for us" is marked as such and earns no place.
 | A2 — attach instead of mint, with attach/mint/held recorded | The graph stops carrying nodes for **non-referential mentions** (`the timeout command`, `the staging constraint`), so recall returns the things that **exist** instead of phantoms. ⚠️ *Corrected: not "duplicates" — the baseline has **zero duplicate names**; the defect is writing things that were never entities (`#4894`).* |
 | A3 — batch story + cross-batch link | A claim made in one session can join work recorded in another, so the user's question is answered across sessions instead of per-session. |
 | A5 — Subjects populated | *"What does this agent/team own and manage"* returns an answer; today the subject field and org structure are structurally empty, so the question fails silently. |
-| A4 — typing attribution (no target) | The owner can decide the `statement`-only question on measured provenance rather than on a docs sentence — a decision-grade input, not a feature. |
+| A4 — the declared labels appear on the right nodes | An answer can use **kinds**: a plan is a `plan`, a decision is a `decision`, so the graph says *what a thing is* instead of leaving the thing and event layers unlabelled — and the `statement`-only question becomes answerable from measured kinds rather than from a docs sentence. |
 | E1+E2 — volume + the no-fact-loss guard | When the graph gets smaller, the user can trust it got smaller by dropping *bookkeeping*, not facts — the difference between a cleaner map and a quieter one. |
 | E4+E5 — re-derived at this head | The owner's ship call rests on a number measured at the current head, not on a closed issue's claim — the difference between evidence and a citation. |
 | **Instrument + door** | **Internal — no user-visible value.** Recorded as such: it exists so the other seven rows' numbers are reproducible. It is in scope because *without* it every other row is an unverifiable claim, not because it helps a user. |
@@ -219,7 +234,7 @@ is not the graph measured — and `#4889` is confirmed or **reopened** according
 **When:** the census runs twice from the same head, same corpus, same transport
 **Then:** every **deterministic census** quantity is **identical** across the two runs — edges by type and
 endpoint kind, the attach/mint/held split, the `pointKind` typed/statement/`NULL` split, the subject-family
-counts, and A4's attribution
+counts, and A4's per-layer label coverage (its attribution reported as a diagnostic)
 **And:** the **model-proposed** arms (the rollup answers, S5's connections) are **not** required to be
 run-invariant — D6 makes both connection sets model-proposed, and this repo has measured gold swinging
 `0,1,1,1,2 of 4` on **identical code** (`PRE-REGISTRATION.md` §1.4). They are reported against a **stated repeat
@@ -252,16 +267,21 @@ shipped verdict table, `5/15` corrected by `E1-E5-PROOFS.md`) so the stale one c
 **And:** E5's raw arm is measured on the **reconciled** population — `≥ 0.80` met, or **blocked-by `#5087`** by
 id with the ratio/floor asymmetry recorded (never reported as green)
 
-### E2E-8: the typed population is attributable
-**Given:** today's typed `pointKind` population (109 on `live-v4`)
-**When:** attribution runs
-**Then:** **100 % of typed points are attributed to a named writer**, and typed / `statement` / **`NULL`** are
-reported **separately** (a "typed share" without its `NULL` denominator is not a measurement this epic accepts)
-**And:** **no numeric target is asserted** — the case asserts *attribution and reporting*, never a count, because
-the count is the D3 reopen's to set
-
-⚠️ **A4 has no numeric target**, not "no verifiable surface": E2E-8 asserts attribution and reporting, which
-presuppose nothing about D3 and would red if the population went unattributed.
+### E2E-8 · things and events carry their declared labels
+**Given:** the fleet graph at C1's named head, and the labels the core ontology plus the installed packs declare
+**When:** the read-only census runs over that head (no capture, no spend)
+**Then:** **things and events carry the labels the ontology declares for them** — a plan is labelled `plan`, a
+decision is labelled `decision` — reported **per layer** (things / events / claims), never as one blended
+percentage, so a failing layer cannot hide in an average
+**And:** the bar is **appears + labelled** — the declared kinds the graph should produce **appear at all**, and
+things/events are not left unlabelled. The coverage percentage is **reported, not chased**: a coverage number over
+unknown corpora gets optimised instead of understood
+**And:** a **failing run** is concrete and checkable — a declared kind the corpus should produce is **absent**
+from the graph, **or** a thing/event carries no label the ontology declares for it. Either is `RED` for that
+layer, reported with the offending nodes named; it is never averaged away by a green claim layer
+**And:** **attribution is still reported, as a diagnostic** — the per-writer split, and the `typed` / `statement` /
+**`NULL`** shares **separately** (a share quoted without its `NULL` denominator is not a measurement this epic
+accepts). It informs; it is not the bar.
 
 ---
 
@@ -294,7 +314,7 @@ asserted one corpus for all rows, which the registered denominators refute.)*
 | row | corpus | door / run | why that corpus |
 |---|---|---|---|
 | **A1, A2, A3, A5** | the **A-corpus** (curated real payloads, committed + hash-pinned, §below) | hosted `POST /v1/sessions` (v2 lane) | these rows are about *the graph the fleet builds*; their evidence must come from a real capture through the real door |
-| **A4** | the **fleet graph** at C1's head | read-only census over `live-v4` | the 109-typed-point population is a property of the fleet's graph, not of any corpus |
+| **A4** | the **fleet graph** at C1's head | read-only census over `live-v4` | the things/events label coverage A4 measures is a property of the fleet's graph, not of any corpus |
 | **E1, E2a, E2b** | the **fixture** (`tests/eval/write_path`, already pinned) | the committed arm | the denominators (14 value-bearing, 90 planted, floors 30) exist only there, and E1's threshold basis was calibrated on that fixture's own labelled names |
 | **E1b** | the **fixture** | deterministic **`m2`** lane | it is an anti-gaming control on a deterministic lane by construction |
 | **E4, E5** | the **fixture** (planted-operator corpus) | **unpatched** extractor leg | the registered bars (`15 of 15`, E5's raw ratio) are fixture-denominated |
@@ -340,7 +360,7 @@ C1 **registers these verbatim**; it may not re-derive or tighten them after a sc
 | **A1** | edges of the declared types present **and** rollup precision vs labelled truth | the **transitive** label set (D-S2 gives it the verdict) | **≥ 30** labelled pairs — *sample sufficiency*: the registration's own constant (30), chosen because ~10 pp is this repo's recorded resolution limit and fewer pairs cannot separate a fix from variance (`EXTRACTOR-V4-ARCHITECTURE.md:1197`) | **precision ≥ 0.80** on the transitive set **and** every claimed inherited part reachable through declared intermediates (the direct set) |
 | **A2** | attach / mint / held distribution; `the <X>` share | definite-description candidates in the A-corpus | **≥ 30** candidates — *sample sufficiency* (same constant) | **attach share > mint share**, and attached+minted+held = 100 % classified |
 | **A3** | unlinked-statement share **+ both S5 jobs** | statements written by the run | **≥ 30** statements — *sample sufficiency* | share **strictly lower** than the before-arm **AND** D-S5's component arm positive |
-| **A4** | attribution of the typed population; typed/statement/`NULL` reported separately | the **typed population of the named graph at C1's head** | **n > 0** — *non-vacuity* (100 % of 0 is not attribution) | **100 % attributed to a named writer**; **no count target** (D3's) |
+| **A4** | **per-layer label coverage** — the declared kinds present, and each thing/event carrying the label the ontology declares for it — with the per-writer split and the `typed`/`statement`/`NULL` shares reported beside it as **diagnostics** | the **things-and-events population of the named graph at C1's head**, counted **per layer** (things / events / claims) | **≥ 1 labelled node** — *non-vacuity*: at least one thing or event carrying a declared label ("0 of 0 labelled" is not coverage) | **appears + labelled**, with the percentage **reported, not chased** — there is no `≥ X %` bar; a declared kind the graph should produce that is **absent**, or a thing/event left **unlabelled**, is a **failing run** |
 | **A5** | `Subject` count + the four edge families + the two customer readers | bindable subject slots in the A-corpus | **≥ 5** slots — *constructibility*, presence question (not a statistic) | non-zero families **and** both readers non-empty — **or** the reported reason, which is the finding |
 
 **⛔ The ground truth is sealed BEFORE the rollup exists.** Both label sets (direct and transitive) are committed
@@ -403,13 +423,14 @@ and it is cheap to close."*
 ```
 ## Epic Scope Ready for Review
 
-**Scope:** IN — A1/A2/A3/A5 evidence, A4 attribution (no target), E1+E2 guard, E4+E5 re-derivation,
-         the instrument and the door, reporting.
+**Scope:** IN — A1/A2/A3/A5 evidence, A4 per-layer label coverage (**appears + labelled**, the percentage
+         reported), E1+E2 guard, E4+E5 re-derivation, the instrument and the door, reporting.
          OUT — the mechanisms owned by #5087's children, the MCP-side nudge, any volume target,
          E3's metric re-registration, relocation/deletion (#5333), the v3 programme, #2817, the quota root.
 **Customer value map:** 8 capabilities mapped (item 9 "Reporting" is the delivery mechanism, not a row)
-**E2E test cases:** 8 drafted (E2E-1…E2E-8), behavioural; A4 has no *numeric target* but does have a case
-         (E2E-8: attribution + typed/statement/NULL reporting)
+**E2E test cases:** 8 drafted (E2E-1…E2E-8), behavioural; A4's case is E2E-8 — things and events carry the
+         labels the ontology declares for them, reported **per layer** on the **appears + labelled** bar, with
+         attribution and the typed/statement/NULL shares kept as diagnostics
 **Complexity:** UX low · Architecture **high** · Ontology medium · Accessibility low → overall `complex`
 **Decisions taken at scope (override available):** D-S1 A-corpus = curated, hash-pinned payloads posted to
          `POST /v1/sessions`, **the same payloads replayed through `TortoiseSDK.capture_session`** as the negative
