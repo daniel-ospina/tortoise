@@ -1837,10 +1837,20 @@ class TestCoreHierarchy:
         assert "team" in CORE_ALIASED_KINDS
         assert "core:team" in shipped.expand_kind("team")
 
-        # ORDERING (#11000 R3): the alias pass must run AFTER
-        # `LEGACY_KIND_ALIASES`, or a stored legacy spelling is dropped from the
-        # `core:` bucket — `core:deployment` would lose `dev:deployment` and
-        # pre-#7848 rows stop being readable.
+        # STORED LEGACY SPELLINGS — an OUTCOME pin, not an ordering rule (#11000
+        # R3, corrected by the post-merge review of #11667): `core:deployment`
+        # must carry `dev:deployment`, because pre-#7848 rows are stored under the
+        # legacy spelling and a read keyed on the relation's spelling has to find
+        # them. The recovery comes from the EQUIVALENCE seeding —
+        # `_equivalent(kind, f"core:{kind}")` plus `LEGACY_KIND_ALIASES` recorded
+        # as equivalences — so it holds whichever order those constants are
+        # folded in, and nothing has to run "after `LEGACY_KIND_ALIASES`". This
+        # used to state the reverse ("the alias pass must run AFTER … or a stored
+        # legacy spelling is dropped"), which measured false: the assertion below
+        # stayed green with the ordering reversed AND with the copy pass deleted,
+        # so the pin never depended on that pass and the prose misled readers
+        # about where the recovery comes from. Measured in that review: the
+        # deleted pass appended 0 members to 0 of 311 buckets.
         assert "dev:deployment" in shipped.expand_kind("core:deployment")
 
     def test_get_subclasses_folds_the_core_prefix_like_expand_kind(self, shipped):

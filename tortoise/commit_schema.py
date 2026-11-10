@@ -55,7 +55,7 @@ from pydantic import (
 
 from ._gate_memo import GateMemo
 from .file_indexer import provenance_basename
-from .ids import content_hash
+from .ids import content_hash, session_id_refusal
 from .pack_registry import (
     CANONICAL_POINT_KINDS,
     DECISION_POINT_KINDS,
@@ -963,8 +963,34 @@ class CommitPayload(BaseModel):
         # counters, Document and Event were written — a redacted 500 with the
         # CommitRecord stuck ``partial`` and a non-converging retry. The id is
         # the Source's collision domain, so reject a blank one at Layer-1.
-        if not v.strip():
-            raise ValueError("session_id must be a non-blank string")
+        #
+        # #8290 review P1: this door used to be the FOURTH of four caller-id
+        # doors and the only one that judged the id with its own ad-hoc test
+        # instead of the shared predicate. It is not a cosmetic difference:
+        # the payload's id is written VERBATIM as a ``:Session``
+        # (``hosted_api._execute_commit_writes`` / the budget-held path) and as
+        # an ``AgentSession`` Event under the same id, so an id inside the
+        # RESERVED demo namespace would be filed here and then hidden by every
+        # session read surface — written, durable (the replay fold is
+        # BLANK-ONLY by #9594/#9553, so it survives), and invisible to its
+        # owner. Delegating to ``ids.session_id_refusal`` keeps ONE predicate
+        # across all four doors — and, since #11576's review, one REASON plus THIS
+        # door's own REMEDY (``may_mint=False``): its ``session_id`` is required, so
+        # the mint advice the other three doors give is a remedy this one rejects.
+        #
+        # ⛔ Deliberately NOT widened: ``projection._writable_container_id`` (the
+        # REPLAY half) stays BLANK-ONLY — #9594/#9553 govern it, and a replay that
+        # started refusing rows an older tree legitimately wrote would LOSE those
+        # rows.
+        #
+        # ``is not None``, never truthiness: a refusal is a STRING and every
+        # sibling door compares it that way, so an empty refusal can never
+        # silently read as "admit" here either — the polarity this door exists
+        # to share. (The module already imports ``session_id_refusal`` from
+        # ``.ids`` beside ``content_hash``; no local re-import.)
+        refusal = session_id_refusal(v, may_mint=False)
+        if refusal is not None:
+            raise ValueError(refusal)
         return v
 
     @field_validator("captured_at")
