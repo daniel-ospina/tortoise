@@ -965,6 +965,13 @@ def test_the_prose_pin_reads_through_formatting_but_not_wording():
     assert unknown == ["some"], unknown
     assert _cardinality_of(unknown[0]) is None
     assert _cardinality_of("fourteen") is None
+    # The DIGITS branch, which had no arm of its own before (#11777 review round 4,
+    # non-blocking finding 3): a set that outgrows the word table is written `13`, and a
+    # pin that could not read a numeral would report the sentence missing while it sat in
+    # front of it — the false red this whole change exists to remove.
+    assert _cardinality_of("13") == 13
+    assert claims("while the 4 entries below do not.") == ["4"]
+    assert _cardinality_of(claims("while the 4 entries below do not.")[0]) == 4
     # A duplicate INSIDE the block is two claims — the pin's `len(matches) == 1` arm is
     # what rejects it. (This is the duplicate arm, NOT the scoping arm.)
     assert len(claims("while the four entries below do not.", "while the four entries below do not.")) == 2
@@ -993,45 +1000,66 @@ def test_the_pin_reads_through_the_seam_rather_than_its_own_copy():
     became dead code that reads as coverage. So this asserts the wiring itself.
 
     Its limit, stated rather than hidden: this is a SHAPE pin (it reads this file's
-    source), so an edit that rewrites the pin *and* this assertion defeats it. That is
-    an adversarial edit, and it lands in a visible diff; the class being prevented here
-    is the accidental revert, which it does catch. The `[pin-defensive-claim]` row in this
+    syntax), so an edit that rewrites the pin *and* this assertion defeats it. That is an
+    adversarial edit, and it lands in a visible diff; the class being prevented here is
+    the accidental revert, which it does catch. The `[pin-defensive-claim]` row in this
     repo's `MEMORY.md` is the reason the limit is written down instead of implied.
 
-    One non-adversarial edit can also trip it: RENAMING the pin. The lookup below then
-    finds no `def` line, and deriving the body by text search instead would be worse than
-    useless — an earlier draft of this test searched for the marker STRING, which occurs
-    twice (the `def`, and the literal in this assertion), so a rename made it derive its
-    own tail and red on the assertion that forbids `re.findall` — "the cardinality pin
-    does its own matching again" — about a pin that was fine (measured, #11777 review
-    round 4, finding 1: that tail carries `_cardinality_claims_in(` as this test's own
-    assertion text, so the "has its own copy of the extraction" assertion before it
-    cannot fire). So the lookup is anchored on a `def` at the start of a line, and the
-    missing case is its own failure with its own remedy.
+    It reads the file's AST, not its TEXT, and that is deliberate: two earlier drafts of
+    this test were defeated by their own carrier. A text search for the marker string
+    occurs twice (the `def`, and the literal in this assertion), so a rename made it
+    derive its own tail and misdiagnose a correct pin (#11777 review round 3). A bare
+    substring check over the body is satisfied by a COMMENT naming the seam, so a pin that
+    re-derived the extraction and *mentioned* `_cardinality_claims_in` in prose passed
+    (measured: green with the comment, red without — #11777 review round 4). So the
+    assertion is on the CALL: the pin's own body must contain a call to the seam and must
+    not call the pieces it composes.
+
+    Two non-adversarial edits can trip it — RENAMING the pin, and DELETING it. Both are
+    named in the failure, because a remedy that does not exist for the case in hand is
+    how the round-3 version sent a deletion to "update `name` here".
     """
     source = Path(__file__).read_text(encoding="utf-8")
     name = "test_the_record_exemption_prose_counts_the_set_it_describes"
-    lines = source.splitlines(keepends=True)
-    start = next((i for i, line in enumerate(lines) if line.startswith(f"def {name}(")), None)
-    assert start is not None, (
-        f"no `def {name}(` line in this file — if you RENAMED the cardinality pin, update "
-        f"`name` here; do not delete this test, which is the only thing that observes the "
-        "pin still calling `_cardinality_claims_in`."
+    pin = next(
+        (
+            node
+            for node in ast.parse(source).body
+            if isinstance(node, ast.FunctionDef) and node.name == name
+        ),
+        None,
     )
-    body = ""
-    for line in lines[start:]:
-        if body and line.startswith("def "):
-            break
-        body += line
-    assert "_cardinality_claims_in(" in body, (
-        "the cardinality pin no longer reads through `_cardinality_claims_in` — it has "
-        "its own copy of the extraction again, so the formatting tolerance is dead code "
-        "and the next `**four**` reds with 'the sentence is gone' (that is #11775). "
-        "Call the seam."
+    assert pin is not None, (
+        f"no `def {name}` in this file. If you RENAMED the cardinality pin, update `name` "
+        "here. If you DELETED it, restore it or retire this call-site pin in the same "
+        "change — this is the only thing that observes the pin still reading through "
+        "`_cardinality_claims_in`, and without it a pin that re-derives the extraction is "
+        "green (#11775 returns)."
     )
-    assert "re.findall" not in body and "re.sub" not in body, (
-        "the cardinality pin does its own matching again; the seam exists so the pin and "
-        "its tolerance test cannot drift (#11777 review B1)."
+    called = {
+        node.func.id
+        for node in ast.walk(pin)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Name)
+    }
+    assert "_cardinality_claims_in" in called, (
+        "the cardinality pin no longer CALLS `_cardinality_claims_in` — it has its own "
+        "copy of the extraction again, so the formatting tolerance is dead code and the "
+        "next `**four**` reds with 'the sentence is gone' (that is #11775). Call the seam."
+    )
+    rederived = called & {"_normalise_prose", "_stated_cardinalities", "_comment_region_above"}
+    assert not rederived, (
+        f"the cardinality pin calls {sorted(rederived)} itself, so it re-assembles the "
+        "seam's composition instead of using it — the pieces can then drift apart exactly "
+        "as they did in #11777 review round 1. Read through `_cardinality_claims_in`."
+    )
+    attributes = {
+        node.func.attr
+        for node in ast.walk(pin)
+        if isinstance(node, ast.Call) and isinstance(node.func, ast.Attribute)
+    }
+    assert not attributes & {"findall", "sub", "search", "match"}, (
+        f"the cardinality pin does its own matching ({sorted(attributes & {'findall', 'sub', 'search', 'match'})}) "
+        "again; the seam exists so the pin and its tolerance test cannot drift (#11777 B1)."
     )
 
 
