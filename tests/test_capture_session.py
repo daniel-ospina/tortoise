@@ -132,14 +132,21 @@ def _extract_with_payload(payload: dict, extracted: list):
 
 
 def test_capture_session_module_isolates_real_home(tmp_path):
-    """#3662 review (P2): pin the HOME isolation the refusal test depends on.
+    """#3662 review (P2): pin the HOME isolation the module-wide fixture gives.
 
-    ``test_commit_session_refuses_without_consent_before_extraction`` reaches
-    ``record_capture_declined()``, which resolves and CREATES
-    ``$HOME/.tortoise/capture-consent-notice``. Without the module-wide HOME
-    isolation (see ``_isolated_home``) that path is the developer's real
-    ``$HOME`` and the durable #3615 notice leaks onto their machine. Assert the
-    resolved location, not the notice text.
+    ⚠️ The fixture's ORIGINAL justification is gone: it existed because
+    ``test_commit_session_refuses_without_consent_before_extraction`` drove
+    ``record_capture_declined()``, which CREATED
+    ``$HOME/.tortoise/capture-consent-notice`` — and `#4282` retired that test
+    with the public ``commit_session`` door. What survives is the READ side:
+    ``_post_commit`` refuses through ``capture_consent.capture_declined_reason()``
+    (pinned by ``test_capture_consent.py::test_sdk_post_commit_refuses_without_consent_and_never_posts``),
+    and that resolution reads ``Path.home()`` on the very path this module
+    drives 120+ times. The isolation therefore stays — it is what keeps a
+    future consent-declining test HERE from resolving the developer's real
+    ``$HOME`` — but it is pinned on the RESOLUTION it still guarantees, not on
+    a writer this file no longer has. Assert the resolved location, not the
+    notice text.
     """
     from tortoise.capture_consent import capture_notice_path
 
@@ -291,15 +298,19 @@ def _pinned_provider_routing_env(monkeypatch):
 
 @pytest.fixture(autouse=True)
 def _isolated_home(monkeypatch, tmp_path):
-    """#3662 review (P2): never let this module write into the developer's real
+    """#3662 review (P2): never let this module resolve the developer's real
     ``$HOME``.
 
-    The unconsented-refusal test below drives
+    ⚠️ Restated after `#4282` (the wording below used to name a test that PR
+    deleted): the fixture was added because an unconsented-refusal test drove
     ``capture_consent.capture_declined_reason()`` → ``record_capture_declined()``,
     which resolves ``Path.home()/.tortoise/capture-consent-notice`` and CREATES
     it — so a normal pytest run left the durable #3615 migration notice in the
     real ``$HOME``, and the next interactive ``tortoise`` command printed it.
-    Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
+    That test went with the public ``commit_session`` door, so nothing here
+    writes the notice any more; the fixture is kept because the consent READ
+    still resolves ``Path.home()`` on the path this module drives, and pinning
+    it costs nothing. Mirrors ``test_capture_consent.py::_isolated`` for the HOME half only: the
     suite-wide ``_capture_consent_default_on`` grant stays in force here (unlike
     that file's decline matrix), so the consented control test is unaffected.
     """

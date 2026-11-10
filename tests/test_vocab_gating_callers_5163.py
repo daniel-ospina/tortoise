@@ -297,6 +297,97 @@ class TestCaller2SdkV2GateOutage:
             out["errors"]
 
 
+class TestCaller2SdkV1GateOutage:
+    """#5339 review round 2 (P1) — the v1 sibling of the outage guard.
+
+    ⛔ RE-POINTED, not new. `#4282` retired the public `commit_session` door and
+    deleted the two v1 tests that lived on it, but the v1 body survives
+    privately as `TortoiseSDK._commit_session_v1` — so the branches below were
+    left in the tree with nothing exercising them, including the one that keeps
+    an unreadable pack gate from admitting another pack's kinds.
+
+    The history matters because the branch is a regression guard, not a
+    formality: `_commit_session_v1` resolved `_installed_namespaces_for_gate`
+    OUTSIDE any error handling, so a bound-but-unreachable graph raised out of
+    the public door on BOTH v1 routes (a direct `summary=` and the
+    `extractor="v1"` route, which the wrapper used to pick). The base
+    (`9c4788400`) had no resolver call in v1 at all, so this came in with the
+    #5339 fix rather than pre-dating it.
+
+    Fail-closed, same as v2: record the failure and return BEFORE the
+    extraction/validation that would need the gate, so the result is a
+    structured `ok=False` and nothing is POSTed. `installed = None` would mean
+    NO gate (the catalog union) and would silently admit another pack's kinds,
+    so the guard must never degrade to it.
+
+    FAIL-ON: the resolver raise escapes `_commit_session_v1`.
+    REACHABLE: the graph handle IS bound (a real SDK), and the resolver is
+    patched to raise exactly as an unreachable graph does.
+    """
+
+    @staticmethod
+    def _outage_sdk(tmp_path):
+        from tortoise.sdk import TortoiseSDK
+        return TortoiseSDK(db_path=str(tmp_path / "g5339_v1.db"),
+                           namespace="test_g5339_v1")
+
+    @staticmethod
+    def _unreachable(monkeypatch):
+        import tortoise.pack_state as ps_mod
+
+        def _raise(*a, **k):
+            raise RuntimeError("graph unreachable (simulated outage)")
+        monkeypatch.setattr(ps_mod, "graph_installed_namespaces", _raise)
+
+    @staticmethod
+    def _no_post(monkeypatch):
+        from tortoise import sdk as sdk_mod
+        posted = []
+        monkeypatch.setattr(sdk_mod, "_post_commit",
+                            lambda *a, **k: posted.append(a) or {"ok": True})
+        return posted
+
+    def _assert_structured_outage(self, out, posted):
+        assert isinstance(out, dict), out
+        assert out["ok"] is False, out
+        assert any("gate resolution failed" in e for e in out["errors"]), \
+            out["errors"]
+        # Fail-CLOSED: the union fallback would have admitted this payload
+        # and reached the POST.
+        assert posted == [], "an unreadable gate must not POST a payload"
+
+    def test_v1_direct_summary_outage_returns_a_structured_result(
+            self, tmp_path, monkeypatch):
+        """Route 1: a caller-supplied ``summary=`` (the v1 direct path)."""
+        self._unreachable(monkeypatch)
+        posted = self._no_post(monkeypatch)
+        sdk = self._outage_sdk(tmp_path)
+        out = sdk._commit_session_v1(
+            None, "s5339",
+            {"session": {"summary": "S"},
+             "state": [{"name": "artifact",
+                        "objectKind": MARKETING_OBJECT}],
+             "decisions": [], "logic": [], "issues": []},
+            None, None, None, "http://unused", "k", "fail-closed")
+        self._assert_structured_outage(out, posted)
+
+    def test_v1_extractor_route_outage_returns_a_structured_result(
+            self, tmp_path, monkeypatch):
+        """Route 2: a raw conversation through the legacy v1 extractor."""
+        from tests.test_extractor_v2 import MockModel
+
+        self._unreachable(monkeypatch)
+        posted = self._no_post(monkeypatch)
+        sdk = self._outage_sdk(tmp_path)
+        out = sdk._commit_session_v1(
+            [{"role": "user", "content": "hi"}], "s5339", None, None,
+            MockModel(
+                lambda system, user: '{"entities": [], "events": [], '
+                                    '"points": [], "operators": []}'),
+            None, "http://unused", "k", "fail-closed")
+        self._assert_structured_outage(out, posted)
+
+
 # ══════════════════════════════════════════════════════════════════════════
 # 3. The hosted commit door — the WRITE GATE
 # ══════════════════════════════════════════════════════════════════════════

@@ -1117,11 +1117,13 @@ def _count_resource(org_id: str, resource: str, sdk=None) -> int:
         # R-18 predicate as Point: a MISSING flag counts as non-episodic.
         #
         # Events reaching this branch carry ``is_episodic`` UNSET, which is
-        # why they ARE charged. Only two writers stamp it true: the
-        # ``sessionCaptured`` Event minted by the hosted capture path (the
-        # SDK ``capture_session`` writer is now the private ``_capture_session`` after
-        # #4282 retired the public name; both still pass ``is_episodic=True`` to
-        # ``create_event``), and the hosted
+        # why they ARE charged. THREE writers stamp it true: the SDK capture
+        # door (the public ``capture_session`` was retired by #4282 and its body
+        # survives as the private ``_capture_session``, which still passes
+        # ``is_episodic=True`` to ``create_event`` — the rename changed the
+        # NAME, not the write, so the count does not move with it), the
+        # ``sessionCaptured`` Event minted by the hosted capture path, and the
+        # hosted
         # commit path, which sets
         # ``e.is_episodic=true`` on its AgentSession Event and on its
         # extracted occurrence Events. Those stay EXCLUDED — that exclusion is

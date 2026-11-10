@@ -562,3 +562,88 @@ class TestReviewFixes:
         assert p["operators"][0]["op_type"] == "IMPL"
         assert p["operators"][0]["src"] == pt
         assert p["operators"][0]["dst"] == ev
+
+
+#: `TortoiseSDK._commit_session_v2`'s three FAIL-CLOSED locks, re-pointed at the
+#: private body when #4282 retired the public `commit_session` door.
+#:
+#: ⛔ These are not new tests. They are the `#1350` locks that
+#: `TestCommitSessionRoundTrip` carried until #4282 deleted that class along with
+#: the public name — and deleting them WITH the door is the mistake this class
+#: exists to undo: `commit_session`'s body did not go anywhere, it survives as
+#: `_commit_session_v2`/`_commit_session_v1` (deliberately, the same way
+#: `capture_session`'s body survives as `_capture_session`), so the three
+#: branches below were left in the tree with nothing exercising them. Each one
+#: guards a shape where a broken commit could look successful to a caller —
+#: a raising extraction model, an empty conversation, and a payload that fails
+#: Layer-1 — so an unexercised one is the difference between "nothing is sent"
+#: and "a half-written session is reported ok=True".
+#:
+#: What changed in the re-point: the door's WRAPPER is gone (session-id minting,
+#: the consent gate, extractor routing), so the tests address the v2 body with
+#: its own signature. What they assert is untouched.
+class TestCommitSessionV2FailClosedLocks:
+    def test_v2_error_path_reports_errors(self, monkeypatch):
+        """#1350: a raising v2 model surfaces errors (ok=False) instead of
+        writing nothing silently."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk._commit_session_v2(
+            conversation=[{"role": "user", "content": "x"}],
+            session_id="sess_4282", extractor_model=BoomV2Model(),
+            chunk_size=50, base_url="http://unused", api_key="k")
+        assert out["ok"] is False
+        assert any("rate limited" in e for e in out["errors"])
+
+    def test_v2_empty_conversation_not_ok(self, monkeypatch):
+        """#1350 (review P1): an empty/blank conversation must never report
+        ok=True — nothing was committed, and a receipt that says otherwise is
+        the one a caller acts on."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = object.__new__(TortoiseSDK)
+        out = sdk._commit_session_v2(
+            conversation=[], session_id="sess_4282",
+            extractor_model=V2MockModel(), chunk_size=None,
+            base_url="http://unused", api_key="k")
+        assert out["ok"] is False
+        assert out["payload"] is None
+        assert any("no payload" in e for e in out["errors"])
+
+    def test_v2_layer1_rejected_payload_not_posted(self, monkeypatch):
+        """#1350: a payload that fails Layer-1 returns ok=False with the
+        Layer-1 errors and is NEVER POSTed (fail-closed at the gate) — the
+        `_post_commit` recorder proves no call was made."""
+        monkeypatch.delenv("TORTOISE_DB_URI", raising=False)
+        import tortoise.extractor_v2 as ev2
+        import tortoise.sdk as sdk_mod
+        from tortoise.sdk import TortoiseSDK
+
+        sdk = object.__new__(TortoiseSDK)
+        _real = ev2.extract_session_v2
+        posted: list[dict] = []
+
+        def _record(payload, **kw):
+            posted.append(payload)
+            return {"ok": True}
+
+        def _broken(model, conversation, **kw):
+            out = _real(model, conversation, **kw)
+            out["payload"]["points"][0]["id"] = "not-a-content-addressed-id"
+            return out
+
+        monkeypatch.setattr(ev2, "extract_session_v2", _broken)
+        monkeypatch.setattr(sdk_mod, "_post_commit", _record)
+        try:
+            out = sdk._commit_session_v2(
+                conversation=[{"role": "user", "content": "x"}],
+                session_id="sess_4282", extractor_model=V2MockModel(),
+                chunk_size=50, base_url="http://unused", api_key="k")
+        finally:
+            monkeypatch.setattr(ev2, "extract_session_v2", _real)
+        assert out["ok"] is False
+        assert any("Layer-1" in e for e in out["errors"])
+        assert posted == [], "Layer-1-rejected payload must never be POSTed"
